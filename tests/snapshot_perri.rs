@@ -15,20 +15,20 @@ fn fake_queue() -> PrQueueSnapshot {
         generated_at: None,
         items: vec![
             PrQueueItem {
-                repo: "Carefeed/admin-portal".into(),
-                number: 2340,
-                title: "feat: backfill MVP referral activity feed".into(),
+                repo: "acme/web-app".into(),
+                number: 42,
+                title: "feat: add user authentication".into(),
                 author: "cody".into(),
                 requested: true,
-                url: "https://github.com/Carefeed/admin-portal/pull/2340".into(),
+                url: "https://github.com/acme/web-app/pull/42".into(),
             },
             PrQueueItem {
-                repo: "Carefeed/intelligence".into(),
+                repo: "acme/api".into(),
                 number: 892,
-                title: "fix: streaming criteria flicker".into(),
+                title: "fix: cache invalidation bug".into(),
                 author: "marty".into(),
                 requested: false,
-                url: "https://github.com/Carefeed/intelligence/pull/892".into(),
+                url: "https://github.com/acme/api/pull/17".into(),
             },
         ],
         stale: false,
@@ -38,12 +38,12 @@ fn fake_queue() -> PrQueueSnapshot {
 
 fn fake_pr() -> PrSnapshot {
     PrSnapshot {
-        pr_number: Some(2340),
-        repo: "Carefeed/admin-portal".into(),
-        title: "feat: backfill MVP referral activity feed".into(),
+        pr_number: Some(42),
+        repo: "acme/web-app".into(),
+        title: "feat: add user authentication".into(),
         author: "cody".into(),
-        url: "https://github.com/Carefeed/admin-portal/pull/2340".into(),
-        diff: "+++ b/app/Models/ReferralActivity.php\n@@ -0,0 +1,30 @@\n+class ReferralActivity extends Model".into(),
+        url: "https://github.com/acme/web-app/pull/42".into(),
+        diff: "+++ b/src/auth/login.rs\n@@ -0,0 +1,10 @@\n+pub fn authenticate(token: &str) -> bool {".into(),
         stale: false,
         error: None,
     }

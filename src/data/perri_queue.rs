@@ -8,12 +8,12 @@
 //!   "generated_at": "2026-05-07T14:00:00Z",
 //!   "items": [
 //!     {
-//!       "repo": "Carefeed/admin-portal",
-//!       "number": 234,
-//!       "title": "Fix authentication bug",
+//!       "repo": "acme/web-app",
+//!       "number": 42,
+//!       "title": "feat: add user authentication",
 //!       "author": "alice",
 //!       "requested": true,
-//!       "url": "https://github.com/Carefeed/admin-portal/pull/234"
+//!       "url": "https://github.com/acme/web-app/pull/42"
 //!     }
 //!   ],
 //!   "stale": false

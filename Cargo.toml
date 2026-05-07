@@ -3,7 +3,7 @@ name = "nostromo"
 version = "0.1.0"
 edition = "2021"
 description = "A Ratatui-based AI agent IDE — unified dashboard for fred, perri, claudia, cody, and mother"
-authors = ["hammer@carefeed.com"]
+authors = ["thehammer"]
 license = "MIT"
 
 [lib]

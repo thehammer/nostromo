@@ -6,10 +6,10 @@
 //! ```json
 //! {
 //!   "pr_number": 234,
-//!   "repo": "Carefeed/admin-portal",
-//!   "title": "Fix authentication bug",
+//!   "repo": "acme/web-app",
+//!   "title": "feat: add user authentication",
 //!   "author": "alice",
-//!   "url": "https://github.com/Carefeed/admin-portal/pull/234",
+//!   "url": "https://github.com/acme/web-app/pull/42",
 //!   "diff": "...",
 //!   "stale": false
 //! }

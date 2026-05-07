@@ -5,7 +5,7 @@
 
 ## Context
 
-The user currently runs Claude Code agents inside a complex tmux layout: three mirrored `screen1/2/3` sessions, each with windows for `Admin Portal`, `Mother`, `Dependabot`, `Intelligence`, `Referral Monitor`, `Perri`, `Fred`, and `Claudia`. The two most elaborate windows — `Perri` (PR queue + current PR diff + REPL) and `Fred` (mailbox + today calendar + REPL) — are driven by ~1600 lines of bash scripts that poll Microsoft Graph and GitHub on timers, write transient files, and rely on tmux to compose panes.
+The user currently runs Claude Code agents inside a tmux layout with windows for agent dashboards and project workspaces. The two most elaborate windows — `Perri` (PR queue + current PR diff + REPL) and `Fred` (mailbox + today calendar + REPL) — are driven by ~1600 lines of bash scripts that poll external APIs on timers, write transient files, and rely on tmux to compose panes.
 
 This setup works but has obvious ceilings. tmux gives panes but nothing about the panes is *aware* of each other. There's no unified activity feed, no inline approval for Mother `await` checkpoints, no syntax highlighting for diffs, no mouse interactions, and adding a new agent dashboard means writing more bash and shoving it into another tmux window. The agents themselves (fred, perri, claudia, cody, kennedy) increasingly behave like a team — the UI should reflect that.
 
