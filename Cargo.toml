@@ -1,0 +1,52 @@
+[package]
+name = "nostromo"
+version = "0.1.0"
+edition = "2021"
+description = "A Ratatui-based AI agent IDE — unified dashboard for fred, perri, claudia, cody, and mother"
+authors = ["hammer@carefeed.com"]
+license = "MIT"
+
+[lib]
+name = "nostromo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nostromo"
+path = "src/main.rs"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal", "io-util", "fs"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+
+# Utilities
+directories = "5"
+dirs-next = "2"
+chrono = { version = "0.4", features = ["serde"] }
+notify = "6"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+insta = { version = "1", features = ["yaml"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

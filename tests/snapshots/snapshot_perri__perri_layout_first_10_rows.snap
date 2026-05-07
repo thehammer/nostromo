@@ -1,0 +1,15 @@
+---
+source: tests/snapshot_perri.rs
+assertion_line: 85
+expression: snapshot
+---
+┌ PR Queue [2] ────────────────────────────────────────────────┐┌ PR #2340 — feat: backfill MVP referral activity feed ────────────────────────────────────────┐
+│▶ ★ #2340  feat: backfill MVP referral activity feed admin-por││+++ b/app/Models/ReferralActivity.php                                                         │
+│    #892   fix: streaming criteria flicker intelligence       ││@@ -0,0 +1,30 @@                                                                              │
+│                                                              ││+class ReferralActivity extends Model                                                         │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │

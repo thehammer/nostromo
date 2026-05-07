@@ -1,0 +1,15 @@
+---
+source: tests/snapshot_fred.rs
+assertion_line: 103
+expression: snapshot
+---
+┌ ✉ Mailbox [2] ───────────────────────────────────────────┐┌ 📅  Calendar ─────────────────────────────────────────────┐
+│● Alice Smith         Weekly sync    ?                    ││▶ ? Weekly sync                                           │
+│  Bob Jones           Re: Q2 planning    ?                ││                                                          │
+│                                                          ││▶ 1:1 with manager in 45m                                 │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
