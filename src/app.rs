@@ -8,6 +8,11 @@
 //! - `Ctrl-R` to toggle the right panel.
 //! - `Ctrl-B` to open the break-glass modal (when sentinel present).
 //! - Modal routing: modals receive key events first and short-circuit dispatch.
+//!
+//! Phase 5c additions:
+//! - Split-pane layout system (`LayoutNode`, `Ctrl-W` chord).
+//! - Command palette (`Ctrl-P`).
+//! - Sweater status colours on tab bar (Perri PR count, Mother job runtime).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -37,7 +42,8 @@ use crate::{
         right_panel_source::{self, RightPanelSnapshot},
     },
     event::{self, AppEvent},
-    mother,
+    layout::{self, LayoutNode, Side, SplitDir},
+    mother::{self, MotherJob},
     pty::{DaemonPtyFactory, InProcessPtyFactory, PtyFactory},
     ui,
     ui::widgets::syntect_cache::SyntectCache,
@@ -45,6 +51,7 @@ use crate::{
         self, BoxedView, ViewCtx,
         await_modal::{AwaitAction, AwaitModal},
         break_glass_modal::{BreakGlassAction, BreakGlassModal, ConfirmAction, ConfirmModal},
+        command_palette::{CommandPalette, PaletteAction, PaletteOutcome, build_items},
         mother::MotherAction,
     },
 };
@@ -65,6 +72,8 @@ pub enum ModalState {
         plan_path: String,
         modal: ConfirmModal,
     },
+    /// Command palette overlay (Ctrl-P).
+    Palette(Box<CommandPalette>),
 }
 
 // ── app state ─────────────────────────────────────────────────────────────────
@@ -81,6 +90,23 @@ pub struct AppState {
     pub modal: Option<ModalState>,
     /// Status bar note shown when retry is not possible.
     pub status_note: Option<String>,
+
+    // ── Phase 5c additions ────────────────────────────────────────────────────
+
+    /// Split-pane layout tree.
+    pub layout: LayoutNode,
+    /// Path from the root of `layout` to the currently-focused pane.
+    pub focused_path: Vec<Side>,
+    /// When `false`, single-view behaviour is identical to pre-5c.
+    pub split_mode: bool,
+    /// First key of a `Ctrl-W` chord while waiting for the second key.
+    pub pending_chord: Option<KeyCode>,
+    /// Most-recently-known Mother job list (populated via `AppEvent::MotherJobs`).
+    pub mother_jobs: Vec<MotherJob>,
+    /// Number of open PRs in Perri's review queue (for sweater-colour tab bar).
+    pub perri_open_pr_count: usize,
+    /// PR list snapshot for the command palette (url, title).
+    pub open_pr_list: Vec<(String, String)>,
 }
 
 impl AppState {
@@ -91,6 +117,13 @@ impl AppState {
             right_panel_data: HashMap::new(),
             modal: None,
             status_note: None,
+            layout: layout::persist::load(),
+            focused_path: Vec::new(),
+            split_mode: false,
+            pending_chord: None,
+            mother_jobs: Vec::new(),
+            perri_open_pr_count: 0,
+            open_pr_list: Vec::new(),
         }
     }
 
@@ -131,6 +164,9 @@ pub async fn run(
     } else {
         PerriPrNativeSource::spawn(config.clone())
     };
+
+    // Clone queue_rx to monitor PR count for sweater status in the main loop.
+    let mut queue_rx_for_count = queue_rx.clone();
 
     // Create the event channel before views so they can send AgentUpdate.
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -183,6 +219,18 @@ pub async fn run(
     info!("event loop starting");
 
     loop {
+        // Keep perri_open_pr_count in sync with the queue watch.
+        if queue_rx_for_count.has_changed().unwrap_or(false) {
+            if let Some(snap) = queue_rx_for_count.borrow_and_update().clone() {
+                state.perri_open_pr_count = snap.items.len();
+                state.open_pr_list = snap
+                    .items
+                    .iter()
+                    .map(|it| (it.url.clone(), it.title.clone()))
+                    .collect();
+            }
+        }
+
         // Collect titles before the mutable borrow of views[active].
         let titles: Vec<String> = views.iter().map(|v| v.title().to_string()).collect();
         let title_refs: Vec<&str> = titles.iter().map(|s| s.as_str()).collect();
@@ -190,23 +238,28 @@ pub async fn run(
         // Snapshot recent bus events for the status bar.
         let recent = bus.recent_snapshot();
 
-        // Active agent id for the right panel (use view id).
-        let active_agent_id = views[active].id().to_string();
+        // Active view index: in split mode, use the focused pane's view idx.
+        let focused_view_idx = if state.split_mode {
+            state.layout.focused_view_idx(&state.focused_path).min(views.len() - 1)
+        } else {
+            active
+        };
 
-        {
-            let v = &mut views[active];
-            terminal.draw(|f| {
-                ui::render(
-                    f,
-                    &mut **v,
-                    active,
-                    &title_refs,
-                    recent.as_slice(),
-                    &state,
-                    &active_agent_id,
-                );
-            })?;
-        }
+        // Active agent id for the right panel (use view id).
+        let active_agent_id = views[focused_view_idx].id().to_string();
+
+        terminal.draw(|f| {
+            ui::render(
+                f,
+                &mut views,
+                active,
+                focused_view_idx,
+                &title_refs,
+                recent.as_slice(),
+                &state,
+                &active_agent_id,
+            );
+        })?;
 
         let ev = match rx.recv().await {
             Some(e) => e,
@@ -218,7 +271,8 @@ pub async fn run(
         // ── Modal events (highest priority) ──────────────────────────────────
         if state.modal_active() {
             if let AppEvent::Key(k) = &ev {
-                let outcome = handle_modal_key(k, &mut state, &mut views, PERRI_IDX, active);
+                let outcome =
+                    handle_modal_key(k, &mut state, &mut views, PERRI_IDX, active, focused_view_idx);
                 if let Some(new_active) = outcome {
                     active = new_active;
                 }
@@ -243,7 +297,6 @@ pub async fn run(
         match &ev {
             AppEvent::BreakGlassDetected(req) => {
                 state.break_glass = Some(req.clone());
-                // Forward to all views for completeness (no-op for most).
                 views[active].on_event(&ev);
                 continue;
             }
@@ -252,18 +305,20 @@ pub async fn run(
                 continue;
             }
             AppEvent::AwaitDetected(job) => {
-                // Auto-open the await modal if no other modal is active.
                 if state.modal.is_none() {
                     info!("auto-opening await modal for job {}", job.id);
                     state.modal =
                         Some(ModalState::Await(Box::new(AwaitModal::new(*job.clone()))));
-                    // Also forward to Mother view so it can update its job list.
                 }
                 views[MOTHER_IDX].on_event(&ev);
                 continue;
             }
-            AppEvent::MotherJobs(_) | AppEvent::MotherStatusline(_) => {
-                // Always forward to Mother view; it owns this state.
+            AppEvent::MotherJobs(jobs) => {
+                state.mother_jobs = jobs.clone();
+                views[MOTHER_IDX].on_event(&ev);
+                continue;
+            }
+            AppEvent::MotherStatusline(_) => {
                 views[MOTHER_IDX].on_event(&ev);
                 continue;
             }
@@ -276,6 +331,25 @@ pub async fn run(
                 // Global: always quit on Ctrl-C.
                 if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                     break;
+                }
+
+                // Ctrl-P: open command palette (before PTY guard).
+                if k.code == KeyCode::Char('p') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    let items = build_items(&state, &state.mother_jobs.clone());
+                    state.modal = Some(ModalState::Palette(Box::new(CommandPalette::new(items))));
+                    continue;
+                }
+
+                // Ctrl-W: layout chord — intercepted before PTY-focus guard.
+                if k.code == KeyCode::Char('w') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    state.pending_chord = Some(KeyCode::Char('w'));
+                    continue;
+                }
+
+                // Consume the second key of a pending Ctrl-W chord.
+                if let Some(KeyCode::Char('w')) = state.pending_chord.take() {
+                    handle_ctrl_w_chord(k.code, &mut state, &mut views, &mut active);
+                    continue;
                 }
 
                 // Ctrl-R: toggle right panel.
@@ -297,13 +371,13 @@ pub async fn run(
 
                 // Ctrl-\: toggle PTY input capture on the active view.
                 if k.code == KeyCode::Char('\\') && k.modifiers.contains(KeyModifiers::CONTROL) {
-                    let cur = views[active].pty_capturing_input();
-                    views[active].set_pty_capturing_input(!cur);
+                    let cur = views[focused_view_idx].pty_capturing_input();
+                    views[focused_view_idx].set_pty_capturing_input(!cur);
                     continue;
                 }
 
                 // Global tab switching (unless PTY is capturing input).
-                if !views[active].pty_capturing_input() {
+                if !views[focused_view_idx].pty_capturing_input() {
                     match k.code {
                         KeyCode::Char('q') => break,
 
@@ -312,6 +386,11 @@ pub async fn run(
                             active = (active + 1) % views.len();
                             views[old].blur();
                             views[active].focus();
+                            // In split mode, also update the focused leaf's view_idx.
+                            if state.split_mode {
+                                update_focused_leaf_view(&mut state.layout, &state.focused_path, active);
+                                layout::persist::save(&state.layout);
+                            }
                             continue;
                         }
                         KeyCode::BackTab => {
@@ -319,6 +398,10 @@ pub async fn run(
                             active = active.checked_sub(1).unwrap_or(views.len() - 1);
                             views[old].blur();
                             views[active].focus();
+                            if state.split_mode {
+                                update_focused_leaf_view(&mut state.layout, &state.focused_path, active);
+                                layout::persist::save(&state.layout);
+                            }
                             continue;
                         }
                         _ => {}
@@ -326,10 +409,10 @@ pub async fn run(
                 }
 
                 // Dispatch key to the active view.
-                views[active].on_event(&ev);
+                views[focused_view_idx].on_event(&ev);
 
                 // ── Check if MotherView posted a pending action ───────────────
-                if active == MOTHER_IDX {
+                if focused_view_idx == MOTHER_IDX {
                     if let Some(mv) = views[MOTHER_IDX]
                         .as_any_mut()
                         .downcast_mut::<views::mother::MotherView>()
@@ -354,17 +437,92 @@ pub async fn run(
             }
 
             AppEvent::Tick => {
-                views[active].on_tick();
+                views[focused_view_idx].on_tick();
             }
 
             _ => {
-                views[active].on_event(&ev);
+                views[focused_view_idx].on_event(&ev);
             }
         }
     }
 
     info!("event loop exiting");
     Ok(())
+}
+
+// ── Ctrl-W chord handler ──────────────────────────────────────────────────────
+
+fn handle_ctrl_w_chord(
+    code: KeyCode,
+    state: &mut AppState,
+    views: &mut [BoxedView],
+    active: &mut usize,
+) {
+    // Compute next unused view index for new splits.
+    let next_view_idx = || -> usize {
+        let used: std::collections::HashSet<usize> = state.layout.all_view_indices().into_iter().collect();
+        (0..views.len()).find(|i| !used.contains(i)).unwrap_or(0)
+    };
+
+    match code {
+        // s = vertical split (side-by-side)
+        KeyCode::Char('s') => {
+            let idx = next_view_idx();
+            state.layout.split(&state.focused_path.clone(), SplitDir::Vertical, idx);
+            state.split_mode = true;
+            layout::persist::save(&state.layout);
+        }
+
+        // v = horizontal split (top/bottom)
+        KeyCode::Char('v') => {
+            let idx = next_view_idx();
+            state.layout.split(&state.focused_path.clone(), SplitDir::Horizontal, idx);
+            state.split_mode = true;
+            layout::persist::save(&state.layout);
+        }
+
+        // q = close focused pane
+        KeyCode::Char('q') => {
+            if state.focused_path.is_empty() {
+                // Last pane — toggle off split mode instead of closing.
+                state.split_mode = false;
+            } else {
+                state.layout.close(&state.focused_path.clone());
+                // Pop the last side off the path; the focus moves to the parent or sibling.
+                state.focused_path.pop();
+                layout::persist::save(&state.layout);
+                if state.layout.leaf_count() <= 1 {
+                    state.split_mode = false;
+                }
+            }
+        }
+
+        // h/j/k/l = move focus through the pane tree
+        KeyCode::Char('h') | KeyCode::Char('k') => {
+            // Move focus toward A (left/up).
+            if let Some(last) = state.focused_path.last_mut() {
+                *last = Side::A;
+            }
+        }
+        KeyCode::Char('l') | KeyCode::Char('j') => {
+            // Move focus toward B (right/down).
+            if let Some(last) = state.focused_path.last_mut() {
+                *last = Side::B;
+            }
+        }
+
+        // t = toggle split mode
+        KeyCode::Char('t') => {
+            state.split_mode = !state.split_mode;
+            if state.split_mode {
+                // Restore layout; ensure active view matches focused leaf.
+                *active = state.layout.focused_view_idx(&state.focused_path).min(views.len() - 1);
+            }
+        }
+
+        // Any unrecognised key: reset chord, do not consume.
+        _ => {}
+    }
 }
 
 // ── modal key dispatch ────────────────────────────────────────────────────────
@@ -377,12 +535,27 @@ fn handle_modal_key(
     views: &mut [BoxedView],
     perri_idx: usize,
     current_active: usize,
+    _focused_view_idx: usize,
 ) -> Option<usize> {
     let mut new_active: Option<usize> = None;
 
     let modal = state.modal.take()?;
 
     match modal {
+        ModalState::Palette(mut pal) => {
+            match pal.on_key(k) {
+                PaletteOutcome::Consumed => {
+                    state.modal = Some(ModalState::Palette(pal));
+                }
+                PaletteOutcome::Dismiss => {
+                    // modal closed
+                }
+                PaletteOutcome::Execute(action) => {
+                    apply_palette_action(action, state, views, &mut new_active);
+                }
+            }
+        }
+
         ModalState::Await(mut m) => {
             match m.on_key(k) {
                 AwaitAction::Consumed => {
@@ -395,7 +568,6 @@ fn handle_modal_key(
                             warn!("mother resume failed: {e:#}");
                         }
                     });
-                    // modal closed
                 }
                 AwaitAction::Deny => {
                     let id = m.job.id.clone();
@@ -406,7 +578,6 @@ fn handle_modal_key(
                     });
                 }
                 AwaitAction::ViewDiff => {
-                    // Close modal, switch to Perri, focus its diff.
                     if let Some(path) = worktree_path_for_job(&m.job) {
                         if let Some(pv) = views[perri_idx]
                             .as_any_mut()
@@ -417,9 +588,7 @@ fn handle_modal_key(
                     }
                     new_active = Some(perri_idx);
                 }
-                AwaitAction::Dismiss => {
-                    // modal closed, no action
-                }
+                AwaitAction::Dismiss => {}
             }
         }
 
@@ -486,6 +655,94 @@ fn handle_modal_key(
     new_active.or(Some(current_active)).filter(|&v| v != current_active)
 }
 
+// ── palette action dispatch ───────────────────────────────────────────────────
+
+fn apply_palette_action(
+    action: PaletteAction,
+    state: &mut AppState,
+    views: &mut [BoxedView],
+    new_active: &mut Option<usize>,
+) {
+    match action {
+        PaletteAction::SwitchView(id) => {
+            if let Some(idx) = views.iter().position(|v| v.id() == id) {
+                *new_active = Some(idx);
+            }
+        }
+
+        PaletteAction::SpawnFredRepl => {
+            // Focus Fred view — it handles REPL spawning on focus.
+            if let Some(idx) = views.iter().position(|v| v.id() == "fred") {
+                *new_active = Some(idx);
+            }
+        }
+
+        PaletteAction::SpawnAgentRepl(agent) => {
+            if let Some(idx) = views.iter().position(|v| v.id() == agent) {
+                *new_active = Some(idx);
+            }
+        }
+
+        PaletteAction::OpenPrDiff(_url) => {
+            // Switch to Perri; it will show the PR diff.
+            if let Some(idx) = views.iter().position(|v| v.id() == "perri") {
+                *new_active = Some(idx);
+            }
+        }
+
+        PaletteAction::ApproveMotherJob(id) => {
+            if let Some(job) = state.mother_jobs.iter().find(|j| j.id == id).cloned() {
+                state.modal = Some(ModalState::Await(Box::new(AwaitModal::new(job))));
+            }
+        }
+
+        PaletteAction::CancelMotherJob(job_id) => {
+            let prompt = format!("Cancel job \"{}\"? [y/n]", &job_id[..8.min(job_id.len())]);
+            state.modal = Some(ModalState::ConfirmCancel {
+                job_id,
+                modal: ConfirmModal::new(prompt),
+            });
+        }
+
+        PaletteAction::SplitHorizontal => {
+            let used: std::collections::HashSet<usize> =
+                state.layout.all_view_indices().into_iter().collect();
+            let idx = (0..views.len()).find(|i| !used.contains(i)).unwrap_or(0);
+            state.layout.split(&state.focused_path.clone(), SplitDir::Horizontal, idx);
+            state.split_mode = true;
+            layout::persist::save(&state.layout);
+        }
+
+        PaletteAction::SplitVertical => {
+            let used: std::collections::HashSet<usize> =
+                state.layout.all_view_indices().into_iter().collect();
+            let idx = (0..views.len()).find(|i| !used.contains(i)).unwrap_or(0);
+            state.layout.split(&state.focused_path.clone(), SplitDir::Vertical, idx);
+            state.split_mode = true;
+            layout::persist::save(&state.layout);
+        }
+
+        PaletteAction::ClosePane => {
+            if !state.focused_path.is_empty() {
+                state.layout.close(&state.focused_path.clone());
+                state.focused_path.pop();
+                layout::persist::save(&state.layout);
+                if state.layout.leaf_count() <= 1 {
+                    state.split_mode = false;
+                }
+            }
+        }
+
+        PaletteAction::ToggleRightPanel => {
+            state.right_panel_visible = !state.right_panel_visible;
+        }
+
+        PaletteAction::ToggleSplitMode => {
+            state.split_mode = !state.split_mode;
+        }
+    }
+}
+
 // ── mother action handling ────────────────────────────────────────────────────
 
 fn handle_mother_action(action: MotherAction, state: &mut AppState) {
@@ -510,7 +767,6 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
                     });
                 }
                 _ => {
-                    // No plan_path — show status note, skip retry.
                     warn!(
                         "retry requested for job {} but plan_path absent; cannot retry",
                         job.id
@@ -532,13 +788,20 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Derive a worktree path for a job (used by "view diff").
-///
-/// Mother stores `work_dir` in the job JSON but `MotherJob` doesn't currently
-/// deserialise it — we fall back to using the job's branch if available.
-/// For now, returns `None` (Perri's `focus_diff_for_worktree` is a no-op when
-/// path is absent).
 fn worktree_path_for_job(_job: &crate::mother::MotherJob) -> Option<PathBuf> {
-    // Phase 3: work_dir is present in the full job JSON but not yet in MotherJob.
-    // Return None — PerriView::focus_diff_for_worktree handles None gracefully.
     None
+}
+
+/// Update the view index stored in the focused leaf.
+fn update_focused_leaf_view(layout: &mut LayoutNode, path: &[Side], view_idx: usize) {
+    match (layout, path.first()) {
+        (LayoutNode::Leaf { view_idx: v }, _) => *v = view_idx,
+        (LayoutNode::Split { a, b, .. }, Some(side)) => {
+            let child = if *side == Side::A { a.as_mut() } else { b.as_mut() };
+            update_focused_leaf_view(child, &path[1..], view_idx);
+        }
+        (LayoutNode::Split { a, .. }, None) => {
+            update_focused_leaf_view(a, &[], view_idx);
+        }
+    }
 }

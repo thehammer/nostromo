@@ -1,4 +1,9 @@
 //! Tab bar, status bar, break-glass banner, and sidebar widgets.
+//!
+//! Phase 5c: sweater-colour status indicators on the tab bar.
+//! - Perri tab: amber when open PR count > 5, red when > 10.
+//! - Cody and Mother tabs: amber when any Mother job has been running > 15 min.
+//! - Split mode: focused-pane view title highlighted; non-focused panes listed dimly.
 
 use ratatui::{
     layout::Rect,
@@ -7,10 +12,11 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use chrono::Local;
+use chrono::{Local, Utc};
 
 use crate::{
     agent_bus::ActivityEvent,
+    app::AppState,
     data::{
         break_glass::BreakGlassRequest,
         fred_calendar::CalendarSnapshot,
@@ -19,16 +25,49 @@ use crate::{
     ui::{theme, widgets::truncate::truncate},
 };
 
+// ── sweater helpers ───────────────────────────────────────────────────────────
+
+/// Sweater colour for the Perri tab based on open PR count.
+fn perri_sweater_style(open_pr_count: usize) -> Option<Style> {
+    if open_pr_count > 10 {
+        Some(Style::default().fg(theme::RED_SWEATER))
+    } else if open_pr_count > 5 {
+        Some(Style::default().fg(theme::AMBER))
+    } else {
+        None
+    }
+}
+
+/// True when any Mother job has been running for more than 15 minutes.
+fn any_job_over_15_min(state: &AppState) -> bool {
+    let threshold = chrono::Duration::minutes(15);
+    let now = Utc::now();
+    state.mother_jobs.iter().any(|job| {
+        if job.state == "running" {
+            if let Some(started) = job.started_at {
+                return (now - started) > threshold;
+            }
+        }
+        false
+    })
+}
+
+// ── tab bar ───────────────────────────────────────────────────────────────────
+
 /// Render the top tab bar.  Returns the area below the tab bar.
 ///
 /// `active_pty_capturing` — when `true`, a `●` badge is appended to the
 /// active tab label to indicate that the PTY is capturing input.
+///
+/// `state` is used to compute per-tab sweater-colour indicators and the
+/// split-mode pane count badge.
 pub fn render_tab_bar(
     f: &mut Frame,
     area: Rect,
     titles: &[&str],
     active: usize,
     active_pty_capturing: bool,
+    state: &AppState,
 ) -> Rect {
     let bar_area = Rect { height: 1, ..area };
     let below = Rect {
@@ -37,27 +76,72 @@ pub fn render_tab_bar(
         ..area
     };
 
+    let any_long_job = any_job_over_15_min(state);
+    let pane_count = if state.split_mode { state.layout.leaf_count() } else { 0 };
+
     let mut spans: Vec<Span> = Vec::new();
     for (i, &title) in titles.iter().enumerate() {
+        let is_active = i == active;
+
+        // Per-tab sweater colour override.
+        let sweater_style: Option<Style> = match title {
+            "Perri" => perri_sweater_style(state.perri_open_pr_count),
+            "Cody" | "Mother" => {
+                if any_long_job {
+                    Some(Style::default().fg(theme::AMBER))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
         let label = format!(" {title} ");
-        if i == active {
-            spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(theme::FG)
-                    .bg(theme::BORDER_ACTIVE)
-                    .add_modifier(Modifier::BOLD),
-            ));
+
+        if is_active {
+            let base = Style::default()
+                .fg(theme::FG)
+                .bg(theme::BORDER_ACTIVE)
+                .add_modifier(Modifier::BOLD);
+
+            // Apply sweater background colour when the active tab has a status.
+            let style = if let Some(sw) = sweater_style {
+                base.bg(sw.fg.unwrap_or(theme::BORDER_ACTIVE))
+            } else {
+                base
+            };
+
+            spans.push(Span::styled(label, style));
+
             if active_pty_capturing {
                 spans.push(Span::styled(
                     "● ",
                     Style::default().fg(theme::AMBER).bg(theme::BORDER_ACTIVE),
                 ));
             }
+
+            // Split mode: show pane count badge on the active tab.
+            if pane_count > 1 {
+                let focused_view = state.layout.focused_view_idx(&state.focused_path);
+                spans.push(Span::styled(
+                    format!("[{}/{}] ", focused_view + 1, pane_count),
+                    Style::default().fg(theme::FG_MUTED).bg(theme::BORDER_ACTIVE),
+                ));
+            }
         } else {
-            spans.push(Span::styled(label, Style::default().fg(theme::FG_MUTED)));
+            // Inactive tab: use sweater foreground colour if applicable.
+            let style = sweater_style.unwrap_or_else(|| Style::default().fg(theme::FG_MUTED));
+            spans.push(Span::styled(label, style));
         }
         spans.push(Span::raw(" "));
+    }
+
+    // In split mode, append a dim list of non-active split panes after the tab row.
+    if pane_count > 1 {
+        spans.push(Span::styled(
+            format!(" split:{pane_count} "),
+            Style::default().fg(theme::FG_MUTED),
+        ));
     }
 
     let tab_line = Line::from(spans);
@@ -67,15 +151,9 @@ pub fn render_tab_bar(
     below
 }
 
+// ── status bar ────────────────────────────────────────────────────────────────
+
 /// Render the bottom status bar.  Returns the area above the status bar.
-///
-/// `recent_activity` is a slice of the latest `ActivityEvent`s from the bus
-/// (newest last).  The most recent event is shown in the centre of the bar;
-/// when the terminal is ≥ 140 cols wide the previous four events appear on
-/// the right side.
-///
-/// `status_note` is an optional one-shot note (e.g. "retry unavailable") shown
-/// in the status bar when present.
 pub fn render_status_bar(
     f: &mut Frame,
     area: Rect,
@@ -110,7 +188,6 @@ pub fn render_status_bar(
         })
         .unwrap_or_else(|| " ◷ — ".to_string());
 
-    // Centre content: prefer status_note when set, otherwise most-recent activity.
     let activity_str = if let Some(note) = status_note {
         format!(" {note} ")
     } else {
@@ -122,7 +199,6 @@ pub fn render_status_bar(
 
     let left = format!(" {time_str}{mail_str}{next_str}");
 
-    // Right-side: up to last 5 events when terminal is wide enough.
     let right_str = if area.width >= 140 {
         let count = recent_activity.len().min(5);
         let events: Vec<String> = recent_activity
@@ -143,7 +219,6 @@ pub fn render_status_bar(
         String::new()
     };
 
-    // Build the status line, fitting activity into remaining space.
     let used = left.len() + right_str.len() + 2;
     let available = (area.width as usize).saturating_sub(used);
     let activity_display = truncate(&activity_str, available.max(6));
@@ -169,6 +244,8 @@ pub fn render_status_bar(
 
     above
 }
+
+// ── break-glass banner ────────────────────────────────────────────────────────
 
 /// Render a one-row break-glass banner between the tab bar and content area.
 ///
@@ -207,6 +284,8 @@ pub fn render_break_glass_banner(
     below
 }
 
+// ── render_chrome ─────────────────────────────────────────────────────────────
+
 /// Render chrome and return content area.
 #[allow(clippy::too_many_arguments)]
 pub fn render_chrome(
@@ -220,8 +299,9 @@ pub fn render_chrome(
     recent_activity: &[ActivityEvent],
     break_glass: Option<&BreakGlassRequest>,
     status_note: Option<&str>,
+    state: &AppState,
 ) -> Rect {
-    let after_tabs = render_tab_bar(f, full_area, titles, active, active_pty_capturing);
+    let after_tabs = render_tab_bar(f, full_area, titles, active, active_pty_capturing, state);
     let after_banner = render_break_glass_banner(f, after_tabs, break_glass);
     render_status_bar(f, after_banner, mailbox, calendar, recent_activity, status_note)
 }
