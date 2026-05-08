@@ -7,10 +7,16 @@
 pub mod break_glass;
 pub mod dirty_file;
 pub mod fred_calendar;
+pub mod fred_calendar_native;
 pub mod fred_mailbox;
+pub mod fred_mailbox_native;
+pub mod github_client;
+pub mod graph_client;
 pub mod mother_poll;
 pub mod perri_pr;
+pub mod perri_pr_native;
 pub mod perri_queue;
+pub mod perri_queue_native;
 pub mod right_panel_source;
 
 use std::time::Duration;

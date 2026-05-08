@@ -41,6 +41,7 @@ fn fake_mailbox() -> MailboxSnapshot {
         ],
         stale: false,
         error: None,
+        auth_prompt: None,
     }
 }
 

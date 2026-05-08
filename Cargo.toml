@@ -51,8 +51,20 @@ chrono = { version = "0.4", features = ["serde"] }
 notify = "6"
 clap = { version = "4", features = ["derive"] }
 
+# HTTP + OAuth2 (Phase 4 native clients)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+oauth2 = "4"
+tokio-util = { version = "0.7", features = ["io"] }
+
+# GitHub API (Phase 4)
+octocrab = "0.41"
+serde_yaml = "0.9"
+url = "2"
+
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }
+wiremock = "0.6"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

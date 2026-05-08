@@ -27,6 +27,26 @@ pub struct Config {
     pub pr_queue_poll_secs: u64,
     /// PR diff poll interval in seconds (default: 30).
     pub pr_diff_poll_secs: u64,
+
+    // ── Phase 4: Microsoft Graph (native mailbox/calendar) ──────────────────
+
+    /// Azure AD application (client) ID for Microsoft Graph OAuth2 device flow.
+    pub graph_client_id: Option<String>,
+    /// Azure AD tenant ID (default: `"common"` for multi-tenant / personal accounts).
+    pub graph_tenant: Option<String>,
+    /// Path where the Graph OAuth2 token is cached.
+    /// Default: `$HOME/.cache/nostromo/graph-token.json`.
+    pub graph_token_cache: Option<PathBuf>,
+
+    // ── Phase 4: GitHub (native PR queue/diff) ──────────────────────────────
+
+    /// Path to the gh CLI `hosts.yml` used to resolve a GitHub token when
+    /// `GITHUB_TOKEN` is not set.  Default: `$HOME/.config/gh/hosts.yml`.
+    pub github_token_path: Option<PathBuf>,
+
+    /// VIP sender addresses (lowercase); emails from these addresses are
+    /// highlighted in the mailbox panel.
+    pub vip_senders: Vec<String>,
 }
 
 impl Default for Config {
@@ -39,6 +59,11 @@ impl Default for Config {
             calendar_poll_secs: 120,
             pr_queue_poll_secs: 60,
             pr_diff_poll_secs: 30,
+            graph_client_id: None,
+            graph_tenant: None,
+            graph_token_cache: None,
+            github_token_path: None,
+            vip_senders: Vec::new(),
         }
     }
 }
@@ -82,6 +107,16 @@ impl Config {
         self.claude_bin
             .clone()
             .unwrap_or_else(|| home_dir().join(".claude").join("bin"))
+    }
+
+    /// Resolved Graph OAuth2 token cache path.
+    pub fn graph_token_cache_path(&self) -> PathBuf {
+        self.graph_token_cache.clone().unwrap_or_else(|| {
+            home_dir()
+                .join(".cache")
+                .join("nostromo")
+                .join("graph-token.json")
+        })
     }
 
     pub fn mailbox_poll_interval(&self) -> Duration {

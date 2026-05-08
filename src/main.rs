@@ -37,6 +37,12 @@ struct Args {
     /// Override config file path
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// Use the legacy bash data sources instead of native Rust clients.
+    /// Requires fred-mailbox-pane, fred-calendar-pane, perri-queue-pane, and
+    /// perri-diff-pane to be installed in the claude bin directory.
+    #[arg(long)]
+    bash_fallback: bool,
 }
 
 fn main() -> Result<()> {
@@ -109,7 +115,7 @@ fn main() -> Result<()> {
     // ------------------------------------------------------------------
     // Run
     // ------------------------------------------------------------------
-    let result = app::run(args.view, config, &mut terminal, syntect, bus);
+    let result = app::run(args.view, args.bash_fallback, config, &mut terminal, syntect, bus);
 
     // ------------------------------------------------------------------
     // Terminal teardown (always, even if run() errored)

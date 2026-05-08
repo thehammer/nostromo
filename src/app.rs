@@ -26,10 +26,14 @@ use crate::{
     data::{
         break_glass::{self, BreakGlassRequest},
         fred_calendar::FredCalendarSource,
+        fred_calendar_native::FredCalendarNativeSource,
         fred_mailbox::FredMailboxSource,
+        fred_mailbox_native::FredMailboxNativeSource,
         mother_poll,
         perri_pr::PerriPrSource,
+        perri_pr_native::PerriPrNativeSource,
         perri_queue::PerriQueueSource,
+        perri_queue_native::PerriQueueNativeSource,
         right_panel_source::{self, RightPanelSnapshot},
     },
     event::{self, AppEvent},
@@ -100,15 +104,32 @@ impl AppState {
 #[tokio::main]
 pub async fn run(
     initial_view: ViewArg,
+    bash_fallback: bool,
     config: Config,
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     syntect: Arc<SyntectCache>,
     bus: Arc<AgentBus>,
 ) -> Result<()> {
-    let mailbox_rx = FredMailboxSource::spawn(config.clone());
-    let calendar_rx = FredCalendarSource::spawn(config.clone());
-    let queue_rx = PerriQueueSource::spawn(config.clone());
-    let pr_rx = PerriPrSource::spawn(config.clone());
+    let mailbox_rx = if bash_fallback {
+        FredMailboxSource::spawn(config.clone())
+    } else {
+        FredMailboxNativeSource::spawn(config.clone())
+    };
+    let calendar_rx = if bash_fallback {
+        FredCalendarSource::spawn(config.clone())
+    } else {
+        FredCalendarNativeSource::spawn(config.clone())
+    };
+    let queue_rx = if bash_fallback {
+        PerriQueueSource::spawn(config.clone())
+    } else {
+        PerriQueueNativeSource::spawn(config.clone())
+    };
+    let pr_rx = if bash_fallback {
+        PerriPrSource::spawn(config.clone())
+    } else {
+        PerriPrNativeSource::spawn(config.clone())
+    };
 
     // Create the event channel before views so they can send AgentUpdate.
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();

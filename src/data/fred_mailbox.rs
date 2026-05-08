@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
+pub use crate::data::graph_client::DeviceFlowPrompt;
+
 use crate::{
     config::Config,
     data::dirty_file,
@@ -53,6 +55,11 @@ pub struct MailboxSnapshot {
     pub stale: bool,
     /// Error message if last fetch failed.
     pub error: Option<String>,
+    /// Present when Graph auth is required (device-flow prompt for the TUI).
+    /// `serde(default)` keeps the bash source's JSON (which omits this field)
+    /// backwards-compatible.
+    #[serde(default)]
+    pub auth_prompt: Option<DeviceFlowPrompt>,
 }
 
 // ── Source ──────────────────────────────────────────────────────────────────

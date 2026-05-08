@@ -4,7 +4,7 @@ use std::any::Any;
 
 use crossterm::event::KeyCode;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
@@ -95,6 +95,47 @@ impl FredView {
 
         let inner = block.inner(area);
         f.render_widget(block, area);
+
+        // Auth-prompt rendering: when Graph sign-in is required, show device flow UI.
+        if let Some(Some(prompt)) = snap.map(|s| s.auth_prompt.as_ref()) {
+            let remaining = prompt.expires_at - chrono::Utc::now();
+            let mins = remaining.num_minutes().max(0);
+            let secs = remaining.num_seconds().max(0) % 60;
+
+            let lines = vec![
+                Line::from(Span::styled(
+                    "Microsoft sign-in required",
+                    Style::default()
+                        .fg(theme::AMBER)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(vec![]),
+                Line::from(vec![
+                    Span::styled("Visit:  ", theme::style_muted()),
+                    Span::styled(
+                        prompt.verification_uri.clone(),
+                        Style::default().fg(theme::FG).add_modifier(Modifier::UNDERLINED),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("Code:   ", theme::style_muted()),
+                    Span::styled(
+                        prompt.user_code.clone(),
+                        Style::default()
+                            .fg(theme::AMBER)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(vec![]),
+                Line::from(Span::styled(
+                    format!("(expires in {mins:02}:{secs:02})"),
+                    theme::style_muted(),
+                )),
+            ];
+            let p = Paragraph::new(lines).alignment(Alignment::Center);
+            f.render_widget(p, inner);
+            return;
+        }
 
         let items: Vec<ListItem> = if let Some(s) = snap {
             s.items
