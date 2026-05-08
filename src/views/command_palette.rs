@@ -95,7 +95,12 @@ pub struct CommandPalette {
 impl CommandPalette {
     pub fn new(items: Vec<PaletteItem>) -> Self {
         let filtered: Vec<usize> = (0..items.len()).collect();
-        Self { query: String::new(), items, filtered, selected: 0 }
+        Self {
+            query: String::new(),
+            items,
+            filtered,
+            selected: 0,
+        }
     }
 
     pub fn on_key(&mut self, k: &KeyEvent) -> PaletteOutcome {
@@ -151,7 +156,10 @@ impl CommandPalette {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::BORDER_ACTIVE))
-            .title(Span::styled(" Command Palette ", Style::default().fg(theme::FG_MUTED)));
+            .title(Span::styled(
+                " Command Palette ",
+                Style::default().fg(theme::FG_MUTED),
+            ));
 
         let inner = block.inner(overlay);
         f.render_widget(block, overlay);
@@ -225,7 +233,12 @@ impl CommandPalette {
         scored.sort_by(|(ai, as_), (bi, bs)| {
             bs.partial_cmp(as_)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| self.items[*ai].label.len().cmp(&self.items[*bi].label.len()))
+                .then_with(|| {
+                    self.items[*ai]
+                        .label
+                        .len()
+                        .cmp(&self.items[*bi].label.len())
+                })
         });
 
         self.filtered = scored.into_iter().map(|(i, _)| i).collect();
@@ -259,7 +272,11 @@ pub fn subsequence_score(query: &str, text: &str) -> Option<f64> {
         }
     }
 
-    if q_idx == q_chars.len() { Some(score) } else { None }
+    if q_idx == q_chars.len() {
+        Some(score)
+    } else {
+        None
+    }
 }
 
 // ── build_items ───────────────────────────────────────────────────────────────
@@ -308,11 +325,31 @@ pub fn build_items(state: &AppState, jobs: &[MotherJob]) -> Vec<PaletteItem> {
 
     // Layout actions.
     let layout_actions: &[(&str, &str, PaletteAction)] = &[
-        ("split-h", "Split Horizontal (Ctrl-W s)", PaletteAction::SplitHorizontal),
-        ("split-v", "Split Vertical (Ctrl-W v)", PaletteAction::SplitVertical),
-        ("close-pane", "Close Pane (Ctrl-W q)", PaletteAction::ClosePane),
-        ("toggle-split", "Toggle Split Mode (Ctrl-W t)", PaletteAction::ToggleSplitMode),
-        ("toggle-right", "Toggle Right Panel (Ctrl-R)", PaletteAction::ToggleRightPanel),
+        (
+            "split-h",
+            "Split Horizontal (Ctrl-W s)",
+            PaletteAction::SplitHorizontal,
+        ),
+        (
+            "split-v",
+            "Split Vertical (Ctrl-W v)",
+            PaletteAction::SplitVertical,
+        ),
+        (
+            "close-pane",
+            "Close Pane (Ctrl-W q)",
+            PaletteAction::ClosePane,
+        ),
+        (
+            "toggle-split",
+            "Toggle Split Mode (Ctrl-W t)",
+            PaletteAction::ToggleSplitMode,
+        ),
+        (
+            "toggle-right",
+            "Toggle Right Panel (Ctrl-R)",
+            PaletteAction::ToggleRightPanel,
+        ),
     ];
     for &(id, label, ref action) in layout_actions {
         items.push(PaletteItem {
@@ -357,11 +394,7 @@ pub fn build_items(state: &AppState, jobs: &[MotherJob]) -> Vec<PaletteItem> {
 }
 
 fn truncate_label(s: &str, max: usize) -> &str {
-    let end = s
-        .char_indices()
-        .nth(max)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
+    let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
     &s[..end]
 }
 
@@ -373,5 +406,10 @@ pub fn centered_rect(pct_w: u16, pct_h: u16, area: Rect) -> Rect {
     let h = area.height * pct_h / 100;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }

@@ -5,6 +5,7 @@
 //! - Cody and Mother tabs: amber when any Mother job has been running > 15 min.
 //! - Split mode: focused-pane view title highlighted; non-focused panes listed dimly.
 
+use chrono::{Local, Utc};
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -12,14 +13,13 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use chrono::{Local, Utc};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     agent_bus::ActivityEvent,
     app::AppState,
     data::{
-        break_glass::BreakGlassRequest,
-        fred_calendar::CalendarSnapshot,
+        break_glass::BreakGlassRequest, fred_calendar::CalendarSnapshot,
         fred_mailbox::MailboxSnapshot,
     },
     ui::{theme, widgets::truncate::truncate},
@@ -67,7 +67,7 @@ pub fn render_tab_bar(
     titles: &[&str],
     active: usize,
     active_pty_capturing: bool,
-    state: &AppState,
+    state: &mut AppState,
 ) -> Rect {
     let bar_area = Rect { height: 1, ..area };
     let below = Rect {
@@ -77,9 +77,19 @@ pub fn render_tab_bar(
     };
 
     let any_long_job = any_job_over_15_min(state);
-    let pane_count = if state.split_mode { state.layout.leaf_count() } else { 0 };
+    let pane_count = if state.split_mode {
+        state.layout.leaf_count()
+    } else {
+        0
+    };
+
+    // Reset hitmap — rebuilt from scratch each frame.
+    state.tab_hitmap.clear();
 
     let mut spans: Vec<Span> = Vec::new();
+    // Track cumulative column offset from area.x for hitmap computation.
+    let mut col_offset: u16 = area.x;
+
     for (i, &title) in titles.iter().enumerate() {
         let is_active = i == active;
 
@@ -97,6 +107,7 @@ pub fn render_tab_bar(
         };
 
         let label = format!(" {title} ");
+        let tab_start = col_offset;
 
         if is_active {
             let base = Style::default()
@@ -111,11 +122,14 @@ pub fn render_tab_bar(
                 base
             };
 
+            col_offset += label.width() as u16;
             spans.push(Span::styled(label, style));
 
             if active_pty_capturing {
+                let badge = "● ";
+                col_offset += badge.width() as u16;
                 spans.push(Span::styled(
-                    "● ",
+                    badge,
                     Style::default().fg(theme::AMBER).bg(theme::BORDER_ACTIVE),
                 ));
             }
@@ -123,16 +137,27 @@ pub fn render_tab_bar(
             // Split mode: show pane count badge on the active tab.
             if pane_count > 1 {
                 let focused_view = state.layout.focused_view_idx(&state.focused_path);
+                let badge = format!("[{}/{}] ", focused_view + 1, pane_count);
+                col_offset += badge.width() as u16;
                 spans.push(Span::styled(
-                    format!("[{}/{}] ", focused_view + 1, pane_count),
-                    Style::default().fg(theme::FG_MUTED).bg(theme::BORDER_ACTIVE),
+                    badge,
+                    Style::default()
+                        .fg(theme::FG_MUTED)
+                        .bg(theme::BORDER_ACTIVE),
                 ));
             }
         } else {
             // Inactive tab: use sweater foreground colour if applicable.
             let style = sweater_style.unwrap_or_else(|| Style::default().fg(theme::FG_MUTED));
+            col_offset += label.width() as u16;
             spans.push(Span::styled(label, style));
         }
+
+        // Record the hit region for this tab (covers label + badges, before separator).
+        state.tab_hitmap.push((tab_start, col_offset));
+
+        // Inter-tab separator (single space) — not part of any tab's hit region.
+        col_offset += 1;
         spans.push(Span::raw(" "));
     }
 
@@ -268,10 +293,7 @@ pub fn render_break_glass_banner(
         ..area
     };
 
-    let text = format!(
-        " ⚠ BREAK-GLASS: {} — press Ctrl-B to review ",
-        req.action
-    );
+    let text = format!(" ⚠ BREAK-GLASS: {} — press Ctrl-B to review ", req.action);
     let line = Line::from(Span::styled(
         truncate(&text, area.width as usize),
         Style::default()
@@ -299,9 +321,16 @@ pub fn render_chrome(
     recent_activity: &[ActivityEvent],
     break_glass: Option<&BreakGlassRequest>,
     status_note: Option<&str>,
-    state: &AppState,
+    state: &mut AppState,
 ) -> Rect {
     let after_tabs = render_tab_bar(f, full_area, titles, active, active_pty_capturing, state);
     let after_banner = render_break_glass_banner(f, after_tabs, break_glass);
-    render_status_bar(f, after_banner, mailbox, calendar, recent_activity, status_note)
+    render_status_bar(
+        f,
+        after_banner,
+        mailbox,
+        calendar,
+        recent_activity,
+        status_note,
+    )
 }

@@ -14,10 +14,7 @@ use tokio::sync::watch;
 
 use crate::{
     config::Config,
-    data::{
-        fred_calendar::CalendarSnapshot,
-        fred_mailbox::MailboxSnapshot,
-    },
+    data::{fred_calendar::CalendarSnapshot, fred_mailbox::MailboxSnapshot},
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
     ui::{
@@ -145,7 +142,9 @@ impl FredView {
                     Span::styled("Visit:  ", theme::style_muted()),
                     Span::styled(
                         prompt.verification_uri.clone(),
-                        Style::default().fg(theme::FG).add_modifier(Modifier::UNDERLINED),
+                        Style::default()
+                            .fg(theme::FG)
+                            .add_modifier(Modifier::UNDERLINED),
                     ),
                 ]),
                 Line::from(vec![
@@ -310,10 +309,7 @@ impl FredView {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
-            .title(Span::styled(
-                " REPL ",
-                Style::default().fg(theme::FG_MUTED),
-            ));
+            .title(Span::styled(" REPL ", Style::default().fg(theme::FG_MUTED)));
 
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -348,10 +344,45 @@ impl View for FredView {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
+        // Error banner: show 1-row yellow banner if any snapshot has an error.
+        let mailbox_error = self
+            .mailbox_rx
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.error.clone());
+        let calendar_error = self
+            .calendar_rx
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.error.clone());
+        let error_msg = mailbox_error.or(calendar_error);
+
+        let (content_area, banner_area) = if error_msg.is_some() {
+            let banner = Rect { height: 1, ..area };
+            let rest = Rect {
+                y: area.y + 1,
+                height: area.height.saturating_sub(1),
+                ..area
+            };
+            (rest, Some(banner))
+        } else {
+            (area, None)
+        };
+
+        if let (Some(banner), Some(ref msg)) = (banner_area, &error_msg) {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" ⚠ {msg}"),
+                    Style::default().fg(ratatui::style::Color::Yellow),
+                ))),
+                banner,
+            );
+        }
+
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(area);
+            .split(content_area);
 
         let top_cols = Layout::default()
             .direction(Direction::Horizontal)

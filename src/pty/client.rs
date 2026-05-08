@@ -15,7 +15,6 @@
 //! `Drop` sends `PtyDetach` (PTY keeps running in the daemon).
 //! `kill()` sends `PtyKill` (daemon kills the child process).
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::KeyEvent;
@@ -27,8 +26,8 @@ use uuid::Uuid;
 use crate::{
     event::AppEvent,
     ipc::{
-        DaemonClient,
         protocol::{ClientMsg, ServerMsg},
+        DaemonClient,
     },
     pty::keys::key_to_bytes,
 };
@@ -68,7 +67,7 @@ impl DaemonPtyClient {
             args: args.iter().map(|s| s.to_string()).collect(),
             cols,
             rows,
-            cwd: std::env::current_dir().ok().map(PathBuf::from),
+            cwd: std::env::current_dir().ok(),
             client_tag: client_tag.to_string(),
         });
 
@@ -97,14 +96,7 @@ impl DaemonPtyClient {
             });
 
             // Stream output.
-            run_output_loop(
-                &spawned_id,
-                rx,
-                parser_clone,
-                event_tx,
-                view_id,
-            )
-            .await;
+            run_output_loop(&spawned_id, rx, parser_clone, event_tx, view_id).await;
         });
 
         Self {
@@ -217,10 +209,7 @@ async fn run_output_loop(
 ) {
     loop {
         match rx.recv().await {
-            Ok(ServerMsg::PtyScrollback {
-                pty_id: id,
-                bytes,
-            }) if id == pty_id => {
+            Ok(ServerMsg::PtyScrollback { pty_id: id, bytes }) if id == pty_id => {
                 parser.lock().unwrap().process(&bytes);
                 let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
             }
@@ -340,8 +329,7 @@ impl DaemonPtyFactory {
             return;
         }
         // Wait briefly for PtyListResp.
-        let deadline = tokio::time::Instant::now()
-            + tokio::time::Duration::from_millis(500);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
         loop {
             match tokio::time::timeout_at(deadline, rx.recv()).await {
                 Ok(Ok(ServerMsg::PtyListResp { ptys })) => {

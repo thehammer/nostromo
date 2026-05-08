@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     codec::{read_frame, write_frame},
-    protocol::{ClientMsg, MIN_CLIENT_VERSION, PROTOCOL_VERSION, ServerMsg, Topic},
+    protocol::{ClientMsg, ServerMsg, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
 };
 
 // ── inner ─────────────────────────────────────────────────────────────────────

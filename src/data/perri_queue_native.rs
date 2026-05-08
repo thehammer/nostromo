@@ -151,10 +151,7 @@ impl PerriQueueNativeSource {
     }
 
     fn build_client(&self) -> Result<GithubClient> {
-        let hosts_path = self
-            .config
-            .github_token_path
-            .as_deref();
+        let hosts_path = self.config.github_token_path.as_deref();
         GithubClient::new(hosts_path)
     }
 }
@@ -175,10 +172,7 @@ async fn search_prs(
 
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, "application/vnd.github+json".parse().unwrap());
-    headers.insert(
-        "X-GitHub-Api-Version",
-        "2022-11-28".parse().unwrap(),
-    );
+    headers.insert("X-GitHub-Api-Version", "2022-11-28".parse().unwrap());
     headers.insert(
         AUTHORIZATION,
         format!("Bearer {}", client.token()).parse().unwrap(),
@@ -215,7 +209,10 @@ async fn search_prs(
         anyhow::bail!("github search -> {status}: {body}");
     }
 
-    let search: SearchResponse = resp.json().await.context("parsing github search response")?;
+    let search: SearchResponse = resp
+        .json()
+        .await
+        .context("parsing github search response")?;
     let tagged: Vec<(SearchIssueItem, bool)> =
         search.items.into_iter().map(|i| (i, requested)).collect();
     let result = build_pr_items(&tagged);
@@ -237,7 +234,11 @@ fn build_pr_items(items: &[(SearchIssueItem, bool)]) -> Vec<PrQueueItem> {
                 repo,
                 number: item.number,
                 title: item.title.clone(),
-                author: item.user.as_ref().map(|u| u.login.clone()).unwrap_or_default(),
+                author: item
+                    .user
+                    .as_ref()
+                    .map(|u| u.login.clone())
+                    .unwrap_or_default(),
                 requested: *requested,
                 url: item.html_url.clone(),
             }

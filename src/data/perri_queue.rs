@@ -93,7 +93,13 @@ impl PerriQueueSource {
         let bin = self.config.claude_bin_dir().join("perri-queue-pane");
         let output = tokio::process::Command::new(&bin)
             .arg("--json")
-            .env("PERRI_HOME", self.config.claude_bin_dir().parent().unwrap_or_else(|| std::path::Path::new(".")))
+            .env(
+                "PERRI_HOME",
+                self.config
+                    .claude_bin_dir()
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            )
             .env("PERRI_STATE", self.config.perri_state_dir())
             .output()
             .await

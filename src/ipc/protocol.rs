@@ -65,7 +65,7 @@ pub struct PtyInfo {
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────
 
 pub(crate) mod base64_bytes {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
@@ -94,7 +94,6 @@ pub enum ClientMsg {
     Ping,
 
     // ── PTY commands ──────────────────────────────────────────────────────────
-
     /// Spawn a new PTY in the daemon.
     PtySpawn {
         pty_id: String,
@@ -164,7 +163,6 @@ pub enum ServerMsg {
     },
 
     // ── PTY responses ─────────────────────────────────────────────────────────
-
     /// The requested PTY was successfully spawned.
     PtySpawned {
         pty_id: String,

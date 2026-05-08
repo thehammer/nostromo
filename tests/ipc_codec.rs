@@ -4,9 +4,7 @@
 //! or file descriptors required.
 
 use nostromo::ipc::codec::{read_frame, write_frame};
-use nostromo::ipc::protocol::{
-    ClientMsg, ServerMsg, Topic, PROTOCOL_VERSION,
-};
+use nostromo::ipc::protocol::{ClientMsg, ServerMsg, Topic, PROTOCOL_VERSION};
 use tokio::io::AsyncWriteExt;
 
 // ── Frame codec round-trips ───────────────────────────────────────────────────
@@ -70,9 +68,7 @@ async fn codec_client_msg_hello_round_trip() {
     drop(writer);
     let got_bytes = read_frame(&mut reader).await.unwrap();
     let got: ClientMsg = serde_json::from_slice(&got_bytes).unwrap();
-    assert!(
-        matches!(got, ClientMsg::Hello { protocol_version: v, .. } if v == PROTOCOL_VERSION)
-    );
+    assert!(matches!(got, ClientMsg::Hello { protocol_version: v, .. } if v == PROTOCOL_VERSION));
 }
 
 #[tokio::test]
@@ -101,9 +97,13 @@ async fn codec_server_msg_welcome_round_trip() {
     drop(writer);
     let got_bytes = read_frame(&mut reader).await.unwrap();
     let got: ServerMsg = serde_json::from_slice(&got_bytes).unwrap();
-    assert!(
-        matches!(got, ServerMsg::Welcome { daemon_pid: 12345, .. })
-    );
+    assert!(matches!(
+        got,
+        ServerMsg::Welcome {
+            daemon_pid: 12345,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]

@@ -57,7 +57,10 @@ pub fn render(f: &mut Frame, area: Rect, snap: &RightPanelSnapshot) {
     let tools_block = Block::default()
         .borders(Borders::BOTTOM)
         .border_style(Style::default().fg(theme::BORDER_INACTIVE))
-        .title(Span::styled(" Tools ", Style::default().fg(theme::FG_MUTED)));
+        .title(Span::styled(
+            " Tools ",
+            Style::default().fg(theme::FG_MUTED),
+        ));
     let tools_inner = tools_block.inner(chunks[1]);
     f.render_widget(tools_block, chunks[1]);
     let tool_items: Vec<ListItem> = if snap.recent_tools.is_empty() {
@@ -82,7 +85,10 @@ pub fn render(f: &mut Frame, area: Rect, snap: &RightPanelSnapshot) {
     let files_block = Block::default()
         .borders(Borders::BOTTOM)
         .border_style(Style::default().fg(theme::BORDER_INACTIVE))
-        .title(Span::styled(" Files ", Style::default().fg(theme::FG_MUTED)));
+        .title(Span::styled(
+            " Files ",
+            Style::default().fg(theme::FG_MUTED),
+        ));
     let files_inner = files_block.inner(chunks[2]);
     f.render_widget(files_block, chunks[2]);
     let file_items: Vec<ListItem> = if snap.open_files.is_empty() {

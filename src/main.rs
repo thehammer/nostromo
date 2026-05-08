@@ -25,7 +25,7 @@ use nostromo::{
     agent_bus::AgentBus,
     app,
     config::Config,
-    ipc::{DaemonClient, default_socket_path},
+    ipc::{default_socket_path, DaemonClient},
     ui::widgets::syntect_cache::SyntectCache,
     ViewArg,
 };
@@ -85,9 +85,7 @@ async fn main() -> Result<()> {
     // ------------------------------------------------------------------
     // Syntect cache — built once, shared across all diff views
     // ------------------------------------------------------------------
-    let syntect = Arc::new(
-        SyntectCache::load().context("loading syntect syntax/theme cache")?,
-    );
+    let syntect = Arc::new(SyntectCache::load().context("loading syntect syntax/theme cache")?);
 
     // ------------------------------------------------------------------
     // Agent bus — tails ~/.claude/activity.jsonl (in-process fallback)

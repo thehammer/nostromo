@@ -30,7 +30,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>> {
 /// Write one length-prefixed frame to `w`.
 pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, body: &[u8]) -> Result<()> {
     if body.len() > MAX_FRAME_LEN {
-        bail!("frame too large: {} bytes (max {MAX_FRAME_LEN})", body.len());
+        bail!(
+            "frame too large: {} bytes (max {MAX_FRAME_LEN})",
+            body.len()
+        );
     }
     let len = (body.len() as u32).to_be_bytes();
     w.write_all(&len).await?;

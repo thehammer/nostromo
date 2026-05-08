@@ -72,10 +72,7 @@ async fn test_device_flow_happy_path() {
         .post(format!("{}/common/oauth2/v2.0/token", server.uri()))
         .form(&[
             ("client_id", "test"),
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:device_code",
-            ),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", device_code),
         ])
         .send()
@@ -91,10 +88,7 @@ async fn test_device_flow_happy_path() {
         .post(format!("{}/common/oauth2/v2.0/token", server.uri()))
         .form(&[
             ("client_id", "test"),
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:device_code",
-            ),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", device_code),
         ])
         .send()
@@ -138,9 +132,7 @@ async fn test_refresh_on_401() {
     // Second GET (after refresh) returns 200.
     Mock::given(method("GET"))
         .and(path("/v1.0/me/messages"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})))
         .mount(&server)
         .await;
 
@@ -231,11 +223,17 @@ async fn test_delta_link_persistence() {
 
     // Verify deltaLink is present.
     let delta_link = body["@odata.deltaLink"].as_str().unwrap();
-    assert!(delta_link.contains("deltaToken=abc123"), "deltaLink should be present");
+    assert!(
+        delta_link.contains("deltaToken=abc123"),
+        "deltaLink should be present"
+    );
 
     // Simulate GraphClient.delta persisting the link.
     std::fs::write(&delta_file, delta_link).unwrap();
-    assert!(delta_file.exists(), "delta link file should be written to disk");
+    assert!(
+        delta_file.exists(),
+        "delta link file should be written to disk"
+    );
 
     let written = std::fs::read_to_string(&delta_file).unwrap();
     assert_eq!(written, delta_link, "persisted link should match response");
@@ -263,5 +261,9 @@ async fn test_delta_link_persistence() {
         .unwrap();
     assert!(r2.status().is_success());
     let body2: serde_json::Value = r2.json().await.unwrap();
-    assert_eq!(body2["value"].as_array().unwrap().len(), 0, "no new items in second delta");
+    assert_eq!(
+        body2["value"].as_array().unwrap().len(),
+        0,
+        "no new items in second delta"
+    );
 }

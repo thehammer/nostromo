@@ -197,15 +197,9 @@ impl GraphClient {
             }
 
             // Prefer deltaLink (end of set) over nextLink (more pages).
-            if let Some(dl) = page
-                .get("@odata.deltaLink")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(dl) = page.get("@odata.deltaLink").and_then(|v| v.as_str()) {
                 delta_link = dl.to_owned();
-            } else if let Some(nl) = page
-                .get("@odata.nextLink")
-                .and_then(|v| v.as_str())
-            {
+            } else if let Some(nl) = page.get("@odata.nextLink").and_then(|v| v.as_str()) {
                 next_url = Some(nl.to_owned());
             }
         }
@@ -294,10 +288,7 @@ impl GraphClient {
 
     async fn start_device_flow(&self) -> Result<DeviceFlowPrompt> {
         let url = format!("{LOGIN_BASE}/{}/oauth2/v2.0/devicecode", self.tenant);
-        let params = [
-            ("client_id", self.client_id.as_str()),
-            ("scope", SCOPES),
-        ];
+        let params = [("client_id", self.client_id.as_str()), ("scope", SCOPES)];
 
         let dc: DeviceCodeResponse = self
             .http
@@ -322,9 +313,7 @@ impl GraphClient {
         let device_code = dc.device_code.clone();
         let poll_interval = dc.interval.max(5);
         tokio::spawn(async move {
-            client
-                .poll_device_code(&device_code, poll_interval)
-                .await;
+            client.poll_device_code(&device_code, poll_interval).await;
         });
 
         Ok(prompt)
@@ -334,10 +323,7 @@ impl GraphClient {
         let url = format!("{LOGIN_BASE}/{}/oauth2/v2.0/token", self.tenant);
         let params = [
             ("client_id", self.client_id.as_str()),
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:device_code",
-            ),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", device_code),
         ];
 
@@ -416,13 +402,11 @@ fn persist_token(path: &Path, tok: &TokenState) -> Result<()> {
             .with_context(|| format!("setting permissions on {}", parent.display()))?;
     }
 
-    let data =
-        serde_json::to_string_pretty(tok).context("serialising token")?;
+    let data = serde_json::to_string_pretty(tok).context("serialising token")?;
 
     // Write to a temp file then rename for atomicity.
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &data)
-        .with_context(|| format!("writing token to {}", tmp.display()))?;
+    std::fs::write(&tmp, &data).with_context(|| format!("writing token to {}", tmp.display()))?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("setting permissions on {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
@@ -441,4 +425,3 @@ fn absolute_url(path_or_url: &str) -> String {
         format!("{GRAPH_BASE}{path_or_url}")
     }
 }
-

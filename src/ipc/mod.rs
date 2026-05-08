@@ -18,6 +18,6 @@ pub mod scrollback;
 pub mod server;
 
 pub use client::DaemonClient;
-pub use protocol::{ClientMsg, ServerMsg, Topic, default_socket_path};
+pub use protocol::{default_socket_path, ClientMsg, ServerMsg, Topic};
 pub use pty_manager::PtyManager;
 pub use server::Server;

@@ -14,11 +14,7 @@ use tracing::{debug, warn};
 
 use crate::{
     config::Config,
-    data::{
-        dirty_file,
-        github_client::GithubClient,
-        perri_pr::PrSnapshot,
-    },
+    data::{dirty_file, github_client::GithubClient, perri_pr::PrSnapshot},
 };
 
 // ── current-pr.json shape ─────────────────────────────────────────────────────
@@ -27,7 +23,7 @@ use crate::{
 #[derive(Debug, Deserialize)]
 pub struct CurrentPrPointer {
     pub number: u64,
-    pub repo: String,   // "owner/repo"
+    pub repo: String, // "owner/repo"
     pub title: Option<String>,
     pub author: Option<String>,
     pub url: Option<String>,
@@ -125,9 +121,7 @@ impl PerriPrNativeSource {
             .pulls(&owner, &repo_name)
             .get(pointer.number)
             .await
-            .with_context(|| {
-                format!("fetching PR {}/{} #{}", owner, repo_name, pointer.number)
-            })?;
+            .with_context(|| format!("fetching PR {}/{} #{}", owner, repo_name, pointer.number))?;
 
         let title = pr_meta
             .title
@@ -170,12 +164,7 @@ impl PerriPrNativeSource {
 
 // ── Raw diff fetch ────────────────────────────────────────────────────────────
 
-async fn fetch_diff(
-    client: &GithubClient,
-    owner: &str,
-    repo: &str,
-    number: u64,
-) -> Result<String> {
+async fn fetch_diff(client: &GithubClient, owner: &str, repo: &str, number: u64) -> Result<String> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
 
     let resp = client

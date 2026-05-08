@@ -20,11 +20,7 @@ use crate::{
     pty::{PtyHost, PtyWidget},
     ui::{
         theme,
-        widgets::{
-            syntect_cache::SyntectCache,
-            syntect_diff::SyntectDiff,
-            truncate::truncate,
-        },
+        widgets::{syntect_cache::SyntectCache, syntect_diff::SyntectDiff, truncate::truncate},
     },
     views::{EventOutcome, View, ViewCtx},
 };
@@ -97,7 +93,9 @@ impl PerriView {
             .border_style(Style::default().fg(queue_color))
             .title(Span::styled(
                 title,
-                Style::default().fg(queue_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(queue_color)
+                    .add_modifier(Modifier::BOLD),
             ));
 
         let inner = block.inner(area);
@@ -136,10 +134,7 @@ impl PerriView {
                                 Style::default().fg(theme::BORDER_ACTIVE),
                             ),
                             Span::styled(title_str, theme::style_normal()),
-                            Span::styled(
-                                format!(" {}", repo_short),
-                                theme::style_muted(),
-                            ),
+                            Span::styled(format!(" {}", repo_short), theme::style_muted()),
                         ])
                     })
                     .map(ListItem::new)
@@ -218,10 +213,7 @@ impl PerriView {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
-            .title(Span::styled(
-                " REPL ",
-                Style::default().fg(theme::FG_MUTED),
-            ));
+            .title(Span::styled(" REPL ", Style::default().fg(theme::FG_MUTED)));
 
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -255,10 +247,41 @@ impl View for PerriView {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
+        // Error banner: show 1-row yellow banner if any snapshot has an error.
+        let pr_error = self.pr_rx.borrow().as_ref().and_then(|s| s.error.clone());
+        let queue_error = self
+            .queue_rx
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.error.clone());
+        let error_msg = pr_error.or(queue_error);
+
+        let (content_area, banner_area) = if error_msg.is_some() {
+            let banner = Rect { height: 1, ..area };
+            let rest = Rect {
+                y: area.y + 1,
+                height: area.height.saturating_sub(1),
+                ..area
+            };
+            (rest, Some(banner))
+        } else {
+            (area, None)
+        };
+
+        if let (Some(banner), Some(msg)) = (banner_area, error_msg.as_deref()) {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" ⚠ {msg}"),
+                    Style::default().fg(ratatui::style::Color::Yellow),
+                ))),
+                banner,
+            );
+        }
+
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(area);
+            .split(content_area);
 
         let top_cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -326,8 +349,7 @@ impl View for PerriView {
                         .map(|s| s.items.len())
                         .unwrap_or(0);
                     if len > 0 {
-                        self.selected_pr =
-                            self.selected_pr.checked_sub(1).unwrap_or(len - 1);
+                        self.selected_pr = self.selected_pr.checked_sub(1).unwrap_or(len - 1);
                     }
                     return EventOutcome::Consumed;
                 }

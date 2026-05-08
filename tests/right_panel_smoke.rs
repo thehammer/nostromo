@@ -2,25 +2,15 @@
 //! it renders without panicking and contains expected sections.
 
 use chrono::Utc;
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{backend::TestBackend, Terminal};
 
-use nostromo::{
-    data::right_panel_source::RightPanelSnapshot,
-    ui::widgets::right_panel,
-};
+use nostromo::{data::right_panel_source::RightPanelSnapshot, ui::widgets::right_panel};
 
 fn make_snapshot() -> RightPanelSnapshot {
     RightPanelSnapshot {
         task_title: "Implement auth middleware".to_string(),
-        recent_tools: vec![
-            "Read".to_string(),
-            "Edit".to_string(),
-            "Bash".to_string(),
-        ],
-        open_files: vec![
-            "src/middleware.rs".to_string(),
-            "src/main.rs".to_string(),
-        ],
+        recent_tools: vec!["Read".to_string(), "Edit".to_string(), "Bash".to_string()],
+        open_files: vec!["src/middleware.rs".to_string(), "src/main.rs".to_string()],
         total_tokens: 42_000,
         last_activity: Utc::now(),
     }

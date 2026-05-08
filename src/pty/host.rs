@@ -75,7 +75,9 @@ impl PtyHost {
                         use std::io::ErrorKind;
                         if matches!(
                             e.kind(),
-                            ErrorKind::WouldBlock | ErrorKind::Interrupted | ErrorKind::ConnectionReset
+                            ErrorKind::WouldBlock
+                                | ErrorKind::Interrupted
+                                | ErrorKind::ConnectionReset
                         ) {
                             break;
                         }

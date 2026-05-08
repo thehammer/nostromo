@@ -19,7 +19,10 @@ fn parses_all_three_jobs() {
 #[test]
 fn running_job_fields() {
     let jobs = load_fixture();
-    let job = jobs.iter().find(|j| j.state == "running").expect("running job missing");
+    let job = jobs
+        .iter()
+        .find(|j| j.state == "running")
+        .expect("running job missing");
 
     assert_eq!(job.id, "20260508T144457Z-6e3043a1");
     assert_eq!(job.repo, "nostromo");
@@ -36,7 +39,10 @@ fn running_job_fields() {
 #[test]
 fn queued_job_fields() {
     let jobs = load_fixture();
-    let job = jobs.iter().find(|j| j.state == "queued").expect("queued job missing");
+    let job = jobs
+        .iter()
+        .find(|j| j.state == "queued")
+        .expect("queued job missing");
     assert_eq!(job.id, "20260508T144522Z-63e0f6f4");
     assert!(job.started_at.is_none());
     assert!(job.question.is_none());
@@ -45,13 +51,19 @@ fn queued_job_fields() {
 #[test]
 fn awaiting_job_fields() {
     let jobs = load_fixture();
-    let job = jobs.iter().find(|j| j.state == "awaiting").expect("awaiting job missing");
+    let job = jobs
+        .iter()
+        .find(|j| j.state == "awaiting")
+        .expect("awaiting job missing");
 
     assert!(job.is_awaiting());
     assert!(!job.is_failed());
 
     let q = job.question.as_deref().expect("question should be set");
-    assert!(q.contains("transaction"), "question should mention 'transaction'");
+    assert!(
+        q.contains("transaction"),
+        "question should mention 'transaction'"
+    );
 
     assert_eq!(job.paused_reason.as_deref(), Some("user"));
 }
@@ -66,10 +78,6 @@ fn extra_fields_ignored() {
 #[test]
 fn all_jobs_have_plan_path() {
     for job in load_fixture() {
-        assert!(
-            job.plan_path.is_some(),
-            "job {} missing plan_path",
-            job.id
-        );
+        assert!(job.plan_path.is_some(), "job {} missing plan_path", job.id);
     }
 }

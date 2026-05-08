@@ -45,10 +45,7 @@ impl AwaitModal {
     }
 
     /// Handle a key event.  Returns the action the app should take.
-    pub fn on_key(
-        &mut self,
-        k: &crossterm::event::KeyEvent,
-    ) -> AwaitAction {
+    pub fn on_key(&mut self, k: &crossterm::event::KeyEvent) -> AwaitAction {
         use crossterm::event::KeyCode;
 
         match &mut self.mode {
@@ -155,9 +152,7 @@ impl AwaitModal {
                     Span::styled("Answer: ", Style::default().fg(theme::SAGE)),
                     Span::styled(
                         format!("{input}█"),
-                        Style::default()
-                            .fg(theme::FG)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
                     ),
                 ]);
                 f.render_widget(Paragraph::new(input_line), chunks[2]);
