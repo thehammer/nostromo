@@ -10,8 +10,9 @@ use ratatui::{
 use chrono::Local;
 
 use crate::{
+    agent_bus::ActivityEvent,
     data::{fred_calendar::CalendarSnapshot, fred_mailbox::MailboxSnapshot},
-    ui::theme,
+    ui::{theme, widgets::truncate::truncate},
 };
 
 /// Render the top tab bar.  Returns the area below the tab bar.
@@ -53,11 +54,17 @@ pub fn render_tab_bar(
 }
 
 /// Render the bottom status bar.  Returns the area above the status bar.
+///
+/// `recent_activity` is a slice of the latest `ActivityEvent`s from the bus
+/// (newest last).  The most recent event is shown in the centre of the bar;
+/// when the terminal is ≥ 140 cols wide the previous four events appear on
+/// the right side.
 pub fn render_status_bar(
     f: &mut Frame,
     area: Rect,
     mailbox: Option<&MailboxSnapshot>,
     calendar: Option<&CalendarSnapshot>,
+    recent_activity: &[ActivityEvent],
 ) -> Rect {
     let bar_area = Rect {
         y: area.y + area.height.saturating_sub(1),
@@ -85,9 +92,52 @@ pub fn render_status_bar(
         })
         .unwrap_or_else(|| " ◷ — ".to_string());
 
-    let left = format!(" {time_str}{mail_str}{next_str} ⚙ mother: — ");
+    // Most-recent activity event.
+    let activity_str = recent_activity
+        .last()
+        .map(|ev| format!(" ⚙ {}: {} ", ev.agent, ev.summary))
+        .unwrap_or_else(|| " ⚙ — ".to_string());
 
-    let line = Line::from(Span::styled(left, Style::default().fg(theme::FG_MUTED)));
+    let left = format!(" {time_str}{mail_str}{next_str}");
+
+    // Right-side: up to last 5 events when terminal is wide enough.
+    let right_str = if area.width >= 140 {
+        let count = recent_activity.len().min(5);
+        let events: Vec<String> = recent_activity
+            .iter()
+            .rev()
+            .take(count)
+            .map(|ev| format!("{}: {}", ev.agent, truncate(&ev.summary, 20)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if events.is_empty() {
+            String::new()
+        } else {
+            format!(" {} ", events.join("  ·  "))
+        }
+    } else {
+        String::new()
+    };
+
+    // Build the status line, fitting activity into remaining space.
+    let used = left.len() + right_str.len() + 2;
+    let available = (area.width as usize).saturating_sub(used);
+    let activity_display = truncate(&activity_str, available.max(6));
+
+    let full_line = if right_str.is_empty() {
+        format!("{left}{activity_display}")
+    } else {
+        let pad = (area.width as usize)
+            .saturating_sub(left.len() + activity_display.len() + right_str.len());
+        format!("{left}{activity_display}{:>pad$}{right_str}", "", pad = pad)
+    };
+
+    let line = Line::from(Span::styled(
+        truncate(&full_line, area.width as usize),
+        Style::default().fg(theme::FG_MUTED),
+    ));
     let p = Paragraph::new(line).block(
         Block::default()
             .borders(Borders::TOP)
@@ -106,7 +156,8 @@ pub fn render_chrome(
     active: usize,
     mailbox: Option<&MailboxSnapshot>,
     calendar: Option<&CalendarSnapshot>,
+    recent_activity: &[ActivityEvent],
 ) -> Rect {
     let after_tabs = render_tab_bar(f, full_area, titles, active);
-    render_status_bar(f, after_tabs, mailbox, calendar)
+    render_status_bar(f, after_tabs, mailbox, calendar, recent_activity)
 }

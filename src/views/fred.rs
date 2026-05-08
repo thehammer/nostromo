@@ -1,7 +1,8 @@
-//! Fred view: mailbox (top-left) + calendar (top-right) + REPL placeholder.
+//! Fred view: mailbox (top-left) + calendar (top-right) + embedded PTY REPL.
 
 use std::any::Any;
 
+use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -18,11 +19,12 @@ use crate::{
         fred_mailbox::MailboxSnapshot,
     },
     event::AppEvent,
+    pty::{PtyHost, PtyWidget},
     ui::{
         theme::{self, Sweater},
         widgets::{relative_time::format_relative_now, truncate::truncate},
     },
-    views::{EventOutcome, View},
+    views::{EventOutcome, View, ViewCtx},
 };
 
 pub struct FredView {
@@ -30,6 +32,10 @@ pub struct FredView {
     calendar_rx: watch::Receiver<Option<CalendarSnapshot>>,
     #[allow(dead_code)]
     config: Config,
+    ctx: ViewCtx,
+    pty: Option<PtyHost>,
+    /// Last known inner area of the REPL pane.
+    repl_area: Rect,
 }
 
 impl FredView {
@@ -37,8 +43,16 @@ impl FredView {
         mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
         calendar_rx: watch::Receiver<Option<CalendarSnapshot>>,
         config: Config,
+        ctx: ViewCtx,
     ) -> Self {
-        Self { mailbox_rx, calendar_rx, config }
+        Self {
+            mailbox_rx,
+            calendar_rx,
+            config,
+            ctx,
+            pty: None,
+            repl_area: Rect::new(0, 0, 80, 10),
+        }
     }
 
     /// Clone the current mailbox snapshot (for status bar use in ui::render).
@@ -213,10 +227,14 @@ impl FredView {
         f.render_widget(p, inner);
     }
 
-    fn render_repl_placeholder(&self, f: &mut Frame, area: Rect) {
+    fn render_repl(&mut self, f: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_INACTIVE))
+            .border_style(Style::default().fg(if self.pty.is_some() {
+                theme::BORDER_ACTIVE
+            } else {
+                theme::BORDER_INACTIVE
+            }))
             .title(Span::styled(
                 " REPL ",
                 Style::default().fg(theme::FG_MUTED),
@@ -225,22 +243,23 @@ impl FredView {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let lines = vec![
-            Line::from(vec![]),
-            Line::from(Span::styled(
-                "Press Enter to launch fred REPL (claude --agent fred)",
-                theme::style_muted(),
-            )),
-            Line::from(Span::styled(
-                "(embedded PTY: phase 2)",
-                Style::default()
-                    .fg(theme::FG_MUTED)
-                    .add_modifier(Modifier::DIM),
-            )),
-        ];
+        // Store the inner area for PTY spawn / resize.
+        self.repl_area = inner;
 
-        let p = Paragraph::new(lines);
-        f.render_widget(p, inner);
+        if let Some(pty) = &self.pty {
+            let guard = pty.parser.lock().unwrap();
+            f.render_widget(PtyWidget::new(guard), inner);
+        } else {
+            let lines = vec![
+                Line::from(vec![]),
+                Line::from(Span::styled(
+                    "Press Enter to start fred REPL (claude --agent fred)",
+                    theme::style_muted(),
+                )),
+            ];
+            let p = Paragraph::new(lines);
+            f.render_widget(p, inner);
+        }
     }
 }
 
@@ -266,11 +285,55 @@ impl View for FredView {
 
         self.render_mailbox(f, top_cols[0]);
         self.render_calendar(f, top_cols[1]);
-        self.render_repl_placeholder(f, rows[1]);
+        self.render_repl(f, rows[1]);
+
+        // Resize PTY if the pane size changed.
+        if let Some(pty) = &mut self.pty {
+            pty.resize(self.repl_area.width.max(1), self.repl_area.height.max(1));
+        }
     }
 
-    fn on_event(&mut self, _ev: &AppEvent) -> EventOutcome {
+    fn on_event(&mut self, ev: &AppEvent) -> EventOutcome {
+        // When PTY is active, forward all keys to it.
+        if let Some(pty) = &mut self.pty {
+            if let AppEvent::Key(k) = ev {
+                pty.send_key(k);
+                return EventOutcome::Consumed;
+            }
+        }
+
+        if let AppEvent::Key(k) = ev {
+            if k.code == KeyCode::Enter && self.pty.is_none() {
+                let (cols, rows) = (self.repl_area.width.max(20), self.repl_area.height.max(5));
+                match PtyHost::spawn(
+                    "claude",
+                    &["--agent", "fred"],
+                    (cols, rows),
+                    self.ctx.event_tx.clone(),
+                    "fred",
+                ) {
+                    Ok(host) => {
+                        self.pty = Some(host);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to spawn PTY for fred: {e}");
+                    }
+                }
+                return EventOutcome::Consumed;
+            }
+        }
+
         EventOutcome::Ignored
+    }
+
+    fn on_resize(&mut self, _area: Rect) {
+        if let Some(pty) = &mut self.pty {
+            pty.resize(self.repl_area.width.max(1), self.repl_area.height.max(1));
+        }
+    }
+
+    fn pty_focus(&self) -> bool {
+        self.pty.is_some()
     }
 
     fn as_any(&self) -> &dyn Any {

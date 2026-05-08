@@ -1,7 +1,9 @@
-//! Perri view: PR queue (top-left) + current PR diff (top-right) + REPL.
+//! Perri view: PR queue (top-left) + syntax-highlighted diff (top-right) + PTY REPL.
 
 use std::any::Any;
+use std::sync::Arc;
 
+use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -15,11 +17,16 @@ use crate::{
     config::Config,
     data::{perri_pr::PrSnapshot, perri_queue::PrQueueSnapshot},
     event::AppEvent,
+    pty::{PtyHost, PtyWidget},
     ui::{
         theme,
-        widgets::truncate::truncate,
+        widgets::{
+            syntect_cache::SyntectCache,
+            syntect_diff::SyntectDiff,
+            truncate::truncate,
+        },
     },
-    views::{EventOutcome, View},
+    views::{EventOutcome, View, ViewCtx},
 };
 
 pub struct PerriView {
@@ -28,6 +35,11 @@ pub struct PerriView {
     selected_pr: usize,
     #[allow(dead_code)]
     config: Config,
+    ctx: ViewCtx,
+    syntect: Arc<SyntectCache>,
+    pty: Option<PtyHost>,
+    /// Last known inner area of the REPL pane.
+    repl_area: Rect,
 }
 
 impl PerriView {
@@ -35,8 +47,19 @@ impl PerriView {
         queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
         pr_rx: watch::Receiver<Option<PrSnapshot>>,
         config: Config,
+        ctx: ViewCtx,
+        syntect: Arc<SyntectCache>,
     ) -> Self {
-        Self { queue_rx, pr_rx, selected_pr: 0, config }
+        Self {
+            queue_rx,
+            pr_rx,
+            selected_pr: 0,
+            config,
+            ctx,
+            syntect,
+            pty: None,
+            repl_area: Rect::new(0, 0, 80, 10),
+        }
     }
 
     fn render_queue(&self, f: &mut Frame, area: Rect) {
@@ -87,7 +110,7 @@ impl PerriView {
                         let selected_glyph = if i == self.selected_pr { "▶ " } else { "  " };
 
                         let number_str = format!("#{}", pr.number);
-                        let repo_short = pr.repo.split('/').last().unwrap_or(&pr.repo);
+                        let repo_short = pr.repo.split('/').next_back().unwrap_or(&pr.repo);
                         let label_width = inner.width as usize - 16;
                         let title_str = truncate(&pr.title, label_width);
 
@@ -147,47 +170,37 @@ impl PerriView {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let lines: Vec<Line> = if let Some(s) = snap {
+        if let Some(s) = snap {
             if s.diff.is_empty() {
-                vec![Line::from(Span::styled(
+                let p = Paragraph::new(Line::from(Span::styled(
                     " No diff available",
                     theme::style_muted(),
-                ))]
+                )));
+                f.render_widget(p, inner);
             } else {
-                // Phase 1: render raw diff with basic +/- colouring.
-                // Phase 2 adds syntect highlighting.
-                s.diff
-                    .lines()
-                    .take(inner.height as usize)
-                    .map(|l| {
-                        let style = if l.starts_with('+') {
-                            Style::default().fg(theme::SAGE)
-                        } else if l.starts_with('-') {
-                            Style::default().fg(theme::RED_SWEATER)
-                        } else if l.starts_with("@@") {
-                            Style::default().fg(theme::AMBER)
-                        } else {
-                            theme::style_muted()
-                        };
-                        Line::from(Span::styled(truncate(l, inner.width as usize), style))
-                    })
-                    .collect()
+                f.render_widget(
+                    SyntectDiff::new(&s.diff, Arc::clone(&self.syntect))
+                        .max_lines(inner.height as usize),
+                    inner,
+                );
             }
         } else {
-            vec![Line::from(Span::styled(
+            let p = Paragraph::new(Line::from(Span::styled(
                 " Loading diff…",
                 theme::style_muted(),
-            ))]
-        };
-
-        let p = Paragraph::new(lines);
-        f.render_widget(p, inner);
+            )));
+            f.render_widget(p, inner);
+        }
     }
 
-    fn render_repl_placeholder(&self, f: &mut Frame, area: Rect) {
+    fn render_repl(&mut self, f: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_INACTIVE))
+            .border_style(Style::default().fg(if self.pty.is_some() {
+                theme::BORDER_ACTIVE
+            } else {
+                theme::BORDER_INACTIVE
+            }))
             .title(Span::styled(
                 " REPL ",
                 Style::default().fg(theme::FG_MUTED),
@@ -196,22 +209,22 @@ impl PerriView {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let lines = vec![
-            Line::from(vec![]),
-            Line::from(Span::styled(
-                "Press Enter to launch perri REPL (claude --agent perri)",
-                theme::style_muted(),
-            )),
-            Line::from(Span::styled(
-                "(embedded PTY: phase 2)",
-                Style::default()
-                    .fg(theme::FG_MUTED)
-                    .add_modifier(Modifier::DIM),
-            )),
-        ];
+        self.repl_area = inner;
 
-        let p = Paragraph::new(lines);
-        f.render_widget(p, inner);
+        if let Some(pty) = &self.pty {
+            let guard = pty.parser.lock().unwrap();
+            f.render_widget(PtyWidget::new(guard), inner);
+        } else {
+            let lines = vec![
+                Line::from(vec![]),
+                Line::from(Span::styled(
+                    "Press Enter to start perri REPL (claude --agent perri)",
+                    theme::style_muted(),
+                )),
+            ];
+            let p = Paragraph::new(lines);
+            f.render_widget(p, inner);
+        }
     }
 }
 
@@ -237,16 +250,43 @@ impl View for PerriView {
 
         self.render_queue(f, top_cols[0]);
         self.render_diff(f, top_cols[1]);
-        self.render_repl_placeholder(f, rows[1]);
+        self.render_repl(f, rows[1]);
+
+        if let Some(pty) = &mut self.pty {
+            pty.resize(self.repl_area.width.max(1), self.repl_area.height.max(1));
+        }
     }
 
     fn on_event(&mut self, ev: &AppEvent) -> EventOutcome {
-        use crossterm::event::KeyCode;
-        use crate::event::AppEvent;
+        // Forward all keys to the PTY when active.
+        if let Some(pty) = &mut self.pty {
+            if let AppEvent::Key(k) = ev {
+                pty.send_key(k);
+                return EventOutcome::Consumed;
+            }
+        }
 
         if let AppEvent::Key(k) = ev {
             match k.code {
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Enter if self.pty.is_none() => {
+                    let (cols, rows) = (self.repl_area.width.max(20), self.repl_area.height.max(5));
+                    match PtyHost::spawn(
+                        "claude",
+                        &["--agent", "perri"],
+                        (cols, rows),
+                        self.ctx.event_tx.clone(),
+                        "perri",
+                    ) {
+                        Ok(host) => {
+                            self.pty = Some(host);
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to spawn PTY for perri: {e}");
+                        }
+                    }
+                    return EventOutcome::Consumed;
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.pty.is_none() => {
                     let len = self
                         .queue_rx
                         .borrow()
@@ -258,7 +298,7 @@ impl View for PerriView {
                     }
                     return EventOutcome::Consumed;
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up | KeyCode::Char('k') if self.pty.is_none() => {
                     let len = self
                         .queue_rx
                         .borrow()
@@ -274,7 +314,18 @@ impl View for PerriView {
                 _ => {}
             }
         }
+
         EventOutcome::Ignored
+    }
+
+    fn on_resize(&mut self, _area: Rect) {
+        if let Some(pty) = &mut self.pty {
+            pty.resize(self.repl_area.width.max(1), self.repl_area.height.max(1));
+        }
+    }
+
+    fn pty_focus(&self) -> bool {
+        self.pty.is_some()
     }
 
     fn as_any(&self) -> &dyn Any {

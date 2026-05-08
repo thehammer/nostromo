@@ -6,6 +6,7 @@
 use std::io;
 use std::panic;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -20,7 +21,7 @@ use tracing_appender::rolling;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 // All application logic lives in the library crate.
-use nostromo::{app, config::Config, ViewArg};
+use nostromo::{agent_bus::AgentBus, app, config::Config, ui::widgets::syntect_cache::SyntectCache, ViewArg};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -64,6 +65,23 @@ fn main() -> Result<()> {
     info!(version = env!("CARGO_PKG_VERSION"), view = ?args.view, "nostromo starting");
 
     // ------------------------------------------------------------------
+    // Syntect cache — built once, shared across all diff views
+    // ------------------------------------------------------------------
+    let syntect = Arc::new(
+        SyntectCache::load().context("loading syntect syntax/theme cache")?,
+    );
+
+    // ------------------------------------------------------------------
+    // Agent bus — tails ~/.claude/activity.jsonl
+    // ------------------------------------------------------------------
+    let bus = Arc::new(AgentBus::new());
+    let activity_path = dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("activity.jsonl");
+    Arc::clone(&bus).start_tail(activity_path);
+
+    // ------------------------------------------------------------------
     // Terminal setup
     // ------------------------------------------------------------------
     let mut stdout = io::stdout();
@@ -91,7 +109,7 @@ fn main() -> Result<()> {
     // ------------------------------------------------------------------
     // Run
     // ------------------------------------------------------------------
-    let result = app::run(args.view, config, &mut terminal);
+    let result = app::run(args.view, config, &mut terminal, syntect, bus);
 
     // ------------------------------------------------------------------
     // Terminal teardown (always, even if run() errored)

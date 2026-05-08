@@ -6,16 +6,18 @@ pub mod widgets;
 
 use ratatui::Frame;
 
-use crate::views::View;
+use crate::{agent_bus::ActivityEvent, views::View};
 
 /// Render one frame.
 ///
 /// `titles` is the list of view tab labels (pre-collected to avoid double-borrow).
+/// `recent_activity` is the latest activity slice from the `AgentBus`.
 pub fn render(
     f: &mut Frame,
     active_view: &mut dyn View,
     active_idx: usize,
     titles: &[&str],
+    recent_activity: &[ActivityEvent],
 ) {
     let area = f.area();
 
@@ -41,6 +43,7 @@ pub fn render(
         active_idx,
         mailbox_snap.as_ref(),
         calendar_snap.as_ref(),
+        recent_activity,
     );
 
     active_view.render(f, content_area);

@@ -1,10 +1,11 @@
-//! Generic agent view — status header + REPL placeholder.
+//! Generic agent view — status header + embedded PTY REPL.
 //!
 //! Used for Claudia, Cody, Kennedy, Mother, and any future agent that doesn't
 //! yet have a dedicated view layout.
 
 use std::any::Any;
 
+use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Modifier, Style},
@@ -15,18 +16,71 @@ use ratatui::{
 
 use crate::{
     event::AppEvent,
+    pty::{PtyHost, PtyWidget},
     ui::theme,
-    views::{EventOutcome, View},
+    views::{EventOutcome, View, ViewCtx},
 };
 
 pub struct GenericView {
     id: &'static str,
     title: &'static str,
+    ctx: ViewCtx,
+    pty: Option<PtyHost>,
+    /// Last known inner area of the REPL pane, used for PTY sizing.
+    repl_area: Rect,
 }
 
 impl GenericView {
-    pub fn new(id: &'static str, title: &'static str) -> Self {
-        Self { id, title }
+    pub fn new(id: &'static str, title: &'static str, ctx: ViewCtx) -> Self {
+        Self {
+            id,
+            title,
+            ctx,
+            pty: None,
+            repl_area: Rect::new(0, 0, 80, 24),
+        }
+    }
+
+    fn render_repl(&mut self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if self.pty.is_some() {
+                theme::BORDER_ACTIVE
+            } else {
+                theme::BORDER_INACTIVE
+            }))
+            .title(Span::styled(
+                format!(" {} REPL ", self.title),
+                Style::default().fg(theme::FG_MUTED),
+            ));
+
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        // Remember the inner area for PTY spawn sizing and resize.
+        self.repl_area = inner;
+
+        if let Some(pty) = &self.pty {
+            let guard = pty.parser.lock().unwrap();
+            f.render_widget(PtyWidget::new(guard), inner);
+        } else {
+            let lines = vec![
+                Line::from(vec![]),
+                Line::from(vec![Span::styled(
+                    format!("[ {} ]", self.title.to_uppercase()),
+                    Style::default()
+                        .fg(theme::FG_MUTED)
+                        .add_modifier(Modifier::DIM),
+                )]),
+                Line::from(vec![]),
+                Line::from(vec![Span::styled(
+                    "Press Enter to start agent REPL",
+                    Style::default().fg(theme::FG_MUTED),
+                )]),
+            ];
+            let p = Paragraph::new(lines).alignment(Alignment::Center);
+            f.render_widget(p, inner);
+        }
     }
 }
 
@@ -40,47 +94,57 @@ impl View for GenericView {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_INACTIVE))
-            .title(Span::styled(
-                format!(" {} ", self.title),
-                Style::default()
-                    .fg(theme::FG)
-                    .add_modifier(Modifier::BOLD),
-            ));
+        self.render_repl(f, area);
 
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-
-        let lines = vec![
-            Line::from(vec![]),
-            Line::from(vec![Span::styled(
-                format!("[ {} ]", self.title.to_uppercase()),
-                Style::default()
-                    .fg(theme::FG_MUTED)
-                    .add_modifier(Modifier::DIM),
-            )]),
-            Line::from(vec![]),
-            Line::from(vec![Span::styled(
-                "Press Enter to launch agent REPL",
-                Style::default().fg(theme::FG_MUTED),
-            )]),
-            Line::from(vec![]),
-            Line::from(vec![Span::styled(
-                "(embedded PTY: phase 2)",
-                Style::default()
-                    .fg(theme::FG_MUTED)
-                    .add_modifier(Modifier::DIM),
-            )]),
-        ];
-
-        let p = Paragraph::new(lines).alignment(Alignment::Center);
-        f.render_widget(p, inner);
+        // Resize PTY if the area changed.
+        if let Some(pty) = &mut self.pty {
+            let (cols, rows) = (self.repl_area.width, self.repl_area.height);
+            pty.resize(cols, rows);
+        }
     }
 
-    fn on_event(&mut self, _ev: &AppEvent) -> EventOutcome {
+    fn on_event(&mut self, ev: &AppEvent) -> EventOutcome {
+        // Forward all keys to the PTY when it's active.
+        if let Some(pty) = &mut self.pty {
+            if let AppEvent::Key(k) = ev {
+                pty.send_key(k);
+                return EventOutcome::Consumed;
+            }
+        }
+
+        if let AppEvent::Key(k) = ev {
+            if k.code == KeyCode::Enter && self.pty.is_none() {
+                let (cols, rows) = (self.repl_area.width.max(20), self.repl_area.height.max(5));
+                match PtyHost::spawn(
+                    "claude",
+                    &["--agent", self.id],
+                    (cols, rows),
+                    self.ctx.event_tx.clone(),
+                    self.id,
+                ) {
+                    Ok(host) => {
+                        self.pty = Some(host);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to spawn PTY for {}: {e}", self.id);
+                    }
+                }
+                return EventOutcome::Consumed;
+            }
+        }
+
         EventOutcome::Ignored
+    }
+
+    fn on_resize(&mut self, _area: Rect) {
+        if let Some(pty) = &mut self.pty {
+            let (cols, rows) = (self.repl_area.width.max(1), self.repl_area.height.max(1));
+            pty.resize(cols, rows);
+        }
+    }
+
+    fn pty_focus(&self) -> bool {
+        self.pty.is_some()
     }
 
     fn as_any(&self) -> &dyn Any {

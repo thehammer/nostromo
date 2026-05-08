@@ -19,6 +19,14 @@ path = "src/main.rs"
 ratatui = "0.29"
 crossterm = "0.28"
 
+# Embedded PTY
+portable-pty = "0.8"
+vt100 = "0.15"
+bytes = "1"
+
+# Syntax highlighting
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal", "io-util", "fs"] }
 

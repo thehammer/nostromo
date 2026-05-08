@@ -8,6 +8,7 @@ pub mod config;
 pub mod data;
 pub mod event;
 pub mod mother;
+pub mod pty;
 pub mod ui;
 pub mod views;
 

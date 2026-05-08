@@ -69,7 +69,8 @@ fn fred_layout_renders_without_panic() {
     // Verify the Fred layout renders without crashing at 120x40.
     // Snapshot the rendered buffer.
     use nostromo::views::fred::FredView;
-    use tokio::sync::watch;
+    use nostromo::views::ViewCtx;
+    use tokio::sync::{mpsc, watch};
     use ratatui::layout::Rect;
 
     let (mb_tx, mb_rx) = watch::channel(Some(fake_mailbox()));
@@ -78,7 +79,9 @@ fn fred_layout_renders_without_panic() {
     drop(cal_tx);
 
     let config = nostromo::config::Config::default();
-    let mut view = FredView::new(mb_rx, cal_rx, config);
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let ctx = ViewCtx { event_tx };
+    let mut view = FredView::new(mb_rx, cal_rx, config, ctx);
 
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).unwrap();

@@ -1,0 +1,5 @@
+---
+source: tests/snapshot_pty.rs
+expression: snapshot
+---
+Hello, world!

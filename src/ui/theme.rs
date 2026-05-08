@@ -45,6 +45,7 @@ pub enum Sweater {
 
 impl Sweater {
     /// Parse from the string emitted by `fred-calendar-pane --json`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "amber" => Self::Amber,

@@ -1,5 +1,7 @@
 //! Golden snapshot tests for the Perri view layout.
 
+use std::sync::Arc;
+
 use ratatui::{backend::TestBackend, Terminal};
 
 use nostromo::views::View;
@@ -8,6 +10,7 @@ use nostromo::{
         perri_pr::PrSnapshot,
         perri_queue::{PrQueueItem, PrQueueSnapshot},
     },
+    ui::widgets::syntect_cache::SyntectCache,
 };
 
 fn fake_queue() -> PrQueueSnapshot {
@@ -52,7 +55,8 @@ fn fake_pr() -> PrSnapshot {
 #[test]
 fn perri_layout_renders_without_panic() {
     use nostromo::views::perri::PerriView;
-    use tokio::sync::watch;
+    use nostromo::views::ViewCtx;
+    use tokio::sync::{mpsc, watch};
     use ratatui::layout::Rect;
 
     let (q_tx, q_rx) = watch::channel(Some(fake_queue()));
@@ -61,7 +65,10 @@ fn perri_layout_renders_without_panic() {
     drop(pr_tx);
 
     let config = nostromo::config::Config::default();
-    let mut view = PerriView::new(q_rx, pr_rx, config);
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let ctx = ViewCtx { event_tx };
+    let syntect = Arc::new(SyntectCache::load().expect("syntect load"));
+    let mut view = PerriView::new(q_rx, pr_rx, config, ctx, syntect);
 
     let backend = TestBackend::new(160, 50);
     let mut terminal = Terminal::new(backend).unwrap();

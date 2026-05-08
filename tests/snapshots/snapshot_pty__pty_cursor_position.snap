@@ -1,0 +1,6 @@
+---
+source: tests/snapshot_pty.rs
+expression: snapshot
+---
+ABCDE
+     X

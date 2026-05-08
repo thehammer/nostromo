@@ -10,8 +10,16 @@ pub mod perri;
 use std::any::Any;
 
 use ratatui::{layout::Rect, Frame};
+use tokio::sync::mpsc;
 
 use crate::event::AppEvent;
+
+/// Shared wiring passed to every view that can host a PTY.
+pub struct ViewCtx {
+    /// Channel for sending app-level events (e.g. `AgentUpdate`) from async
+    /// tasks back into the main event loop.
+    pub event_tx: mpsc::UnboundedSender<AppEvent>,
+}
 
 /// What a view returns after handling an event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +47,17 @@ pub trait View: Send + Any {
 
     /// Called on every `Tick` while this view is active.
     fn on_tick(&mut self) {}
+
+    /// Called when the terminal is resized. Views that own a PTY should
+    /// forward the new inner dimensions to `PtyHost::resize`.
+    fn on_resize(&mut self, _area: Rect) {}
+
+    /// Returns `true` when a PTY REPL is active and should receive raw key
+    /// input. The app loop uses this to decide whether to forward keys or keep
+    /// them for global navigation.
+    fn pty_focus(&self) -> bool {
+        false
+    }
 
     /// Called when this view gains focus.
     fn focus(&mut self) {}
