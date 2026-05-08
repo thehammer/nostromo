@@ -34,12 +34,38 @@ make install
 
 ## Daemon
 
-Phase 5a introduces `nostromd`, a companion daemon that runs in the background
-and shares live state (agent activity events, Mother job queue) across all TUI
-instances over a Unix socket at `~/.nostromo/nostromd.sock`.
+`nostromd` is a companion daemon that runs in the background and provides two
+services to all TUI instances over a Unix socket at `~/.nostromo/nostromd.sock`:
+
+1. **Shared live state** — agent activity events, Mother job queue (Phase 5a).
+2. **PTY ownership** — PTY child processes live *inside the daemon*, so they
+   survive TUI close and reopen (Phase 5b).
 
 The TUI works perfectly without the daemon — it falls back to in-process mode
 automatically.
+
+### Reattach behaviour (Phase 5b)
+
+When `nostromd` is running:
+
+- Opening a REPL view (e.g. Fred, Cody) spawns a PTY child inside the daemon.
+- **Quitting nostromo** (Ctrl-C) sends `PtyDetach` — the PTY child keeps
+  running under `nostromd`; you can verify with `ps` or in the daemon log.
+- **Reopening nostromo** auto-reattaches: the view calls `PtyList`, finds the
+  live PTY, sends `PtyAttach`, and receives a `PtyScrollback` frame containing
+  the full terminal history before live output resumes.  Your session state is
+  preserved as if you never closed the TUI.
+- **Stopping `nostromd`** (SIGTERM) cleanly kills all child processes — no
+  zombies.
+
+When the daemon is **not** running the TUI falls back to in-process PTYs with
+no behaviour change.
+
+### Scrollback ring
+
+`nostromd` keeps up to **2 MiB** of raw terminal output per PTY (or 10 000
+newline boundaries, whichever is reached first).  On reattach the ring is
+replayed in full before live output begins.
 
 ### Install
 
@@ -85,6 +111,6 @@ This unloads the agent, removes the plist, and deletes the binary.
 - **Phase 2**: Embedded PTY + syntax-highlighted diffs
 - **Phase 3**: Mother queue + inline `await` approval modals
 - **Phase 4**: Native Microsoft Graph + GitHub clients
-- **Phase 5a** *(current)*: `nostromd` daemon + Unix socket IPC
-- **Phase 5b**: PTY ownership moves to daemon (detach/attach)
+- **Phase 5a**: `nostromd` daemon + Unix socket IPC
+- **Phase 5b** *(current)*: Daemon-owned PTYs with detach/attach + scrollback
 - **Phase 5c**: Split panes, layout changes, command palette

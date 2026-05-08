@@ -54,6 +54,8 @@ dirs-next = "2"
 chrono = { version = "0.4", features = ["serde"] }
 notify = "6"
 clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
 
 # HTTP + OAuth2 (Phase 4 native clients)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

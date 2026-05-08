@@ -16,7 +16,7 @@ use ratatui::{
 
 use crate::{
     event::AppEvent,
-    pty::{PtyHost, PtyWidget},
+    pty::{PtyBackend, PtyWidget},
     ui::theme,
     views::{EventOutcome, View, ViewCtx},
 };
@@ -25,7 +25,7 @@ pub struct GenericView {
     id: &'static str,
     title: &'static str,
     ctx: ViewCtx,
-    pty: Option<PtyHost>,
+    pty: Option<PtyBackend>,
     /// Whether the PTY is currently capturing keystrokes.
     pty_capturing: bool,
     /// Last known inner area of the REPL pane, used for PTY sizing.
@@ -34,14 +34,39 @@ pub struct GenericView {
 
 impl GenericView {
     pub fn new(id: &'static str, title: &'static str, ctx: ViewCtx) -> Self {
+        // Attempt to reattach to an existing daemon PTY for this view.
+        let pty = Self::try_reattach(id, &ctx);
+        let pty_capturing = pty.is_some();
+
         Self {
             id,
             title,
             ctx,
-            pty: None,
-            pty_capturing: false,
+            pty,
+            pty_capturing,
             repl_area: Rect::new(0, 0, 80, 24),
         }
+    }
+
+    /// Reattach to a live daemon PTY if one exists for this view's tag.
+    fn try_reattach(view_tag: &'static str, ctx: &ViewCtx) -> Option<PtyBackend> {
+        let existing = ctx.pty_factory.list_existing(view_tag);
+        let info = existing.into_iter().find(|p| p.alive)?;
+
+        tracing::info!(
+            pty_id = %info.pty_id,
+            view_tag,
+            "GenericView reattaching to existing daemon PTY"
+        );
+
+        ctx.pty_factory
+            .attach(
+                &info.pty_id,
+                (info.cols, info.rows),
+                ctx.event_tx.clone(),
+                view_tag,
+            )
+            .ok()
     }
 
     fn render_repl(&mut self, f: &mut Frame, area: Rect) {
@@ -63,11 +88,11 @@ impl GenericView {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Remember the inner area for PTY spawn sizing and resize.
         self.repl_area = inner;
 
         if let Some(pty) = &self.pty {
-            let guard = pty.parser.lock().unwrap();
+            let parser = pty.parser();
+            let guard = parser.lock().unwrap();
             f.render_widget(PtyWidget::new(guard), inner);
         } else {
             let lines = vec![
@@ -123,15 +148,15 @@ impl View for GenericView {
         if let AppEvent::Key(k) = ev {
             if k.code == KeyCode::Enter && self.pty.is_none() {
                 let (cols, rows) = (self.repl_area.width.max(20), self.repl_area.height.max(5));
-                match PtyHost::spawn(
+                match self.ctx.pty_factory.spawn(
+                    self.id,
                     "claude",
                     &["--agent", self.id],
                     (cols, rows),
                     self.ctx.event_tx.clone(),
-                    self.id,
                 ) {
-                    Ok(host) => {
-                        self.pty = Some(host);
+                    Ok(backend) => {
+                        self.pty = Some(backend);
                         self.pty_capturing = true;
                     }
                     Err(e) => {

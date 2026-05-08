@@ -6,10 +6,12 @@
 //! - Tails `~/.claude/activity.jsonl` and fans out `Activity` events.
 //! - Polls `mother list --format json` every 2 s and broadcasts `MotherJobs`,
 //!   `MotherStatusline`, and `MotherAwaitDetected` events.
+//! - Owns PTY processes on behalf of TUI clients so they survive TUI restarts.
 //! - Removes the socket file on clean exit (SIGTERM / SIGINT).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tokio::signal::unix::{SignalKind, signal};
@@ -20,7 +22,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use nostromo::{
     agent_bus::{ActivityEvent, tail_activity_jsonl},
-    ipc::{Server, protocol::ServerMsg},
+    ipc::{PtyManager, Server, protocol::ServerMsg},
     mother::{self, MotherStatus, statusline_cache_path},
 };
 
@@ -46,9 +48,12 @@ async fn main() -> Result<()> {
 
     info!(pid = std::process::id(), "nostromd starting");
 
+    // ── PTY manager ───────────────────────────────────────────────────────────
+    let pty_mgr: Arc<Mutex<PtyManager>> = Arc::new(Mutex::new(PtyManager::new()));
+
     // ── IPC server ────────────────────────────────────────────────────────────
     let socket_path = nostromo::ipc::default_socket_path();
-    let server = Server::bind(&socket_path)
+    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr))
         .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
 
     let broadcast_tx = server.tx.clone();
@@ -82,7 +87,14 @@ async fn main() -> Result<()> {
         _ = sigint.recv()  => info!("received SIGINT"),
     }
 
-    info!("nostromd shutting down");
+    info!("nostromd shutting down; killing all PTYs");
+
+    // Kill all child processes cleanly before exiting.
+    {
+        let mut mgr = pty_mgr.lock().unwrap();
+        mgr.kill_all_on_shutdown();
+    }
+
     // `server` drop impl removes the socket file.
     drop(server);
     Ok(())
@@ -91,7 +103,6 @@ async fn main() -> Result<()> {
 // ── mother pollers ────────────────────────────────────────────────────────────
 
 async fn run_mother_pollers(tx: broadcast::Sender<ServerMsg>) {
-    // Spawn statusline watcher concurrently with job poller.
     let tx2 = tx.clone();
     tokio::join!(
         run_statusline_watcher(tx),
@@ -102,7 +113,6 @@ async fn run_mother_pollers(tx: broadcast::Sender<ServerMsg>) {
 async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
     let path: PathBuf = statusline_cache_path();
 
-    // Ensure parent directory exists.
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -141,7 +151,6 @@ async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
         return;
     }
 
-    // Emit once immediately.
     let _ = tx.send(ServerMsg::MotherStatusline(MotherStatus::load()));
 
     while notify_rx.recv().await.is_some() {
