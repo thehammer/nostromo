@@ -101,7 +101,6 @@ impl AppState {
 // ── run ───────────────────────────────────────────────────────────────────────
 
 /// Run the application until the user quits.
-#[tokio::main]
 pub async fn run(
     initial_view: ViewArg,
     bash_fallback: bool,
@@ -109,6 +108,7 @@ pub async fn run(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     syntect: Arc<SyntectCache>,
     bus: Arc<AgentBus>,
+    daemon_client: Option<crate::ipc::DaemonClient>,
 ) -> Result<()> {
     let mailbox_rx = if bash_fallback {
         FredMailboxSource::spawn(config.clone())
@@ -135,8 +135,14 @@ pub async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     event::spawn(tx.clone());
 
-    // Spawn Mother pollers (statusline watcher + job-list poll every 2s).
-    mother_poll::spawn(tx.clone());
+    // Spawn Mother pollers OR wire up the daemon bridge.
+    if let Some(client) = daemon_client {
+        info!("using daemon bridge for Mother + activity events");
+        crate::data::daemon_bridge::spawn(client, tx.clone(), Arc::clone(&bus));
+    } else {
+        // In-process fallback: spawn Mother pollers as before.
+        mother_poll::spawn(tx.clone());
+    }
 
     // Spawn break-glass sentinel watcher.
     break_glass::spawn(tx.clone());

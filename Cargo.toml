@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "nostromo"
 path = "src/main.rs"
 
+[[bin]]
+name = "nostromd"
+path = "src/bin/nostromd.rs"
+
 [dependencies]
 # TUI
 ratatui = "0.29"
@@ -28,7 +32,7 @@ bytes = "1"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal", "io-util", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal", "io-util", "net", "fs"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

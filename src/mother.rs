@@ -43,7 +43,7 @@ pub fn statusline_cache_path() -> PathBuf {
 /// Cache format: `running:queued:failed:awaiting` (four colon-separated
 /// integers).  Three-field caches (pre-`awaiting` field) are handled by
 /// defaulting the missing field to 0.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MotherStatus {
     pub running: usize,
     pub queued: usize,
@@ -100,7 +100,7 @@ impl MotherStatus {
 ///
 /// All optional fields are `None` when absent in the JSON; extra fields added
 /// by future Mother versions are silently ignored via `#[serde(default)]`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct MotherJob {
     pub id: String,
     pub state: String,
