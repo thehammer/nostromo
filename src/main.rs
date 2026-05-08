@@ -21,7 +21,14 @@ use tracing_appender::rolling;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 // All application logic lives in the library crate.
-use nostromo::{agent_bus::AgentBus, app, config::Config, ui::widgets::syntect_cache::SyntectCache, ViewArg};
+use nostromo::{
+    agent_bus::AgentBus,
+    app,
+    config::Config,
+    ipc::{DaemonClient, default_socket_path},
+    ui::widgets::syntect_cache::SyntectCache,
+    ViewArg,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -43,9 +50,14 @@ struct Args {
     /// perri-diff-pane to be installed in the claude bin directory.
     #[arg(long)]
     bash_fallback: bool,
+
+    /// Skip attempting to connect to the nostromd daemon (force in-process mode).
+    #[arg(long)]
+    no_daemon: bool,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     // ------------------------------------------------------------------
@@ -78,14 +90,46 @@ fn main() -> Result<()> {
     );
 
     // ------------------------------------------------------------------
-    // Agent bus — tails ~/.claude/activity.jsonl
+    // Agent bus — tails ~/.claude/activity.jsonl (in-process fallback)
     // ------------------------------------------------------------------
     let bus = Arc::new(AgentBus::new());
-    let activity_path = dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join("activity.jsonl");
-    Arc::clone(&bus).start_tail(activity_path);
+
+    // ------------------------------------------------------------------
+    // Daemon connection — attempt with 500 ms timeout
+    // ------------------------------------------------------------------
+    let daemon_client = if args.no_daemon {
+        info!("--no-daemon flag set; running in in-process mode");
+        None
+    } else {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            DaemonClient::connect(&default_socket_path()),
+        )
+        .await
+        {
+            Ok(Ok(client)) => {
+                info!("connected to nostromd");
+                Some(client)
+            }
+            Ok(Err(e)) => {
+                info!("daemon unavailable, running in-process mode: {e:#}");
+                None
+            }
+            Err(_) => {
+                info!("daemon unavailable, running in-process mode: connection timed out");
+                None
+            }
+        }
+    };
+
+    // If no daemon, start the in-process activity tailer now that we're async.
+    if daemon_client.is_none() {
+        let activity_path = dirs_next::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".claude")
+            .join("activity.jsonl");
+        Arc::clone(&bus).start_tail(activity_path);
+    }
 
     // ------------------------------------------------------------------
     // Terminal setup
@@ -115,7 +159,16 @@ fn main() -> Result<()> {
     // ------------------------------------------------------------------
     // Run
     // ------------------------------------------------------------------
-    let result = app::run(args.view, args.bash_fallback, config, &mut terminal, syntect, bus);
+    let result = app::run(
+        args.view,
+        args.bash_fallback,
+        config,
+        &mut terminal,
+        syntect,
+        bus,
+        daemon_client,
+    )
+    .await;
 
     // ------------------------------------------------------------------
     // Terminal teardown (always, even if run() errored)
