@@ -140,7 +140,28 @@ impl FredCalendarNativeSource {
     }
 
     async fn build_graph_client(&self) -> Result<GraphClient> {
-        let client_id = self.config.graph_client_id.clone().unwrap_or_default();
+        let client_id = self
+            .config
+            .graph_client_id
+            .clone()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "graph_client_id not configured. \
+                     Add to ~/.config/nostromo/config.toml:\n  \
+                     graph_client_id = \"<your-azure-app-id>\"\n\n\
+                     Or use --bash-fallback flag to use legacy bash sources."
+                )
+            })?;
+
+        if client_id.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "graph_client_id is empty. \
+                 Set a valid Azure AD application ID in ~/.config/nostromo/config.toml:\n  \
+                 graph_client_id = \"<your-azure-app-id>\"\n\n\
+                 Or use --bash-fallback flag to use legacy bash sources."
+            ));
+        }
+
         let tenant = self
             .config
             .graph_tenant
