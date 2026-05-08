@@ -1,4 +1,4 @@
-//! Tab bar, status bar, and sidebar widgets — shared chrome across all views.
+//! Tab bar, status bar, break-glass banner, and sidebar widgets.
 
 use ratatui::{
     layout::Rect,
@@ -11,7 +11,11 @@ use chrono::Local;
 
 use crate::{
     agent_bus::ActivityEvent,
-    data::{fred_calendar::CalendarSnapshot, fred_mailbox::MailboxSnapshot},
+    data::{
+        break_glass::BreakGlassRequest,
+        fred_calendar::CalendarSnapshot,
+        fred_mailbox::MailboxSnapshot,
+    },
     ui::{theme, widgets::truncate::truncate},
 };
 
@@ -59,12 +63,16 @@ pub fn render_tab_bar(
 /// (newest last).  The most recent event is shown in the centre of the bar;
 /// when the terminal is ≥ 140 cols wide the previous four events appear on
 /// the right side.
+///
+/// `status_note` is an optional one-shot note (e.g. "retry unavailable") shown
+/// in the status bar when present.
 pub fn render_status_bar(
     f: &mut Frame,
     area: Rect,
     mailbox: Option<&MailboxSnapshot>,
     calendar: Option<&CalendarSnapshot>,
     recent_activity: &[ActivityEvent],
+    status_note: Option<&str>,
 ) -> Rect {
     let bar_area = Rect {
         y: area.y + area.height.saturating_sub(1),
@@ -92,11 +100,15 @@ pub fn render_status_bar(
         })
         .unwrap_or_else(|| " ◷ — ".to_string());
 
-    // Most-recent activity event.
-    let activity_str = recent_activity
-        .last()
-        .map(|ev| format!(" ⚙ {}: {} ", ev.agent, ev.summary))
-        .unwrap_or_else(|| " ⚙ — ".to_string());
+    // Centre content: prefer status_note when set, otherwise most-recent activity.
+    let activity_str = if let Some(note) = status_note {
+        format!(" {note} ")
+    } else {
+        recent_activity
+            .last()
+            .map(|ev| format!(" ⚙ {}: {} ", ev.agent, ev.summary))
+            .unwrap_or_else(|| " ⚙ — ".to_string())
+    };
 
     let left = format!(" {time_str}{mail_str}{next_str}");
 
@@ -148,7 +160,45 @@ pub fn render_status_bar(
     above
 }
 
+/// Render a one-row break-glass banner between the tab bar and content area.
+///
+/// Returns the remaining area below the banner.  If `break_glass` is `None`,
+/// returns `area` unchanged (no banner rendered).
+pub fn render_break_glass_banner(
+    f: &mut Frame,
+    area: Rect,
+    break_glass: Option<&BreakGlassRequest>,
+) -> Rect {
+    let req = match break_glass {
+        Some(r) => r,
+        None => return area,
+    };
+
+    let banner_area = Rect { height: 1, ..area };
+    let below = Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+
+    let text = format!(
+        " ⚠ BREAK-GLASS: {} — press Ctrl-B to review ",
+        req.action
+    );
+    let line = Line::from(Span::styled(
+        truncate(&text, area.width as usize),
+        Style::default()
+            .fg(ratatui::style::Color::Black)
+            .bg(theme::RED_SWEATER)
+            .add_modifier(Modifier::BOLD),
+    ));
+    f.render_widget(Paragraph::new(line), banner_area);
+
+    below
+}
+
 /// Render chrome and return content area.
+#[allow(clippy::too_many_arguments)]
 pub fn render_chrome(
     f: &mut Frame,
     full_area: Rect,
@@ -157,7 +207,10 @@ pub fn render_chrome(
     mailbox: Option<&MailboxSnapshot>,
     calendar: Option<&CalendarSnapshot>,
     recent_activity: &[ActivityEvent],
+    break_glass: Option<&BreakGlassRequest>,
+    status_note: Option<&str>,
 ) -> Rect {
     let after_tabs = render_tab_bar(f, full_area, titles, active);
-    render_status_bar(f, after_tabs, mailbox, calendar, recent_activity)
+    let after_banner = render_break_glass_banner(f, after_tabs, break_glass);
+    render_status_bar(f, after_banner, mailbox, calendar, recent_activity, status_note)
 }

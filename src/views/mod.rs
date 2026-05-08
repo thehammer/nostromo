@@ -4,7 +4,10 @@
 //! 1 has Fred, Perri, and generic stub views for the other agents.
 
 pub mod agent_generic;
+pub mod await_modal;
+pub mod break_glass_modal;
 pub mod fred;
+pub mod mother;
 pub mod perri;
 
 use std::any::Any;

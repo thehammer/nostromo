@@ -5,11 +5,17 @@
 //! periodic tick is also injected on a fixed interval so views can animate
 //! without waiting for user input.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, MouseEvent};
 use tokio::sync::mpsc;
 use tracing::warn;
+
+use crate::{
+    data::{break_glass::BreakGlassRequest, right_panel_source::RightPanelSnapshot},
+    mother::{MotherJob, MotherStatus},
+};
 
 /// Normalised event enum consumed by `App` and `View` implementations.
 #[derive(Debug, Clone)]
@@ -24,10 +30,17 @@ pub enum AppEvent {
     Resize(u16, u16),
     /// A data snapshot from an agent was updated — view should re-render.
     AgentUpdate { view_id: &'static str },
-    /// Mother job queue changed.
-    JobUpdate,
-    /// Break-glass alarm fired.
-    BreakGlass,
+    /// Mother job list refreshed.
+    MotherJobs(Vec<MotherJob>),
+    /// Mother statusline cache changed.
+    MotherStatusline(MotherStatus),
+    /// A job transitioned into `awaiting` since the last poll.
+    /// Boxed to keep enum size uniform (MotherJob is large).
+    AwaitDetected(Box<MotherJob>),
+    /// Break-glass sentinel appeared at `$HOME/.nostromo/break-glass.json`.
+    BreakGlassDetected(BreakGlassRequest),
+    /// Right-panel snapshots updated (keyed by agent id).
+    RightPanelData(HashMap<String, RightPanelSnapshot>),
 }
 
 /// Tick interval for the event loop.

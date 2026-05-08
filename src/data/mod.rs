@@ -4,11 +4,14 @@
 //! dirty-file wakeup, and pushes snapshots to a `tokio::sync::watch` channel.
 //! Views read the latest value on each render tick.
 
+pub mod break_glass;
 pub mod dirty_file;
 pub mod fred_calendar;
 pub mod fred_mailbox;
+pub mod mother_poll;
 pub mod perri_pr;
 pub mod perri_queue;
+pub mod right_panel_source;
 
 use std::time::Duration;
 

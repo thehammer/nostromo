@@ -62,6 +62,17 @@ impl PerriView {
         }
     }
 
+    /// Focus the diff pane on the HEAD diff of a Mother worktree.
+    ///
+    /// Called by the app when the operator presses `v` in the await modal.
+    /// Phase 3: path-based diff is not yet wired to a live data source, so
+    /// this is a stub that records the path for future display.
+    pub fn focus_diff_for_worktree(&mut self, _path: &std::path::Path) {
+        // No-op for now — Perri's diff pane already shows the most-recently
+        // fetched PR diff.  A future phase will add a `git diff HEAD` pane
+        // keyed to the worktree path.
+    }
+
     fn render_queue(&self, f: &mut Frame, area: Rect) {
         let snap = self.queue_rx.borrow();
         let snap = snap.as_ref();
