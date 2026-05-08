@@ -38,6 +38,7 @@ use crate::{
     },
     event::{self, AppEvent},
     mother,
+    pty::{DaemonPtyFactory, InProcessPtyFactory, PtyFactory},
     ui,
     ui::widgets::syntect_cache::SyntectCache,
     views::{
@@ -135,14 +136,17 @@ pub async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     event::spawn(tx.clone());
 
-    // Spawn Mother pollers OR wire up the daemon bridge.
-    if let Some(client) = daemon_client {
+    // Construct PtyFactory; also spawn Mother pollers or daemon bridge.
+    let pty_factory: Arc<dyn PtyFactory> = if let Some(client) = daemon_client {
         info!("using daemon bridge for Mother + activity events");
-        crate::data::daemon_bridge::spawn(client, tx.clone(), Arc::clone(&bus));
+        crate::data::daemon_bridge::spawn(client.clone(), tx.clone(), Arc::clone(&bus));
+        let factory = DaemonPtyFactory::new_with_refresh(client).await;
+        Arc::new(factory)
     } else {
         // In-process fallback: spawn Mother pollers as before.
         mother_poll::spawn(tx.clone());
-    }
+        Arc::new(InProcessPtyFactory)
+    };
 
     // Spawn break-glass sentinel watcher.
     break_glass::spawn(tx.clone());
@@ -150,16 +154,16 @@ pub async fn run(
     // Spawn right-panel data source (subscribes to AgentBus).
     right_panel_source::spawn(Arc::clone(&bus), tx.clone());
 
-    let fred_ctx = ViewCtx { event_tx: tx.clone() };
-    let perri_ctx = ViewCtx { event_tx: tx.clone() };
-    let mother_ctx = ViewCtx { event_tx: tx.clone() };
+    let fred_ctx = ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) };
+    let perri_ctx = ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) };
+    let mother_ctx = ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) };
 
     let mut views: Vec<BoxedView> = vec![
         Box::new(views::fred::FredView::new(mailbox_rx, calendar_rx, config.clone(), fred_ctx)),
         Box::new(views::perri::PerriView::new(queue_rx, pr_rx, config.clone(), perri_ctx, Arc::clone(&syntect))),
-        Box::new(views::agent_generic::GenericView::new("claudia", "Claudia", ViewCtx { event_tx: tx.clone() })),
-        Box::new(views::agent_generic::GenericView::new("cody",    "Cody",    ViewCtx { event_tx: tx.clone() })),
-        Box::new(views::agent_generic::GenericView::new("kennedy", "Kennedy", ViewCtx { event_tx: tx.clone() })),
+        Box::new(views::agent_generic::GenericView::new("claudia", "Claudia", ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) })),
+        Box::new(views::agent_generic::GenericView::new("cody",    "Cody",    ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) })),
+        Box::new(views::agent_generic::GenericView::new("kennedy", "Kennedy", ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) })),
         Box::new(views::mother::MotherView::new(config.clone(), mother_ctx)),
     ];
 

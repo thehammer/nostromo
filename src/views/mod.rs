@@ -1,7 +1,6 @@
 //! View trait and view registry.
 //!
-//! A `View` owns a region of the screen and handles input when active.  Phase
-//! 1 has Fred, Perri, and generic stub views for the other agents.
+//! A `View` owns a region of the screen and handles input when active.
 
 pub mod agent_generic;
 pub mod await_modal;
@@ -11,17 +10,23 @@ pub mod mother;
 pub mod perri;
 
 use std::any::Any;
+use std::sync::Arc;
 
 use ratatui::{layout::Rect, Frame};
 use tokio::sync::mpsc;
 
-use crate::event::AppEvent;
+use crate::{event::AppEvent, pty::PtyFactory};
 
 /// Shared wiring passed to every view that can host a PTY.
 pub struct ViewCtx {
     /// Channel for sending app-level events (e.g. `AgentUpdate`) from async
     /// tasks back into the main event loop.
     pub event_tx: mpsc::UnboundedSender<AppEvent>,
+    /// Factory for spawning / reattaching PTYs.
+    ///
+    /// Uses daemon-owned PTYs when the daemon is connected; falls back to
+    /// in-process `PtyHost` otherwise.
+    pub pty_factory: Arc<dyn PtyFactory>,
 }
 
 /// What a view returns after handling an event.
@@ -52,7 +57,7 @@ pub trait View: Send + Any {
     fn on_tick(&mut self) {}
 
     /// Called when the terminal is resized. Views that own a PTY should
-    /// forward the new inner dimensions to `PtyHost::resize`.
+    /// forward the new inner dimensions to the PTY backend.
     fn on_resize(&mut self, _area: Rect) {}
 
     /// Returns `true` when this view's PTY is active **and** currently

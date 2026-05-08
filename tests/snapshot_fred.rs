@@ -80,8 +80,10 @@ fn fred_layout_renders_without_panic() {
     drop(cal_tx);
 
     let config = nostromo::config::Config::default();
+    use std::sync::Arc;
+    use nostromo::pty::InProcessPtyFactory;
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let ctx = ViewCtx { event_tx };
+    let ctx = ViewCtx { event_tx, pty_factory: Arc::new(InProcessPtyFactory) };
     let mut view = FredView::new(mb_rx, cal_rx, config, ctx);
 
     let backend = TestBackend::new(120, 40);

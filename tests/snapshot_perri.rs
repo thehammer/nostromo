@@ -65,8 +65,9 @@ fn perri_layout_renders_without_panic() {
     drop(pr_tx);
 
     let config = nostromo::config::Config::default();
+    use nostromo::pty::InProcessPtyFactory;
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let ctx = ViewCtx { event_tx };
+    let ctx = ViewCtx { event_tx, pty_factory: Arc::new(InProcessPtyFactory) };
     let syntect = Arc::new(SyntectCache::load().expect("syntect load"));
     let mut view = PerriView::new(q_rx, pr_rx, config, ctx, syntect);
 

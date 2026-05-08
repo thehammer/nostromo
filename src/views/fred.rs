@@ -19,7 +19,7 @@ use crate::{
         fred_mailbox::MailboxSnapshot,
     },
     event::AppEvent,
-    pty::{PtyHost, PtyWidget},
+    pty::{PtyBackend, PtyWidget},
     ui::{
         theme::{self, Sweater},
         widgets::{relative_time::format_relative_now, truncate::truncate},
@@ -27,13 +27,16 @@ use crate::{
     views::{EventOutcome, View, ViewCtx},
 };
 
+/// Tag used to identify Fred's PTY in the daemon registry.
+const FRED_PTY_TAG: &str = "fred";
+
 pub struct FredView {
     mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
     calendar_rx: watch::Receiver<Option<CalendarSnapshot>>,
     #[allow(dead_code)]
     config: Config,
     ctx: ViewCtx,
-    pty: Option<PtyHost>,
+    pty: Option<PtyBackend>,
     /// Whether the PTY is currently capturing keystrokes.
     pty_capturing: bool,
     /// Last known inner area of the REPL pane.
@@ -47,15 +50,40 @@ impl FredView {
         config: Config,
         ctx: ViewCtx,
     ) -> Self {
+        // Attempt to reattach to an existing daemon PTY for this view.
+        let pty = Self::try_reattach(&ctx);
+
+        let pty_capturing = pty.is_some();
+
         Self {
             mailbox_rx,
             calendar_rx,
             config,
             ctx,
-            pty: None,
-            pty_capturing: false,
+            pty,
+            pty_capturing,
             repl_area: Rect::new(0, 0, 80, 10),
         }
+    }
+
+    /// Reattach to a live daemon PTY if one exists for this view tag.
+    fn try_reattach(ctx: &ViewCtx) -> Option<PtyBackend> {
+        let existing = ctx.pty_factory.list_existing(FRED_PTY_TAG);
+        let info = existing.into_iter().find(|p| p.alive)?;
+
+        tracing::info!(
+            pty_id = %info.pty_id,
+            "Fred view reattaching to existing daemon PTY"
+        );
+
+        ctx.pty_factory
+            .attach(
+                &info.pty_id,
+                (info.cols, info.rows),
+                ctx.event_tx.clone(),
+                FRED_PTY_TAG,
+            )
+            .ok()
     }
 
     /// Clone the current mailbox snapshot (for status bar use in ui::render).
@@ -99,7 +127,7 @@ impl FredView {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Auth-prompt rendering: when Graph sign-in is required, show device flow UI.
+        // Auth-prompt rendering.
         if let Some(Some(prompt)) = snap.map(|s| s.auth_prompt.as_ref()) {
             let remaining = prompt.expires_at - chrono::Utc::now();
             let mins = remaining.num_minutes().max(0);
@@ -290,11 +318,11 @@ impl FredView {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Store the inner area for PTY spawn / resize.
         self.repl_area = inner;
 
         if let Some(pty) = &self.pty {
-            let guard = pty.parser.lock().unwrap();
+            let parser = pty.parser();
+            let guard = parser.lock().unwrap();
             f.render_widget(PtyWidget::new(guard), inner);
         } else {
             let lines = vec![
@@ -354,15 +382,15 @@ impl View for FredView {
         if let AppEvent::Key(k) = ev {
             if k.code == KeyCode::Enter && self.pty.is_none() {
                 let (cols, rows) = (self.repl_area.width.max(20), self.repl_area.height.max(5));
-                match PtyHost::spawn(
+                match self.ctx.pty_factory.spawn(
+                    FRED_PTY_TAG,
                     "claude",
                     &["--agent", "fred"],
                     (cols, rows),
                     self.ctx.event_tx.clone(),
-                    "fred",
                 ) {
-                    Ok(host) => {
-                        self.pty = Some(host);
+                    Ok(backend) => {
+                        self.pty = Some(backend);
                         self.pty_capturing = true;
                     }
                     Err(e) => {
