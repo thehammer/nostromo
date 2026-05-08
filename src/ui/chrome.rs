@@ -20,11 +20,15 @@ use crate::{
 };
 
 /// Render the top tab bar.  Returns the area below the tab bar.
+///
+/// `active_pty_capturing` — when `true`, a `●` badge is appended to the
+/// active tab label to indicate that the PTY is capturing input.
 pub fn render_tab_bar(
     f: &mut Frame,
     area: Rect,
     titles: &[&str],
     active: usize,
+    active_pty_capturing: bool,
 ) -> Rect {
     let bar_area = Rect { height: 1, ..area };
     let below = Rect {
@@ -44,6 +48,12 @@ pub fn render_tab_bar(
                     .bg(theme::BORDER_ACTIVE)
                     .add_modifier(Modifier::BOLD),
             ));
+            if active_pty_capturing {
+                spans.push(Span::styled(
+                    "● ",
+                    Style::default().fg(theme::AMBER).bg(theme::BORDER_ACTIVE),
+                ));
+            }
         } else {
             spans.push(Span::styled(label, Style::default().fg(theme::FG_MUTED)));
         }
@@ -204,13 +214,14 @@ pub fn render_chrome(
     full_area: Rect,
     titles: &[&str],
     active: usize,
+    active_pty_capturing: bool,
     mailbox: Option<&MailboxSnapshot>,
     calendar: Option<&CalendarSnapshot>,
     recent_activity: &[ActivityEvent],
     break_glass: Option<&BreakGlassRequest>,
     status_note: Option<&str>,
 ) -> Rect {
-    let after_tabs = render_tab_bar(f, full_area, titles, active);
+    let after_tabs = render_tab_bar(f, full_area, titles, active, active_pty_capturing);
     let after_banner = render_break_glass_banner(f, after_tabs, break_glass);
     render_status_bar(f, after_banner, mailbox, calendar, recent_activity, status_note)
 }

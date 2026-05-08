@@ -52,11 +52,14 @@ pub fn render(
         calendar_snap = None;
     }
 
+    let pty_capturing = active_view.pty_capturing_input();
+
     let content_area = chrome::render_chrome(
         f,
         area,
         titles,
         active_idx,
+        pty_capturing,
         mailbox_snap.as_ref(),
         calendar_snap.as_ref(),
         recent_activity,

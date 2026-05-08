@@ -26,6 +26,8 @@ pub struct GenericView {
     title: &'static str,
     ctx: ViewCtx,
     pty: Option<PtyHost>,
+    /// Whether the PTY is currently capturing keystrokes.
+    pty_capturing: bool,
     /// Last known inner area of the REPL pane, used for PTY sizing.
     repl_area: Rect,
 }
@@ -37,18 +39,22 @@ impl GenericView {
             title,
             ctx,
             pty: None,
+            pty_capturing: false,
             repl_area: Rect::new(0, 0, 80, 24),
         }
     }
 
     fn render_repl(&mut self, f: &mut Frame, area: Rect) {
+        let border_color = if self.pty_capturing {
+            theme::BORDER_ACTIVE
+        } else if self.pty.is_some() {
+            theme::AMBER
+        } else {
+            theme::BORDER_INACTIVE
+        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(if self.pty.is_some() {
-                theme::BORDER_ACTIVE
-            } else {
-                theme::BORDER_INACTIVE
-            }))
+            .border_style(Style::default().fg(border_color))
             .title(Span::styled(
                 format!(" {} REPL ", self.title),
                 Style::default().fg(theme::FG_MUTED),
@@ -104,11 +110,13 @@ impl View for GenericView {
     }
 
     fn on_event(&mut self, ev: &AppEvent) -> EventOutcome {
-        // Forward all keys to the PTY when it's active.
-        if let Some(pty) = &mut self.pty {
-            if let AppEvent::Key(k) = ev {
-                pty.send_key(k);
-                return EventOutcome::Consumed;
+        // Forward keys to the PTY only when it is active and capturing input.
+        if self.pty_capturing {
+            if let Some(pty) = &mut self.pty {
+                if let AppEvent::Key(k) = ev {
+                    pty.send_key(k);
+                    return EventOutcome::Consumed;
+                }
             }
         }
 
@@ -124,6 +132,7 @@ impl View for GenericView {
                 ) {
                     Ok(host) => {
                         self.pty = Some(host);
+                        self.pty_capturing = true;
                     }
                     Err(e) => {
                         tracing::warn!("failed to spawn PTY for {}: {e}", self.id);
@@ -143,8 +152,24 @@ impl View for GenericView {
         }
     }
 
-    fn pty_focus(&self) -> bool {
-        self.pty.is_some()
+    fn pty_capturing_input(&self) -> bool {
+        self.pty.is_some() && self.pty_capturing
+    }
+
+    fn set_pty_capturing_input(&mut self, capturing: bool) {
+        if self.pty.is_some() {
+            self.pty_capturing = capturing;
+        }
+    }
+
+    fn focus(&mut self) {
+        if self.pty.is_some() {
+            self.pty_capturing = true;
+        }
+    }
+
+    fn blur(&mut self) {
+        self.pty_capturing = false;
     }
 
     fn as_any(&self) -> &dyn Any {
