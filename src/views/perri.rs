@@ -38,6 +38,8 @@ pub struct PerriView {
     ctx: ViewCtx,
     syntect: Arc<SyntectCache>,
     pty: Option<PtyHost>,
+    /// Whether the PTY is currently capturing keystrokes.
+    pty_capturing: bool,
     /// Last known inner area of the REPL pane.
     repl_area: Rect,
 }
@@ -58,6 +60,7 @@ impl PerriView {
             ctx,
             syntect,
             pty: None,
+            pty_capturing: false,
             repl_area: Rect::new(0, 0, 80, 10),
         }
     }
@@ -205,13 +208,16 @@ impl PerriView {
     }
 
     fn render_repl(&mut self, f: &mut Frame, area: Rect) {
+        let border_color = if self.pty_capturing {
+            theme::BORDER_ACTIVE
+        } else if self.pty.is_some() {
+            theme::AMBER
+        } else {
+            theme::BORDER_INACTIVE
+        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(if self.pty.is_some() {
-                theme::BORDER_ACTIVE
-            } else {
-                theme::BORDER_INACTIVE
-            }))
+            .border_style(Style::default().fg(border_color))
             .title(Span::styled(
                 " REPL ",
                 Style::default().fg(theme::FG_MUTED),
@@ -269,11 +275,13 @@ impl View for PerriView {
     }
 
     fn on_event(&mut self, ev: &AppEvent) -> EventOutcome {
-        // Forward all keys to the PTY when active.
-        if let Some(pty) = &mut self.pty {
-            if let AppEvent::Key(k) = ev {
-                pty.send_key(k);
-                return EventOutcome::Consumed;
+        // Forward keys to the PTY only when it is active and capturing input.
+        if self.pty_capturing {
+            if let Some(pty) = &mut self.pty {
+                if let AppEvent::Key(k) = ev {
+                    pty.send_key(k);
+                    return EventOutcome::Consumed;
+                }
             }
         }
 
@@ -290,6 +298,7 @@ impl View for PerriView {
                     ) {
                         Ok(host) => {
                             self.pty = Some(host);
+                            self.pty_capturing = true;
                         }
                         Err(e) => {
                             tracing::warn!("failed to spawn PTY for perri: {e}");
@@ -297,7 +306,7 @@ impl View for PerriView {
                     }
                     return EventOutcome::Consumed;
                 }
-                KeyCode::Down | KeyCode::Char('j') if self.pty.is_none() => {
+                KeyCode::Down | KeyCode::Char('j') if !self.pty_capturing => {
                     let len = self
                         .queue_rx
                         .borrow()
@@ -309,7 +318,7 @@ impl View for PerriView {
                     }
                     return EventOutcome::Consumed;
                 }
-                KeyCode::Up | KeyCode::Char('k') if self.pty.is_none() => {
+                KeyCode::Up | KeyCode::Char('k') if !self.pty_capturing => {
                     let len = self
                         .queue_rx
                         .borrow()
@@ -335,8 +344,24 @@ impl View for PerriView {
         }
     }
 
-    fn pty_focus(&self) -> bool {
-        self.pty.is_some()
+    fn pty_capturing_input(&self) -> bool {
+        self.pty.is_some() && self.pty_capturing
+    }
+
+    fn set_pty_capturing_input(&mut self, capturing: bool) {
+        if self.pty.is_some() {
+            self.pty_capturing = capturing;
+        }
+    }
+
+    fn focus(&mut self) {
+        if self.pty.is_some() {
+            self.pty_capturing = true;
+        }
+    }
+
+    fn blur(&mut self) {
+        self.pty_capturing = false;
     }
 
     fn as_any(&self) -> &dyn Any {

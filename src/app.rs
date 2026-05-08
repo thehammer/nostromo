@@ -285,17 +285,30 @@ pub async fn run(
                     continue;
                 }
 
-                // Global tab switching (unless PTY focused).
-                if !views[active].pty_focus() {
+                // Ctrl-\: toggle PTY input capture on the active view.
+                if k.code == KeyCode::Char('\\') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    let cur = views[active].pty_capturing_input();
+                    views[active].set_pty_capturing_input(!cur);
+                    continue;
+                }
+
+                // Global tab switching (unless PTY is capturing input).
+                if !views[active].pty_capturing_input() {
                     match k.code {
                         KeyCode::Char('q') => break,
 
                         KeyCode::Tab => {
+                            let old = active;
                             active = (active + 1) % views.len();
+                            views[old].blur();
+                            views[active].focus();
                             continue;
                         }
                         KeyCode::BackTab => {
+                            let old = active;
                             active = active.checked_sub(1).unwrap_or(views.len() - 1);
+                            views[old].blur();
+                            views[active].focus();
                             continue;
                         }
                         _ => {}
@@ -322,8 +335,10 @@ pub async fn run(
                 use crossterm::event::MouseEventKind;
                 if matches!(m.kind, MouseEventKind::Down(_)) && m.row == 0 {
                     let idx = (m.column as usize) / 12;
-                    if idx < views.len() {
+                    if idx < views.len() && idx != active {
+                        views[active].blur();
                         active = idx;
+                        views[active].focus();
                     }
                 }
             }

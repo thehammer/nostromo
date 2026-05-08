@@ -55,12 +55,16 @@ pub trait View: Send + Any {
     /// forward the new inner dimensions to `PtyHost::resize`.
     fn on_resize(&mut self, _area: Rect) {}
 
-    /// Returns `true` when a PTY REPL is active and should receive raw key
-    /// input. The app loop uses this to decide whether to forward keys or keep
-    /// them for global navigation.
-    fn pty_focus(&self) -> bool {
+    /// Returns `true` when this view's PTY is active **and** currently
+    /// capturing keystrokes. The app loop uses this to decide whether to
+    /// forward keys or keep them for global navigation.
+    fn pty_capturing_input(&self) -> bool {
         false
     }
+
+    /// Toggle whether this view should route keystrokes into its PTY.
+    /// No-op for views without a PTY.
+    fn set_pty_capturing_input(&mut self, _capturing: bool) {}
 
     /// Called when this view gains focus.
     fn focus(&mut self) {}
