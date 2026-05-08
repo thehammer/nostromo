@@ -23,6 +23,51 @@ nostromo --view perri # Perri: PR queue + diff
 | `q` / `Ctrl-C`  | Quit                           |
 | `Enter`         | Open REPL for active view      |
 | Mouse click tab | Switch view                    |
+| `Ctrl-P`        | Open command palette           |
+| `Ctrl-R`        | Toggle right context panel     |
+| `Ctrl-B`        | Open break-glass modal         |
+| `Ctrl-\`        | Toggle PTY input capture       |
+
+## Layout chords (`Ctrl-W` + …)
+
+`Ctrl-W` opens a one-shot chord mode.  Press the second key immediately after:
+
+| Second key | Action                                        |
+|------------|-----------------------------------------------|
+| `t`        | Toggle split mode on/off                      |
+| `s`        | Split current pane **side-by-side** (vertical split) |
+| `v`        | Split current pane **top/bottom** (horizontal split) |
+| `q`        | Close the focused pane                        |
+| `h` / `k`  | Move focus to the left/upper pane             |
+| `l` / `j`  | Move focus to the right/lower pane            |
+
+Layout is persisted to `~/.nostromo/layout.toml` after every change and
+restored on the next launch.  If the file is absent or unreadable, nostromo
+starts in single-pane mode (identical to pre-5c behaviour).
+
+## Command palette (`Ctrl-P`)
+
+The palette overlays the current layout and provides fuzzy-search over all
+available actions:
+
+- **Navigation** — switch to any view (Fred, Perri, Claudia, Cody, Kennedy, Mother)
+- **Agent REPLs** — spawn a REPL for any agent
+- **Layout** — split panes, close pane, toggle split/right-panel mode
+- **Mother** — approve or cancel running jobs
+- **PR** — jump to an open PR diff in Perri
+
+Type to filter (subsequence fuzzy match), `↑`/`↓` to navigate, `Enter` to
+execute, `Esc` to dismiss.
+
+## Status-bar tab colours
+
+The tab bar uses sweater colours to signal load:
+
+| Tab     | Amber                              | Red                               |
+|---------|------------------------------------|-----------------------------------|
+| Perri   | > 5 open PRs awaiting review       | > 10 open PRs awaiting review     |
+| Cody    | Any Mother job running > 15 min    | —                                 |
+| Mother  | Any Mother job running > 15 min    | —                                 |
 
 ## Build
 
@@ -112,5 +157,5 @@ This unloads the agent, removes the plist, and deletes the binary.
 - **Phase 3**: Mother queue + inline `await` approval modals
 - **Phase 4**: Native Microsoft Graph + GitHub clients
 - **Phase 5a**: `nostromd` daemon + Unix socket IPC
-- **Phase 5b** *(current)*: Daemon-owned PTYs with detach/attach + scrollback
-- **Phase 5c**: Split panes, layout changes, command palette
+- **Phase 5b**: Daemon-owned PTYs with detach/attach + scrollback
+- **Phase 5c** *(current)*: Split panes, command palette, sweater status colours

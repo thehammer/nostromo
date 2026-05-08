@@ -5,6 +5,7 @@
 pub mod agent_generic;
 pub mod await_modal;
 pub mod break_glass_modal;
+pub mod command_palette;
 pub mod fred;
 pub mod mother;
 pub mod perri;

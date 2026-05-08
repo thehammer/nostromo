@@ -4,32 +4,42 @@
 //! - Horizontal right-panel split (25% wide) when `AppState::right_panel_visible`.
 //! - Active modal drawn as centered overlay after the view content.
 //! - Break-glass banner propagated to chrome via `AppState::break_glass`.
+//!
+//! Phase 5c additions:
+//! - Split-pane layout: when `state.split_mode == true`, walk `state.layout.rects()`
+//!   and render each leaf's view into its rect.
+//! - Focused leaf gets a highlighted border (`theme::BORDER_ACTIVE`).
+//! - Tab bar shows per-tab sweater-colour indicators.
+//! - Command palette rendered as overlay (last, on top).
 
 pub mod chrome;
 pub mod theme;
 pub mod widgets;
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::Style,
+    widgets::{Block, Borders},
     Frame,
 };
 
 use crate::{
     agent_bus::ActivityEvent,
     app::{AppState, ModalState},
-    views::View,
+    views::BoxedView,
 };
 
 /// Render one frame.
 ///
-/// `titles` is the list of view tab labels (pre-collected to avoid double-borrow).
-/// `recent_activity` is the latest activity slice from the `AgentBus`.
-/// `state` is the shared application state (modals, right panel, break-glass).
-/// `active_agent_id` is the view id of the currently-active view (for right panel lookup).
+/// `views` is the full view list (for split-mode rendering).
+/// `active` is the single-view active index (used when `split_mode == false`).
+/// `focused_view_idx` is the view index of the currently-focused pane.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
-    active_view: &mut dyn View,
-    active_idx: usize,
+    views: &mut Vec<BoxedView>,
+    active: usize,
+    focused_view_idx: usize,
     titles: &[&str],
     recent_activity: &[ActivityEvent],
     state: &AppState,
@@ -41,10 +51,8 @@ pub fn render(
     let mailbox_snap;
     let calendar_snap;
 
-    if let Some(fred) = active_view
-        .as_any()
-        .downcast_ref::<crate::views::fred::FredView>()
-    {
+    let fred_view = views.iter().find(|v| v.id() == "fred");
+    if let Some(fred) = fred_view.and_then(|v| v.as_any().downcast_ref::<crate::views::fred::FredView>()) {
         mailbox_snap = fred.mailbox_snapshot_cloned();
         calendar_snap = fred.calendar_snapshot_cloned();
     } else {
@@ -52,19 +60,20 @@ pub fn render(
         calendar_snap = None;
     }
 
-    let pty_capturing = active_view.pty_capturing_input();
+    let pty_capturing = views[focused_view_idx].pty_capturing_input();
 
     let content_area = chrome::render_chrome(
         f,
         area,
         titles,
-        active_idx,
+        active,
         pty_capturing,
         mailbox_snap.as_ref(),
         calendar_snap.as_ref(),
         recent_activity,
         state.break_glass.as_ref(),
         state.status_note.as_deref(),
+        state,
     );
 
     // Split content area horizontally if the right panel is visible.
@@ -78,8 +87,33 @@ pub fn render(
         (content_area, None)
     };
 
-    // Render the active view.
-    active_view.render(f, view_area);
+    // Render views.
+    if state.split_mode && state.layout.leaf_count() > 1 {
+        // Split mode: render each leaf into its computed rect.
+        let pane_rects = state.layout.rects(view_area);
+        let focused_idx = state.layout.focused_view_idx(&state.focused_path);
+
+        for (view_idx, pane_rect) in &pane_rects {
+            let view_idx = (*view_idx).min(views.len() - 1);
+            let is_focused = view_idx == focused_idx;
+
+            // Draw a border around the pane; active pane gets BORDER_ACTIVE.
+            let border_style = if is_focused {
+                Style::default().fg(theme::BORDER_ACTIVE)
+            } else {
+                Style::default().fg(theme::BORDER_INACTIVE)
+            };
+            let block = Block::default().borders(Borders::ALL).border_style(border_style);
+            let inner = block.inner(*pane_rect);
+            f.render_widget(block, *pane_rect);
+
+            // Safety: we split the &mut Vec borrow by index.
+            views[view_idx].render(f, inner);
+        }
+    } else {
+        // Single-pane: render only the active view (original behaviour).
+        views[active].render(f, view_area);
+    }
 
     // Render the right panel if visible.
     if let Some(rp_area) = right_area {
@@ -87,7 +121,6 @@ pub fn render(
         if let Some(snap) = snap {
             widgets::right_panel::render(f, rp_area, snap);
         } else {
-            // Empty panel with border when no data yet.
             use ratatui::{
                 style::Style,
                 widgets::{Borders, Paragraph},
@@ -113,11 +146,12 @@ pub fn render(
 }
 
 /// Draw the active modal overlay on top of the given area.
-fn render_modal(f: &mut Frame, area: ratatui::layout::Rect, modal: &ModalState) {
+fn render_modal(f: &mut Frame, area: Rect, modal: &ModalState) {
     match modal {
         ModalState::Await(m) => m.render(f, area),
         ModalState::BreakGlass(m) => m.render(f, area),
         ModalState::ConfirmCancel { modal: m, .. } => m.render(f, area),
         ModalState::ConfirmRetry { modal: m, .. } => m.render(f, area),
+        ModalState::Palette(p) => p.render(f, area),
     }
 }
