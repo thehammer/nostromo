@@ -29,15 +29,17 @@ use crate::{
     config::Config,
     data::{
         break_glass::{self, BreakGlassRequest},
-        fred_calendar::FredCalendarSource,
+        fred_calendar::{CalendarSnapshot, FredCalendarSource},
         fred_calendar_native::FredCalendarNativeSource,
-        fred_mailbox::FredMailboxSource,
+        fred_mailbox::{FredMailboxSource, MailboxSnapshot},
         fred_mailbox_native::FredMailboxNativeSource,
         mother_poll,
         perri_pr::PerriPrSource,
         perri_pr_native::PerriPrNativeSource,
         perri_queue::PerriQueueSource,
         perri_queue_native::PerriQueueNativeSource,
+        rate_limits::{BudgetPosture, RateLimits},
+        rate_limits_watcher,
         right_panel_source::{self, RightPanelSnapshot},
     },
     event::{self, AppEvent},
@@ -121,10 +123,23 @@ pub struct AppState {
     pub daemon_connected: bool,
     /// Path to the nostromd Unix socket.
     pub daemon_socket_path: std::path::PathBuf,
+
+    // ── Status bar data ───────────────────────────────────────────────────────
+    /// Latest Claude rate-limit snapshot (populated via `AppEvent::RateLimitsChanged`).
+    pub rate_limits: Option<RateLimits>,
+    /// Latest budget posture (populated via `AppEvent::PostureChanged`).
+    pub budget_posture: Option<BudgetPosture>,
+    /// Watch receiver for mailbox snapshots (for the bottom status bar).
+    pub mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
+    /// Watch receiver for calendar snapshots (for the bottom status bar).
+    pub calendar_rx: tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(
+        mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
+        calendar_rx: tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
+    ) -> Self {
         Self {
             right_panel_visible: false,
             break_glass: None,
@@ -142,6 +157,10 @@ impl AppState {
             tab_hitmap: Vec::new(),
             daemon_connected: false,
             daemon_socket_path: std::path::PathBuf::new(),
+            rate_limits: None,
+            budget_posture: None,
+            mailbox_rx,
+            calendar_rx,
         }
     }
 
@@ -172,6 +191,10 @@ pub async fn run(
     } else {
         FredCalendarNativeSource::spawn(config.clone())
     };
+
+    // Clone receivers for AppState (status bar reads them directly).
+    let mailbox_rx_state = mailbox_rx.clone();
+    let calendar_rx_state = calendar_rx.clone();
     let queue_rx = if bash_fallback {
         PerriQueueSource::spawn(config.clone())
     } else {
@@ -210,6 +233,9 @@ pub async fn run(
 
     // Spawn right-panel data source (subscribes to AgentBus).
     right_panel_source::spawn(Arc::clone(&bus), tx.clone());
+
+    // Spawn rate-limit and budget-posture file watchers.
+    rate_limits_watcher::spawn(tx.clone());
 
     let fred_ctx = ViewCtx {
         event_tx: tx.clone(),
@@ -276,7 +302,7 @@ pub async fn run(
         ViewArg::All => 0,
     };
 
-    let mut state = AppState::new();
+    let mut state = AppState::new(mailbox_rx_state, calendar_rx_state);
     state.daemon_connected = daemon_was_connected;
     state.daemon_socket_path = crate::ipc::default_socket_path();
 
@@ -316,9 +342,13 @@ pub async fn run(
         let active_agent_id = views[focused_view_idx].id().to_string();
 
         terminal.draw(|f| {
+            use ratatui::layout::{Constraint, Layout};
             let full_area = f.area();
+            let [content_area, status_area] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(full_area);
             ui::render(
                 f,
+                content_area,
                 &mut views,
                 active,
                 focused_view_idx,
@@ -327,6 +357,7 @@ pub async fn run(
                 &mut state,
                 &active_agent_id,
             );
+            ui::status_bar::render(f, status_area, &state);
             if state.show_debug_overlay {
                 ui::debug_overlay::render(f, full_area, &state, &views, active);
             }
@@ -396,6 +427,14 @@ pub async fn run(
             }
             AppEvent::MotherStatusline(_) => {
                 views[MOTHER_IDX].on_event(&ev);
+                continue;
+            }
+            AppEvent::RateLimitsChanged(rl) => {
+                state.rate_limits = Some(*rl);
+                continue;
+            }
+            AppEvent::PostureChanged(p) => {
+                state.budget_posture = Some(*p);
                 continue;
             }
             _ => {}

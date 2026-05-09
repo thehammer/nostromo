@@ -18,6 +18,8 @@ pub mod perri_pr;
 pub mod perri_pr_native;
 pub mod perri_queue;
 pub mod perri_queue_native;
+pub mod rate_limits;
+pub mod rate_limits_watcher;
 pub mod right_panel_source;
 
 use std::time::Duration;

@@ -13,7 +13,11 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::{
-    data::{break_glass::BreakGlassRequest, right_panel_source::RightPanelSnapshot},
+    data::{
+        break_glass::BreakGlassRequest,
+        rate_limits::{BudgetPosture, RateLimits},
+        right_panel_source::RightPanelSnapshot,
+    },
     mother::{MotherJob, MotherStatus},
 };
 
@@ -41,6 +45,10 @@ pub enum AppEvent {
     BreakGlassDetected(BreakGlassRequest),
     /// Right-panel snapshots updated (keyed by agent id).
     RightPanelData(HashMap<String, RightPanelSnapshot>),
+    /// Claude rate-limit window snapshot updated.
+    RateLimitsChanged(RateLimits),
+    /// Budget posture file updated.
+    PostureChanged(BudgetPosture),
 }
 
 /// Tick interval for the event loop.
