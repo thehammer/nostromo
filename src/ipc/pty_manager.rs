@@ -102,6 +102,7 @@ impl PtyManager {
     // ── spawn ─────────────────────────────────────────────────────────────────
 
     /// Spawn a new PTY process.  Returns the canonical `pty_id`.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_pty(
         &mut self,
         pty_id: String,
@@ -206,11 +207,7 @@ impl PtyManager {
     /// Sends `PtyAttached` + `PtyScrollback` to the client, then starts
     /// forwarding live output.  If another client was attached, it first
     /// receives `PtyDetach`.
-    pub fn attach(
-        &mut self,
-        pty_id: &str,
-        client_id: &str,
-    ) -> Result<()> {
+    pub fn attach(&mut self, pty_id: &str, client_id: &str) -> Result<()> {
         // ── Phase 1: mutate PTY state, collect what we need ───────────────────
         let (old_client, cols, rows, scrollback_bytes, output_rx) = {
             let pty = self
@@ -392,7 +389,11 @@ impl PtyManager {
                     .ptys
                     .iter()
                     .find_map(|(k, v)| {
-                        if std::ptr::eq(v, p) { Some(k.clone()) } else { None }
+                        if std::ptr::eq(v, p) {
+                            Some(k.clone())
+                        } else {
+                            None
+                        }
                     })
                     .unwrap_or_default(),
                 cmd: p.cmd.clone(),

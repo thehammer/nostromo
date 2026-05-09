@@ -84,27 +84,18 @@ mod tests {
     #[test]
     fn ctrl_c() {
         // Ctrl-C → ETX (0x03)
-        assert_eq!(
-            key_to_bytes(&ctrl(KeyCode::Char('c'))),
-            Some(vec![0x03])
-        );
+        assert_eq!(key_to_bytes(&ctrl(KeyCode::Char('c'))), Some(vec![0x03]));
     }
 
     #[test]
     fn ctrl_l() {
         // Ctrl-L → FF (0x0c)
-        assert_eq!(
-            key_to_bytes(&ctrl(KeyCode::Char('l'))),
-            Some(vec![0x0c])
-        );
+        assert_eq!(key_to_bytes(&ctrl(KeyCode::Char('l'))), Some(vec![0x0c]));
     }
 
     #[test]
     fn arrow_up() {
-        assert_eq!(
-            key_to_bytes(&key(KeyCode::Up)),
-            Some(b"\x1b[A".to_vec())
-        );
+        assert_eq!(key_to_bytes(&key(KeyCode::Up)), Some(b"\x1b[A".to_vec()));
     }
 
     #[test]
@@ -128,9 +119,6 @@ mod tests {
 
     #[test]
     fn regular_char() {
-        assert_eq!(
-            key_to_bytes(&key(KeyCode::Char('a'))),
-            Some(b"a".to_vec())
-        );
+        assert_eq!(key_to_bytes(&key(KeyCode::Char('a'))), Some(b"a".to_vec()));
     }
 }

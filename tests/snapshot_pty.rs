@@ -2,7 +2,7 @@
 //! `vt100::Parser`, render via `PtyWidget` to a Ratatui `TestBackend`, and
 //! snapshot the result with `insta`.
 
-use ratatui::{backend::TestBackend, Terminal, layout::Rect};
+use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 
 use nostromo::pty::PtyWidget;
 

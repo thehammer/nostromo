@@ -1,12 +1,9 @@
 //! Render the await modal into a test backend and assert it contains the
 //! expected content: job id, question text, and all four key hints.
 
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{backend::TestBackend, Terminal};
 
-use nostromo::{
-    mother::MotherJob,
-    views::await_modal::AwaitModal,
-};
+use nostromo::{mother::MotherJob, views::await_modal::AwaitModal};
 
 fn make_test_job() -> MotherJob {
     MotherJob {

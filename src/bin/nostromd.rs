@@ -14,16 +14,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::broadcast;
 use tracing::info;
 use tracing_appender::rolling;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use nostromo::{
-    agent_bus::{ActivityEvent, tail_activity_jsonl},
-    ipc::{PtyManager, Server, protocol::ServerMsg},
-    mother::{self, MotherStatus, statusline_cache_path},
+    agent_bus::{tail_activity_jsonl, ActivityEvent},
+    ipc::{protocol::ServerMsg, PtyManager, Server},
+    mother::{self, statusline_cache_path, MotherStatus},
 };
 
 #[tokio::main]
@@ -104,10 +104,7 @@ async fn main() -> Result<()> {
 
 async fn run_mother_pollers(tx: broadcast::Sender<ServerMsg>) {
     let tx2 = tx.clone();
-    tokio::join!(
-        run_statusline_watcher(tx),
-        run_job_poller(tx2),
-    );
+    tokio::join!(run_statusline_watcher(tx), run_job_poller(tx2),);
 }
 
 async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
@@ -127,16 +124,15 @@ async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
         .to_path_buf();
 
     let cache_path_clone = path.clone();
-    let watcher_result = notify::recommended_watcher(
-        move |res: notify::Result<notify::Event>| match res {
+    let watcher_result =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
             Ok(ev) => {
                 if ev.paths.iter().any(|p| p == &cache_path_clone) {
                     let _ = notify_tx.blocking_send(());
                 }
             }
             Err(e) => tracing::warn!("statusline notify error: {e}"),
-        },
-    );
+        });
 
     let mut watcher = match watcher_result {
         Ok(w) => w,
@@ -176,11 +172,12 @@ async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
                         .map(|s| s.as_str())
                         .unwrap_or("unknown");
 
-                    if job.is_awaiting() && !seen_awaiting.contains(&job.id) {
-                        if prev_state != "awaiting" || !last_states.contains_key(&job.id) {
-                            seen_awaiting.insert(job.id.clone());
-                            let _ = tx.send(ServerMsg::MotherAwaitDetected(job.clone()));
-                        }
+                    if job.is_awaiting()
+                        && !seen_awaiting.contains(&job.id)
+                        && (prev_state != "awaiting" || !last_states.contains_key(&job.id))
+                    {
+                        seen_awaiting.insert(job.id.clone());
+                        let _ = tx.send(ServerMsg::MotherAwaitDetected(job.clone()));
                     }
 
                     if !job.is_awaiting() {

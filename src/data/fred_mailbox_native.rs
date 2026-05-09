@@ -20,11 +20,7 @@ use tracing::{debug, warn};
 
 use crate::{
     config::Config,
-    data::{
-        dirty_file,
-        fred_mailbox::MailboxSnapshot,
-        graph_client::GraphClient,
-    },
+    data::{dirty_file, fred_mailbox::MailboxSnapshot, graph_client::GraphClient},
 };
 
 // Rebuild alias so we can refer to the item type easily.
@@ -122,7 +118,10 @@ impl FredMailboxNativeSource {
                 }));
             } else {
                 // Fetch delta.
-                match graph.delta::<GraphMessage>(MAILBOX_DELTA_PATH, &delta_file).await {
+                match graph
+                    .delta::<GraphMessage>(MAILBOX_DELTA_PATH, &delta_file)
+                    .await
+                {
                     Ok((msgs, _dl)) => {
                         debug!(count = msgs.len(), "mailbox delta received");
                         for msg in msgs {
@@ -156,18 +155,14 @@ impl FredMailboxNativeSource {
     }
 
     async fn build_graph_client(&self) -> Result<GraphClient> {
-        let client_id = self
-            .config
-            .graph_client_id
-            .clone()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "graph_client_id not configured. \
+        let client_id = self.config.graph_client_id.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "graph_client_id not configured. \
                      Add to ~/.config/nostromo/config.toml:\n  \
                      graph_client_id = \"<your-azure-app-id>\"\n\n\
                      Or use --bash-fallback flag to use legacy bash sources."
-                )
-            })?;
+            )
+        })?;
 
         if client_id.trim().is_empty() {
             return Err(anyhow::anyhow!(

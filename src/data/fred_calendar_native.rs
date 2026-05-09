@@ -101,10 +101,7 @@ impl FredCalendarNativeSource {
                 }
                 Ok(None) => {
                     let initial_path = calendar_delta_path();
-                    match graph
-                        .delta::<GraphEvent>(&initial_path, &delta_file)
-                        .await
-                    {
+                    match graph.delta::<GraphEvent>(&initial_path, &delta_file).await {
                         Ok((events, _dl)) => {
                             debug!(count = events.len(), "calendar delta received");
                             for ev in events {
@@ -140,18 +137,14 @@ impl FredCalendarNativeSource {
     }
 
     async fn build_graph_client(&self) -> Result<GraphClient> {
-        let client_id = self
-            .config
-            .graph_client_id
-            .clone()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "graph_client_id not configured. \
+        let client_id = self.config.graph_client_id.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "graph_client_id not configured. \
                      Add to ~/.config/nostromo/config.toml:\n  \
                      graph_client_id = \"<your-azure-app-id>\"\n\n\
                      Or use --bash-fallback flag to use legacy bash sources."
-                )
-            })?;
+            )
+        })?;
 
         if client_id.trim().is_empty() {
             return Err(anyhow::anyhow!(
@@ -219,8 +212,8 @@ fn build_snapshot(store: &HashMap<String, GraphEvent>) -> CalendarSnapshot {
                 .as_ref()
                 .and_then(|r| r.response.clone())
                 .unwrap_or_default();
-            let is_now = start.map(|s| s <= now).unwrap_or(false)
-                && end.map(|e| e > now).unwrap_or(false);
+            let is_now =
+                start.map(|s| s <= now).unwrap_or(false) && end.map(|e| e > now).unwrap_or(false);
 
             CalendarEvent {
                 start,
@@ -236,11 +229,9 @@ fn build_snapshot(store: &HashMap<String, GraphEvent>) -> CalendarSnapshot {
     events.sort_by_key(|ev| ev.start);
 
     // Find next upcoming event.
-    let next = events.iter().find(|ev| {
-        ev.start
-            .map(|s| s > now)
-            .unwrap_or(false)
-    });
+    let next = events
+        .iter()
+        .find(|ev| ev.start.map(|s| s > now).unwrap_or(false));
 
     let (next_event, sweater) = match next {
         Some(ev) => {

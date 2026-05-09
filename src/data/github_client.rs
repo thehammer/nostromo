@@ -47,7 +47,11 @@ impl GithubClient {
             .build()
             .context("building reqwest client for github")?;
 
-        Ok(Self { octocrab, http, token })
+        Ok(Self {
+            octocrab,
+            http,
+            token,
+        })
     }
 
     /// The resolved personal access token (used for raw Bearer requests).
@@ -86,19 +90,17 @@ fn resolve_token(hosts_yml_path: Option<&Path>) -> Result<String> {
 }
 
 fn parse_hosts_yml(path: &Path) -> Result<Option<String>> {
-    let data = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let data =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
     // serde_yaml parses the whole document.  The structure is:
     // github.com:
     //   oauth_token: ghp_xxx
-    let map: serde_yaml::Mapping = serde_yaml::from_str(&data)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let map: serde_yaml::Mapping =
+        serde_yaml::from_str(&data).with_context(|| format!("parsing {}", path.display()))?;
 
     for (key, value) in &map {
-        let host = key
-            .as_str()
-            .unwrap_or_default();
+        let host = key.as_str().unwrap_or_default();
         if host == "github.com" {
             let entry: GhHostEntry = serde_yaml::from_value(value.clone())
                 .with_context(|| "parsing github.com entry in hosts.yml")?;

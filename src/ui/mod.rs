@@ -13,6 +13,7 @@
 //! - Command palette rendered as overlay (last, on top).
 
 pub mod chrome;
+pub mod debug_overlay;
 pub mod theme;
 pub mod widgets;
 
@@ -42,7 +43,7 @@ pub fn render(
     focused_view_idx: usize,
     titles: &[&str],
     recent_activity: &[ActivityEvent],
-    state: &AppState,
+    state: &mut AppState,
     active_agent_id: &str,
 ) {
     let area = f.area();
@@ -52,7 +53,9 @@ pub fn render(
     let calendar_snap;
 
     let fred_view = views.iter().find(|v| v.id() == "fred");
-    if let Some(fred) = fred_view.and_then(|v| v.as_any().downcast_ref::<crate::views::fred::FredView>()) {
+    if let Some(fred) =
+        fred_view.and_then(|v| v.as_any().downcast_ref::<crate::views::fred::FredView>())
+    {
         mailbox_snap = fred.mailbox_snapshot_cloned();
         calendar_snap = fred.calendar_snapshot_cloned();
     } else {
@@ -61,6 +64,10 @@ pub fn render(
     }
 
     let pty_capturing = views[focused_view_idx].pty_capturing_input();
+
+    // Extract values that are immutably borrowed before passing `state` as &mut.
+    let break_glass_snap = state.break_glass.clone();
+    let status_note_snap: Option<String> = state.status_note.clone();
 
     let content_area = chrome::render_chrome(
         f,
@@ -71,10 +78,11 @@ pub fn render(
         mailbox_snap.as_ref(),
         calendar_snap.as_ref(),
         recent_activity,
-        state.break_glass.as_ref(),
-        state.status_note.as_deref(),
+        break_glass_snap.as_ref(),
+        status_note_snap.as_deref(),
         state,
     );
+    // NOTE: state.tab_hitmap is now populated by render_chrome → render_tab_bar.
 
     // Split content area horizontally if the right panel is visible.
     let (view_area, right_area) = if state.right_panel_visible {
@@ -103,7 +111,9 @@ pub fn render(
             } else {
                 Style::default().fg(theme::BORDER_INACTIVE)
             };
-            let block = Block::default().borders(Borders::ALL).border_style(border_style);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style);
             let inner = block.inner(*pane_rect);
             f.render_widget(block, *pane_rect);
 
@@ -123,17 +133,23 @@ pub fn render(
         } else {
             use ratatui::{
                 style::Style,
-                widgets::{Borders, Paragraph},
                 text::Span,
+                widgets::{Borders, Paragraph},
             };
             let block = ratatui::widgets::Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::BORDER_INACTIVE))
-                .title(Span::styled(" Context ", Style::default().fg(theme::FG_MUTED)));
+                .title(Span::styled(
+                    " Context ",
+                    Style::default().fg(theme::FG_MUTED),
+                ));
             let inner = block.inner(rp_area);
             f.render_widget(block, rp_area);
             f.render_widget(
-                Paragraph::new(Span::styled("(no data)", Style::default().fg(theme::FG_MUTED))),
+                Paragraph::new(Span::styled(
+                    "(no data)",
+                    Style::default().fg(theme::FG_MUTED),
+                )),
                 inner,
             );
         }

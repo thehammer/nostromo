@@ -108,16 +108,15 @@ where
     use notify::{RecursiveMode, Watcher};
 
     let path_for_watcher = path.clone();
-    let mut watcher = notify::recommended_watcher(
-        move |res: notify::Result<notify::Event>| match res {
+    let mut watcher =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
             Ok(_) => {
                 let _ = notify_tx.blocking_send(());
             }
             Err(e) => {
                 warn!("notify watcher error: {e}");
             }
-        },
-    )?;
+        })?;
 
     watcher.watch(&path_for_watcher, RecursiveMode::NonRecursive)?;
     debug!(path = %path.display(), "activity.jsonl tailer started");

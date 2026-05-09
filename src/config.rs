@@ -29,7 +29,6 @@ pub struct Config {
     pub pr_diff_poll_secs: u64,
 
     // ── Phase 4: Microsoft Graph (native mailbox/calendar) ──────────────────
-
     /// Azure AD application (client) ID for Microsoft Graph OAuth2 device flow.
     pub graph_client_id: Option<String>,
     /// Azure AD tenant ID (default: `"common"` for multi-tenant / personal accounts).
@@ -39,7 +38,6 @@ pub struct Config {
     pub graph_token_cache: Option<PathBuf>,
 
     // ── Phase 4: GitHub (native PR queue/diff) ──────────────────────────────
-
     /// Path to the gh CLI `hosts.yml` used to resolve a GitHub token when
     /// `GITHUB_TOKEN` is not set.  Default: `$HOME/.config/gh/hosts.yml`.
     pub github_token_path: Option<PathBuf>,
@@ -83,8 +81,8 @@ impl Config {
 
         let raw = std::fs::read_to_string(&resolved)
             .with_context(|| format!("reading config {}", resolved.display()))?;
-        let cfg: Config =
-            toml::from_str(&raw).with_context(|| format!("parsing config {}", resolved.display()))?;
+        let cfg: Config = toml::from_str(&raw)
+            .with_context(|| format!("parsing config {}", resolved.display()))?;
         Ok(cfg)
     }
 
@@ -140,7 +138,10 @@ fn default_config_path() -> Result<PathBuf> {
     if let Some(proj) = directories::ProjectDirs::from("", "", "nostromo") {
         Ok(proj.config_dir().join("config.toml"))
     } else {
-        Ok(home_dir().join(".config").join("nostromo").join("config.toml"))
+        Ok(home_dir()
+            .join(".config")
+            .join("nostromo")
+            .join("config.toml"))
     }
 }
 

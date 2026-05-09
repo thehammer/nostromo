@@ -1,6 +1,6 @@
 //! Acceptance test: scrollback ring buffer is bounded at ≤ 2 MiB and ≤ 10 000 newlines.
 
-use nostromo::ipc::scrollback::{MAX_BYTES, MAX_NEWLINES, ScrollbackBuf};
+use nostromo::ipc::scrollback::{ScrollbackBuf, MAX_BYTES, MAX_NEWLINES};
 
 #[test]
 fn push_20k_lines_bytes_bounded() {

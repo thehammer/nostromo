@@ -25,7 +25,6 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    ViewArg,
     agent_bus::AgentBus,
     config::Config,
     data::{
@@ -48,12 +47,14 @@ use crate::{
     ui,
     ui::widgets::syntect_cache::SyntectCache,
     views::{
-        self, BoxedView, ViewCtx,
+        self,
         await_modal::{AwaitAction, AwaitModal},
         break_glass_modal::{BreakGlassAction, BreakGlassModal, ConfirmAction, ConfirmModal},
-        command_palette::{CommandPalette, PaletteAction, PaletteOutcome, build_items},
+        command_palette::{build_items, CommandPalette, PaletteAction, PaletteOutcome},
         mother::MotherAction,
+        BoxedView, ViewCtx,
     },
+    ViewArg,
 };
 
 // ── modal state ───────────────────────────────────────────────────────────────
@@ -65,7 +66,10 @@ pub enum ModalState {
     Await(Box<AwaitModal>),
     BreakGlass(Box<BreakGlassModal>),
     /// Confirm a `mother cancel <id>` operation.
-    ConfirmCancel { job_id: String, modal: ConfirmModal },
+    ConfirmCancel {
+        job_id: String,
+        modal: ConfirmModal,
+    },
     /// Confirm a `mother add --plan <path>` retry operation.
     ConfirmRetry {
         job_id: String,
@@ -92,7 +96,6 @@ pub struct AppState {
     pub status_note: Option<String>,
 
     // ── Phase 5c additions ────────────────────────────────────────────────────
-
     /// Split-pane layout tree.
     pub layout: LayoutNode,
     /// Path from the root of `layout` to the currently-focused pane.
@@ -107,6 +110,17 @@ pub struct AppState {
     pub perri_open_pr_count: usize,
     /// PR list snapshot for the command palette (url, title).
     pub open_pr_list: Vec<(String, String)>,
+
+    // ── UX polish / debug overlay additions ──────────────────────────────────
+    /// Whether the Ctrl-D debug overlay is currently shown.
+    pub show_debug_overlay: bool,
+    /// Per-tab (start_col_inclusive, end_col_exclusive) in terminal coordinates.
+    /// Populated by `render_tab_bar` each frame for accurate mouse hit detection.
+    pub tab_hitmap: Vec<(u16, u16)>,
+    /// Whether a daemon client was successfully connected at startup.
+    pub daemon_connected: bool,
+    /// Path to the nostromd Unix socket.
+    pub daemon_socket_path: std::path::PathBuf,
 }
 
 impl AppState {
@@ -124,6 +138,10 @@ impl AppState {
             mother_jobs: Vec::new(),
             perri_open_pr_count: 0,
             open_pr_list: Vec::new(),
+            show_debug_overlay: false,
+            tab_hitmap: Vec::new(),
+            daemon_connected: false,
+            daemon_socket_path: std::path::PathBuf::new(),
         }
     }
 
@@ -168,6 +186,9 @@ pub async fn run(
     // Clone queue_rx to monitor PR count for sweater status in the main loop.
     let mut queue_rx_for_count = queue_rx.clone();
 
+    // Record daemon connection state before daemon_client is consumed below.
+    let daemon_was_connected = daemon_client.is_some();
+
     // Create the event channel before views so they can send AgentUpdate.
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     event::spawn(tx.clone());
@@ -190,16 +211,57 @@ pub async fn run(
     // Spawn right-panel data source (subscribes to AgentBus).
     right_panel_source::spawn(Arc::clone(&bus), tx.clone());
 
-    let fred_ctx = ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) };
-    let perri_ctx = ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) };
-    let mother_ctx = ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) };
+    let fred_ctx = ViewCtx {
+        event_tx: tx.clone(),
+        pty_factory: Arc::clone(&pty_factory),
+    };
+    let perri_ctx = ViewCtx {
+        event_tx: tx.clone(),
+        pty_factory: Arc::clone(&pty_factory),
+    };
+    let mother_ctx = ViewCtx {
+        event_tx: tx.clone(),
+        pty_factory: Arc::clone(&pty_factory),
+    };
 
     let mut views: Vec<BoxedView> = vec![
-        Box::new(views::fred::FredView::new(mailbox_rx, calendar_rx, config.clone(), fred_ctx)),
-        Box::new(views::perri::PerriView::new(queue_rx, pr_rx, config.clone(), perri_ctx, Arc::clone(&syntect))),
-        Box::new(views::agent_generic::GenericView::new("claudia", "Claudia", ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) })),
-        Box::new(views::agent_generic::GenericView::new("cody",    "Cody",    ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) })),
-        Box::new(views::agent_generic::GenericView::new("kennedy", "Kennedy", ViewCtx { event_tx: tx.clone(), pty_factory: Arc::clone(&pty_factory) })),
+        Box::new(views::fred::FredView::new(
+            mailbox_rx,
+            calendar_rx,
+            config.clone(),
+            fred_ctx,
+        )),
+        Box::new(views::perri::PerriView::new(
+            queue_rx,
+            pr_rx,
+            config.clone(),
+            perri_ctx,
+            Arc::clone(&syntect),
+        )),
+        Box::new(views::agent_generic::GenericView::new(
+            "claudia",
+            "Claudia",
+            ViewCtx {
+                event_tx: tx.clone(),
+                pty_factory: Arc::clone(&pty_factory),
+            },
+        )),
+        Box::new(views::agent_generic::GenericView::new(
+            "cody",
+            "Cody",
+            ViewCtx {
+                event_tx: tx.clone(),
+                pty_factory: Arc::clone(&pty_factory),
+            },
+        )),
+        Box::new(views::agent_generic::GenericView::new(
+            "kennedy",
+            "Kennedy",
+            ViewCtx {
+                event_tx: tx.clone(),
+                pty_factory: Arc::clone(&pty_factory),
+            },
+        )),
         Box::new(views::mother::MotherView::new(config.clone(), mother_ctx)),
     ];
 
@@ -215,6 +277,8 @@ pub async fn run(
     };
 
     let mut state = AppState::new();
+    state.daemon_connected = daemon_was_connected;
+    state.daemon_socket_path = crate::ipc::default_socket_path();
 
     info!("event loop starting");
 
@@ -240,7 +304,10 @@ pub async fn run(
 
         // Active view index: in split mode, use the focused pane's view idx.
         let focused_view_idx = if state.split_mode {
-            state.layout.focused_view_idx(&state.focused_path).min(views.len() - 1)
+            state
+                .layout
+                .focused_view_idx(&state.focused_path)
+                .min(views.len() - 1)
         } else {
             active
         };
@@ -249,6 +316,7 @@ pub async fn run(
         let active_agent_id = views[focused_view_idx].id().to_string();
 
         terminal.draw(|f| {
+            let full_area = f.area();
             ui::render(
                 f,
                 &mut views,
@@ -256,9 +324,12 @@ pub async fn run(
                 focused_view_idx,
                 &title_refs,
                 recent.as_slice(),
-                &state,
+                &mut state,
                 &active_agent_id,
             );
+            if state.show_debug_overlay {
+                ui::debug_overlay::render(f, full_area, &state, &views, active);
+            }
         })?;
 
         let ev = match rx.recv().await {
@@ -271,8 +342,14 @@ pub async fn run(
         // ── Modal events (highest priority) ──────────────────────────────────
         if state.modal_active() {
             if let AppEvent::Key(k) = &ev {
-                let outcome =
-                    handle_modal_key(k, &mut state, &mut views, PERRI_IDX, active, focused_view_idx);
+                let outcome = handle_modal_key(
+                    k,
+                    &mut state,
+                    &mut views,
+                    PERRI_IDX,
+                    active,
+                    focused_view_idx,
+                );
                 if let Some(new_active) = outcome {
                     active = new_active;
                 }
@@ -307,8 +384,7 @@ pub async fn run(
             AppEvent::AwaitDetected(job) => {
                 if state.modal.is_none() {
                     info!("auto-opening await modal for job {}", job.id);
-                    state.modal =
-                        Some(ModalState::Await(Box::new(AwaitModal::new(*job.clone()))));
+                    state.modal = Some(ModalState::Await(Box::new(AwaitModal::new(*job.clone()))));
                 }
                 views[MOTHER_IDX].on_event(&ev);
                 continue;
@@ -376,6 +452,46 @@ pub async fn run(
                     continue;
                 }
 
+                // Ctrl-D: toggle debug overlay.
+                if k.code == KeyCode::Char('d') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    state.show_debug_overlay = !state.show_debug_overlay;
+                    continue;
+                }
+
+                // If debug overlay is up, any other key dismisses it (consumed).
+                if state.show_debug_overlay {
+                    state.show_debug_overlay = false;
+                    continue;
+                }
+
+                // Ctrl-1..9: switch tab by index (only when PTY is not capturing).
+                // NOTE: Ghostty/kitty protocol may alias Ctrl-] as Ctrl-5 — handled above.
+                if k.modifiers.contains(KeyModifiers::CONTROL)
+                    && !views[focused_view_idx].pty_capturing_input()
+                {
+                    if let KeyCode::Char(c) = k.code {
+                        if let Some(d) = c.to_digit(10) {
+                            if (1..=9).contains(&d) {
+                                let idx = (d as usize) - 1;
+                                if idx < views.len() && idx != active {
+                                    views[active].blur();
+                                    active = idx;
+                                    views[active].focus();
+                                    if state.split_mode {
+                                        update_focused_leaf_view(
+                                            &mut state.layout,
+                                            &state.focused_path,
+                                            active,
+                                        );
+                                        layout::persist::save(&state.layout);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+
                 // Global tab switching (unless PTY is capturing input).
                 if !views[focused_view_idx].pty_capturing_input() {
                     match k.code {
@@ -388,7 +504,11 @@ pub async fn run(
                             views[active].focus();
                             // In split mode, also update the focused leaf's view_idx.
                             if state.split_mode {
-                                update_focused_leaf_view(&mut state.layout, &state.focused_path, active);
+                                update_focused_leaf_view(
+                                    &mut state.layout,
+                                    &state.focused_path,
+                                    active,
+                                );
                                 layout::persist::save(&state.layout);
                             }
                             continue;
@@ -399,7 +519,11 @@ pub async fn run(
                             views[old].blur();
                             views[active].focus();
                             if state.split_mode {
-                                update_focused_leaf_view(&mut state.layout, &state.focused_path, active);
+                                update_focused_leaf_view(
+                                    &mut state.layout,
+                                    &state.focused_path,
+                                    active,
+                                );
                                 layout::persist::save(&state.layout);
                             }
                             continue;
@@ -427,11 +551,24 @@ pub async fn run(
             AppEvent::Mouse(m) => {
                 use crossterm::event::MouseEventKind;
                 if matches!(m.kind, MouseEventKind::Down(_)) && m.row == 0 {
-                    let idx = (m.column as usize) / 12;
-                    if idx < views.len() && idx != active {
-                        views[active].blur();
-                        active = idx;
-                        views[active].focus();
+                    if let Some(idx) = state
+                        .tab_hitmap
+                        .iter()
+                        .position(|(s, e)| m.column >= *s && m.column < *e)
+                    {
+                        if idx < views.len() && idx != active {
+                            views[active].blur();
+                            active = idx;
+                            views[active].focus();
+                            if state.split_mode {
+                                update_focused_leaf_view(
+                                    &mut state.layout,
+                                    &state.focused_path,
+                                    active,
+                                );
+                                layout::persist::save(&state.layout);
+                            }
+                        }
                     }
                 }
             }
@@ -460,7 +597,8 @@ fn handle_ctrl_w_chord(
 ) {
     // Compute next unused view index for new splits.
     let next_view_idx = || -> usize {
-        let used: std::collections::HashSet<usize> = state.layout.all_view_indices().into_iter().collect();
+        let used: std::collections::HashSet<usize> =
+            state.layout.all_view_indices().into_iter().collect();
         (0..views.len()).find(|i| !used.contains(i)).unwrap_or(0)
     };
 
@@ -468,7 +606,9 @@ fn handle_ctrl_w_chord(
         // s = vertical split (side-by-side)
         KeyCode::Char('s') => {
             let idx = next_view_idx();
-            state.layout.split(&state.focused_path.clone(), SplitDir::Vertical, idx);
+            state
+                .layout
+                .split(&state.focused_path.clone(), SplitDir::Vertical, idx);
             state.split_mode = true;
             layout::persist::save(&state.layout);
         }
@@ -476,7 +616,9 @@ fn handle_ctrl_w_chord(
         // v = horizontal split (top/bottom)
         KeyCode::Char('v') => {
             let idx = next_view_idx();
-            state.layout.split(&state.focused_path.clone(), SplitDir::Horizontal, idx);
+            state
+                .layout
+                .split(&state.focused_path.clone(), SplitDir::Horizontal, idx);
             state.split_mode = true;
             layout::persist::save(&state.layout);
         }
@@ -516,7 +658,10 @@ fn handle_ctrl_w_chord(
             state.split_mode = !state.split_mode;
             if state.split_mode {
                 // Restore layout; ensure active view matches focused leaf.
-                *active = state.layout.focused_view_idx(&state.focused_path).min(views.len() - 1);
+                *active = state
+                    .layout
+                    .focused_view_idx(&state.focused_path)
+                    .min(views.len() - 1);
             }
         }
 
@@ -556,103 +701,101 @@ fn handle_modal_key(
             }
         }
 
-        ModalState::Await(mut m) => {
-            match m.on_key(k) {
-                AwaitAction::Consumed => {
-                    state.modal = Some(ModalState::Await(m));
-                }
-                AwaitAction::Approve(answer) => {
-                    let id = m.job.id.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = mother::resume(&id, &answer).await {
-                            warn!("mother resume failed: {e:#}");
-                        }
-                    });
-                }
-                AwaitAction::Deny => {
-                    let id = m.job.id.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = mother::cancel(&id).await {
-                            warn!("mother cancel failed: {e:#}");
-                        }
-                    });
-                }
-                AwaitAction::ViewDiff => {
-                    if let Some(path) = worktree_path_for_job(&m.job) {
-                        if let Some(pv) = views[perri_idx]
-                            .as_any_mut()
-                            .downcast_mut::<views::perri::PerriView>()
-                        {
-                            pv.focus_diff_for_worktree(&path);
-                        }
+        ModalState::Await(mut m) => match m.on_key(k) {
+            AwaitAction::Consumed => {
+                state.modal = Some(ModalState::Await(m));
+            }
+            AwaitAction::Approve(answer) => {
+                let id = m.job.id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = mother::resume(&id, &answer).await {
+                        warn!("mother resume failed: {e:#}");
                     }
-                    new_active = Some(perri_idx);
-                }
-                AwaitAction::Dismiss => {}
+                });
             }
-        }
-
-        ModalState::BreakGlass(m) => {
-            match m.on_key(k) {
-                BreakGlassAction::Consumed => {
-                    state.modal = Some(ModalState::BreakGlass(m));
-                }
-                BreakGlassAction::Confirm => {
-                    if let Err(e) = break_glass::respond(true) {
-                        warn!("break-glass respond(approved) failed: {e:#}");
+            AwaitAction::Deny => {
+                let id = m.job.id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = mother::cancel(&id).await {
+                        warn!("mother cancel failed: {e:#}");
                     }
-                    state.break_glass = None;
-                }
-                BreakGlassAction::Deny => {
-                    if let Err(e) = break_glass::respond(false) {
-                        warn!("break-glass respond(denied) failed: {e:#}");
+                });
+            }
+            AwaitAction::ViewDiff => {
+                if let Some(path) = worktree_path_for_job(&m.job) {
+                    if let Some(pv) = views[perri_idx]
+                        .as_any_mut()
+                        .downcast_mut::<views::perri::PerriView>()
+                    {
+                        pv.focus_diff_for_worktree(&path);
                     }
-                    state.break_glass = None;
                 }
-                BreakGlassAction::Dismiss => {}
+                new_active = Some(perri_idx);
             }
-        }
+            AwaitAction::Dismiss => {}
+        },
 
-        ModalState::ConfirmCancel { job_id, modal: m } => {
-            match m.on_key(k) {
-                ConfirmAction::Yes => {
-                    tokio::spawn(async move {
-                        if let Err(e) = mother::cancel(&job_id).await {
-                            warn!("mother cancel failed: {e:#}");
-                        }
-                    });
-                }
-                ConfirmAction::No | ConfirmAction::Dismiss => {}
-                ConfirmAction::Consumed => {
-                    state.modal = Some(ModalState::ConfirmCancel { job_id, modal: m });
-                }
+        ModalState::BreakGlass(m) => match m.on_key(k) {
+            BreakGlassAction::Consumed => {
+                state.modal = Some(ModalState::BreakGlass(m));
             }
-        }
+            BreakGlassAction::Confirm => {
+                if let Err(e) = break_glass::respond(true) {
+                    warn!("break-glass respond(approved) failed: {e:#}");
+                }
+                state.break_glass = None;
+            }
+            BreakGlassAction::Deny => {
+                if let Err(e) = break_glass::respond(false) {
+                    warn!("break-glass respond(denied) failed: {e:#}");
+                }
+                state.break_glass = None;
+            }
+            BreakGlassAction::Dismiss => {}
+        },
 
-        ModalState::ConfirmRetry { job_id, plan_path, modal: m } => {
-            match m.on_key(k) {
-                ConfirmAction::Yes => {
-                    let path = PathBuf::from(plan_path);
-                    let _job_id = job_id;
-                    tokio::spawn(async move {
-                        if let Err(e) = mother::add_plan(&path).await {
-                            warn!("mother add --plan failed: {e:#}");
-                        }
-                    });
-                }
-                ConfirmAction::No | ConfirmAction::Dismiss => {}
-                ConfirmAction::Consumed => {
-                    state.modal = Some(ModalState::ConfirmRetry {
-                        job_id,
-                        plan_path,
-                        modal: m,
-                    });
-                }
+        ModalState::ConfirmCancel { job_id, modal: m } => match m.on_key(k) {
+            ConfirmAction::Yes => {
+                tokio::spawn(async move {
+                    if let Err(e) = mother::cancel(&job_id).await {
+                        warn!("mother cancel failed: {e:#}");
+                    }
+                });
             }
-        }
+            ConfirmAction::No | ConfirmAction::Dismiss => {}
+            ConfirmAction::Consumed => {
+                state.modal = Some(ModalState::ConfirmCancel { job_id, modal: m });
+            }
+        },
+
+        ModalState::ConfirmRetry {
+            job_id,
+            plan_path,
+            modal: m,
+        } => match m.on_key(k) {
+            ConfirmAction::Yes => {
+                let path = PathBuf::from(plan_path);
+                let _job_id = job_id;
+                tokio::spawn(async move {
+                    if let Err(e) = mother::add_plan(&path).await {
+                        warn!("mother add --plan failed: {e:#}");
+                    }
+                });
+            }
+            ConfirmAction::No | ConfirmAction::Dismiss => {}
+            ConfirmAction::Consumed => {
+                state.modal = Some(ModalState::ConfirmRetry {
+                    job_id,
+                    plan_path,
+                    modal: m,
+                });
+            }
+        },
     }
 
-    new_active.or(Some(current_active)).filter(|&v| v != current_active)
+    new_active
+        .or(Some(current_active))
+        .filter(|&v| v != current_active)
 }
 
 // ── palette action dispatch ───────────────────────────────────────────────────
@@ -708,7 +851,9 @@ fn apply_palette_action(
             let used: std::collections::HashSet<usize> =
                 state.layout.all_view_indices().into_iter().collect();
             let idx = (0..views.len()).find(|i| !used.contains(i)).unwrap_or(0);
-            state.layout.split(&state.focused_path.clone(), SplitDir::Horizontal, idx);
+            state
+                .layout
+                .split(&state.focused_path.clone(), SplitDir::Horizontal, idx);
             state.split_mode = true;
             layout::persist::save(&state.layout);
         }
@@ -717,7 +862,9 @@ fn apply_palette_action(
             let used: std::collections::HashSet<usize> =
                 state.layout.all_view_indices().into_iter().collect();
             let idx = (0..views.len()).find(|i| !used.contains(i)).unwrap_or(0);
-            state.layout.split(&state.focused_path.clone(), SplitDir::Vertical, idx);
+            state
+                .layout
+                .split(&state.focused_path.clone(), SplitDir::Vertical, idx);
             state.split_mode = true;
             layout::persist::save(&state.layout);
         }
@@ -755,29 +902,26 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
             });
         }
 
-        MotherAction::RetryJob(job) => {
-            match &job.plan_path {
-                Some(path) if !path.is_empty() => {
-                    let prompt =
-                        format!("Retry job \"{}\" by re-adding its plan? [y/n]", job.title);
-                    state.modal = Some(ModalState::ConfirmRetry {
-                        job_id: job.id,
-                        plan_path: path.clone(),
-                        modal: ConfirmModal::new(prompt),
-                    });
-                }
-                _ => {
-                    warn!(
-                        "retry requested for job {} but plan_path absent; cannot retry",
-                        job.id
-                    );
-                    state.status_note = Some(format!(
-                        "⚠ Cannot retry {}: no plan_path in job record",
-                        &job.id[..8.min(job.id.len())]
-                    ));
-                }
+        MotherAction::RetryJob(job) => match &job.plan_path {
+            Some(path) if !path.is_empty() => {
+                let prompt = format!("Retry job \"{}\" by re-adding its plan? [y/n]", job.title);
+                state.modal = Some(ModalState::ConfirmRetry {
+                    job_id: job.id,
+                    plan_path: path.clone(),
+                    modal: ConfirmModal::new(prompt),
+                });
             }
-        }
+            _ => {
+                warn!(
+                    "retry requested for job {} but plan_path absent; cannot retry",
+                    job.id
+                );
+                state.status_note = Some(format!(
+                    "⚠ Cannot retry {}: no plan_path in job record",
+                    &job.id[..8.min(job.id.len())]
+                ));
+            }
+        },
 
         MotherAction::OpenAwaitModal(job) => {
             state.modal = Some(ModalState::Await(Box::new(AwaitModal::new(job))));
@@ -797,7 +941,11 @@ fn update_focused_leaf_view(layout: &mut LayoutNode, path: &[Side], view_idx: us
     match (layout, path.first()) {
         (LayoutNode::Leaf { view_idx: v }, _) => *v = view_idx,
         (LayoutNode::Split { a, b, .. }, Some(side)) => {
-            let child = if *side == Side::A { a.as_mut() } else { b.as_mut() };
+            let child = if *side == Side::A {
+                a.as_mut()
+            } else {
+                b.as_mut()
+            };
             update_focused_leaf_view(child, &path[1..], view_idx);
         }
         (LayoutNode::Split { a, .. }, None) => {

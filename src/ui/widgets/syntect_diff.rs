@@ -30,7 +30,11 @@ pub struct SyntectDiff<'a> {
 
 impl<'a> SyntectDiff<'a> {
     pub fn new(diff: &'a str, cache: Arc<SyntectCache>) -> Self {
-        Self { diff, cache, max_lines: usize::MAX }
+        Self {
+            diff,
+            cache,
+            max_lines: usize::MAX,
+        }
     }
 
     /// Restrict rendering to the first `n` lines (useful when the caller
@@ -46,7 +50,13 @@ impl<'a> SyntectDiff<'a> {
         let mut syntax_ref = self.cache.syntaxes.find_syntax_plain_text();
         for line in self.diff.lines().take(10) {
             if let Some(rest) = line.strip_prefix("+++ b/") {
-                if let Some(s) = self.cache.syntaxes.find_syntax_for_file(rest).ok().flatten() {
+                if let Some(s) = self
+                    .cache
+                    .syntaxes
+                    .find_syntax_for_file(rest)
+                    .ok()
+                    .flatten()
+                {
                     syntax_ref = s;
                 }
                 break;
@@ -58,7 +68,8 @@ impl<'a> SyntectDiff<'a> {
 
         for raw_line in self.diff.lines().take(self.max_lines) {
             // Determine the diff accent colour for this line prefix.
-            let accent: Option<Color> = if raw_line.starts_with('+') && !raw_line.starts_with("+++") {
+            let accent: Option<Color> = if raw_line.starts_with('+') && !raw_line.starts_with("+++")
+            {
                 Some(theme::SAGE)
             } else if raw_line.starts_with('-') && !raw_line.starts_with("---") {
                 Some(theme::RED_SWEATER)
@@ -93,7 +104,9 @@ impl<'a> SyntectDiff<'a> {
             if spans.is_empty() {
                 result.push(Line::from(Span::styled(
                     truncate(raw_line, area.width as usize),
-                    accent.map(|c| Style::default().fg(c)).unwrap_or(theme::style_muted()),
+                    accent
+                        .map(|c| Style::default().fg(c))
+                        .unwrap_or(theme::style_muted()),
                 )));
             } else {
                 result.push(Line::from(spans));

@@ -20,8 +20,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-               ScrollbarState, Wrap},
+    widgets::{
+        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Wrap,
+    },
     Frame,
 };
 use tracing::debug;
@@ -123,30 +125,20 @@ impl MotherView {
         let mut order: Vec<String> = Vec::new();
 
         for state in ["awaiting", "running", "ready", "queued"] {
-            let mut group: Vec<&MotherJob> = self
-                .jobs
-                .iter()
-                .filter(|j| j.state == state)
-                .collect();
+            let mut group: Vec<&MotherJob> =
+                self.jobs.iter().filter(|j| j.state == state).collect();
             group.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             order.extend(group.iter().map(|j| j.id.clone()));
         }
 
         // Recent succeeded (last 10, newest first).
-        let mut succeeded: Vec<&MotherJob> = self
-            .jobs
-            .iter()
-            .filter(|j| j.is_succeeded())
-            .collect();
+        let mut succeeded: Vec<&MotherJob> =
+            self.jobs.iter().filter(|j| j.is_succeeded()).collect();
         succeeded.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
         order.extend(succeeded.iter().take(10).map(|j| j.id.clone()));
 
         // Recent failed (last 10, newest first).
-        let mut failed: Vec<&MotherJob> = self
-            .jobs
-            .iter()
-            .filter(|j| j.is_failed())
-            .collect();
+        let mut failed: Vec<&MotherJob> = self.jobs.iter().filter(|j| j.is_failed()).collect();
         failed.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
         order.extend(failed.iter().take(10).map(|j| j.id.clone()));
 
@@ -174,8 +166,7 @@ impl MotherView {
                 }
                 Err(e) => {
                     debug!("tail_log error for {id}: {e:#}");
-                    *log_text.lock().unwrap() =
-                        format!("(log unavailable: {e})");
+                    *log_text.lock().unwrap() = format!("(log unavailable: {e})");
                 }
             }
         });
@@ -207,16 +198,20 @@ impl MotherView {
 
         let cells = [
             ("Running", self.status.running, theme::SAGE),
-            ("Queued",  self.status.queued,  theme::AMBER),
-            ("Failed",  self.status.failed,  theme::RED_SWEATER),
-            ("Awaiting",self.status.awaiting, theme::RED_SWEATER),
+            ("Queued", self.status.queued, theme::AMBER),
+            ("Failed", self.status.failed, theme::RED_SWEATER),
+            ("Awaiting", self.status.awaiting, theme::RED_SWEATER),
         ];
 
         for (i, (label, count, color)) in cells.iter().enumerate() {
             let active = *count > 0;
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(if active { *color } else { theme::BORDER_INACTIVE }));
+                .border_style(Style::default().fg(if active {
+                    *color
+                } else {
+                    theme::BORDER_INACTIVE
+                }));
             let inner = block.inner(chunks[i]);
             f.render_widget(block, chunks[i]);
 
@@ -226,10 +221,8 @@ impl MotherView {
                     .fg(if active { *color } else { theme::FG_MUTED })
                     .add_modifier(Modifier::BOLD),
             );
-            let label_span = Span::styled(
-                format!(" {label}"),
-                Style::default().fg(theme::FG_MUTED),
-            );
+            let label_span =
+                Span::styled(format!(" {label}"), Style::default().fg(theme::FG_MUTED));
             let line = Line::from(vec![count_span, label_span]);
             f.render_widget(Paragraph::new(line), inner);
         }
@@ -278,7 +271,10 @@ impl MotherView {
 
                 let mut line_spans = vec![
                     Span::styled(format!("{glyph} "), Style::default().fg(color)),
-                    Span::styled(title, Style::default().fg(if is_sel { theme::FG } else { theme::FG_MUTED })),
+                    Span::styled(
+                        title,
+                        Style::default().fg(if is_sel { theme::FG } else { theme::FG_MUTED }),
+                    ),
                 ];
                 if !job.repo.is_empty() {
                     line_spans.push(Span::styled(
@@ -289,9 +285,7 @@ impl MotherView {
 
                 let mut item = ListItem::new(Line::from(line_spans));
                 if is_sel {
-                    item = item.style(
-                        Style::default().bg(ratatui::style::Color::Rgb(40, 40, 60)),
-                    );
+                    item = item.style(Style::default().bg(ratatui::style::Color::Rgb(40, 40, 60)));
                 }
                 Some(item)
             })
@@ -309,7 +303,10 @@ impl MotherView {
             } else {
                 theme::BORDER_INACTIVE
             }))
-            .title(Span::styled(" Detail ", Style::default().fg(theme::FG_MUTED)));
+            .title(Span::styled(
+                " Detail ",
+                Style::default().fg(theme::FG_MUTED),
+            ));
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -317,7 +314,10 @@ impl MotherView {
             Some(j) => j,
             None => {
                 f.render_widget(
-                    Paragraph::new(Span::styled("(no selection)", Style::default().fg(theme::FG_MUTED))),
+                    Paragraph::new(Span::styled(
+                        "(no selection)",
+                        Style::default().fg(theme::FG_MUTED),
+                    )),
                     inner,
                 );
                 return;
@@ -362,7 +362,11 @@ impl MotherView {
             Line::from(vec![
                 Span::styled("Repo:   ", Style::default().fg(theme::FG_MUTED)),
                 Span::styled(
-                    if job.repo.is_empty() { "—" } else { &job.repo },
+                    if job.repo.is_empty() {
+                        "—"
+                    } else {
+                        &job.repo
+                    },
                     Style::default().fg(theme::FG),
                 ),
             ]),
@@ -388,10 +392,7 @@ impl MotherView {
             ]),
         ];
 
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default()),
-            area,
-        );
+        f.render_widget(Paragraph::new(lines).style(Style::default()), area);
     }
 
     fn render_log_tail(&self, f: &mut Frame, area: Rect) {
@@ -433,12 +434,12 @@ impl MotherView {
 fn state_style(state: &str) -> (ratatui::style::Color, &'static str) {
     match state {
         "awaiting" => (theme::RED_SWEATER, "⏸"),
-        "running"  => (theme::SAGE,        "▶"),
+        "running" => (theme::SAGE, "▶"),
         "queued" | "ready" => (theme::AMBER, "◷"),
-        "succeeded" => (theme::SAGE,       "✓"),
-        "failed"   => (theme::RED_SWEATER, "✗"),
-        "cancelled" => (theme::FG_MUTED,   "⊘"),
-        _          => (theme::FG_MUTED,    "?"),
+        "succeeded" => (theme::SAGE, "✓"),
+        "failed" => (theme::RED_SWEATER, "✗"),
+        "cancelled" => (theme::FG_MUTED, "⊘"),
+        _ => (theme::FG_MUTED, "?"),
     }
 }
 
@@ -454,6 +455,9 @@ impl View for MotherView {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
+        // TODO: surface Mother errors — MotherView has no `error: Option<String>` field yet.
+        // When added, render a 1-row yellow banner here (same pattern as fred/perri).
+
         // Kick off log fetch if needed.
         self.maybe_fetch_log();
 
@@ -541,8 +545,7 @@ impl View for MotherView {
                                 if let Some(job) = self.selected_job().cloned() {
                                     // Only for non-terminal states.
                                     if !matches!(job.state.as_str(), "succeeded" | "cancelled") {
-                                        self.pending_action =
-                                            Some(MotherAction::CancelJob(job));
+                                        self.pending_action = Some(MotherAction::CancelJob(job));
                                     }
                                 }
                                 return EventOutcome::Consumed;
@@ -551,8 +554,7 @@ impl View for MotherView {
                             KeyCode::Char('r') | KeyCode::Char('R') => {
                                 if let Some(job) = self.selected_job().cloned() {
                                     if job.is_failed() {
-                                        self.pending_action =
-                                            Some(MotherAction::RetryJob(job));
+                                        self.pending_action = Some(MotherAction::RetryJob(job));
                                     }
                                 }
                                 return EventOutcome::Consumed;

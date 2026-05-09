@@ -20,7 +20,6 @@
 //! }
 //! ```
 
-
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -29,10 +28,7 @@ use tracing::{debug, warn};
 
 pub use crate::data::graph_client::DeviceFlowPrompt;
 
-use crate::{
-    config::Config,
-    data::dirty_file,
-};
+use crate::{config::Config, data::dirty_file};
 
 // ── Snapshot types ──────────────────────────────────────────────────────────
 
@@ -115,7 +111,13 @@ impl FredMailboxSource {
         let bin = self.config.claude_bin_dir().join("fred-mailbox-pane");
         let output = tokio::process::Command::new(&bin)
             .arg("--json")
-            .env("FRED_HOME", self.config.claude_bin_dir().parent().unwrap_or_else(|| std::path::Path::new(".")))
+            .env(
+                "FRED_HOME",
+                self.config
+                    .claude_bin_dir()
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            )
             .env("FRED_STATE", self.config.fred_state_dir())
             .output()
             .await

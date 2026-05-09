@@ -56,29 +56,27 @@ pub fn spawn(tx: mpsc::UnboundedSender<AppEvent>) {
         loop {
             // Block for up to TICK_INTERVAL so we can inject ticks ourselves.
             match event::poll(TICK_INTERVAL) {
-                Ok(true) => {
-                    match event::read() {
-                        Ok(CtEvent::Key(k)) => {
-                            if tx.send(AppEvent::Key(k)).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(CtEvent::Mouse(m)) => {
-                            if tx.send(AppEvent::Mouse(m)).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(CtEvent::Resize(w, h)) => {
-                            if tx.send(AppEvent::Resize(w, h)).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            warn!("crossterm read error: {e}");
+                Ok(true) => match event::read() {
+                    Ok(CtEvent::Key(k)) => {
+                        if tx.send(AppEvent::Key(k)).is_err() {
+                            break;
                         }
                     }
-                }
+                    Ok(CtEvent::Mouse(m)) => {
+                        if tx.send(AppEvent::Mouse(m)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(CtEvent::Resize(w, h)) => {
+                        if tx.send(AppEvent::Resize(w, h)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("crossterm read error: {e}");
+                    }
+                },
                 Ok(false) => {
                     // Timeout — inject tick
                     if tx.send(AppEvent::Tick).is_err() {

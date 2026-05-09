@@ -14,16 +14,12 @@ use tracing::{debug, warn};
 use crate::{
     agent_bus::AgentBus,
     event::AppEvent,
-    ipc::{DaemonClient, protocol::ServerMsg},
+    ipc::{protocol::ServerMsg, DaemonClient},
 };
 
 /// Subscribe to `client`, dispatch each `ServerMsg` to the appropriate channel,
 /// and return immediately (the work happens in a spawned task).
-pub fn spawn(
-    client: DaemonClient,
-    app_tx: mpsc::UnboundedSender<AppEvent>,
-    bus: Arc<AgentBus>,
-) {
+pub fn spawn(client: DaemonClient, app_tx: mpsc::UnboundedSender<AppEvent>, bus: Arc<AgentBus>) {
     let mut rx = client.subscribe();
     tokio::spawn(async move {
         debug!("daemon bridge task started");

@@ -84,10 +84,7 @@ impl MotherStatus {
         if self.awaiting > 0 {
             format!("⚙ mother: {} awaiting", self.awaiting)
         } else if self.running > 0 || self.queued > 0 {
-            format!(
-                "⚙ mother: {} running, {} queued",
-                self.running, self.queued
-            )
+            format!("⚙ mother: {} running, {} queued", self.running, self.queued)
         } else {
             "⚙ mother: idle".to_string()
         }
@@ -201,10 +198,7 @@ pub async fn add_plan(plan_path: &Path) -> Result<()> {
         .await?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!(
-            "mother add --plan {} failed: {stderr}",
-            plan_path.display()
-        );
+        warn!("mother add --plan {} failed: {stderr}", plan_path.display());
     }
     Ok(())
 }

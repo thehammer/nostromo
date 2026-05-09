@@ -86,14 +86,13 @@ async fn run_watcher(tx: mpsc::UnboundedSender<AppEvent>) -> Result<()> {
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<()>(8);
 
     use notify::{RecursiveMode, Watcher};
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        match res {
+    let mut watcher =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
             Ok(_) => {
                 let _ = notify_tx.blocking_send(());
             }
             Err(e) => warn!("break-glass notify error: {e}"),
-        }
-    })?;
+        })?;
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
 
     debug!(dir = %dir.display(), "break-glass watcher started");

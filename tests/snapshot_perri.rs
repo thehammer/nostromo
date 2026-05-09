@@ -46,7 +46,9 @@ fn fake_pr() -> PrSnapshot {
         title: "feat: add user authentication".into(),
         author: "cody".into(),
         url: "https://github.com/acme/web-app/pull/42".into(),
-        diff: "+++ b/src/auth/login.rs\n@@ -0,0 +1,10 @@\n+pub fn authenticate(token: &str) -> bool {".into(),
+        diff:
+            "+++ b/src/auth/login.rs\n@@ -0,0 +1,10 @@\n+pub fn authenticate(token: &str) -> bool {"
+                .into(),
         stale: false,
         error: None,
     }
@@ -56,8 +58,8 @@ fn fake_pr() -> PrSnapshot {
 fn perri_layout_renders_without_panic() {
     use nostromo::views::perri::PerriView;
     use nostromo::views::ViewCtx;
-    use tokio::sync::{mpsc, watch};
     use ratatui::layout::Rect;
+    use tokio::sync::{mpsc, watch};
 
     let (q_tx, q_rx) = watch::channel(Some(fake_queue()));
     let (pr_tx, pr_rx) = watch::channel(Some(fake_pr()));
@@ -67,7 +69,10 @@ fn perri_layout_renders_without_panic() {
     let config = nostromo::config::Config::default();
     use nostromo::pty::InProcessPtyFactory;
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let ctx = ViewCtx { event_tx, pty_factory: Arc::new(InProcessPtyFactory) };
+    let ctx = ViewCtx {
+        event_tx,
+        pty_factory: Arc::new(InProcessPtyFactory),
+    };
     let syntect = Arc::new(SyntectCache::load().expect("syntect load"));
     let mut view = PerriView::new(q_rx, pr_rx, config, ctx, syntect);
 
@@ -84,7 +89,12 @@ fn perri_layout_renders_without_panic() {
     let mut lines: Vec<String> = Vec::new();
     for y in 0..buffer.area.height.min(10) {
         let row: String = (0..buffer.area.width)
-            .map(|x| buffer.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .map(|x| {
+                buffer
+                    .cell((x, y))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
             .collect();
         lines.push(row.trim_end().to_string());
     }

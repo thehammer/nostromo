@@ -71,7 +71,11 @@ impl LayoutNode {
         match (self, path.first()) {
             (LayoutNode::Leaf { view_idx }, _) => *view_idx,
             (LayoutNode::Split { a, b, .. }, Some(side)) => {
-                let child = if *side == Side::A { a.as_ref() } else { b.as_ref() };
+                let child = if *side == Side::A {
+                    a.as_ref()
+                } else {
+                    b.as_ref()
+                };
                 child.focused_view_idx(&path[1..])
             }
             (LayoutNode::Split { a, .. }, None) => {
@@ -109,8 +113,12 @@ impl LayoutNode {
         match self {
             LayoutNode::Leaf { view_idx } => {
                 // Replace this leaf with a split.
-                let existing = LayoutNode::Leaf { view_idx: *view_idx };
-                let fresh = LayoutNode::Leaf { view_idx: new_view_idx };
+                let existing = LayoutNode::Leaf {
+                    view_idx: *view_idx,
+                };
+                let fresh = LayoutNode::Leaf {
+                    view_idx: new_view_idx,
+                };
                 *self = LayoutNode::Split {
                     dir,
                     ratio: 50,
@@ -156,7 +164,11 @@ impl LayoutNode {
                         *self = sibling;
                     } else {
                         // Recurse deeper.
-                        let child = if *side == Side::A { a.as_mut() } else { b.as_mut() };
+                        let child = if *side == Side::A {
+                            a.as_mut()
+                        } else {
+                            b.as_mut()
+                        };
                         child.close(&path[1..]);
                     }
                 }
@@ -185,14 +197,25 @@ fn split_rect(area: Rect, dir: SplitDir, ratio: u16) -> (Rect, Rect) {
             let w_a = ((area.width as u32 * ratio) / 100) as u16;
             let w_b = area.width.saturating_sub(w_a);
             let rect_a = Rect { width: w_a, ..area };
-            let rect_b = Rect { x: area.x + w_a, width: w_b, ..area };
+            let rect_b = Rect {
+                x: area.x + w_a,
+                width: w_b,
+                ..area
+            };
             (rect_a, rect_b)
         }
         SplitDir::Vertical => {
             let h_a = ((area.height as u32 * ratio) / 100) as u16;
             let h_b = area.height.saturating_sub(h_a);
-            let rect_a = Rect { height: h_a, ..area };
-            let rect_b = Rect { y: area.y + h_a, height: h_b, ..area };
+            let rect_a = Rect {
+                height: h_a,
+                ..area
+            };
+            let rect_b = Rect {
+                y: area.y + h_a,
+                height: h_b,
+                ..area
+            };
             (rect_a, rect_b)
         }
     }
@@ -205,7 +228,12 @@ mod tests {
     use super::*;
 
     fn rect(w: u16, h: u16) -> Rect {
-        Rect { x: 0, y: 0, width: w, height: h }
+        Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        }
     }
 
     #[test]

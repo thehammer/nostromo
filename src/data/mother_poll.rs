@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 
 use crate::{
     event::AppEvent,
-    mother::{self, MotherStatus, statusline_cache_path},
+    mother::{self, statusline_cache_path, MotherStatus},
 };
 
 /// Spawn both the statusline watcher and the job-list poller.

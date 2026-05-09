@@ -8,13 +8,11 @@
 
 use ratatui::{backend::TestBackend, Terminal};
 
-use nostromo::views::View;
-use nostromo::{
-    data::{
-        fred_calendar::{CalendarEvent, CalendarSnapshot, NextEvent},
-        fred_mailbox::{MailboxItem, MailboxSnapshot},
-    },
+use nostromo::data::{
+    fred_calendar::{CalendarEvent, CalendarSnapshot, NextEvent},
+    fred_mailbox::{MailboxItem, MailboxSnapshot},
 };
+use nostromo::views::View;
 
 /// Build a minimal Fred mailbox snapshot for testing.
 fn fake_mailbox() -> MailboxSnapshot {
@@ -71,8 +69,8 @@ fn fred_layout_renders_without_panic() {
     // Snapshot the rendered buffer.
     use nostromo::views::fred::FredView;
     use nostromo::views::ViewCtx;
-    use tokio::sync::{mpsc, watch};
     use ratatui::layout::Rect;
+    use tokio::sync::{mpsc, watch};
 
     let (mb_tx, mb_rx) = watch::channel(Some(fake_mailbox()));
     let (cal_tx, cal_rx) = watch::channel(Some(fake_calendar()));
@@ -80,10 +78,13 @@ fn fred_layout_renders_without_panic() {
     drop(cal_tx);
 
     let config = nostromo::config::Config::default();
-    use std::sync::Arc;
     use nostromo::pty::InProcessPtyFactory;
+    use std::sync::Arc;
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let ctx = ViewCtx { event_tx, pty_factory: Arc::new(InProcessPtyFactory) };
+    let ctx = ViewCtx {
+        event_tx,
+        pty_factory: Arc::new(InProcessPtyFactory),
+    };
     let mut view = FredView::new(mb_rx, cal_rx, config, ctx);
 
     let backend = TestBackend::new(120, 40);
@@ -100,7 +101,12 @@ fn fred_layout_renders_without_panic() {
     let mut lines: Vec<String> = Vec::new();
     for y in 0..buffer.area.height.min(10) {
         let row: String = (0..buffer.area.width)
-            .map(|x| buffer.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .map(|x| {
+                buffer
+                    .cell((x, y))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
             .collect();
         lines.push(row.trim_end().to_string());
     }
