@@ -14,6 +14,7 @@
 
 pub mod chrome;
 pub mod debug_overlay;
+pub mod status_bar;
 pub mod theme;
 pub mod widgets;
 
@@ -32,13 +33,16 @@ use crate::{
 
 /// Render one frame.
 ///
+/// `area` is the rect to render into — the caller is responsible for splitting
+/// off any reserved rows (e.g. the 1-row bottom status bar) before calling.
 /// `views` is the full view list (for split-mode rendering).
 /// `active` is the single-view active index (used when `split_mode == false`).
 /// `focused_view_idx` is the view index of the currently-focused pane.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
-    views: &mut Vec<BoxedView>,
+    area: Rect,
+    views: &mut [BoxedView],
     active: usize,
     focused_view_idx: usize,
     titles: &[&str],
@@ -46,22 +50,9 @@ pub fn render(
     state: &mut AppState,
     active_agent_id: &str,
 ) {
-    let area = f.area();
-
-    // Pull snapshot refs for the status bar from the Fred view if active.
-    let mailbox_snap;
-    let calendar_snap;
-
-    let fred_view = views.iter().find(|v| v.id() == "fred");
-    if let Some(fred) =
-        fred_view.and_then(|v| v.as_any().downcast_ref::<crate::views::fred::FredView>())
-    {
-        mailbox_snap = fred.mailbox_snapshot_cloned();
-        calendar_snap = fred.calendar_snapshot_cloned();
-    } else {
-        mailbox_snap = None;
-        calendar_snap = None;
-    }
+    // Pull snapshot refs for the chrome status bar from AppState receivers.
+    let mailbox_snap = state.mailbox_rx.borrow().clone();
+    let calendar_snap = state.calendar_rx.borrow().clone();
 
     let pty_capturing = views[focused_view_idx].pty_capturing_input();
 
