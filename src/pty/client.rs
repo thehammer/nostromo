@@ -60,6 +60,10 @@ impl DaemonPtyClient {
         let pty_id = Uuid::new_v4().to_string();
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
 
+        // Subscribe BEFORE sending PtySpawn so we cannot miss the PtySpawned
+        // response if the daemon replies before the subscriber is registered.
+        let mut rx = client.subscribe();
+
         // Send PtySpawn.
         let _ = client.send(ClientMsg::PtySpawn {
             pty_id: pty_id.clone(),
@@ -74,7 +78,6 @@ impl DaemonPtyClient {
         // Background task: wait for PtySpawned → PtyAttach → stream output.
         let client_clone = client.clone();
         let parser_clone = Arc::clone(&parser);
-        let mut rx = client.subscribe();
 
         let reader_task = tokio::spawn(async move {
             // Wait for PtySpawned.

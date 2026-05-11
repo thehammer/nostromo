@@ -484,8 +484,11 @@ pub async fn run(
                     continue;
                 }
 
-                // Ctrl-\: toggle PTY input capture on the active view.
-                if k.code == KeyCode::Char('\\') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                // Ctrl-]: toggle PTY input capture on the active view.
+                // Ghostty (kitty protocol) encodes Ctrl-] as Char('5')+CONTROL.
+                if (k.code == KeyCode::Char(']') || k.code == KeyCode::Char('5'))
+                    && k.modifiers.contains(KeyModifiers::CONTROL)
+                {
                     let cur = views[focused_view_idx].pty_capturing_input();
                     views[focused_view_idx].set_pty_capturing_input(!cur);
                     continue;

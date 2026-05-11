@@ -14,6 +14,9 @@
   <key>StandardOutPath</key><string>__HOME__/.cache/nostromd/log/stdout.log</string>
   <key>StandardErrorPath</key><string>__HOME__/.cache/nostromd/log/stderr.log</string>
   <key>EnvironmentVariables</key>
-    <dict><key>RUST_LOG</key><string>info</string></dict>
+    <dict>
+      <key>RUST_LOG</key><string>info</string>
+      <key>PATH</key><string>__HOME__/.local/bin:__HOME__/.cargo/bin:__HOME__/.claude/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
 </dict>
 </plist>

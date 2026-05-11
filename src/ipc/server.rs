@@ -290,6 +290,7 @@ fn handle_client_msg(
                     let _ = targeted_tx.send(ServerMsg::PtySpawned { pty_id: id });
                 }
                 Err(e) => {
+                    warn!(client_id, cmd, "PtySpawn failed: {e:#}");
                     let _ = targeted_tx.send(ServerMsg::Error {
                         message: format!("PtySpawn failed: {e}"),
                     });

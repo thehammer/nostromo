@@ -166,6 +166,7 @@ async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
 
         match mother::list_jobs().await {
             Ok(jobs) => {
+                tracing::debug!(count = jobs.len(), "mother poll ok");
                 for job in &jobs {
                     let prev_state = last_states
                         .get(&job.id)
@@ -187,12 +188,16 @@ async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
                     last_states.insert(job.id.clone(), job.state.clone());
                 }
 
-                if tx.send(ServerMsg::MotherJobs(jobs)).is_err() {
-                    break;
+                match tx.send(ServerMsg::MotherJobs(jobs)) {
+                    Ok(n) => tracing::debug!(receivers = n, "MotherJobs broadcast sent"),
+                    Err(_) => {
+                        tracing::warn!("MotherJobs broadcast: no receivers, channel closed");
+                        break;
+                    }
                 }
             }
             Err(e) => {
-                tracing::debug!("mother list_jobs error: {e:#}");
+                tracing::warn!("mother list_jobs error: {e:#}");
             }
         }
     }
