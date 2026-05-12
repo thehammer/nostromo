@@ -127,19 +127,19 @@ impl MotherView {
         for state in ["awaiting", "running", "ready", "queued"] {
             let mut group: Vec<&MotherJob> =
                 self.jobs.iter().filter(|j| j.state == state).collect();
-            group.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            group.sort_by_key(|j| std::cmp::Reverse(j.created_at));
             order.extend(group.iter().map(|j| j.id.clone()));
         }
 
         // Recent succeeded (last 10, newest first).
         let mut succeeded: Vec<&MotherJob> =
             self.jobs.iter().filter(|j| j.is_succeeded()).collect();
-        succeeded.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
+        succeeded.sort_by_key(|j| std::cmp::Reverse(j.finished_at));
         order.extend(succeeded.iter().take(10).map(|j| j.id.clone()));
 
         // Recent failed (last 10, newest first).
         let mut failed: Vec<&MotherJob> = self.jobs.iter().filter(|j| j.is_failed()).collect();
-        failed.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
+        failed.sort_by_key(|j| std::cmp::Reverse(j.finished_at));
         order.extend(failed.iter().take(10).map(|j| j.id.clone()));
 
         self.display_order = order;
