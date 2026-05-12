@@ -233,8 +233,8 @@ fn build_snapshot(store: &HashMap<String, GraphEvent>) -> CalendarSnapshot {
             }
 
             // Normalize Graph's "Canceled: Foo" title prefix → strip prefix, force status.
-            let (title, forced_cancelled) = if let Some(stripped) = raw_title.strip_prefix("Canceled: ") {
-                (stripped.to_owned(), true)
+            let (title, forced_cancelled) = if raw_title.starts_with("Canceled: ") {
+                (raw_title.strip_prefix("Canceled: ").unwrap_or(&raw_title).to_owned(), true)
             } else {
                 (raw_title, false)
             };

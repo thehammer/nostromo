@@ -14,6 +14,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{app::AppState, data::rate_limits::BudgetPosture, ui::theme};
 
@@ -24,30 +25,55 @@ const SEP: &str = " │ ";
 // ── entry point ───────────────────────────────────────────────────────────────
 
 /// Render the bottom status bar into `area` (expected height: 1).
-pub fn render(f: &mut Frame, area: Rect, state: &AppState) {
+pub fn render(f: &mut Frame, area: Rect, state: &mut AppState) {
+    state.status_hitmap.clear();
+
     // ── Left segments ─────────────────────────────────────────────────────────
 
-    let mut left_spans: Vec<Span<'_>> = Vec::new();
+    // 'static spans: all segment content is owned (format!/String), so no
+    // borrow of `state` escapes into `left_spans`. This lets us mutably
+    // borrow `state.status_hitmap` inside the loop without conflict.
+    let mut left_spans: Vec<Span<'static>> = Vec::new();
+    let mut col_offset: u16 = area.x;
 
+    let sep_width = SEP.width() as u16;
+
+    // Helper: append one segment, tracking its column range in the hitmap.
+    // Segments are processed one at a time to avoid holding multiple immutable
+    // borrows of `state` while also needing a mutable borrow for `status_hitmap`.
     macro_rules! push_seg {
-        ($seg:expr) => {
+        ($seg:expr, $view_id:expr) => {
             if let Some(seg) = $seg {
                 if !left_spans.is_empty() {
                     left_spans.push(Span::styled(
                         SEP,
                         Style::default().fg(theme::BORDER_INACTIVE),
                     ));
+                    col_offset += sep_width;
                 }
+                let seg_start = col_offset;
+                let seg_width: u16 = seg.iter().map(|s| s.content.width() as u16).sum();
+                let seg_end = seg_start + seg_width;
                 left_spans.extend(seg);
+                col_offset = seg_end;
+                state.status_hitmap.push((seg_start, seg_end, $view_id));
             }
         };
     }
 
-    push_seg!(mother_segment(state));
-    push_seg!(email_segment(state));
-    push_seg!(calendar_segment(state));
-    push_seg!(my_pr_segment(state));
-    push_seg!(pr_queue_segment(state));
+    // Each segment is computed and consumed before the next is started, so
+    // immutable borrows on `state` data do not overlap with the hitmap push.
+    let seg = mother_segment(state);
+    push_seg!(seg, "mother");
+    let seg = email_segment(state);
+    push_seg!(seg, "fred");
+    let seg = calendar_segment(state);
+    push_seg!(seg, "fred");
+    let seg = my_pr_segment(state);
+    push_seg!(seg, "perri");
+    let seg = pr_queue_segment(state);
+    push_seg!(seg, "perri");
+    let _ = col_offset; // col_offset is only needed between segments; discard after last push
 
     // ── Right segments ────────────────────────────────────────────────────────
 
@@ -71,7 +97,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState) {
 
 /// Mother segment: `🏭 ▶{r} ⏸{q} ?{a} !{f}` — zero counts hidden; segment
 /// hidden entirely when all counts are zero.
-fn mother_segment(state: &AppState) -> Option<Vec<Span<'_>>> {
+fn mother_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
     let mut running = 0usize;
     let mut queued = 0usize;
     let mut awaiting = 0usize;
@@ -131,7 +157,7 @@ fn mother_segment(state: &AppState) -> Option<Vec<Span<'_>>> {
 }
 
 /// Email segment: `📭 {total}·{unread}` — unread yellow if ≥1, red if ≥10.
-fn email_segment(state: &AppState) -> Option<Vec<Span<'_>>> {
+fn email_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
     let snap = state.mailbox_rx.borrow();
     let snap = snap.as_ref()?;
 
@@ -155,7 +181,7 @@ fn email_segment(state: &AppState) -> Option<Vec<Span<'_>>> {
 }
 
 /// Calendar segment: `{title} @ {relative_time}` truncated to 35 chars.
-fn calendar_segment(state: &AppState) -> Option<Vec<Span<'_>>> {
+fn calendar_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
     let snap = state.calendar_rx.borrow();
     let snap = snap.as_ref()?;
     let next = snap.next.as_ref()?;
@@ -184,7 +210,7 @@ fn calendar_segment(state: &AppState) -> Option<Vec<Span<'_>>> {
 }
 
 /// My PRs segment: `{n} PRs` when any open PRs exist.
-fn my_pr_segment(state: &AppState) -> Option<Vec<Span<'_>>> {
+fn my_pr_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
     let count = state.open_pr_list.len();
     if count == 0 {
         return None;
@@ -196,7 +222,7 @@ fn my_pr_segment(state: &AppState) -> Option<Vec<Span<'_>>> {
 }
 
 /// PR review queue segment: `👀 {n}` — green/yellow/red by depth.
-fn pr_queue_segment(state: &AppState) -> Option<Vec<Span<'_>>> {
+fn pr_queue_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
     let count = state.perri_open_pr_count;
     if count == 0 {
         return None;

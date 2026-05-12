@@ -120,16 +120,14 @@ impl CommandPalette {
             }
 
             // Navigation
-            KeyCode::Up | KeyCode::BackTab => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+            KeyCode::Up | KeyCode::BackTab if self.selected > 0 => {
+                self.selected -= 1;
             }
-            KeyCode::Down | KeyCode::Tab => {
-                if self.selected + 1 < self.filtered.len() {
-                    self.selected += 1;
-                }
+            KeyCode::Up | KeyCode::BackTab => {}
+            KeyCode::Down | KeyCode::Tab if self.selected + 1 < self.filtered.len() => {
+                self.selected += 1;
             }
+            KeyCode::Down | KeyCode::Tab => {}
 
             // Query editing
             KeyCode::Char(c) => {

@@ -668,11 +668,7 @@ pub fn render_calendar_lines(
 
     // ── Column widths ──
     let content_width = (width as usize).saturating_sub(LABEL_COLS);
-    let col_width = if max_cols > 0 {
-        content_width / max_cols
-    } else {
-        content_width
-    };
+    let col_width = content_width.checked_div(max_cols).unwrap_or(content_width);
     let inner_width = col_width.saturating_sub(2);
 
     // ── Build slot grid ──
