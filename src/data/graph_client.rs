@@ -227,6 +227,39 @@ impl GraphClient {
         Ok((items, delta_link))
     }
 
+    /// Fetch all pages of a collection endpoint (no delta tracking).
+    ///
+    /// Follows `@odata.nextLink` pagination and returns every item.
+    /// Use this for endpoints where you want the full current state on every
+    /// call rather than incremental changes (e.g. `calendarView`).
+    pub async fn get_paged<T: DeserializeOwned>(&self, initial_path: &str) -> Result<Vec<T>> {
+        let mut items: Vec<T> = Vec::new();
+        let mut next_url: Option<String> = Some(absolute_url(initial_path));
+
+        while let Some(url) = next_url.take() {
+            let page: serde_json::Value = self
+                .get_json(&url)
+                .await
+                .with_context(|| format!("paged fetch {url}"))?;
+
+            if let Some(arr) = page.get("value").and_then(|v| v.as_array()) {
+                for item in arr {
+                    match serde_json::from_value::<T>(item.clone()) {
+                        Ok(t) => items.push(t),
+                        Err(e) => warn!("skipping paged item, deserialise error: {e}"),
+                    }
+                }
+            }
+
+            next_url = page
+                .get("@odata.nextLink")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned());
+        }
+
+        Ok(items)
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     async fn authenticated_get(&self, url: &str) -> Result<reqwest::Response> {

@@ -1,4 +1,4 @@
-//! Fred calendar native data source — uses Microsoft Graph `calendarView/delta`.
+//! Fred calendar native data source — uses Microsoft Graph `calendarView`.
 //!
 //! Replaces `fred-calendar-pane --json` with a native Rust poller.
 //!
@@ -6,9 +6,6 @@
 //!   red   = < 5 min
 //!   amber = 5–15 min
 //!   sage  = > 15 min, or no upcoming event
-
-use std::collections::HashMap;
-use std::path::PathBuf;
 
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -30,14 +27,11 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphEvent {
-    id: String,
     subject: Option<String>,
     start: Option<GraphDateTimeTimeZone>,
     end: Option<GraphDateTimeTimeZone>,
     response_status: Option<GraphResponseStatus>,
     is_cancelled: Option<bool>,
-    #[serde(rename = "@removed")]
-    removed: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,32 +86,22 @@ impl FredCalendarNativeSource {
             }
         };
 
-        let delta_file = self.delta_cache_dir().join("calendar.delta");
-        let mut store: HashMap<String, GraphEvent> = HashMap::new();
-
         loop {
             match graph.ensure_authed().await {
                 Ok(Some(_prompt)) => {
                     // Calendar waits for mailbox auth prompt to drive sign-in.
                 }
                 Ok(None) => {
-                    let initial_path = calendar_delta_path();
-                    match graph.delta::<GraphEvent>(&initial_path, &delta_file).await {
-                        Ok((events, _dl)) => {
-                            debug!(count = events.len(), "calendar delta received");
-                            for ev in events {
-                                if ev.removed.is_some() {
-                                    store.remove(&ev.id);
-                                } else {
-                                    store.insert(ev.id.clone(), ev);
-                                }
-                            }
-                            let snap = build_snapshot(&store);
+                    let path = calendar_view_path();
+                    match graph.get_paged::<GraphEvent>(&path).await {
+                        Ok(events) => {
+                            debug!(count = events.len(), "calendar fetch received");
+                            let snap = build_snapshot(events);
                             debug!(sweater = %snap.sweater, events = snap.events.len(), "calendar refreshed");
                             let _ = tx.send(Some(snap));
                         }
                         Err(e) => {
-                            warn!("calendar delta failed: {e:#}");
+                            warn!("calendar fetch failed: {e:#}");
                             let mut snap = tx.borrow().clone().unwrap_or_default();
                             snap.stale = true;
                             snap.error = Some(e.to_string());
@@ -129,7 +113,7 @@ impl FredCalendarNativeSource {
             }
 
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
                 _ = dirty_rx.recv() => {
                     debug!("calendar dirty signal received");
                 }
@@ -164,21 +148,26 @@ impl FredCalendarNativeSource {
         let cache_path = self.config.graph_token_cache_path();
         GraphClient::new(client_id, tenant, cache_path).await
     }
-
-    fn delta_cache_dir(&self) -> PathBuf {
-        home_dir().join(".cache").join("nostromo")
-    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn calendar_delta_path() -> String {
-    let now = Utc::now();
-    let end = now + ChronoDuration::hours(24);
+fn calendar_view_path() -> String {
+    // Start at midnight local time today so events earlier in the day are included.
+    // Uses plain calendarView (not delta) to get expanded instances with correct dates.
+    let today_local = chrono::Local::now().date_naive();
+    let start_local = today_local
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is valid");
+    let start_utc: DateTime<Utc> = chrono::TimeZone::from_local_datetime(&chrono::Local, &start_local)
+        .single()
+        .unwrap_or_else(|| Utc::now().with_timezone(&chrono::Local))
+        .with_timezone(&Utc);
+    let end_utc = start_utc + ChronoDuration::hours(24);
     format!(
-        "/me/calendarView/delta?startDateTime={}&endDateTime={}",
-        now.format("%Y-%m-%dT%H:%M:%SZ"),
-        end.format("%Y-%m-%dT%H:%M:%SZ"),
+        "/me/calendarView?startDateTime={}&endDateTime={}&$select=subject,start,end,responseStatus,isCancelled&$top=50",
+        start_utc.format("%Y-%m-%dT%H:%M:%SZ"),
+        end_utc.format("%Y-%m-%dT%H:%M:%SZ"),
     )
 }
 
@@ -191,12 +180,13 @@ fn parse_graph_dt(s: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-fn build_snapshot(store: &HashMap<String, GraphEvent>) -> CalendarSnapshot {
+fn build_snapshot(raw_events: Vec<GraphEvent>) -> CalendarSnapshot {
     let now = Utc::now();
-    let today_local = chrono::Local::now().date_naive();
 
-    let mut events: Vec<CalendarEvent> = store
-        .values()
+    // calendarView already returns only events within today's window — no date
+    // filtering needed here.  Just parse and convert every returned event.
+    let mut events: Vec<CalendarEvent> = raw_events
+        .iter()
         .filter_map(|ev| {
             let start = ev
                 .start
@@ -209,28 +199,17 @@ fn build_snapshot(store: &HashMap<String, GraphEvent>) -> CalendarSnapshot {
                 .and_then(|d| d.date_time.as_deref())
                 .and_then(parse_graph_dt);
 
-            // Only show events that overlap with today (local time).
-            let on_today = match (start, end) {
-                (Some(s), Some(e)) => {
-                    let s_local: chrono::DateTime<chrono::Local> = s.into();
-                    let e_local: chrono::DateTime<chrono::Local> = e.into();
-                    s_local.date_naive() == today_local || e_local.date_naive() == today_local
-                }
-                (Some(s), None) => {
-                    let s_local: chrono::DateTime<chrono::Local> = s.into();
-                    s_local.date_naive() == today_local
-                }
-                _ => false,
-            };
-            if !on_today {
-                return None;
-            }
+            // Skip events with no parseable start time.
+            start?;
 
-            // Skip events with no subject (untitled calendar blocks, OOO markers, etc.)
+            // calendarView returns expanded instances; subjects are always present.
+            // Use "(no title)" as a safe fallback for the rare null case.
             let raw_title = ev.subject.clone().unwrap_or_default();
-            if raw_title.trim().is_empty() {
-                return None;
-            }
+            let raw_title = if raw_title.trim().is_empty() {
+                "(no title)".to_owned()
+            } else {
+                raw_title
+            };
 
             // Normalize Graph's "Canceled: Foo" title prefix → strip prefix, force status.
             let (title, forced_cancelled) = if raw_title.starts_with("Canceled: ") {
@@ -309,8 +288,3 @@ fn sweater_for_minutes(mins: i64) -> String {
     }
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-}
