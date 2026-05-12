@@ -506,35 +506,10 @@ pub async fn run(
                     continue;
                 }
 
-                // Ctrl-1..9: switch tab by index (only when PTY is not capturing).
-                // NOTE: Ghostty/kitty protocol may alias Ctrl-] as Ctrl-5 — handled above.
-                if k.modifiers.contains(KeyModifiers::CONTROL)
-                    && !views[focused_view_idx].pty_capturing_input()
-                {
-                    if let KeyCode::Char(c) = k.code {
-                        if let Some(d) = c.to_digit(10) {
-                            if (1..=9).contains(&d) {
-                                let idx = (d as usize) - 1;
-                                if idx < views.len() && idx != active {
-                                    views[active].blur();
-                                    active = idx;
-                                    views[active].focus();
-                                    if state.split_mode {
-                                        update_focused_leaf_view(
-                                            &mut state.layout,
-                                            &state.focused_path,
-                                            active,
-                                        );
-                                        layout::persist::save(&state.layout);
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                }
-
                 // Global tab switching (unless PTY is capturing input).
+                // Use Tab / Shift-Tab to cycle.  Ctrl-digit shortcuts are not used:
+                // Ghostty (kitty protocol) only reliably delivers Ctrl-4..7 with the
+                // CONTROL modifier; Ctrl-1/2/3/8/9/0 arrive as bare digits or Esc/BS.
                 if !views[focused_view_idx].pty_capturing_input() {
                     match k.code {
                         KeyCode::Char('q') => break,
