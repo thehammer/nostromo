@@ -35,6 +35,7 @@ struct GraphEvent {
     start: Option<GraphDateTimeTimeZone>,
     end: Option<GraphDateTimeTimeZone>,
     response_status: Option<GraphResponseStatus>,
+    is_cancelled: Option<bool>,
     #[serde(rename = "@removed")]
     removed: Option<serde_json::Value>,
 }
@@ -192,10 +193,11 @@ fn parse_graph_dt(s: &str) -> Option<DateTime<Utc>> {
 
 fn build_snapshot(store: &HashMap<String, GraphEvent>) -> CalendarSnapshot {
     let now = Utc::now();
+    let today_local = chrono::Local::now().date_naive();
 
     let mut events: Vec<CalendarEvent> = store
         .values()
-        .map(|ev| {
+        .filter_map(|ev| {
             let start = ev
                 .start
                 .as_ref()
@@ -206,32 +208,71 @@ fn build_snapshot(store: &HashMap<String, GraphEvent>) -> CalendarSnapshot {
                 .as_ref()
                 .and_then(|d| d.date_time.as_deref())
                 .and_then(parse_graph_dt);
-            let title = ev.subject.clone().unwrap_or_default();
-            let status = ev
+
+            // Only show events that overlap with today (local time).
+            let on_today = match (start, end) {
+                (Some(s), Some(e)) => {
+                    let s_local: chrono::DateTime<chrono::Local> = s.into();
+                    let e_local: chrono::DateTime<chrono::Local> = e.into();
+                    s_local.date_naive() == today_local || e_local.date_naive() == today_local
+                }
+                (Some(s), None) => {
+                    let s_local: chrono::DateTime<chrono::Local> = s.into();
+                    s_local.date_naive() == today_local
+                }
+                _ => false,
+            };
+            if !on_today {
+                return None;
+            }
+
+            // Skip events with no subject (untitled calendar blocks, OOO markers, etc.)
+            let raw_title = ev.subject.clone().unwrap_or_default();
+            if raw_title.trim().is_empty() {
+                return None;
+            }
+
+            // Normalize Graph's "Canceled: Foo" title prefix → strip prefix, force status.
+            let (title, forced_cancelled) = if raw_title.starts_with("Canceled: ") {
+                (raw_title["Canceled: ".len()..].to_owned(), true)
+            } else {
+                (raw_title, false)
+            };
+
+            let response = ev
                 .response_status
                 .as_ref()
                 .and_then(|r| r.response.clone())
                 .unwrap_or_default();
+
+            let status = if forced_cancelled || ev.is_cancelled == Some(true) {
+                "cancelled".to_owned()
+            } else {
+                response
+            };
+
             let is_now =
                 start.map(|s| s <= now).unwrap_or(false) && end.map(|e| e > now).unwrap_or(false);
 
-            CalendarEvent {
+            Some(CalendarEvent {
                 start,
                 end,
                 title,
                 status,
                 is_now,
-            }
+            })
         })
         .collect();
 
     // Sort by start time ascending.
     events.sort_by_key(|ev| ev.start);
 
-    // Find next upcoming event.
-    let next = events
-        .iter()
-        .find(|ev| ev.start.map(|s| s > now).unwrap_or(false));
+    // Find next upcoming event — skip cancelled/declined.
+    let next = events.iter().find(|ev| {
+        ev.start.map(|s| s > now).unwrap_or(false)
+            && ev.status != "cancelled"
+            && ev.status != "declined"
+    });
 
     let (next_event, sweater) = match next {
         Some(ev) => {

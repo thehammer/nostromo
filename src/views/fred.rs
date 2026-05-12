@@ -247,11 +247,27 @@ impl FredView {
                 .events
                 .iter()
                 .map(|ev| {
+                    let is_cancelled = ev.status == "cancelled" || ev.status == "declined";
+                    let is_tentative = ev.status == "tentativelyAccepted";
+
                     let now_glyph = if ev.is_now { "▶ " } else { "  " };
-                    let style = if ev.is_now {
+
+                    let style = if is_cancelled {
+                        Style::default()
+                            .fg(ratatui::style::Color::DarkGray)
+                            .add_modifier(Modifier::CROSSED_OUT)
+                    } else if is_tentative {
+                        Style::default().fg(ratatui::style::Color::DarkGray)
+                    } else if ev.is_now {
                         theme::style_amber()
                     } else {
                         theme::style_normal()
+                    };
+
+                    let time_style = if is_cancelled {
+                        Style::default().fg(ratatui::style::Color::DarkGray)
+                    } else {
+                        theme::style_muted()
                     };
 
                     let start_str = ev
@@ -267,7 +283,7 @@ impl FredView {
 
                     Line::from(vec![
                         Span::styled(now_glyph, style),
-                        Span::styled(format!("{start_str} "), theme::style_muted()),
+                        Span::styled(format!("{start_str} "), time_style),
                         Span::styled(title_str, style),
                     ])
                 })
