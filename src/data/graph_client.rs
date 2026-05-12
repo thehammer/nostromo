@@ -403,7 +403,13 @@ impl GraphClient {
 /// Returns `None` if m365 is not installed, not authenticated, or returns an error.
 async fn try_m365_token() -> Option<TokenState> {
     let output = tokio::process::Command::new("m365")
-        .args(["util", "accesstoken", "get", "--resource", "https://graph.microsoft.com"])
+        .args([
+            "util",
+            "accesstoken",
+            "get",
+            "--resource",
+            "https://graph.microsoft.com",
+        ])
         .output()
         .await
         .ok()?;
@@ -423,8 +429,8 @@ async fn try_m365_token() -> Option<TokenState> {
     }
 
     // Decode the JWT payload (middle segment) to read the `exp` claim.
-    let expires_at = jwt_expiry(&token_str)
-        .unwrap_or_else(|| Utc::now() + ChronoDuration::seconds(45 * 60));
+    let expires_at =
+        jwt_expiry(&token_str).unwrap_or_else(|| Utc::now() + ChronoDuration::seconds(45 * 60));
 
     Some(TokenState {
         access_token: token_str,
@@ -443,7 +449,7 @@ fn jwt_expiry(token: &str) -> Option<DateTime<Utc>> {
         .ok()?;
     let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let exp = json.get("exp")?.as_i64()?;
-    Some(DateTime::from_timestamp(exp, 0)?)
+    DateTime::from_timestamp(exp, 0)
 }
 
 // ── Token persistence ─────────────────────────────────────────────────────────
