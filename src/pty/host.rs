@@ -55,7 +55,7 @@ impl PtyHost {
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
         let parser_clone = Arc::clone(&parser);
 
         let reader_task = tokio::task::spawn_blocking(move || {

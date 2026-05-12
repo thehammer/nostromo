@@ -58,7 +58,7 @@ impl DaemonPtyClient {
         client_tag: &str,
     ) -> Self {
         let pty_id = Uuid::new_v4().to_string();
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
 
         // Subscribe BEFORE sending PtySpawn so we cannot miss the PtySpawned
         // response if the daemon replies before the subscriber is registered.
@@ -122,7 +122,7 @@ impl DaemonPtyClient {
         event_tx: mpsc::UnboundedSender<AppEvent>,
         view_id: &'static str,
     ) -> Self {
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
 
         // Send PtyAttach immediately.
         let _ = client.send(ClientMsg::PtyAttach {

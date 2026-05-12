@@ -9,48 +9,89 @@ use ratatui::{
     widgets::Widget,
 };
 
+use crate::ui::theme;
+
 /// Renders the contents of a locked `vt100::Parser` into a Ratatui buffer.
+///
+/// When `scroll_offset > 0` the widget shifts the view into the scrollback
+/// buffer, hides the cursor, and shows a dim `[scroll: N]` indicator in the
+/// top-right corner of the pane.
 ///
 /// Holds the `MutexGuard` for the duration of `Widget::render`; the lock is
 /// released when the widget is consumed.
 pub struct PtyWidget<'a> {
     guard: MutexGuard<'a, vt100::Parser>,
+    scroll_offset: u16,
 }
 
 impl<'a> PtyWidget<'a> {
-    pub fn new(guard: MutexGuard<'a, vt100::Parser>) -> Self {
-        Self { guard }
+    pub fn new(guard: MutexGuard<'a, vt100::Parser>, scroll_offset: u16) -> Self {
+        Self {
+            guard,
+            scroll_offset,
+        }
     }
 }
 
 impl<'a> Widget for PtyWidget<'a> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let screen = self.guard.screen();
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        let show_cursor = !screen.hide_cursor();
+    fn render(mut self, area: Rect, buf: &mut Buffer) {
+        // Shift the parser's view into the scrollback buffer for this render.
+        // We reset to 0 afterwards so the live view is restored between frames.
+        self.guard.set_scrollback(self.scroll_offset as usize);
 
-        for row in 0..area.height {
-            for col in 0..area.width {
-                let Some(cell) = screen.cell(row, col) else {
-                    continue;
-                };
+        let (cursor_row, cursor_col, show_cursor) = {
+            let screen = self.guard.screen();
+            let (cursor_row, cursor_col) = screen.cursor_position();
+            // Hide cursor when scrolled away from live view.
+            let show_cursor = !screen.hide_cursor() && self.scroll_offset == 0;
+            (cursor_row, cursor_col, show_cursor)
+        };
 
-                let contents = cell.contents();
-                let display = if contents.is_empty() { " " } else { &contents };
+        {
+            let screen = self.guard.screen();
+            for row in 0..area.height {
+                for col in 0..area.width {
+                    let Some(cell) = screen.cell(row, col) else {
+                        continue;
+                    };
 
-                let mut style = build_style(cell);
+                    let contents = cell.contents();
+                    let display = if contents.is_empty() { " " } else { &contents };
 
-                // Render cursor as reverse-video overlay.
-                if show_cursor && row == cursor_row && col == cursor_col {
-                    style = style.add_modifier(Modifier::REVERSED);
+                    let mut style = build_style(cell);
+
+                    // Render cursor as reverse-video overlay.
+                    if show_cursor && row == cursor_row && col == cursor_col {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+
+                    let x = area.x + col;
+                    let y = area.y + row;
+                    if x < buf.area.right() && y < buf.area.bottom() {
+                        if let Some(c) = buf.cell_mut((x, y)) {
+                            c.set_symbol(display);
+                            c.set_style(style);
+                        }
+                    }
                 }
+            }
+        }
+        // screen borrow released — safe to mutate guard again.
+        self.guard.set_scrollback(0);
 
-                let x = area.x + col;
-                let y = area.y + row;
+        // Dim scroll indicator in top-right corner when scrolled.
+        if self.scroll_offset > 0 {
+            let label = format!("[scroll: {}]", self.scroll_offset);
+            let indicator_style = theme::style_muted().add_modifier(Modifier::DIM);
+            let label_len = label.len() as u16;
+            let x_start = area.x + area.width.saturating_sub(label_len);
+            let y = area.y;
+            for (i, ch) in label.chars().enumerate() {
+                let x = x_start + i as u16;
                 if x < buf.area.right() && y < buf.area.bottom() {
                     if let Some(c) = buf.cell_mut((x, y)) {
-                        c.set_symbol(display);
-                        c.set_style(style);
+                        c.set_symbol(&ch.to_string());
+                        c.set_style(indicator_style);
                     }
                 }
             }

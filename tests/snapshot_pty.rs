@@ -21,7 +21,7 @@ fn render_pty_bytes(bytes: &[u8], cols: u16, rows: u16) -> String {
     terminal
         .draw(|f| {
             let guard = parser_arc.lock().unwrap();
-            f.render_widget(PtyWidget::new(guard), Rect::new(0, 0, cols, rows));
+            f.render_widget(PtyWidget::new(guard, 0), Rect::new(0, 0, cols, rows));
         })
         .unwrap();
 
