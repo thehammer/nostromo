@@ -3,7 +3,7 @@ source: tests/snapshot_fred.rs
 expression: snapshot
 ---
 ┌ ✉ Mailbox [2] ───────────────────────────────────────────┐┌ 📅  Calendar ─────────────────────────────────────────────┐
-│● Alice Smith         Weekly sync    ?                    ││      ─────────────────────── now ────────────────────────│
+│● Alice Smith         Weekly sync    ?                    ││ No events today                                          │
 │  Bob Jones           Re: Q2 planning    ?                ││                                                          │
 │                                                          ││▶ 1:1 with manager in 45m                                 │
 │                                                          ││                                                          │
