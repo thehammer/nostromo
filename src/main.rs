@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
+    event::EnableMouseCapture,
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -134,14 +135,19 @@ async fn main() -> Result<()> {
     // ------------------------------------------------------------------
     let mut stdout = io::stdout();
     enable_raw_mode().context("enabling raw mode")?;
-    execute!(stdout, EnterAlternateScreen).context("entering alternate screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("entering alternate screen")?;
 
     // Panic hook: restore terminal before dumping the panic message so the
     // user's shell isn't left in an unusable state.
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            crossterm::event::DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         original_hook(info);
     }));
 
@@ -172,7 +178,12 @@ async fn main() -> Result<()> {
     // Terminal teardown (always, even if run() errored)
     // ------------------------------------------------------------------
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(
+        terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .ok();
     terminal.show_cursor().ok();
 
     result
