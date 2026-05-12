@@ -151,6 +151,25 @@ async fn main() -> Result<()> {
         original_hook(info);
     }));
 
+    // SIGTERM handler: clean up the terminal before the OS kills us.
+    // Without this, `pkill nostromo` leaves the shell in raw mode with
+    // mouse-event reporting enabled, printing garbage escape sequences.
+    tokio::spawn(async {
+        if let Ok(mut stream) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            stream.recv().await;
+        }
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            crossterm::event::DisableMouseCapture,
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show,
+        );
+        std::process::exit(0);
+    });
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
     terminal.clear()?;
