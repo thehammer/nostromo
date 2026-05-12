@@ -1,11 +1,15 @@
 //! Microsoft Graph API client with OAuth2 device-flow auth.
 //!
 //! # Auth lifecycle
-//! On first use (or after token expiry + failed refresh) `ensure_authed` kicks
-//! off the device-code flow and returns a `DeviceFlowPrompt` for the TUI to
-//! render.  A background tokio task polls the token endpoint until the user
-//! completes sign-in.  The resulting token is cached to
-//! `~/.cache/nostromo/graph-token.json` (mode 0600, parent dir 0700).
+//! On first use (or after token expiry + failed refresh) `ensure_authed` first
+//! tries shelling out to `m365 util accesstoken get` (cli-microsoft365) if that
+//! binary is on PATH — this reuses an existing browser-authenticated session and
+//! avoids Conditional Access restrictions on the device-code flow.  If `m365`
+//! is unavailable or fails, the classic device-code flow is started instead and
+//! a `DeviceFlowPrompt` is returned for the TUI to render.
+//!
+//! The resulting token is cached to `~/.cache/nostromo/graph-token.json`
+//! (mode 0600, parent dir 0700).
 //!
 //! # Delta queries
 //! `delta()` fetches changes since the last call by persisting the
@@ -127,8 +131,16 @@ impl GraphClient {
             }
         }
 
-        // No valid token — start device flow.
+        // No valid token — try m365 CLI first, fall back to device flow.
         drop(guard); // release lock before async I/O
+
+        if let Some(tok) = try_m365_token().await {
+            info!("graph token acquired via m365 CLI");
+            persist_token(&self.cache_path, &tok)?;
+            *self.token.lock().await = Some(tok);
+            return Ok(None);
+        }
+
         let prompt = self.start_device_flow().await?;
         Ok(Some(prompt))
     }
@@ -381,6 +393,57 @@ impl GraphClient {
             }
         }
     }
+}
+
+// ── m365 CLI token acquisition ────────────────────────────────────────────────
+
+/// Try to get a Graph access token by shelling out to the `m365` CLI.
+///
+/// Runs: `m365 util accesstoken get --resource https://graph.microsoft.com`
+/// Returns `None` if m365 is not installed, not authenticated, or returns an error.
+async fn try_m365_token() -> Option<TokenState> {
+    let output = tokio::process::Command::new("m365")
+        .args(["util", "accesstoken", "get", "--resource", "https://graph.microsoft.com"])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        debug!("m365 accesstoken get failed (exit {})", output.status);
+        return None;
+    }
+
+    // The command outputs a raw JWT string (may be wrapped in quotes or have
+    // trailing whitespace/newlines).
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let token_str = raw.trim().trim_matches('"').to_owned();
+
+    if token_str.is_empty() {
+        return None;
+    }
+
+    // Decode the JWT payload (middle segment) to read the `exp` claim.
+    let expires_at = jwt_expiry(&token_str)
+        .unwrap_or_else(|| Utc::now() + ChronoDuration::seconds(45 * 60));
+
+    Some(TokenState {
+        access_token: token_str,
+        refresh_token: None, // m365 handles its own refresh
+        expires_at,
+    })
+}
+
+/// Parse the `exp` Unix timestamp out of a JWT payload without a crypto library.
+fn jwt_expiry(token: &str) -> Option<DateTime<Utc>> {
+    use base64::Engine;
+    let payload_b64 = token.split('.').nth(1)?;
+    // JWT uses base64url without padding.
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = json.get("exp")?.as_i64()?;
+    Some(DateTime::from_timestamp(exp, 0)?)
 }
 
 // ── Token persistence ─────────────────────────────────────────────────────────
