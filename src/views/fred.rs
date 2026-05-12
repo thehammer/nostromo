@@ -4,7 +4,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Local, TimeZone};
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -79,6 +79,8 @@ pub struct FredView {
     repl_area: Rect,
     /// Current scroll offset for the calendar pane.
     calendar_scroll: u16,
+    /// Rows scrolled back in the REPL pane (0 = live view).
+    repl_scroll: u16,
 }
 
 impl FredView {
@@ -102,6 +104,7 @@ impl FredView {
             pty_capturing,
             repl_area: Rect::new(0, 0, 80, 10),
             calendar_scroll: 0,
+            repl_scroll: 0,
         }
     }
 
@@ -363,7 +366,7 @@ impl FredView {
         if let Some(pty) = &self.pty {
             let parser = pty.parser();
             let guard = parser.lock().unwrap();
-            f.render_widget(PtyWidget::new(guard), inner);
+            f.render_widget(PtyWidget::new(guard, self.repl_scroll), inner);
         } else {
             let lines = vec![
                 Line::from(vec![]),
@@ -444,6 +447,33 @@ impl View for FredView {
     }
 
     fn on_event(&mut self, ev: &AppEvent) -> EventOutcome {
+        // Intercept scroll keys when a PTY pane is present, before forwarding
+        // to the PTY. This lets users scroll the REPL history even while
+        // capturing is active.
+        if self.pty.is_some() {
+            if let AppEvent::Key(k) = ev {
+                let scroll_up = k.code == KeyCode::PageUp
+                    || (k.code == KeyCode::Up
+                        && k.modifiers.contains(KeyModifiers::SHIFT));
+                let scroll_down = k.code == KeyCode::PageDown
+                    || (k.code == KeyCode::Down
+                        && k.modifiers.contains(KeyModifiers::SHIFT));
+
+                if scroll_up {
+                    self.repl_scroll =
+                        self.repl_scroll.saturating_add(self.repl_area.height / 2);
+                    return EventOutcome::Consumed;
+                } else if scroll_down {
+                    self.repl_scroll =
+                        self.repl_scroll.saturating_sub(self.repl_area.height / 2);
+                    return EventOutcome::Consumed;
+                } else if self.repl_scroll > 0 {
+                    // Any other key resets to live view and falls through.
+                    self.repl_scroll = 0;
+                }
+            }
+        }
+
         // Forward keys to the PTY only when it is active and capturing input.
         if self.pty_capturing {
             if let Some(pty) = &mut self.pty {

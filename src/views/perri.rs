@@ -222,7 +222,7 @@ impl PerriView {
 
         if let Some(pty) = &self.pty {
             let guard = pty.parser.lock().unwrap();
-            f.render_widget(PtyWidget::new(guard), inner);
+            f.render_widget(PtyWidget::new(guard, 0), inner);
         } else {
             let lines = vec![
                 Line::from(vec![]),
