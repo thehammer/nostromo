@@ -280,7 +280,7 @@ impl View for PerriView {
 
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(content_area);
 
         let top_cols = Layout::default()

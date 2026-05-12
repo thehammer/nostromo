@@ -96,7 +96,7 @@ pub fn render_tab_bar(
         // Per-tab sweater colour override.
         let sweater_style: Option<Style> = match title {
             "Perri" => perri_sweater_style(state.perri_open_pr_count),
-            "Cody" | "Mother" => {
+            "Mother" => {
                 if any_long_job {
                     Some(Style::default().fg(theme::AMBER))
                 } else {
