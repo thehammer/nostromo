@@ -119,6 +119,9 @@ pub struct AppState {
     /// Per-tab (start_col_inclusive, end_col_exclusive) in terminal coordinates.
     /// Populated by `render_tab_bar` each frame for accurate mouse hit detection.
     pub tab_hitmap: Vec<(u16, u16)>,
+    /// Per-status-bar-segment (start_col_inclusive, end_col_exclusive, view_id).
+    /// Populated by `ui::status_bar::render` each frame for mouse hit detection.
+    pub status_hitmap: Vec<(u16, u16, &'static str)>,
     /// Whether a daemon client was successfully connected at startup.
     pub daemon_connected: bool,
     /// Path to the nostromd Unix socket.
@@ -155,6 +158,7 @@ impl AppState {
             open_pr_list: Vec::new(),
             show_debug_overlay: false,
             tab_hitmap: Vec::new(),
+            status_hitmap: Vec::new(),
             daemon_connected: false,
             daemon_socket_path: std::path::PathBuf::new(),
             rate_limits: None,
@@ -357,7 +361,7 @@ pub async fn run(
                 &mut state,
                 &active_agent_id,
             );
-            ui::status_bar::render(f, status_area, &state);
+            ui::status_bar::render(f, status_area, &mut state);
             if state.show_debug_overlay {
                 ui::debug_overlay::render(f, full_area, &state, &views, active);
             }
@@ -584,6 +588,29 @@ pub async fn run(
                                     active,
                                 );
                                 layout::persist::save(&state.layout);
+                            }
+                        }
+                    }
+                } else if matches!(m.kind, MouseEventKind::Down(_)) {
+                    let term_h = terminal.size().map(|s| s.height).unwrap_or(0);
+                    if term_h > 0 && m.row == term_h - 1 {
+                        if let Some(&(_, _, view_id)) = state.status_hitmap.iter()
+                            .find(|(s, e, _)| m.column >= *s && m.column < *e)
+                        {
+                            if let Some(idx) = views.iter().position(|v| v.id() == view_id) {
+                                if idx != active {
+                                    views[active].blur();
+                                    active = idx;
+                                    views[active].focus();
+                                    if state.split_mode {
+                                        update_focused_leaf_view(
+                                            &mut state.layout,
+                                            &state.focused_path,
+                                            active,
+                                        );
+                                        layout::persist::save(&state.layout);
+                                    }
+                                }
                             }
                         }
                     }
