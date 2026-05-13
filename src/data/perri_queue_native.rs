@@ -466,8 +466,7 @@ async fn get_our_last_review(
     // Find our last review (last in the list wins).
     reviews
         .into_iter()
-        .filter(|r| r.user.as_ref().map(|u| u.login.as_str()) == Some(me))
-        .next_back()
+        .rfind(|r| r.user.as_ref().map(|u| u.login.as_str()) == Some(me))
         .map(|r| (r.state, r.submitted_at))
 }
 
