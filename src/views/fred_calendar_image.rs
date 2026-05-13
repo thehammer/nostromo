@@ -32,7 +32,6 @@ const BG:           (u8, u8, u8, u8) = (20,  20,  28,  255);
 const GRID_LINE:    (u8, u8, u8, u8) = (45,  45,  58,  255);
 const AMBER:        (u8, u8, u8, u8) = (255, 191,  0,  255);
 const AMBER_DIM:    (u8, u8, u8, u8) = (100,  75,   0,  220);
-const FG:           (u8, u8, u8, u8) = (220, 220, 220, 255);
 const FG_MUTED:     (u8, u8, u8, u8) = (140, 140, 140, 255);
 const PAST_FILL:    (u8, u8, u8, u8) = ( 38,  38,  50, 200);
 const PAST_TEXT:    (u8, u8, u8, u8) = ( 90,  90, 100, 200);
