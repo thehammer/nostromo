@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod layout;
 pub mod mother;
 pub mod pty;
+pub mod sessions;
 pub mod ui;
 pub mod views;
 
