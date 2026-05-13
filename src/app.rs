@@ -176,6 +176,7 @@ impl AppState {
 // ── run ───────────────────────────────────────────────────────────────────────
 
 /// Run the application until the user quits.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     initial_view: ViewArg,
     bash_fallback: bool,
@@ -184,6 +185,7 @@ pub async fn run(
     syntect: Arc<SyntectCache>,
     bus: Arc<AgentBus>,
     daemon_client: Option<crate::ipc::DaemonClient>,
+    picker: ratatui_image::picker::Picker,
 ) -> Result<()> {
     let mailbox_rx = if bash_fallback {
         FredMailboxSource::spawn(config.clone())
@@ -260,6 +262,7 @@ pub async fn run(
             calendar_rx,
             config.clone(),
             fred_ctx,
+            picker,
         )),
         Box::new(views::perri::PerriView::new(
             queue_rx,

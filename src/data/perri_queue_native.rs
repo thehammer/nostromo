@@ -5,8 +5,8 @@
 //!   1. **`requested`**    — `review-requested:@me org:Carefeed`
 //!   2. **`needs_review`** — `review:required org:Carefeed` (deduplicated against bucket 1)
 //!   3. **`changes_req`**  — `reviewed-by:@me org:Carefeed`, filtered to CHANGES_REQUESTED
-//!                          reviews where the PR was updated >30 s after our review
-//!                          (i.e. the author has responded)
+//!      reviews where the PR was updated >30 s after our review
+//!      (i.e. the author has responded)
 //!
 //! PRs are excluded if:
 //!   - They are drafts
@@ -466,8 +466,7 @@ async fn get_our_last_review(
     // Find our last review (last in the list wins).
     reviews
         .into_iter()
-        .filter(|r| r.user.as_ref().map(|u| u.login.as_str()) == Some(me))
-        .last()
+        .rfind(|r| r.user.as_ref().map(|u| u.login.as_str()) == Some(me))
         .map(|r| (r.state, r.submitted_at))
 }
 
