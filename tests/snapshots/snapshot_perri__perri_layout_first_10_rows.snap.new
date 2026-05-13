@@ -1,0 +1,15 @@
+---
+source: tests/snapshot_perri.rs
+assertion_line: 105
+expression: snapshot
+---
+┌ PR Queue [2] ────────────────────────────────────────────────┐┌ PR #42 — feat: add user authentication ──────────────────────────────────────────────────────┐
+│▶ ● #42    feat: add user authentication web-app              ││+++ b/src/auth/login.rs                                                                       │
+│  ○ #892   fix: cache invalidation bug api                    ││@@ -0,0 +1,10 @@                                                                              │
+│                                                              ││+pub fn authenticate(token: &str) -> bool {                                                   │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │
+│                                                              ││                                                                                              │

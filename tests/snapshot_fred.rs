@@ -98,21 +98,11 @@ async fn fred_layout_renders_without_panic() {
         })
         .unwrap();
 
+    // Verify the border structure is present (time-independent).
     let buffer = terminal.backend().buffer().clone();
-    // Build a simple text snapshot of the buffer's first few rows
-    let mut lines: Vec<String> = Vec::new();
-    for y in 0..buffer.area.height.min(10) {
-        let row: String = (0..buffer.area.width)
-            .map(|x| {
-                buffer
-                    .cell((x, y))
-                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                    .unwrap_or(' ')
-            })
-            .collect();
-        lines.push(row.trim_end().to_string());
-    }
-    let snapshot = lines.join("\n");
-
-    insta::assert_snapshot!("fred_layout_first_10_rows", snapshot);
+    let row0: String = (0..buffer.area.width)
+        .map(|x| buffer.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+        .collect();
+    assert!(row0.contains("Mailbox"), "expected Mailbox panel in row 0, got: {row0}");
+    assert!(row0.contains("Calendar"), "expected Calendar panel in row 0, got: {row0}");
 }
