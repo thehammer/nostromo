@@ -37,7 +37,25 @@ pub struct GenericView {
 impl GenericView {
     pub fn new(id: &'static str, title: &'static str, ctx: ViewCtx) -> Self {
         // Attempt to reattach to an existing daemon PTY for this view.
-        let pty = Self::try_reattach(id, &ctx);
+        let mut pty = Self::try_reattach(id, &ctx);
+
+        // If no live daemon PTY exists, check the session store and auto-spawn.
+        if pty.is_none() {
+            if let Some(entry) = crate::sessions::SessionStore::load().get(id).cloned() {
+                let (cols, rows) = (80u16, 24u16);
+                let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
+                match ctx.pty_factory.spawn(id, &entry.cmd, &args, (cols, rows), ctx.event_tx.clone()) {
+                    Ok(backend) => {
+                        tracing::info!(view_tag = id, "auto-spawned PTY from session store");
+                        pty = Some(backend);
+                    }
+                    Err(e) => {
+                        tracing::warn!("session-store auto-spawn failed for {id}: {e}");
+                    }
+                }
+            }
+        }
+
         let pty_capturing = pty.is_some();
 
         Self {
@@ -188,6 +206,9 @@ impl View for GenericView {
                     Ok(backend) => {
                         self.pty = Some(backend);
                         self.pty_capturing = true;
+                        let mut store = crate::sessions::SessionStore::load();
+                        store.record(self.id, "claude", &["--agent", self.id], std::env::current_dir().ok());
+                        // TODO: remove session entry on PTY exit (no AppEvent::PtyExited today)
                     }
                     Err(e) => {
                         tracing::warn!("failed to spawn PTY for {}: {e}", self.id);

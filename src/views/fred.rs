@@ -91,7 +91,24 @@ impl FredView {
         ctx: ViewCtx,
     ) -> Self {
         // Attempt to reattach to an existing daemon PTY for this view.
-        let pty = Self::try_reattach(&ctx);
+        let mut pty = Self::try_reattach(&ctx);
+
+        // If no live daemon PTY exists, check the session store and auto-spawn.
+        if pty.is_none() {
+            if let Some(entry) = crate::sessions::SessionStore::load().get(FRED_PTY_TAG).cloned() {
+                let (cols, rows) = (80u16, 24u16);
+                let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
+                match ctx.pty_factory.spawn(FRED_PTY_TAG, &entry.cmd, &args, (cols, rows), ctx.event_tx.clone()) {
+                    Ok(backend) => {
+                        tracing::info!(view_tag = FRED_PTY_TAG, "auto-spawned PTY from session store");
+                        pty = Some(backend);
+                    }
+                    Err(e) => {
+                        tracing::warn!("session-store auto-spawn failed for {FRED_PTY_TAG}: {e}");
+                    }
+                }
+            }
+        }
 
         let pty_capturing = pty.is_some();
 
@@ -497,6 +514,9 @@ impl View for FredView {
                     Ok(backend) => {
                         self.pty = Some(backend);
                         self.pty_capturing = true;
+                        let mut store = crate::sessions::SessionStore::load();
+                        store.record(FRED_PTY_TAG, "claude", &["--agent", "fred"], std::env::current_dir().ok());
+                        // TODO: remove session entry on PTY exit (no AppEvent::PtyExited today)
                     }
                     Err(e) => {
                         tracing::warn!("failed to spawn PTY for fred: {e}");
