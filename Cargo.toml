@@ -21,7 +21,13 @@ path = "src/bin/nostromd.rs"
 [dependencies]
 # TUI
 ratatui = "0.30"
+ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
 crossterm = "0.28"
+
+# Image rendering (calendar pixel renderer)
+image = "0.25"
+tiny-skia = "0.11"
+fontdue = "0.9"
 
 # Embedded PTY
 portable-pty = "0.8"

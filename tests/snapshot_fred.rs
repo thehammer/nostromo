@@ -85,7 +85,9 @@ fn fred_layout_renders_without_panic() {
         event_tx,
         pty_factory: Arc::new(InProcessPtyFactory),
     };
-    let mut view = FredView::new(mb_rx, cal_rx, config, ctx);
+    // Use halfblocks picker for tests — avoids querying the terminal.
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    let mut view = FredView::new(mb_rx, cal_rx, config, ctx, picker);
 
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).unwrap();

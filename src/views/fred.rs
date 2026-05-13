@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::sync::mpsc;
 
 use chrono::{DateTime, Local, TimeZone};
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
@@ -12,6 +13,13 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
+use ratatui_image::{
+    picker::Picker,
+    protocol::StatefulProtocol,
+    thread::{ResizeRequest, ResizeResponse, ThreadProtocol},
+    StatefulImage,
+};
+use std::sync::mpsc::Receiver as MpscReceiver;
 use tokio::sync::watch;
 
 use crate::{
@@ -23,7 +31,7 @@ use crate::{
         theme::{self, Sweater},
         widgets::{relative_time::format_relative_now, truncate::truncate},
     },
-    views::{EventOutcome, View, ViewCtx},
+    views::{fred_calendar_image::render_calendar_to_image, EventOutcome, View, ViewCtx},
 };
 
 /// Tag used to identify Fred's PTY in the daemon registry.
@@ -79,10 +87,24 @@ pub struct FredView {
     repl_area: Rect,
     /// Last known inner area of the calendar pane.
     calendar_area: Rect,
-    /// Current scroll offset for the calendar pane.
+    /// Current scroll offset for the calendar pane (number of 15-min slot rows).
     calendar_scroll: u16,
     /// Rows scrolled back in the REPL pane (0 = live view).
     repl_scroll: u16,
+
+    // ── Kitty-protocol image rendering ───────────────────────────────────────
+    /// Graphics-protocol picker (Kitty / sixel / halfblock fallback).
+    picker: Picker,
+    /// Active `ThreadProtocol` state for the calendar image.
+    calendar_image_state: Option<ThreadProtocol>,
+    /// Sender side of the background resize-encode worker channel.
+    resize_tx: mpsc::Sender<ResizeRequest>,
+    /// Receiver for completed `ResizeResponse` values from the worker.
+    /// Polled non-blocking in `render_calendar` each frame.
+    resize_result_rx: MpscReceiver<ResizeResponse>,
+    /// `(area, scroll)` from the last time we issued an image generation
+    /// request — used to detect when a re-render is needed.
+    calendar_last_rendered: Option<(Rect, u16)>,
 }
 
 impl FredView {
@@ -91,11 +113,24 @@ impl FredView {
         calendar_rx: watch::Receiver<Option<crate::data::fred_calendar::CalendarSnapshot>>,
         config: Config,
         ctx: ViewCtx,
+        picker: Picker,
     ) -> Self {
         // Attempt to reattach to an existing daemon PTY for this view.
         let pty = Self::try_reattach(&ctx);
-
         let pty_capturing = pty.is_some();
+
+        // Spawn the background resize-encode worker thread.
+        // Requests flow in via `resize_tx`; completed responses come back on
+        // `resize_result_rx` (polled non-blocking in `render_calendar`).
+        let (resize_tx, resize_rx) = mpsc::channel::<ResizeRequest>();
+        let (result_tx, resize_result_rx) = mpsc::channel::<ResizeResponse>();
+        std::thread::spawn(move || {
+            while let Ok(request) = resize_rx.recv() {
+                if let Ok(response) = request.resize_encode() {
+                    let _ = result_tx.send(response);
+                }
+            }
+        });
 
         Self {
             mailbox_rx,
@@ -108,6 +143,11 @@ impl FredView {
             calendar_area: Rect::new(0, 0, 80, 10),
             calendar_scroll: 0,
             repl_scroll: 0,
+            picker,
+            calendar_image_state: None,
+            resize_tx,
+            resize_result_rx,
+            calendar_last_rendered: None,
         }
     }
 
@@ -267,87 +307,100 @@ impl FredView {
     }
 
     fn render_calendar(&mut self, f: &mut Frame, area: Rect) {
-        // Phase 1: read snapshot data and build lines.
-        // We scope the snapshot borrow so it drops before we mutate self.
-        let (lines, focus_idx, inner_rect) = {
+        // ── Draw border & title ────────────────────────────────────────────
+        let (sweater, stale, has_snap) = {
             let snap = self.calendar_rx.borrow();
-            let snap = snap.as_ref();
-
-            let sweater = snap
-                .map(|s| Sweater::from_str(&s.sweater))
-                .unwrap_or_default();
-            let stale = snap.map(|s| s.stale).unwrap_or(false);
-            let stale_suffix = if stale { " (stale)" } else { "" };
-
-            let border_style = Style::default().fg(sweater.color());
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(Span::styled(
-                    format!(" 📅 Calendar{stale_suffix} "),
-                    Style::default()
-                        .fg(sweater.color())
-                        .add_modifier(Modifier::BOLD),
-                ));
-
-            let inner_rect = block.inner(area);
-            f.render_widget(block, area);
-
-            let now: DateTime<Local> = chrono::Local::now();
-
-            let (ls, fi) = if let Some(s) = snap {
-                let (mut ls, fi) = render_calendar_lines(
-                    &s.events,
-                    now,
-                    inner_rect.width,
-                    inner_rect.height,
-                    sweater,
-                );
-
-                if let Some(next) = &s.next {
-                    ls.push(Line::from(vec![]));
-                    let countdown = if next.in_minutes <= 0 {
-                        format!("▶ {} — now", next.title)
-                    } else {
-                        format!("▶ {} in {}m", next.title, next.in_minutes)
-                    };
-                    ls.push(Line::from(Span::styled(
-                        truncate(
-                            &countdown,
-                            (inner_rect.width as usize).saturating_sub(2).max(4),
-                        ),
-                        theme::style_for_sweater(sweater),
-                    )));
-                }
-
-                (ls, fi)
-            } else {
-                (
-                    vec![Line::from(Span::styled(
-                        " Loading calendar…",
-                        theme::style_muted(),
-                    ))],
-                    None,
-                )
-            };
-
-            (ls, fi, inner_rect)
-            // snap Ref drops here
+            let s = snap.as_ref();
+            (
+                s.map(|x| Sweater::from_str(&x.sweater)).unwrap_or_default(),
+                s.map(|x| x.stale).unwrap_or(false),
+                s.is_some(),
+            )
         };
 
-        // Phase 2: update auto-scroll — anchor 2 rows above the "now" row so
-        // recent past events remain visible above the current-time marker.
-        let viewport = inner_rect.height as usize;
-        if let Some(fi) = focus_idx {
-            let target_top = fi.saturating_sub(2);
-            let max_top = lines.len().saturating_sub(viewport);
-            self.calendar_scroll = target_top.min(max_top) as u16;
+        let stale_suffix = if stale { " (stale)" } else { "" };
+        let border_style = Style::default().fg(sweater.color());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Span::styled(
+                format!(" 📅 Calendar{stale_suffix} "),
+                Style::default()
+                    .fg(sweater.color())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        self.calendar_area = inner;
+
+        if !has_snap {
+            let p = Paragraph::new(Line::from(Span::styled(
+                " Loading calendar…",
+                theme::style_muted(),
+            )));
+            f.render_widget(p, inner);
+            return;
         }
 
-        // Phase 3: render.
-        self.calendar_area = inner_rect;
-        let p = Paragraph::new(lines).scroll((self.calendar_scroll, 0));
-        f.render_widget(p, inner_rect);
+        // ── Auto-scroll: anchor near the "now" row ─────────────────────────
+        // Compute focus_idx from the ASCII render helper so scroll behaviour
+        // is identical to the old text path.
+        {
+            let snap = self.calendar_rx.borrow();
+            if let Some(s) = snap.as_ref() {
+                let now = chrono::Local::now();
+                let (lines, focus_idx) = render_calendar_lines(
+                    &s.events,
+                    now,
+                    inner.width,
+                    inner.height,
+                    sweater,
+                );
+                let viewport = inner.height as usize;
+                if let Some(fi) = focus_idx {
+                    let target_top = fi.saturating_sub(2);
+                    let max_top = lines.len().saturating_sub(viewport);
+                    self.calendar_scroll = target_top.min(max_top) as u16;
+                }
+            }
+        }
+
+        // ── Drain any completed resize responses ───────────────────────────
+        while let Ok(response) = self.resize_result_rx.try_recv() {
+            if let Some(state) = &mut self.calendar_image_state {
+                state.update_resized_protocol(response);
+            }
+        }
+
+        // ── Compute pixel dimensions ───────────────────────────────────────
+        let font_size = self.picker.font_size();
+        let w_px = (inner.width as u32) * (font_size.width as u32);
+        let h_px = (inner.height as u32) * (font_size.height as u32);
+
+        // ── Re-generate image if area or scroll changed ────────────────────
+        let needs_regen = self
+            .calendar_last_rendered
+            .map(|(r, s)| r != inner || s != self.calendar_scroll)
+            .unwrap_or(true);
+
+        if needs_regen {
+            let snap = self.calendar_rx.borrow().clone();
+            if let Some(snap) = snap {
+                let scroll = self.calendar_scroll;
+                let cell_h = font_size.height;
+                let dyn_img = render_calendar_to_image(&snap, w_px, h_px, scroll, cell_h);
+                let protocol: StatefulProtocol = self.picker.new_resize_protocol(dyn_img);
+                self.calendar_image_state =
+                    Some(ThreadProtocol::new(self.resize_tx.clone(), Some(protocol)));
+                self.calendar_last_rendered = Some((inner, self.calendar_scroll));
+            }
+        }
+
+        // ── Render image widget ───────────────────────────────────────────
+        if let Some(state) = &mut self.calendar_image_state {
+            f.render_stateful_widget(StatefulImage::new(), inner, state);
+        }
     }
 
     fn render_repl(&mut self, f: &mut Frame, area: Rect) {

@@ -131,6 +131,14 @@ async fn main() -> Result<()> {
     }
 
     // ------------------------------------------------------------------
+    // Kitty graphics-protocol picker — MUST run before enable_raw_mode().
+    // Probes the terminal by writing/reading escape sequences; raw mode
+    // prevents the terminal from echoing the responses correctly.
+    // ------------------------------------------------------------------
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+
+    // ------------------------------------------------------------------
     // Terminal setup
     // ------------------------------------------------------------------
     let mut stdout = io::stdout();
@@ -190,6 +198,7 @@ async fn main() -> Result<()> {
         syntect,
         bus,
         daemon_client,
+        picker,
     )
     .await;
 
