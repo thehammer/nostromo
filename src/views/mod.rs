@@ -10,6 +10,7 @@ pub mod fred;
 pub mod fred_calendar_image;
 pub mod mother;
 pub mod perri;
+pub mod teri;
 
 use std::any::Any;
 use std::sync::Arc;

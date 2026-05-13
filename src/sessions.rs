@@ -74,7 +74,9 @@ impl SessionStore {
         if file.version != CURRENT_VERSION {
             anyhow::bail!("unsupported session store version {}", file.version);
         }
-        Ok(Self { inner: file.sessions })
+        Ok(Self {
+            inner: file.sessions,
+        })
     }
 
     /// Look up a session entry by PTY tag.
@@ -137,7 +139,9 @@ mod tests {
 
         let raw = std::fs::read_to_string(path).unwrap();
         let loaded: SessionFile = toml::from_str(&raw).unwrap();
-        SessionStore { inner: loaded.sessions }
+        SessionStore {
+            inner: loaded.sessions,
+        }
     }
 
     #[test]
@@ -168,7 +172,7 @@ mod tests {
         let path = dir.path().join("sessions.toml");
 
         let mut store = SessionStore::default();
-        for tag in &["claudia", "cody", "kennedy"] {
+        for tag in &["claudia", "cody", "kennedy", "teri"] {
             store.inner.insert(
                 tag.to_string(),
                 SessionEntry {
@@ -183,8 +187,12 @@ mod tests {
         assert!(restored.get("claudia").is_some());
         assert!(restored.get("cody").is_some());
         assert!(restored.get("kennedy").is_some());
+        assert!(restored.get("teri").is_some());
         assert!(restored.get("fred").is_none());
-        assert_eq!(restored.get("cody").unwrap().cwd, Some(PathBuf::from("/tmp")));
+        assert_eq!(
+            restored.get("cody").unwrap().cwd,
+            Some(PathBuf::from("/tmp"))
+        );
     }
 
     #[test]
@@ -202,11 +210,7 @@ mod tests {
         let path = dir.path().join("sessions.toml");
 
         // Write a future-version file manually.
-        std::fs::write(
-            &path,
-            "version = 999\n[sessions]\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "version = 999\n[sessions]\n").unwrap();
 
         // We can't easily override sessions_path() in tests, but we can verify
         // load_inner parses version correctly.
@@ -215,9 +219,14 @@ mod tests {
         assert_eq!(file.version, 999);
         // Simulate what load_inner does with a bad version.
         let result: anyhow::Result<SessionStore> = if file.version != CURRENT_VERSION {
-            Err(anyhow::anyhow!("unsupported session store version {}", file.version))
+            Err(anyhow::anyhow!(
+                "unsupported session store version {}",
+                file.version
+            ))
         } else {
-            Ok(SessionStore { inner: file.sessions })
+            Ok(SessionStore {
+                inner: file.sessions,
+            })
         };
         assert!(result.is_err());
     }

@@ -41,6 +41,7 @@ use crate::{
         rate_limits::{BudgetPosture, RateLimits},
         rate_limits_watcher,
         right_panel_source::{self, RightPanelSnapshot},
+        teri_todos::TeriTodosNativeSource,
     },
     event::{self, AppEvent},
     layout::{self, LayoutNode, Side, SplitDir},
@@ -256,6 +257,12 @@ pub async fn run(
         pty_factory: Arc::clone(&pty_factory),
     };
 
+    let teri_todos_rx = TeriTodosNativeSource::spawn();
+    let teri_ctx = ViewCtx {
+        event_tx: tx.clone(),
+        pty_factory: Arc::clone(&pty_factory),
+    };
+
     let mut views: Vec<BoxedView> = vec![
         Box::new(views::fred::FredView::new(
             mailbox_rx,
@@ -295,11 +302,12 @@ pub async fn run(
                 pty_factory: Arc::clone(&pty_factory),
             },
         )),
+        Box::new(views::teri::TeriView::new(teri_todos_rx, teri_ctx)),
         Box::new(views::mother::MotherView::new(config.clone(), mother_ctx)),
     ];
 
     // Index of the Mother view within `views`.
-    const MOTHER_IDX: usize = 5;
+    const MOTHER_IDX: usize = 6;
     // Index of the Perri view within `views`.
     const PERRI_IDX: usize = 1;
 
@@ -597,7 +605,9 @@ pub async fn run(
                 } else if matches!(m.kind, MouseEventKind::Down(_)) {
                     let term_h = terminal.size().map(|s| s.height).unwrap_or(0);
                     if term_h > 0 && m.row == term_h - 1 {
-                        if let Some(&(_, _, view_id)) = state.status_hitmap.iter()
+                        if let Some(&(_, _, view_id)) = state
+                            .status_hitmap
+                            .iter()
                             .find(|(s, e, _)| m.column >= *s && m.column < *e)
                         {
                             if let Some(idx) = views.iter().position(|v| v.id() == view_id) {

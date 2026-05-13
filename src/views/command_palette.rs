@@ -294,6 +294,7 @@ pub fn build_items(state: &AppState, jobs: &[MotherJob]) -> Vec<PaletteItem> {
         ("claudia", "Switch to Claudia"),
         ("cody", "Switch to Cody"),
         ("kennedy", "Switch to Kennedy"),
+        ("teri", "Switch to Teri"),
         ("mother", "Switch to Mother"),
     ];
     for &(id, label) in VIEWS {
@@ -312,7 +313,7 @@ pub fn build_items(state: &AppState, jobs: &[MotherJob]) -> Vec<PaletteItem> {
         category: PaletteCategory::Agent,
         action: PaletteAction::SpawnFredRepl,
     });
-    for &agent in &["cody", "claudia", "kennedy"] {
+    for &agent in &["cody", "claudia", "kennedy", "teri"] {
         items.push(PaletteItem {
             id: agent,
             label: format!("Spawn {agent} REPL"),
