@@ -5,7 +5,7 @@
 
 use std::any::Any;
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Modifier, Style},
@@ -194,6 +194,21 @@ impl View for GenericView {
                     }
                 }
                 return EventOutcome::Consumed;
+            }
+        }
+
+        // Mouse scroll: always scroll the REPL (single scrollable pane).
+        if let AppEvent::Mouse(m) = ev {
+            match m.kind {
+                MouseEventKind::ScrollUp => {
+                    self.repl_scroll = self.repl_scroll.saturating_add(3);
+                    return EventOutcome::Consumed;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.repl_scroll = self.repl_scroll.saturating_sub(3);
+                    return EventOutcome::Consumed;
+                }
+                _ => {}
             }
         }
 

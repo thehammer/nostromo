@@ -614,6 +614,13 @@ pub async fn run(
                             }
                         }
                     }
+                } else if matches!(
+                    m.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) {
+                    // Forward scroll events to the active view so each pane
+                    // can handle them based on where the cursor is pointing.
+                    views[focused_view_idx].on_event(&AppEvent::Mouse(*m));
                 }
             }
 

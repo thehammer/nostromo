@@ -4,7 +4,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Local, TimeZone};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -77,6 +77,8 @@ pub struct FredView {
     pty_capturing: bool,
     /// Last known inner area of the REPL pane.
     repl_area: Rect,
+    /// Last known inner area of the calendar pane.
+    calendar_area: Rect,
     /// Current scroll offset for the calendar pane.
     calendar_scroll: u16,
     /// Rows scrolled back in the REPL pane (0 = live view).
@@ -103,6 +105,7 @@ impl FredView {
             pty,
             pty_capturing,
             repl_area: Rect::new(0, 0, 80, 10),
+            calendar_area: Rect::new(0, 0, 80, 10),
             calendar_scroll: 0,
             repl_scroll: 0,
         }
@@ -332,15 +335,17 @@ impl FredView {
             // snap Ref drops here
         };
 
-        // Phase 2: update auto-scroll (needs mutable self).
+        // Phase 2: update auto-scroll — anchor 2 rows above the "now" row so
+        // recent past events remain visible above the current-time marker.
         let viewport = inner_rect.height as usize;
         if let Some(fi) = focus_idx {
-            let target_top = fi.saturating_sub(viewport / 3);
+            let target_top = fi.saturating_sub(2);
             let max_top = lines.len().saturating_sub(viewport);
             self.calendar_scroll = target_top.min(max_top) as u16;
         }
 
         // Phase 3: render.
+        self.calendar_area = inner_rect;
         let p = Paragraph::new(lines).scroll((self.calendar_scroll, 0));
         f.render_widget(p, inner_rect);
     }
@@ -503,6 +508,31 @@ impl View for FredView {
                     }
                 }
                 return EventOutcome::Consumed;
+            }
+        }
+
+        // Mouse scroll: hit-test against tracked pane areas.
+        if let AppEvent::Mouse(m) = ev {
+            let in_repl = rect_contains(self.repl_area, m.column, m.row);
+            let in_calendar = rect_contains(self.calendar_area, m.column, m.row);
+            match m.kind {
+                MouseEventKind::ScrollUp => {
+                    if in_repl {
+                        self.repl_scroll = self.repl_scroll.saturating_add(3);
+                    } else if in_calendar {
+                        self.calendar_scroll = self.calendar_scroll.saturating_sub(3);
+                    }
+                    return EventOutcome::Consumed;
+                }
+                MouseEventKind::ScrollDown => {
+                    if in_repl {
+                        self.repl_scroll = self.repl_scroll.saturating_sub(3);
+                    } else if in_calendar {
+                        self.calendar_scroll = self.calendar_scroll.saturating_add(3);
+                    }
+                    return EventOutcome::Consumed;
+                }
+                _ => {}
             }
         }
 
@@ -942,4 +972,10 @@ fn build_slot_line(
     let _ = work_start;
 
     Line::from(spans)
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
