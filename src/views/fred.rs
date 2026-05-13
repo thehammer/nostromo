@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::mpsc;
 
 use chrono::{DateTime, Local, TimeZone};
-use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -28,6 +28,8 @@ use crate::{
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
     ui::{
+        drag::{self, DividerAxis, DragState},
+        pane_ratios,
         theme::{self, Sweater},
         widgets::{relative_time::format_relative_now, truncate::truncate},
     },
@@ -105,6 +107,22 @@ pub struct FredView {
     /// `(area, scroll)` from the last time we issued an image generation
     /// request — used to detect when a re-render is needed.
     calendar_last_rendered: Option<(Rect, u16)>,
+
+    // ── pane resize ──────────────────────────────────────────────────────────
+    /// Fraction of vertical space given to the top row (mailbox+calendar) vs. REPL.
+    col_ratio: f32,
+    /// Fraction of horizontal space given to the mailbox vs. calendar.
+    row_ratio: f32,
+    /// Current drag state.
+    drag: DragState,
+    /// Y coordinate of the horizontal divider between top row and REPL.
+    row_divider_row: u16,
+    /// X coordinate of the vertical divider between mailbox and calendar.
+    col_divider_col: u16,
+    /// Parent rect for the vertical (top/REPL) split.
+    main_area: Rect,
+    /// Parent rect for the horizontal (mailbox/calendar) split.
+    top_area: Rect,
 }
 
 impl FredView {
@@ -136,6 +154,7 @@ impl FredView {
         }
 
         let pty_capturing = pty.is_some();
+        let ratios = pane_ratios::load();
 
         // Spawn the background resize-encode worker thread.
         // Requests flow in via `resize_tx`; completed responses come back on
@@ -166,6 +185,13 @@ impl FredView {
             resize_tx,
             resize_result_rx,
             calendar_last_rendered: None,
+            col_ratio: ratios.fred.col,
+            row_ratio: ratios.fred.row,
+            drag: DragState::Idle,
+            row_divider_row: 0,
+            col_divider_col: 0,
+            main_area: Rect::default(),
+            top_area: Rect::default(),
         }
     }
 
@@ -502,15 +528,36 @@ impl View for FredView {
             );
         }
 
+        // Ratio-based vertical split: top row (mailbox+calendar) vs. REPL.
+        let col_pct = (self.col_ratio * 100.0) as u16;
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([
+                Constraint::Percentage(col_pct),
+                Constraint::Percentage(100u16.saturating_sub(col_pct)),
+            ])
             .split(content_area);
+        self.main_area = content_area;
+        self.row_divider_row = rows[1].y;
 
+        // Ratio-based horizontal split: mailbox vs. calendar.
+        let row_pct = (self.row_ratio * 100.0) as u16;
         let top_cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([
+                Constraint::Percentage(row_pct),
+                Constraint::Percentage(100u16.saturating_sub(row_pct)),
+            ])
             .split(rows[0]);
+        self.top_area = rows[0];
+        self.col_divider_col = top_cols[1].x;
+
+        // Visual feedback when dragging.
+        let dragging_id = match self.drag {
+            DragState::Dragging { divider_id, .. } => Some(divider_id),
+            DragState::Idle => None,
+        };
+        let _ = dragging_id; // highlight would need to be passed into render helpers
 
         self.render_mailbox(f, top_cols[0]);
         self.render_calendar(f, top_cols[1]);
@@ -585,11 +632,66 @@ impl View for FredView {
             }
         }
 
-        // Mouse scroll: hit-test against tracked pane areas.
+        // Mouse events: drag resize + scroll.
         if let AppEvent::Mouse(m) = ev {
             let in_repl = rect_contains(self.repl_area, m.column, m.row);
             let in_calendar = rect_contains(self.calendar_area, m.column, m.row);
             match m.kind {
+                // ── drag start ────────────────────────────────────────────────
+                MouseEventKind::Down(MouseButton::Left) => {
+                    // Divider 0: horizontal top-row/REPL split.
+                    if drag::hit_test(
+                        m.column, m.row,
+                        0, self.row_divider_row,
+                        DividerAxis::Horizontal,
+                        self.main_area,
+                    ) {
+                        self.drag = DragState::Dragging {
+                            divider_id: 0,
+                            parent: self.main_area,
+                            axis: DividerAxis::Horizontal,
+                        };
+                        return EventOutcome::Consumed;
+                    }
+                    // Divider 1: vertical mailbox/calendar split.
+                    if drag::hit_test(
+                        m.column, m.row,
+                        self.col_divider_col, 0,
+                        DividerAxis::Vertical,
+                        self.top_area,
+                    ) {
+                        self.drag = DragState::Dragging {
+                            divider_id: 1,
+                            parent: self.top_area,
+                            axis: DividerAxis::Vertical,
+                        };
+                        return EventOutcome::Consumed;
+                    }
+                }
+                // ── drag move ─────────────────────────────────────────────────
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let DragState::Dragging { divider_id, parent, axis } = self.drag {
+                        let new_ratio = drag::ratio_from_mouse(parent, m.column, m.row, axis);
+                        match divider_id {
+                            0 => self.col_ratio = new_ratio,
+                            1 => self.row_ratio = new_ratio,
+                            _ => {}
+                        }
+                        return EventOutcome::Consumed;
+                    }
+                }
+                // ── drag end ──────────────────────────────────────────────────
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if matches!(self.drag, DragState::Dragging { .. }) {
+                        self.drag = DragState::Idle;
+                        let mut p = pane_ratios::load();
+                        p.fred.col = self.col_ratio;
+                        p.fred.row = self.row_ratio;
+                        pane_ratios::save(&p);
+                        return EventOutcome::Consumed;
+                    }
+                }
+                // ── scroll ────────────────────────────────────────────────────
                 MouseEventKind::ScrollUp => {
                     if in_repl {
                         self.repl_scroll = self.repl_scroll.saturating_add(3);

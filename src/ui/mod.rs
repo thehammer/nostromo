@@ -14,6 +14,8 @@
 
 pub mod chrome;
 pub mod debug_overlay;
+pub mod drag;
+pub mod pane_ratios;
 pub mod status_bar;
 pub mod theme;
 pub mod widgets;
