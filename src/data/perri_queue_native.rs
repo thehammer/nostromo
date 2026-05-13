@@ -5,8 +5,8 @@
 //!   1. **`requested`**    — `review-requested:@me org:Carefeed`
 //!   2. **`needs_review`** — `review:required org:Carefeed` (deduplicated against bucket 1)
 //!   3. **`changes_req`**  — `reviewed-by:@me org:Carefeed`, filtered to CHANGES_REQUESTED
-//!                          reviews where the PR was updated >30 s after our review
-//!                          (i.e. the author has responded)
+//!      reviews where the PR was updated >30 s after our review
+//!      (i.e. the author has responded)
 //!
 //! PRs are excluded if:
 //!   - They are drafts
@@ -202,10 +202,8 @@ impl PerriQueueNativeSource {
         // ── Run the three search queries ──────────────────────────────────────
         let q_requested =
             "is:open is:pr review-requested:@me org:Carefeed archived:false".to_owned();
-        let q_needs =
-            "is:open is:pr review:required org:Carefeed archived:false".to_owned();
-        let q_reviewed =
-            "is:open is:pr reviewed-by:@me org:Carefeed archived:false".to_owned();
+        let q_needs = "is:open is:pr review:required org:Carefeed archived:false".to_owned();
+        let q_reviewed = "is:open is:pr reviewed-by:@me org:Carefeed archived:false".to_owned();
 
         // Searches must run sequentially because they share the mutable ETag
         // and item caches.  This is fine — the poll interval is 60s.
@@ -215,8 +213,10 @@ impl PerriQueueNativeSource {
 
         // ── Build bucket 1 & 2 candidates (dedup, basic filters) ─────────────
         // requested takes priority; needs_review fills in the rest.
-        let requested_urls: std::collections::HashSet<&str> =
-            requested_items.iter().map(|i| i.html_url.as_str()).collect();
+        let requested_urls: std::collections::HashSet<&str> = requested_items
+            .iter()
+            .map(|i| i.html_url.as_str())
+            .collect();
 
         let b12_candidates: Vec<(SearchIssueItem, &str)> = requested_items
             .iter()
@@ -244,7 +244,11 @@ impl PerriQueueNativeSource {
                         repo,
                         number: item.number,
                         title: item.title.clone(),
-                        author: item.user.as_ref().map(|u| u.login.clone()).unwrap_or_default(),
+                        author: item
+                            .user
+                            .as_ref()
+                            .map(|u| u.login.clone())
+                            .unwrap_or_default(),
                         bucket: bucket.to_owned(),
                         new_activity: false,
                         url: item.html_url.clone(),
@@ -435,7 +439,10 @@ async fn search_issues(
         anyhow::bail!("github search -> {status}: {body}");
     }
 
-    let search: SearchResponse = resp.json().await.context("parsing github search response")?;
+    let search: SearchResponse = resp
+        .json()
+        .await
+        .context("parsing github search response")?;
     let items = search.items;
     item_cache.insert(query.to_owned(), items.clone());
     Ok(items)
@@ -466,8 +473,7 @@ async fn get_our_last_review(
     // Find our last review (last in the list wins).
     reviews
         .into_iter()
-        .filter(|r| r.user.as_ref().map(|u| u.login.as_str()) == Some(me))
-        .last()
+        .rfind(|r| r.user.as_ref().map(|u| u.login.as_str()) == Some(me))
         .map(|r| (r.state, r.submitted_at))
 }
 

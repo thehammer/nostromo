@@ -21,6 +21,7 @@ pub mod perri_queue_native;
 pub mod rate_limits;
 pub mod rate_limits_watcher;
 pub mod right_panel_source;
+pub mod teri_todos;
 
 use std::time::Duration;
 

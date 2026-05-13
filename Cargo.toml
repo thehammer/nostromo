@@ -58,6 +58,9 @@ clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 
+# SQLite (Teri todos)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # HTTP + OAuth2 (Phase 4 native clients)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 oauth2 = "4"

@@ -9,6 +9,7 @@ pub mod command_palette;
 pub mod fred;
 pub mod mother;
 pub mod perri;
+pub mod teri;
 
 use std::any::Any;
 use std::sync::Arc;

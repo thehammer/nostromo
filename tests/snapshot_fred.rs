@@ -63,8 +63,8 @@ fn fake_calendar() -> CalendarSnapshot {
     }
 }
 
-#[test]
-fn fred_layout_renders_without_panic() {
+#[tokio::test]
+async fn fred_layout_renders_without_panic() {
     // Verify the Fred layout renders without crashing at 120x40.
     // Snapshot the rendered buffer.
     use nostromo::views::fred::FredView;
