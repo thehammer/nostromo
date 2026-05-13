@@ -176,6 +176,7 @@ impl AppState {
 // ── run ───────────────────────────────────────────────────────────────────────
 
 /// Run the application until the user quits.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     initial_view: ViewArg,
     bash_fallback: bool,
