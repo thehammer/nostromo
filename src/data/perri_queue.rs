@@ -12,13 +12,19 @@
 //!       "number": 42,
 //!       "title": "feat: add user authentication",
 //!       "author": "alice",
-//!       "requested": true,
+//!       "bucket": "requested",
+//!       "new_activity": false,
 //!       "url": "https://github.com/acme/web-app/pull/42"
 //!     }
 //!   ],
 //!   "stale": false
 //! }
 //! ```
+//!
+//! ## Buckets
+//! - `requested`    — review explicitly requested from me
+//! - `needs_review` — open PR that needs at least one approval
+//! - `changes_req`  — I requested changes and the author has since responded
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -34,8 +40,18 @@ pub struct PrQueueItem {
     pub number: u64,
     pub title: String,
     pub author: String,
-    pub requested: bool,
+    /// One of: `"requested"`, `"needs_review"`, `"changes_req"`.
+    #[serde(default = "default_bucket")]
+    pub bucket: String,
+    /// For `changes_req` items: whether the author has pushed new commits or
+    /// comments since we requested changes.  Always `false` for other buckets.
+    #[serde(default)]
+    pub new_activity: bool,
     pub url: String,
+}
+
+fn default_bucket() -> String {
+    "needs_review".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

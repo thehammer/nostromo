@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -38,6 +38,10 @@ pub struct PerriView {
     pty_capturing: bool,
     /// Last known inner area of the REPL pane.
     repl_area: Rect,
+    /// Last known inner area of the PR queue list.
+    pr_list_area: Rect,
+    /// Rows scrolled back in the REPL pane (0 = live view).
+    repl_scroll: u16,
 }
 
 impl PerriView {
@@ -58,6 +62,8 @@ impl PerriView {
             pty: None,
             pty_capturing: false,
             repl_area: Rect::new(0, 0, 80, 10),
+            pr_list_area: Rect::new(0, 0, 40, 10),
+            repl_scroll: 0,
         }
     }
 
@@ -72,7 +78,7 @@ impl PerriView {
         // keyed to the worktree path.
     }
 
-    fn render_queue(&self, f: &mut Frame, area: Rect) {
+    fn render_queue(&mut self, f: &mut Frame, area: Rect) {
         let snap = self.queue_rx.borrow();
         let snap = snap.as_ref();
 
@@ -112,11 +118,18 @@ impl PerriView {
                     .iter()
                     .enumerate()
                     .map(|(i, pr)| {
-                        let req_glyph = if pr.requested { "★ " } else { "  " };
-                        let req_style = if pr.requested {
-                            theme::style_amber()
-                        } else {
-                            theme::style_normal()
+                        // Glyph and colour reflect the bucket, matching the
+                        // tmux queue pane display:
+                        //   requested    → blue ●  (explicitly asked for our eyes)
+                        //   needs_review → plain ○ (needs at least one approval)
+                        //   changes_req  → amber ● (author responded to our request)
+                        let (req_glyph, req_style) = match pr.bucket.as_str() {
+                            "requested" => (
+                                "● ",
+                                Style::default().fg(theme::BORDER_ACTIVE),
+                            ),
+                            "changes_req" => ("● ", theme::style_amber()),
+                            _ => ("○ ", theme::style_normal()),
                         };
 
                         let selected_glyph = if i == self.selected_pr { "▶ " } else { "  " };
@@ -147,6 +160,7 @@ impl PerriView {
             )))]
         };
 
+        self.pr_list_area = inner;
         let list = List::new(items);
         f.render_widget(list, inner);
     }
@@ -222,7 +236,7 @@ impl PerriView {
 
         if let Some(pty) = &self.pty {
             let guard = pty.parser.lock().unwrap();
-            f.render_widget(PtyWidget::new(guard, 0), inner);
+            f.render_widget(PtyWidget::new(guard, self.repl_scroll), inner);
         } else {
             let lines = vec![
                 Line::from(vec![]),
@@ -357,6 +371,32 @@ impl View for PerriView {
             }
         }
 
+        // Mouse scroll: hit-test against tracked pane areas.
+        if let AppEvent::Mouse(m) = ev {
+            let in_repl = rect_contains(self.repl_area, m.column, m.row);
+            let in_list = rect_contains(self.pr_list_area, m.column, m.row);
+            let len = self.queue_rx.borrow().as_ref().map(|s| s.items.len()).unwrap_or(0);
+            match m.kind {
+                MouseEventKind::ScrollUp => {
+                    if in_repl {
+                        self.repl_scroll = self.repl_scroll.saturating_add(3);
+                    } else if in_list && len > 0 {
+                        self.selected_pr = self.selected_pr.checked_sub(1).unwrap_or(len - 1);
+                    }
+                    return EventOutcome::Consumed;
+                }
+                MouseEventKind::ScrollDown => {
+                    if in_repl {
+                        self.repl_scroll = self.repl_scroll.saturating_sub(3);
+                    } else if in_list && len > 0 {
+                        self.selected_pr = (self.selected_pr + 1) % len;
+                    }
+                    return EventOutcome::Consumed;
+                }
+                _ => {}
+            }
+        }
+
         EventOutcome::Ignored
     }
 
@@ -393,4 +433,10 @@ impl View for PerriView {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }

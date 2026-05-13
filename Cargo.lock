@@ -1528,6 +1528,7 @@ dependencies = [
  "crossterm",
  "directories",
  "dirs-next",
+ "futures",
  "insta",
  "notify",
  "oauth2",
