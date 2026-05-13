@@ -202,3 +202,41 @@ pub async fn add_plan(plan_path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+// ── peek types ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct PeekTodo {
+    pub status: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct PeekToolCall {
+    pub tool: String,
+    pub brief: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct PeekSnapshot {
+    #[serde(default)]
+    pub todos: Vec<PeekTodo>,
+    #[serde(default)]
+    pub tool_trail: Vec<PeekToolCall>,
+    #[serde(default)]
+    pub last_text: String,
+    pub question: Option<String>,
+}
+
+/// Fetch a live snapshot of a running job via `mother peek <id> --format json`.
+pub async fn peek(id: &str) -> Result<PeekSnapshot> {
+    let out = Command::new(mother_bin())
+        .args(["peek", id, "--format", "json", "--tail", "5"])
+        .output()
+        .await?;
+    if out.stdout.is_empty() {
+        return Ok(PeekSnapshot::default());
+    }
+    let snap: PeekSnapshot = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    Ok(snap)
+}

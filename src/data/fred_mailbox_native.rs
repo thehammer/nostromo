@@ -96,6 +96,11 @@ impl FredMailboxNativeSource {
         };
 
         let delta_file = self.delta_cache_dir().join("mailbox.delta");
+
+        // Always start with a fresh full sync — the in-memory store is empty on
+        // every launch, so reusing a stale delta token would return 0 items.
+        let _ = std::fs::remove_file(&delta_file);
+
         // In-memory message store: id -> item.
         let mut store: HashMap<String, GraphMessage> = HashMap::new();
 
