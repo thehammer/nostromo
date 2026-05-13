@@ -1102,21 +1102,21 @@ impl View for MotherView {
             let in_log = rect_contains(self.log_area, m.column, m.row);
             match m.kind {
                 // ── drag start ────────────────────────────────────────────────
-                MouseEventKind::Down(MouseButton::Left) => {
-                    // Divider 0: vertical list/detail split.
+                MouseEventKind::Down(MouseButton::Left)
                     if drag::hit_test(
                         m.column, m.row,
                         self.main_divider_col, 0,
                         DividerAxis::Vertical,
                         self.main_rect,
-                    ) {
-                        self.drag = DragState::Dragging {
-                            divider_id: 0,
-                            parent: self.main_rect,
-                            axis: DividerAxis::Vertical,
-                        };
-                        return EventOutcome::Consumed;
-                    }
+                    ) =>
+                {
+                    // Divider 0: vertical list/detail split.
+                    self.drag = DragState::Dragging {
+                        divider_id: 0,
+                        parent: self.main_rect,
+                        axis: DividerAxis::Vertical,
+                    };
+                    return EventOutcome::Consumed;
                 }
                 // ── drag move ─────────────────────────────────────────────────
                 MouseEventKind::Drag(MouseButton::Left) => {
