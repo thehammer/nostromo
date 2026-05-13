@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, MouseEventKind};
+use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -19,6 +19,8 @@ use crate::{
     event::AppEvent,
     pty::{PtyHost, PtyWidget},
     ui::{
+        drag::{self, DividerAxis, DragState},
+        pane_ratios,
         theme,
         widgets::{syntect_cache::SyntectCache, syntect_diff::SyntectDiff, truncate::truncate},
     },
@@ -42,6 +44,21 @@ pub struct PerriView {
     pr_list_area: Rect,
     /// Rows scrolled back in the REPL pane (0 = live view).
     repl_scroll: u16,
+    // ── pane resize ──────────────────────────────────────────────────────────
+    /// Fraction of vertical space given to the queue+diff row (vs. REPL).
+    top_row_ratio: f32,
+    /// Fraction of horizontal space given to the PR queue list (vs. diff).
+    queue_ratio: f32,
+    /// Current drag state.
+    drag: DragState,
+    /// Y coordinate of the horizontal divider between top row and REPL.
+    top_row_divider_row: u16,
+    /// X coordinate of the vertical divider between queue and diff.
+    queue_divider_col: u16,
+    /// Parent rect for the top-row split (the full content_area).
+    top_row_area: Rect,
+    /// Parent rect for the horizontal queue/diff split (rows[0]).
+    top_cols_area: Rect,
 }
 
 impl PerriView {
@@ -52,6 +69,7 @@ impl PerriView {
         ctx: ViewCtx,
         syntect: Arc<SyntectCache>,
     ) -> Self {
+        let ratios = pane_ratios::load();
         Self {
             queue_rx,
             pr_rx,
@@ -64,6 +82,13 @@ impl PerriView {
             repl_area: Rect::new(0, 0, 80, 10),
             pr_list_area: Rect::new(0, 0, 40, 10),
             repl_scroll: 0,
+            top_row_ratio: ratios.perri.top_row,
+            queue_ratio: ratios.perri.queue,
+            drag: DragState::Idle,
+            top_row_divider_row: 0,
+            queue_divider_col: 0,
+            top_row_area: Rect::default(),
+            top_cols_area: Rect::default(),
         }
     }
 
@@ -78,17 +103,21 @@ impl PerriView {
         // keyed to the worktree path.
     }
 
-    fn render_queue(&mut self, f: &mut Frame, area: Rect) {
+    fn render_queue_with_drag(&mut self, f: &mut Frame, area: Rect, dragging: bool) {
         let snap = self.queue_rx.borrow();
         let snap = snap.as_ref();
 
         let count = snap.map(|s| s.items.len()).unwrap_or(0);
         let stale = snap.map(|s| s.stale).unwrap_or(false);
 
-        let queue_color = match count {
-            0..=4 => theme::SAGE,
-            5..=9 => theme::AMBER,
-            _ => theme::RED_SWEATER,
+        let queue_color = if dragging {
+            theme::BORDER_ACTIVE
+        } else {
+            match count {
+                0..=4 => theme::SAGE,
+                5..=9 => theme::AMBER,
+                _ => theme::RED_SWEATER,
+            }
         };
 
         let stale_suffix = if stale { " (stale)" } else { "" };
@@ -165,7 +194,7 @@ impl PerriView {
         f.render_widget(list, inner);
     }
 
-    fn render_diff(&self, f: &mut Frame, area: Rect) {
+    fn render_diff_with_drag(&self, f: &mut Frame, area: Rect, dragging: bool) {
         let snap = self.pr_rx.borrow();
         let snap = snap.as_ref();
 
@@ -182,9 +211,15 @@ impl PerriView {
             })
             .unwrap_or_else(|| " Diff ".into());
 
+        let border_color = if dragging {
+            theme::BORDER_ACTIVE
+        } else {
+            theme::BORDER_INACTIVE
+        };
+
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_INACTIVE))
+            .border_style(Style::default().fg(border_color))
             .title(Span::styled(
                 truncate(&pr_title, area.width as usize - 4),
                 Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
@@ -292,18 +327,38 @@ impl View for PerriView {
             );
         }
 
+        // Ratio-based vertical split: top row (queue+diff) vs. REPL.
+        let top_pct = (self.top_row_ratio * 100.0) as u16;
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([
+                Constraint::Percentage(top_pct),
+                Constraint::Percentage(100u16.saturating_sub(top_pct)),
+            ])
             .split(content_area);
+        self.top_row_area = content_area;
+        self.top_row_divider_row = rows[1].y;
 
+        // Ratio-based horizontal split: queue vs. diff.
+        let queue_pct = (self.queue_ratio * 100.0) as u16;
         let top_cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .constraints([
+                Constraint::Percentage(queue_pct),
+                Constraint::Percentage(100u16.saturating_sub(queue_pct)),
+            ])
             .split(rows[0]);
+        self.top_cols_area = rows[0];
+        self.queue_divider_col = top_cols[1].x;
 
-        self.render_queue(f, top_cols[0]);
-        self.render_diff(f, top_cols[1]);
+        // Visual feedback: when dragging, highlight adjacent-pane borders.
+        let dragging_id = match self.drag {
+            DragState::Dragging { divider_id, .. } => Some(divider_id),
+            DragState::Idle => None,
+        };
+
+        self.render_queue_with_drag(f, top_cols[0], dragging_id == Some(1));
+        self.render_diff_with_drag(f, top_cols[1], dragging_id == Some(1));
         self.render_repl(f, rows[1]);
 
         if let Some(pty) = &mut self.pty {
@@ -371,12 +426,68 @@ impl View for PerriView {
             }
         }
 
-        // Mouse scroll: hit-test against tracked pane areas.
+        // Mouse events: drag resize + scroll.
         if let AppEvent::Mouse(m) = ev {
             let in_repl = rect_contains(self.repl_area, m.column, m.row);
             let in_list = rect_contains(self.pr_list_area, m.column, m.row);
             let len = self.queue_rx.borrow().as_ref().map(|s| s.items.len()).unwrap_or(0);
             match m.kind {
+                // ── drag start ────────────────────────────────────────────────
+                MouseEventKind::Down(MouseButton::Left) => {
+                    // Divider 0: horizontal top-row/REPL split.
+                    if drag::hit_test(
+                        m.column, m.row,
+                        0, self.top_row_divider_row,
+                        DividerAxis::Horizontal,
+                        self.top_row_area,
+                    ) {
+                        self.drag = DragState::Dragging {
+                            divider_id: 0,
+                            parent: self.top_row_area,
+                            axis: DividerAxis::Horizontal,
+                        };
+                        return EventOutcome::Consumed;
+                    }
+                    // Divider 1: vertical queue/diff split.
+                    if drag::hit_test(
+                        m.column, m.row,
+                        self.queue_divider_col, 0,
+                        DividerAxis::Vertical,
+                        self.top_cols_area,
+                    ) {
+                        self.drag = DragState::Dragging {
+                            divider_id: 1,
+                            parent: self.top_cols_area,
+                            axis: DividerAxis::Vertical,
+                        };
+                        return EventOutcome::Consumed;
+                    }
+                }
+                // ── drag move ─────────────────────────────────────────────────
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let DragState::Dragging { divider_id, parent, axis } = self.drag {
+                        let new_ratio = drag::ratio_from_mouse(parent, m.column, m.row, axis);
+                        match divider_id {
+                            0 => self.top_row_ratio = new_ratio,
+                            1 => self.queue_ratio = new_ratio,
+                            _ => {}
+                        }
+                        return EventOutcome::Consumed;
+                    }
+                }
+                // ── drag end ──────────────────────────────────────────────────
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if matches!(self.drag, DragState::Dragging { .. }) {
+                        self.drag = DragState::Idle;
+                        // Merge-save: load current file, update only perri ratios.
+                        let mut p = pane_ratios::load();
+                        p.perri.top_row = self.top_row_ratio;
+                        p.perri.queue = self.queue_ratio;
+                        pane_ratios::save(&p);
+                        return EventOutcome::Consumed;
+                    }
+                }
+                // ── scroll ────────────────────────────────────────────────────
                 MouseEventKind::ScrollUp => {
                     if in_repl {
                         self.repl_scroll = self.repl_scroll.saturating_add(3);

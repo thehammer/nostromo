@@ -19,7 +19,7 @@ use std::any::Any;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crossterm::event::{KeyCode, MouseEventKind};
+use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -35,7 +35,11 @@ use tracing::debug;
 use crate::{
     event::AppEvent,
     mother::{self, MotherJob, MotherStatus, PeekSnapshot},
-    ui::theme,
+    ui::{
+        drag::{self, DividerAxis, DragState},
+        pane_ratios,
+        theme,
+    },
     views::{EventOutcome, View, ViewCtx},
 };
 
@@ -99,12 +103,22 @@ pub struct MotherView {
     log_area: Rect,
     /// Pending action to be consumed by the app event loop.
     pending_action: Option<MotherAction>,
+    // ── pane resize ──────────────────────────────────────────────────────────
+    /// Fraction of horizontal space given to the job list vs. detail pane.
+    list_ratio: f32,
+    /// Current drag state.
+    drag: DragState,
+    /// X coordinate of the vertical divider between list and detail.
+    main_divider_col: u16,
+    /// The main area rect (chunks[1]) used for hit-testing.
+    main_rect: Rect,
     #[allow(dead_code)]
     ctx: ViewCtx,
 }
 
 impl MotherView {
     pub fn new(_config: crate::config::Config, ctx: ViewCtx) -> Self {
+        let ratios = pane_ratios::load();
         Self {
             jobs: Vec::new(),
             display_order: Vec::new(),
@@ -123,6 +137,10 @@ impl MotherView {
             list_area: Rect::default(),
             log_area: Rect::default(),
             pending_action: None,
+            list_ratio: ratios.mother.list,
+            drag: DragState::Idle,
+            main_divider_col: 0,
+            main_rect: Rect::default(),
             ctx,
         }
     }
@@ -899,10 +917,17 @@ impl View for MotherView {
 
         self.render_counts_strip(f, chunks[0]);
 
+        // Ratio-based horizontal split: job list vs. detail pane.
+        let list_pct = (self.list_ratio * 100.0) as u16;
         let main = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(2, 5), Constraint::Ratio(3, 5)])
+            .constraints([
+                Constraint::Percentage(list_pct),
+                Constraint::Percentage(100u16.saturating_sub(list_pct)),
+            ])
             .split(chunks[1]);
+        self.main_rect = chunks[1];
+        self.main_divider_col = main[1].x;
 
         // Record inner areas for mouse hit-testing (subtract 1-px border on each side).
         self.list_area = shrink_border(main[0]);
@@ -1071,11 +1096,46 @@ impl View for MotherView {
             _ => {}
         }
 
-        // Mouse scroll: hit-test against tracked pane areas.
+        // Mouse events: drag resize + scroll.
         if let AppEvent::Mouse(m) = ev {
             let in_list = rect_contains(self.list_area, m.column, m.row);
             let in_log = rect_contains(self.log_area, m.column, m.row);
             match m.kind {
+                // ── drag start ────────────────────────────────────────────────
+                MouseEventKind::Down(MouseButton::Left) => {
+                    // Divider 0: vertical list/detail split.
+                    if drag::hit_test(
+                        m.column, m.row,
+                        self.main_divider_col, 0,
+                        DividerAxis::Vertical,
+                        self.main_rect,
+                    ) {
+                        self.drag = DragState::Dragging {
+                            divider_id: 0,
+                            parent: self.main_rect,
+                            axis: DividerAxis::Vertical,
+                        };
+                        return EventOutcome::Consumed;
+                    }
+                }
+                // ── drag move ─────────────────────────────────────────────────
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let DragState::Dragging { divider_id: 0, parent, axis } = self.drag {
+                        self.list_ratio = drag::ratio_from_mouse(parent, m.column, m.row, axis);
+                        return EventOutcome::Consumed;
+                    }
+                }
+                // ── drag end ──────────────────────────────────────────────────
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if matches!(self.drag, DragState::Dragging { .. }) {
+                        self.drag = DragState::Idle;
+                        let mut p = pane_ratios::load();
+                        p.mother.list = self.list_ratio;
+                        pane_ratios::save(&p);
+                        return EventOutcome::Consumed;
+                    }
+                }
+                // ── scroll ────────────────────────────────────────────────────
                 MouseEventKind::ScrollUp => {
                     if self.focus == Focus::PlanView {
                         self.plan_scroll = self.plan_scroll.saturating_sub(3);
