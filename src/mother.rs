@@ -113,11 +113,8 @@ pub struct MotherJob {
     pub plan_path: Option<String>,
     /// Question written by a worker that called `mother await --question "..."`.
     pub question: Option<String>,
-    /// `"user"` when paused by an explicit `mother await`; `"adherence_blocked"` when
-    /// the Perri adherence reviewer blocked the job for human inspection.
+    /// `"user"` when paused by an explicit `mother await`.
     pub paused_reason: Option<String>,
-    /// Narrative from the Perri adherence reviewer explaining what to inspect or fix.
-    pub adherence_notes: Option<String>,
     /// Result of the Perri adherence pass: `"passed"`, `"blocked_for_human"`, etc.
     pub adherence_status: Option<String>,
     /// Which escalation tier spawned the current worker.
@@ -176,34 +173,6 @@ pub async fn cancel(id: &str) -> Result<()> {
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         warn!("mother cancel {id} failed: {stderr}");
-    }
-    Ok(())
-}
-
-/// Archive a single terminal-state job (`mother archive <id>`).
-/// Mother CLI silently skips jobs that are not in a terminal state.
-pub async fn archive(id: &str) -> Result<()> {
-    let out = Command::new(mother_bin())
-        .args(["archive", id])
-        .output()
-        .await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother archive {id} failed: {stderr}");
-    }
-    Ok(())
-}
-
-/// Archive every terminal-state job, regardless of age
-/// (`mother archive --older-than 0`).
-pub async fn archive_all() -> Result<()> {
-    let out = Command::new(mother_bin())
-        .args(["archive", "--older-than", "0"])
-        .output()
-        .await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother archive --older-than 0 failed: {stderr}");
     }
     Ok(())
 }

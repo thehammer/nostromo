@@ -199,7 +199,7 @@ impl View for GenericView {
                 match self.ctx.pty_factory.spawn(
                     self.id,
                     "claude",
-                    &["--dangerously-skip-permissions", "--agent", self.id],
+                    &["--agent", self.id],
                     (cols, rows),
                     self.ctx.event_tx.clone(),
                 ) {
@@ -207,7 +207,7 @@ impl View for GenericView {
                         self.pty = Some(backend);
                         self.pty_capturing = true;
                         let mut store = crate::sessions::SessionStore::load();
-                        store.record(self.id, "claude", &["--dangerously-skip-permissions", "--agent", self.id], std::env::current_dir().ok());
+                        store.record(self.id, "claude", &["--agent", self.id], std::env::current_dir().ok());
                         // TODO: remove session entry on PTY exit (no AppEvent::PtyExited today)
                     }
                     Err(e) => {
