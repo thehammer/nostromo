@@ -23,7 +23,9 @@ fn sessions_path() -> PathBuf {
 // ── wire types ────────────────────────────────────────────────────────────────
 
 /// Wire format version — bump when the schema changes in a breaking way.
-const CURRENT_VERSION: u32 = 1;
+///
+/// v1 → v2: added `session_id: Option<String>` to `SessionEntry`.
+const CURRENT_VERSION: u32 = 2;
 
 /// A recorded session entry: what command to re-spawn and in what directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +33,9 @@ pub struct SessionEntry {
     pub cmd: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
+    /// Claude `--session-id` UUID pinned at spawn; `None` for legacy entries.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -71,8 +76,10 @@ impl SessionStore {
         let path = sessions_path();
         let raw = std::fs::read_to_string(&path)?;
         let file: SessionFile = toml::from_str(&raw)?;
-        if file.version != CURRENT_VERSION {
-            anyhow::bail!("unsupported session store version {}", file.version);
+        match file.version {
+            // v1 is accepted; entries simply lack session_id (default None).
+            1 | 2 => {}
+            v => anyhow::bail!("unsupported session store version {v}"),
         }
         Ok(Self {
             inner: file.sessions,
@@ -85,13 +92,23 @@ impl SessionStore {
     }
 
     /// Record (or overwrite) a session entry and flush to disk.
-    pub fn record(&mut self, tag: &str, cmd: &str, args: &[&str], cwd: Option<PathBuf>) {
+    ///
+    /// Pass `session_id: Some(uuid_string)` when spawning with `--session-id`.
+    pub fn record(
+        &mut self,
+        tag: &str,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<PathBuf>,
+        session_id: Option<String>,
+    ) {
         self.inner.insert(
             tag.to_string(),
             SessionEntry {
                 cmd: cmd.to_string(),
                 args: args.iter().map(|s| s.to_string()).collect(),
                 cwd,
+                session_id,
             },
         );
         if let Err(e) = self.save() {
@@ -156,6 +173,7 @@ mod tests {
                 cmd: "claude".to_string(),
                 args: vec!["--agent".to_string(), "claudia".to_string()],
                 cwd: None,
+                session_id: None,
             },
         );
 
@@ -179,6 +197,7 @@ mod tests {
                     cmd: "claude".to_string(),
                     args: vec!["--agent".to_string(), tag.to_string()],
                     cwd: Some(PathBuf::from("/tmp")),
+                    session_id: None,
                 },
             );
         }
@@ -218,16 +237,58 @@ mod tests {
         let file: SessionFile = toml::from_str(&raw).unwrap();
         assert_eq!(file.version, 999);
         // Simulate what load_inner does with a bad version.
-        let result: anyhow::Result<SessionStore> = if file.version != CURRENT_VERSION {
-            Err(anyhow::anyhow!(
-                "unsupported session store version {}",
-                file.version
-            ))
-        } else {
-            Ok(SessionStore {
+        let result: anyhow::Result<SessionStore> = match file.version {
+            1 | 2 => Ok(SessionStore {
                 inner: file.sessions,
-            })
+            }),
+            v => Err(anyhow::anyhow!("unsupported session store version {v}")),
         };
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn v1_file_loads_with_session_id_none() {
+        // A v1 sessions.toml (no session_id field) must load cleanly with
+        // session_id defaulting to None on every entry.
+        let v1_toml = r#"
+version = 1
+
+[sessions.perri]
+cmd = "claude"
+args = ["--dangerously-skip-permissions", "--agent", "perri"]
+"#;
+        let file: SessionFile = toml::from_str(v1_toml).unwrap();
+        // Version 1 is accepted.
+        assert!(matches!(file.version, 1 | 2));
+        let entry = file.sessions.get("perri").unwrap();
+        assert_eq!(entry.session_id, None);
+        assert_eq!(entry.cmd, "claude");
+    }
+
+    #[test]
+    fn v2_file_round_trips_session_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.toml");
+
+        let mut store = SessionStore::default();
+        store.inner.insert(
+            "perri".to_string(),
+            SessionEntry {
+                cmd: "claude".to_string(),
+                args: vec![
+                    "--dangerously-skip-permissions".to_string(),
+                    "--agent".to_string(),
+                    "perri".to_string(),
+                    "--session-id".to_string(),
+                    "test-uuid-1234".to_string(),
+                ],
+                cwd: Some(PathBuf::from("/Users/hammer/Code/nostromo")),
+                session_id: Some("test-uuid-1234".to_string()),
+            },
+        );
+
+        let restored = round_trip_at(&store, &path);
+        let entry = restored.get("perri").unwrap();
+        assert_eq!(entry.session_id, Some("test-uuid-1234".to_string()));
     }
 }

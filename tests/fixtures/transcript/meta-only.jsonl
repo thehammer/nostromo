@@ -1,0 +1,4 @@
+{"type":"agent-setting","agentSetting":"perri","sessionId":"test-meta-0001"}
+{"type":"file-history-snapshot","files":[],"sessionId":"test-meta-0001"}
+{"type":"permission-mode","mode":"default","sessionId":"test-meta-0001"}
+{"type":"last-prompt","prompt":"Let's review","sessionId":"test-meta-0001"}

@@ -344,6 +344,7 @@ impl View for TeriView {
                             "claude",
                             &["--dangerously-skip-permissions", "--agent", "teri"],
                             std::env::current_dir().ok(),
+                            None,
                         );
                     }
                     Err(e) => {
