@@ -27,10 +27,6 @@
 //! `AltScreenFilter` instance carries leftover bytes that look like a partial
 //! sequence prefix across calls.
 
-/// Maximum length of any alt-screen sequence we recognise (e.g. `\x1b[?1049h`
-/// = 8 bytes).
-const MAX_SEQ: usize = 8;
-
 /// Alt-screen sequences to strip.
 const STRIP: &[&[u8]] = &[
     b"\x1b[?1047h",
