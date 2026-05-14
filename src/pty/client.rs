@@ -277,14 +277,17 @@ async fn run_output_loop(
     event_tx: mpsc::UnboundedSender<AppEvent>,
     view_id: &'static str,
 ) {
+    let mut filter = crate::pty::altscreen::AltScreenFilter::new();
     loop {
         match rx.recv().await {
             Ok(ServerMsg::PtyScrollback { pty_id: id, bytes }) if id == pty_id => {
-                parser.lock().unwrap().process(&bytes);
+                let filtered = filter.process(&bytes);
+                parser.lock().unwrap().process(&filtered);
                 let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
             }
             Ok(ServerMsg::PtyOutput { pty_id: id, bytes }) if id == pty_id => {
-                parser.lock().unwrap().process(&bytes);
+                let filtered = filter.process(&bytes);
+                parser.lock().unwrap().process(&filtered);
                 let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
             }
             Ok(ServerMsg::PtyExited { pty_id: id, .. }) if id == pty_id => {
