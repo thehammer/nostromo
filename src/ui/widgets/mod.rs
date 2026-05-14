@@ -1,3 +1,4 @@
+pub mod markdown;
 pub mod modal;
 pub mod relative_time;
 pub mod right_panel;

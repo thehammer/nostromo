@@ -101,3 +101,15 @@ pub fn style_for_sweater(s: Sweater) -> Style {
         Sweater::Red => style_red(),
     }
 }
+
+/// Inline code style — light teal foreground.
+pub fn style_code_inline() -> Style {
+    Style::default().fg(Color::Rgb(170, 205, 210))
+}
+
+/// Hyperlink style — cornflower blue, underlined.
+pub fn style_link() -> Style {
+    Style::default()
+        .fg(BORDER_ACTIVE)
+        .add_modifier(Modifier::UNDERLINED)
+}

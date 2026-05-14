@@ -1,6 +1,7 @@
 //! Perri view: PR queue (top-left) + syntax-highlighted diff / transcript (top-right) + PTY REPL.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
@@ -81,6 +82,11 @@ pub struct PerriView {
     transcript_visible: bool,
     /// Lines scrolled up from the bottom in the transcript pane (0 = live).
     transcript_scroll: u16,
+    /// Per-entry markdown render cache: entry index → `Vec<Line<'static>>`.
+    /// Invalidated when `last_transcript_width` changes.
+    transcript_cache: HashMap<usize, Vec<Line<'static>>>,
+    /// Inner width used to build `transcript_cache`; used to detect resizes.
+    last_transcript_width: u16,
 }
 
 impl PerriView {
@@ -132,6 +138,8 @@ impl PerriView {
             transcript_rx: None,
             transcript_visible: false,
             transcript_scroll: 0,
+            transcript_cache: HashMap::new(),
+            last_transcript_width: 0,
         }
     }
 
@@ -280,9 +288,25 @@ impl PerriView {
     }
 
     fn render_transcript(&mut self, f: &mut Frame, area: Rect) {
+        // Inner width excludes the 1-cell border on each side.
+        let inner_w = area.width.saturating_sub(2);
+
+        // Invalidate render cache on width change.
+        if inner_w != self.last_transcript_width {
+            self.transcript_cache.clear();
+            self.last_transcript_width = inner_w;
+        }
+
         if let Some(rx) = &self.transcript_rx {
             let snap = rx.borrow().clone();
-            TranscriptWidget::new(&snap, self.transcript_scroll).render(area, f.buffer_mut());
+            TranscriptWidget::new(
+                &snap,
+                self.transcript_scroll,
+                &self.syntect,
+                &mut self.transcript_cache,
+                inner_w,
+            )
+            .render(area, f.buffer_mut());
         } else {
             let block = Block::default()
                 .borders(Borders::ALL)
