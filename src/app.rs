@@ -13,8 +13,13 @@
 //! - Split-pane layout system (`LayoutNode`, `Ctrl-W` chord).
 //! - Command palette (`Ctrl-P`).
 //! - Sweater status colours on tab bar (Perri PR count, Mother job runtime).
+//!
+//! Phase 4 MCP additions:
+//! - `AppState::toasts` — transient toast queue, auto-expired on Tick.
+//! - `AppState::mcp_status_segments` — per-view status-bar segments.
+//! - `McpCommand::Notify`, `RegisterStatusSegment`, `ClearStatusSegment` handlers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -60,6 +65,35 @@ use crate::{
     },
     ViewArg,
 };
+
+// ── MCP phase-4 types ─────────────────────────────────────────────────────────
+
+/// A transient notification posted via `nostromo.notify`.
+///
+/// Displayed in the status bar and auto-expires after `TOAST_TTL_SECS` seconds.
+pub struct Toast {
+    pub text: String,
+    pub level: crate::mcp::command::NotifyLevel,
+    /// Unix epoch second at which this toast should stop rendering.
+    pub expires_at: i64,
+}
+
+impl Toast {
+    pub fn new(text: String, level: crate::mcp::command::NotifyLevel) -> Self {
+        let expires_at = chrono::Utc::now().timestamp() + TOAST_TTL_SECS;
+        Self { text, level, expires_at }
+    }
+}
+
+/// How long a toast is displayed.
+const TOAST_TTL_SECS: i64 = 5;
+
+/// A status-bar segment registered by an MCP tool call.
+pub struct McpStatusSegment {
+    pub text: String,
+    /// Optional named or hex color string.
+    pub color: Option<String>,
+}
 
 // ── modal state ───────────────────────────────────────────────────────────────
 
@@ -138,6 +172,21 @@ pub struct AppState {
     pub mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
     /// Watch receiver for calendar snapshots (for the bottom status bar).
     pub calendar_rx: tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
+
+    // ── Phase 4: MCP notifications & status segments ──────────────────────────
+    /// Transient toast notifications posted via `nostromo.notify`.
+    /// Expired entries are garbage-collected on every `AppEvent::Tick`.
+    pub toasts: VecDeque<Toast>,
+    /// MCP-registered status-bar segments keyed by `(view_id, segment_id)`.
+    pub mcp_status_segments: HashMap<(String, String), McpStatusSegment>,
+    /// Id of the currently active view — kept in sync each render frame so
+    /// `status_bar::render` can filter segments to the active view without
+    /// needing direct access to the `views` slice.
+    pub active_view_id: String,
+    /// Direct-push refresh sender for `PerriPrNativeSource` (Phase 4).
+    /// Sending `()` triggers an immediate re-fetch, bypassing the dirty-file
+    /// sentinel.  `None` when running in bash-fallback mode.
+    pub perri_pr_refresh_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
 }
 
 impl AppState {
@@ -167,6 +216,10 @@ impl AppState {
             budget_posture: None,
             mailbox_rx,
             calendar_rx,
+            toasts: VecDeque::new(),
+            mcp_status_segments: HashMap::new(),
+            active_view_id: String::new(),
+            perri_pr_refresh_tx: None,
         }
     }
 
@@ -206,12 +259,17 @@ pub async fn run(
     let queue_rx = if bash_fallback {
         PerriQueueSource::spawn(config.clone())
     } else {
-        PerriQueueNativeSource::spawn(config.clone())
+        // Phase 4: the second element is the direct-push refresh sender.
+        // The queue source is polled on an interval; MCP tools don't currently
+        // trigger manual queue refreshes, so we discard the sender.
+        let (rx, _queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
+        rx
     };
-    let pr_rx = if bash_fallback {
-        PerriPrSource::spawn(config.clone())
+    let (pr_rx, perri_pr_refresh_tx_opt) = if bash_fallback {
+        (PerriPrSource::spawn(config.clone()), None)
     } else {
-        PerriPrNativeSource::spawn(config.clone())
+        let (rx, tx) = PerriPrNativeSource::spawn(config.clone());
+        (rx, Some(tx))
     };
 
     // Clone queue_rx to monitor PR count for sweater status in the main loop.
@@ -386,6 +444,7 @@ pub async fn run(
     let mut state = AppState::new(mailbox_rx_state, calendar_rx_state);
     state.daemon_connected = daemon_was_connected;
     state.daemon_socket_path = crate::ipc::default_socket_path();
+    state.perri_pr_refresh_tx = perri_pr_refresh_tx_opt;
 
     info!("event loop starting");
 
@@ -438,6 +497,8 @@ pub async fn run(
                 &mut state,
                 &active_agent_id,
             );
+            // Keep active_view_id in sync so status_bar can filter MCP segments.
+            state.active_view_id = views[active].id().to_owned();
             ui::status_bar::render(f, status_area, &mut state);
             if state.show_debug_overlay {
                 ui::debug_overlay::render(f, full_area, &state, &views, active);
@@ -722,6 +783,9 @@ pub async fn run(
 
             AppEvent::Tick => {
                 views[focused_view_idx].on_tick();
+                // Garbage-collect expired toasts.
+                let now = chrono::Utc::now().timestamp();
+                state.toasts.retain(|t| t.expires_at > now);
             }
 
             _ => {
@@ -1165,6 +1229,11 @@ async fn handle_mcp_command(
                 .downcast_mut::<views::perri::PerriView>()
             {
                 let result = pv.load_pr(number, repo, highlights);
+                // Phase 4: also trigger the direct-push refresh so the data
+                // source re-fetches immediately without needing the dirty file.
+                if let Some(tx) = &state.perri_pr_refresh_tx {
+                    let _ = tx.send(());
+                }
                 let _ = reply.send(result);
             } else {
                 let _ = reply.send(Err("internal_error: perri downcast failed".into()));
@@ -1280,6 +1349,30 @@ async fn handle_mcp_command(
                 Ok(()) => { let _ = reply.send(Ok(())); }
                 Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
             }
+        }
+
+        // ── Phase 4: notifications & status segments ──────────────────────────
+
+        // ── Notify ────────────────────────────────────────────────────────────
+        McpCommand::Notify { message, level, source_view: _, reply } => {
+            let toast = Toast::new(message, level);
+            state.toasts.push_back(toast);
+            let _ = reply.send(Ok(()));
+        }
+
+        // ── RegisterStatusSegment ─────────────────────────────────────────────
+        McpCommand::RegisterStatusSegment { view_id, segment_id, text, color, reply } => {
+            state.mcp_status_segments.insert(
+                (view_id, segment_id),
+                McpStatusSegment { text, color },
+            );
+            let _ = reply.send(Ok(()));
+        }
+
+        // ── ClearStatusSegment ────────────────────────────────────────────────
+        McpCommand::ClearStatusSegment { view_id, segment_id, reply } => {
+            state.mcp_status_segments.remove(&(view_id, segment_id));
+            let _ = reply.send(Ok(()));
         }
     }
 }

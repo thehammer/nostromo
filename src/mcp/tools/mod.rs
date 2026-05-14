@@ -3,6 +3,8 @@
 //! Phase 1: `nostromo.get_self`
 //! Phase 2: 12 new read-only introspection tools across all views.
 //! Phase 3: Pane mutation and cross-view dispatch tools.
+//! Phase 4: `nostromo.notify`, `nostromo.register_status_segment`,
+//!           `nostromo.clear_status_segment`.
 
 pub mod fred;
 pub mod get_self;
@@ -10,10 +12,12 @@ pub mod get_view_state;
 pub mod list_views;
 pub mod mother;
 pub mod mother_mutators;
+pub mod notify;
 pub mod nostromo_meta;
 pub mod perri;
 pub mod perri_mutators;
 pub mod set_pane;
+pub mod status_segment;
 pub mod switch_view;
 pub mod teri;
 
@@ -288,6 +292,53 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "required": ["id", "answer"]
             }
         }),
+        // ── Phase 4: notifications & status segments ───────────────────────
+        json!({
+            "name": "nostromo.notify",
+            "description": "Post a transient toast notification to the Nostromo status bar. The toast auto-expires after 5 s.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string", "description": "Notification text" },
+                    "level": {
+                        "type": "string",
+                        "enum": ["info", "warn", "error"],
+                        "description": "Severity level (default: info)"
+                    },
+                    "view_id": { "type": "string", "description": "Optional view id requesting the notification (informational)" }
+                },
+                "required": ["message"]
+            }
+        }),
+        json!({
+            "name": "nostromo.register_status_segment",
+            "description": "Add or update a named status-bar segment for a view. Segment is displayed when the view is active.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id":    { "type": "string", "description": "View id (e.g. 'perri', 'fred')" },
+                    "segment_id": { "type": "string", "description": "Stable identifier for this segment within the view" },
+                    "text":       { "type": "string", "description": "Text to display" },
+                    "color": {
+                        "type": "string",
+                        "description": "Named color (red, amber, sage, blue, muted) or 6-digit hex (#rrggbb)"
+                    }
+                },
+                "required": ["view_id", "segment_id", "text"]
+            }
+        }),
+        json!({
+            "name": "nostromo.clear_status_segment",
+            "description": "Remove a named status-bar segment for a view.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id":    { "type": "string" },
+                    "segment_id": { "type": "string" }
+                },
+                "required": ["view_id", "segment_id"]
+            }
+        }),
     ]
 }
 
@@ -428,6 +479,20 @@ pub async fn dispatch(
         "mother.resume_job" => {
             let args = arguments.cloned().unwrap_or_default();
             mother_mutators::resume_job(state, &args).await
+        }
+
+        // ── Phase 4: notifications & status segments ────────────────────────
+        "nostromo.notify" => {
+            let args = arguments.cloned().unwrap_or_default();
+            notify::handle(state, &args).await
+        }
+        "nostromo.register_status_segment" => {
+            let args = arguments.cloned().unwrap_or_default();
+            status_segment::register(state, &args).await
+        }
+        "nostromo.clear_status_segment" => {
+            let args = arguments.cloned().unwrap_or_default();
+            status_segment::clear(state, &args).await
         }
 
         other => return ToolResult::UnknownTool(other.to_string()),
