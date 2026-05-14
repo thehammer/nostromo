@@ -20,7 +20,7 @@ use crate::{
     event::AppEvent,
     pty::{PtyHost, PtyWidget},
     transcript::{
-        snapshot::TranscriptSnapshot,
+        snapshot::{TranscriptEntry, TranscriptSnapshot},
         TranscriptReader,
     },
     ui::{
@@ -31,6 +31,7 @@ use crate::{
             syntect_cache::SyntectCache,
             syntect_diff::SyntectDiff,
             transcript::TranscriptWidget,
+            transcript_layout::{scroll_to_cursor, TranscriptInteraction},
             truncate::truncate,
         },
     },
@@ -54,6 +55,8 @@ pub struct PerriView {
     repl_area: Rect,
     /// Last known inner area of the PR queue list.
     pr_list_area: Rect,
+    /// Last known inner area of the transcript pane (for mouse hit-testing).
+    transcript_area: Rect,
     /// Rows scrolled back in the REPL pane (0 = live view).
     repl_scroll: u16,
     // ── pane resize ──────────────────────────────────────────────────────────
@@ -80,13 +83,16 @@ pub struct PerriView {
     transcript_rx: Option<watch::Receiver<TranscriptSnapshot>>,
     /// Whether the transcript pane is shown (default false — opt-in via Ctrl+T).
     transcript_visible: bool,
-    /// Lines scrolled up from the bottom in the transcript pane (0 = live).
-    transcript_scroll: u16,
-    /// Per-entry markdown render cache: entry index → `Vec<Line<'static>>`.
-    /// Invalidated when `last_transcript_width` changes.
-    transcript_cache: HashMap<usize, Vec<Line<'static>>>,
+    /// Top-of-viewport line offset for the transcript pane (0 = top).
+    transcript_scroll_offset: u16,
+    /// Interaction state: cursor, expanded set, thinking visibility.
+    transcript_interaction: TranscriptInteraction,
+    /// Render cache keyed by `(entry_index, is_expanded)`.
+    transcript_cache: HashMap<(usize, bool), Vec<ratatui::text::Line<'static>>>,
     /// Inner width used to build `transcript_cache`; used to detect resizes.
     last_transcript_width: u16,
+    /// Last known number of entries; used to detect appends for tail-follow.
+    last_entry_count: usize,
 }
 
 impl PerriView {
@@ -105,7 +111,6 @@ impl PerriView {
                 if e.session_id.is_some() {
                     e.session_id.clone()
                 } else {
-                    // Legacy entry — fall back to the newest jsonl in the project dir.
                     let cwd = e.cwd.clone().or_else(|| std::env::current_dir().ok());
                     cwd.as_deref()
                         .and_then(crate::transcript::find_latest_session_id_for_cwd)
@@ -125,6 +130,7 @@ impl PerriView {
             pty_capturing: false,
             repl_area: Rect::new(0, 0, 80, 10),
             pr_list_area: Rect::new(0, 0, 40, 10),
+            transcript_area: Rect::default(),
             repl_scroll: 0,
             top_row_ratio: ratios.perri.top_row,
             queue_ratio: ratios.perri.queue,
@@ -137,9 +143,11 @@ impl PerriView {
             transcript_reader: None,
             transcript_rx: None,
             transcript_visible: false,
-            transcript_scroll: 0,
+            transcript_scroll_offset: 0,
+            transcript_interaction: TranscriptInteraction::default(),
             transcript_cache: HashMap::new(),
             last_transcript_width: 0,
+            last_entry_count: 0,
         }
     }
 
@@ -290,21 +298,58 @@ impl PerriView {
     fn render_transcript(&mut self, f: &mut Frame, area: Rect) {
         // Inner width excludes the 1-cell border on each side.
         let inner_w = area.width.saturating_sub(2);
+        let inner_h = area.height.saturating_sub(2);
 
-        // Invalidate render cache on width change.
+        // Invalidate render cache on width change or thinking-toggle.
         if inner_w != self.last_transcript_width {
             self.transcript_cache.clear();
             self.last_transcript_width = inner_w;
         }
 
+        self.transcript_area = Rect {
+            x: area.x + 1,
+            y: area.y + 1,
+            width: inner_w,
+            height: inner_h,
+        };
+
         if let Some(rx) = &self.transcript_rx {
             let snap = rx.borrow().clone();
+
+            // Tail-follow: if following and the snapshot grew, advance cursor.
+            let entry_count = snap.entries.len();
+            if entry_count != self.last_entry_count {
+                self.last_entry_count = entry_count;
+                if self.transcript_interaction.following {
+                    let nav = snap.navigable_entries(self.transcript_interaction.show_thinking);
+                    if let Some(&last_nav) = nav.last() {
+                        self.transcript_interaction.cursor = last_nav;
+                    }
+                }
+            }
+
+            // Compute layout to drive auto-scroll.
+            let plan = crate::ui::widgets::transcript_layout::compute(
+                &snap,
+                &self.transcript_interaction,
+                inner_w,
+                &self.syntect,
+                &mut self.transcript_cache,
+            );
+            self.transcript_scroll_offset = scroll_to_cursor(
+                &plan.entry_rows,
+                self.transcript_interaction.cursor,
+                inner_h,
+                self.transcript_scroll_offset,
+            );
+
             TranscriptWidget::new(
                 &snap,
-                self.transcript_scroll,
+                self.transcript_scroll_offset,
                 &self.syntect,
                 &mut self.transcript_cache,
                 inner_w,
+                &self.transcript_interaction,
             )
             .render(area, f.buffer_mut());
         } else {
@@ -358,6 +403,112 @@ impl PerriView {
             ];
             let p = Paragraph::new(lines);
             f.render_widget(p, inner);
+        }
+    }
+
+    // ── Transcript navigation helpers ─────────────────────────────────────────
+
+    /// Move cursor to the next navigable entry (clamp at last).
+    fn transcript_cursor_next(&mut self, snap: &TranscriptSnapshot) {
+        let nav = snap.navigable_entries(self.transcript_interaction.show_thinking);
+        if let Some(pos) = nav.iter().position(|&i| i == self.transcript_interaction.cursor) {
+            if pos + 1 < nav.len() {
+                self.transcript_interaction.cursor = nav[pos + 1];
+            }
+        } else if let Some(&first) = nav.first() {
+            self.transcript_interaction.cursor = first;
+        }
+        // Following is off when the user explicitly navigates.
+        let nav2 = snap.navigable_entries(self.transcript_interaction.show_thinking);
+        self.transcript_interaction.following =
+            nav2.last().copied() == Some(self.transcript_interaction.cursor);
+    }
+
+    /// Move cursor to the previous navigable entry (clamp at first).
+    fn transcript_cursor_prev(&mut self, snap: &TranscriptSnapshot) {
+        let nav = snap.navigable_entries(self.transcript_interaction.show_thinking);
+        if let Some(pos) = nav.iter().position(|&i| i == self.transcript_interaction.cursor) {
+            if pos > 0 {
+                self.transcript_interaction.cursor = nav[pos - 1];
+            }
+        } else if let Some(&first) = nav.first() {
+            self.transcript_interaction.cursor = first;
+        }
+        self.transcript_interaction.following = false;
+    }
+
+    /// Move cursor by `delta` navigable entries (positive = forward, negative = back).
+    fn transcript_cursor_by(&mut self, snap: &TranscriptSnapshot, delta: isize) {
+        let nav = snap.navigable_entries(self.transcript_interaction.show_thinking);
+        if nav.is_empty() {
+            return;
+        }
+        let pos = nav
+            .iter()
+            .position(|&i| i == self.transcript_interaction.cursor)
+            .unwrap_or(0);
+        let new_pos = (pos as isize + delta).clamp(0, nav.len() as isize - 1) as usize;
+        self.transcript_interaction.cursor = nav[new_pos];
+        self.transcript_interaction.following =
+            new_pos + 1 == nav.len();
+    }
+
+    /// Jump to the first navigable entry.
+    fn transcript_cursor_first(&mut self, snap: &TranscriptSnapshot) {
+        let nav = snap.navigable_entries(self.transcript_interaction.show_thinking);
+        if let Some(&first) = nav.first() {
+            self.transcript_interaction.cursor = first;
+        }
+        self.transcript_interaction.following = false;
+    }
+
+    /// Jump to the last navigable entry and re-engage tail-follow.
+    fn transcript_cursor_last(&mut self, snap: &TranscriptSnapshot) {
+        let nav = snap.navigable_entries(self.transcript_interaction.show_thinking);
+        if let Some(&last) = nav.last() {
+            self.transcript_interaction.cursor = last;
+        }
+        self.transcript_interaction.following = true;
+    }
+
+    /// Toggle expansion of the current cursor entry.
+    fn transcript_toggle_expand(&mut self) {
+        let idx = self.transcript_interaction.cursor;
+        if self.transcript_interaction.expanded.contains(&idx) {
+            self.transcript_interaction.expanded.remove(&idx);
+        } else {
+            self.transcript_interaction.expanded.insert(idx);
+        }
+        // Expanding/collapsing invalidates the cached lines for this entry.
+        self.transcript_cache.remove(&(idx, true));
+        self.transcript_cache.remove(&(idx, false));
+    }
+
+    /// Toggle thinking visibility.  If turning off and cursor is on a Thinking
+    /// entry, advance to the next visible entry.
+    fn transcript_toggle_thinking(&mut self, snap: &TranscriptSnapshot) {
+        self.transcript_interaction.show_thinking = !self.transcript_interaction.show_thinking;
+        // Toggling invalidates all thinking-block cache entries.
+        self.transcript_cache.retain(|(idx, _), _| {
+            !matches!(snap.entries.get(*idx), Some(TranscriptEntry::Thinking(_)))
+        });
+
+        // If now hiding thinking and cursor is on a Thinking entry, advance.
+        if !self.transcript_interaction.show_thinking {
+            if let Some(TranscriptEntry::Thinking(_)) =
+                snap.entries.get(self.transcript_interaction.cursor)
+            {
+                let nav = snap.navigable_entries(false);
+                // Find the next entry after the current cursor.
+                let next = nav
+                    .iter()
+                    .find(|&&i| i > self.transcript_interaction.cursor)
+                    .or_else(|| nav.first())
+                    .copied();
+                if let Some(next_idx) = next {
+                    self.transcript_interaction.cursor = next_idx;
+                }
+            }
         }
     }
 }
@@ -468,27 +619,70 @@ impl View for PerriView {
                         self.transcript_rx = Some(rx);
                     }
                 }
-                self.transcript_scroll = 0;
+                self.transcript_scroll_offset = 0;
                 return EventOutcome::Consumed;
             }
 
-            // Scroll transcript when visible and not capturing.
+            // Transcript navigation keys — only when transcript visible and not capturing PTY.
             if self.transcript_visible && !self.pty_capturing {
+                // Snapshot borrow must be released before mutably borrowing self.
+                let snap_opt = self.transcript_rx.as_ref().map(|rx| rx.borrow().clone());
+
                 match k.code {
+                    // j / Down — next entry.
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if let Some(snap) = snap_opt {
+                            self.transcript_cursor_next(&snap);
+                        }
+                        return EventOutcome::Consumed;
+                    }
+                    // k / Up — previous entry.
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if let Some(snap) = snap_opt {
+                            self.transcript_cursor_prev(&snap);
+                        }
+                        return EventOutcome::Consumed;
+                    }
+                    // g / Home — jump to first.
+                    KeyCode::Char('g') | KeyCode::Home => {
+                        if let Some(snap) = snap_opt {
+                            self.transcript_cursor_first(&snap);
+                        }
+                        return EventOutcome::Consumed;
+                    }
+                    // G / End — jump to last, re-engage tail-follow.
+                    KeyCode::Char('G') | KeyCode::End => {
+                        if let Some(snap) = snap_opt {
+                            self.transcript_cursor_last(&snap);
+                        }
+                        return EventOutcome::Consumed;
+                    }
+                    // o / Enter — toggle expansion of current entry.
+                    KeyCode::Char('o') | KeyCode::Enter => {
+                        self.transcript_toggle_expand();
+                        return EventOutcome::Consumed;
+                    }
+                    // T — toggle thinking visibility.
+                    KeyCode::Char('T') => {
+                        if let Some(snap) = snap_opt {
+                            self.transcript_toggle_thinking(&snap);
+                        }
+                        return EventOutcome::Consumed;
+                    }
+                    // PageUp — move cursor back by half pane height.
                     KeyCode::PageUp => {
-                        self.transcript_scroll = self.transcript_scroll.saturating_add(10);
+                        let half = self.transcript_area.height / 2;
+                        if let Some(snap) = snap_opt {
+                            self.transcript_cursor_by(&snap, -(half as isize));
+                        }
                         return EventOutcome::Consumed;
                     }
+                    // PageDown — move cursor forward by half pane height.
                     KeyCode::PageDown => {
-                        self.transcript_scroll = self.transcript_scroll.saturating_sub(10);
-                        return EventOutcome::Consumed;
-                    }
-                    KeyCode::Home | KeyCode::Char('g') => {
-                        self.transcript_scroll = u16::MAX;
-                        return EventOutcome::Consumed;
-                    }
-                    KeyCode::End | KeyCode::Char('G') => {
-                        self.transcript_scroll = 0;
+                        let half = self.transcript_area.height / 2;
+                        if let Some(snap) = snap_opt {
+                            self.transcript_cursor_by(&snap, half as isize);
+                        }
                         return EventOutcome::Consumed;
                     }
                     _ => {}
@@ -496,7 +690,7 @@ impl View for PerriView {
             }
 
             match k.code {
-                KeyCode::Enter if self.pty.is_none() => {
+                KeyCode::Enter if self.pty.is_none() && !self.transcript_visible => {
                     let sid = uuid::Uuid::new_v4().to_string();
                     let sid_clone = sid.clone();
                     let (cols, rows) =
@@ -518,12 +712,13 @@ impl View for PerriView {
                         Ok(host) => {
                             self.pty = Some(host);
                             self.pty_capturing = true;
-                            // Reset any previous transcript reader.
                             self.transcript_reader = None;
                             self.transcript_rx = None;
-                            self.transcript_scroll = 0;
+                            self.transcript_scroll_offset = 0;
+                            self.transcript_interaction = TranscriptInteraction::default();
+                            self.transcript_cache.clear();
+                            self.last_entry_count = 0;
                             self.current_session_id = Some(sid.clone());
-                            // Persist so Ctrl+T works after restart.
                             let mut store = crate::sessions::SessionStore::load();
                             store.record(
                                 PERRI_PTY_TAG,
@@ -539,7 +734,7 @@ impl View for PerriView {
                     }
                     return EventOutcome::Consumed;
                 }
-                KeyCode::Down | KeyCode::Char('j') if !self.pty_capturing => {
+                KeyCode::Down | KeyCode::Char('j') if !self.pty_capturing && !self.transcript_visible => {
                     let len = self
                         .queue_rx
                         .borrow()
@@ -551,7 +746,7 @@ impl View for PerriView {
                     }
                     return EventOutcome::Consumed;
                 }
-                KeyCode::Up | KeyCode::Char('k') if !self.pty_capturing => {
+                KeyCode::Up | KeyCode::Char('k') if !self.pty_capturing && !self.transcript_visible => {
                     let len = self
                         .queue_rx
                         .borrow()
@@ -570,6 +765,8 @@ impl View for PerriView {
         if let AppEvent::Mouse(m) = ev {
             let in_repl = rect_contains(self.repl_area, m.column, m.row);
             let in_list = rect_contains(self.pr_list_area, m.column, m.row);
+            let in_transcript = self.transcript_visible
+                && rect_contains(self.transcript_area, m.column, m.row);
             let len = self
                 .queue_rx
                 .borrow()
@@ -578,6 +775,14 @@ impl View for PerriView {
                 .unwrap_or(0);
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
+                    // Check transcript area for left-click to toggle expansion.
+                    if in_transcript {
+                        // A click anywhere in the transcript pane toggles expand
+                        // on the cursor entry (the layout highlight makes it clear
+                        // which entry is focused).
+                        self.transcript_toggle_expand();
+                        return EventOutcome::Consumed;
+                    }
                     if drag::hit_test(
                         m.column, m.row,
                         0, self.top_row_divider_row,
@@ -627,6 +832,14 @@ impl View for PerriView {
                     }
                 }
                 MouseEventKind::ScrollUp => {
+                    if in_transcript {
+                        // Scroll wheel moves the cursor (keeps selection with eye movement).
+                        let snap_opt = self.transcript_rx.as_ref().map(|rx| rx.borrow().clone());
+                        if let Some(snap) = snap_opt {
+                            self.transcript_cursor_prev(&snap);
+                        }
+                        return EventOutcome::Consumed;
+                    }
                     if in_repl {
                         self.repl_scroll = self.repl_scroll.saturating_add(3);
                     } else if in_list && len > 0 {
@@ -635,6 +848,13 @@ impl View for PerriView {
                     return EventOutcome::Consumed;
                 }
                 MouseEventKind::ScrollDown => {
+                    if in_transcript {
+                        let snap_opt = self.transcript_rx.as_ref().map(|rx| rx.borrow().clone());
+                        if let Some(snap) = snap_opt {
+                            self.transcript_cursor_next(&snap);
+                        }
+                        return EventOutcome::Consumed;
+                    }
                     if in_repl {
                         self.repl_scroll = self.repl_scroll.saturating_sub(3);
                     } else if in_list && len > 0 {

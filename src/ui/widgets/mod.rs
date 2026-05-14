@@ -5,4 +5,5 @@ pub mod right_panel;
 pub mod syntect_cache;
 pub mod syntect_diff;
 pub mod transcript;
+pub mod transcript_layout;
 pub mod truncate;

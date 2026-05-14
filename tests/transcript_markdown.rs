@@ -286,6 +286,8 @@ fn cache_does_not_recompute_on_same_snapshot() {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use nostromo::ui::widgets::transcript_layout::TranscriptInteraction;
+
     let sc = sc();
     let snap = TranscriptSnapshot {
         entries: Arc::new(vec![TranscriptEntry::AssistantText(
@@ -295,22 +297,26 @@ fn cache_does_not_recompute_on_same_snapshot() {
         session_id: "test-sid".to_string(),
     };
 
-    let mut cache: HashMap<usize, Vec<ratatui::text::Line<'static>>> = HashMap::new();
+    let interaction = TranscriptInteraction::default();
+    let mut cache: HashMap<(usize, bool), Vec<ratatui::text::Line<'static>>> = HashMap::new();
     let width = 80u16;
     let area = Rect::new(0, 0, 82, 20);
 
     // First render: fills cache.
     {
         let mut buf = Buffer::empty(area);
-        TranscriptWidget::new(&snap, 0, &sc, &mut cache, width).render(area, &mut buf);
+        TranscriptWidget::new(&snap, 0, &sc, &mut cache, width, &interaction)
+            .render(area, &mut buf);
     }
+    // AssistantText is cached under (idx=0, is_expanded=false).
     assert_eq!(cache.len(), 1, "cache should have 1 entry after first render");
 
     // Second render: should NOT add new entries (count stays the same).
     let cache_len_before = cache.len();
     {
         let mut buf = Buffer::empty(area);
-        TranscriptWidget::new(&snap, 0, &sc, &mut cache, width).render(area, &mut buf);
+        TranscriptWidget::new(&snap, 0, &sc, &mut cache, width, &interaction)
+            .render(area, &mut buf);
     }
     assert_eq!(
         cache.len(),

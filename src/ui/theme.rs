@@ -113,3 +113,11 @@ pub fn style_link() -> Style {
         .fg(BORDER_ACTIVE)
         .add_modifier(Modifier::UNDERLINED)
 }
+
+/// Cursor gutter colour — left-gutter marker for the selected transcript entry.
+pub const CURSOR: Color = Color::Rgb(100, 149, 237); // cornflower (matches BORDER_ACTIVE)
+
+/// Dim style — used for collapsed arrow glyphs and thinking prefixes.
+pub fn style_dim() -> Style {
+    Style::default().fg(FG_MUTED)
+}

@@ -35,3 +35,22 @@ pub struct TranscriptSnapshot {
     pub path: PathBuf,
     pub session_id: String,
 }
+
+impl TranscriptSnapshot {
+    /// Returns the list of entry indices the cursor can land on.
+    ///
+    /// - `TurnEnd` entries are always skipped (they are visual separators, not
+    ///   navigable content).
+    /// - `Thinking` entries are included only when `show_thinking` is `true`.
+    pub fn navigable_entries(&self, show_thinking: bool) -> Vec<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match e {
+                TranscriptEntry::TurnEnd => None,
+                TranscriptEntry::Thinking(_) if !show_thinking => None,
+                _ => Some(i),
+            })
+            .collect()
+    }
+}
