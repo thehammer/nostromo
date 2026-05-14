@@ -45,6 +45,7 @@ use crate::{
     },
     event::{self, AppEvent},
     layout::{self, LayoutNode, Side, SplitDir},
+    mcp::{McpServer, McpSharedState, ViewMeta},
     mother::{self, MotherJob},
     pty::{DaemonPtyFactory, InProcessPtyFactory, PtyFactory},
     ui,
@@ -230,16 +231,48 @@ pub async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     event::spawn(tx.clone());
 
+    // ── MCP shared state ─────────────────────────────────────────────────────
+    let mcp_state = Arc::new(McpSharedState::new(tx.clone()));
+
+    // Populate static view metadata once at startup.
+    {
+        let mut views_meta = mcp_state.views_meta.write().await;
+        *views_meta = vec![
+            ViewMeta { id: "fred",    title: "Fred".to_string(),    pane_ids: vec!["mailbox", "calendar", "repl"] },
+            ViewMeta { id: "perri",   title: "Perri".to_string(),   pane_ids: vec!["pr_queue", "diff", "repl"] },
+            ViewMeta { id: "claudia", title: "Claudia".to_string(), pane_ids: vec!["repl"] },
+            ViewMeta { id: "cody",    title: "Cody".to_string(),    pane_ids: vec!["repl"] },
+            ViewMeta { id: "kennedy", title: "Kennedy".to_string(), pane_ids: vec!["repl"] },
+            ViewMeta { id: "teri",    title: "Teri".to_string(),    pane_ids: vec!["todos", "repl"] },
+            ViewMeta { id: "mother",  title: "Mother".to_string(),  pane_ids: vec!["job_list", "log", "preview"] },
+        ];
+    }
+
+    // Bind MCP server (best-effort: failure logs a warning but doesn't crash).
+    let _mcp_server = match McpServer::bind(
+        crate::mcp::default_socket_path(),
+        (*mcp_state).clone(),
+    ).await {
+        Ok(srv) => {
+            info!(socket = ?srv.socket_path(), "MCP server bound");
+            Some(srv)
+        }
+        Err(e) => {
+            warn!("MCP server bind failed (continuing without MCP): {e:#}");
+            None
+        }
+    };
+
     // Construct PtyFactory; also spawn Mother pollers or daemon bridge.
     let pty_factory: Arc<dyn PtyFactory> = if let Some(client) = daemon_client {
         info!("using daemon bridge for Mother + activity events");
         crate::data::daemon_bridge::spawn(client.clone(), tx.clone(), Arc::clone(&bus));
-        let factory = DaemonPtyFactory::new_with_refresh(client).await;
+        let factory = DaemonPtyFactory::new_with_refresh(client, Arc::clone(&mcp_state)).await;
         Arc::new(factory)
     } else {
         // In-process fallback: spawn Mother pollers as before.
         mother_poll::spawn(tx.clone());
-        Arc::new(InProcessPtyFactory)
+        Arc::new(InProcessPtyFactory::new(Arc::clone(&mcp_state)))
     };
 
     // Spawn break-glass sentinel watcher.
@@ -254,20 +287,24 @@ pub async fn run(
     let fred_ctx = ViewCtx {
         event_tx: tx.clone(),
         pty_factory: Arc::clone(&pty_factory),
+        mcp_state: Arc::clone(&mcp_state),
     };
     let perri_ctx = ViewCtx {
         event_tx: tx.clone(),
         pty_factory: Arc::clone(&pty_factory),
+        mcp_state: Arc::clone(&mcp_state),
     };
     let mother_ctx = ViewCtx {
         event_tx: tx.clone(),
         pty_factory: Arc::clone(&pty_factory),
+        mcp_state: Arc::clone(&mcp_state),
     };
 
     let teri_todos_rx = TeriTodosNativeSource::spawn();
     let teri_ctx = ViewCtx {
         event_tx: tx.clone(),
         pty_factory: Arc::clone(&pty_factory),
+        mcp_state: Arc::clone(&mcp_state),
     };
 
     let mut views: Vec<BoxedView> = vec![
@@ -291,6 +328,7 @@ pub async fn run(
             ViewCtx {
                 event_tx: tx.clone(),
                 pty_factory: Arc::clone(&pty_factory),
+                mcp_state: Arc::clone(&mcp_state),
             },
         )),
         Box::new(views::agent_generic::GenericView::new(
@@ -299,6 +337,7 @@ pub async fn run(
             ViewCtx {
                 event_tx: tx.clone(),
                 pty_factory: Arc::clone(&pty_factory),
+                mcp_state: Arc::clone(&mcp_state),
             },
         )),
         Box::new(views::agent_generic::GenericView::new(
@@ -307,6 +346,7 @@ pub async fn run(
             ViewCtx {
                 event_tx: tx.clone(),
                 pty_factory: Arc::clone(&pty_factory),
+                mcp_state: Arc::clone(&mcp_state),
             },
         )),
         Box::new(views::teri::TeriView::new(teri_todos_rx, teri_ctx)),

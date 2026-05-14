@@ -78,12 +78,16 @@ async fn fred_layout_renders_without_panic() {
     drop(cal_tx);
 
     let config = nostromo::config::Config::default();
+    use nostromo::mcp::McpSharedState;
     use nostromo::pty::InProcessPtyFactory;
     use std::sync::Arc;
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (mcp_tx, _mcp_rx) = mpsc::unbounded_channel();
+    let mcp_state = Arc::new(McpSharedState::new(mcp_tx));
     let ctx = ViewCtx {
         event_tx,
-        pty_factory: Arc::new(InProcessPtyFactory),
+        pty_factory: Arc::new(InProcessPtyFactory::new(Arc::clone(&mcp_state))),
+        mcp_state,
     };
     // Use halfblocks picker for tests — avoids querying the terminal.
     let picker = ratatui_image::picker::Picker::halfblocks();

@@ -286,8 +286,16 @@ fn handle_client_msg(
                 mgr.spawn_pty(pty_id, &cmd, &args, cols, rows, cwd, client_tag)
             };
             match result {
-                Ok(id) => {
-                    let _ = targeted_tx.send(ServerMsg::PtySpawned { pty_id: id });
+                Ok((id, nostromo_pty_id, nostromo_session_id)) => {
+                    let _ = targeted_tx.send(ServerMsg::PtySpawned { pty_id: id.clone() });
+                    // Send PtyIdentity follow-up so the TUI can register the PTY
+                    // with McpSharedState.  Sent as a separate message to avoid a
+                    // protocol-version bump.
+                    let _ = targeted_tx.send(ServerMsg::PtyIdentity {
+                        pty_id: id,
+                        nostromo_pty_id,
+                        nostromo_session_id,
+                    });
                 }
                 Err(e) => {
                     warn!(client_id, cmd, "PtySpawn failed: {e:#}");

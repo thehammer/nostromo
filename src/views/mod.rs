@@ -18,7 +18,7 @@ use std::sync::Arc;
 use ratatui::{layout::Rect, Frame};
 use tokio::sync::mpsc;
 
-use crate::{event::AppEvent, pty::PtyFactory};
+use crate::{event::AppEvent, mcp::state::McpSharedState, pty::PtyFactory};
 
 /// Shared wiring passed to every view that can host a PTY.
 pub struct ViewCtx {
@@ -30,6 +30,9 @@ pub struct ViewCtx {
     /// Uses daemon-owned PTYs when the daemon is connected; falls back to
     /// in-process `PtyHost` otherwise.
     pub pty_factory: Arc<dyn PtyFactory>,
+    /// Shared MCP state.  Views that spawn PTYs directly (bypassing the
+    /// factory) should use this to register/deregister identities.
+    pub mcp_state: Arc<McpSharedState>,
 }
 
 /// What a view returns after handling an event.
