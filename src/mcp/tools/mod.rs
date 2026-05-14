@@ -2,14 +2,19 @@
 //!
 //! Phase 1: `nostromo.get_self`
 //! Phase 2: 12 new read-only introspection tools across all views.
+//! Phase 3: Pane mutation and cross-view dispatch tools.
 
 pub mod fred;
 pub mod get_self;
 pub mod get_view_state;
 pub mod list_views;
 pub mod mother;
+pub mod mother_mutators;
 pub mod nostromo_meta;
 pub mod perri;
+pub mod perri_mutators;
+pub mod set_pane;
+pub mod switch_view;
 pub mod teri;
 
 use serde_json::{json, Value};
@@ -155,6 +160,134 @@ pub fn tool_descriptors() -> Vec<Value> {
             "description": "Returns Teri's active todo list (open, in_progress, blocked items).",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
+        // ── Phase 3: pane / view mutations ────────────────────────────────
+        json!({
+            "name": "nostromo.set_pane_content",
+            "description": "Set the content of a named pane within a view. Errors: unknown_view, unknown_pane, readonly_pane, not_supported.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string", "description": "View id (e.g. 'perri', 'fred')" },
+                    "pane_id": { "type": "string", "description": "Pane id within the view (e.g. 'diff', 'mailbox')" },
+                    "content": {
+                        "type": "object",
+                        "description": "{ type: 'text', text: '...' } or { type: 'json_snapshot', value: ... }"
+                    }
+                },
+                "required": ["view_id", "pane_id", "content"]
+            }
+        }),
+        json!({
+            "name": "nostromo.set_pane_focus",
+            "description": "Focus a specific pane within a view (also switches the active view tab).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string" },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["view_id", "pane_id"]
+            }
+        }),
+        json!({
+            "name": "nostromo.set_pane_layout",
+            "description": "Update a view's pane-split ratios. Ratios are view-specific JSON (e.g. { top_row: 0.6, queue: 0.4 } for Perri).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string" },
+                    "ratios": { "type": "object", "description": "View-specific ratio keys and values (0.1–0.9)" }
+                },
+                "required": ["view_id", "ratios"]
+            }
+        }),
+        json!({
+            "name": "nostromo.switch_active_view",
+            "description": "Switch the globally-active Nostromo view tab. Calls blur() on the old view and focus() on the new.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string", "description": "View id to activate" }
+                },
+                "required": ["view_id"]
+            }
+        }),
+        // ── Phase 3: Perri mutations ───────────────────────────────────────
+        json!({
+            "name": "perri.load_pr",
+            "description": "Load a pull request into Perri's diff pane. Writes current-pr.json and triggers the native watcher.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "number": { "type": "integer", "description": "PR number" },
+                    "repo": { "type": "string", "description": "Repository in 'owner/repo' format" },
+                    "highlights": { "type": "string", "description": "Optional review notes or highlight context" }
+                },
+                "required": ["number", "repo"]
+            }
+        }),
+        json!({
+            "name": "perri.clear_current_pr",
+            "description": "Clear the currently-loaded PR from Perri's diff pane.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        }),
+        json!({
+            "name": "perri.set_selected_index",
+            "description": "Set the selected PR index in Perri's queue list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "description": "0-based index into the PR queue" }
+                },
+                "required": ["index"]
+            }
+        }),
+        // ── Phase 3: Mother mutations ──────────────────────────────────────
+        json!({
+            "name": "mother.enqueue_job",
+            "description": "Enqueue a plan file as a new Mother job. Returns { id, title, status }.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plan_path": { "type": "string", "description": "Absolute path to the plan Markdown file" }
+                },
+                "required": ["plan_path"]
+            }
+        }),
+        json!({
+            "name": "mother.cancel_job",
+            "description": "Cancel a running, queued, or awaiting Mother job by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }
+                },
+                "required": ["id"]
+            }
+        }),
+        json!({
+            "name": "mother.archive_job",
+            "description": "Archive a terminal-state Mother job by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }
+                },
+                "required": ["id"]
+            }
+        }),
+        json!({
+            "name": "mother.resume_job",
+            "description": "Resume an awaiting Mother job by providing the operator's answer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "answer": { "type": "string", "description": "The operator's answer to the pending question" }
+                },
+                "required": ["id", "answer"]
+            }
+        }),
     ]
 }
 
@@ -247,6 +380,55 @@ pub async fn dispatch(
 
         // ── Phase 2: Teri ─────────────────────────────────────────────────
         "teri.list_todos" => teri::list_todos(state),
+
+        // ── Phase 3: pane / view mutations ────────────────────────────────
+        "nostromo.set_pane_content" => {
+            let args = arguments.cloned().unwrap_or_default();
+            set_pane::set_pane_content(state, &args).await
+        }
+        "nostromo.set_pane_focus" => {
+            let args = arguments.cloned().unwrap_or_default();
+            set_pane::set_pane_focus(state, &args).await
+        }
+        "nostromo.set_pane_layout" => {
+            let args = arguments.cloned().unwrap_or_default();
+            set_pane::set_pane_layout(state, &args).await
+        }
+        "nostromo.switch_active_view" => {
+            let args = arguments.cloned().unwrap_or_default();
+            switch_view::switch_active_view(state, &args).await
+        }
+
+        // ── Phase 3: Perri mutations ───────────────────────────────────────
+        "perri.load_pr" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri_mutators::load_pr(state, &args).await
+        }
+        "perri.clear_current_pr" => {
+            perri_mutators::clear_current_pr(state).await
+        }
+        "perri.set_selected_index" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri_mutators::set_selected_index(state, &args).await
+        }
+
+        // ── Phase 3: Mother mutations ──────────────────────────────────────
+        "mother.enqueue_job" => {
+            let args = arguments.cloned().unwrap_or_default();
+            mother_mutators::enqueue_job(state, &args).await
+        }
+        "mother.cancel_job" => {
+            let args = arguments.cloned().unwrap_or_default();
+            mother_mutators::cancel_job(state, &args).await
+        }
+        "mother.archive_job" => {
+            let args = arguments.cloned().unwrap_or_default();
+            mother_mutators::archive_job(state, &args).await
+        }
+        "mother.resume_job" => {
+            let args = arguments.cloned().unwrap_or_default();
+            mother_mutators::resume_job(state, &args).await
+        }
 
         other => return ToolResult::UnknownTool(other.to_string()),
     };

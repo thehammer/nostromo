@@ -33,11 +33,13 @@
 //!
 //! Phases 3–4 will add pane mutations and cross-view dispatch.
 
+pub mod command;
 pub mod server;
 pub mod socket;
 pub mod state;
 pub mod tools;
 
+pub use command::{McpCommand, PaneContent};
 pub use server::McpServer;
 pub use socket::default_socket_path;
 pub use state::{McpSharedState, PtyIdentity, ViewMeta};

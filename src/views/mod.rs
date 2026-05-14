@@ -18,7 +18,7 @@ use std::sync::Arc;
 use ratatui::{layout::Rect, Frame};
 use tokio::sync::mpsc;
 
-use crate::{event::AppEvent, mcp::state::McpSharedState, pty::PtyFactory};
+use crate::{event::AppEvent, mcp::{command::PaneContent, state::McpSharedState}, pty::PtyFactory};
 
 /// Shared wiring passed to every view that can host a PTY.
 pub struct ViewCtx {
@@ -82,6 +82,22 @@ pub trait View: Send + Any {
 
     /// Called when this view loses focus.
     fn blur(&mut self) {}
+
+    /// Apply a structural content change to a named pane.
+    ///
+    /// Returns `Ok(())` on success.  Returns `Err` with a stable machine-readable
+    /// string code for unknown panes (`"unknown_pane"`), read-only panes
+    /// (`"readonly_pane"`), or unsupported views (`"not_supported"`).
+    fn apply_pane_content(&mut self, _pane_id: &str, _content: &PaneContent) -> Result<(), String> {
+        Err("not_supported".into())
+    }
+
+    /// Apply layout-ratio changes from a JSON value.
+    ///
+    /// Same error-code convention as [`apply_pane_content`].
+    fn apply_pane_layout(&mut self, _ratios: &serde_json::Value) -> Result<(), String> {
+        Err("not_supported".into())
+    }
 
     /// Downcast support.
     fn as_any(&self) -> &dyn Any;

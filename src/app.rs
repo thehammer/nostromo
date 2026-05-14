@@ -482,6 +482,19 @@ pub async fn run(
             continue;
         }
 
+        // ── MCP mutations ─────────────────────────────────────────────────────
+        if let AppEvent::McpCommand(cmd) = ev {
+            handle_mcp_command(
+                *cmd,
+                &mut views,
+                &mut active,
+                &mut state,
+                PERRI_IDX,
+                MOTHER_IDX,
+            ).await;
+            continue;
+        }
+
         // ── Background data events ────────────────────────────────────────────
         match &ev {
             AppEvent::BreakGlassDetected(req) => {
@@ -1059,6 +1072,214 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
 
         MotherAction::OpenAwaitModal(job) => {
             state.modal = Some(ModalState::Await(Box::new(AwaitModal::new(job))));
+        }
+    }
+}
+
+// ── MCP command dispatcher ────────────────────────────────────────────────────
+
+/// Dispatch an `McpCommand` from the MCP server to the correct view or system.
+///
+/// All reply channels are consumed here; if we can't find the reply receiver
+/// (already dropped) we log a warning and move on.
+async fn handle_mcp_command(
+    cmd: crate::mcp::command::McpCommand,
+    views: &mut Vec<BoxedView>,
+    active: &mut usize,
+    state: &mut AppState,
+    perri_idx: usize,
+    mother_idx: usize,
+) {
+    use crate::mcp::command::McpCommand;
+
+    let _ = mother_idx; // used for context; Mother mutations are CLI-based
+
+    match cmd {
+        // ── SetPaneFocus ─────────────────────────────────────────────────────
+        McpCommand::SetPaneFocus { view_id, pane_id: _, reply } => {
+            // For now, interpret SetPaneFocus as switching the active view.
+            match views.iter().position(|v| v.id() == view_id) {
+                Some(idx) => {
+                    let old = *active;
+                    if old != idx {
+                        views[old].blur();
+                        *active = idx;
+                        if state.split_mode {
+                            update_focused_leaf_view(&mut state.layout, &state.focused_path, idx);
+                            layout::persist::save(&state.layout);
+                        }
+                        views[*active].focus();
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                None => { let _ = reply.send(Err("unknown_view".into())); }
+            }
+        }
+
+        // ── SetPaneContent ───────────────────────────────────────────────────
+        McpCommand::SetPaneContent { view_id, pane_id, content, reply } => {
+            match views.iter_mut().position(|v| v.id() == view_id.as_str()) {
+                Some(idx) => {
+                    let result = views[idx].apply_pane_content(&pane_id, &content);
+                    let _ = reply.send(result);
+                }
+                None => { let _ = reply.send(Err("unknown_view".into())); }
+            }
+        }
+
+        // ── SetPaneLayout ────────────────────────────────────────────────────
+        McpCommand::SetPaneLayout { view_id, ratios, reply } => {
+            match views.iter_mut().position(|v| v.id() == view_id.as_str()) {
+                Some(idx) => {
+                    let result = views[idx].apply_pane_layout(&ratios);
+                    let _ = reply.send(result);
+                }
+                None => { let _ = reply.send(Err("unknown_view".into())); }
+            }
+        }
+
+        // ── SwitchActiveView ─────────────────────────────────────────────────
+        McpCommand::SwitchActiveView { view_id, reply } => {
+            match views.iter().position(|v| v.id() == view_id) {
+                Some(idx) => {
+                    let old = *active;
+                    if old != idx {
+                        views[old].blur();
+                        *active = idx;
+                        if state.split_mode {
+                            update_focused_leaf_view(&mut state.layout, &state.focused_path, idx);
+                            layout::persist::save(&state.layout);
+                        }
+                        views[*active].focus();
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                None => { let _ = reply.send(Err("unknown_view".into())); }
+            }
+        }
+
+        // ── PerriLoadPr ──────────────────────────────────────────────────────
+        McpCommand::PerriLoadPr { number, repo, highlights, reply } => {
+            if let Some(pv) = views[perri_idx]
+                .as_any_mut()
+                .downcast_mut::<views::perri::PerriView>()
+            {
+                let result = pv.load_pr(number, repo, highlights);
+                let _ = reply.send(result);
+            } else {
+                let _ = reply.send(Err("internal_error: perri downcast failed".into()));
+            }
+        }
+
+        // ── PerriClearCurrentPr ───────────────────────────────────────────────
+        McpCommand::PerriClearCurrentPr { reply } => {
+            if let Some(pv) = views[perri_idx]
+                .as_any_mut()
+                .downcast_mut::<views::perri::PerriView>()
+            {
+                let result = pv.clear_current_pr();
+                let _ = reply.send(result);
+            } else {
+                let _ = reply.send(Err("internal_error: perri downcast failed".into()));
+            }
+        }
+
+        // ── GetPerriSelectedIndex ─────────────────────────────────────────────
+        McpCommand::GetPerriSelectedIndex { reply } => {
+            if let Some(pv) = views[perri_idx]
+                .as_any()
+                .downcast_ref::<views::perri::PerriView>()
+            {
+                let _ = reply.send(Ok(pv.selected_pr_index()));
+            } else {
+                let _ = reply.send(Err("internal_error: perri downcast failed".into()));
+            }
+        }
+
+        // ── SetPerriSelectedIndex ─────────────────────────────────────────────
+        McpCommand::SetPerriSelectedIndex { index, reply } => {
+            if let Some(pv) = views[perri_idx]
+                .as_any_mut()
+                .downcast_mut::<views::perri::PerriView>()
+            {
+                pv.set_selected_pr_index(index);
+                let _ = reply.send(Ok(()));
+            } else {
+                let _ = reply.send(Err("internal_error: perri downcast failed".into()));
+            }
+        }
+
+        // ── MotherEnqueue ─────────────────────────────────────────────────────
+        McpCommand::MotherEnqueue { plan_path, reply } => {
+            if !plan_path.exists() || !plan_path.is_file() {
+                let _ = reply.send(Err(format!(
+                    "plan_not_found: {}",
+                    plan_path.display()
+                )));
+                return;
+            }
+            if let Err(e) = mother::add_plan(&plan_path).await {
+                let _ = reply.send(Err(format!("mother_cli_error: {e}")));
+                return;
+            }
+            // Re-list to find the new job (mother add doesn't return a job id).
+            match mother::list_jobs().await {
+                Ok(jobs) => {
+                    // The most recently created job is probably our new one.
+                    // Find a queued or ready job whose plan_path matches.
+                    let path_str = plan_path.to_string_lossy();
+                    let lite = jobs
+                        .iter()
+                        .find(|j| {
+                            j.plan_path.as_deref() == Some(path_str.as_ref())
+                                && (j.state == "queued" || j.state == "ready")
+                        })
+                        .or_else(|| jobs.iter().max_by_key(|j| j.created_at))
+                        .map(|j| crate::mcp::command::MotherJobLite {
+                            id: j.id.clone(),
+                            title: j.title.clone(),
+                            status: j.state.clone(),
+                        })
+                        .unwrap_or_else(|| crate::mcp::command::MotherJobLite {
+                            id: String::new(),
+                            title: String::new(),
+                            status: "unknown".into(),
+                        });
+                    let _ = reply.send(Ok(lite));
+                }
+                Err(e) => {
+                    // add_plan succeeded, but list failed — best-effort reply.
+                    let _ = reply.send(Ok(crate::mcp::command::MotherJobLite {
+                        id: String::new(),
+                        title: format!("mother_list_error: {e}"),
+                        status: "queued".into(),
+                    }));
+                }
+            }
+        }
+
+        // ── MotherCancel ──────────────────────────────────────────────────────
+        McpCommand::MotherCancel { job_id, reply } => {
+            match mother::cancel(&job_id).await {
+                Ok(()) => { let _ = reply.send(Ok(())); }
+                Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
+            }
+        }
+
+        // ── MotherArchive ─────────────────────────────────────────────────────
+        McpCommand::MotherArchive { job_id, reply } => {
+            match mother::archive(&job_id).await {
+                Ok(()) => { let _ = reply.send(Ok(())); }
+                Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
+            }
+        }
+
+        // ── MotherResume ──────────────────────────────────────────────────────
+        McpCommand::MotherResume { job_id, answer, reply } => {
+            match mother::resume(&job_id, &answer).await {
+                Ok(()) => { let _ = reply.send(Ok(())); }
+                Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
+            }
         }
     }
 }
