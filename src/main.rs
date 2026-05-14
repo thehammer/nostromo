@@ -146,21 +146,10 @@ async fn main() -> Result<()> {
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
         .context("entering alternate screen")?;
 
-    // Kitty keyboard protocol push — temporarily disabled while investigating
-    // whether it breaks mouse scroll in REPL panes on Ghostty.
-    // let _ = execute!(
-    //     stdout,
-    //     crossterm::event::PushKeyboardEnhancementFlags(
-    //         crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-    //             | crossterm::event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
-    //     )
-    // );
-
     // Panic hook: restore terminal before dumping the panic message so the
     // user's shell isn't left in an unusable state.
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
@@ -179,7 +168,6 @@ async fn main() -> Result<()> {
         {
             stream.recv().await;
         }
-        let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
@@ -217,11 +205,6 @@ async fn main() -> Result<()> {
     // ------------------------------------------------------------------
     // Terminal teardown (always, even if run() errored)
     // ------------------------------------------------------------------
-    execute!(
-        terminal.backend_mut(),
-        crossterm::event::PopKeyboardEnhancementFlags
-    )
-    .ok();
     disable_raw_mode().ok();
     execute!(
         terminal.backend_mut(),
