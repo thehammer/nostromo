@@ -18,6 +18,10 @@ path = "src/main.rs"
 name = "nostromd"
 path = "src/bin/nostromd.rs"
 
+[[bin]]
+name = "nostromo-mcp-bridge"
+path = "src/bin/nostromo_mcp_bridge.rs"
+
 [dependencies]
 # TUI
 ratatui = "0.30"

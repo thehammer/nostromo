@@ -60,7 +60,9 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::PtySpawned { .. }
         | ServerMsg::PtyExited { .. }
         | ServerMsg::PtyDetach { .. }
-        | ServerMsg::PtyListResp { .. } => {
+        | ServerMsg::PtyListResp { .. }
+        // PtyIdentity is consumed directly by DaemonPtyClient::spawn_new_with_mcp.
+        | ServerMsg::PtyIdentity { .. } => {
             // Ignored here — PTY consumers subscribe independently.
         }
         // Control messages — no action needed.

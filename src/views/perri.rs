@@ -31,7 +31,6 @@ pub struct PerriView {
     queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
     pr_rx: watch::Receiver<Option<PrSnapshot>>,
     selected_pr: usize,
-    #[allow(dead_code)]
     config: Config,
     ctx: ViewCtx,
     syntect: Arc<SyntectCache>,
@@ -59,6 +58,10 @@ pub struct PerriView {
     top_row_area: Rect,
     /// Parent rect for the horizontal queue/diff split (rows[0]).
     top_cols_area: Rect,
+    // ── MCP Phase 3: diff override ────────────────────────────────────────────
+    /// When set, rendered in the diff pane instead of the `pr_rx` snapshot.
+    /// Cleared when the `pr_rx` watch channel next delivers an update.
+    diff_override: Option<String>,
 }
 
 impl PerriView {
@@ -89,6 +92,7 @@ impl PerriView {
             queue_divider_col: 0,
             top_row_area: Rect::default(),
             top_cols_area: Rect::default(),
+            diff_override: None,
         }
     }
 
@@ -101,6 +105,69 @@ impl PerriView {
         // No-op for now — Perri's diff pane already shows the most-recently
         // fetched PR diff.  A future phase will add a `git diff HEAD` pane
         // keyed to the worktree path.
+    }
+
+    /// Write `current-pr.json` so the native watcher fetches the given PR.
+    ///
+    /// Constructs the minimal JSON shape accepted by `PerriPrNativeSource`
+    /// and touches the `.dirty` sentinel.  The dirty-file watcher then picks
+    /// it up and updates `pr_rx` within one poll cycle.
+    pub fn load_pr(&mut self, number: u64, repo: String, highlights: Option<String>) -> Result<(), String> {
+        let state_dir = self.config.perri_state_dir();
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| format!("io_error: {e}"))?;
+
+        let pointer = serde_json::json!({
+            "number": number,
+            "repo": repo,
+            "highlights": highlights,
+        });
+        let json = serde_json::to_string_pretty(&pointer)
+            .map_err(|e| format!("serialization_failed: {e}"))?;
+
+        let json_path = state_dir.join("current-pr.json");
+        std::fs::write(&json_path, json.as_bytes())
+            .map_err(|e| format!("io_error: {e}"))?;
+
+        // Touch the dirty sentinel to wake the watcher.
+        let dirty_path = state_dir.join("current-pr.dirty");
+        std::fs::write(&dirty_path, b"")
+            .map_err(|e| format!("io_error: {e}"))?;
+
+        // Clear any override so the live diff shows once pr_rx updates.
+        self.diff_override = None;
+
+        Ok(())
+    }
+
+    /// Remove `current-pr.json` and touch the dirty sentinel to clear Perri's diff pane.
+    pub fn clear_current_pr(&mut self) -> Result<(), String> {
+        let state_dir = self.config.perri_state_dir();
+        let json_path = state_dir.join("current-pr.json");
+        if json_path.exists() {
+            std::fs::remove_file(&json_path)
+                .map_err(|e| format!("io_error: {e}"))?;
+        }
+        let dirty_path = state_dir.join("current-pr.dirty");
+        std::fs::write(&dirty_path, b"")
+            .map_err(|e| format!("io_error: {e}"))?;
+
+        self.diff_override = None;
+        Ok(())
+    }
+
+    /// Return the current selected PR index.
+    pub fn selected_pr_index(&self) -> usize {
+        self.selected_pr
+    }
+
+    /// Set the selected PR index, clamped to the queue length.
+    pub fn set_selected_pr_index(&mut self, index: usize) {
+        let len = self.queue_rx.borrow()
+            .as_ref()
+            .map(|s| s.items.len())
+            .unwrap_or(0);
+        self.selected_pr = if len == 0 { 0 } else { index.min(len - 1) };
     }
 
     fn render_queue_with_drag(&mut self, f: &mut Frame, area: Rect, dragging: bool) {
@@ -195,6 +262,26 @@ impl PerriView {
     }
 
     fn render_diff_with_drag(&self, f: &mut Frame, area: Rect, dragging: bool) {
+        // If a diff_override is set, render it directly rather than pr_rx.
+        if let Some(override_text) = &self.diff_override {
+            let border_color = if dragging { theme::BORDER_ACTIVE } else { theme::BORDER_INACTIVE };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(Span::styled(
+                    " Diff (override) ",
+                    Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+                ));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            f.render_widget(
+                SyntectDiff::new(override_text, Arc::clone(&self.syntect))
+                    .max_lines(inner.height as usize),
+                inner,
+            );
+            return;
+        }
+
         let snap = self.pr_rx.borrow();
         let snap = snap.as_ref();
 
@@ -511,6 +598,15 @@ impl View for PerriView {
         EventOutcome::Ignored
     }
 
+    fn on_tick(&mut self) {
+        // If pr_rx was updated, clear any MCP-set diff override so the live
+        // diff takes over again.
+        if self.diff_override.is_some() && self.pr_rx.has_changed().unwrap_or(false) {
+            let _ = self.pr_rx.borrow_and_update();
+            self.diff_override = None;
+        }
+    }
+
     fn on_resize(&mut self, _area: Rect) {
         if let Some(pty) = &mut self.pty {
             pty.resize(self.repl_area.width.max(1), self.repl_area.height.max(1));
@@ -535,6 +631,56 @@ impl View for PerriView {
 
     fn blur(&mut self) {
         self.pty_capturing = false;
+    }
+
+    fn apply_pane_content(
+        &mut self,
+        pane_id: &str,
+        content: &crate::mcp::command::PaneContent,
+    ) -> Result<(), String> {
+        use crate::mcp::command::PaneContent;
+        match pane_id {
+            "pr_queue" => {
+                // Queue is data-driven from the watch channel; reject mutations.
+                Err("readonly_pane".into())
+            }
+            "diff" => match content {
+                PaneContent::Text(s) => {
+                    self.diff_override = Some(s.clone());
+                    Ok(())
+                }
+                PaneContent::JsonSnapshot(_) => Err("unsupported_payload".into()),
+            },
+            "repl" => {
+                // PTY-owned pane; reject mutations.
+                Err("readonly_pane".into())
+            }
+            _ => Err("unknown_pane".into()),
+        }
+    }
+
+    fn apply_pane_layout(&mut self, ratios: &serde_json::Value) -> Result<(), String> {
+        let top_row = ratios.get("top_row")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
+        let queue = ratios.get("queue")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
+
+        if top_row.is_none() && queue.is_none() {
+            return Err("invalid_args: expected top_row and/or queue fields".into());
+        }
+        if let Some(r) = top_row {
+            self.top_row_ratio = pane_ratios::clamp(r);
+        }
+        if let Some(r) = queue {
+            self.queue_ratio = pane_ratios::clamp(r);
+        }
+        let mut p = pane_ratios::load();
+        p.perri.top_row = self.top_row_ratio;
+        p.perri.queue = self.queue_ratio;
+        pane_ratios::save(&p);
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {
