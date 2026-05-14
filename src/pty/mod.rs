@@ -6,6 +6,7 @@
 //! - [`PtyFactory`]     — trait for spawning / reattaching PTYs.
 //! - [`PtyWidget`]      — Ratatui widget that renders a `vt100::Parser` screen.
 
+pub mod altscreen;
 pub mod client;
 pub mod host;
 pub mod keys;
