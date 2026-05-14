@@ -18,6 +18,21 @@ pub struct SyntectCache {
 }
 
 impl SyntectCache {
+    /// Build a minimal stub with an empty syntax set (used as fallback when
+    /// `load()` fails).  Syntax highlighting will produce plain-text output.
+    pub fn empty() -> Self {
+        use syntect::highlighting::ThemeSet;
+        let syntaxes = SyntaxSet::load_defaults_newlines();
+        let theme_set = ThemeSet::load_defaults();
+        let theme = theme_set
+            .themes
+            .values()
+            .next()
+            .cloned()
+            .expect("syntect ships at least one theme");
+        Self { syntaxes, theme }
+    }
+
     /// Build the cache from syntect's bundled defaults.
     pub fn load() -> Result<Self> {
         let syntaxes = SyntaxSet::load_defaults_newlines();

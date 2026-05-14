@@ -27,6 +27,7 @@ use crate::{
     data::{fred_calendar::CalendarEvent, fred_mailbox::MailboxSnapshot},
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
+    transcript::TranscriptPane,
     ui::{
         drag::{self, DividerAxis, DragState},
         pane_ratios,
@@ -123,6 +124,11 @@ pub struct FredView {
     main_area: Rect,
     /// Parent rect for the horizontal (mailbox/calendar) split.
     top_area: Rect,
+    // ── transcript pane ───────────────────────────────────────────────────────
+    /// Transcript overlay (Ctrl+T toggles; replaces calendar when visible).
+    transcript: TranscriptPane,
+    /// Last area used to render the right-column slot (calendar or transcript).
+    transcript_render_area: Rect,
 }
 
 impl FredView {
@@ -136,9 +142,14 @@ impl FredView {
         // Attempt to reattach to an existing daemon PTY for this view.
         let mut pty = Self::try_reattach(&ctx);
 
+        // Recover session context from the store for the transcript pane.
+        let mut transcript = TranscriptPane::new();
+        let store = crate::sessions::SessionStore::load();
+        let stored_entry = store.get(FRED_PTY_TAG).cloned();
+
         // If no live daemon PTY exists, check the session store and auto-spawn.
         if pty.is_none() {
-            if let Some(entry) = crate::sessions::SessionStore::load().get(FRED_PTY_TAG).cloned() {
+            if let Some(ref entry) = stored_entry {
                 let (cols, rows) = (80u16, 24u16);
                 let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
                 match ctx.pty_factory.spawn(FRED_PTY_TAG, &entry.cmd, &args, (cols, rows), ctx.event_tx.clone()) {
@@ -150,6 +161,20 @@ impl FredView {
                         tracing::warn!("session-store auto-spawn failed for {FRED_PTY_TAG}: {e}");
                     }
                 }
+            }
+        }
+
+        // Restore session context for Ctrl+T transcript bring-up.
+        if let Some(entry) = stored_entry {
+            let sid_opt = entry.session_id.clone().or_else(|| {
+                entry.cwd.as_deref()
+                    .and_then(crate::transcript::find_latest_session_id_for_cwd)
+            });
+            if let Some(sid) = sid_opt {
+                let cwd = entry.cwd
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+                transcript.set_session_context(cwd, sid);
             }
         }
 
@@ -192,6 +217,8 @@ impl FredView {
             col_divider_col: 0,
             main_area: Rect::default(),
             top_area: Rect::default(),
+            transcript,
+            transcript_render_area: Rect::default(),
         }
     }
 
@@ -560,7 +587,13 @@ impl View for FredView {
         let _ = dragging_id; // highlight would need to be passed into render helpers
 
         self.render_mailbox(f, top_cols[0]);
-        self.render_calendar(f, top_cols[1]);
+        // Right column: calendar normally, transcript overlay when Ctrl+T.
+        self.transcript_render_area = top_cols[1];
+        if self.transcript.is_visible() {
+            self.transcript.render(f, top_cols[1]);
+        } else {
+            self.render_calendar(f, top_cols[1]);
+        }
         self.render_repl(f, rows[1]);
 
         // Resize PTY if the pane size changed.
@@ -608,21 +641,52 @@ impl View for FredView {
         }
 
         if let AppEvent::Key(k) = ev {
+            // Ctrl+T — toggle transcript pane (nav mode only).
+            if k.code == KeyCode::Char('t')
+                && k.modifiers == KeyModifiers::CONTROL
+                && !self.pty_capturing
+            {
+                self.transcript.toggle_visible();
+                return EventOutcome::Consumed;
+            }
+
+            // Transcript navigation keys when visible.
+            if self.transcript.is_visible() && !self.pty_capturing && self.transcript.on_key(k) {
+                return EventOutcome::Consumed;
+            }
+
             if k.code == KeyCode::Enter && self.pty.is_none() {
+                let sid = uuid::Uuid::new_v4().to_string();
+                let sid_clone = sid.clone();
                 let (cols, rows) = (self.repl_area.width.max(20), self.repl_area.height.max(5));
+                let args = [
+                    "--dangerously-skip-permissions",
+                    "--agent",
+                    "fred",
+                    "--session-id",
+                    &sid_clone,
+                ];
                 match self.ctx.pty_factory.spawn(
                     FRED_PTY_TAG,
                     "claude",
-                    &["--agent", "fred"],
+                    &args,
                     (cols, rows),
                     self.ctx.event_tx.clone(),
                 ) {
                     Ok(backend) => {
                         self.pty = Some(backend);
                         self.pty_capturing = true;
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+                        self.transcript.set_session_context(cwd.clone(), sid.clone());
                         let mut store = crate::sessions::SessionStore::load();
-                        store.record(FRED_PTY_TAG, "claude", &["--agent", "fred"], std::env::current_dir().ok(), None);
-                        // TODO: remove session entry on PTY exit (no AppEvent::PtyExited today)
+                        store.record(
+                            FRED_PTY_TAG,
+                            "claude",
+                            &args,
+                            Some(cwd),
+                            Some(sid),
+                        );
                     }
                     Err(e) => {
                         tracing::warn!("failed to spawn PTY for fred: {e}");
@@ -634,6 +698,13 @@ impl View for FredView {
 
         // Mouse events: drag resize + scroll.
         if let AppEvent::Mouse(m) = ev {
+            // Delegate transcript mouse events first.
+            if self.transcript.is_visible()
+                && self.transcript.on_mouse(m, self.transcript_render_area)
+            {
+                return EventOutcome::Consumed;
+            }
+
             let in_repl = rect_contains(self.repl_area, m.column, m.row);
             let in_calendar = rect_contains(self.calendar_area, m.column, m.row);
             match m.kind {

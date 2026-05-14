@@ -10,11 +10,13 @@
 //! - `reader` — `TranscriptReader` that tails the file and publishes
 //!   `TranscriptSnapshot` updates on a `tokio::sync::watch` channel.
 
+pub mod integration;
 pub mod path;
 pub mod reader;
 pub mod record;
 pub mod snapshot;
 
+pub use integration::TranscriptPane;
 pub use path::find_latest_session_id_for_cwd;
 pub use reader::TranscriptReader;
 pub use snapshot::{TranscriptEntry, TranscriptSnapshot};
