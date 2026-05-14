@@ -1,4 +1,4 @@
-//! Nostromo in-process MCP server — Phase 1 scaffolding.
+//! Nostromo in-process MCP server.
 //!
 //! ## Architecture
 //!
@@ -15,12 +15,23 @@
 //!
 //! `~/.nostromo/mcp.sock` by default; override with `$NOSTROMO_MCP_SOCKET`.
 //!
-//! ## Phase 1 surface
+//! ## Tool surface
 //!
-//! One tool is registered: `nostromo.get_self`.  It returns the calling PTY's
-//! view identity (`view_id`, `view_title`, `pane_ids`, `session_id`).
-//! Phases 2–4 will add view-state queries, pane mutations, and cross-view
-//! dispatch.
+//! **Phase 1**: `nostromo.get_self` — returns the calling PTY's view identity
+//! (`view_id`, `view_title`, `pane_ids`, `session_id`).
+//!
+//! **Phase 2**: 17 read-only introspection tools across all views:
+//! - Global: `nostromo.list_views`, `nostromo.get_view_state`,
+//!   `nostromo.get_worktree_info`, `nostromo.get_rate_limits`,
+//!   `nostromo.get_budget_posture`
+//! - Perri: `perri.list_pr_queue`, `perri.get_current_pr`, `perri.get_state`
+//! - Fred: `fred.list_unread_emails`, `fred.list_calendar_events`,
+//!   `fred.get_state`
+//! - Mother: `mother.list_jobs`, `mother.get_job`, `mother.tail_log`,
+//!   `mother.peek`, `mother.get_status`
+//! - Teri: `teri.list_todos`
+//!
+//! Phases 3–4 will add pane mutations and cross-view dispatch.
 
 pub mod server;
 pub mod socket;

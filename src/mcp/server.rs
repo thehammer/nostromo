@@ -28,7 +28,6 @@
 //! `tools/call`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};

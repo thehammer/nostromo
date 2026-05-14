@@ -217,6 +217,9 @@ pub async fn run(
     // Clone queue_rx to monitor PR count for sweater status in the main loop.
     let mut queue_rx_for_count = queue_rx.clone();
 
+    // Spawn Teri todos source early so its receiver is available for MCP state.
+    let teri_todos_rx = TeriTodosNativeSource::spawn();
+
     // Record daemon connection state before daemon_client is consumed below.
     let daemon_was_connected = daemon_client.is_some();
 
@@ -224,8 +227,32 @@ pub async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     event::spawn(tx.clone());
 
+    // ── MCP mirror channels (Phase 2) ────────────────────────────────────────
+    // Mother jobs, statusline, rate-limits, and budget posture flow through
+    // AppEvent rather than watch channels.  We mirror them into watch channels
+    // so MCP tool handlers can read them without touching the event loop.
+    let (mother_jobs_mcp_tx, mother_jobs_mcp_rx) =
+        tokio::sync::watch::channel::<Vec<MotherJob>>(vec![]);
+    let (mother_status_mcp_tx, mother_status_mcp_rx) =
+        tokio::sync::watch::channel::<Option<crate::mother::MotherStatus>>(None);
+    let (rate_limits_mcp_tx, rate_limits_mcp_rx) =
+        tokio::sync::watch::channel::<Option<RateLimits>>(None);
+    let (budget_posture_mcp_tx, budget_posture_mcp_rx) =
+        tokio::sync::watch::channel::<Option<BudgetPosture>>(None);
+
     // ── MCP shared state ─────────────────────────────────────────────────────
-    let mcp_state = Arc::new(McpSharedState::new(tx.clone()));
+    let mcp_state = Arc::new(McpSharedState::new(
+        tx.clone(),
+        queue_rx.clone(),
+        pr_rx.clone(),
+        mailbox_rx.clone(),
+        calendar_rx.clone(),
+        teri_todos_rx.clone(),
+        mother_jobs_mcp_rx,
+        mother_status_mcp_rx,
+        rate_limits_mcp_rx,
+        budget_posture_mcp_rx,
+    ));
 
     // Populate static view metadata once at startup.
     {
@@ -293,7 +320,6 @@ pub async fn run(
         mcp_state: Arc::clone(&mcp_state),
     };
 
-    let teri_todos_rx = TeriTodosNativeSource::spawn();
     let teri_ctx = ViewCtx {
         event_tx: tx.clone(),
         pty_factory: Arc::clone(&pty_factory),
@@ -477,19 +503,23 @@ pub async fn run(
             }
             AppEvent::MotherJobs(jobs) => {
                 state.mother_jobs = jobs.clone();
+                let _ = mother_jobs_mcp_tx.send(jobs.clone());
                 views[MOTHER_IDX].on_event(&ev);
                 continue;
             }
-            AppEvent::MotherStatusline(_) => {
+            AppEvent::MotherStatusline(status) => {
+                let _ = mother_status_mcp_tx.send(Some(status.clone()));
                 views[MOTHER_IDX].on_event(&ev);
                 continue;
             }
             AppEvent::RateLimitsChanged(rl) => {
                 state.rate_limits = Some(*rl);
+                let _ = rate_limits_mcp_tx.send(Some(*rl));
                 continue;
             }
             AppEvent::PostureChanged(p) => {
                 state.budget_posture = Some(*p);
+                let _ = budget_posture_mcp_tx.send(Some(*p));
                 continue;
             }
             _ => {}

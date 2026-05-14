@@ -205,19 +205,19 @@ pub async fn add_plan(plan_path: &Path) -> Result<()> {
 
 // ── peek types ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PeekTodo {
     pub status: String,
     pub content: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PeekToolCall {
     pub tool: String,
     pub brief: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PeekSnapshot {
     #[serde(default)]
     pub todos: Vec<PeekTodo>,

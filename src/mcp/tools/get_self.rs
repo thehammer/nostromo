@@ -64,7 +64,7 @@ mod tests {
 
     async fn make_state() -> McpSharedState {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let state = McpSharedState::new(tx);
+        let state = McpSharedState::for_test(tx);
 
         // Register one view.
         state.views_meta.write().await.push(ViewMeta {

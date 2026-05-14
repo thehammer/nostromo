@@ -83,7 +83,7 @@ async fn fred_layout_renders_without_panic() {
     use std::sync::Arc;
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let (mcp_tx, _mcp_rx) = mpsc::unbounded_channel();
-    let mcp_state = Arc::new(McpSharedState::new(mcp_tx));
+    let mcp_state = Arc::new(McpSharedState::for_test(mcp_tx));
     let ctx = ViewCtx {
         event_tx,
         pty_factory: Arc::new(InProcessPtyFactory::new(Arc::clone(&mcp_state))),

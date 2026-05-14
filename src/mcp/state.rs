@@ -7,9 +7,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 
-use crate::event::AppEvent;
+use crate::{
+    data::{
+        fred_calendar::CalendarSnapshot,
+        fred_mailbox::MailboxSnapshot,
+        perri_pr::PrSnapshot,
+        perri_queue::PrQueueSnapshot,
+        rate_limits::{BudgetPosture, RateLimits},
+        teri_todos::TeriTodosSnapshot,
+    },
+    event::AppEvent,
+    mother::{MotherJob, MotherStatus},
+};
 
 // ── identity types ─────────────────────────────────────────────────────────────
 
@@ -55,14 +66,70 @@ pub struct McpSharedState {
     ///
     /// Keys are the `NOSTROMO_PTY_ID` env var values injected at spawn time.
     pub ptys: Arc<RwLock<HashMap<String, PtyIdentity>>>,
+
+    // ── per-view data receivers (Phase 2) ─────────────────────────────────────
+
+    /// Live Perri PR queue snapshot.
+    pub perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
+
+    /// Live Perri current-PR snapshot.
+    pub perri_pr_rx: watch::Receiver<Option<PrSnapshot>>,
+
+    /// Live Fred mailbox snapshot.
+    pub fred_mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
+
+    /// Live Fred calendar snapshot.
+    pub fred_calendar_rx: watch::Receiver<Option<CalendarSnapshot>>,
+
+    /// Live Teri todos snapshot.
+    pub teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
+
+    // ── event-mirrored receivers (Phase 2) ────────────────────────────────────
+    // These wrap AppEvent-driven data (Mother jobs/status, rate limits, posture)
+    // in watch channels so MCP tool handlers can read them without going through
+    // the event loop.
+
+    /// Mirror of the most recent `AppEvent::MotherJobs`.
+    pub mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
+
+    /// Mirror of the most recent `AppEvent::MotherStatusline`.
+    pub mother_status_rx: watch::Receiver<Option<MotherStatus>>,
+
+    /// Mirror of the most recent `AppEvent::RateLimitsChanged`.
+    pub rate_limits_rx: watch::Receiver<Option<RateLimits>>,
+
+    /// Mirror of the most recent `AppEvent::PostureChanged`.
+    pub budget_posture_rx: watch::Receiver<Option<BudgetPosture>>,
 }
 
 impl McpSharedState {
-    pub fn new(event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+    /// Construct with all required watch receivers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+        perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
+        perri_pr_rx: watch::Receiver<Option<PrSnapshot>>,
+        fred_mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
+        fred_calendar_rx: watch::Receiver<Option<CalendarSnapshot>>,
+        teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
+        mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
+        mother_status_rx: watch::Receiver<Option<MotherStatus>>,
+        rate_limits_rx: watch::Receiver<Option<RateLimits>>,
+        budget_posture_rx: watch::Receiver<Option<BudgetPosture>>,
+    ) -> Self {
         Self {
             event_tx,
             views_meta: Arc::new(RwLock::new(Vec::new())),
             ptys: Arc::new(RwLock::new(HashMap::new())),
+            perri_queue_rx,
+            perri_pr_rx,
+            fred_mailbox_rx,
+            fred_calendar_rx,
+            teri_todos_rx,
+            mother_jobs_rx,
+            mother_status_rx,
+            rate_limits_rx,
+            budget_posture_rx,
         }
     }
 
@@ -74,5 +141,38 @@ impl McpSharedState {
     /// Deregister a PTY (called on PTY drop).
     pub async fn deregister_pty(&self, nostromo_pty_id: &str) {
         self.ptys.write().await.remove(nostromo_pty_id);
+    }
+
+    /// Construct a minimal `McpSharedState` suitable for unit/integration tests.
+    ///
+    /// All watch channels are initialised with empty/`None` values.  Tests can
+    /// override individual receivers via `watch::channel(...)` before constructing
+    /// the state through `Self::new`.
+    ///
+    /// This is intentionally not `#[cfg(test)]` — integration tests in the
+    /// `tests/` directory are compiled as separate crates and need access to it
+    /// without `--cfg test` in scope.
+    pub fn for_test(event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+        let (_, perri_queue_rx) = watch::channel(None);
+        let (_, perri_pr_rx) = watch::channel(None);
+        let (_, fred_mailbox_rx) = watch::channel(None);
+        let (_, fred_calendar_rx) = watch::channel(None);
+        let (_, teri_todos_rx) = watch::channel(None);
+        let (_, mother_jobs_rx) = watch::channel(vec![]);
+        let (_, mother_status_rx) = watch::channel(None);
+        let (_, rate_limits_rx) = watch::channel(None);
+        let (_, budget_posture_rx) = watch::channel(None);
+        Self::new(
+            event_tx,
+            perri_queue_rx,
+            perri_pr_rx,
+            fred_mailbox_rx,
+            fred_calendar_rx,
+            teri_todos_rx,
+            mother_jobs_rx,
+            mother_status_rx,
+            rate_limits_rx,
+            budget_posture_rx,
+        )
     }
 }

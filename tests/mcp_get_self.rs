@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 /// Build a populated `McpSharedState` with one view + one PTY registered.
 async fn make_state() -> Arc<McpSharedState> {
     let (tx, _rx) = mpsc::unbounded_channel();
-    let state = Arc::new(McpSharedState::new(tx));
+    let state = Arc::new(McpSharedState::for_test(tx));
 
     state.views_meta.write().await.push(ViewMeta {
         id: "perri",
