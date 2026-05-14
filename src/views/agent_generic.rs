@@ -7,7 +7,7 @@ use std::any::Any;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
@@ -17,6 +17,7 @@ use ratatui::{
 use crate::{
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
+    transcript::TranscriptPane,
     ui::theme,
     views::{EventOutcome, View, ViewCtx},
 };
@@ -32,6 +33,11 @@ pub struct GenericView {
     repl_area: Rect,
     /// Rows scrolled back in the REPL pane (0 = live view).
     repl_scroll: u16,
+    // ── transcript pane ───────────────────────────────────────────────────────
+    /// Transcript overlay (Ctrl+T toggles; shown as right 50% when visible).
+    transcript: TranscriptPane,
+    /// Last area used to render the transcript (for mouse hit-testing).
+    transcript_render_area: Rect,
 }
 
 impl GenericView {
@@ -39,9 +45,14 @@ impl GenericView {
         // Attempt to reattach to an existing daemon PTY for this view.
         let mut pty = Self::try_reattach(id, &ctx);
 
+        // Recover session context for the transcript pane.
+        let mut transcript = TranscriptPane::new();
+        let store = crate::sessions::SessionStore::load();
+        let stored_entry = store.get(id).cloned();
+
         // If no live daemon PTY exists, check the session store and auto-spawn.
         if pty.is_none() {
-            if let Some(entry) = crate::sessions::SessionStore::load().get(id).cloned() {
+            if let Some(ref entry) = stored_entry {
                 let (cols, rows) = (80u16, 24u16);
                 let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
                 match ctx.pty_factory.spawn(id, &entry.cmd, &args, (cols, rows), ctx.event_tx.clone()) {
@@ -56,6 +67,20 @@ impl GenericView {
             }
         }
 
+        // Restore session context for Ctrl+T transcript bring-up.
+        if let Some(entry) = stored_entry {
+            let sid_opt = entry.session_id.clone().or_else(|| {
+                entry.cwd.as_deref()
+                    .and_then(crate::transcript::find_latest_session_id_for_cwd)
+            });
+            if let Some(sid) = sid_opt {
+                let cwd = entry.cwd
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+                transcript.set_session_context(cwd, sid);
+            }
+        }
+
         let pty_capturing = pty.is_some();
 
         Self {
@@ -66,6 +91,8 @@ impl GenericView {
             pty_capturing,
             repl_area: Rect::new(0, 0, 80, 24),
             repl_scroll: 0,
+            transcript,
+            transcript_render_area: Rect::default(),
         }
     }
 
@@ -146,11 +173,23 @@ impl View for GenericView {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        self.render_repl(f, area);
+        if self.transcript.is_visible() {
+            // 50/50 split: REPL on left, transcript on right.
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+            self.render_repl(f, cols[0]);
+            self.transcript_render_area = cols[1];
+            self.transcript.render(f, cols[1]);
+        } else {
+            self.transcript_render_area = Rect::default();
+            self.render_repl(f, area);
+        }
 
         // Resize PTY if the area changed.
         if let Some(pty) = &mut self.pty {
-            let (cols, rows) = (self.repl_area.width, self.repl_area.height);
+            let (cols, rows) = (self.repl_area.width.max(1), self.repl_area.height.max(1));
             pty.resize(cols, rows);
         }
     }
@@ -194,21 +233,46 @@ impl View for GenericView {
         }
 
         if let AppEvent::Key(k) = ev {
+            // Ctrl+T — toggle transcript pane (nav mode only).
+            if k.code == KeyCode::Char('t')
+                && k.modifiers == KeyModifiers::CONTROL
+                && !self.pty_capturing
+            {
+                self.transcript.toggle_visible();
+                return EventOutcome::Consumed;
+            }
+
+            // Transcript navigation keys when visible and not in PTY.
+            if self.transcript.is_visible() && !self.pty_capturing && self.transcript.on_key(k) {
+                return EventOutcome::Consumed;
+            }
+
             if k.code == KeyCode::Enter && self.pty.is_none() {
+                let sid = uuid::Uuid::new_v4().to_string();
+                let sid_clone = sid.clone();
                 let (cols, rows) = (self.repl_area.width.max(20), self.repl_area.height.max(5));
+                let args = [
+                    "--dangerously-skip-permissions",
+                    "--agent",
+                    self.id,
+                    "--session-id",
+                    &sid_clone,
+                ];
                 match self.ctx.pty_factory.spawn(
                     self.id,
                     "claude",
-                    &["--agent", self.id],
+                    &args,
                     (cols, rows),
                     self.ctx.event_tx.clone(),
                 ) {
                     Ok(backend) => {
                         self.pty = Some(backend);
                         self.pty_capturing = true;
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+                        self.transcript.set_session_context(cwd.clone(), sid.clone());
                         let mut store = crate::sessions::SessionStore::load();
-                        store.record(self.id, "claude", &["--agent", self.id], std::env::current_dir().ok(), None);
-                        // TODO: remove session entry on PTY exit (no AppEvent::PtyExited today)
+                        store.record(self.id, "claude", &args, Some(cwd), Some(sid));
                     }
                     Err(e) => {
                         tracing::warn!("failed to spawn PTY for {}: {e}", self.id);
@@ -218,8 +282,14 @@ impl View for GenericView {
             }
         }
 
-        // Mouse scroll: always scroll the REPL (single scrollable pane).
+        // Mouse events: delegate to transcript first, then scroll the REPL.
         if let AppEvent::Mouse(m) = ev {
+            if self.transcript.is_visible()
+                && self.transcript.on_mouse(m, self.transcript_render_area)
+            {
+                return EventOutcome::Consumed;
+            }
+
             match m.kind {
                 MouseEventKind::ScrollUp => {
                     self.repl_scroll = self.repl_scroll.saturating_add(3);

@@ -35,6 +35,7 @@ use tracing::debug;
 use crate::{
     event::AppEvent,
     mother::{self, MotherJob, MotherStatus, PeekSnapshot},
+    transcript::TranscriptPane,
     ui::{
         drag::{self, DividerAxis, DragState},
         pane_ratios,
@@ -114,11 +115,25 @@ pub struct MotherView {
     main_rect: Rect,
     #[allow(dead_code)]
     ctx: ViewCtx,
+    // ── transcript pane ───────────────────────────────────────────────────────
+    /// Transcript overlay (Ctrl+T toggles; replaces detail pane when visible).
+    transcript: TranscriptPane,
+    /// Last area used to render the right-column slot (detail or transcript).
+    transcript_render_area: Rect,
 }
 
 impl MotherView {
     pub fn new(_config: crate::config::Config, ctx: ViewCtx) -> Self {
         let ratios = pane_ratios::load();
+
+        // Seed the transcript pane with the most-recent session in the CWD.
+        let mut transcript = TranscriptPane::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(sid) = crate::transcript::find_latest_session_id_for_cwd(&cwd) {
+                transcript.set_session_context(cwd, sid);
+            }
+        }
+
         Self {
             jobs: Vec::new(),
             display_order: Vec::new(),
@@ -142,6 +157,8 @@ impl MotherView {
             main_divider_col: 0,
             main_rect: Rect::default(),
             ctx,
+            transcript,
+            transcript_render_area: Rect::default(),
         }
     }
 
@@ -932,7 +949,14 @@ impl View for MotherView {
         // Record inner areas for mouse hit-testing (subtract 1-px border on each side).
         self.list_area = shrink_border(main[0]);
         self.render_job_list(f, main[0]);
-        self.render_detail_pane(f, main[1]);
+
+        // Right column: detail pane normally, transcript overlay when Ctrl+T.
+        self.transcript_render_area = main[1];
+        if self.transcript.is_visible() {
+            self.transcript.render(f, main[1]);
+        } else {
+            self.render_detail_pane(f, main[1]);
+        }
 
         // Plan overlay covers the entire main area (counts strip + list/detail).
         if self.focus == Focus::PlanView {
@@ -1006,6 +1030,27 @@ impl View for MotherView {
                     }
 
                     Focus::List => {
+                        // Ctrl+T — toggle transcript pane.
+                        if k.code == KeyCode::Char('t')
+                            && k.modifiers == crossterm::event::KeyModifiers::CONTROL
+                        {
+                            // Re-seed from CWD in case a new session appeared.
+                            if self.transcript.active_session_id().is_none() {
+                                if let Ok(cwd) = std::env::current_dir() {
+                                    if let Some(sid) = crate::transcript::find_latest_session_id_for_cwd(&cwd) {
+                                        self.transcript.set_session_context(cwd, sid);
+                                    }
+                                }
+                            }
+                            self.transcript.toggle_visible();
+                            return EventOutcome::Consumed;
+                        }
+
+                        // Transcript navigation when visible.
+                        if self.transcript.is_visible() && self.transcript.on_key(k) {
+                            return EventOutcome::Consumed;
+                        }
+
                         match k.code {
                             KeyCode::Up => {
                                 if self.selected > 0 {
@@ -1098,6 +1143,13 @@ impl View for MotherView {
 
         // Mouse events: drag resize + scroll.
         if let AppEvent::Mouse(m) = ev {
+            // Transcript mouse events take priority when visible.
+            if self.transcript.is_visible()
+                && self.transcript.on_mouse(m, self.transcript_render_area)
+            {
+                return EventOutcome::Consumed;
+            }
+
             let in_list = rect_contains(self.list_area, m.column, m.row);
             let in_log = rect_contains(self.log_area, m.column, m.row);
             match m.kind {
