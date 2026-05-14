@@ -60,7 +60,6 @@ impl PtyHost {
 
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 4096];
-            let mut filter = crate::pty::altscreen::AltScreenFilter::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -68,8 +67,7 @@ impl PtyHost {
                         break;
                     }
                     Ok(n) => {
-                        let filtered = filter.process(&buf[..n]);
-                        parser_clone.lock().unwrap().process(&filtered);
+                        parser_clone.lock().unwrap().process(&buf[..n]);
                         let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
                     }
                     Err(e) => {

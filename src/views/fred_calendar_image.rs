@@ -17,9 +17,8 @@ static FONT_BYTES: &[u8] = include_bytes!("../../assets/font.ttf");
 
 // ── Layout constants ─────────────────────────────────────────────────────────
 
-/// Left-margin width in pixels for the time labels — computed dynamically from
-/// font size; this constant is the fallback minimum.
-const label_px_MIN: u32 = 50;
+/// Left-margin width in pixels for the time labels.
+const LABEL_PX: u32 = 50;
 /// Working hours start (local, inclusive).
 const WORK_START_HOUR: u32 = 8;
 /// Working hours end (local, exclusive).
@@ -81,9 +80,7 @@ pub fn render_calendar_to_image(
     let row_h = cell_height_px as f32;
     let px_per_min = row_h / MINS_PER_ROW as f32;
     let scroll_px = scroll_offset_rows as f32 * row_h;
-    let font_px = (row_h * 0.85).clamp(11.0, 22.0);
-    // "HH:MM" is 5 chars; estimate ~0.6× font_px per char + a little padding.
-    let label_px = ((font_px * 5.0 * 0.62) as u32 + 6).max(label_px_MIN);
+    let font_px = (row_h * 0.65).clamp(8.0, 13.0);
 
     let now: DateTime<Local> = chrono::Local::now();
     let today = now.date_naive();
@@ -99,28 +96,9 @@ pub fn render_calendar_to_image(
 
     // Column assignment.
     let col_indices = assign_columns(&snap.events);
-    let content_w = w.saturating_sub(label_px);
-
-    // For each event, compute the local column count: how many columns are
-    // needed among the group of events that overlap with it.  Events that don't
-    // overlap with anything else get local_cols = 1 (full width).
-    let local_cols: Vec<usize> = snap.events.iter().enumerate().map(|(i, ev_i)| {
-        let max_col = snap.events.iter().enumerate()
-            .filter(|&(j, ev_j)| {
-                if j == i { return true; }
-                // Check temporal overlap.
-                let (s_i, e_i) = (ev_i.start, ev_i.end.or(ev_i.start));
-                let (s_j, e_j) = (ev_j.start, ev_j.end.or(ev_j.start));
-                match (s_i, e_i, s_j, e_j) {
-                    (Some(si), Some(ei), Some(sj), Some(ej)) => si < ej && sj < ei,
-                    _ => false,
-                }
-            })
-            .map(|(j, _)| col_indices[j])
-            .max()
-            .unwrap_or(0);
-        max_col + 1
-    }).collect();
+    let max_cols = col_indices.iter().max().copied().unwrap_or(0) + 1;
+    let content_w = w.saturating_sub(LABEL_PX);
+    let col_w = (content_w / max_cols as u32).max(1);
 
     // ── Hour grid lines & labels ───────────────────────────────────────────
     for hour in WORK_START_HOUR..=WORK_END_HOUR {
@@ -167,10 +145,8 @@ pub fn render_calendar_to_image(
         }
 
         let col = col_indices[ev_idx];
-        let n_cols = local_cols[ev_idx] as u32;
-        let col_w = (content_w / n_cols).max(1);
-        let x0 = label_px + col as u32 * col_w + 2;
-        let x1 = (label_px + (col as u32 + 1) * col_w).min(w).saturating_sub(2);
+        let x0 = LABEL_PX + col as u32 * col_w + 2;
+        let x1 = (LABEL_PX + (col as u32 + 1) * col_w).min(w).saturating_sub(2);
         if x1 <= x0 {
             continue;
         }
@@ -218,9 +194,9 @@ pub fn render_calendar_to_image(
         if now_y >= 0.0 && now_y < h as f32 {
             let iy = now_y.round() as i32;
             // Thick amber line.
-            hline(&mut pixmap, label_px, w, iy, AMBER);
+            hline(&mut pixmap, LABEL_PX, w, iy, AMBER);
             if iy + 1 < h as i32 {
-                hline(&mut pixmap, label_px, w, iy + 1, AMBER_DIM);
+                hline(&mut pixmap, LABEL_PX, w, iy + 1, AMBER_DIM);
             }
             // "now" label.
             draw_text(&mut pixmap, &font, "now", 2, iy + 1, font_px, AMBER);

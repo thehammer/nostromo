@@ -26,7 +26,6 @@ pub struct SyntectDiff<'a> {
     diff: &'a str,
     cache: Arc<SyntectCache>,
     max_lines: usize,
-    scroll_offset: usize,
 }
 
 impl<'a> SyntectDiff<'a> {
@@ -35,7 +34,6 @@ impl<'a> SyntectDiff<'a> {
             diff,
             cache,
             max_lines: usize::MAX,
-            scroll_offset: 0,
         }
     }
 
@@ -44,12 +42,6 @@ impl<'a> SyntectDiff<'a> {
     #[allow(dead_code)]
     pub fn max_lines(mut self, n: usize) -> Self {
         self.max_lines = n;
-        self
-    }
-
-    /// Skip the first `n` lines (scrolls the diff view down).
-    pub fn scroll_offset(mut self, n: usize) -> Self {
-        self.scroll_offset = n;
         self
     }
 
@@ -74,7 +66,7 @@ impl<'a> SyntectDiff<'a> {
         let mut highlighter = HighlightLines::new(syntax_ref, &self.cache.theme);
         let mut result: Vec<Line<'static>> = Vec::new();
 
-        for raw_line in self.diff.lines().skip(self.scroll_offset).take(self.max_lines) {
+        for raw_line in self.diff.lines().take(self.max_lines) {
             // Determine the diff accent colour for this line prefix.
             let accent: Option<Color> = if raw_line.starts_with('+') && !raw_line.starts_with("+++")
             {
