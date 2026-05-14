@@ -16,7 +16,6 @@
 //!   - `Esc` — exit log/plan view, return to list
 
 use std::any::Any;
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
@@ -55,6 +54,10 @@ pub enum MotherAction {
     RetryJob(MotherJob),
     /// `a` on an awaiting job — open await modal.
     OpenAwaitModal(MotherJob),
+    /// `x` on a terminal-state job — archive immediately (no confirm).
+    ArchiveJob(MotherJob),
+    /// `X` (shift+x) — archive every terminal-state job, with confirm.
+    ArchiveAll,
 }
 
 // ── view ──────────────────────────────────────────────────────────────────────
@@ -95,8 +98,6 @@ pub struct MotherView {
     last_peek_id: Option<String>,
     /// Throttle counter: only re-fetch peek every 5 ticks.
     peek_refresh_counter: u8,
-    /// Job IDs dismissed from view via [x] (terminal-state only, local to this session).
-    hidden_ids: HashSet<String>,
     /// Last known inner area of the job list pane.
     list_area: Rect,
     /// Last known inner area of the log tail pane.
@@ -133,7 +134,6 @@ impl MotherView {
             peek_data: Arc::new(Mutex::new(None)),
             last_peek_id: None,
             peek_refresh_counter: 0,
-            hidden_ids: HashSet::new(),
             list_area: Rect::default(),
             log_area: Rect::default(),
             pending_action: None,
@@ -176,7 +176,7 @@ impl MotherView {
             let mut group: Vec<&MotherJob> = self
                 .jobs
                 .iter()
-                .filter(|j| j.state == state && !self.hidden_ids.contains(&j.id))
+                .filter(|j| j.state == state)
                 .collect();
             group.sort_by_key(|j| std::cmp::Reverse(j.created_at));
             order.extend(group.iter().map(|j| j.id.clone()));
@@ -186,7 +186,7 @@ impl MotherView {
         let mut succeeded: Vec<&MotherJob> = self
             .jobs
             .iter()
-            .filter(|j| j.is_succeeded() && !self.hidden_ids.contains(&j.id))
+            .filter(|j| j.is_succeeded())
             .collect();
         succeeded.sort_by_key(|j| std::cmp::Reverse(j.finished_at));
         order.extend(succeeded.iter().take(10).map(|j| j.id.clone()));
@@ -195,7 +195,7 @@ impl MotherView {
         let mut failed: Vec<&MotherJob> = self
             .jobs
             .iter()
-            .filter(|j| j.is_failed() && !self.hidden_ids.contains(&j.id))
+            .filter(|j| j.is_failed())
             .collect();
         failed.sort_by_key(|j| std::cmp::Reverse(j.finished_at));
         order.extend(failed.iter().take(10).map(|j| j.id.clone()));
@@ -559,9 +559,18 @@ impl MotherView {
         let total = lines.len();
         let scroll = self.log_scroll.min(total.saturating_sub(1));
 
-        let para = Paragraph::new(lines)
+        // Slice the visible window manually rather than using Paragraph::scroll.
+        // Combining scroll() with Wrap causes Ratatui to emit wrapped-line
+        // continuations at x=0 of the render area, producing stray character
+        // artifacts outside the pane boundaries.
+        let visible: Vec<Line> = lines
+            .into_iter()
+            .skip(scroll)
+            .take(area.height as usize)
+            .collect();
+
+        let para = Paragraph::new(visible)
             .wrap(Wrap { trim: false })
-            .scroll((scroll as u16, 0))
             .style(Style::default());
         f.render_widget(para, area);
 
@@ -633,7 +642,9 @@ impl MotherView {
                     Span::styled("v", Style::default().fg(theme::FG)),
                     Span::styled(" plan  ", Style::default().fg(theme::FG_MUTED)),
                     Span::styled("x", Style::default().fg(theme::FG)),
-                    Span::styled(" dismiss  ", Style::default().fg(theme::FG_MUTED)),
+                    Span::styled(" archive  ", Style::default().fg(theme::FG_MUTED)),
+                    Span::styled("X", Style::default().fg(theme::FG)),
+                    Span::styled(" archive all  ", Style::default().fg(theme::FG_MUTED)),
                 ],
                 vec![
                     Span::styled("d", Style::default().fg(theme::AMBER)),
@@ -1037,25 +1048,23 @@ impl View for MotherView {
                                 return EventOutcome::Consumed;
                             }
 
-                            KeyCode::Char('x') | KeyCode::Char('X') => {
-                                // Dismiss terminal-state job from view.
+                            KeyCode::Char('x') => {
+                                // Archive selected terminal-state job (no confirm).
                                 if let Some(job) = self.selected_job().cloned() {
                                     if matches!(
                                         job.state.as_str(),
                                         "succeeded" | "failed" | "cancelled"
                                     ) {
-                                        self.hidden_ids.insert(job.id);
-                                        self.rebuild_display_order();
-                                        // Clamp selection after removal.
-                                        if !self.display_order.is_empty() {
-                                            self.selected =
-                                                self.selected.min(self.display_order.len() - 1);
-                                        } else {
-                                            self.selected = 0;
-                                        }
-                                        self.clear_detail_cache();
+                                        self.pending_action =
+                                            Some(MotherAction::ArchiveJob(job));
                                     }
                                 }
+                                return EventOutcome::Consumed;
+                            }
+
+                            KeyCode::Char('X') => {
+                                // Archive all terminal-state jobs (with confirm).
+                                self.pending_action = Some(MotherAction::ArchiveAll);
                                 return EventOutcome::Consumed;
                             }
 

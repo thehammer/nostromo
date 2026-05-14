@@ -613,7 +613,7 @@ impl View for FredView {
                 match self.ctx.pty_factory.spawn(
                     FRED_PTY_TAG,
                     "claude",
-                    &["--agent", "fred"],
+                    &["--dangerously-skip-permissions", "--agent", "fred"],
                     (cols, rows),
                     self.ctx.event_tx.clone(),
                 ) {
@@ -621,7 +621,7 @@ impl View for FredView {
                         self.pty = Some(backend);
                         self.pty_capturing = true;
                         let mut store = crate::sessions::SessionStore::load();
-                        store.record(FRED_PTY_TAG, "claude", &["--agent", "fred"], std::env::current_dir().ok());
+                        store.record(FRED_PTY_TAG, "claude", &["--dangerously-skip-permissions", "--agent", "fred"], std::env::current_dir().ok());
                         // TODO: remove session entry on PTY exit (no AppEvent::PtyExited today)
                     }
                     Err(e) => {

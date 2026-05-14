@@ -79,6 +79,10 @@ pub enum ModalState {
         plan_path: String,
         modal: ConfirmModal,
     },
+    /// Confirm a `mother archive --older-than 0` bulk-archive operation.
+    ConfirmArchiveAll {
+        modal: ConfirmModal,
+    },
     /// Command palette overlay (Ctrl-P).
     Palette(Box<CommandPalette>),
 }
@@ -117,6 +121,8 @@ pub struct AppState {
     // ── UX polish / debug overlay additions ──────────────────────────────────
     /// Whether the Ctrl-D debug overlay is currently shown.
     pub show_debug_overlay: bool,
+    /// Last N mouse events for debug overlay inspection.
+    pub mouse_event_log: std::collections::VecDeque<String>,
     /// Per-tab (start_col_inclusive, end_col_exclusive) in terminal coordinates.
     /// Populated by `render_tab_bar` each frame for accurate mouse hit detection.
     pub tab_hitmap: Vec<(u16, u16)>,
@@ -158,6 +164,7 @@ impl AppState {
             perri_open_pr_count: 0,
             open_pr_list: Vec::new(),
             show_debug_overlay: false,
+            mouse_event_log: std::collections::VecDeque::new(),
             tab_hitmap: Vec::new(),
             status_hitmap: Vec::new(),
             daemon_connected: false,
@@ -582,6 +589,16 @@ pub async fn run(
 
             AppEvent::Mouse(m) => {
                 use crossterm::event::MouseEventKind;
+                // Log for Ctrl-D debug overlay.
+                {
+                    let entry = format!("{:?} col={} row={} view={}", m.kind, m.column, m.row, focused_view_idx);
+                    if state.mouse_event_log.len() >= 12 {
+                        state.mouse_event_log.pop_front();
+                    }
+                    state.mouse_event_log.push_back(entry);
+                }
+                // Tab bar: Down on row 0.
+                let mut consumed = false;
                 if matches!(m.kind, MouseEventKind::Down(_)) && m.row == 0 {
                     if let Some(idx) = state
                         .tab_hitmap
@@ -601,8 +618,11 @@ pub async fn run(
                                 layout::persist::save(&state.layout);
                             }
                         }
+                        consumed = true;
                     }
-                } else if matches!(m.kind, MouseEventKind::Down(_)) {
+                }
+                // Status bar: Down on the last row.
+                if !consumed && matches!(m.kind, MouseEventKind::Down(_)) {
                     let term_h = terminal.size().map(|s| s.height).unwrap_or(0);
                     if term_h > 0 && m.row == term_h - 1 {
                         if let Some(&(_, _, view_id)) = state
@@ -625,14 +645,13 @@ pub async fn run(
                                     }
                                 }
                             }
+                            consumed = true;
                         }
                     }
-                } else if matches!(
-                    m.kind,
-                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                ) {
-                    // Forward scroll events to the active view so each pane
-                    // can handle them based on where the cursor is pointing.
+                }
+                // Forward all other mouse events (scroll, drag, unhandled clicks)
+                // to the active view.
+                if !consumed {
                     views[focused_view_idx].on_event(&AppEvent::Mouse(*m));
                 }
             }
@@ -855,6 +874,20 @@ fn handle_modal_key(
                 });
             }
         },
+
+        ModalState::ConfirmArchiveAll { modal: m } => match m.on_key(k) {
+            ConfirmAction::Yes => {
+                tokio::spawn(async move {
+                    if let Err(e) = mother::archive_all().await {
+                        warn!("mother archive --older-than 0 failed: {e:#}");
+                    }
+                });
+            }
+            ConfirmAction::No | ConfirmAction::Dismiss => {}
+            ConfirmAction::Consumed => {
+                state.modal = Some(ModalState::ConfirmArchiveAll { modal: m });
+            }
+        },
     }
 
     new_active
@@ -989,6 +1022,24 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
 
         MotherAction::OpenAwaitModal(job) => {
             state.modal = Some(ModalState::Await(Box::new(AwaitModal::new(job))));
+        }
+
+        MotherAction::ArchiveJob(job) => {
+            // Fire-and-forget, no confirm — matches the tmux switcher's Ctrl-D UX.
+            let id = job.id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = mother::archive(&id).await {
+                    warn!("mother archive {id} failed: {e:#}");
+                }
+            });
+        }
+
+        MotherAction::ArchiveAll => {
+            state.modal = Some(ModalState::ConfirmArchiveAll {
+                modal: ConfirmModal::new(
+                    "Archive ALL terminal-state jobs? [y/n]".to_string(),
+                ),
+            });
         }
     }
 }

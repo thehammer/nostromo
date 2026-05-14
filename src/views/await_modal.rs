@@ -93,11 +93,18 @@ impl AwaitModal {
         let title = truncate(&format!("{} — {}", self.job.id, self.job.title), 60);
         let inner = modal::clear_and_block(f, overlay, &title);
 
+        // For adherence-blocked jobs the worker writes to `adherence_notes`, not `question`.
+        let is_adherence = self.job.paused_reason.as_deref() == Some("adherence_blocked");
         let question = self
             .job
             .question
             .as_deref()
-            .unwrap_or("(no question recorded)");
+            .or_else(|| self.job.adherence_notes.as_deref())
+            .unwrap_or(if is_adherence {
+                "(adherence review blocked — no notes recorded)"
+            } else {
+                "(no question recorded)"
+            });
 
         match &self.mode {
             AwaitModalMode::Prompt => {

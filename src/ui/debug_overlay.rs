@@ -37,14 +37,17 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, views: &[BoxedView], 
     //   [0] Daemon info   — 2 rows
     //   [1] PTYs          — min(views.len()+2, 6) rows
     //   [2] Mother        — 2 rows
-    //   [3] Log tail      — remainder
+    //   [3] Mouse log     — min(12+1, 14) rows
+    //   [4] Log tail      — remainder
     let pty_rows = (views.len() as u16 + 2).min(8);
+    let mouse_rows = (state.mouse_event_log.len() as u16 + 1).min(14);
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
             Constraint::Length(pty_rows),
             Constraint::Length(2),
+            Constraint::Length(mouse_rows),
             Constraint::Min(0),
         ])
         .split(inner);
@@ -116,8 +119,23 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, views: &[BoxedView], 
     ];
     f.render_widget(Paragraph::new(mother_lines), sections[2]);
 
-    // ── Log tail ────────────────────────────────────────────────────────────
+    // ── Mouse event log ─────────────────────────────────────────────────────
     if sections[3].height > 1 {
+        let mut mouse_lines = vec![Line::from(Span::styled(
+            " Mouse events (recent)",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))];
+        for entry in &state.mouse_event_log {
+            mouse_lines.push(Line::from(Span::styled(
+                format!("  {entry}"),
+                theme::style_muted(),
+            )));
+        }
+        f.render_widget(Paragraph::new(mouse_lines), sections[3]);
+    }
+
+    // ── Log tail ────────────────────────────────────────────────────────────
+    if sections[4].height > 1 {
         let log_text = tail_log(20);
         let log_lines: Vec<Line> = {
             let header = Line::from(Span::styled(
@@ -135,7 +153,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, views: &[BoxedView], 
         };
         f.render_widget(
             Paragraph::new(log_lines).wrap(Wrap { trim: false }),
-            sections[3],
+            sections[4],
         );
     }
 }
