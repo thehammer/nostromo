@@ -1,6 +1,7 @@
 //! `PtyHost` — owns the master PTY, child process, vt100 parser, and reader task.
 
 use std::io::Write as _;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -19,6 +20,9 @@ pub struct PtyHost {
     pub parser: Arc<Mutex<vt100::Parser>>,
     size: (u16, u16),
     _reader_task: tokio::task::JoinHandle<()>,
+    /// Current top-of-stack kitty keyboard flags for this PTY.
+    /// `0` means legacy mode (no kitty protocol active).
+    kitty_flags: Arc<AtomicU32>,
 }
 
 impl PtyHost {
@@ -58,6 +62,9 @@ impl PtyHost {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
         let parser_clone = Arc::clone(&parser);
 
+        let mut kitty_tracker = crate::pty::kitty::KittyFlagsTracker::new();
+        let kitty_flags = kitty_tracker.flags();
+
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 4096];
             let mut filter = crate::pty::altscreen::AltScreenFilter::new();
@@ -68,7 +75,10 @@ impl PtyHost {
                         break;
                     }
                     Ok(n) => {
-                        let filtered = filter.process(&buf[..n]);
+                        let chunk = &buf[..n];
+                        // Track kitty flag escapes (does not mutate chunk).
+                        kitty_tracker.feed(chunk);
+                        let filtered = filter.process(chunk);
                         parser_clone.lock().unwrap().process(&filtered);
                         let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
                     }
@@ -97,6 +107,7 @@ impl PtyHost {
             parser,
             size: (cols, rows),
             _reader_task: reader_task,
+            kitty_flags,
         })
     }
 
@@ -119,7 +130,8 @@ impl PtyHost {
 
     /// Forward a crossterm key event to the PTY child.
     pub fn send_key(&mut self, key: &KeyEvent) {
-        if let Some(bytes) = crate::pty::keys::key_to_bytes(key) {
+        let flags = self.kitty_flags.load(Ordering::Relaxed);
+        if let Some(bytes) = crate::pty::keys::key_to_bytes_for(key, flags) {
             use std::io::ErrorKind;
             if let Err(e) = self.writer.write_all(&bytes) {
                 if !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) {

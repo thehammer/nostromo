@@ -62,6 +62,20 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Choose between legacy and kitty key encoding based on the PTY's current
+/// kitty flag value.
+///
+/// When `kitty_flags == 0` (legacy mode), delegates to [`key_to_bytes`].
+/// When non-zero (kitty mode active), delegates to
+/// [`crate::pty::kitty::key_to_bytes_kitty`].
+pub fn key_to_bytes_for(key: &KeyEvent, kitty_flags: u32) -> Option<Vec<u8>> {
+    if kitty_flags == 0 {
+        key_to_bytes(key)
+    } else {
+        crate::pty::kitty::key_to_bytes_kitty(key)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
