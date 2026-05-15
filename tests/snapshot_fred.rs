@@ -101,8 +101,19 @@ async fn fred_layout_renders_without_panic() {
     // Verify the border structure is present (time-independent).
     let buffer = terminal.backend().buffer().clone();
     let row0: String = (0..buffer.area.width)
-        .map(|x| buffer.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+        .map(|x| {
+            buffer
+                .cell((x, 0))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .unwrap_or(' ')
+        })
         .collect();
-    assert!(row0.contains("Mailbox"), "expected Mailbox panel in row 0, got: {row0}");
-    assert!(row0.contains("Calendar"), "expected Calendar panel in row 0, got: {row0}");
+    assert!(
+        row0.contains("Mailbox"),
+        "expected Mailbox panel in row 0, got: {row0}"
+    );
+    assert!(
+        row0.contains("Calendar"),
+        "expected Calendar panel in row 0, got: {row0}"
+    );
 }

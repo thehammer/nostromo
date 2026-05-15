@@ -15,7 +15,7 @@ use tracing::warn;
 use crate::{
     data::{
         break_glass::BreakGlassRequest,
-        rate_limits::{BudgetPosture, RateLimits},
+        rate_limits::{BudgetPosture, PostureSnapshot, RateLimits},
         right_panel_source::RightPanelSnapshot,
     },
     mother::{MotherJob, MotherStatus},
@@ -47,8 +47,10 @@ pub enum AppEvent {
     RightPanelData(HashMap<String, RightPanelSnapshot>),
     /// Claude rate-limit window snapshot updated.
     RateLimitsChanged(RateLimits),
-    /// Budget posture file updated.
+    /// Budget posture file updated (back-compat, posture string only).
     PostureChanged(BudgetPosture),
+    /// Full posture snapshot including per-window pace data.
+    PostureSnapshot(PostureSnapshot),
 }
 
 /// Tick interval for the event loop.

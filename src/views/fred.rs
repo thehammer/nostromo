@@ -24,7 +24,9 @@ use tokio::sync::watch;
 
 use crate::{
     config::Config,
-    data::{fred_calendar::CalendarEvent, fred_mailbox::MailboxSnapshot},
+    data::{
+        fred_calendar::CalendarEvent, fred_mailbox::MailboxSnapshot, rate_limits::PostureSnapshot,
+    },
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
     ui::{
@@ -33,7 +35,10 @@ use crate::{
         theme::{self, Sweater},
         widgets::{relative_time::format_relative_now, truncate::truncate},
     },
-    views::{fred_calendar_image::render_calendar_to_image, EventOutcome, View, ViewCtx},
+    views::{
+        fred_calendar_image::render_calendar_to_image, pace_bars_image::render_pace_bars_to_image,
+        EventOutcome, View, ViewCtx,
+    },
 };
 
 /// Tag used to identify Fred's PTY in the daemon registry.
@@ -99,6 +104,15 @@ pub struct FredView {
     picker: Picker,
     /// Active `ThreadProtocol` state for the calendar image.
     calendar_image_state: Option<ThreadProtocol>,
+    /// `StatefulProtocol` for the pace-bars widget (rebuilt on change).
+    pace_bars_image_state: Option<StatefulProtocol>,
+    /// `loaded_at` of the snapshot used for the last pace-bars render,
+    /// for cache-busting: when this changes we re-encode the image.
+    pace_bars_last_loaded_at: Option<std::time::Instant>,
+    /// Cell-area size `(cols, rows)` from the last pace-bars render.
+    pace_bars_last_size: Option<(u16, u16)>,
+    /// Latest posture snapshot forwarded from `AppEvent::PostureSnapshot`.
+    posture_snapshot: Option<PostureSnapshot>,
     /// Sender side of the background resize-encode worker channel.
     resize_tx: mpsc::Sender<ResizeRequest>,
     /// Receiver for completed `ResizeResponse` values from the worker.
@@ -138,12 +152,24 @@ impl FredView {
 
         // If no live daemon PTY exists, check the session store and auto-spawn.
         if pty.is_none() {
-            if let Some(entry) = crate::sessions::SessionStore::load().get(FRED_PTY_TAG).cloned() {
+            if let Some(entry) = crate::sessions::SessionStore::load()
+                .get(FRED_PTY_TAG)
+                .cloned()
+            {
                 let (cols, rows) = (80u16, 24u16);
                 let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
-                match ctx.pty_factory.spawn(FRED_PTY_TAG, &entry.cmd, &args, (cols, rows), ctx.event_tx.clone()) {
+                match ctx.pty_factory.spawn(
+                    FRED_PTY_TAG,
+                    &entry.cmd,
+                    &args,
+                    (cols, rows),
+                    ctx.event_tx.clone(),
+                ) {
                     Ok(backend) => {
-                        tracing::info!(view_tag = FRED_PTY_TAG, "auto-spawned PTY from session store");
+                        tracing::info!(
+                            view_tag = FRED_PTY_TAG,
+                            "auto-spawned PTY from session store"
+                        );
                         pty = Some(backend);
                     }
                     Err(e) => {
@@ -182,6 +208,10 @@ impl FredView {
             repl_scroll: 0,
             picker,
             calendar_image_state: None,
+            pace_bars_image_state: None,
+            pace_bars_last_loaded_at: None,
+            pace_bars_last_size: None,
+            posture_snapshot: None,
             resize_tx,
             resize_result_rx,
             calendar_last_rendered: None,
@@ -376,14 +406,31 @@ impl FredView {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        self.calendar_area = inner;
+        // ── Pace bars strip (4 rows, above the calendar image) ─────────────
+        const PACE_STRIP_ROWS: u16 = 4;
+        let (pace_strip, cal_inner) = if inner.width >= 20 && inner.height > PACE_STRIP_ROWS {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(PACE_STRIP_ROWS), Constraint::Min(0)])
+                .split(inner);
+            (Some(chunks[0]), chunks[1])
+        } else {
+            (None, inner)
+        };
+
+        // Render pace bars into the strip when available.
+        if let Some(strip) = pace_strip {
+            self.render_pace_bars(f, strip);
+        }
+
+        self.calendar_area = cal_inner;
 
         if !has_snap {
             let p = Paragraph::new(Line::from(Span::styled(
                 " Loading calendar…",
                 theme::style_muted(),
             )));
-            f.render_widget(p, inner);
+            f.render_widget(p, cal_inner);
             return;
         }
 
@@ -397,11 +444,11 @@ impl FredView {
                 let (lines, focus_idx) = render_calendar_lines(
                     &s.events,
                     now,
-                    inner.width,
-                    inner.height,
+                    cal_inner.width,
+                    cal_inner.height,
                     sweater,
                 );
-                let viewport = inner.height as usize;
+                let viewport = cal_inner.height as usize;
                 if let Some(fi) = focus_idx {
                     let target_top = fi.saturating_sub(2);
                     let max_top = lines.len().saturating_sub(viewport);
@@ -419,13 +466,13 @@ impl FredView {
 
         // ── Compute pixel dimensions ───────────────────────────────────────
         let font_size = self.picker.font_size();
-        let w_px = (inner.width as u32) * (font_size.width as u32);
-        let h_px = (inner.height as u32) * (font_size.height as u32);
+        let w_px = (cal_inner.width as u32) * (font_size.width as u32);
+        let h_px = (cal_inner.height as u32) * (font_size.height as u32);
 
         // ── Re-generate image if area or scroll changed ────────────────────
         let needs_regen = self
             .calendar_last_rendered
-            .map(|(r, s)| r != inner || s != self.calendar_scroll)
+            .map(|(r, s)| r != cal_inner || s != self.calendar_scroll)
             .unwrap_or(true);
 
         if needs_regen {
@@ -437,13 +484,43 @@ impl FredView {
                 let protocol: StatefulProtocol = self.picker.new_resize_protocol(dyn_img);
                 self.calendar_image_state =
                     Some(ThreadProtocol::new(self.resize_tx.clone(), Some(protocol)));
-                self.calendar_last_rendered = Some((inner, self.calendar_scroll));
+                self.calendar_last_rendered = Some((cal_inner, self.calendar_scroll));
             }
         }
 
         // ── Render image widget ───────────────────────────────────────────
         if let Some(state) = &mut self.calendar_image_state {
-            f.render_stateful_widget(StatefulImage::new(), inner, state);
+            f.render_stateful_widget(StatefulImage::new(), cal_inner, state);
+        }
+    }
+
+    /// Render the pace-bars pixel widget into the 4-row strip.
+    fn render_pace_bars(&mut self, f: &mut Frame, area: Rect) {
+        let snap = match self.posture_snapshot.as_ref() {
+            Some(s) => s,
+            None => return, // nothing to render yet
+        };
+
+        let font_size = self.picker.font_size();
+        let cell_size = (area.width, area.height);
+        let loaded_at = snap.loaded_at;
+
+        // Rebuild the protocol when the snapshot changed or the area resized.
+        let needs_regen = self.pace_bars_image_state.is_none()
+            || self.pace_bars_last_size != Some(cell_size)
+            || self.pace_bars_last_loaded_at != Some(loaded_at);
+
+        if needs_regen {
+            let w_px = (area.width as u32) * (font_size.width as u32);
+            let h_px = (area.height as u32) * (font_size.height as u32);
+            let dyn_img = render_pace_bars_to_image(snap, w_px, h_px);
+            self.pace_bars_image_state = Some(self.picker.new_resize_protocol(dyn_img));
+            self.pace_bars_last_loaded_at = Some(loaded_at);
+            self.pace_bars_last_size = Some(cell_size);
+        }
+
+        if let Some(state) = &mut self.pace_bars_image_state {
+            f.render_stateful_widget(StatefulImage::new(), area, state);
         }
     }
 
@@ -576,25 +653,29 @@ impl View for FredView {
         if self.pty.is_some() {
             if let AppEvent::Key(k) = ev {
                 let scroll_up = k.code == KeyCode::PageUp
-                    || (k.code == KeyCode::Up
-                        && k.modifiers.contains(KeyModifiers::SHIFT));
+                    || (k.code == KeyCode::Up && k.modifiers.contains(KeyModifiers::SHIFT));
                 let scroll_down = k.code == KeyCode::PageDown
-                    || (k.code == KeyCode::Down
-                        && k.modifiers.contains(KeyModifiers::SHIFT));
+                    || (k.code == KeyCode::Down && k.modifiers.contains(KeyModifiers::SHIFT));
 
                 if scroll_up {
-                    self.repl_scroll =
-                        self.repl_scroll.saturating_add(self.repl_area.height / 2);
+                    self.repl_scroll = self.repl_scroll.saturating_add(self.repl_area.height / 2);
                     return EventOutcome::Consumed;
                 } else if scroll_down {
-                    self.repl_scroll =
-                        self.repl_scroll.saturating_sub(self.repl_area.height / 2);
+                    self.repl_scroll = self.repl_scroll.saturating_sub(self.repl_area.height / 2);
                     return EventOutcome::Consumed;
                 } else if self.repl_scroll > 0 {
                     // Any other key resets to live view and falls through.
                     self.repl_scroll = 0;
                 }
             }
+        }
+
+        // Cache the latest posture snapshot for the pace-bars widget.
+        if let AppEvent::PostureSnapshot(snap) = ev {
+            self.posture_snapshot = Some(snap.clone());
+            // Invalidate cached state so the bars re-encode on next render.
+            self.pace_bars_last_loaded_at = None;
+            return EventOutcome::Consumed;
         }
 
         // Forward keys to the PTY only when it is active and capturing input.
@@ -621,7 +702,12 @@ impl View for FredView {
                         self.pty = Some(backend);
                         self.pty_capturing = true;
                         let mut store = crate::sessions::SessionStore::load();
-                        store.record(FRED_PTY_TAG, "claude", &["--agent", "fred"], std::env::current_dir().ok());
+                        store.record(
+                            FRED_PTY_TAG,
+                            "claude",
+                            &["--agent", "fred"],
+                            std::env::current_dir().ok(),
+                        );
                         // TODO: remove session entry on PTY exit (no AppEvent::PtyExited today)
                     }
                     Err(e) => {
@@ -641,8 +727,10 @@ impl View for FredView {
                 MouseEventKind::Down(MouseButton::Left) => {
                     // Divider 0: horizontal top-row/REPL split.
                     if drag::hit_test(
-                        m.column, m.row,
-                        0, self.row_divider_row,
+                        m.column,
+                        m.row,
+                        0,
+                        self.row_divider_row,
                         DividerAxis::Horizontal,
                         self.main_area,
                     ) {
@@ -655,8 +743,10 @@ impl View for FredView {
                     }
                     // Divider 1: vertical mailbox/calendar split.
                     if drag::hit_test(
-                        m.column, m.row,
-                        self.col_divider_col, 0,
+                        m.column,
+                        m.row,
+                        self.col_divider_col,
+                        0,
                         DividerAxis::Vertical,
                         self.top_area,
                     ) {
@@ -670,7 +760,12 @@ impl View for FredView {
                 }
                 // ── drag move ─────────────────────────────────────────────────
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    if let DragState::Dragging { divider_id, parent, axis } = self.drag {
+                    if let DragState::Dragging {
+                        divider_id,
+                        parent,
+                        axis,
+                    } = self.drag
+                    {
                         let new_ratio = drag::ratio_from_mouse(parent, m.column, m.row, axis);
                         match divider_id {
                             0 => self.col_ratio = new_ratio,

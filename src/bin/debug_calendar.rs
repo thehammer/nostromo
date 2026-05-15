@@ -78,12 +78,15 @@ fn calendar_view_path() -> String {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let config = Config::load(args.config.as_deref())
-        .context("loading config")?;
+    let config = Config::load(args.config.as_deref()).context("loading config")?;
 
-    let client_id = config.graph_client_id.clone()
+    let client_id = config
+        .graph_client_id
+        .clone()
         .context("graph_client_id not set in config")?;
-    let tenant = config.graph_tenant.clone()
+    let tenant = config
+        .graph_tenant
+        .clone()
         .unwrap_or_else(|| "common".to_owned());
     let cache_path = config.graph_token_cache_path();
 
@@ -92,7 +95,10 @@ async fn main() -> Result<()> {
     println!("Checking auth…");
     match graph.ensure_authed().await? {
         Some(prompt) => {
-            println!("⚠  Need to sign in: {} (code: {})", prompt.verification_uri, prompt.user_code);
+            println!(
+                "⚠  Need to sign in: {} (code: {})",
+                prompt.verification_uri, prompt.user_code
+            );
             return Ok(());
         }
         None => println!("✓ Authenticated"),
@@ -105,7 +111,11 @@ async fn main() -> Result<()> {
     let url = format!("https://graph.microsoft.com/v1.0{path}");
     let page: serde_json::Value = graph.get_json(&url).await?;
 
-    let arr = page.get("value").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let arr = page
+        .get("value")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     println!("Raw event count from API: {}", arr.len());
 
     if let Some(err) = page.get("error") {
@@ -126,21 +136,48 @@ async fn main() -> Result<()> {
         match serde_json::from_value::<GraphEvent>(item.clone()) {
             Ok(ev) => {
                 let subject = ev.subject.as_deref().unwrap_or("(no subject)");
-                let start_raw = ev.start.as_ref().and_then(|d| d.date_time.as_deref()).unwrap_or("?");
-                let end_raw   = ev.end.as_ref().and_then(|d| d.date_time.as_deref()).unwrap_or("?");
-                let tz        = ev.start.as_ref().and_then(|d| d.time_zone.as_deref()).unwrap_or("?");
-                let start_utc = ev.start.as_ref().and_then(|d| d.date_time.as_deref()).and_then(parse_dt);
-                let response  = ev.response_status.as_ref().and_then(|r| r.response.as_deref()).unwrap_or("");
+                let start_raw = ev
+                    .start
+                    .as_ref()
+                    .and_then(|d| d.date_time.as_deref())
+                    .unwrap_or("?");
+                let end_raw = ev
+                    .end
+                    .as_ref()
+                    .and_then(|d| d.date_time.as_deref())
+                    .unwrap_or("?");
+                let tz = ev
+                    .start
+                    .as_ref()
+                    .and_then(|d| d.time_zone.as_deref())
+                    .unwrap_or("?");
+                let start_utc = ev
+                    .start
+                    .as_ref()
+                    .and_then(|d| d.date_time.as_deref())
+                    .and_then(parse_dt);
+                let response = ev
+                    .response_status
+                    .as_ref()
+                    .and_then(|r| r.response.as_deref())
+                    .unwrap_or("");
                 let cancelled = ev.is_cancelled.unwrap_or(false);
 
                 let is_now = start_utc.map(|s| s <= now).unwrap_or(false)
-                    && ev.end.as_ref().and_then(|d| d.date_time.as_deref()).and_then(parse_dt)
-                       .map(|e| e > now).unwrap_or(false);
+                    && ev
+                        .end
+                        .as_ref()
+                        .and_then(|d| d.date_time.as_deref())
+                        .and_then(parse_dt)
+                        .map(|e| e > now)
+                        .unwrap_or(false);
 
-                let local_start = start_utc.map(|s| {
-                    let l: chrono::DateTime<chrono::Local> = s.into();
-                    l.format("%H:%M").to_string()
-                }).unwrap_or_else(|| "?".to_owned());
+                let local_start = start_utc
+                    .map(|s| {
+                        let l: chrono::DateTime<chrono::Local> = s.into();
+                        l.format("%H:%M").to_string()
+                    })
+                    .unwrap_or_else(|| "?".to_owned());
 
                 let status_tag = if cancelled || subject.starts_with("Canceled:") {
                     " [cancelled]"
@@ -152,12 +189,12 @@ async fn main() -> Result<()> {
                     ""
                 };
 
-                println!(
-                    "  {local_start} CDT  |  {subject}{status_tag}"
-                );
+                println!("  {local_start} CDT  |  {subject}{status_tag}");
                 println!(
                     "           raw start={start_raw} tz={tz}  utc_parsed={}  end={end_raw}",
-                    start_utc.map(|s| s.to_string()).unwrap_or_else(|| "PARSE FAIL".to_owned())
+                    start_utc
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "PARSE FAIL".to_owned())
                 );
                 shown += 1;
             }
@@ -170,7 +207,11 @@ async fn main() -> Result<()> {
     }
 
     println!("─────────────────────────────");
-    println!("Total: {} events from API, {} deserialized OK", arr.len(), shown);
+    println!(
+        "Total: {} events from API, {} deserialized OK",
+        arr.len(),
+        shown
+    );
 
     Ok(())
 }

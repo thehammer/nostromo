@@ -209,7 +209,10 @@ mod tests {
                 top_row: 0.6,
                 queue: 0.35,
             },
-            fred: FredRatios { col: 0.45, row: 0.55 },
+            fred: FredRatios {
+                col: 0.45,
+                row: 0.55,
+            },
             mother: MotherRatios { list: 0.3 },
         };
 
