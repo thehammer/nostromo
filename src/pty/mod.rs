@@ -10,6 +10,7 @@ pub mod altscreen;
 pub mod client;
 pub mod host;
 pub mod keys;
+pub mod kitty;
 pub mod widget;
 
 pub use client::{DaemonPtyClient, DaemonPtyFactory, InProcessPtyFactory, PtyFactory};

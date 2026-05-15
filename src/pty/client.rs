@@ -15,6 +15,7 @@
 //! `Drop` sends `PtyDetach` (PTY keeps running in the daemon).
 //! `kill()` sends `PtyKill` (daemon kills the child process).
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::KeyEvent;
@@ -29,7 +30,7 @@ use crate::{
         protocol::{ClientMsg, ServerMsg},
         DaemonClient,
     },
-    pty::keys::key_to_bytes,
+    pty::keys::key_to_bytes_for,
 };
 
 /// A TUI-side handle to a PTY that lives inside the daemon.
@@ -39,6 +40,9 @@ pub struct DaemonPtyClient {
     pub parser: Arc<Mutex<vt100::Parser>>,
     size: (u16, u16),
     _reader_task: tokio::task::JoinHandle<()>,
+    /// Current top-of-stack kitty keyboard flags for this PTY.
+    /// `0` means legacy mode (no kitty protocol active).
+    kitty_flags: Arc<AtomicU32>,
 }
 
 impl DaemonPtyClient {
@@ -59,6 +63,9 @@ impl DaemonPtyClient {
     ) -> Self {
         let pty_id = Uuid::new_v4().to_string();
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
+
+        let kitty_tracker = crate::pty::kitty::KittyFlagsTracker::new();
+        let kitty_flags = kitty_tracker.flags();
 
         // Subscribe BEFORE sending PtySpawn so we cannot miss the PtySpawned
         // response if the daemon replies before the subscriber is registered.
@@ -99,7 +106,8 @@ impl DaemonPtyClient {
             });
 
             // Stream output.
-            run_output_loop(&spawned_id, rx, parser_clone, event_tx, view_id).await;
+            run_output_loop(&spawned_id, rx, parser_clone, event_tx, view_id, kitty_tracker)
+                .await;
         });
 
         Self {
@@ -108,6 +116,7 @@ impl DaemonPtyClient {
             parser,
             size: (cols, rows),
             _reader_task: reader_task,
+            kitty_flags,
         }
     }
 
@@ -123,6 +132,9 @@ impl DaemonPtyClient {
         view_id: &'static str,
     ) -> Self {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
+
+        let kitty_tracker = crate::pty::kitty::KittyFlagsTracker::new();
+        let kitty_flags = kitty_tracker.flags();
 
         // Send PtyAttach immediately.
         let _ = client.send(ClientMsg::PtyAttach {
@@ -143,7 +155,15 @@ impl DaemonPtyClient {
                 }
             }
 
-            run_output_loop(&pty_id_clone, rx, parser_clone, event_tx, view_id).await;
+            run_output_loop(
+                &pty_id_clone,
+                rx,
+                parser_clone,
+                event_tx,
+                view_id,
+                kitty_tracker,
+            )
+            .await;
         });
 
         Self {
@@ -152,6 +172,7 @@ impl DaemonPtyClient {
             parser,
             size: (cols, rows),
             _reader_task: reader_task,
+            kitty_flags,
         }
     }
 
@@ -170,7 +191,8 @@ impl DaemonPtyClient {
     }
 
     pub fn send_key(&mut self, key: &KeyEvent) {
-        if let Some(bytes) = key_to_bytes(key) {
+        let flags = self.kitty_flags.load(Ordering::Relaxed);
+        if let Some(bytes) = key_to_bytes_for(key, flags) {
             let _ = self.client.send(ClientMsg::PtyInput {
                 pty_id: self.pty_id.clone(),
                 bytes,
@@ -203,22 +225,28 @@ impl Drop for DaemonPtyClient {
 // ── output streaming loop ────────────────────────────────────────────────────
 
 /// Feed `PtyScrollback` then `PtyOutput` chunks for `pty_id` into `parser`.
+///
+/// `kitty_tracker` observes the byte stream so that `DaemonPtyClient::send_key`
+/// can encode keys correctly when the inner app pushes kitty flags.
 async fn run_output_loop(
     pty_id: &str,
     mut rx: broadcast::Receiver<ServerMsg>,
     parser: Arc<Mutex<vt100::Parser>>,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     view_id: &'static str,
+    mut kitty_tracker: crate::pty::kitty::KittyFlagsTracker,
 ) {
     let mut filter = crate::pty::altscreen::AltScreenFilter::new();
     loop {
         match rx.recv().await {
             Ok(ServerMsg::PtyScrollback { pty_id: id, bytes }) if id == pty_id => {
+                kitty_tracker.feed(&bytes);
                 let filtered = filter.process(&bytes);
                 parser.lock().unwrap().process(&filtered);
                 let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
             }
             Ok(ServerMsg::PtyOutput { pty_id: id, bytes }) if id == pty_id => {
+                kitty_tracker.feed(&bytes);
                 let filtered = filter.process(&bytes);
                 parser.lock().unwrap().process(&filtered);
                 let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
