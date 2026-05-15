@@ -103,9 +103,16 @@ pub struct PerriQueueNativeSource {
 }
 
 impl PerriQueueNativeSource {
-    pub fn spawn(config: Config) -> watch::Receiver<Option<PrQueueSnapshot>> {
+    /// Spawn the data source.
+    ///
+    /// Returns `(snapshot_rx, refresh_tx)`.
+    ///
+    /// Phase 4: `refresh_tx` allows MCP tools to request an immediate queue
+    /// re-fetch without touching the dirty-file sentinel.
+    pub fn spawn(config: Config) -> (watch::Receiver<Option<PrQueueSnapshot>>, mpsc::UnboundedSender<()>) {
         let (tx, rx) = watch::channel(None);
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
 
         let dirty_path = config.perri_state_dir().join("queue.dirty");
         dirty_file::spawn_watcher(dirty_path, dirty_tx);
@@ -114,16 +121,17 @@ impl PerriQueueNativeSource {
 
         tokio::spawn(async move {
             let source = PerriQueueNativeSource { config };
-            source.run(tx, &mut dirty_rx, interval_secs).await;
+            source.run(tx, &mut dirty_rx, &mut refresh_rx, interval_secs).await;
         });
 
-        rx
+        (rx, refresh_tx)
     }
 
     async fn run(
         &self,
         tx: watch::Sender<Option<PrQueueSnapshot>>,
         dirty_rx: &mut mpsc::UnboundedReceiver<()>,
+        refresh_rx: &mut mpsc::UnboundedReceiver<()>,
         interval_secs: u64,
     ) {
         let client = match self.build_client() {
@@ -186,7 +194,10 @@ impl PerriQueueNativeSource {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
                 _ = dirty_rx.recv() => {
-                    debug!("perri queue dirty signal");
+                    debug!("perri queue dirty-file signal");
+                }
+                _ = refresh_rx.recv() => {
+                    debug!("perri queue direct-push refresh signal (MCP)");
                 }
             }
         }

@@ -26,11 +26,14 @@ use anyhow::Result;
 use portable_pty::{CommandBuilder, PtySize};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use super::{
     protocol::{PtyInfo, ServerMsg},
     scrollback::ScrollbackBuf,
 };
+
+use crate::pty::host::{ENV_MCP_SOCKET, ENV_PTY_ID, ENV_SESSION_ID, ENV_VIEW_ID};
 
 // ── PTY chunk ─────────────────────────────────────────────────────────────────
 
@@ -101,7 +104,8 @@ impl PtyManager {
 
     // ── spawn ─────────────────────────────────────────────────────────────────
 
-    /// Spawn a new PTY process.  Returns the canonical `pty_id`.
+    /// Spawn a new PTY process.  Returns the canonical `pty_id` plus the
+    /// Nostromo identity ids injected into the child environment.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_pty(
         &mut self,
@@ -112,7 +116,11 @@ impl PtyManager {
         rows: u16,
         cwd: Option<PathBuf>,
         client_tag: String,
-    ) -> Result<String> {
+    ) -> Result<(String, String, String)> {
+        let nostromo_pty_id = Uuid::new_v4().to_string();
+        let nostromo_session_id = Uuid::new_v4().to_string();
+        let mcp_socket = crate::mcp::socket::default_socket_path();
+
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows,
@@ -128,6 +136,12 @@ impl PtyManager {
         if let Some(dir) = cwd.or_else(|| std::env::current_dir().ok()) {
             cmd_builder.cwd(dir);
         }
+
+        // Inject Nostromo identity env vars so the agent can identify itself.
+        cmd_builder.env(ENV_VIEW_ID, &client_tag);
+        cmd_builder.env(ENV_PTY_ID, &nostromo_pty_id);
+        cmd_builder.env(ENV_SESSION_ID, &nostromo_session_id);
+        cmd_builder.env(ENV_MCP_SOCKET, &mcp_socket);
 
         let child = pair.slave.spawn_command(cmd_builder)?;
         drop(pair.slave);
@@ -197,7 +211,7 @@ impl PtyManager {
         );
 
         info!(pty_id, "PTY spawned");
-        Ok(pty_id)
+        Ok((pty_id, nostromo_pty_id, nostromo_session_id))
     }
 
     // ── attach ────────────────────────────────────────────────────────────────
