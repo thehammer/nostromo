@@ -30,6 +30,7 @@ use crate::{
         protocol::{ClientMsg, ServerMsg},
         DaemonClient,
     },
+    mcp::state::{McpSharedState, PtyIdentity},
     pty::keys::key_to_bytes_for,
 };
 
@@ -40,6 +41,11 @@ pub struct DaemonPtyClient {
     pub parser: Arc<Mutex<vt100::Parser>>,
     size: (u16, u16),
     _reader_task: tokio::task::JoinHandle<()>,
+    /// `NOSTROMO_PTY_ID` injected into the daemon-side child process.
+    /// `None` until the `PtyIdentity` follow-up is received.
+    nostromo_pty_id: Arc<Mutex<Option<String>>>,
+    /// Shared MCP state; used on Drop to deregister the PTY.
+    mcp_state: Option<Arc<McpSharedState>>,
     /// Current top-of-stack kitty keyboard flags for this PTY.
     /// `0` means legacy mode (no kitty protocol active).
     kitty_flags: Arc<AtomicU32>,
@@ -61,8 +67,25 @@ impl DaemonPtyClient {
         view_id: &'static str,
         client_tag: &str,
     ) -> Self {
+        Self::spawn_new_with_mcp(client, cmd, args, (cols, rows), event_tx, view_id, client_tag, None)
+    }
+
+    /// Like [`spawn_new`] but registers the PTY with `mcp_state` when the
+    /// `PtyIdentity` follow-up message arrives from the daemon.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_new_with_mcp(
+        client: DaemonClient,
+        cmd: &str,
+        args: &[&str],
+        (cols, rows): (u16, u16),
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+        view_id: &'static str,
+        client_tag: &str,
+        mcp_state: Option<Arc<McpSharedState>>,
+    ) -> Self {
         let pty_id = Uuid::new_v4().to_string();
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
+        let nostromo_pty_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         let kitty_tracker = crate::pty::kitty::KittyFlagsTracker::new();
         let kitty_flags = kitty_tracker.flags();
@@ -82,11 +105,15 @@ impl DaemonPtyClient {
             client_tag: client_tag.to_string(),
         });
 
-        // Background task: wait for PtySpawned → PtyAttach → stream output.
+        // Background task: wait for PtySpawned → (PtyIdentity) → PtyAttach → stream output.
         let client_clone = client.clone();
         let parser_clone = Arc::clone(&parser);
+        let nostromo_pty_id_clone = Arc::clone(&nostromo_pty_id);
+        // Clone mcp_state for the background task; original is kept for the struct.
+        let mcp_state_for_task = mcp_state.clone();
 
         let reader_task = tokio::spawn(async move {
+            let mcp_state = mcp_state_for_task;
             // Wait for PtySpawned.
             let spawned_id = loop {
                 match rx.recv().await {
@@ -99,6 +126,34 @@ impl DaemonPtyClient {
                     Err(_) => return,
                 }
             };
+
+            // Opportunistically wait a short time for the PtyIdentity follow-up.
+            // The daemon sends it immediately after PtySpawned so this window is
+            // always sufficient; we don't block the attach if it doesn't arrive.
+            let deadline = tokio::time::Instant::now()
+                + tokio::time::Duration::from_millis(100);
+            if let Ok(Ok(ServerMsg::PtyIdentity {
+                pty_id: identity_pty_id,
+                nostromo_pty_id: nid,
+                nostromo_session_id: sid,
+            })) = tokio::time::timeout_at(deadline, rx.recv()).await
+            {
+                if identity_pty_id == spawned_id {
+                    *nostromo_pty_id_clone.lock().unwrap() = Some(nid.clone());
+                    if let Some(ref state) = mcp_state {
+                        state
+                            .register_pty(
+                                nid,
+                                PtyIdentity {
+                                    view_id,
+                                    session_id: sid,
+                                    spawned_at: std::time::SystemTime::now(),
+                                },
+                            )
+                            .await;
+                    }
+                }
+            }
 
             // Attach.
             let _ = client_clone.send(ClientMsg::PtyAttach {
@@ -123,6 +178,8 @@ impl DaemonPtyClient {
             parser,
             size: (cols, rows),
             _reader_task: reader_task,
+            nostromo_pty_id,
+            mcp_state,
             kitty_flags,
         }
     }
@@ -179,6 +236,8 @@ impl DaemonPtyClient {
             parser,
             size: (cols, rows),
             _reader_task: reader_task,
+            nostromo_pty_id: Arc::new(Mutex::new(None)),
+            mcp_state: None,
             kitty_flags,
         }
     }
@@ -226,6 +285,15 @@ impl Drop for DaemonPtyClient {
             pty_id: self.pty_id.clone(),
         });
         debug!(pty_id = %self.pty_id, "DaemonPtyClient dropped; sent PtyDetach");
+
+        // Deregister from MCP state if we have a nostromo_pty_id.
+        if let Some(state) = self.mcp_state.take() {
+            if let Some(nid) = self.nostromo_pty_id.lock().unwrap().clone() {
+                tokio::spawn(async move {
+                    state.deregister_pty(&nid).await;
+                });
+            }
+        }
     }
 }
 
@@ -313,7 +381,16 @@ pub trait PtyFactory: Send + Sync {
 // ── InProcessPtyFactory ───────────────────────────────────────────────────────
 
 /// Factory that creates in-process `PtyHost` instances (daemon not available).
-pub struct InProcessPtyFactory;
+pub struct InProcessPtyFactory {
+    /// Shared MCP state.  PTYs spawned by this factory are registered here.
+    pub mcp_state: Arc<McpSharedState>,
+}
+
+impl InProcessPtyFactory {
+    pub fn new(mcp_state: Arc<McpSharedState>) -> Self {
+        Self { mcp_state }
+    }
+}
 
 impl PtyFactory for InProcessPtyFactory {
     fn spawn(
@@ -324,7 +401,14 @@ impl PtyFactory for InProcessPtyFactory {
         size: (u16, u16),
         tx: mpsc::UnboundedSender<AppEvent>,
     ) -> anyhow::Result<crate::pty::PtyBackend> {
-        let host = crate::pty::PtyHost::spawn(cmd, args, size, tx, view_tag)?;
+        let host = crate::pty::PtyHost::spawn_with_mcp(
+            cmd,
+            args,
+            size,
+            tx,
+            view_tag,
+            Arc::clone(&self.mcp_state),
+        )?;
         Ok(crate::pty::PtyBackend::InProcess(host))
     }
 
@@ -350,14 +434,17 @@ pub struct DaemonPtyFactory {
     client: DaemonClient,
     /// Cached PTY list from last `refresh_existing` call.
     existing: Arc<Mutex<Vec<PtyInfo>>>,
+    /// Shared MCP state.  PTYs spawned by this factory are registered here.
+    pub mcp_state: Arc<McpSharedState>,
 }
 
 impl DaemonPtyFactory {
     /// Create factory and pre-fetch the existing PTY list from the daemon.
-    pub async fn new_with_refresh(client: DaemonClient) -> Self {
+    pub async fn new_with_refresh(client: DaemonClient, mcp_state: Arc<McpSharedState>) -> Self {
         let factory = Self {
             client,
             existing: Arc::new(Mutex::new(vec![])),
+            mcp_state,
         };
         factory.refresh_existing().await;
         factory
@@ -393,7 +480,7 @@ impl PtyFactory for DaemonPtyFactory {
         size: (u16, u16),
         tx: mpsc::UnboundedSender<AppEvent>,
     ) -> anyhow::Result<crate::pty::PtyBackend> {
-        let daemon_client = DaemonPtyClient::spawn_new(
+        let daemon_client = DaemonPtyClient::spawn_new_with_mcp(
             self.client.clone(),
             cmd,
             args,
@@ -401,6 +488,7 @@ impl PtyFactory for DaemonPtyFactory {
             tx,
             view_tag,
             view_tag,
+            Some(Arc::clone(&self.mcp_state)),
         );
         Ok(crate::pty::PtyBackend::Daemon(daemon_client))
     }

@@ -12,7 +12,7 @@ use ratatui::style::Color;
 // ── RateLimits ────────────────────────────────────────────────────────────────
 
 /// Snapshot of Claude's 5-hour and 7-day rate-limit windows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct RateLimits {
     /// Percentage consumed in the 5-hour window (-1 = unknown).
     pub pct_5h: i32,
@@ -54,7 +54,8 @@ impl RateLimits {
 // ── BudgetPosture ─────────────────────────────────────────────────────────────
 
 /// Global budget posture level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BudgetPosture {
     Flush,
     Normal,

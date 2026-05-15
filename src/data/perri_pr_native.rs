@@ -3,6 +3,12 @@
 //! Reads `~/.claude/state/perri/current-pr.json` to find which PR to display,
 //! then fetches metadata via `octocrab` and the raw diff via a reqwest GET with
 //! `Accept: application/vnd.github.diff`.
+//!
+//! Phase 4: `PerriPrNativeSource::spawn` now returns a `refresh_tx` alongside
+//! the `watch::Receiver`.  Callers (e.g. `perri.load_pr` MCP tool) can send
+//! `()` on the sender to trigger an immediate re-fetch without touching the
+//! dirty-file sentinel.  The sentinel watcher is kept as a fallback for the
+//! deprecation window.
 
 use std::path::PathBuf;
 
@@ -36,9 +42,18 @@ pub struct PerriPrNativeSource {
 }
 
 impl PerriPrNativeSource {
-    pub fn spawn(config: Config) -> watch::Receiver<Option<PrSnapshot>> {
+    /// Spawn the data source.
+    ///
+    /// Returns `(snapshot_rx, refresh_tx)`.
+    ///
+    /// - `snapshot_rx` — watch receiver for the latest `PrSnapshot`.
+    /// - `refresh_tx`  — send `()` to trigger an immediate re-fetch (direct
+    ///   MCP push path introduced in Phase 4).  The dirty-file watcher remains
+    ///   active as a fallback for the shell-script deprecation window.
+    pub fn spawn(config: Config) -> (watch::Receiver<Option<PrSnapshot>>, mpsc::UnboundedSender<()>) {
         let (tx, rx) = watch::channel(None);
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
 
         let dirty_path = config.perri_state_dir().join("current-pr.dirty");
         dirty_file::spawn_watcher(dirty_path, dirty_tx);
@@ -47,16 +62,17 @@ impl PerriPrNativeSource {
 
         tokio::spawn(async move {
             let source = PerriPrNativeSource { config };
-            source.run(tx, &mut dirty_rx, interval_secs).await;
+            source.run(tx, &mut dirty_rx, &mut refresh_rx, interval_secs).await;
         });
 
-        rx
+        (rx, refresh_tx)
     }
 
     async fn run(
         &self,
         tx: watch::Sender<Option<PrSnapshot>>,
         dirty_rx: &mut mpsc::UnboundedReceiver<()>,
+        refresh_rx: &mut mpsc::UnboundedReceiver<()>,
         interval_secs: u64,
     ) {
         let client = match self.build_client() {
@@ -90,7 +106,10 @@ impl PerriPrNativeSource {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
                 _ = dirty_rx.recv() => {
-                    debug!("perri diff dirty signal");
+                    debug!("perri diff dirty-file signal");
+                }
+                _ = refresh_rx.recv() => {
+                    debug!("perri diff direct-push refresh signal (MCP)");
                 }
             }
         }

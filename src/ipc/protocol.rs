@@ -205,4 +205,19 @@ pub enum ServerMsg {
     PtyListResp {
         ptys: Vec<PtyInfo>,
     },
+
+    /// Sent immediately after `PtySpawned` to convey the Nostromo identity
+    /// env vars injected into the child process.
+    ///
+    /// Using a follow-up message rather than extending `PtySpawned` avoids a
+    /// protocol version bump; clients that don't understand this message will
+    /// simply ignore it.
+    PtyIdentity {
+        /// Daemon-side `pty_id` that this identity corresponds to.
+        pty_id: String,
+        /// Value of `NOSTROMO_PTY_ID` injected into the child env.
+        nostromo_pty_id: String,
+        /// Value of `NOSTROMO_SESSION_ID` injected into the child env.
+        nostromo_session_id: String,
+    },
 }

@@ -1198,6 +1198,17 @@ impl View for MotherView {
         self.refresh_peek_for_running();
     }
 
+    fn apply_pane_content(
+        &mut self,
+        pane_id: &str,
+        _content: &crate::mcp::command::PaneContent,
+    ) -> Result<(), String> {
+        match pane_id {
+            "job_list" | "log" | "preview" => Err("readonly_pane".into()),
+            _ => Err("unknown_pane".into()),
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

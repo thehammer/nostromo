@@ -190,6 +190,19 @@ pub async fn resume(id: &str, answer: &str) -> Result<()> {
     Ok(())
 }
 
+/// Archive a single terminal-state job by id.
+pub async fn archive(id: &str) -> Result<()> {
+    let out = Command::new(mother_bin())
+        .args(["archive", id])
+        .output()
+        .await?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        warn!("mother archive {id} failed: {stderr}");
+    }
+    Ok(())
+}
+
 /// Re-enqueue a plan file (used to retry failed jobs via `mother add --plan`).
 pub async fn add_plan(plan_path: &Path) -> Result<()> {
     let out = Command::new(mother_bin())
@@ -205,19 +218,19 @@ pub async fn add_plan(plan_path: &Path) -> Result<()> {
 
 // ── peek types ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PeekTodo {
     pub status: String,
     pub content: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PeekToolCall {
     pub tool: String,
     pub brief: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PeekSnapshot {
     #[serde(default)]
     pub todos: Vec<PeekTodo>,

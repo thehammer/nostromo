@@ -836,6 +836,18 @@ impl View for FredView {
         self.pty_capturing = false;
     }
 
+    fn apply_pane_content(
+        &mut self,
+        pane_id: &str,
+        _content: &crate::mcp::command::PaneContent,
+    ) -> Result<(), String> {
+        match pane_id {
+            "mailbox" | "calendar" => Err("readonly_pane".into()),
+            "repl" => Err("readonly_pane".into()),
+            _ => Err("unknown_pane".into()),
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

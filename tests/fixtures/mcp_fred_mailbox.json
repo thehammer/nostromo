@@ -1,0 +1,32 @@
+{
+  "generated_at": "2026-05-14T10:05:00Z",
+  "unread_count": 2,
+  "items": [
+    {
+      "from": "Alice Smith <alice@example.com>",
+      "subject": "Q2 planning sync",
+      "received_at": "2026-05-14T09:30:00Z",
+      "vip": true,
+      "is_invite": false,
+      "is_read": false
+    },
+    {
+      "from": "Bob Jones <bob@example.com>",
+      "subject": "Re: deploy window",
+      "received_at": "2026-05-14T08:15:00Z",
+      "vip": false,
+      "is_invite": false,
+      "is_read": false
+    },
+    {
+      "from": "Carol Lee <carol@example.com>",
+      "subject": "Lunch Thursday?",
+      "received_at": "2026-05-13T17:00:00Z",
+      "vip": false,
+      "is_invite": false,
+      "is_read": true
+    }
+  ],
+  "stale": false,
+  "error": null
+}
