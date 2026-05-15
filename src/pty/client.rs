@@ -161,8 +161,15 @@ impl DaemonPtyClient {
             });
 
             // Stream output.
-            run_output_loop(&spawned_id, rx, parser_clone, event_tx, view_id, kitty_tracker)
-                .await;
+            run_output_loop(
+                &spawned_id,
+                rx,
+                parser_clone,
+                event_tx,
+                view_id,
+                kitty_tracker,
+            )
+            .await;
         });
 
         Self {

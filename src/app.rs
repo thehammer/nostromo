@@ -43,7 +43,7 @@ use crate::{
         perri_pr_native::PerriPrNativeSource,
         perri_queue::PerriQueueSource,
         perri_queue_native::PerriQueueNativeSource,
-        rate_limits::{BudgetPosture, RateLimits},
+        rate_limits::{BudgetPosture, PostureSnapshot, RateLimits},
         rate_limits_watcher,
         right_panel_source::{self, RightPanelSnapshot},
         teri_todos::TeriTodosNativeSource,
@@ -168,6 +168,8 @@ pub struct AppState {
     pub rate_limits: Option<RateLimits>,
     /// Latest budget posture (populated via `AppEvent::PostureChanged`).
     pub budget_posture: Option<BudgetPosture>,
+    /// Latest full posture snapshot (populated via `AppEvent::PostureSnapshot`).
+    pub posture_snapshot: Option<PostureSnapshot>,
     /// Watch receiver for mailbox snapshots (for the bottom status bar).
     pub mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
     /// Watch receiver for calendar snapshots (for the bottom status bar).
@@ -214,6 +216,7 @@ impl AppState {
             daemon_socket_path: std::path::PathBuf::new(),
             rate_limits: None,
             budget_posture: None,
+            posture_snapshot: None,
             mailbox_rx,
             calendar_rx,
             toasts: VecDeque::new(),
@@ -431,6 +434,7 @@ pub async fn run(
     ];
 
     // Index of the Mother view within `views`.
+    const FRED_IDX: usize = 0;
     const MOTHER_IDX: usize = 6;
     // Index of the Perri view within `views`.
     const PERRI_IDX: usize = 1;
@@ -594,6 +598,11 @@ pub async fn run(
             AppEvent::PostureChanged(p) => {
                 state.budget_posture = Some(*p);
                 let _ = budget_posture_mcp_tx.send(Some(*p));
+                continue;
+            }
+            AppEvent::PostureSnapshot(snap) => {
+                state.posture_snapshot = Some(snap.clone());
+                views[FRED_IDX].on_event(&ev);
                 continue;
             }
             _ => {}

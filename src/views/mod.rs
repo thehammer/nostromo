@@ -9,6 +9,7 @@ pub mod command_palette;
 pub mod fred;
 pub mod fred_calendar_image;
 pub mod mother;
+pub mod pace_bars_image;
 pub mod perri;
 pub mod teri;
 

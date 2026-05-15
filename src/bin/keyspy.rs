@@ -17,7 +17,10 @@ fn main() {
             if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                 break;
             }
-            println!("code={:?}  modifiers={:?}  kind={:?}\r", k.code, k.modifiers, k.kind);
+            println!(
+                "code={:?}  modifiers={:?}  kind={:?}\r",
+                k.code, k.modifiers, k.kind
+            );
         }
     }
 

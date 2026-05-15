@@ -28,23 +28,23 @@ const MINS_PER_ROW: u32 = 15;
 
 // ── Colour palette (mirrors ui::theme) ───────────────────────────────────────
 
-const BG:           (u8, u8, u8, u8) = (20,  20,  28,  255);
-const GRID_LINE:    (u8, u8, u8, u8) = (45,  45,  58,  255);
-const AMBER:        (u8, u8, u8, u8) = (255, 191,  0,  255);
-const AMBER_DIM:    (u8, u8, u8, u8) = (100,  75,   0,  220);
-const FG_MUTED:     (u8, u8, u8, u8) = (140, 140, 140, 255);
-const PAST_FILL:    (u8, u8, u8, u8) = ( 38,  38,  50, 200);
-const PAST_TEXT:    (u8, u8, u8, u8) = ( 90,  90, 100, 200);
-const NOW_FILL:     (u8, u8, u8, u8) = ( 80,  60,   0, 230);
-const NOW_BORDER:   (u8, u8, u8, u8) = (255, 191,   0, 255);
-const NOW_TEXT:     (u8, u8, u8, u8) = (255, 210,  60, 255);
-const FUTURE_FILL:  (u8, u8, u8, u8) = ( 30,  52,  88, 230);
-const FUTURE_BORDER:(u8, u8, u8, u8) = ( 80, 120, 200, 255);
-const FUTURE_TEXT:  (u8, u8, u8, u8) = (180, 200, 235, 255);
-const CANCEL_FILL:  (u8, u8, u8, u8) = ( 35,  35,  40, 190);
-const CANCEL_TEXT:  (u8, u8, u8, u8) = ( 90,  90,  96, 190);
-const TENT_FILL:    (u8, u8, u8, u8) = ( 35,  48,  58, 190);
-const TENT_TEXT:    (u8, u8, u8, u8) = (110, 140, 165, 200);
+const BG: (u8, u8, u8, u8) = (20, 20, 28, 255);
+const GRID_LINE: (u8, u8, u8, u8) = (45, 45, 58, 255);
+const AMBER: (u8, u8, u8, u8) = (255, 191, 0, 255);
+const AMBER_DIM: (u8, u8, u8, u8) = (100, 75, 0, 220);
+const FG_MUTED: (u8, u8, u8, u8) = (140, 140, 140, 255);
+const PAST_FILL: (u8, u8, u8, u8) = (38, 38, 50, 200);
+const PAST_TEXT: (u8, u8, u8, u8) = (90, 90, 100, 200);
+const NOW_FILL: (u8, u8, u8, u8) = (80, 60, 0, 230);
+const NOW_BORDER: (u8, u8, u8, u8) = (255, 191, 0, 255);
+const NOW_TEXT: (u8, u8, u8, u8) = (255, 210, 60, 255);
+const FUTURE_FILL: (u8, u8, u8, u8) = (30, 52, 88, 230);
+const FUTURE_BORDER: (u8, u8, u8, u8) = (80, 120, 200, 255);
+const FUTURE_TEXT: (u8, u8, u8, u8) = (180, 200, 235, 255);
+const CANCEL_FILL: (u8, u8, u8, u8) = (35, 35, 40, 190);
+const CANCEL_TEXT: (u8, u8, u8, u8) = (90, 90, 96, 190);
+const TENT_FILL: (u8, u8, u8, u8) = (35, 48, 58, 190);
+const TENT_TEXT: (u8, u8, u8, u8) = (110, 140, 165, 200);
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -118,9 +118,7 @@ pub fn render_calendar_to_image(
             Some(s) => s,
             None => continue,
         };
-        let end_utc = ev
-            .end
-            .unwrap_or(start_utc + chrono::Duration::minutes(30));
+        let end_utc = ev.end.unwrap_or(start_utc + chrono::Duration::minutes(30));
         let start_local: DateTime<Local> = start_utc.into();
         let end_local: DateTime<Local> = end_utc.into();
 
@@ -146,7 +144,9 @@ pub fn render_calendar_to_image(
 
         let col = col_indices[ev_idx];
         let x0 = LABEL_PX + col as u32 * col_w + 2;
-        let x1 = (LABEL_PX + (col as u32 + 1) * col_w).min(w).saturating_sub(2);
+        let x1 = (LABEL_PX + (col as u32 + 1) * col_w)
+            .min(w)
+            .saturating_sub(2);
         if x1 <= x0 {
             continue;
         }
@@ -182,7 +182,15 @@ pub fn render_calendar_to_image(
             let prefix = if ev.is_now { "▶ " } else { "" };
             let title = format!("{prefix}{}", ev.title);
             let baseline_y = y0 as i32 + font_px as i32 + 1;
-            draw_text(&mut pixmap, &font, &title, x0 as i32 + 3, baseline_y, font_px, text_color);
+            draw_text(
+                &mut pixmap,
+                &font,
+                &title,
+                x0 as i32 + 3,
+                baseline_y,
+                font_px,
+                text_color,
+            );
         }
     }
 
@@ -324,8 +332,8 @@ fn draw_text(
                 let nb = (cb as f32 * alpha + db * (1.0 - alpha)).round() as u8;
 
                 // Result is fully opaque (background was opaque).
-                pixels[idx] = tiny_skia::PremultipliedColorU8::from_rgba(nr, ng, nb, 255)
-                    .unwrap_or(dst);
+                pixels[idx] =
+                    tiny_skia::PremultipliedColorU8::from_rgba(nr, ng, nb, 255).unwrap_or(dst);
             }
         }
 
@@ -362,7 +370,6 @@ fn pixmap_to_dynamic_image(pixmap: Pixmap) -> image::DynamicImage {
         }
     }
 
-    let img = image::RgbaImage::from_raw(w, h, rgba)
-        .unwrap_or_else(|| image::RgbaImage::new(w, h));
+    let img = image::RgbaImage::from_raw(w, h, rgba).unwrap_or_else(|| image::RgbaImage::new(w, h));
     image::DynamicImage::ImageRgba8(img)
 }

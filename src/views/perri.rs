@@ -20,8 +20,7 @@ use crate::{
     pty::{PtyHost, PtyWidget},
     ui::{
         drag::{self, DividerAxis, DragState},
-        pane_ratios,
-        theme,
+        pane_ratios, theme,
         widgets::{syntect_cache::SyntectCache, syntect_diff::SyntectDiff, truncate::truncate},
     },
     views::{EventOutcome, View, ViewCtx},
@@ -220,10 +219,7 @@ impl PerriView {
                         //   needs_review → plain ○ (needs at least one approval)
                         //   changes_req  → amber ● (author responded to our request)
                         let (req_glyph, req_style) = match pr.bucket.as_str() {
-                            "requested" => (
-                                "● ",
-                                Style::default().fg(theme::BORDER_ACTIVE),
-                            ),
+                            "requested" => ("● ", Style::default().fg(theme::BORDER_ACTIVE)),
                             "changes_req" => ("● ", theme::style_amber()),
                             _ => ("○ ", theme::style_normal()),
                         };
@@ -517,14 +513,21 @@ impl View for PerriView {
         if let AppEvent::Mouse(m) = ev {
             let in_repl = rect_contains(self.repl_area, m.column, m.row);
             let in_list = rect_contains(self.pr_list_area, m.column, m.row);
-            let len = self.queue_rx.borrow().as_ref().map(|s| s.items.len()).unwrap_or(0);
+            let len = self
+                .queue_rx
+                .borrow()
+                .as_ref()
+                .map(|s| s.items.len())
+                .unwrap_or(0);
             match m.kind {
                 // ── drag start ────────────────────────────────────────────────
                 MouseEventKind::Down(MouseButton::Left) => {
                     // Divider 0: horizontal top-row/REPL split.
                     if drag::hit_test(
-                        m.column, m.row,
-                        0, self.top_row_divider_row,
+                        m.column,
+                        m.row,
+                        0,
+                        self.top_row_divider_row,
                         DividerAxis::Horizontal,
                         self.top_row_area,
                     ) {
@@ -537,8 +540,10 @@ impl View for PerriView {
                     }
                     // Divider 1: vertical queue/diff split.
                     if drag::hit_test(
-                        m.column, m.row,
-                        self.queue_divider_col, 0,
+                        m.column,
+                        m.row,
+                        self.queue_divider_col,
+                        0,
                         DividerAxis::Vertical,
                         self.top_cols_area,
                     ) {
@@ -552,7 +557,12 @@ impl View for PerriView {
                 }
                 // ── drag move ─────────────────────────────────────────────────
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    if let DragState::Dragging { divider_id, parent, axis } = self.drag {
+                    if let DragState::Dragging {
+                        divider_id,
+                        parent,
+                        axis,
+                    } = self.drag
+                    {
                         let new_ratio = drag::ratio_from_mouse(parent, m.column, m.row, axis);
                         match divider_id {
                             0 => self.top_row_ratio = new_ratio,
