@@ -1,6 +1,5 @@
 ---
 source: tests/snapshot_perri.rs
-assertion_line: 105
 expression: snapshot
 ---
 ┌ PR Queue [2] ────────────────────────────────────────────────┐┌ PR #42 — feat: add user authentication ──────────────────────────────────────────────────────┐

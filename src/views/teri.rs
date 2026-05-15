@@ -17,6 +17,7 @@ use crate::{
     data::teri_todos::TeriTodosSnapshot,
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
+    transcript::TranscriptPane,
     ui::theme,
     views::{EventOutcome, View, ViewCtx},
 };
@@ -38,6 +39,11 @@ pub struct TeriView {
     repl_area: Rect,
     repl_scroll: u16,
     todos_selected: usize,
+    // ── transcript pane ───────────────────────────────────────────────────────
+    /// Transcript overlay (Ctrl+T toggles; shown as right 40% when visible).
+    transcript: TranscriptPane,
+    /// Last area used to render the transcript (for mouse hit-testing).
+    transcript_render_area: Rect,
 }
 
 impl TeriView {
@@ -45,12 +51,14 @@ impl TeriView {
         // Attempt to reattach to an existing daemon PTY for this view.
         let mut pty = Self::try_reattach(&ctx);
 
+        // Recover session context for the transcript pane.
+        let mut transcript = TranscriptPane::new();
+        let store = crate::sessions::SessionStore::load();
+        let stored_entry = store.get(TERI_PTY_TAG).cloned();
+
         // If no live daemon PTY exists, check the session store and auto-spawn.
         if pty.is_none() {
-            if let Some(entry) = crate::sessions::SessionStore::load()
-                .get(TERI_PTY_TAG)
-                .cloned()
-            {
+            if let Some(ref entry) = stored_entry {
                 let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
                 match ctx.pty_factory.spawn(
                     TERI_PTY_TAG,
@@ -73,6 +81,20 @@ impl TeriView {
             }
         }
 
+        // Restore session context for Ctrl+T transcript bring-up.
+        if let Some(entry) = stored_entry {
+            let sid_opt = entry.session_id.clone().or_else(|| {
+                entry.cwd.as_deref()
+                    .and_then(crate::transcript::find_latest_session_id_for_cwd)
+            });
+            if let Some(sid) = sid_opt {
+                let cwd = entry.cwd
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+                transcript.set_session_context(cwd, sid);
+            }
+        }
+
         let pty_capturing = pty.is_some();
         let pane_focus = if pty_capturing {
             Pane::Repl
@@ -89,6 +111,8 @@ impl TeriView {
             repl_area: Rect::new(0, 0, 80, 24),
             repl_scroll: 0,
             todos_selected: 0,
+            transcript,
+            transcript_render_area: Rect::default(),
         }
     }
 
@@ -270,14 +294,26 @@ impl View for TeriView {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        // 40% todos, 60% REPL
+        // 40% todos, 60% REPL (when transcript visible, REPL+transcript split 60/40).
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
 
         self.render_todos(f, chunks[0]);
-        self.render_repl(f, chunks[1]);
+
+        if self.transcript.is_visible() {
+            // Split the REPL column 60 (PTY) / 40 (transcript) horizontally.
+            let repl_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(chunks[1]);
+            self.render_repl(f, repl_chunks[0]);
+            self.transcript_render_area = repl_chunks[1];
+            self.transcript.render(f, repl_chunks[1]);
+        } else {
+            self.render_repl(f, chunks[1]);
+        }
 
         // Resize PTY if the area changed.
         if let Some(pty) = &mut self.pty {
@@ -295,6 +331,20 @@ impl View for TeriView {
                     Pane::Repl => Pane::Todos,
                 };
                 self.pty_capturing = self.pane_focus == Pane::Repl && self.pty.is_some();
+                return EventOutcome::Consumed;
+            }
+
+            // Ctrl+T — toggle transcript pane (nav mode only).
+            if k.code == KeyCode::Char('t')
+                && k.modifiers == KeyModifiers::CONTROL
+                && !self.pty_capturing
+            {
+                self.transcript.toggle_visible();
+                return EventOutcome::Consumed;
+            }
+
+            // Transcript navigation when visible and not capturing PTY.
+            if self.transcript.is_visible() && !self.pty_capturing && self.transcript.on_key(k) {
                 return EventOutcome::Consumed;
             }
 
@@ -327,23 +377,36 @@ impl View for TeriView {
 
             // Enter in REPL pane with no PTY: spawn the agent.
             if k.code == KeyCode::Enter && self.pane_focus == Pane::Repl && self.pty.is_none() {
+                let sid = uuid::Uuid::new_v4().to_string();
+                let sid_clone = sid.clone();
                 let (cols, rows) = (self.repl_area.width.max(20), self.repl_area.height.max(5));
+                let args = [
+                    "--dangerously-skip-permissions",
+                    "--agent",
+                    "teri",
+                    "--session-id",
+                    &sid_clone,
+                ];
                 match self.ctx.pty_factory.spawn(
                     TERI_PTY_TAG,
                     "claude",
-                    &["--dangerously-skip-permissions", "--agent", "teri"],
+                    &args,
                     (cols, rows),
                     self.ctx.event_tx.clone(),
                 ) {
                     Ok(backend) => {
                         self.pty = Some(backend);
                         self.pty_capturing = true;
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+                        self.transcript.set_session_context(cwd.clone(), sid.clone());
                         let mut store = crate::sessions::SessionStore::load();
                         store.record(
                             TERI_PTY_TAG,
                             "claude",
-                            &["--dangerously-skip-permissions", "--agent", "teri"],
-                            std::env::current_dir().ok(),
+                            &args,
+                            Some(cwd),
+                            Some(sid),
                         );
                     }
                     Err(e) => {
@@ -378,8 +441,13 @@ impl View for TeriView {
             }
         }
 
-        // Mouse scroll: scroll the REPL.
+        // Mouse scroll: scroll the REPL (delegate to transcript when visible).
         if let AppEvent::Mouse(m) = ev {
+            if self.transcript.is_visible()
+                && self.transcript.on_mouse(m, self.transcript_render_area)
+            {
+                return EventOutcome::Consumed;
+            }
             match m.kind {
                 MouseEventKind::ScrollUp => {
                     self.repl_scroll = self.repl_scroll.saturating_add(3);

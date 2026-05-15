@@ -13,6 +13,7 @@ pub mod layout;
 pub mod mother;
 pub mod pty;
 pub mod sessions;
+pub mod transcript;
 pub mod ui;
 pub mod views;
 

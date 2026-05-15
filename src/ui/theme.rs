@@ -101,3 +101,23 @@ pub fn style_for_sweater(s: Sweater) -> Style {
         Sweater::Red => style_red(),
     }
 }
+
+/// Inline code style — light teal foreground.
+pub fn style_code_inline() -> Style {
+    Style::default().fg(Color::Rgb(170, 205, 210))
+}
+
+/// Hyperlink style — cornflower blue, underlined.
+pub fn style_link() -> Style {
+    Style::default()
+        .fg(BORDER_ACTIVE)
+        .add_modifier(Modifier::UNDERLINED)
+}
+
+/// Cursor gutter colour — left-gutter marker for the selected transcript entry.
+pub const CURSOR: Color = Color::Rgb(100, 149, 237); // cornflower (matches BORDER_ACTIVE)
+
+/// Dim style — used for collapsed arrow glyphs and thinking prefixes.
+pub fn style_dim() -> Style {
+    Style::default().fg(FG_MUTED)
+}
