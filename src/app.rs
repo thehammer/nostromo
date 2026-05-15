@@ -13,8 +13,13 @@
 //! - Split-pane layout system (`LayoutNode`, `Ctrl-W` chord).
 //! - Command palette (`Ctrl-P`).
 //! - Sweater status colours on tab bar (Perri PR count, Mother job runtime).
+//!
+//! Phase 4 MCP additions:
+//! - `AppState::toasts` — transient toast queue, auto-expired on Tick.
+//! - `AppState::mcp_status_segments` — per-view status-bar segments.
+//! - `McpCommand::Notify`, `RegisterStatusSegment`, `ClearStatusSegment` handlers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,13 +43,14 @@ use crate::{
         perri_pr_native::PerriPrNativeSource,
         perri_queue::PerriQueueSource,
         perri_queue_native::PerriQueueNativeSource,
-        rate_limits::{BudgetPosture, RateLimits},
+        rate_limits::{BudgetPosture, PostureSnapshot, RateLimits},
         rate_limits_watcher,
         right_panel_source::{self, RightPanelSnapshot},
         teri_todos::TeriTodosNativeSource,
     },
     event::{self, AppEvent},
     layout::{self, LayoutNode, Side, SplitDir},
+    mcp::{McpServer, McpSharedState, ViewMeta},
     mother::{self, MotherJob},
     pty::{DaemonPtyFactory, InProcessPtyFactory, PtyFactory},
     ui,
@@ -59,6 +65,35 @@ use crate::{
     },
     ViewArg,
 };
+
+// ── MCP phase-4 types ─────────────────────────────────────────────────────────
+
+/// A transient notification posted via `nostromo.notify`.
+///
+/// Displayed in the status bar and auto-expires after `TOAST_TTL_SECS` seconds.
+pub struct Toast {
+    pub text: String,
+    pub level: crate::mcp::command::NotifyLevel,
+    /// Unix epoch second at which this toast should stop rendering.
+    pub expires_at: i64,
+}
+
+impl Toast {
+    pub fn new(text: String, level: crate::mcp::command::NotifyLevel) -> Self {
+        let expires_at = chrono::Utc::now().timestamp() + TOAST_TTL_SECS;
+        Self { text, level, expires_at }
+    }
+}
+
+/// How long a toast is displayed.
+const TOAST_TTL_SECS: i64 = 5;
+
+/// A status-bar segment registered by an MCP tool call.
+pub struct McpStatusSegment {
+    pub text: String,
+    /// Optional named or hex color string.
+    pub color: Option<String>,
+}
 
 // ── modal state ───────────────────────────────────────────────────────────────
 
@@ -133,10 +168,27 @@ pub struct AppState {
     pub rate_limits: Option<RateLimits>,
     /// Latest budget posture (populated via `AppEvent::PostureChanged`).
     pub budget_posture: Option<BudgetPosture>,
+    /// Latest full posture snapshot (populated via `AppEvent::PostureSnapshot`).
+    pub posture_snapshot: Option<PostureSnapshot>,
     /// Watch receiver for mailbox snapshots (for the bottom status bar).
     pub mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
     /// Watch receiver for calendar snapshots (for the bottom status bar).
     pub calendar_rx: tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
+
+    // ── Phase 4: MCP notifications & status segments ──────────────────────────
+    /// Transient toast notifications posted via `nostromo.notify`.
+    /// Expired entries are garbage-collected on every `AppEvent::Tick`.
+    pub toasts: VecDeque<Toast>,
+    /// MCP-registered status-bar segments keyed by `(view_id, segment_id)`.
+    pub mcp_status_segments: HashMap<(String, String), McpStatusSegment>,
+    /// Id of the currently active view — kept in sync each render frame so
+    /// `status_bar::render` can filter segments to the active view without
+    /// needing direct access to the `views` slice.
+    pub active_view_id: String,
+    /// Direct-push refresh sender for `PerriPrNativeSource` (Phase 4).
+    /// Sending `()` triggers an immediate re-fetch, bypassing the dirty-file
+    /// sentinel.  `None` when running in bash-fallback mode.
+    pub perri_pr_refresh_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
 }
 
 impl AppState {
@@ -164,8 +216,13 @@ impl AppState {
             daemon_socket_path: std::path::PathBuf::new(),
             rate_limits: None,
             budget_posture: None,
+            posture_snapshot: None,
             mailbox_rx,
             calendar_rx,
+            toasts: VecDeque::new(),
+            mcp_status_segments: HashMap::new(),
+            active_view_id: String::new(),
+            perri_pr_refresh_tx: None,
         }
     }
 
@@ -205,16 +262,24 @@ pub async fn run(
     let queue_rx = if bash_fallback {
         PerriQueueSource::spawn(config.clone())
     } else {
-        PerriQueueNativeSource::spawn(config.clone())
+        // Phase 4: the second element is the direct-push refresh sender.
+        // The queue source is polled on an interval; MCP tools don't currently
+        // trigger manual queue refreshes, so we discard the sender.
+        let (rx, _queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
+        rx
     };
-    let pr_rx = if bash_fallback {
-        PerriPrSource::spawn(config.clone())
+    let (pr_rx, perri_pr_refresh_tx_opt) = if bash_fallback {
+        (PerriPrSource::spawn(config.clone()), None)
     } else {
-        PerriPrNativeSource::spawn(config.clone())
+        let (rx, tx) = PerriPrNativeSource::spawn(config.clone());
+        (rx, Some(tx))
     };
 
     // Clone queue_rx to monitor PR count for sweater status in the main loop.
     let mut queue_rx_for_count = queue_rx.clone();
+
+    // Spawn Teri todos source early so its receiver is available for MCP state.
+    let teri_todos_rx = TeriTodosNativeSource::spawn();
 
     // Record daemon connection state before daemon_client is consumed below.
     let daemon_was_connected = daemon_client.is_some();
@@ -223,16 +288,72 @@ pub async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     event::spawn(tx.clone());
 
+    // ── MCP mirror channels (Phase 2) ────────────────────────────────────────
+    // Mother jobs, statusline, rate-limits, and budget posture flow through
+    // AppEvent rather than watch channels.  We mirror them into watch channels
+    // so MCP tool handlers can read them without touching the event loop.
+    let (mother_jobs_mcp_tx, mother_jobs_mcp_rx) =
+        tokio::sync::watch::channel::<Vec<MotherJob>>(vec![]);
+    let (mother_status_mcp_tx, mother_status_mcp_rx) =
+        tokio::sync::watch::channel::<Option<crate::mother::MotherStatus>>(None);
+    let (rate_limits_mcp_tx, rate_limits_mcp_rx) =
+        tokio::sync::watch::channel::<Option<RateLimits>>(None);
+    let (budget_posture_mcp_tx, budget_posture_mcp_rx) =
+        tokio::sync::watch::channel::<Option<BudgetPosture>>(None);
+
+    // ── MCP shared state ─────────────────────────────────────────────────────
+    let mcp_state = Arc::new(McpSharedState::new(
+        tx.clone(),
+        queue_rx.clone(),
+        pr_rx.clone(),
+        mailbox_rx.clone(),
+        calendar_rx.clone(),
+        teri_todos_rx.clone(),
+        mother_jobs_mcp_rx,
+        mother_status_mcp_rx,
+        rate_limits_mcp_rx,
+        budget_posture_mcp_rx,
+    ));
+
+    // Populate static view metadata once at startup.
+    {
+        let mut views_meta = mcp_state.views_meta.write().await;
+        *views_meta = vec![
+            ViewMeta { id: "fred",    title: "Fred".to_string(),    pane_ids: vec!["mailbox", "calendar", "repl"] },
+            ViewMeta { id: "perri",   title: "Perri".to_string(),   pane_ids: vec!["pr_queue", "diff", "repl"] },
+            ViewMeta { id: "claudia", title: "Claudia".to_string(), pane_ids: vec!["repl"] },
+            ViewMeta { id: "cody",    title: "Cody".to_string(),    pane_ids: vec!["repl"] },
+            ViewMeta { id: "kennedy", title: "Kennedy".to_string(), pane_ids: vec!["repl"] },
+            ViewMeta { id: "teri",    title: "Teri".to_string(),    pane_ids: vec!["todos", "repl"] },
+            ViewMeta { id: "mother",  title: "Mother".to_string(),  pane_ids: vec!["job_list", "log", "preview"] },
+        ];
+    }
+
+    // Bind MCP server (best-effort: failure logs a warning but doesn't crash).
+    let _mcp_server = match McpServer::bind(
+        crate::mcp::default_socket_path(),
+        (*mcp_state).clone(),
+    ).await {
+        Ok(srv) => {
+            info!(socket = ?srv.socket_path(), "MCP server bound");
+            Some(srv)
+        }
+        Err(e) => {
+            warn!("MCP server bind failed (continuing without MCP): {e:#}");
+            None
+        }
+    };
+
     // Construct PtyFactory; also spawn Mother pollers or daemon bridge.
     let pty_factory: Arc<dyn PtyFactory> = if let Some(client) = daemon_client {
         info!("using daemon bridge for Mother + activity events");
         crate::data::daemon_bridge::spawn(client.clone(), tx.clone(), Arc::clone(&bus));
-        let factory = DaemonPtyFactory::new_with_refresh(client).await;
+        let factory = DaemonPtyFactory::new_with_refresh(client, Arc::clone(&mcp_state)).await;
         Arc::new(factory)
     } else {
         // In-process fallback: spawn Mother pollers as before.
         mother_poll::spawn(tx.clone());
-        Arc::new(InProcessPtyFactory)
+        Arc::new(InProcessPtyFactory::new(Arc::clone(&mcp_state)))
     };
 
     // Spawn break-glass sentinel watcher.
@@ -247,20 +368,23 @@ pub async fn run(
     let fred_ctx = ViewCtx {
         event_tx: tx.clone(),
         pty_factory: Arc::clone(&pty_factory),
+        mcp_state: Arc::clone(&mcp_state),
     };
     let perri_ctx = ViewCtx {
         event_tx: tx.clone(),
         pty_factory: Arc::clone(&pty_factory),
+        mcp_state: Arc::clone(&mcp_state),
     };
     let mother_ctx = ViewCtx {
         event_tx: tx.clone(),
         pty_factory: Arc::clone(&pty_factory),
+        mcp_state: Arc::clone(&mcp_state),
     };
 
-    let teri_todos_rx = TeriTodosNativeSource::spawn();
     let teri_ctx = ViewCtx {
         event_tx: tx.clone(),
         pty_factory: Arc::clone(&pty_factory),
+        mcp_state: Arc::clone(&mcp_state),
     };
 
     let mut views: Vec<BoxedView> = vec![
@@ -284,6 +408,7 @@ pub async fn run(
             ViewCtx {
                 event_tx: tx.clone(),
                 pty_factory: Arc::clone(&pty_factory),
+                mcp_state: Arc::clone(&mcp_state),
             },
         )),
         Box::new(views::agent_generic::GenericView::new(
@@ -292,6 +417,7 @@ pub async fn run(
             ViewCtx {
                 event_tx: tx.clone(),
                 pty_factory: Arc::clone(&pty_factory),
+                mcp_state: Arc::clone(&mcp_state),
             },
         )),
         Box::new(views::agent_generic::GenericView::new(
@@ -300,6 +426,7 @@ pub async fn run(
             ViewCtx {
                 event_tx: tx.clone(),
                 pty_factory: Arc::clone(&pty_factory),
+                mcp_state: Arc::clone(&mcp_state),
             },
         )),
         Box::new(views::teri::TeriView::new(teri_todos_rx, teri_ctx)),
@@ -307,6 +434,7 @@ pub async fn run(
     ];
 
     // Index of the Mother view within `views`.
+    const FRED_IDX: usize = 0;
     const MOTHER_IDX: usize = 6;
     // Index of the Perri view within `views`.
     const PERRI_IDX: usize = 1;
@@ -320,6 +448,7 @@ pub async fn run(
     let mut state = AppState::new(mailbox_rx_state, calendar_rx_state);
     state.daemon_connected = daemon_was_connected;
     state.daemon_socket_path = crate::ipc::default_socket_path();
+    state.perri_pr_refresh_tx = perri_pr_refresh_tx_opt;
 
     info!("event loop starting");
 
@@ -372,6 +501,8 @@ pub async fn run(
                 &mut state,
                 &active_agent_id,
             );
+            // Keep active_view_id in sync so status_bar can filter MCP segments.
+            state.active_view_id = views[active].id().to_owned();
             ui::status_bar::render(f, status_area, &mut state);
             if state.show_debug_overlay {
                 ui::debug_overlay::render(f, full_area, &state, &views, active);
@@ -416,6 +547,19 @@ pub async fn run(
             continue;
         }
 
+        // ── MCP mutations ─────────────────────────────────────────────────────
+        if let AppEvent::McpCommand(cmd) = ev {
+            handle_mcp_command(
+                *cmd,
+                &mut views,
+                &mut active,
+                &mut state,
+                PERRI_IDX,
+                MOTHER_IDX,
+            ).await;
+            continue;
+        }
+
         // ── Background data events ────────────────────────────────────────────
         match &ev {
             AppEvent::BreakGlassDetected(req) => {
@@ -437,19 +581,28 @@ pub async fn run(
             }
             AppEvent::MotherJobs(jobs) => {
                 state.mother_jobs = jobs.clone();
+                let _ = mother_jobs_mcp_tx.send(jobs.clone());
                 views[MOTHER_IDX].on_event(&ev);
                 continue;
             }
-            AppEvent::MotherStatusline(_) => {
+            AppEvent::MotherStatusline(status) => {
+                let _ = mother_status_mcp_tx.send(Some(status.clone()));
                 views[MOTHER_IDX].on_event(&ev);
                 continue;
             }
             AppEvent::RateLimitsChanged(rl) => {
                 state.rate_limits = Some(*rl);
+                let _ = rate_limits_mcp_tx.send(Some(*rl));
                 continue;
             }
             AppEvent::PostureChanged(p) => {
                 state.budget_posture = Some(*p);
+                let _ = budget_posture_mcp_tx.send(Some(*p));
+                continue;
+            }
+            AppEvent::PostureSnapshot(snap) => {
+                state.posture_snapshot = Some(snap.clone());
+                views[FRED_IDX].on_event(&ev);
                 continue;
             }
             _ => {}
@@ -639,6 +792,9 @@ pub async fn run(
 
             AppEvent::Tick => {
                 views[focused_view_idx].on_tick();
+                // Garbage-collect expired toasts.
+                let now = chrono::Utc::now().timestamp();
+                state.toasts.retain(|t| t.expires_at > now);
             }
 
             _ => {
@@ -989,6 +1145,243 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
 
         MotherAction::OpenAwaitModal(job) => {
             state.modal = Some(ModalState::Await(Box::new(AwaitModal::new(job))));
+        }
+    }
+}
+
+// ── MCP command dispatcher ────────────────────────────────────────────────────
+
+/// Dispatch an `McpCommand` from the MCP server to the correct view or system.
+///
+/// All reply channels are consumed here; if we can't find the reply receiver
+/// (already dropped) we log a warning and move on.
+async fn handle_mcp_command(
+    cmd: crate::mcp::command::McpCommand,
+    views: &mut Vec<BoxedView>,
+    active: &mut usize,
+    state: &mut AppState,
+    perri_idx: usize,
+    mother_idx: usize,
+) {
+    use crate::mcp::command::McpCommand;
+
+    let _ = mother_idx; // used for context; Mother mutations are CLI-based
+
+    match cmd {
+        // ── SetPaneFocus ─────────────────────────────────────────────────────
+        McpCommand::SetPaneFocus { view_id, pane_id: _, reply } => {
+            // For now, interpret SetPaneFocus as switching the active view.
+            match views.iter().position(|v| v.id() == view_id) {
+                Some(idx) => {
+                    let old = *active;
+                    if old != idx {
+                        views[old].blur();
+                        *active = idx;
+                        if state.split_mode {
+                            update_focused_leaf_view(&mut state.layout, &state.focused_path, idx);
+                            layout::persist::save(&state.layout);
+                        }
+                        views[*active].focus();
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                None => { let _ = reply.send(Err("unknown_view".into())); }
+            }
+        }
+
+        // ── SetPaneContent ───────────────────────────────────────────────────
+        McpCommand::SetPaneContent { view_id, pane_id, content, reply } => {
+            match views.iter_mut().position(|v| v.id() == view_id.as_str()) {
+                Some(idx) => {
+                    let result = views[idx].apply_pane_content(&pane_id, &content);
+                    let _ = reply.send(result);
+                }
+                None => { let _ = reply.send(Err("unknown_view".into())); }
+            }
+        }
+
+        // ── SetPaneLayout ────────────────────────────────────────────────────
+        McpCommand::SetPaneLayout { view_id, ratios, reply } => {
+            match views.iter_mut().position(|v| v.id() == view_id.as_str()) {
+                Some(idx) => {
+                    let result = views[idx].apply_pane_layout(&ratios);
+                    let _ = reply.send(result);
+                }
+                None => { let _ = reply.send(Err("unknown_view".into())); }
+            }
+        }
+
+        // ── SwitchActiveView ─────────────────────────────────────────────────
+        McpCommand::SwitchActiveView { view_id, reply } => {
+            match views.iter().position(|v| v.id() == view_id) {
+                Some(idx) => {
+                    let old = *active;
+                    if old != idx {
+                        views[old].blur();
+                        *active = idx;
+                        if state.split_mode {
+                            update_focused_leaf_view(&mut state.layout, &state.focused_path, idx);
+                            layout::persist::save(&state.layout);
+                        }
+                        views[*active].focus();
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                None => { let _ = reply.send(Err("unknown_view".into())); }
+            }
+        }
+
+        // ── PerriLoadPr ──────────────────────────────────────────────────────
+        McpCommand::PerriLoadPr { number, repo, highlights, reply } => {
+            if let Some(pv) = views[perri_idx]
+                .as_any_mut()
+                .downcast_mut::<views::perri::PerriView>()
+            {
+                let result = pv.load_pr(number, repo, highlights);
+                // Phase 4: also trigger the direct-push refresh so the data
+                // source re-fetches immediately without needing the dirty file.
+                if let Some(tx) = &state.perri_pr_refresh_tx {
+                    let _ = tx.send(());
+                }
+                let _ = reply.send(result);
+            } else {
+                let _ = reply.send(Err("internal_error: perri downcast failed".into()));
+            }
+        }
+
+        // ── PerriClearCurrentPr ───────────────────────────────────────────────
+        McpCommand::PerriClearCurrentPr { reply } => {
+            if let Some(pv) = views[perri_idx]
+                .as_any_mut()
+                .downcast_mut::<views::perri::PerriView>()
+            {
+                let result = pv.clear_current_pr();
+                let _ = reply.send(result);
+            } else {
+                let _ = reply.send(Err("internal_error: perri downcast failed".into()));
+            }
+        }
+
+        // ── GetPerriSelectedIndex ─────────────────────────────────────────────
+        McpCommand::GetPerriSelectedIndex { reply } => {
+            if let Some(pv) = views[perri_idx]
+                .as_any()
+                .downcast_ref::<views::perri::PerriView>()
+            {
+                let _ = reply.send(Ok(pv.selected_pr_index()));
+            } else {
+                let _ = reply.send(Err("internal_error: perri downcast failed".into()));
+            }
+        }
+
+        // ── SetPerriSelectedIndex ─────────────────────────────────────────────
+        McpCommand::SetPerriSelectedIndex { index, reply } => {
+            if let Some(pv) = views[perri_idx]
+                .as_any_mut()
+                .downcast_mut::<views::perri::PerriView>()
+            {
+                pv.set_selected_pr_index(index);
+                let _ = reply.send(Ok(()));
+            } else {
+                let _ = reply.send(Err("internal_error: perri downcast failed".into()));
+            }
+        }
+
+        // ── MotherEnqueue ─────────────────────────────────────────────────────
+        McpCommand::MotherEnqueue { plan_path, reply } => {
+            if !plan_path.exists() || !plan_path.is_file() {
+                let _ = reply.send(Err(format!(
+                    "plan_not_found: {}",
+                    plan_path.display()
+                )));
+                return;
+            }
+            if let Err(e) = mother::add_plan(&plan_path).await {
+                let _ = reply.send(Err(format!("mother_cli_error: {e}")));
+                return;
+            }
+            // Re-list to find the new job (mother add doesn't return a job id).
+            match mother::list_jobs().await {
+                Ok(jobs) => {
+                    // The most recently created job is probably our new one.
+                    // Find a queued or ready job whose plan_path matches.
+                    let path_str = plan_path.to_string_lossy();
+                    let lite = jobs
+                        .iter()
+                        .find(|j| {
+                            j.plan_path.as_deref() == Some(path_str.as_ref())
+                                && (j.state == "queued" || j.state == "ready")
+                        })
+                        .or_else(|| jobs.iter().max_by_key(|j| j.created_at))
+                        .map(|j| crate::mcp::command::MotherJobLite {
+                            id: j.id.clone(),
+                            title: j.title.clone(),
+                            status: j.state.clone(),
+                        })
+                        .unwrap_or_else(|| crate::mcp::command::MotherJobLite {
+                            id: String::new(),
+                            title: String::new(),
+                            status: "unknown".into(),
+                        });
+                    let _ = reply.send(Ok(lite));
+                }
+                Err(e) => {
+                    // add_plan succeeded, but list failed — best-effort reply.
+                    let _ = reply.send(Ok(crate::mcp::command::MotherJobLite {
+                        id: String::new(),
+                        title: format!("mother_list_error: {e}"),
+                        status: "queued".into(),
+                    }));
+                }
+            }
+        }
+
+        // ── MotherCancel ──────────────────────────────────────────────────────
+        McpCommand::MotherCancel { job_id, reply } => {
+            match mother::cancel(&job_id).await {
+                Ok(()) => { let _ = reply.send(Ok(())); }
+                Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
+            }
+        }
+
+        // ── MotherArchive ─────────────────────────────────────────────────────
+        McpCommand::MotherArchive { job_id, reply } => {
+            match mother::archive(&job_id).await {
+                Ok(()) => { let _ = reply.send(Ok(())); }
+                Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
+            }
+        }
+
+        // ── MotherResume ──────────────────────────────────────────────────────
+        McpCommand::MotherResume { job_id, answer, reply } => {
+            match mother::resume(&job_id, &answer).await {
+                Ok(()) => { let _ = reply.send(Ok(())); }
+                Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
+            }
+        }
+
+        // ── Phase 4: notifications & status segments ──────────────────────────
+
+        // ── Notify ────────────────────────────────────────────────────────────
+        McpCommand::Notify { message, level, source_view: _, reply } => {
+            let toast = Toast::new(message, level);
+            state.toasts.push_back(toast);
+            let _ = reply.send(Ok(()));
+        }
+
+        // ── RegisterStatusSegment ─────────────────────────────────────────────
+        McpCommand::RegisterStatusSegment { view_id, segment_id, text, color, reply } => {
+            state.mcp_status_segments.insert(
+                (view_id, segment_id),
+                McpStatusSegment { text, color },
+            );
+            let _ = reply.send(Ok(()));
+        }
+
+        // ── ClearStatusSegment ────────────────────────────────────────────────
+        McpCommand::ClearStatusSegment { view_id, segment_id, reply } => {
+            state.mcp_status_segments.remove(&(view_id, segment_id));
+            let _ = reply.send(Ok(()));
         }
     }
 }

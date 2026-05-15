@@ -78,12 +78,16 @@ async fn fred_layout_renders_without_panic() {
     drop(cal_tx);
 
     let config = nostromo::config::Config::default();
+    use nostromo::mcp::McpSharedState;
     use nostromo::pty::InProcessPtyFactory;
     use std::sync::Arc;
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (mcp_tx, _mcp_rx) = mpsc::unbounded_channel();
+    let mcp_state = Arc::new(McpSharedState::for_test(mcp_tx));
     let ctx = ViewCtx {
         event_tx,
-        pty_factory: Arc::new(InProcessPtyFactory),
+        pty_factory: Arc::new(InProcessPtyFactory::new(Arc::clone(&mcp_state))),
+        mcp_state,
     };
     // Use halfblocks picker for tests — avoids querying the terminal.
     let picker = ratatui_image::picker::Picker::halfblocks();
@@ -101,8 +105,19 @@ async fn fred_layout_renders_without_panic() {
     // Verify the border structure is present (time-independent).
     let buffer = terminal.backend().buffer().clone();
     let row0: String = (0..buffer.area.width)
-        .map(|x| buffer.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+        .map(|x| {
+            buffer
+                .cell((x, 0))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .unwrap_or(' ')
+        })
         .collect();
-    assert!(row0.contains("Mailbox"), "expected Mailbox panel in row 0, got: {row0}");
-    assert!(row0.contains("Calendar"), "expected Calendar panel in row 0, got: {row0}");
+    assert!(
+        row0.contains("Mailbox"),
+        "expected Mailbox panel in row 0, got: {row0}"
+    );
+    assert!(
+        row0.contains("Calendar"),
+        "expected Calendar panel in row 0, got: {row0}"
+    );
 }

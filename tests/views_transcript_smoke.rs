@@ -12,15 +12,21 @@ use tokio::sync::mpsc;
 
 use nostromo::{
     event::AppEvent,
+    mcp::state::McpSharedState,
     pty::InProcessPtyFactory,
     views::{EventOutcome, View, ViewCtx},
 };
 
 fn make_ctx() -> ViewCtx {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (mcp_tx, _mcp_rx) = mpsc::unbounded_channel();
+    let mcp_state = Arc::new(McpSharedState::for_test(mcp_tx));
     ViewCtx {
         event_tx,
-        pty_factory: Arc::new(InProcessPtyFactory),
+        pty_factory: Arc::new(InProcessPtyFactory {
+            mcp_state: mcp_state.clone(),
+        }),
+        mcp_state,
     }
 }
 

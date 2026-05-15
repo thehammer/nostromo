@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "nostromo": {
+      "type": "stdio",
+      "command": "nostromo-mcp-bridge",
+      "env": {}
+    }
+  }
+}

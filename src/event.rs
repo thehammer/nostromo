@@ -15,14 +15,19 @@ use tracing::warn;
 use crate::{
     data::{
         break_glass::BreakGlassRequest,
-        rate_limits::{BudgetPosture, RateLimits},
+        rate_limits::{BudgetPosture, PostureSnapshot, RateLimits},
         right_panel_source::RightPanelSnapshot,
     },
+    mcp::command::McpCommand,
     mother::{MotherJob, MotherStatus},
 };
 
 /// Normalised event enum consumed by `App` and `View` implementations.
-#[derive(Debug, Clone)]
+///
+/// Note: `Clone` is intentionally absent — the `McpCommand` variant carries
+/// `oneshot::Sender`s which are not `Clone`.  Events are consumed once by the
+/// event loop and never need to be cloned.
+#[derive(Debug)]
 pub enum AppEvent {
     /// A keyboard event (raw crossterm key event).
     Key(KeyEvent),
@@ -47,8 +52,14 @@ pub enum AppEvent {
     RightPanelData(HashMap<String, RightPanelSnapshot>),
     /// Claude rate-limit window snapshot updated.
     RateLimitsChanged(RateLimits),
-    /// Budget posture file updated.
+    /// Budget posture file updated (back-compat, posture string only).
     PostureChanged(BudgetPosture),
+    /// Full posture snapshot including per-window pace data.
+    PostureSnapshot(PostureSnapshot),
+    /// A command from the MCP server intended for the main event loop.
+    ///
+    /// Boxed to keep `AppEvent` size uniform — `McpCommand` can carry large strings.
+    McpCommand(Box<McpCommand>),
 }
 
 /// Tick interval for the event loop.

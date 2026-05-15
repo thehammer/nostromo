@@ -130,5 +130,12 @@ fn build_style(cell: &vt100::Cell) -> Style {
         style = style.add_modifier(Modifier::REVERSED);
     }
 
+    // TODO: vt100 0.15.x Cell exposes no dim/faint accessor (bold/italic/
+    // underline/inverse are the only supported attributes).  When a future
+    // version adds `cell.dim()` or `cell.faint()`, add:
+    //   if cell.dim() { style = style.add_modifier(Modifier::DIM); }
+    // This means SGR 2 (dim/faint) from the inner PTY is currently not
+    // rendered; the workaround is to upgrade the vt100 crate.
+
     style
 }

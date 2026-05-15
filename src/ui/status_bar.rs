@@ -1,10 +1,15 @@
 //! Persistent 1-row bottom status bar.
 //!
 //! Renders a horizontal bar split into:
-//! - **Left**: Mother queue counts, email, calendar, my-PR count, PR review queue.
+//! - **Left**: Mother queue counts, email, calendar, my-PR count, PR review queue,
+//!   MCP-registered segments for the active view, toasts.
 //! - **Right**: Budget posture chip + Claude rate-limit windows.
 //!
 //! All segments are optional and hide automatically when data is absent or zero.
+//!
+//! Phase 4 additions:
+//! - MCP status segments: shown when their view is the active tab.
+//! - Toasts: shown as `[⚡ text]` on the left, fading after 5 s.
 
 use chrono::Utc;
 use ratatui::{
@@ -16,7 +21,12 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::{app::AppState, data::rate_limits::BudgetPosture, ui::theme};
+use crate::{
+    app::{AppState, Toast},
+    data::rate_limits::BudgetPosture,
+    mcp::command::NotifyLevel,
+    ui::theme,
+};
 
 // ── separator ─────────────────────────────────────────────────────────────────
 
@@ -73,6 +83,18 @@ pub fn render(f: &mut Frame, area: Rect, state: &mut AppState) {
     push_seg!(seg, "perri");
     let seg = pr_queue_segment(state);
     push_seg!(seg, "perri");
+
+    // MCP-registered segments for the active view (Phase 4).
+    let mcp_segs = mcp_status_segments(state);
+    for seg in mcp_segs {
+        push_seg!(Some(seg), "mcp");
+    }
+
+    // Toasts (Phase 4) — shown after all regular segments.
+    if let Some(toast_seg) = toast_segment(state) {
+        push_seg!(Some(toast_seg), "mcp");
+    }
+
     let _ = col_offset; // col_offset is only needed between segments; discard after last push
 
     // ── Right segments ────────────────────────────────────────────────────────
@@ -238,6 +260,76 @@ fn pr_queue_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
         format!("👀 {count}"),
         Style::default().fg(color),
     )])
+}
+
+// ── MCP phase-4 segments ──────────────────────────────────────────────────────
+
+/// Returns one `Vec<Span>` per MCP-registered segment for the active view.
+///
+/// Only segments whose `view_id` matches `state.active_view_id` are shown.
+fn mcp_status_segments(state: &AppState) -> Vec<Vec<Span<'static>>> {
+    let active = &state.active_view_id;
+    let mut out: Vec<Vec<Span<'static>>> = Vec::new();
+
+    // Collect matching segments, sorted by segment_id for stable ordering.
+    let mut pairs: Vec<(&String, &crate::app::McpStatusSegment)> = state
+        .mcp_status_segments
+        .iter()
+        .filter(|((vid, _), _)| vid == active)
+        .map(|((_, sid), seg)| (sid, seg))
+        .collect();
+    pairs.sort_by_key(|(sid, _)| sid.as_str());
+
+    for (_, seg) in pairs {
+        let color = parse_segment_color(seg.color.as_deref());
+        out.push(vec![Span::styled(seg.text.clone(), Style::default().fg(color))]);
+    }
+
+    out
+}
+
+/// Most recent non-expired toast, if any.
+fn toast_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
+    let now = Utc::now().timestamp();
+    // Find the most recently pushed toast that hasn't expired.
+    let toast: Option<&Toast> = state
+        .toasts
+        .iter()
+        .rev()
+        .find(|t| t.expires_at > now);
+
+    let toast = toast?;
+    let (icon, color) = match toast.level {
+        NotifyLevel::Info  => ("ℹ ", theme::SAGE),
+        NotifyLevel::Warn  => ("⚠ ", theme::AMBER),
+        NotifyLevel::Error => ("✕ ", theme::RED_SWEATER),
+    };
+    Some(vec![
+        Span::styled(icon, Style::default().fg(color)),
+        Span::styled(toast.text.clone(), Style::default().fg(theme::FG)),
+    ])
+}
+
+/// Parse a color string into a ratatui `Color`.
+///
+/// Accepts named strings (`red`, `amber`, `sage`, `blue`, `muted`) or
+/// 6-digit hex with leading `#` (e.g. `#ff8800`).
+fn parse_segment_color(s: Option<&str>) -> Color {
+    match s {
+        None           => theme::FG_MUTED,
+        Some("red")    => theme::RED_SWEATER,
+        Some("amber")  => theme::AMBER,
+        Some("sage")   => theme::SAGE,
+        Some("blue")   => Color::Rgb(100, 149, 237),
+        Some("muted")  => theme::FG_MUTED,
+        Some(hex) if hex.starts_with('#') && hex.len() == 7 => {
+            let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(180);
+            let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(180);
+            let b = u8::from_str_radix(&hex[5..7], 16).unwrap_or(180);
+            Color::Rgb(r, g, b)
+        }
+        _ => theme::FG_MUTED,
+    }
 }
 
 // ── right segment ─────────────────────────────────────────────────────────────

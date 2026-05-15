@@ -1,0 +1,34 @@
+{
+  "generated_at": "2026-05-14T10:00:00Z",
+  "items": [
+    {
+      "repo": "acme/web-app",
+      "number": 42,
+      "title": "feat: add auth",
+      "author": "alice",
+      "bucket": "requested",
+      "new_activity": false,
+      "url": "https://github.com/acme/web-app/pull/42"
+    },
+    {
+      "repo": "acme/api",
+      "number": 7,
+      "title": "fix: null pointer",
+      "author": "bob",
+      "bucket": "needs_review",
+      "new_activity": false,
+      "url": "https://github.com/acme/api/pull/7"
+    },
+    {
+      "repo": "acme/mobile",
+      "number": 99,
+      "title": "chore: bump deps",
+      "author": "carol",
+      "bucket": "changes_req",
+      "new_activity": true,
+      "url": "https://github.com/acme/mobile/pull/99"
+    }
+  ],
+  "stale": false,
+  "error": null
+}

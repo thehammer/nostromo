@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::{
-    data::rate_limits::{BudgetPosture, RateLimits},
+    data::rate_limits::{BudgetPosture, PostureSnapshot, RateLimits},
     event::AppEvent,
 };
 
@@ -77,6 +77,27 @@ async fn run_rate_limits_watcher(tx: mpsc::UnboundedSender<AppEvent>) -> anyhow:
     Ok(())
 }
 
+/// Emit both `PostureSnapshot` and the back-compat `PostureChanged` events.
+///
+/// Returns `false` if the channel has closed (caller should break the loop).
+fn emit_posture(tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
+    if let Some(snap) = PostureSnapshot::load() {
+        let posture = snap.posture;
+        if tx.send(AppEvent::PostureSnapshot(snap)).is_err() {
+            return false;
+        }
+        if tx.send(AppEvent::PostureChanged(posture)).is_err() {
+            return false;
+        }
+    } else if let Some(p) = BudgetPosture::load() {
+        // Fallback: rich parse failed but simple posture-only parse succeeds.
+        if tx.send(AppEvent::PostureChanged(p)).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 // ── posture watcher ───────────────────────────────────────────────────────────
 
 fn spawn_posture_watcher(tx: mpsc::UnboundedSender<AppEvent>) {
@@ -118,15 +139,11 @@ async fn run_posture_watcher(tx: mpsc::UnboundedSender<AppEvent>) -> anyhow::Res
     debug!(path = %path.display(), "posture watcher started");
 
     // Emit once on startup.
-    if let Some(p) = BudgetPosture::load() {
-        let _ = tx.send(AppEvent::PostureChanged(p));
-    }
+    emit_posture(&tx);
 
     while notify_rx.recv().await.is_some() {
-        if let Some(p) = BudgetPosture::load() {
-            if tx.send(AppEvent::PostureChanged(p)).is_err() {
-                break;
-            }
+        if !emit_posture(&tx) {
+            break;
         }
     }
 

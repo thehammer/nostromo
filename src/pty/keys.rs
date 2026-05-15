@@ -18,7 +18,15 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
                 c.encode_utf8(&mut buf).as_bytes().to_vec()
             }
         }
-        KeyCode::Enter => b"\r".to_vec(),
+        KeyCode::Enter => {
+            // Shift+Enter → ESC+CR (Alt-Enter sequence). Claude Code treats this
+            // as "insert newline without submit". Plain Enter submits as usual.
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                b"\x1b\r".to_vec()
+            } else {
+                b"\r".to_vec()
+            }
+        }
         KeyCode::Backspace => b"\x7f".to_vec(),
         KeyCode::Tab => b"\t".to_vec(),
         KeyCode::Esc => b"\x1b".to_vec(),
@@ -54,6 +62,20 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Choose between legacy and kitty key encoding based on the PTY's current
+/// kitty flag value.
+///
+/// When `kitty_flags == 0` (legacy mode), delegates to [`key_to_bytes`].
+/// When non-zero (kitty mode active), delegates to
+/// [`crate::pty::kitty::key_to_bytes_kitty`].
+pub fn key_to_bytes_for(key: &KeyEvent, kitty_flags: u32) -> Option<Vec<u8>> {
+    if kitty_flags == 0 {
+        key_to_bytes(key)
+    } else {
+        crate::pty::kitty::key_to_bytes_kitty(key)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -71,6 +93,12 @@ mod tests {
     #[test]
     fn enter() {
         assert_eq!(key_to_bytes(&key(KeyCode::Enter)), Some(b"\r".to_vec()));
+    }
+
+    #[test]
+    fn shift_enter_is_alt_enter() {
+        let k = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(key_to_bytes(&k), Some(b"\x1b\r".to_vec()));
     }
 
     #[test]
