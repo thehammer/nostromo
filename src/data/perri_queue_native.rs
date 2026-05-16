@@ -15,9 +15,14 @@
 //!   - Any GitHub Actions check suite on the HEAD commit has `conclusion = "failure"`
 //!
 //! The two search queries for buckets 1 & 2 use ETags so a 304 Not Modified
-//! response reuses the in-memory cache without re-processing.
+//! response reuses the in-memory cache without re-processing.  The three
+//! per-PR endpoint calls (`get_pr_head_sha`, check-suites, `get_our_last_review`)
+//! also use ETag conditional GETs via [`etag_get`].  Additionally, CI results
+//! are cached by HEAD SHA so successive cycles skip the check-suites call when
+//! the PR hasn't received a new push.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -34,6 +39,24 @@ use crate::{
         perri_queue::{PrQueueItem, PrQueueSnapshot},
     },
 };
+
+// ── Test-injectable API base URL ─────────────────────────────────────────────
+//
+// Always compiled so integration tests can override without feature flags.
+
+thread_local! {
+    /// Override the GitHub API base URL for tests.  Leave `None` in production.
+    pub static API_BASE_OVERRIDE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn api_base() -> String {
+    API_BASE_OVERRIDE.with(|o| {
+        o.borrow()
+            .clone()
+            .unwrap_or_else(|| "https://api.github.com".to_owned())
+    })
+}
 
 // ── GitHub API response shapes ────────────────────────────────────────────────
 
@@ -151,6 +174,19 @@ impl PerriQueueNativeSource {
         let mut etags: HashMap<String, String> = HashMap::new();
         // Item cache per search query (for 304 reuse).
         let mut item_cache: HashMap<String, Vec<SearchIssueItem>> = HashMap::new();
+        // ETag + body caches for per-endpoint calls (keyed by URL).
+        // Wrapped in Arc<Mutex> so concurrent join_all futures can share them.
+        let endpoint_etags: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let endpoint_bodies: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        // SHA cache: (repo, number) → last-seen HEAD SHA, used to skip CI calls
+        // when the PR hasn't received a new push.
+        let head_sha_cache: Arc<Mutex<HashMap<(String, u64), String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        // CI result cache: SHA → has_failure, invalidated only when SHA changes.
+        let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         // Authenticated user login — fetched once and reused.
         let mut me: Option<String> = None;
 
@@ -175,7 +211,16 @@ impl PerriQueueNativeSource {
             };
 
             match self
-                .fetch(&client, &me_login, &mut etags, &mut item_cache)
+                .fetch(
+                    &client,
+                    &me_login,
+                    &mut etags,
+                    &mut item_cache,
+                    Arc::clone(&endpoint_etags),
+                    Arc::clone(&endpoint_bodies),
+                    Arc::clone(&head_sha_cache),
+                    Arc::clone(&ci_failure_cache),
+                )
                 .await
             {
                 Ok(snap) => {
@@ -203,12 +248,17 @@ impl PerriQueueNativeSource {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch(
         &self,
         client: &GithubClient,
         me: &str,
         etags: &mut HashMap<String, String>,
         item_cache: &mut HashMap<String, Vec<SearchIssueItem>>,
+        endpoint_etags: Arc<Mutex<HashMap<String, String>>>,
+        endpoint_bodies: Arc<Mutex<HashMap<String, String>>>,
+        head_sha_cache: Arc<Mutex<HashMap<(String, u64), String>>>,
+        ci_failure_cache: Arc<Mutex<HashMap<String, bool>>>,
     ) -> Result<PrQueueSnapshot> {
         // ── Run the three search queries ──────────────────────────────────────
         let q_requested =
@@ -246,9 +296,23 @@ impl PerriQueueNativeSource {
             .into_iter()
             .map(|(item, bucket)| {
                 let client = client.clone();
+                let ep_etags = Arc::clone(&endpoint_etags);
+                let ep_bodies = Arc::clone(&endpoint_bodies);
+                let head_sha_cache = Arc::clone(&head_sha_cache);
+                let ci_failure_cache = Arc::clone(&ci_failure_cache);
                 async move {
                     let repo = repo_from_url(&item.repository_url);
-                    if ci_has_failure(&client, &repo, item.number).await {
+                    if ci_has_failure(
+                        &client,
+                        &repo,
+                        item.number,
+                        &ep_etags,
+                        &ep_bodies,
+                        &head_sha_cache,
+                        &ci_failure_cache,
+                    )
+                    .await
+                    {
                         return None;
                     }
                     Some(PrQueueItem {
@@ -274,6 +338,17 @@ impl PerriQueueNativeSource {
             .flatten()
             .collect();
 
+        // Prune ci_failure_cache: drop SHA entries no longer referenced by any
+        // current PR head.  Runs after every cycle — the set is tiny.
+        {
+            let current_shas: std::collections::HashSet<String> =
+                head_sha_cache.lock().unwrap().values().cloned().collect();
+            ci_failure_cache
+                .lock()
+                .unwrap()
+                .retain(|sha, _| current_shas.contains(sha));
+        }
+
         // URLs already covered by buckets 1 & 2 — skip in bucket 3
         let known_urls: std::collections::HashSet<&str> =
             b12_items.iter().map(|i| i.url.as_str()).collect();
@@ -293,10 +368,15 @@ impl PerriQueueNativeSource {
             .map(|item| {
                 let client = client.clone();
                 let me = me.to_owned();
+                let ep_etags = Arc::clone(&endpoint_etags);
+                let ep_bodies = Arc::clone(&endpoint_bodies);
+                let head_sha_cache = Arc::clone(&head_sha_cache);
+                let ci_failure_cache = Arc::clone(&ci_failure_cache);
                 async move {
                     let repo = repo_from_url(&item.repository_url);
                     let (state, submitted_at) =
-                        get_our_last_review(&client, &repo, item.number, &me).await?;
+                        get_our_last_review(&client, &repo, item.number, &me, &ep_etags, &ep_bodies)
+                            .await?;
 
                     if state != "CHANGES_REQUESTED" {
                         return None;
@@ -317,7 +397,17 @@ impl PerriQueueNativeSource {
                         return None;
                     }
 
-                    if ci_has_failure(&client, &repo, item.number).await {
+                    if ci_has_failure(
+                        &client,
+                        &repo,
+                        item.number,
+                        &ep_etags,
+                        &ep_bodies,
+                        &head_sha_cache,
+                        &ci_failure_cache,
+                    )
+                    .await
+                    {
                         return None;
                     }
 
@@ -461,26 +551,18 @@ async fn search_issues(
 
 /// Returns the state and submitted_at of our most recent review on a PR.
 /// Returns `None` if we have no reviews or the API call fails.
+/// Uses ETag conditional GET — 304 responses are free from the rate-limit budget.
 async fn get_our_last_review(
     client: &GithubClient,
     repo: &str,
     number: u64,
     me: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<(String, Option<String>)> {
-    let url = format!("https://api.github.com/repos/{repo}/pulls/{number}/reviews");
-    let resp = client
-        .http
-        .get(&url)
-        .headers(base_headers(client))
-        .send()
-        .await
-        .ok()?;
-
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let reviews: Vec<ReviewItem> = resp.json().await.ok()?;
+    let url = format!("{}/repos/{repo}/pulls/{number}/reviews", api_base());
+    let body = etag_get(client, &url, etags, body_cache).await?;
+    let reviews: Vec<ReviewItem> = serde_json::from_str(&body).ok()?;
     // Find our last review (last in the list wins).
     reviews
         .into_iter()
@@ -489,30 +571,78 @@ async fn get_our_last_review(
 }
 
 /// Returns `true` if any GitHub Actions check suite on the PR's HEAD commit
-/// has `conclusion = "failure"`.  On any API error, returns `false` (safe default).
-async fn ci_has_failure(client: &GithubClient, repo: &str, number: u64) -> bool {
-    let sha = match get_pr_head_sha(client, repo, number).await {
+/// has `conclusion = "failure"`.
+///
+/// Two layers of caching:
+/// 1. **SHA cache** — if the HEAD SHA hasn't changed since last cycle, returns
+///    the cached boolean without any HTTP call.
+/// 2. **ETag cache** — on a new SHA, `get_pr_head_sha` and `fetch_check_suites`
+///    use conditional GETs so 304 responses don't consume rate-limit budget.
+///
+/// On any API error, returns `false` (safe default).
+async fn ci_has_failure(
+    client: &GithubClient,
+    repo: &str,
+    number: u64,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+    head_sha_cache: &Arc<Mutex<HashMap<(String, u64), String>>>,
+    ci_failure_cache: &Arc<Mutex<HashMap<String, bool>>>,
+) -> bool {
+    let sha = match get_pr_head_sha(client, repo, number, etags, body_cache).await {
         Some(s) => s,
         None => return false,
     };
 
-    let url = format!("https://api.github.com/repos/{repo}/commits/{sha}/check-suites");
-    let resp = match client
-        .http
-        .get(&url)
-        .headers(base_headers(client))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
+    // Record current head SHA (brief lock, no await).
+    head_sha_cache
+        .lock()
+        .unwrap()
+        .insert((repo.to_owned(), number), sha.clone());
 
-    if !resp.status().is_success() {
-        return false;
+    // Return cached result if SHA hasn't changed since last cycle.
+    {
+        let lock = ci_failure_cache.lock().unwrap();
+        if let Some(&cached) = lock.get(&sha) {
+            debug!(%repo, number, "ci_failure cache hit (sha unchanged)");
+            return cached;
+        }
     }
 
-    let suites: CheckSuitesResponse = match resp.json().await {
+    // Cache miss — fetch check suites and store the result.
+    let result = fetch_check_suites_failure(client, repo, &sha, etags, body_cache).await;
+    ci_failure_cache.lock().unwrap().insert(sha, result);
+    result
+}
+
+async fn get_pr_head_sha(
+    client: &GithubClient,
+    repo: &str,
+    number: u64,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<String> {
+    let url = format!("{}/repos/{repo}/pulls/{number}", api_base());
+    let body = etag_get(client, &url, etags, body_cache).await?;
+    let pr: PrDetail = serde_json::from_str(&body).ok()?;
+    Some(pr.head.sha)
+}
+
+/// Fetch the check-suites result for a known HEAD SHA using a conditional GET.
+pub async fn fetch_check_suites_failure(
+    client: &GithubClient,
+    repo: &str,
+    sha: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> bool {
+    let url = format!("{}/repos/{repo}/commits/{sha}/check-suites", api_base());
+    let body = match etag_get(client, &url, etags, body_cache).await {
+        Some(b) => b,
+        None => return false,
+    };
+
+    let suites: CheckSuitesResponse = match serde_json::from_str(&body) {
         Ok(s) => s,
         Err(_) => return false,
     };
@@ -523,22 +653,48 @@ async fn ci_has_failure(client: &GithubClient, repo: &str, number: u64) -> bool 
     })
 }
 
-async fn get_pr_head_sha(client: &GithubClient, repo: &str, number: u64) -> Option<String> {
-    let url = format!("https://api.github.com/repos/{repo}/pulls/{number}");
-    let resp = client
-        .http
-        .get(&url)
-        .headers(base_headers(client))
-        .send()
-        .await
-        .ok()?;
+/// Conditional GET helper.
+///
+/// Sends `If-None-Match` when an ETag is known for `url`.  On 304, returns the
+/// cached body.  On 200, stores the new ETag + body and returns the body.
+/// On any error or non-2xx response, returns `None` without clobbering an
+/// existing cached value — this ensures a transient error never evicts a good
+/// ETag, so the next call will still send `If-None-Match` correctly.
+///
+/// Bodies are stored as raw strings; callers are responsible for
+/// `serde_json::from_str` so this helper stays type-agnostic.
+async fn etag_get(
+    client: &GithubClient,
+    url: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<String> {
+    let existing_etag = etags.lock().ok()?.get(url).cloned();
+    let mut headers = base_headers(client);
+    if let Some(ref etag) = existing_etag {
+        if let Ok(v) = etag.parse() {
+            headers.insert(IF_NONE_MATCH, v);
+        }
+    }
+
+    let resp = client.http.get(url).headers(headers).send().await.ok()?;
+
+    // Capture the new ETag before consuming the response (even on 304).
+    if let Some(etag) = resp.headers().get("etag").and_then(|v| v.to_str().ok()) {
+        etags.lock().ok()?.insert(url.to_owned(), etag.to_owned());
+    }
+
+    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return body_cache.lock().ok()?.get(url).cloned();
+    }
 
     if !resp.status().is_success() {
         return None;
     }
 
-    let pr: PrDetail = resp.json().await.ok()?;
-    Some(pr.head.sha)
+    let body = resp.text().await.ok()?;
+    body_cache.lock().ok()?.insert(url.to_owned(), body.clone());
+    Some(body)
 }
 
 /// Build the standard GitHub API request headers.
@@ -558,5 +714,255 @@ fn base_headers(client: &GithubClient) -> HeaderMap {
 mod urlencoding {
     pub fn encode(s: &str) -> String {
         url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::data::github_client::GithubClient;
+
+    use super::etag_get;
+
+    type SharedStrMap = Arc<Mutex<HashMap<String, String>>>;
+
+    fn make_client() -> GithubClient {
+        // Set a fake token so GithubClient::new(None) succeeds without
+        // touching the filesystem.
+        std::env::set_var("GITHUB_TOKEN", "test-token");
+        GithubClient::new(None).expect("client")
+    }
+
+    fn empty_caches() -> (SharedStrMap, SharedStrMap) {
+        (
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+    }
+
+    // ── 1. First call: no If-None-Match, 200 stores ETag + body ──────────────
+
+    #[tokio::test]
+    async fn etag_get_first_call_sends_no_if_none_match() {
+        let server = MockServer::start().await;
+        let client = make_client();
+        let (etags, bodies) = empty_caches();
+
+        Mock::given(method("GET"))
+            .and(path("/resource"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("etag", "\"abc123\"")
+                    .set_body_string(r#"{"head":{"sha":"deadbeef"}}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/resource", server.uri());
+        let body = etag_get(&client, &url, &etags, &bodies).await;
+
+        assert!(body.is_some(), "should return body on 200");
+        assert_eq!(
+            etags.lock().unwrap().get(&url).cloned().as_deref(),
+            Some("\"abc123\""),
+            "ETag should be stored"
+        );
+        assert_eq!(
+            bodies.lock().unwrap().get(&url).cloned().as_deref(),
+            Some(r#"{"head":{"sha":"deadbeef"}}"#),
+            "body should be cached"
+        );
+    }
+
+    // ── 2. Second call: sends If-None-Match, 304 returns cached body ──────────
+
+    #[tokio::test]
+    async fn etag_get_second_call_sends_if_none_match_and_304_returns_cached_body() {
+        let server = MockServer::start().await;
+        let client = make_client();
+        let (etags, bodies) = empty_caches();
+
+        // Prime the caches as if a first fetch already happened.
+        let url = format!("{}/resource", server.uri());
+        etags
+            .lock()
+            .unwrap()
+            .insert(url.clone(), "\"abc123\"".to_owned());
+        bodies
+            .lock()
+            .unwrap()
+            .insert(url.clone(), r#"{"cached":"body"}"#.to_owned());
+
+        // Expect exactly one request that INCLUDES If-None-Match.
+        Mock::given(method("GET"))
+            .and(path("/resource"))
+            .and(header("If-None-Match", "\"abc123\""))
+            .respond_with(ResponseTemplate::new(304))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = etag_get(&client, &url, &etags, &bodies).await;
+
+        assert_eq!(
+            result.as_deref(),
+            Some(r#"{"cached":"body"}"#),
+            "304 should return cached body"
+        );
+    }
+
+    // ── 3. 200 with new ETag updates both caches ──────────────────────────────
+
+    #[tokio::test]
+    async fn etag_get_200_with_new_etag_updates_both_caches() {
+        let server = MockServer::start().await;
+        let client = make_client();
+        let (etags, bodies) = empty_caches();
+
+        let url = format!("{}/resource", server.uri());
+        // Seed with an old ETag.
+        etags
+            .lock()
+            .unwrap()
+            .insert(url.clone(), "\"old-etag\"".to_owned());
+        bodies
+            .lock()
+            .unwrap()
+            .insert(url.clone(), r#"{"old":"body"}"#.to_owned());
+
+        Mock::given(method("GET"))
+            .and(path("/resource"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("etag", "\"new-etag\"")
+                    .set_body_string(r#"{"new":"body"}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = etag_get(&client, &url, &etags, &bodies).await;
+
+        assert_eq!(result.as_deref(), Some(r#"{"new":"body"}"#));
+        assert_eq!(
+            etags.lock().unwrap().get(&url).cloned().as_deref(),
+            Some("\"new-etag\""),
+            "ETag should be updated"
+        );
+        assert_eq!(
+            bodies.lock().unwrap().get(&url).cloned().as_deref(),
+            Some(r#"{"new":"body"}"#),
+            "body cache should be updated"
+        );
+    }
+
+    // ── 4. Transient error does not evict ETag or body ────────────────────────
+
+    #[tokio::test]
+    async fn etag_get_transient_error_preserves_etag_and_body_cache() {
+        let server = MockServer::start().await;
+        let client = make_client();
+        let (etags, bodies) = empty_caches();
+
+        let url = format!("{}/resource", server.uri());
+        etags
+            .lock()
+            .unwrap()
+            .insert(url.clone(), "\"good-etag\"".to_owned());
+        bodies
+            .lock()
+            .unwrap()
+            .insert(url.clone(), r#"{"good":"body"}"#.to_owned());
+
+        Mock::given(method("GET"))
+            .and(path("/resource"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = etag_get(&client, &url, &etags, &bodies).await;
+
+        assert!(result.is_none(), "500 should return None");
+        // ETag and body must be intact — next call will retry with If-None-Match.
+        assert_eq!(
+            etags.lock().unwrap().get(&url).cloned().as_deref(),
+            Some("\"good-etag\""),
+            "ETag must not be evicted on error"
+        );
+        assert_eq!(
+            bodies.lock().unwrap().get(&url).cloned().as_deref(),
+            Some(r#"{"good":"body"}"#),
+            "body cache must not be evicted on error"
+        );
+    }
+
+    // ── 5. 304 with empty body cache returns None gracefully ──────────────────
+
+    #[tokio::test]
+    async fn etag_get_304_with_empty_body_cache_returns_none() {
+        let server = MockServer::start().await;
+        let client = make_client();
+        let (etags, bodies) = empty_caches();
+
+        let url = format!("{}/resource", server.uri());
+        // ETag present but body cache is empty (orphan state — shouldn't happen
+        // in practice but must not panic).
+        etags
+            .lock()
+            .unwrap()
+            .insert(url.clone(), "\"orphan-etag\"".to_owned());
+
+        Mock::given(method("GET"))
+            .and(path("/resource"))
+            .and(header("If-None-Match", "\"orphan-etag\""))
+            .respond_with(ResponseTemplate::new(304))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = etag_get(&client, &url, &etags, &bodies).await;
+        assert!(
+            result.is_none(),
+            "304 with empty body cache should return None without panicking"
+        );
+    }
+
+    // ── 6. First call must NOT send If-None-Match header ─────────────────────
+
+    #[tokio::test]
+    async fn etag_get_first_call_does_not_send_if_none_match_header() {
+        let server = MockServer::start().await;
+        let client = make_client();
+        let (etags, bodies) = empty_caches();
+
+        Mock::given(method("GET"))
+            .and(path("/no-header"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("etag", "\"first\"")
+                    .set_body_string(r#"{"ok":true}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/no-header", server.uri());
+        let result = etag_get(&client, &url, &etags, &bodies).await;
+        assert!(result.is_some());
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert!(
+            !received[0].headers.contains_key("if-none-match"),
+            "first call must not send If-None-Match"
+        );
     }
 }
