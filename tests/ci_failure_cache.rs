@@ -93,6 +93,10 @@ async fn cache_hit_skips_check_suites_call() {
         Arc::new(Mutex::new(HashMap::new()));
     let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let endpoint_etags: Arc<Mutex<HashMap<String, String>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // First call — cache miss, should fetch check-suites once.
     let result1 = ci_has_failure_cached(
@@ -101,6 +105,8 @@ async fn cache_hit_skips_check_suites_call() {
         42,
         &head_sha_cache,
         &ci_failure_cache,
+        &endpoint_etags,
+        &endpoint_body_cache,
     )
     .await;
     assert!(!result1, "no failure suite — result should be false");
@@ -122,6 +128,8 @@ async fn cache_hit_skips_check_suites_call() {
         42,
         &head_sha_cache,
         &ci_failure_cache,
+        &endpoint_etags,
+        &endpoint_body_cache,
     )
     .await;
     assert!(!result2, "cached result should still be false");
@@ -204,6 +212,10 @@ async fn new_sha_triggers_exactly_one_check_suites_call() {
         Arc::new(Mutex::new(HashMap::new()));
     let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let endpoint_etags: Arc<Mutex<HashMap<String, String>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // First call — sha-old, cache miss, should detect failure.
     let result1 = ci_has_failure_cached(
@@ -212,6 +224,8 @@ async fn new_sha_triggers_exactly_one_check_suites_call() {
         7,
         &head_sha_cache,
         &ci_failure_cache,
+        &endpoint_etags,
+        &endpoint_body_cache,
     )
     .await;
     assert!(result1, "sha-old has a failure suite — result should be true");
@@ -224,6 +238,8 @@ async fn new_sha_triggers_exactly_one_check_suites_call() {
         7,
         &head_sha_cache,
         &ci_failure_cache,
+        &endpoint_etags,
+        &endpoint_body_cache,
     )
     .await;
     assert!(!result2, "sha-new has no failures — result should be false");

@@ -28,6 +28,7 @@ fn make_snapshot() -> PostureSnapshot {
             resets_at: 1_715_800_000,
             level: "normal".to_string(),
         }),
+        sonnet_seven_day: None,
         loaded_at: std::time::Instant::now(),
     }
 }

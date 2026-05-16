@@ -185,6 +185,13 @@ impl PerriQueueNativeSource {
             Arc::new(Mutex::new(HashMap::new()));
         let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        // ETag + body caches for per-endpoint conditional GETs (get_pr_head_sha,
+        // fetch_check_suites_failure, get_our_last_review).  Keyed by full URL so
+        // a single map covers all three endpoints without collisions.
+        let endpoint_etags: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         loop {
             let me_login = match &me {
@@ -216,6 +223,8 @@ impl PerriQueueNativeSource {
                     &mut review_state_cache,
                     &head_sha_cache,
                     &ci_failure_cache,
+                    &endpoint_etags,
+                    &endpoint_body_cache,
                 )
                 .await
             {
@@ -244,6 +253,7 @@ impl PerriQueueNativeSource {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch(
         &self,
         client: &GithubClient,
@@ -254,6 +264,8 @@ impl PerriQueueNativeSource {
         review_state_cache: &mut HashMap<(String, u64), (String, Option<String>)>,
         head_sha_cache: &Arc<Mutex<HashMap<(String, u64), String>>>,
         ci_failure_cache: &Arc<Mutex<HashMap<String, bool>>>,
+        endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
+        endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
     ) -> Result<PrQueueSnapshot> {
         // ── Run the three search queries ──────────────────────────────────────
         let q_requested =
@@ -293,6 +305,8 @@ impl PerriQueueNativeSource {
                 let client = client.clone();
                 let head_sha_cache = Arc::clone(head_sha_cache);
                 let ci_failure_cache = Arc::clone(ci_failure_cache);
+                let endpoint_etags = Arc::clone(endpoint_etags);
+                let endpoint_body_cache = Arc::clone(endpoint_body_cache);
                 async move {
                     let repo = repo_from_url(&item.repository_url);
                     if ci_has_failure_cached(
@@ -301,6 +315,8 @@ impl PerriQueueNativeSource {
                         item.number,
                         &head_sha_cache,
                         &ci_failure_cache,
+                        &endpoint_etags,
+                        &endpoint_body_cache,
                     )
                     .await
                     {
@@ -378,6 +394,8 @@ impl PerriQueueNativeSource {
 
                 let head_sha_cache = Arc::clone(head_sha_cache);
                 let ci_failure_cache = Arc::clone(ci_failure_cache);
+                let endpoint_etags = Arc::clone(endpoint_etags);
+                let endpoint_body_cache = Arc::clone(endpoint_body_cache);
                 async move {
                     let (state, submitted_at, new_cache_entry) = match cached {
                         Some((s, sub)) => {
@@ -388,7 +406,15 @@ impl PerriQueueNativeSource {
                             );
                             (s, sub, None)
                         }
-                        None => match get_our_last_review(&client, &repo, item.number, &me).await
+                        None => match get_our_last_review(
+                            &client,
+                            &repo,
+                            item.number,
+                            &me,
+                            &endpoint_etags,
+                            &endpoint_body_cache,
+                        )
+                        .await
                         {
                             Some((s, sub)) => {
                                 let entry = Some((s.clone(), sub.clone()));
@@ -423,6 +449,8 @@ impl PerriQueueNativeSource {
                         item.number,
                         &head_sha_cache,
                         &ci_failure_cache,
+                        &endpoint_etags,
+                        &endpoint_body_cache,
                     )
                     .await
                     {
@@ -600,26 +628,18 @@ async fn search_issues(
 
 /// Returns the state and submitted_at of our most recent review on a PR.
 /// Returns `None` if we have no reviews or the API call fails.
+/// Uses ETag caching so repeated calls for an unchanged PR cost zero rate-limit budget.
 async fn get_our_last_review(
     client: &GithubClient,
     repo: &str,
     number: u64,
     me: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<(String, Option<String>)> {
-    let url = format!("https://api.github.com/repos/{repo}/pulls/{number}/reviews");
-    let resp = client
-        .http
-        .get(&url)
-        .headers(base_headers(client))
-        .send()
-        .await
-        .ok()?;
-
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let reviews: Vec<ReviewItem> = resp.json().await.ok()?;
+    let url = format!("{}/repos/{repo}/pulls/{number}/reviews", api_base());
+    let body = etag_get(client, &url, etags, body_cache).await?;
+    let reviews: Vec<ReviewItem> = serde_json::from_str(&body).ok()?;
     // Find our last review (last in the list wins).
     reviews
         .into_iter()
@@ -640,8 +660,10 @@ pub async fn ci_has_failure_cached(
     number: u64,
     head_sha_cache: &Arc<Mutex<HashMap<(String, u64), String>>>,
     ci_failure_cache: &Arc<Mutex<HashMap<String, bool>>>,
+    endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
+    endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> bool {
-    let sha = match get_pr_head_sha(client, repo, number).await {
+    let sha = match get_pr_head_sha(client, repo, number, endpoint_etags, endpoint_body_cache).await {
         Some(s) => s,
         None => return false,
     };
@@ -662,7 +684,8 @@ pub async fn ci_has_failure_cached(
     }
 
     // Cache miss — fetch check suites and store the result.
-    let result = fetch_check_suites_failure(client, repo, &sha).await;
+    let result =
+        fetch_check_suites_failure(client, repo, &sha, endpoint_etags, endpoint_body_cache).await;
     ci_failure_cache.lock().unwrap().insert(sha, result);
     result
 }
@@ -670,25 +693,22 @@ pub async fn ci_has_failure_cached(
 /// Fetch the check-suites result for a known HEAD SHA.
 ///
 /// Extracted from the old `ci_has_failure` body so it can be reused by both
-/// the cached path and tests.
-pub async fn fetch_check_suites_failure(client: &GithubClient, repo: &str, sha: &str) -> bool {
+/// the cached path and tests.  Uses ETag caching so a 304 on an unchanged SHA
+/// consumes zero rate-limit budget.
+pub async fn fetch_check_suites_failure(
+    client: &GithubClient,
+    repo: &str,
+    sha: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> bool {
     let url = format!("{}/repos/{repo}/commits/{sha}/check-suites", api_base());
-    let resp = match client
-        .http
-        .get(&url)
-        .headers(base_headers(client))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return false,
+    let body = match etag_get(client, &url, etags, body_cache).await {
+        Some(b) => b,
+        None => return false,
     };
 
-    if !resp.status().is_success() {
-        return false;
-    }
-
-    let suites: CheckSuitesResponse = match resp.json().await {
+    let suites: CheckSuitesResponse = match serde_json::from_str(&body) {
         Ok(s) => s,
         Err(_) => return false,
     };
@@ -699,22 +719,65 @@ pub async fn fetch_check_suites_failure(client: &GithubClient, repo: &str, sha: 
     })
 }
 
-async fn get_pr_head_sha(client: &GithubClient, repo: &str, number: u64) -> Option<String> {
+async fn get_pr_head_sha(
+    client: &GithubClient,
+    repo: &str,
+    number: u64,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<String> {
     let url = format!("{}/repos/{repo}/pulls/{number}", api_base());
-    let resp = client
-        .http
-        .get(&url)
-        .headers(base_headers(client))
-        .send()
-        .await
-        .ok()?;
+    let body = etag_get(client, &url, etags, body_cache).await?;
+    let pr: PrDetail = serde_json::from_str(&body).ok()?;
+    Some(pr.head.sha)
+}
+
+/// Conditional GET helper.
+///
+/// Sends an `If-None-Match` header if we have a cached ETag for the URL.
+/// On 304 Not Modified, returns the cached body (free: does not consume GitHub
+/// rate-limit budget).  On 200+, stores the new ETag and body and returns the
+/// body.  On network error or non-success non-304 status, returns `None`.
+///
+/// Bodies are stored as raw strings; callers deserialise with `serde_json::from_str`.
+///
+/// The Mutex guards are never held across `.await` points.
+async fn etag_get(
+    client: &GithubClient,
+    url: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<String> {
+    // Brief lock — get existing ETag before the HTTP round-trip.
+    let existing_etag = etags.lock().unwrap().get(url).cloned();
+
+    let mut headers = base_headers(client);
+    if let Some(ref etag) = existing_etag {
+        if let Ok(val) = etag.parse() {
+            headers.insert(IF_NONE_MATCH, val);
+        }
+    }
+
+    let resp = client.http.get(url).headers(headers).send().await.ok()?;
+
+    // Brief lock — update ETag from response.
+    if let Some(etag) = resp.headers().get("etag").and_then(|v| v.to_str().ok()) {
+        etags.lock().unwrap().insert(url.to_owned(), etag.to_owned());
+    }
+
+    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        // 304 — serve from body cache (body is None only if we've never stored
+        // a body for this URL, which can't happen after a prior 200 stored one).
+        return body_cache.lock().unwrap().get(url).cloned();
+    }
 
     if !resp.status().is_success() {
         return None;
     }
 
-    let pr: PrDetail = resp.json().await.ok()?;
-    Some(pr.head.sha)
+    let body = resp.text().await.ok()?;
+    body_cache.lock().unwrap().insert(url.to_owned(), body.clone());
+    Some(body)
 }
 
 /// Build the standard GitHub API request headers.

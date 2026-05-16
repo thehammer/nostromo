@@ -8,7 +8,7 @@
 //!     cargo run --bin preview_pace_bars
 //!     open /tmp/pace_bars_preview.png
 
-use image::{DynamicImage, GenericImage, Rgba, RgbaImage};
+use image::{DynamicImage, Rgba, RgbaImage};
 use nostromo::data::rate_limits::PostureSnapshot;
 use nostromo::views::pace_bars_image::render_pace_bars_to_image;
 
