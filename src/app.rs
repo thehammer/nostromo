@@ -170,6 +170,14 @@ pub struct AppState {
     pub budget_posture: Option<BudgetPosture>,
     /// Latest full posture snapshot (populated via `AppEvent::PostureSnapshot`).
     pub posture_snapshot: Option<PostureSnapshot>,
+    /// Ratatui-image picker used to render pixel pace bars in the chrome.
+    pub picker: ratatui_image::picker::Picker,
+    /// Cached pace-bars resize-protocol; rebuilt when posture or size changes.
+    pub pace_bars_state: Option<ratatui_image::protocol::StatefulProtocol>,
+    /// Last-loaded-at timestamp of the posture snapshot cached in pace_bars_state.
+    pub pace_bars_last_loaded_at: Option<std::time::Instant>,
+    /// Cell dimensions of the rect cached in pace_bars_state.
+    pub pace_bars_last_size: Option<(u16, u16)>,
     /// Watch receiver for mailbox snapshots (for the bottom status bar).
     pub mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
     /// Watch receiver for calendar snapshots (for the bottom status bar).
@@ -195,6 +203,7 @@ impl AppState {
     fn new(
         mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
         calendar_rx: tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
+        picker: ratatui_image::picker::Picker,
     ) -> Self {
         Self {
             right_panel_visible: false,
@@ -217,6 +226,10 @@ impl AppState {
             rate_limits: None,
             budget_posture: None,
             posture_snapshot: None,
+            picker,
+            pace_bars_state: None,
+            pace_bars_last_loaded_at: None,
+            pace_bars_last_size: None,
             mailbox_rx,
             calendar_rx,
             toasts: VecDeque::new(),
@@ -393,7 +406,7 @@ pub async fn run(
             calendar_rx,
             config.clone(),
             fred_ctx,
-            picker,
+            picker.clone(),
         )),
         Box::new(views::perri::PerriView::new(
             queue_rx,
@@ -445,7 +458,7 @@ pub async fn run(
         ViewArg::All => 0,
     };
 
-    let mut state = AppState::new(mailbox_rx_state, calendar_rx_state);
+    let mut state = AppState::new(mailbox_rx_state, calendar_rx_state, picker.clone());
     state.daemon_connected = daemon_was_connected;
     state.daemon_socket_path = crate::ipc::default_socket_path();
     state.perri_pr_refresh_tx = perri_pr_refresh_tx_opt;
@@ -602,6 +615,9 @@ pub async fn run(
             }
             AppEvent::PostureSnapshot(snap) => {
                 state.posture_snapshot = Some(snap.clone());
+                // Invalidate the chrome pace-bars cache so it regenerates next frame.
+                state.pace_bars_state = None;
+                state.pace_bars_last_loaded_at = None;
                 views[FRED_IDX].on_event(&ev);
                 continue;
             }
@@ -638,6 +654,12 @@ pub async fn run(
                 // Ctrl-R: toggle right panel.
                 if k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL) {
                     state.right_panel_visible = !state.right_panel_visible;
+                    continue;
+                }
+
+                // Ctrl-T: toggle markdown transcript pane on the focused view.
+                if k.code == KeyCode::Char('t') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    views[focused_view_idx].toggle_transcript();
                     continue;
                 }
 
@@ -735,6 +757,11 @@ pub async fn run(
 
             AppEvent::Mouse(m) => {
                 use crossterm::event::MouseEventKind;
+                // Tab-bar / status-bar Down clicks are CHROME-OWNED. Everything
+                // else (incl. Drag/Up needed for drag-resize, and Scroll for
+                // REPL scrollback) must reach the focused view.
+                let mut consumed = false;
+
                 if matches!(m.kind, MouseEventKind::Down(_)) && m.row == 0 {
                     if let Some(idx) = state
                         .tab_hitmap
@@ -754,8 +781,11 @@ pub async fn run(
                                 layout::persist::save(&state.layout);
                             }
                         }
+                        consumed = true;
                     }
-                } else if matches!(m.kind, MouseEventKind::Down(_)) {
+                }
+
+                if !consumed && matches!(m.kind, MouseEventKind::Down(_)) {
                     let term_h = terminal.size().map(|s| s.height).unwrap_or(0);
                     if term_h > 0 && m.row == term_h - 1 {
                         if let Some(&(_, _, view_id)) = state
@@ -777,15 +807,13 @@ pub async fn run(
                                         layout::persist::save(&state.layout);
                                     }
                                 }
+                                consumed = true;
                             }
                         }
                     }
-                } else if matches!(
-                    m.kind,
-                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                ) {
-                    // Forward scroll events to the active view so each pane
-                    // can handle them based on where the cursor is pointing.
+                }
+
+                if !consumed {
                     views[focused_view_idx].on_event(&AppEvent::Mouse(*m));
                 }
             }

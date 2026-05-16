@@ -325,12 +325,59 @@ pub fn render_chrome(
 ) -> Rect {
     let after_tabs = render_tab_bar(f, full_area, titles, active, active_pty_capturing, state);
     let after_banner = render_break_glass_banner(f, after_tabs, break_glass);
-    render_status_bar(
+    let after_status = render_status_bar(
         f,
         after_banner,
         mailbox,
         calendar,
         recent_activity,
         status_note,
-    )
+    );
+    render_pace_bars(f, after_status, state)
+}
+
+/// Render the pixel-rendered pace bars strip (1 row, full width) above the
+/// status bar.  Returns the area above the strip.  When no posture snapshot
+/// is available the strip is skipped and the input area is returned unchanged.
+fn render_pace_bars(f: &mut Frame, area: Rect, state: &mut AppState) -> Rect {
+    let snap = match state.posture_snapshot.as_ref() {
+        Some(s) => s.clone(),
+        None => return area,
+    };
+    // One row tall — chosen by operator preference; three stacked bars
+    // (5h / 7d / sonnet-7d) fit even in a single cell of vertical space.
+    const STRIP_ROWS: u16 = 1;
+    if area.height < STRIP_ROWS || area.width < 4 {
+        return area;
+    }
+    let strip = Rect {
+        y: area.y + area.height - STRIP_ROWS,
+        height: STRIP_ROWS,
+        ..area
+    };
+    let above = Rect {
+        height: area.height - STRIP_ROWS,
+        ..area
+    };
+
+    let cell_size = (strip.width, strip.height);
+    let needs_regen = state.pace_bars_state.is_none()
+        || state.pace_bars_last_size != Some(cell_size)
+        || state.pace_bars_last_loaded_at != Some(snap.loaded_at);
+
+    if needs_regen {
+        let font_size = state.picker.font_size();
+        let w_px = (strip.width as u32) * (font_size.width as u32);
+        let h_px = (strip.height as u32) * (font_size.height as u32);
+        let dyn_img = crate::views::pace_bars_image::render_pace_bars_to_image(&snap, w_px, h_px);
+        state.pace_bars_state = Some(state.picker.new_resize_protocol(dyn_img));
+        state.pace_bars_last_loaded_at = Some(snap.loaded_at);
+        state.pace_bars_last_size = Some(cell_size);
+    }
+
+    if let Some(prot) = &mut state.pace_bars_state {
+        f.render_stateful_widget(ratatui_image::StatefulImage::new(), strip, prot);
+    }
+
+    above
 }

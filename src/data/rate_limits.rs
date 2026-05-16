@@ -144,6 +144,9 @@ pub struct PostureSnapshot {
     pub five_hour: Option<WindowPace>,
     /// Seven-day window metrics.
     pub seven_day: Option<WindowPace>,
+    /// Seven-day Sonnet-model metrics. Derived from `models.sonnet` —
+    /// shares the seven-day window's elapsed_pct; pace = used_pct / elapsed_pct.
+    pub sonnet_seven_day: Option<WindowPace>,
     /// When the file was loaded — used by the widget to detect fresh reads
     /// and trigger image re-encoding.
     pub loaded_at: std::time::Instant,
@@ -168,15 +171,52 @@ impl PostureSnapshot {
             let p_str = v.get("posture")?.as_str()?;
             BudgetPosture::from_str(p_str)?
         };
-        let five_hour = parse_window_pace(&v, "5h");
-        let seven_day = parse_window_pace(&v, "7d");
+        let five_hour = parse_window_pace(&v, "five_hour");
+        let seven_day = parse_window_pace(&v, "seven_day");
+        let sonnet_seven_day = parse_sonnet_window(&v, seven_day.as_ref());
         Some(PostureSnapshot {
             posture,
             five_hour,
             seven_day,
+            sonnet_seven_day,
             loaded_at: std::time::Instant::now(),
         })
     }
+}
+
+/// Build a `WindowPace` for the Sonnet model's 7-day window.
+///
+/// `models.sonnet` only carries `used_pct` and `resets_at`; we inherit
+/// `elapsed_pct` from the shared 7-day window so the bar length means the
+/// same thing as the other rails. `pace = used_pct / elapsed_pct`.
+fn parse_sonnet_window(
+    v: &serde_json::Value,
+    seven_day: Option<&WindowPace>,
+) -> Option<WindowPace> {
+    let s = v.get("models")?.get("sonnet")?;
+    if !s.is_object() {
+        return None;
+    }
+    let used_pct = s.get("used_pct")?.as_f64()? as f32;
+    let resets_at = s.get("resets_at")?.as_i64()?;
+    let elapsed_pct = seven_day.map(|sd| sd.elapsed_pct).unwrap_or(0.0);
+    let pace = if elapsed_pct > 0.0 {
+        used_pct / elapsed_pct
+    } else {
+        0.0
+    };
+    let level = s
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("normal")
+        .to_string();
+    Some(WindowPace {
+        used_pct,
+        elapsed_pct,
+        pace,
+        resets_at,
+        level,
+    })
 }
 
 /// Extract a `WindowPace` from a JSON value under the given key.
@@ -252,14 +292,14 @@ mod tests {
 
     const RICH_JSON: &str = r#"{
         "posture": "normal",
-        "5h": {
+        "five_hour": {
             "used_pct": 14.0,
             "elapsed_pct": 11.8,
             "pace": 1.18,
             "resets_at": 1715200000,
             "level": "normal"
         },
-        "7d": {
+        "seven_day": {
             "used_pct": 7.0,
             "elapsed_pct": 6.6,
             "pace": 1.06,
@@ -310,8 +350,8 @@ mod tests {
         // 5h present but missing "pace" → five_hour is None, seven_day still parses.
         let json = r#"{
             "posture": "normal",
-            "5h": { "used_pct": 14.0, "elapsed_pct": 11.8 },
-            "7d": { "used_pct": 7.0, "elapsed_pct": 6.6, "pace": 1.06, "resets_at": 1715800000, "level": "normal" }
+            "five_hour": { "used_pct": 14.0, "elapsed_pct": 11.8 },
+            "seven_day": { "used_pct": 7.0, "elapsed_pct": 6.6, "pace": 1.06, "resets_at": 1715800000, "level": "normal" }
         }"#;
         let snap = PostureSnapshot::parse_json(json).unwrap();
         assert!(snap.five_hour.is_none());

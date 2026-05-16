@@ -69,8 +69,9 @@ pub fn render_pace_bars_to_image(
         Err(_) => return pixmap_to_dynamic_image(pixmap),
     };
 
-    let half_h = h / 2;
-    let font_px = (half_h as f32 * 0.55).clamp(8.0, 14.0);
+    // Three bars stacked: 5h, 7d, sonnet 7d.
+    let third_h = h / 3;
+    let font_px = (third_h as f32 * 0.55).clamp(8.0, 14.0);
 
     render_bar(
         &mut pixmap,
@@ -80,7 +81,7 @@ pub fn render_pace_bars_to_image(
         snap.five_hour.as_ref(),
         0,
         w,
-        half_h,
+        third_h,
     );
     render_bar(
         &mut pixmap,
@@ -88,9 +89,20 @@ pub fn render_pace_bars_to_image(
         font_px,
         "7d",
         snap.seven_day.as_ref(),
-        half_h,
+        third_h,
         w,
-        half_h,
+        third_h,
+    );
+    // Third bar — Sonnet 7d. Use a shorter label that fits LABEL_PX.
+    render_bar(
+        &mut pixmap,
+        &font,
+        font_px,
+        "son",
+        snap.sonnet_seven_day.as_ref(),
+        third_h * 2,
+        w,
+        h - (third_h * 2),
     );
 
     pixmap_to_dynamic_image(pixmap)

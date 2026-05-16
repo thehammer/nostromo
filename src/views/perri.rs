@@ -643,7 +643,13 @@ impl View for PerriView {
                 }
                 MouseEventKind::ScrollUp => {
                     if in_repl {
-                        self.repl_scroll = self.repl_scroll.saturating_add(3);
+                        if let Some(pty) = &mut self.pty {
+                            let key = crossterm::event::KeyEvent::new(
+                                crossterm::event::KeyCode::PageUp,
+                                crossterm::event::KeyModifiers::NONE,
+                            );
+                            pty.send_key(&key);
+                        }
                     } else if in_list && len > 0 {
                         self.selected_pr = self.selected_pr.checked_sub(1).unwrap_or(len - 1);
                     }
@@ -651,7 +657,13 @@ impl View for PerriView {
                 }
                 MouseEventKind::ScrollDown => {
                     if in_repl {
-                        self.repl_scroll = self.repl_scroll.saturating_sub(3);
+                        if let Some(pty) = &mut self.pty {
+                            let key = crossterm::event::KeyEvent::new(
+                                crossterm::event::KeyCode::PageDown,
+                                crossterm::event::KeyModifiers::NONE,
+                            );
+                            pty.send_key(&key);
+                        }
                     } else if in_list && len > 0 {
                         self.selected_pr = (self.selected_pr + 1) % len;
                     }
@@ -697,6 +709,11 @@ impl View for PerriView {
 
     fn blur(&mut self) {
         self.pty_capturing = false;
+    }
+
+    fn toggle_transcript(&mut self) -> bool {
+        self.transcript.toggle_visible();
+        true
     }
 
     fn apply_pane_content(

@@ -1250,6 +1250,18 @@ impl View for MotherView {
         self.refresh_peek_for_running();
     }
 
+    fn toggle_transcript(&mut self) -> bool {
+        if self.transcript.active_session_id().is_none() {
+            if let Ok(cwd) = std::env::current_dir() {
+                if let Some(sid) = crate::transcript::find_latest_session_id_for_cwd(&cwd) {
+                    self.transcript.set_session_context(cwd, sid);
+                }
+            }
+        }
+        self.transcript.toggle_visible();
+        true
+    }
+
     fn apply_pane_content(
         &mut self,
         pane_id: &str,

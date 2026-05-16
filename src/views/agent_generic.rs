@@ -294,11 +294,23 @@ impl View for GenericView {
 
             match m.kind {
                 MouseEventKind::ScrollUp => {
-                    self.repl_scroll = self.repl_scroll.saturating_add(3);
+                    if let Some(pty) = &mut self.pty {
+                        let key = crossterm::event::KeyEvent::new(
+                            crossterm::event::KeyCode::PageUp,
+                            crossterm::event::KeyModifiers::NONE,
+                        );
+                        pty.send_key(&key);
+                    }
                     return EventOutcome::Consumed;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.repl_scroll = self.repl_scroll.saturating_sub(3);
+                    if let Some(pty) = &mut self.pty {
+                        let key = crossterm::event::KeyEvent::new(
+                            crossterm::event::KeyCode::PageDown,
+                            crossterm::event::KeyModifiers::NONE,
+                        );
+                        pty.send_key(&key);
+                    }
                     return EventOutcome::Consumed;
                 }
                 _ => {}
@@ -333,6 +345,11 @@ impl View for GenericView {
 
     fn blur(&mut self) {
         self.pty_capturing = false;
+    }
+
+    fn toggle_transcript(&mut self) -> bool {
+        self.transcript.toggle_visible();
+        true
     }
 
     fn apply_pane_content(

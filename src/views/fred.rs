@@ -430,23 +430,8 @@ impl FredView {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // ── Pace bars strip (4 rows, above the calendar image) ─────────────
-        const PACE_STRIP_ROWS: u16 = 4;
-        let (pace_strip, cal_inner) = if inner.width >= 20 && inner.height > PACE_STRIP_ROWS {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(PACE_STRIP_ROWS), Constraint::Min(0)])
-                .split(inner);
-            (Some(chunks[0]), chunks[1])
-        } else {
-            (None, inner)
-        };
-
-        // Render pace bars into the strip when available.
-        if let Some(strip) = pace_strip {
-            self.render_pace_bars(f, strip);
-        }
-
+        // Pace bars moved to the chrome status row; calendar gets the full pane.
+        let cal_inner = inner;
         self.calendar_area = cal_inner;
 
         if !has_snap {
@@ -852,7 +837,13 @@ impl View for FredView {
                 // ── scroll ────────────────────────────────────────────────────
                 MouseEventKind::ScrollUp => {
                     if in_repl {
-                        self.repl_scroll = self.repl_scroll.saturating_add(3);
+                        if let Some(pty) = &mut self.pty {
+                            let key = crossterm::event::KeyEvent::new(
+                                crossterm::event::KeyCode::PageUp,
+                                crossterm::event::KeyModifiers::NONE,
+                            );
+                            pty.send_key(&key);
+                        }
                     } else if in_calendar {
                         self.calendar_scroll = self.calendar_scroll.saturating_sub(3);
                     }
@@ -860,7 +851,13 @@ impl View for FredView {
                 }
                 MouseEventKind::ScrollDown => {
                     if in_repl {
-                        self.repl_scroll = self.repl_scroll.saturating_sub(3);
+                        if let Some(pty) = &mut self.pty {
+                            let key = crossterm::event::KeyEvent::new(
+                                crossterm::event::KeyCode::PageDown,
+                                crossterm::event::KeyModifiers::NONE,
+                            );
+                            pty.send_key(&key);
+                        }
                     } else if in_calendar {
                         self.calendar_scroll = self.calendar_scroll.saturating_add(3);
                     }
@@ -897,6 +894,11 @@ impl View for FredView {
 
     fn blur(&mut self) {
         self.pty_capturing = false;
+    }
+
+    fn toggle_transcript(&mut self) -> bool {
+        self.transcript.toggle_visible();
+        true
     }
 
     fn apply_pane_content(

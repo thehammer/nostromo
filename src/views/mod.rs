@@ -84,6 +84,12 @@ pub trait View: Send + Any {
     /// Called when this view loses focus.
     fn blur(&mut self) {}
 
+    /// Toggle the rich-markdown transcript pane, if this view has one.
+    /// Returns `true` if the view handled it. Default no-op (returns false).
+    fn toggle_transcript(&mut self) -> bool {
+        false
+    }
+
     /// Apply a structural content change to a named pane.
     ///
     /// Returns `Ok(())` on success.  Returns `Err` with a stable machine-readable
