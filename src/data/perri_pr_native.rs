@@ -105,10 +105,13 @@ impl PerriPrNativeSource {
 
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
-                _ = dirty_rx.recv() => {
+                // `Some(_) = recv()` disables the branch on a closed channel.
+                // The plain `_ =` form matches None and fires every poll once
+                // the sender is dropped, producing a hot loop.
+                Some(_) = dirty_rx.recv() => {
                     debug!("perri diff dirty-file signal");
                 }
-                _ = refresh_rx.recv() => {
+                Some(_) = refresh_rx.recv() => {
                     debug!("perri diff direct-push refresh signal (MCP)");
                 }
             }

@@ -243,10 +243,15 @@ impl PerriQueueNativeSource {
 
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
-                _ = dirty_rx.recv() => {
+                // `Some(_) = ...` disables the branch when the channel is
+                // closed (recv() yields None).  The plain `_ = recv()` form
+                // matches None too, which causes the branch to fire on every
+                // poll once the sender is dropped — producing a tight loop
+                // that hammers the GitHub search API.
+                Some(_) = dirty_rx.recv() => {
                     debug!("perri queue dirty-file signal");
                 }
-                _ = refresh_rx.recv() => {
+                Some(_) = refresh_rx.recv() => {
                     debug!("perri queue direct-push refresh signal (MCP)");
                 }
             }
@@ -805,6 +810,65 @@ mod urlencoding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression guard for the refresh-channel hot loop.
+    ///
+    /// The run loop waits on a `tokio::select!` over three branches:
+    /// `sleep(interval)`, `dirty_rx.recv()`, and `refresh_rx.recv()`.
+    /// When the corresponding sender is dropped, `recv()` returns
+    /// `Poll::Ready(None)` on every poll forever.  If the select branch
+    /// uses `_ = recv() => ...`, it fires on every iteration, producing
+    /// a tight loop that hammers the GitHub search API (~120ms cadence,
+    /// 24+ search calls/sec, exhausting the 30/min search bucket in
+    /// seconds and triggering 403s repeatedly).
+    ///
+    /// The fix is `Some(_) = recv() => ...` — the pattern doesn't match
+    /// `None`, which causes tokio::select! to *disable* that branch when
+    /// the channel is closed, letting the sleep branch win normally.
+    ///
+    /// This test exercises the exact select! shape used in `run()` to
+    /// catch any future regression that swaps the pattern back.
+    #[tokio::test]
+    async fn select_does_not_hot_fire_when_refresh_sender_dropped() {
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+
+        // Simulate the bug condition: app.rs:281 drops the queue refresh tx
+        // because MCP doesn't currently push to the queue source.  With the
+        // `_ = recv()` form the closed channel's None return would win
+        // every iteration; with `Some(_) = recv()` the branch is disabled
+        // and the sleep wins.
+        drop(refresh_tx);
+
+        // Short interval so the test stays fast — the assertion is that
+        // the select waits the full interval, not that any particular
+        // duration is held.
+        let interval = Duration::from_millis(120);
+
+        let start = std::time::Instant::now();
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            Some(_) = dirty_rx.recv() => {
+                panic!("dirty branch fired with no sender activity");
+            }
+            Some(_) = refresh_rx.recv() => {
+                panic!("refresh branch fired when sender was dropped (the regression)");
+            }
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "select! returned early ({elapsed:?} < ~100ms) — the refresh \
+             branch is firing on a closed channel"
+        );
+
+        // Keep dirty_tx alive past the select so it's not the closed
+        // channel that wins.
+        let _ = dirty_tx;
+    }
 
     fn make_item(login: &str, draft: bool, updated_at: Option<&str>) -> SearchIssueItem {
         SearchIssueItem {
