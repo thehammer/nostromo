@@ -1,8 +1,23 @@
 # Platform Evolution Sequencing
 
 **Author:** Archie
-**Status:** Draft (turn 1 of Phase 3 design loop)
+**Status:** Draft (turn 2 of Phase 3 design loop)
 **Inputs:** `docs/visions/mac-native.md`, `docs/visions/iphone.md`, `docs/visions/ipad.md`
+
+## Notation
+
+Three prefixes used throughout this memo:
+
+- **W*N*** — **Wedge.** A shippable unit of platform-evolution work. Each
+  wedge gets its own implementation plan in `docs/plans/`. Wedges are
+  numbered roughly in dependency order, not strict execution order
+  (some are parallelisable).
+- **Q*N*** — **Question for Ada.** An open product question raised during
+  this design pass. Each is intended to be answered by Ada (often via a
+  vision-doc update) before downstream wedges can be planned in detail.
+- **B*N*** — **Bet.** An architectural decision with cross-cutting
+  consequences for multiple wedges. Resolved bets are locked in and
+  cited by the wedges that depend on them.
 
 ## What this is
 
