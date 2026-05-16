@@ -82,6 +82,7 @@ struct EvData {
 
 // ── FredView ──────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub struct FredView {
     mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
     calendar_rx: watch::Receiver<Option<crate::data::fred_calendar::CalendarSnapshot>>,
@@ -504,6 +505,7 @@ impl FredView {
     }
 
     /// Render the pace-bars pixel widget into the 4-row strip.
+    #[allow(dead_code)]
     fn render_pace_bars(&mut self, f: &mut Frame, area: Rect) {
         let snap = match self.posture_snapshot.as_ref() {
             Some(s) => s,
