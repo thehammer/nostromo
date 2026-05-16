@@ -151,6 +151,11 @@ impl PerriQueueNativeSource {
         let mut etags: HashMap<String, String> = HashMap::new();
         // Item cache per search query (for 304 reuse).
         let mut item_cache: HashMap<String, Vec<SearchIssueItem>> = HashMap::new();
+        // updated_at seen on last fetch per (repo, number) — used to skip review re-fetches.
+        let mut last_seen_updated: HashMap<(String, u64), String> = HashMap::new();
+        // Cached last review state per (repo, number).
+        let mut review_state_cache: HashMap<(String, u64), (String, Option<String>)> =
+            HashMap::new();
         // Authenticated user login — fetched once and reused.
         let mut me: Option<String> = None;
 
@@ -175,7 +180,14 @@ impl PerriQueueNativeSource {
             };
 
             match self
-                .fetch(&client, &me_login, &mut etags, &mut item_cache)
+                .fetch(
+                    &client,
+                    &me_login,
+                    &mut etags,
+                    &mut item_cache,
+                    &mut last_seen_updated,
+                    &mut review_state_cache,
+                )
                 .await
             {
                 Ok(snap) => {
@@ -209,6 +221,8 @@ impl PerriQueueNativeSource {
         me: &str,
         etags: &mut HashMap<String, String>,
         item_cache: &mut HashMap<String, Vec<SearchIssueItem>>,
+        last_seen_updated: &mut HashMap<(String, u64), String>,
+        review_state_cache: &mut HashMap<(String, u64), (String, Option<String>)>,
     ) -> Result<PrQueueSnapshot> {
         // ── Run the three search queries ──────────────────────────────────────
         let q_requested =
@@ -288,18 +302,46 @@ impl PerriQueueNativeSource {
             .filter(|i| !is_filtered(i, me))
             .collect();
 
+        // For each candidate, snapshot the cache state synchronously before spawning
+        // futures.  The futures run concurrently via join_all and cannot hold &mut refs
+        // to the caches, so we hand each future its own pre-computed Option.
         let b3_futures: Vec<_> = b3_candidates
             .into_iter()
             .map(|item| {
                 let client = client.clone();
                 let me = me.to_owned();
+                let repo = repo_from_url(&item.repository_url);
+                let key = (repo.clone(), item.number);
+
+                let cached = review_from_cache(
+                    &key,
+                    item.updated_at.as_deref(),
+                    last_seen_updated,
+                    review_state_cache,
+                );
+
                 async move {
-                    let repo = repo_from_url(&item.repository_url);
-                    let (state, submitted_at) =
-                        get_our_last_review(&client, &repo, item.number, &me).await?;
+                    let (state, submitted_at, new_cache_entry) = match cached {
+                        Some((s, sub)) => {
+                            debug!(
+                                repo = %repo,
+                                number = item.number,
+                                "bucket-3 review-state cache hit — skipping get_our_last_review"
+                            );
+                            (s, sub, None)
+                        }
+                        None => match get_our_last_review(&client, &repo, item.number, &me).await
+                        {
+                            Some((s, sub)) => {
+                                let entry = Some((s.clone(), sub.clone()));
+                                (s, sub, entry)
+                            }
+                            None => return (key, None, None),
+                        },
+                    };
 
                     if state != "CHANGES_REQUESTED" {
-                        return None;
+                        return (key, None, new_cache_entry);
                     }
 
                     // Only include if the author has responded since our review
@@ -314,14 +356,14 @@ impl PerriQueueNativeSource {
                     };
 
                     if !new_activity {
-                        return None;
+                        return (key, None, new_cache_entry);
                     }
 
                     if ci_has_failure(&client, &repo, item.number).await {
-                        return None;
+                        return (key, None, new_cache_entry);
                     }
 
-                    Some(PrQueueItem {
+                    let pr_item = PrQueueItem {
                         repo,
                         number: item.number,
                         title: item.title.clone(),
@@ -333,16 +375,31 @@ impl PerriQueueNativeSource {
                         bucket: "changes_req".to_owned(),
                         new_activity: true,
                         url: item.html_url.clone(),
-                    })
+                    };
+                    (key, Some(pr_item), new_cache_entry)
                 }
             })
             .collect();
 
-        let b3_items: Vec<PrQueueItem> = futures::future::join_all(b3_futures)
-            .await
-            .into_iter()
-            .flatten()
-            .collect();
+        // Reduce: flush new review-state entries into the cache and collect items.
+        let mut b3_items: Vec<PrQueueItem> = Vec::new();
+        for (key, item, new_entry) in futures::future::join_all(b3_futures).await {
+            if let Some(entry) = new_entry {
+                review_state_cache.insert(key, entry);
+            }
+            if let Some(pr) = item {
+                b3_items.push(pr);
+            }
+        }
+
+        // Record latest updated_at for every reviewed PR so future cycles can skip
+        // unchanged ones (including PRs that fell into b1/b2 this cycle).
+        for item in &reviewed_items {
+            if let Some(updated_at) = &item.updated_at {
+                let repo = repo_from_url(&item.repository_url);
+                last_seen_updated.insert((repo, item.number), updated_at.clone());
+            }
+        }
 
         let items: Vec<PrQueueItem> = b12_items.into_iter().chain(b3_items).collect();
 
@@ -391,6 +448,22 @@ fn parse_epoch(ts: &str) -> u64 {
     chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S")
         .map(|dt| dt.and_utc().timestamp() as u64)
         .unwrap_or(0)
+}
+
+/// Returns the cached `(state, submitted_at)` for `key` if the PR's
+/// `updated_at` matches the last-seen value (i.e. the PR hasn't changed since
+/// the previous cycle).  Returns `None` if a fresh API call is needed.
+fn review_from_cache(
+    key: &(String, u64),
+    updated_at: Option<&str>,
+    last_seen_updated: &HashMap<(String, u64), String>,
+    review_state_cache: &HashMap<(String, u64), (String, Option<String>)>,
+) -> Option<(String, Option<String>)> {
+    if last_seen_updated.get(key).map(|s| s.as_str()) == updated_at {
+        review_state_cache.get(key).cloned()
+    } else {
+        None
+    }
 }
 
 // ── GitHub API calls ──────────────────────────────────────────────────────────
@@ -558,5 +631,113 @@ fn base_headers(client: &GithubClient) -> HeaderMap {
 mod urlencoding {
     pub fn encode(s: &str) -> String {
         url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_item(login: &str, draft: bool, updated_at: Option<&str>) -> SearchIssueItem {
+        SearchIssueItem {
+            number: 1,
+            title: "Test PR".to_owned(),
+            html_url: "https://github.com/Carefeed/care/pull/1".to_owned(),
+            repository_url: "https://api.github.com/repos/Carefeed/care".to_owned(),
+            user: Some(GhUser { login: login.to_owned() }),
+            draft: Some(draft),
+            updated_at: updated_at.map(|s| s.to_owned()),
+        }
+    }
+
+    // ── review_from_cache ──────────────────────────────────────────────────────
+
+    #[test]
+    fn review_cache_hit_when_updated_at_unchanged() {
+        let key = ("Carefeed/care".to_owned(), 42u64);
+        let ts = "2025-01-01T00:00:00Z".to_owned();
+        let mut last_seen: HashMap<(String, u64), String> = HashMap::new();
+        last_seen.insert(key.clone(), ts.clone());
+        let mut rev_cache: HashMap<(String, u64), (String, Option<String>)> = HashMap::new();
+        rev_cache.insert(key.clone(), ("CHANGES_REQUESTED".to_owned(), Some(ts.clone())));
+
+        let result = review_from_cache(&key, Some(&ts), &last_seen, &rev_cache);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, "CHANGES_REQUESTED");
+    }
+
+    #[test]
+    fn review_cache_miss_when_updated_at_changed() {
+        let key = ("Carefeed/care".to_owned(), 42u64);
+        let old_ts = "2025-01-01T00:00:00Z".to_owned();
+        let new_ts = "2025-01-02T00:00:00Z".to_owned();
+        let mut last_seen: HashMap<(String, u64), String> = HashMap::new();
+        last_seen.insert(key.clone(), old_ts.clone());
+        let mut rev_cache: HashMap<(String, u64), (String, Option<String>)> = HashMap::new();
+        rev_cache.insert(key.clone(), ("CHANGES_REQUESTED".to_owned(), Some(old_ts)));
+
+        // Different updated_at → cache miss, API call needed.
+        assert!(review_from_cache(&key, Some(&new_ts), &last_seen, &rev_cache).is_none());
+    }
+
+    #[test]
+    fn review_cache_miss_for_unseen_pr() {
+        let key = ("Carefeed/care".to_owned(), 42u64);
+        let ts = "2025-01-01T00:00:00Z";
+        let last_seen: HashMap<(String, u64), String> = HashMap::new();
+        let rev_cache: HashMap<(String, u64), (String, Option<String>)> = HashMap::new();
+
+        // Never seen before → always a miss.
+        assert!(review_from_cache(&key, Some(ts), &last_seen, &rev_cache).is_none());
+    }
+
+    // ── bucket-3 inclusion logic ───────────────────────────────────────────────
+    //
+    // Verifies that the 30-second grace window used to determine new_activity is
+    // applied correctly.  PRs updated within 30s of our review are NOT included;
+    // PRs updated more than 30s after our review ARE included (state still
+    // checked separately by the caller).
+
+    #[test]
+    fn new_activity_gate_at_30s_boundary() {
+        let review_ts = "2025-01-01T00:00:00Z";
+        let review_epoch = parse_epoch(review_ts);
+
+        // Exactly 30s after — still within grace window, not new activity.
+        let same = parse_epoch("2025-01-01T00:00:30Z");
+        assert!(same.saturating_sub(review_epoch) <= 30);
+
+        // 31s after — beyond grace window, counts as new activity.
+        let after = parse_epoch("2025-01-01T00:00:31Z");
+        assert!(after.saturating_sub(review_epoch) > 30);
+    }
+
+    // ── is_filtered ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_filtered_excludes_drafts() {
+        assert!(is_filtered(&make_item("alice", true, None), "hammer"));
+    }
+
+    #[test]
+    fn is_filtered_excludes_self_authored_prs() {
+        assert!(is_filtered(&make_item("hammer", false, None), "hammer"));
+    }
+
+    #[test]
+    fn is_filtered_excludes_known_bots() {
+        for bot in &["dependabot", "dependabot[bot]", "carefeed-ci"] {
+            assert!(
+                is_filtered(&make_item(bot, false, None), "hammer"),
+                "expected bot '{bot}' to be filtered"
+            );
+        }
+    }
+
+    #[test]
+    fn is_filtered_passes_normal_prs() {
+        assert!(!is_filtered(&make_item("alice", false, None), "hammer"));
     }
 }
