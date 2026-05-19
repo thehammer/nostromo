@@ -54,14 +54,33 @@ impl RateLimits {
 // ── BudgetPosture ─────────────────────────────────────────────────────────────
 
 /// Global budget posture level.
+///
+/// Supports both Bishop's original lowercase vocabulary
+/// (`flush/normal/elevated/conservative/critical`) and the newer
+/// operator-action-oriented vocabulary
+/// (`Pump the brakes / Ease up / Cruise / Push / Put the hammer down`).
+/// Both are parsed; the original variants are deprecated but kept for
+/// backward compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BudgetPosture {
+    // Legacy lowercase vocabulary (kept for backward compat).
     Flush,
     Normal,
     Elevated,
     Conservative,
     Critical,
+    // Current Bishop vocabulary (operator-action-oriented, by pace).
+    /// Slowest pace bracket — over-spending, needs immediate restraint.
+    PumpTheBrakes,
+    /// Slightly above expected pace.
+    EaseUp,
+    /// At expected pace — sustainable.
+    Cruise,
+    /// Under-spending — has margin to push harder.
+    Push,
+    /// Way under-spending — plenty of budget left.
+    PutTheHammerDown,
 }
 
 impl BudgetPosture {
@@ -81,14 +100,34 @@ impl BudgetPosture {
         Self::from_str(posture)
     }
 
+    /// Parse a posture string from either vocabulary.
+    ///
+    /// Case-insensitive on the lowercase tier and exact-match on the
+    /// title-cased tier. Falls back to `Normal` for unrecognised strings
+    /// (preferring a defensible default over a `None` that hides the
+    /// pace bars entirely on the next vocabulary drift).
     fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "flush" => Some(Self::Flush),
-            "normal" => Some(Self::Normal),
-            "elevated" => Some(Self::Elevated),
-            "conservative" => Some(Self::Conservative),
-            "critical" => Some(Self::Critical),
-            _ => None,
+        let trimmed = s.trim();
+        // Original lowercase vocabulary.
+        match trimmed.to_lowercase().as_str() {
+            "flush" => return Some(Self::Flush),
+            "normal" => return Some(Self::Normal),
+            "elevated" => return Some(Self::Elevated),
+            "conservative" => return Some(Self::Conservative),
+            "critical" => return Some(Self::Critical),
+            _ => {}
+        }
+        // Current Bishop vocabulary (exact title-case match as emitted).
+        match trimmed {
+            "Pump the brakes" => Some(Self::PumpTheBrakes),
+            "Ease up" => Some(Self::EaseUp),
+            "Cruise" => Some(Self::Cruise),
+            "Push" => Some(Self::Push),
+            "Put the hammer down" => Some(Self::PutTheHammerDown),
+            // Unknown vocabulary — fall back to Normal so the chrome pace
+            // bars keep rendering and we don't silently lose the widget on
+            // the next Bishop release.
+            _ => Some(Self::Normal),
         }
     }
 
@@ -99,16 +138,29 @@ impl BudgetPosture {
             Self::Elevated => "elevated",
             Self::Conservative => "conservative",
             Self::Critical => "critical",
+            Self::PumpTheBrakes => "Pump the brakes",
+            Self::EaseUp => "Ease up",
+            Self::Cruise => "Cruise",
+            Self::Push => "Push",
+            Self::PutTheHammerDown => "Put the hammer down",
         }
     }
 
     pub fn color(&self) -> Color {
         match self {
+            // Legacy mapping (from low-budget-pressure → high).
             Self::Flush => Color::LightGreen,
             Self::Normal => Color::DarkGray,
             Self::Elevated => Color::Yellow,
             Self::Conservative => Color::Rgb(255, 165, 0),
             Self::Critical => Color::LightRed,
+            // New vocabulary mapping (pace-oriented).
+            // Pump the brakes = burning budget too fast = warn red.
+            Self::PumpTheBrakes => Color::LightRed,
+            Self::EaseUp => Color::Rgb(255, 165, 0),
+            Self::Cruise => Color::DarkGray,
+            Self::Push => Color::Yellow,
+            Self::PutTheHammerDown => Color::LightGreen,
         }
     }
 }
@@ -269,7 +321,9 @@ mod tests {
 
     #[test]
     fn parse_budget_posture_unknown_returns_none() {
-        assert!(BudgetPosture::parse_json(r#"{"posture":"banana"}"#).is_none());
+        // Unknown posture string no longer returns None — it falls back to
+        // Normal (see `unknown_posture_falls_back_to_normal`). But missing
+        // or malformed JSON still returns None.
         assert!(BudgetPosture::parse_json("{}").is_none());
         assert!(BudgetPosture::parse_json("not json").is_none());
     }
@@ -277,15 +331,33 @@ mod tests {
     #[test]
     fn all_postures_parse() {
         for (s, expected) in &[
+            // Legacy lowercase vocabulary.
             ("flush", BudgetPosture::Flush),
             ("normal", BudgetPosture::Normal),
             ("elevated", BudgetPosture::Elevated),
             ("conservative", BudgetPosture::Conservative),
             ("critical", BudgetPosture::Critical),
+            // Current Bishop vocabulary (Title Case with spaces).
+            ("Pump the brakes", BudgetPosture::PumpTheBrakes),
+            ("Ease up", BudgetPosture::EaseUp),
+            ("Cruise", BudgetPosture::Cruise),
+            ("Push", BudgetPosture::Push),
+            ("Put the hammer down", BudgetPosture::PutTheHammerDown),
         ] {
             let json = format!(r#"{{"posture":"{}"}}"#, s);
             assert_eq!(BudgetPosture::parse_json(&json).unwrap(), *expected);
         }
+    }
+
+    #[test]
+    fn unknown_posture_falls_back_to_normal() {
+        // Defensive default so the chrome pace bars keep rendering when
+        // Bishop introduces new vocabulary in a future release.
+        let json = r#"{"posture":"BrandNewLevel"}"#;
+        assert_eq!(
+            BudgetPosture::parse_json(json).unwrap(),
+            BudgetPosture::Normal
+        );
     }
 
     // ── PostureSnapshot tests ─────────────────────────────────────────────────
