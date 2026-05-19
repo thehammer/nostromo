@@ -259,6 +259,7 @@ impl DaemonPtyClient {
     pub fn send_key(&mut self, key: &KeyEvent) {
         let flags = self.kitty_flags.load(Ordering::Relaxed);
         if let Some(bytes) = key_to_bytes_for(key, flags) {
+            tracing::trace!(?key, flags, ?bytes, "send_key");
             let _ = self.client.send(ClientMsg::PtyInput {
                 pty_id: self.pty_id.clone(),
                 bytes,
@@ -315,13 +316,23 @@ async fn run_output_loop(
     loop {
         match rx.recv().await {
             Ok(ServerMsg::PtyScrollback { pty_id: id, bytes }) if id == pty_id => {
+                let flags_before = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
                 kitty_tracker.feed(&bytes);
+                let flags_after = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
+                if flags_after != flags_before {
+                    debug!(pty_id, flags_before, flags_after, "kitty flags changed (scrollback)");
+                }
                 let filtered = filter.process(&bytes);
                 parser.lock().unwrap().process(&filtered);
                 let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
             }
             Ok(ServerMsg::PtyOutput { pty_id: id, bytes }) if id == pty_id => {
+                let flags_before = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
                 kitty_tracker.feed(&bytes);
+                let flags_after = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
+                if flags_after != flags_before {
+                    debug!(pty_id, flags_before, flags_after, "kitty flags changed");
+                }
                 let filtered = filter.process(&bytes);
                 parser.lock().unwrap().process(&filtered);
                 let _ = event_tx.send(AppEvent::AgentUpdate { view_id });

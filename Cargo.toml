@@ -35,7 +35,7 @@ fontdue = "0.9"
 
 # Embedded PTY
 portable-pty = "0.8"
-vt100 = "0.15"
+vt100 = "0.16"
 bytes = "1"
 
 # Syntax highlighting

@@ -37,7 +37,7 @@ impl<'a> Widget for PtyWidget<'a> {
     fn render(mut self, area: Rect, buf: &mut Buffer) {
         // Shift the parser's view into the scrollback buffer for this render.
         // We reset to 0 afterwards so the live view is restored between frames.
-        self.guard.set_scrollback(self.scroll_offset as usize);
+        self.guard.screen_mut().set_scrollback(self.scroll_offset as usize);
 
         let (cursor_row, cursor_col, show_cursor) = {
             let screen = self.guard.screen();
@@ -56,7 +56,7 @@ impl<'a> Widget for PtyWidget<'a> {
                     };
 
                     let contents = cell.contents();
-                    let display = if contents.is_empty() { " " } else { &contents };
+                    let display = if contents.is_empty() { " " } else { contents };
 
                     let mut style = build_style(cell);
 
@@ -77,7 +77,7 @@ impl<'a> Widget for PtyWidget<'a> {
             }
         }
         // screen borrow released — safe to mutate guard again.
-        self.guard.set_scrollback(0);
+        self.guard.screen_mut().set_scrollback(0);
 
         // Dim scroll indicator in top-right corner when scrolled.
         if self.scroll_offset > 0 {
@@ -129,13 +129,9 @@ fn build_style(cell: &vt100::Cell) -> Style {
     if cell.inverse() {
         style = style.add_modifier(Modifier::REVERSED);
     }
-
-    // TODO: vt100 0.15.x Cell exposes no dim/faint accessor (bold/italic/
-    // underline/inverse are the only supported attributes).  When a future
-    // version adds `cell.dim()` or `cell.faint()`, add:
-    //   if cell.dim() { style = style.add_modifier(Modifier::DIM); }
-    // This means SGR 2 (dim/faint) from the inner PTY is currently not
-    // rendered; the workaround is to upgrade the vt100 crate.
+    if cell.dim() {
+        style = style.add_modifier(Modifier::DIM);
+    }
 
     style
 }
