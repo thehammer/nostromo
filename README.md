@@ -6,6 +6,14 @@ grows into a full workspace.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the full design and phased build plan.
 
+## Design philosophy
+
+Nostromo is built around the idea that good tooling should embody discipline structurally — that staying aware of what your AI agents are doing, reviewing their output, and maintaining sustained focus shouldn't depend on individual willpower. The cockpit should make the right practice the easy practice.
+
+This is one concrete expression of **[The AIghtfold Path](https://github.com/thehammer/aightfold-path)** — a framework for skillful AI-assisted development. Nostromo addresses the orchestration and awareness layer: Right Mindfulness (all agent state visible in one place), Right Action (review built into the workflow via approval modals and PR queue), and Right Concentration (persistent sessions, layout memory, low context-switching cost).
+
+The knowledge layer — pre-indexed understanding of your corpora — is handled by **[Callimachus](https://github.com/thehammer/callimachus)**, a companion project from the same work.
+
 ## Usage
 
 ```bash
