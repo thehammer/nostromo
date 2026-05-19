@@ -38,40 +38,29 @@ pub struct GenericView {
     transcript: TranscriptPane,
     /// Last area used to render the transcript (for mouse hit-testing).
     transcript_render_area: Rect,
+    /// Pending auto-spawn from session store, deferred until first render
+    /// so we know the real pane dimensions.
+    pending_auto_spawn: Option<crate::sessions::SessionEntry>,
 }
 
 impl GenericView {
     pub fn new(id: &'static str, title: &'static str, ctx: ViewCtx) -> Self {
         // Attempt to reattach to an existing daemon PTY for this view.
-        let mut pty = Self::try_reattach(id, &ctx);
+        let pty = Self::try_reattach(id, &ctx);
 
         // Recover session context for the transcript pane.
         let mut transcript = TranscriptPane::new();
         let store = crate::sessions::SessionStore::load();
         let stored_entry = store.get(id).cloned();
 
-        // If no live daemon PTY exists, check the session store and auto-spawn.
-        if pty.is_none() {
-            if let Some(ref entry) = stored_entry {
-                let (cols, rows) = (80u16, 24u16);
-                let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
-                match ctx.pty_factory.spawn(
-                    id,
-                    &entry.cmd,
-                    &args,
-                    (cols, rows),
-                    ctx.event_tx.clone(),
-                ) {
-                    Ok(backend) => {
-                        tracing::info!(view_tag = id, "auto-spawned PTY from session store");
-                        pty = Some(backend);
-                    }
-                    Err(e) => {
-                        tracing::warn!("session-store auto-spawn failed for {id}: {e}");
-                    }
-                }
-            }
-        }
+        // Defer auto-spawn from the session store until the first render, when
+        // the real pane dimensions are known. Spawning at hardcoded 80×24 here
+        // causes welcome-screen content to overflow narrower split panes.
+        let pending_auto_spawn = if pty.is_none() {
+            stored_entry.clone()
+        } else {
+            None
+        };
 
         // Restore session context for Ctrl+T transcript bring-up.
         if let Some(entry) = stored_entry {
@@ -102,6 +91,7 @@ impl GenericView {
             repl_scroll: 0,
             transcript,
             transcript_render_area: Rect::default(),
+            pending_auto_spawn,
         }
     }
 
@@ -146,6 +136,34 @@ impl GenericView {
         f.render_widget(block, area);
 
         self.repl_area = inner;
+
+        // Deferred auto-spawn: now that we know the real pane dimensions, spawn
+        // the PTY at the correct size instead of the 80×24 fallback.
+        if self.pty.is_none() {
+            if let Some(entry) = self.pending_auto_spawn.take() {
+                let (cols, rows) = (inner.width.max(20), inner.height.max(5));
+                let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
+                match self.ctx.pty_factory.spawn(
+                    self.id,
+                    &entry.cmd,
+                    &args,
+                    (cols, rows),
+                    self.ctx.event_tx.clone(),
+                ) {
+                    Ok(backend) => {
+                        tracing::info!(
+                            view_tag = self.id,
+                            "deferred auto-spawn PTY at ({cols}x{rows})"
+                        );
+                        self.pty = Some(backend);
+                        self.pty_capturing = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!("deferred auto-spawn failed for {}: {e}", self.id);
+                    }
+                }
+            }
+        }
 
         if let Some(pty) = &self.pty {
             let parser = pty.parser();
