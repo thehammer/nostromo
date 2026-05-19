@@ -33,6 +33,7 @@ use ratatui::{
 use tracing::debug;
 
 use crate::{
+    data::context_usage::{ContextUsage, ContextUsageReader},
     event::AppEvent,
     mother::{self, MotherJob, MotherStatus, PeekSnapshot},
     transcript::TranscriptPane,
@@ -119,6 +120,9 @@ pub struct MotherView {
     transcript: TranscriptPane,
     /// Last area used to render the right-column slot (detail or transcript).
     transcript_render_area: Rect,
+    // ── context usage ─────────────────────────────────────────────────────────
+    _context_usage_reader: Option<ContextUsageReader>,
+    context_usage_rx: Option<tokio::sync::watch::Receiver<Option<ContextUsage>>>,
 }
 
 impl MotherView {
@@ -127,9 +131,14 @@ impl MotherView {
 
         // Seed the transcript pane with the most-recent session in the CWD.
         let mut transcript = TranscriptPane::new();
+        let mut init_ctx_reader = None;
+        let mut init_ctx_rx = None;
         if let Ok(cwd) = std::env::current_dir() {
             if let Some(sid) = crate::transcript::find_latest_session_id_for_cwd(&cwd) {
-                transcript.set_session_context(cwd, sid);
+                transcript.set_session_context(cwd.clone(), sid.clone());
+                let (r, rx) = ContextUsageReader::spawn(cwd, sid);
+                init_ctx_reader = Some(r);
+                init_ctx_rx = Some(rx);
             }
         }
 
@@ -158,7 +167,15 @@ impl MotherView {
             ctx,
             transcript,
             transcript_render_area: Rect::default(),
+            _context_usage_reader: init_ctx_reader,
+            context_usage_rx: init_ctx_rx,
         }
+    }
+
+    fn start_context_reader(&mut self, cwd: std::path::PathBuf, session_id: String) {
+        let (reader, rx) = ContextUsageReader::spawn(cwd, session_id);
+        self._context_usage_reader = Some(reader);
+        self.context_usage_rx = Some(rx);
     }
 
     /// Consume and return any pending app-level action.
@@ -1056,7 +1073,8 @@ impl View for MotherView {
                             if self.transcript.active_session_id().is_none() {
                                 if let Ok(cwd) = std::env::current_dir() {
                                     if let Some(sid) = crate::transcript::find_latest_session_id_for_cwd(&cwd) {
-                                        self.transcript.set_session_context(cwd, sid);
+                                        self.transcript.set_session_context(cwd.clone(), sid.clone());
+                                        self.start_context_reader(cwd, sid);
                                     }
                                 }
                             }
@@ -1254,7 +1272,8 @@ impl View for MotherView {
         if self.transcript.active_session_id().is_none() {
             if let Ok(cwd) = std::env::current_dir() {
                 if let Some(sid) = crate::transcript::find_latest_session_id_for_cwd(&cwd) {
-                    self.transcript.set_session_context(cwd, sid);
+                    self.transcript.set_session_context(cwd.clone(), sid.clone());
+                    self.start_context_reader(cwd, sid);
                 }
             }
         }
@@ -1271,6 +1290,12 @@ impl View for MotherView {
             "job_list" | "log" | "preview" => Err("readonly_pane".into()),
             _ => Err("unknown_pane".into()),
         }
+    }
+
+    fn context_pct(&self) -> Option<f32> {
+        self.context_usage_rx
+            .as_ref()
+            .and_then(|rx| rx.borrow().as_ref().map(|u| u.pct))
     }
 
     fn as_any(&self) -> &dyn Any {

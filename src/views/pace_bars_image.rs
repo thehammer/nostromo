@@ -1,24 +1,31 @@
-//! Pixel-rendered pace bars for the Fred view.
+//! Pixel-rendered pace bars and context-usage bar for the chrome strip.
 //!
-//! Renders two horizontal gradient bars — one for the 5-hour window and one
-//! for the 7-day window — using `tiny-skia` (fills) and `fontdue` (labels).
+//! Renders a set of `BarSpec`-described horizontal bars using `tiny-skia`
+//! (fills) and `fontdue` (labels).
 //!
 //! The bars are passed to `ratatui-image`'s `Picker` for display via the
 //! Kitty graphics protocol (or halfblock fallback).
 //!
-//! # Visual layout (per bar)
+//! # Bar types
+//!
+//! ## Pace bars (OKLab gradient)
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────┐
 //! │  5h  ████████████████░░░░░░░░░░░░░░░░░░   1.18  │
 //! │  7d  ██████████░░░░░░░░░░░░░░░░░░░░░░░░   1.06  │
-//! └──────────────────────────────────────────────────┘
 //! ```
 //!
-//! - Left label column (36 px): "5h" / "7d"
-//! - Rail: gradient from `#00C853` (left) → `pace_color(pace)` (right tip)
-//! - Fill length encodes `elapsed_pct` (not `used_pct`)
-//! - Pace number shown at the right in the tip color
+//! - Fill: OKLab gradient green→tip colour based on pace value
+//! - Right label: pace number
+//!
+//! ## Context bar (solid threshold colour)
+//!
+//! ```text
+//! │  ctx ████████░░░░░░░░░░░░░░░░░░░░░░░░░░   57%   │
+//! ```
+//!
+//! - Fill: solid blue (<70%), amber (70–90%), or red (≥90%)
+//! - Right label: percentage
 
 use tiny_skia::{Paint, Pixmap, Rect as SkRect, Transform};
 
@@ -41,20 +48,42 @@ const FG_MUTED: (u8, u8, u8, u8) = (140, 140, 140, 255);
 const LABEL_PX: u32 = 36;
 /// Horizontal padding between label and rail.
 const GAP_PX: u32 = 4;
-/// Padding between the top of a half and the bar, and between the bar and the bottom.
+/// Padding between the top of a row and the bar, and between the bar and the bottom.
 const V_PAD: u32 = 3;
+
+// ── Bar specification types ───────────────────────────────────────────────────
+
+/// How a bar's filled region should be rendered.
+pub enum Fill {
+    /// OKLab gradient from green→tip; tip RGB determined by `pace_color(pace)`.
+    /// `elapsed_pct` controls the fill length (0–100).
+    PaceGradient { pace: f32, elapsed_pct: f32 },
+    /// Solid threshold colour based on `pct` (0–100).
+    /// <70 → blue, 70–90 → amber, ≥90 → red.
+    ContextSolid { pct: f32 },
+}
+
+/// Specification for a single rendered bar.
+pub struct BarSpec<'a> {
+    /// Short left-side label (e.g. "5h", "7d", "ctx").
+    pub label: &'a str,
+    /// How to fill the bar rail.  `None` draws only the label and an empty
+    /// rail (no right-side text).
+    pub fill: Option<Fill>,
+    /// Text shown right-aligned inside the rail (e.g. "1.18" or "57%").
+    pub right_text: Option<String>,
+    /// Colour of `right_text`.  Falls back to `FG_MUTED` if `None`.
+    pub right_text_color: Option<(u8, u8, u8)>,
+}
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Render pace bars for both windows into a pixel image.
+/// Render a set of `BarSpec` bars into a pixel image.
 ///
-/// - `snap` — the `PostureSnapshot` to render. Missing windows render as a
-///   labelled dim rail without fill or pace number.
-/// - `width_px` / `height_px` — pixel dimensions of the target widget area.
-///
+/// Bar height is distributed evenly across `specs.len()`.
 /// Returns an RGBA `DynamicImage` ready for `Picker::new_resize_protocol()`.
 pub fn render_pace_bars_to_image(
-    snap: &PostureSnapshot,
+    specs: &[BarSpec<'_>],
     width_px: u32,
     height_px: u32,
 ) -> image::DynamicImage {
@@ -64,48 +93,92 @@ pub fn render_pace_bars_to_image(
 
     fill_rect(&mut pixmap, 0, 0, w, h, BG);
 
+    if specs.is_empty() {
+        return pixmap_to_dynamic_image(pixmap);
+    }
+
     let font = match fontdue::Font::from_bytes(FONT_BYTES, fontdue::FontSettings::default()) {
         Ok(f) => f,
         Err(_) => return pixmap_to_dynamic_image(pixmap),
     };
 
-    // Three bars stacked: 5h, 7d, sonnet 7d.
-    let third_h = h / 3;
-    let font_px = (third_h as f32 * 0.55).clamp(8.0, 14.0);
+    let n = specs.len() as u32;
+    let bar_h = h / n;
+    let font_px = (bar_h as f32 * 0.55).clamp(8.0, 14.0);
 
-    render_bar(
-        &mut pixmap,
-        &font,
-        font_px,
-        "5h",
-        snap.five_hour.as_ref(),
-        0,
-        w,
-        third_h,
-    );
-    render_bar(
-        &mut pixmap,
-        &font,
-        font_px,
-        "7d",
-        snap.seven_day.as_ref(),
-        third_h,
-        w,
-        third_h,
-    );
-    // Third bar — Sonnet 7d. Use a shorter label that fits LABEL_PX.
-    render_bar(
-        &mut pixmap,
-        &font,
-        font_px,
-        "son",
-        snap.sonnet_seven_day.as_ref(),
-        third_h * 2,
-        w,
-        h - (third_h * 2),
-    );
+    for (i, spec) in specs.iter().enumerate() {
+        let y_offset = bar_h * i as u32;
+        // Last bar gets any leftover pixels to avoid gaps.
+        let this_h = if i as u32 == n - 1 {
+            h - y_offset
+        } else {
+            bar_h
+        };
+        render_bar(&mut pixmap, &font, font_px, spec, y_offset, w, this_h);
+    }
 
     pixmap_to_dynamic_image(pixmap)
+}
+
+/// Build the 3 standard pace `BarSpec`s from a `PostureSnapshot`.
+///
+/// Convenience used by `chrome.rs` so it doesn't need to import
+/// `WindowPace` directly.
+pub fn pace_specs_from_snapshot(snap: &PostureSnapshot) -> [BarSpecOwned; 3] {
+    [
+        owned_pace_spec("5h", snap.five_hour.as_ref()),
+        owned_pace_spec("7d", snap.seven_day.as_ref()),
+        owned_pace_spec("son", snap.sonnet_seven_day.as_ref()),
+    ]
+}
+
+/// An owned version of `BarSpec` used for the helper above (avoids lifetime
+/// gymnastics when building specs dynamically).
+pub struct BarSpecOwned {
+    pub label: String,
+    pub fill: Option<Fill>,
+    pub right_text: Option<String>,
+    pub right_text_color: Option<(u8, u8, u8)>,
+}
+
+impl BarSpecOwned {
+    pub fn as_ref_spec(&self) -> BarSpec<'_> {
+        BarSpec {
+            label: &self.label,
+            fill: self.fill.as_ref().map(|f| match f {
+                Fill::PaceGradient { pace, elapsed_pct } => Fill::PaceGradient {
+                    pace: *pace,
+                    elapsed_pct: *elapsed_pct,
+                },
+                Fill::ContextSolid { pct } => Fill::ContextSolid { pct: *pct },
+            }),
+            right_text: self.right_text.clone(),
+            right_text_color: self.right_text_color,
+        }
+    }
+}
+
+fn owned_pace_spec(label: &str, window: Option<&WindowPace>) -> BarSpecOwned {
+    match window {
+        Some(wp) => {
+            let tip = pace_color(wp.pace);
+            BarSpecOwned {
+                label: label.to_string(),
+                fill: Some(Fill::PaceGradient {
+                    pace: wp.pace,
+                    elapsed_pct: wp.elapsed_pct,
+                }),
+                right_text: Some(format!("{:.2}", wp.pace)),
+                right_text_color: Some(tip),
+            }
+        }
+        None => BarSpecOwned {
+            label: label.to_string(),
+            fill: None,
+            right_text: None,
+            right_text_color: None,
+        },
+    }
 }
 
 // ── Per-bar renderer ─────────────────────────────────────────────────────────
@@ -115,15 +188,14 @@ fn render_bar(
     pixmap: &mut Pixmap,
     font: &fontdue::Font,
     font_px: f32,
-    label: &str,
-    window: Option<&WindowPace>,
+    spec: &BarSpec<'_>,
     y_offset: u32,
     width: u32,
     height: u32,
 ) {
-    // Label (vertically centred in this half).
+    // Label (vertically centred in this row).
     let label_baseline = y_offset as i32 + (height as f32 / 2.0 + font_px * 0.35) as i32;
-    draw_text(pixmap, font, label, 4, label_baseline, font_px, FG_MUTED);
+    draw_text(pixmap, font, spec.label, 4, label_baseline, font_px, FG_MUTED);
 
     // Rail geometry.
     let rail_x = LABEL_PX + GAP_PX;
@@ -138,44 +210,74 @@ fn render_bar(
     // Empty rail background.
     fill_rect(pixmap, rail_x, bar_y, rail_w, bar_h, RAIL_BG);
 
-    let Some(wp) = window else { return };
-
-    // Gradient fill: length encodes elapsed_pct.
-    let fill_w = ((wp.elapsed_pct.clamp(0.0, 100.0) / 100.0) * rail_w as f32).round() as u32;
-    if fill_w > 0 {
-        let tip_rgb = pace_color(wp.pace);
-        let green = (0u8, 200u8, 83u8);
-
-        for px in 0..fill_w {
-            let t = if fill_w <= 1 {
-                0.0f32
-            } else {
-                px as f32 / (fill_w - 1) as f32
-            };
-            let (r, g, b) = oklab_lerp(green, tip_rgb, t);
-            fill_rect(pixmap, rail_x + px, bar_y, 1, bar_h, (r, g, b, 255));
+    // Fill.
+    match spec.fill {
+        None => {
+            // No fill — leave the empty rail.
+        }
+        Some(Fill::PaceGradient { pace, elapsed_pct }) => {
+            let fill_w =
+                ((elapsed_pct.clamp(0.0, 100.0) / 100.0) * rail_w as f32).round() as u32;
+            if fill_w > 0 {
+                let tip_rgb = pace_color(pace);
+                let green = (0u8, 200u8, 83u8);
+                for px in 0..fill_w {
+                    let t = if fill_w <= 1 {
+                        0.0f32
+                    } else {
+                        px as f32 / (fill_w - 1) as f32
+                    };
+                    let (r, g, b) = oklab_lerp(green, tip_rgb, t);
+                    fill_rect(pixmap, rail_x + px, bar_y, 1, bar_h, (r, g, b, 255));
+                }
+            }
+        }
+        Some(Fill::ContextSolid { pct }) => {
+            let fill_w = ((pct.clamp(0.0, 100.0) / 100.0) * rail_w as f32).round() as u32;
+            if fill_w > 0 {
+                let (r, g, b) = context_color(pct);
+                fill_rect(pixmap, rail_x, bar_y, fill_w, bar_h, (r, g, b, 255));
+            }
         }
     }
 
-    // Pace number — right-aligned, overlaid in tip color at the right of the rail.
-    let tip_rgb = pace_color(wp.pace);
-    let pace_str = format!("{:.2}", wp.pace);
-    // Estimate text width (~font_px * 0.6 per char) to right-align.
-    let approx_text_w = (pace_str.len() as f32 * font_px * 0.6) as i32;
-    let text_x = (width as i32) - approx_text_w - 4;
-    let text_baseline = y_offset as i32 + (height as f32 / 2.0 + font_px * 0.35) as i32;
-    draw_text(
-        pixmap,
-        font,
-        &pace_str,
-        text_x,
-        text_baseline,
-        font_px,
-        (tip_rgb.0, tip_rgb.1, tip_rgb.2, 220),
-    );
+    // Right-side text — right-aligned inside the rail.
+    if let Some(ref text) = spec.right_text {
+        let (tr, tg, tb) = spec.right_text_color.unwrap_or((FG_MUTED.0, FG_MUTED.1, FG_MUTED.2));
+        let approx_text_w = (text.len() as f32 * font_px * 0.6) as i32;
+        let text_x = (width as i32) - approx_text_w - 4;
+        let text_baseline = y_offset as i32 + (height as f32 / 2.0 + font_px * 0.35) as i32;
+        draw_text(
+            pixmap,
+            font,
+            text,
+            text_x,
+            text_baseline,
+            font_px,
+            (tr, tg, tb, 220),
+        );
+    }
 }
 
 // ── Colour helpers ────────────────────────────────────────────────────────────
+
+/// Map a context-window usage percentage to a threshold colour.
+///
+/// - `pct < 70.0`   → cool blue  `(64, 156, 255)` — healthy headroom
+/// - `70.0..90.0`   → amber      `(255, 176, 0)`  — getting full
+/// - `pct >= 90.0`  → red        `(213, 0, 0)`    — critically full
+///
+/// Matches the same red anchor used by `pace_color` at pace = 1.5 so the
+/// two bars share a visual language for "danger."
+pub fn context_color(pct: f32) -> (u8, u8, u8) {
+    if pct < 70.0 {
+        (64, 156, 255) // cool blue
+    } else if pct < 90.0 {
+        (255, 176, 0) // amber
+    } else {
+        (213, 0, 0) // red
+    }
+}
 
 /// Map a pace value to an RGB colour via two-segment OKLab interpolation.
 ///
@@ -287,7 +389,7 @@ fn to_srgb(c: f32) -> f32 {
     }
 }
 
-// ── Drawing primitives (mirrored from fred_calendar_image.rs) ─────────────────
+// ── Drawing primitives ────────────────────────────────────────────────────────
 
 fn fill_rect(pixmap: &mut Pixmap, x: u32, y: u32, w: u32, h: u32, color: (u8, u8, u8, u8)) {
     if w == 0 || h == 0 {
@@ -398,16 +500,97 @@ fn pixmap_to_dynamic_image(pixmap: Pixmap) -> image::DynamicImage {
 mod tests {
     use super::*;
 
+    // ── context_color threshold tests ─────────────────────────────────────────
+
+    #[test]
+    fn context_color_blue_under_70() {
+        let (r, g, b) = context_color(0.0);
+        assert_eq!((r, g, b), (64, 156, 255), "0% should be blue");
+
+        let (r, g, b) = context_color(69.9);
+        assert_eq!((r, g, b), (64, 156, 255), "69.9% should be blue");
+    }
+
+    #[test]
+    fn context_color_amber_70_to_90() {
+        let (r, g, b) = context_color(70.0);
+        assert_eq!((r, g, b), (255, 176, 0), "70% should be amber");
+
+        let (r, g, b) = context_color(89.9);
+        assert_eq!((r, g, b), (255, 176, 0), "89.9% should be amber");
+    }
+
+    #[test]
+    fn context_color_red_at_90() {
+        let (r, g, b) = context_color(90.0);
+        assert_eq!((r, g, b), (213, 0, 0), "90% should be red");
+
+        let (r, g, b) = context_color(100.0);
+        assert_eq!((r, g, b), (213, 0, 0), "100% should be red");
+    }
+
+    #[test]
+    fn context_color_clamped() {
+        // Negative value → treated as < 70 → blue.
+        let (r, g, b) = context_color(-10.0);
+        assert_eq!((r, g, b), (64, 156, 255), "negative should be blue");
+
+        // Value > 100 → treated as ≥ 90 → red.
+        let (r, g, b) = context_color(150.0);
+        assert_eq!((r, g, b), (213, 0, 0), ">100 should be red");
+    }
+
+    // ── render smoke test ─────────────────────────────────────────────────────
+
+    #[test]
+    fn render_with_four_bars() {
+        let specs: Vec<BarSpec<'_>> = vec![
+            BarSpec {
+                label: "ctx",
+                fill: Some(Fill::ContextSolid { pct: 57.0 }),
+                right_text: Some("57%".to_string()),
+                right_text_color: Some(context_color(57.0)),
+            },
+            BarSpec {
+                label: "5h",
+                fill: Some(Fill::PaceGradient { pace: 0.8, elapsed_pct: 60.0 }),
+                right_text: Some("0.80".to_string()),
+                right_text_color: Some(pace_color(0.8)),
+            },
+            BarSpec {
+                label: "7d",
+                fill: Some(Fill::PaceGradient { pace: 1.1, elapsed_pct: 40.0 }),
+                right_text: Some("1.10".to_string()),
+                right_text_color: Some(pace_color(1.1)),
+            },
+            BarSpec {
+                label: "son",
+                fill: None,
+                right_text: None,
+                right_text_color: None,
+            },
+        ];
+
+        let img = render_pace_bars_to_image(&specs, 400, 64);
+        // Should produce a non-empty image at the requested size.
+        assert_eq!(img.width(), 400);
+        assert_eq!(img.height(), 64);
+        // Image should not be all-black (background is BG=(20,20,28)).
+        let rgba = img.to_rgba8();
+        let first_pixel = rgba.get_pixel(0, 0);
+        assert_eq!(first_pixel[0], 20, "background R");
+        assert_eq!(first_pixel[1], 20, "background G");
+        assert_eq!(first_pixel[2], 28, "background B");
+    }
+
+    // ── existing pace_color / oklab tests ─────────────────────────────────────
+
     #[test]
     fn pace_color_green_at_zero() {
         let (r, g, b) = pace_color(0.0);
         assert!(r < 50, "red should be low for green: {r}");
         assert!(g > 180, "green should be high for green: {g}");
-        // #00C853 has B=83; green-dominant means R and B both low relative to G
-        assert!(
-            b < 110,
-            "blue should be significantly lower than green: {b}"
-        );
+        assert!(b < 110, "blue should be significantly lower than green: {b}");
     }
 
     #[test]
@@ -428,7 +611,6 @@ mod tests {
 
     #[test]
     fn oklab_lerp_identity() {
-        // Lerp from A to A at t=0.5 should give A within ±2 per channel.
         let a = (120u8, 80u8, 200u8);
         let result = oklab_lerp(a, a, 0.5);
         assert!(
@@ -453,7 +635,6 @@ mod tests {
 
     #[test]
     fn pace_color_clamped_beyond_one_five() {
-        // Values > 1.5 should be clamped to the same as 1.5.
         assert_eq!(pace_color(2.0), pace_color(1.5));
         assert_eq!(pace_color(-0.5), pace_color(0.0));
     }

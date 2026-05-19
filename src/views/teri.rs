@@ -14,7 +14,10 @@ use ratatui::{
 use tokio::sync::watch;
 
 use crate::{
-    data::teri_todos::TeriTodosSnapshot,
+    data::{
+        context_usage::{ContextUsage, ContextUsageReader},
+        teri_todos::TeriTodosSnapshot,
+    },
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
     transcript::TranscriptPane,
@@ -44,6 +47,9 @@ pub struct TeriView {
     transcript: TranscriptPane,
     /// Last area used to render the transcript (for mouse hit-testing).
     transcript_render_area: Rect,
+    // ── context usage ─────────────────────────────────────────────────────────
+    _context_usage_reader: Option<ContextUsageReader>,
+    context_usage_rx: Option<tokio::sync::watch::Receiver<Option<ContextUsage>>>,
 }
 
 impl TeriView {
@@ -82,6 +88,8 @@ impl TeriView {
         }
 
         // Restore session context for Ctrl+T transcript bring-up.
+        let mut init_ctx_reader = None;
+        let mut init_ctx_rx = None;
         if let Some(entry) = stored_entry {
             let sid_opt = entry.session_id.clone().or_else(|| {
                 entry.cwd.as_deref()
@@ -91,7 +99,10 @@ impl TeriView {
                 let cwd = entry.cwd
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-                transcript.set_session_context(cwd, sid);
+                transcript.set_session_context(cwd.clone(), sid.clone());
+                let (r, rx) = ContextUsageReader::spawn(cwd, sid);
+                init_ctx_reader = Some(r);
+                init_ctx_rx = Some(rx);
             }
         }
 
@@ -113,7 +124,15 @@ impl TeriView {
             todos_selected: 0,
             transcript,
             transcript_render_area: Rect::default(),
+            _context_usage_reader: init_ctx_reader,
+            context_usage_rx: init_ctx_rx,
         }
+    }
+
+    fn start_context_reader(&mut self, cwd: std::path::PathBuf, session_id: String) {
+        let (reader, rx) = ContextUsageReader::spawn(cwd, session_id);
+        self._context_usage_reader = Some(reader);
+        self.context_usage_rx = Some(rx);
     }
 
     fn try_reattach(ctx: &ViewCtx) -> Option<PtyBackend> {
@@ -404,6 +423,7 @@ impl View for TeriView {
                         let cwd = std::env::current_dir()
                             .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
                         self.transcript.set_session_context(cwd.clone(), sid.clone());
+                        self.start_context_reader(cwd.clone(), sid.clone());
                         let mut store = crate::sessions::SessionStore::load();
                         store.record(
                             TERI_PTY_TAG,
@@ -528,6 +548,12 @@ impl View for TeriView {
             "todos" | "repl" => Err("readonly_pane".into()),
             _ => Err("unknown_pane".into()),
         }
+    }
+
+    fn context_pct(&self) -> Option<f32> {
+        self.context_usage_rx
+            .as_ref()
+            .and_then(|rx| rx.borrow().as_ref().map(|u| u.pct))
     }
 
     fn as_any(&self) -> &dyn Any {

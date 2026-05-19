@@ -23,6 +23,7 @@ use crate::{
         fred_mailbox::MailboxSnapshot,
     },
     ui::{theme, widgets::truncate::truncate},
+    views::pace_bars_image::{context_color, BarSpec, Fill},
 };
 
 // ── sweater helpers ───────────────────────────────────────────────────────────
@@ -321,6 +322,7 @@ pub fn render_chrome(
     recent_activity: &[ActivityEvent],
     break_glass: Option<&BreakGlassRequest>,
     status_note: Option<&str>,
+    focused_context_pct: Option<f32>,
     state: &mut AppState,
 ) -> Rect {
     let after_tabs = render_tab_bar(f, full_area, titles, active, active_pty_capturing, state);
@@ -333,46 +335,84 @@ pub fn render_chrome(
         recent_activity,
         status_note,
     );
-    render_pace_bars(f, after_status, state)
+    render_pace_bars(f, after_status, focused_context_pct, state)
 }
 
-/// Render the pixel-rendered pace bars strip (1 row, full width) above the
-/// status bar.  Returns the area above the strip.  When no posture snapshot
-/// is available the strip is skipped and the input area is returned unchanged.
-fn render_pace_bars(f: &mut Frame, area: Rect, state: &mut AppState) -> Rect {
+/// Render the pixel-rendered pace-bars + optional context-usage strip.
+///
+/// When `focused_context_pct` is `Some`, the strip is **2 rows** tall:
+/// the context bar on top, the 3 pace bars on the bottom row.
+///
+/// When `focused_context_pct` is `None` (no REPL focused), the strip is
+/// **1 row** tall (pace bars only) — "gracefully absent" per PRD success
+/// criterion 4.
+///
+/// Returns the area above the strip.  When no posture snapshot is available
+/// the strip is skipped and the input area is returned unchanged.
+fn render_pace_bars(
+    f: &mut Frame,
+    area: Rect,
+    focused_context_pct: Option<f32>,
+    state: &mut AppState,
+) -> Rect {
     let snap = match state.posture_snapshot.as_ref() {
         Some(s) => s.clone(),
         None => return area,
     };
-    // One row tall — chosen by operator preference; three stacked bars
-    // (5h / 7d / sonnet-7d) fit even in a single cell of vertical space.
-    const STRIP_ROWS: u16 = 1;
-    if area.height < STRIP_ROWS || area.width < 4 {
+
+    let strip_rows: u16 = if focused_context_pct.is_some() { 2 } else { 1 };
+
+    if area.height < strip_rows || area.width < 4 {
         return area;
     }
+
     let strip = Rect {
-        y: area.y + area.height - STRIP_ROWS,
-        height: STRIP_ROWS,
+        y: area.y + area.height - strip_rows,
+        height: strip_rows,
         ..area
     };
     let above = Rect {
-        height: area.height - STRIP_ROWS,
+        height: area.height - strip_rows,
         ..area
     };
 
+    // Cache-invalidation: rebuild when size, posture, or context pct changes.
+    // Round pct to 1 decimal place to avoid thrash on every token increment.
+    let rounded_ctx = focused_context_pct.map(|p| (p * 10.0).round() / 10.0);
     let cell_size = (strip.width, strip.height);
     let needs_regen = state.pace_bars_state.is_none()
         || state.pace_bars_last_size != Some(cell_size)
-        || state.pace_bars_last_loaded_at != Some(snap.loaded_at);
+        || state.pace_bars_last_loaded_at != Some(snap.loaded_at)
+        || state.pace_bars_last_ctx_pct != rounded_ctx;
 
     if needs_regen {
         let font_size = state.picker.font_size();
         let w_px = (strip.width as u32) * (font_size.width as u32);
         let h_px = (strip.height as u32) * (font_size.height as u32);
-        let dyn_img = crate::views::pace_bars_image::render_pace_bars_to_image(&snap, w_px, h_px);
+
+        // Build spec list: optional context bar first, then 3 pace bars.
+        let owned_pace_specs = crate::views::pace_bars_image::pace_specs_from_snapshot(&snap);
+        let mut specs: Vec<BarSpec<'_>> = Vec::with_capacity(4);
+
+        if let Some(pct) = focused_context_pct {
+            let (cr, cg, cb) = context_color(pct);
+            specs.push(BarSpec {
+                label: "ctx",
+                fill: Some(Fill::ContextSolid { pct }),
+                right_text: Some(format!("{:.0}%", pct)),
+                right_text_color: Some((cr, cg, cb)),
+            });
+        }
+
+        for owned in &owned_pace_specs {
+            specs.push(owned.as_ref_spec());
+        }
+
+        let dyn_img = crate::views::pace_bars_image::render_pace_bars_to_image(&specs, w_px, h_px);
         state.pace_bars_state = Some(state.picker.new_resize_protocol(dyn_img));
         state.pace_bars_last_loaded_at = Some(snap.loaded_at);
         state.pace_bars_last_size = Some(cell_size);
+        state.pace_bars_last_ctx_pct = rounded_ctx;
     }
 
     if let Some(prot) = &mut state.pace_bars_state {

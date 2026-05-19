@@ -57,6 +57,8 @@ pub fn render(
     let calendar_snap = state.calendar_rx.borrow().clone();
 
     let pty_capturing = views[focused_view_idx].pty_capturing_input();
+    // Sample the context pct of the focused view BEFORE the mutable borrow of state.
+    let focused_context_pct = views[focused_view_idx].context_pct();
 
     // Extract values that are immutably borrowed before passing `state` as &mut.
     let break_glass_snap = state.break_glass.clone();
@@ -73,6 +75,7 @@ pub fn render(
         recent_activity,
         break_glass_snap.as_ref(),
         status_note_snap.as_deref(),
+        focused_context_pct,
         state,
     );
     // NOTE: state.tab_hitmap is now populated by render_chrome → render_tab_bar.

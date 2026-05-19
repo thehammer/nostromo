@@ -25,7 +25,10 @@ use tokio::sync::watch;
 use crate::{
     config::Config,
     data::{
-        fred_calendar::CalendarEvent, fred_mailbox::MailboxSnapshot, rate_limits::PostureSnapshot,
+        context_usage::{ContextUsage, ContextUsageReader},
+        fred_calendar::CalendarEvent,
+        fred_mailbox::MailboxSnapshot,
+        rate_limits::PostureSnapshot,
     },
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
@@ -37,7 +40,8 @@ use crate::{
         widgets::{relative_time::format_relative_now, truncate::truncate},
     },
     views::{
-        fred_calendar_image::render_calendar_to_image, pace_bars_image::render_pace_bars_to_image,
+        fred_calendar_image::render_calendar_to_image,
+        pace_bars_image::{pace_specs_from_snapshot, render_pace_bars_to_image},
         EventOutcome, View, ViewCtx,
     },
 };
@@ -144,6 +148,11 @@ pub struct FredView {
     transcript: TranscriptPane,
     /// Last area used to render the right-column slot (calendar or transcript).
     transcript_render_area: Rect,
+    // ── context usage ─────────────────────────────────────────────────────────
+    /// Background task reading context usage from the session JSONL.
+    _context_usage_reader: Option<ContextUsageReader>,
+    /// Latest context usage value from the background task.
+    context_usage_rx: Option<tokio::sync::watch::Receiver<Option<ContextUsage>>>,
 }
 
 impl FredView {
@@ -189,6 +198,8 @@ impl FredView {
         }
 
         // Restore session context for Ctrl+T transcript bring-up.
+        let mut initial_context_usage_reader = None;
+        let mut initial_context_usage_rx = None;
         if let Some(entry) = stored_entry {
             let sid_opt = entry.session_id.clone().or_else(|| {
                 entry.cwd.as_deref()
@@ -198,7 +209,10 @@ impl FredView {
                 let cwd = entry.cwd
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-                transcript.set_session_context(cwd, sid);
+                transcript.set_session_context(cwd.clone(), sid.clone());
+                let (reader, rx) = ContextUsageReader::spawn(cwd, sid);
+                initial_context_usage_reader = Some(reader);
+                initial_context_usage_rx = Some(rx);
             }
         }
 
@@ -247,7 +261,16 @@ impl FredView {
             top_area: Rect::default(),
             transcript,
             transcript_render_area: Rect::default(),
+            _context_usage_reader: initial_context_usage_reader,
+            context_usage_rx: initial_context_usage_rx,
         }
+    }
+
+    /// Start (or restart) the context-usage reader for the given session.
+    fn start_context_reader(&mut self, cwd: std::path::PathBuf, session_id: String) {
+        let (reader, rx) = ContextUsageReader::spawn(cwd, session_id);
+        self._context_usage_reader = Some(reader);
+        self.context_usage_rx = Some(rx);
     }
 
     /// Reattach to a live daemon PTY if one exists for this view tag.
@@ -524,7 +547,9 @@ impl FredView {
         if needs_regen {
             let w_px = (area.width as u32) * (font_size.width as u32);
             let h_px = (area.height as u32) * (font_size.height as u32);
-            let dyn_img = render_pace_bars_to_image(snap, w_px, h_px);
+            let owned_specs = pace_specs_from_snapshot(snap);
+            let specs: Vec<_> = owned_specs.iter().map(|s| s.as_ref_spec()).collect();
+            let dyn_img = render_pace_bars_to_image(&specs, w_px, h_px);
             self.pace_bars_image_state = Some(self.picker.new_resize_protocol(dyn_img));
             self.pace_bars_last_loaded_at = Some(loaded_at);
             self.pace_bars_last_size = Some(cell_size);
@@ -748,6 +773,7 @@ impl View for FredView {
                         let cwd = std::env::current_dir()
                             .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
                         self.transcript.set_session_context(cwd.clone(), sid.clone());
+                        self.start_context_reader(cwd.clone(), sid.clone());
                         let mut store = crate::sessions::SessionStore::load();
                         store.record(
                             FRED_PTY_TAG,
@@ -917,6 +943,12 @@ impl View for FredView {
             "repl" => Err("readonly_pane".into()),
             _ => Err("unknown_pane".into()),
         }
+    }
+
+    fn context_pct(&self) -> Option<f32> {
+        self.context_usage_rx
+            .as_ref()
+            .and_then(|rx| rx.borrow().as_ref().map(|u| u.pct))
     }
 
     fn as_any(&self) -> &dyn Any {

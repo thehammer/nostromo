@@ -48,6 +48,26 @@ pub struct AssistantMessage {
     pub content: Vec<ContentBlock>,
     /// `null` while streaming; set to the stop reason when the turn completes.
     pub stop_reason: Option<String>,
+    /// Token usage for this turn.  Present once the turn completes; absent
+    /// in streaming records.
+    #[serde(default)]
+    pub usage: Option<Usage>,
+}
+
+/// Token counts reported by the Claude API at the end of each assistant turn.
+///
+/// All fields default to zero via `#[serde(default)]` so that records with
+/// partial or missing usage fields parse cleanly.
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct Usage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
 }
 
 // ── Content blocks ────────────────────────────────────────────────────────────

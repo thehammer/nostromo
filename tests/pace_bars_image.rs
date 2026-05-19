@@ -8,7 +8,9 @@
 
 use nostromo::{
     data::rate_limits::{BudgetPosture, PostureSnapshot, WindowPace},
-    views::pace_bars_image::{pace_color, render_pace_bars_to_image},
+    views::pace_bars_image::{
+        pace_color, pace_specs_from_snapshot, render_pace_bars_to_image,
+    },
 };
 
 fn make_snapshot() -> PostureSnapshot {
@@ -33,10 +35,16 @@ fn make_snapshot() -> PostureSnapshot {
     }
 }
 
+fn render_snap(snap: &PostureSnapshot, w: u32, h: u32) -> image::DynamicImage {
+    let owned_specs = pace_specs_from_snapshot(snap);
+    let specs: Vec<_> = owned_specs.iter().map(|s| s.as_ref_spec()).collect();
+    render_pace_bars_to_image(&specs, w, h)
+}
+
 #[test]
 fn render_returns_correct_dimensions() {
     let snap = make_snapshot();
-    let img = render_pace_bars_to_image(&snap, 400, 48);
+    let img = render_snap(&snap, 400, 48);
     assert_eq!(img.width(), 400, "image width");
     assert_eq!(img.height(), 48, "image height");
 }
@@ -44,7 +52,7 @@ fn render_returns_correct_dimensions() {
 #[test]
 fn top_left_pixel_is_background() {
     let snap = make_snapshot();
-    let img = render_pace_bars_to_image(&snap, 400, 48);
+    let img = render_snap(&snap, 400, 48);
     let rgba = img.to_rgba8();
     let p = rgba.get_pixel(0, 0);
     // BG = (20, 20, 28) — allow a tiny rounding margin.
@@ -68,13 +76,13 @@ fn top_left_pixel_is_background() {
 #[test]
 fn leftmost_fill_pixel_is_green() {
     let snap = make_snapshot();
-    let img = render_pace_bars_to_image(&snap, 400, 48);
+    let img = render_snap(&snap, 400, 48);
     let rgba = img.to_rgba8();
 
-    // The 5h bar occupies the top half. Rail starts at x = LABEL_PX + GAP_PX = 40.
-    // Vertically: mid of top half ≈ row 12 (half_h=24, V_PAD=3 → bar rows 3..21).
+    // The 5h bar occupies the top third. Rail starts at x = LABEL_PX + GAP_PX = 40.
+    // Vertically: mid of top third ≈ row 8 (third_h=16, V_PAD=3 → bar rows 3..13).
     let label_and_gap = 40u32;
-    let bar_row = 12u32; // somewhere in the middle of the top-half bar
+    let bar_row = 8u32; // somewhere in the middle of the top-third bar
 
     let p = rgba.get_pixel(label_and_gap, bar_row);
     // Leftmost pixel of the gradient = green anchor (#00C853 → R~0, G~200, B~83)
@@ -95,7 +103,7 @@ fn leftmost_fill_pixel_is_green() {
 fn rightmost_fill_pixel_matches_pace_color() {
     let snap = make_snapshot();
     let width = 400u32;
-    let img = render_pace_bars_to_image(&snap, width, 48);
+    let img = render_snap(&snap, width, 48);
     let rgba = img.to_rgba8();
 
     // Elapsed_pct = 11.8 → fill_w = (11.8/100) * (400 - 40) ≈ 42 px
@@ -107,7 +115,7 @@ fn rightmost_fill_pixel_matches_pace_color() {
     }
 
     let rightmost_x = rail_x + fill_w - 1;
-    let bar_row = 12u32;
+    let bar_row = 8u32; // top-third bar mid row
     let p = rgba.get_pixel(rightmost_x, bar_row);
 
     let (er, eg, eb) = pace_color(1.18);

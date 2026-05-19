@@ -145,7 +145,10 @@ async fn run_reader(
 
 /// Read all complete lines from `path` starting at `byte_offset`.
 /// Returns `(lines, new_byte_offset)`.
-async fn read_new_lines(path: &PathBuf, byte_offset: u64) -> anyhow::Result<(Vec<String>, u64)> {
+///
+/// `pub(crate)` so that `context_usage` can reuse this primitive without
+/// duplicating the file-tailing logic.
+pub(crate) async fn read_new_lines(path: &PathBuf, byte_offset: u64) -> anyhow::Result<(Vec<String>, u64)> {
     let mut file = tokio::fs::File::open(path).await?;
     tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(byte_offset)).await?;
 
@@ -257,9 +260,14 @@ fn record_to_entries(record: &Record, out: &mut Vec<TranscriptEntry>) -> bool {
 
 // ── Notify watcher ────────────────────────────────────────────────────────────
 
-type BoxedWatcher = Box<dyn notify::Watcher + Send>;
+pub(crate) type BoxedWatcher = Box<dyn notify::Watcher + Send>;
 
-fn install_watcher(path: &PathBuf, notify_tx: tokio::sync::mpsc::Sender<()>) -> Option<BoxedWatcher> {
+/// Install a filesystem watcher on the parent directory of `path`, firing
+/// `notify_tx` on every modification event that touches `path`.
+///
+/// `pub(crate)` so that `context_usage` can share the same notify machinery
+/// without duplicating the watcher setup.
+pub(crate) fn install_watcher(path: &PathBuf, notify_tx: tokio::sync::mpsc::Sender<()>) -> Option<BoxedWatcher> {
     use notify::{RecursiveMode, Watcher};
 
     let target = path.clone();
@@ -297,7 +305,7 @@ fn install_watcher(path: &PathBuf, notify_tx: tokio::sync::mpsc::Sender<()>) -> 
 }
 
 /// Wait for a notify signal, a shutdown signal, or a poll-interval timeout.
-async fn wait_for_signal(
+pub(crate) async fn wait_for_signal(
     notify_rx: &mut tokio::sync::mpsc::Receiver<()>,
     shutdown: &mut oneshot::Receiver<()>,
     timeout: Duration,

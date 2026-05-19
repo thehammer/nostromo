@@ -5,6 +5,7 @@
 //! Views read the latest value on each render tick.
 
 pub mod break_glass;
+pub mod context_usage;
 pub mod daemon_bridge;
 pub mod dirty_file;
 pub mod fred_calendar;

@@ -15,7 +15,11 @@ use tokio::sync::watch;
 
 use crate::{
     config::Config,
-    data::{perri_pr::PrSnapshot, perri_queue::PrQueueSnapshot},
+    data::{
+        context_usage::{ContextUsage, ContextUsageReader},
+        perri_pr::PrSnapshot,
+        perri_queue::PrQueueSnapshot,
+    },
     event::AppEvent,
     pty::{PtyHost, PtyWidget},
     transcript::TranscriptPane,
@@ -69,6 +73,9 @@ pub struct PerriView {
     /// When set, rendered in the diff pane instead of the `pr_rx` snapshot.
     /// Cleared when the `pr_rx` watch channel next delivers an update.
     diff_override: Option<String>,
+    // ── context usage ─────────────────────────────────────────────────────────
+    _context_usage_reader: Option<ContextUsageReader>,
+    context_usage_rx: Option<tokio::sync::watch::Receiver<Option<ContextUsage>>>,
 }
 
 impl PerriView {
@@ -82,6 +89,8 @@ impl PerriView {
         // Try to recover a persisted session id from the session store so that
         // Ctrl+T works after Nostromo restarts without re-spawning the REPL.
         let mut transcript = TranscriptPane::new();
+        let mut init_ctx_reader = None;
+        let mut init_ctx_rx = None;
         {
             let store = crate::sessions::SessionStore::load();
             if let Some(entry) = store.get(PERRI_PTY_TAG) {
@@ -93,7 +102,10 @@ impl PerriView {
                     let cwd = entry.cwd.clone()
                         .or_else(|| std::env::current_dir().ok())
                         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-                    transcript.set_session_context(cwd, sid);
+                    transcript.set_session_context(cwd.clone(), sid.clone());
+                    let (r, rx) = ContextUsageReader::spawn(cwd, sid);
+                    init_ctx_reader = Some(r);
+                    init_ctx_rx = Some(rx);
                 }
             }
         }
@@ -121,7 +133,15 @@ impl PerriView {
             transcript,
             transcript_render_area: Rect::default(),
             diff_override: None,
+            _context_usage_reader: init_ctx_reader,
+            context_usage_rx: init_ctx_rx,
         }
+    }
+
+    fn start_context_reader(&mut self, cwd: std::path::PathBuf, session_id: String) {
+        let (reader, rx) = ContextUsageReader::spawn(cwd, session_id);
+        self._context_usage_reader = Some(reader);
+        self.context_usage_rx = Some(rx);
     }
 
     /// Focus the diff pane on the HEAD diff of a Mother worktree.
@@ -522,6 +542,7 @@ impl View for PerriView {
                             let cwd = std::env::current_dir()
                                 .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
                             self.transcript.set_session_context(cwd.clone(), sid.clone());
+                            self.start_context_reader(cwd.clone(), sid.clone());
                             let mut store = crate::sessions::SessionStore::load();
                             store.record(
                                 PERRI_PTY_TAG,
@@ -768,6 +789,12 @@ impl View for PerriView {
         p.perri.queue = self.queue_ratio;
         pane_ratios::save(&p);
         Ok(())
+    }
+
+    fn context_pct(&self) -> Option<f32> {
+        self.context_usage_rx
+            .as_ref()
+            .and_then(|rx| rx.borrow().as_ref().map(|u| u.pct))
     }
 
     fn as_any(&self) -> &dyn Any {

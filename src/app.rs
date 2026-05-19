@@ -178,6 +178,9 @@ pub struct AppState {
     pub pace_bars_last_loaded_at: Option<std::time::Instant>,
     /// Cell dimensions of the rect cached in pace_bars_state.
     pub pace_bars_last_size: Option<(u16, u16)>,
+    /// Rounded context-pct (1 decimal) used in the last pace_bars render.
+    /// `None` when no context bar was present.  Used for cache invalidation.
+    pub pace_bars_last_ctx_pct: Option<f32>,
     /// Watch receiver for mailbox snapshots (for the bottom status bar).
     pub mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
     /// Watch receiver for calendar snapshots (for the bottom status bar).
@@ -230,6 +233,7 @@ impl AppState {
             pace_bars_state: None,
             pace_bars_last_loaded_at: None,
             pace_bars_last_size: None,
+            pace_bars_last_ctx_pct: None,
             mailbox_rx,
             calendar_rx,
             toasts: VecDeque::new(),
@@ -618,6 +622,7 @@ pub async fn run(
                 // Invalidate the chrome pace-bars cache so it regenerates next frame.
                 state.pace_bars_state = None;
                 state.pace_bars_last_loaded_at = None;
+                state.pace_bars_last_ctx_pct = None;
                 views[FRED_IDX].on_event(&ev);
                 continue;
             }

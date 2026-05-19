@@ -10,7 +10,7 @@
 
 use image::{DynamicImage, Rgba, RgbaImage};
 use nostromo::data::rate_limits::PostureSnapshot;
-use nostromo::views::pace_bars_image::render_pace_bars_to_image;
+use nostromo::views::pace_bars_image::{pace_specs_from_snapshot, render_pace_bars_to_image};
 
 const CELL_W: u32 = 12;
 const CELL_H: u32 = 22;
@@ -34,7 +34,9 @@ fn main() {
     let heights = [1u16, 2, 3, 4];
     let mut renders: Vec<(u16, DynamicImage)> = Vec::new();
     for h in heights {
-        let img = render_pace_bars_to_image(&snap, COLS * CELL_W, (h as u32) * CELL_H);
+        let owned_specs = pace_specs_from_snapshot(&snap);
+        let specs: Vec<_> = owned_specs.iter().map(|s| s.as_ref_spec()).collect();
+        let img = render_pace_bars_to_image(&specs, COLS * CELL_W, (h as u32) * CELL_H);
         renders.push((h, img));
     }
 

@@ -106,6 +106,16 @@ pub trait View: Send + Any {
         Err("not_supported".into())
     }
 
+    /// Current context-window usage percentage (0.0–100.0) for this view's
+    /// Claude REPL session, if any.
+    ///
+    /// Returns `None` when the view does not host a REPL or no session data
+    /// has been received yet.  The chrome pace strip uses this to decide
+    /// whether to render the context bar and what colour to use.
+    fn context_pct(&self) -> Option<f32> {
+        None
+    }
+
     /// Downcast support.
     fn as_any(&self) -> &dyn Any;
 

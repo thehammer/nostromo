@@ -15,6 +15,7 @@ use ratatui::{
 };
 
 use crate::{
+    data::context_usage::{ContextUsage, ContextUsageReader},
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
     transcript::TranscriptPane,
@@ -38,6 +39,11 @@ pub struct GenericView {
     transcript: TranscriptPane,
     /// Last area used to render the transcript (for mouse hit-testing).
     transcript_render_area: Rect,
+    // ── context usage ─────────────────────────────────────────────────────────
+    /// Background task reading context usage from the session JSONL.
+    _context_usage_reader: Option<ContextUsageReader>,
+    /// Latest context usage value from the background task.
+    context_usage_rx: Option<tokio::sync::watch::Receiver<Option<ContextUsage>>>,
 }
 
 impl GenericView {
@@ -89,7 +95,7 @@ impl GenericView {
 
         let pty_capturing = pty.is_some();
 
-        Self {
+        let mut view = Self {
             id,
             title,
             ctx,
@@ -99,7 +105,36 @@ impl GenericView {
             repl_scroll: 0,
             transcript,
             transcript_render_area: Rect::default(),
+            _context_usage_reader: None,
+            context_usage_rx: None,
+        };
+
+        // Start context reader if we already have a session context.
+        let store = crate::sessions::SessionStore::load();
+        if let Some(entry) = store.get(id).cloned() {
+            let sid_opt = entry.session_id.clone().or_else(|| {
+                entry.cwd.as_deref()
+                    .and_then(crate::transcript::find_latest_session_id_for_cwd)
+            });
+            if let Some(sid) = sid_opt {
+                let cwd = entry.cwd
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+                view.start_context_reader(cwd, sid);
+            }
         }
+
+        view
+    }
+
+    /// Start (or restart) the context-usage reader for the given session.
+    ///
+    /// Called whenever `transcript.set_session_context` is called so that the
+    /// context reader lifecycle mirrors the transcript reader lifecycle.
+    fn start_context_reader(&mut self, cwd: std::path::PathBuf, session_id: String) {
+        let (reader, rx) = ContextUsageReader::spawn(cwd, session_id);
+        self._context_usage_reader = Some(reader);
+        self.context_usage_rx = Some(rx);
     }
 
     /// Reattach to a live daemon PTY if one exists for this view's tag.
@@ -277,6 +312,7 @@ impl View for GenericView {
                         let cwd = std::env::current_dir()
                             .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
                         self.transcript.set_session_context(cwd.clone(), sid.clone());
+                        self.start_context_reader(cwd.clone(), sid.clone());
                         let mut store = crate::sessions::SessionStore::load();
                         store.record(self.id, "claude", &args, Some(cwd), Some(sid));
                     }
@@ -365,6 +401,12 @@ impl View for GenericView {
             "repl" => Err("readonly_pane".into()),
             _ => Err("unknown_pane".into()),
         }
+    }
+
+    fn context_pct(&self) -> Option<f32> {
+        self.context_usage_rx
+            .as_ref()
+            .and_then(|rx| rx.borrow().as_ref().map(|u| u.pct))
     }
 
     fn as_any(&self) -> &dyn Any {
