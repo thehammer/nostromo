@@ -86,11 +86,15 @@ impl PerriView {
             let store = crate::sessions::SessionStore::load();
             if let Some(entry) = store.get(PERRI_PTY_TAG) {
                 let sid_opt = entry.session_id.clone().or_else(|| {
-                    entry.cwd.as_deref()
+                    entry
+                        .cwd
+                        .as_deref()
                         .and_then(crate::transcript::find_latest_session_id_for_cwd)
                 });
                 if let Some(sid) = sid_opt {
-                    let cwd = entry.cwd.clone()
+                    let cwd = entry
+                        .cwd
+                        .clone()
                         .or_else(|| std::env::current_dir().ok())
                         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
                     transcript.set_session_context(cwd, sid);
@@ -134,10 +138,14 @@ impl PerriView {
     /// Constructs the minimal JSON shape accepted by `PerriPrNativeSource`
     /// and touches the `.dirty` sentinel.  The dirty-file watcher then picks
     /// it up and updates `pr_rx` within one poll cycle.
-    pub fn load_pr(&mut self, number: u64, repo: String, highlights: Option<String>) -> Result<(), String> {
+    pub fn load_pr(
+        &mut self,
+        number: u64,
+        repo: String,
+        highlights: Option<String>,
+    ) -> Result<(), String> {
         let state_dir = self.config.perri_state_dir();
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| format!("io_error: {e}"))?;
+        std::fs::create_dir_all(&state_dir).map_err(|e| format!("io_error: {e}"))?;
 
         let pointer = serde_json::json!({
             "number": number,
@@ -148,13 +156,11 @@ impl PerriView {
             .map_err(|e| format!("serialization_failed: {e}"))?;
 
         let json_path = state_dir.join("current-pr.json");
-        std::fs::write(&json_path, json.as_bytes())
-            .map_err(|e| format!("io_error: {e}"))?;
+        std::fs::write(&json_path, json.as_bytes()).map_err(|e| format!("io_error: {e}"))?;
 
         // Touch the dirty sentinel to wake the watcher.
         let dirty_path = state_dir.join("current-pr.dirty");
-        std::fs::write(&dirty_path, b"")
-            .map_err(|e| format!("io_error: {e}"))?;
+        std::fs::write(&dirty_path, b"").map_err(|e| format!("io_error: {e}"))?;
 
         // Clear any override so the live diff shows once pr_rx updates.
         self.diff_override = None;
@@ -167,12 +173,10 @@ impl PerriView {
         let state_dir = self.config.perri_state_dir();
         let json_path = state_dir.join("current-pr.json");
         if json_path.exists() {
-            std::fs::remove_file(&json_path)
-                .map_err(|e| format!("io_error: {e}"))?;
+            std::fs::remove_file(&json_path).map_err(|e| format!("io_error: {e}"))?;
         }
         let dirty_path = state_dir.join("current-pr.dirty");
-        std::fs::write(&dirty_path, b"")
-            .map_err(|e| format!("io_error: {e}"))?;
+        std::fs::write(&dirty_path, b"").map_err(|e| format!("io_error: {e}"))?;
 
         self.diff_override = None;
         Ok(())
@@ -185,7 +189,9 @@ impl PerriView {
 
     /// Set the selected PR index, clamped to the queue length.
     pub fn set_selected_pr_index(&mut self, index: usize) {
-        let len = self.queue_rx.borrow()
+        let len = self
+            .queue_rx
+            .borrow()
             .as_ref()
             .map(|s| s.items.len())
             .unwrap_or(0);
@@ -277,7 +283,11 @@ impl PerriView {
     fn render_diff_with_drag(&self, f: &mut Frame, area: Rect, dragging: bool) {
         // If a diff_override is set, render it directly rather than pr_rx.
         if let Some(override_text) = &self.diff_override {
-            let border_color = if dragging { theme::BORDER_ACTIVE } else { theme::BORDER_INACTIVE };
+            let border_color = if dragging {
+                theme::BORDER_ACTIVE
+            } else {
+                theme::BORDER_INACTIVE
+            };
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color))
@@ -496,8 +506,7 @@ impl View for PerriView {
                 KeyCode::Enter if self.pty.is_none() && !self.transcript.is_visible() => {
                     let sid = uuid::Uuid::new_v4().to_string();
                     let sid_clone = sid.clone();
-                    let (cols, rows) =
-                        (self.repl_area.width.max(20), self.repl_area.height.max(5));
+                    let (cols, rows) = (self.repl_area.width.max(20), self.repl_area.height.max(5));
                     let args = [
                         "--dangerously-skip-permissions",
                         "--agent",
@@ -521,15 +530,10 @@ impl View for PerriView {
                             self.pty_capturing = true;
                             let cwd = std::env::current_dir()
                                 .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-                            self.transcript.set_session_context(cwd.clone(), sid.clone());
+                            self.transcript
+                                .set_session_context(cwd.clone(), sid.clone());
                             let mut store = crate::sessions::SessionStore::load();
-                            store.record(
-                                PERRI_PTY_TAG,
-                                "claude",
-                                &args,
-                                Some(cwd),
-                                Some(sid),
-                            );
+                            store.record(PERRI_PTY_TAG, "claude", &args, Some(cwd), Some(sid));
                         }
                         Err(e) => {
                             tracing::warn!("failed to spawn PTY for perri: {e}");
@@ -720,6 +724,10 @@ impl View for PerriView {
         true
     }
 
+    fn jump_to_latest_turn(&mut self) -> bool {
+        self.transcript.open_and_jump_to_latest()
+    }
+
     fn apply_pane_content(
         &mut self,
         pane_id: &str,
@@ -747,10 +755,12 @@ impl View for PerriView {
     }
 
     fn apply_pane_layout(&mut self, ratios: &serde_json::Value) -> Result<(), String> {
-        let top_row = ratios.get("top_row")
+        let top_row = ratios
+            .get("top_row")
             .and_then(|v| v.as_f64())
             .map(|v| v as f32);
-        let queue = ratios.get("queue")
+        let queue = ratios
+            .get("queue")
             .and_then(|v| v.as_f64())
             .map(|v| v as f32);
 

@@ -87,9 +87,7 @@ impl TranscriptPane {
     /// syntax highlighting simply won't work).
     pub fn new() -> Self {
         // SyntectCache::load() is essentially infallible (uses bundled defaults).
-        let syntect = Arc::new(
-            SyntectCache::load().unwrap_or_else(|_| SyntectCache::empty()),
-        );
+        let syntect = Arc::new(SyntectCache::load().unwrap_or_else(|_| SyntectCache::empty()));
 
         Self {
             pending_cwd: None,
@@ -130,10 +128,14 @@ impl TranscriptPane {
             Some(s) => s.clone(),
             None => {
                 // Fallback: scan the CWD for the most-recent JSONL.
-                let cwd = self.pending_cwd
+                let cwd = self
+                    .pending_cwd
                     .clone()
                     .or_else(|| std::env::current_dir().ok());
-                match cwd.as_deref().and_then(crate::transcript::find_latest_session_id_for_cwd) {
+                match cwd
+                    .as_deref()
+                    .and_then(crate::transcript::find_latest_session_id_for_cwd)
+                {
                     Some(found) => found,
                     None => return, // nothing to tail
                 }
@@ -219,39 +221,53 @@ impl TranscriptPane {
 
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(snap) = snap_opt { self.cursor_next(&snap); }
+                if let Some(snap) = snap_opt {
+                    self.cursor_next(&snap);
+                }
                 true
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(snap) = snap_opt { self.cursor_prev(&snap); }
+                if let Some(snap) = snap_opt {
+                    self.cursor_prev(&snap);
+                }
                 true
             }
             KeyCode::Char('g') | KeyCode::Home => {
-                if let Some(snap) = snap_opt { self.cursor_first(&snap); }
+                if let Some(snap) = snap_opt {
+                    self.cursor_first(&snap);
+                }
                 true
             }
             KeyCode::Char('G') | KeyCode::End => {
-                if let Some(snap) = snap_opt { self.cursor_last(&snap); }
+                if let Some(snap) = snap_opt {
+                    self.cursor_last(&snap);
+                }
                 true
             }
             KeyCode::Char('o') | KeyCode::Enter => {
                 self.toggle_expand();
                 true
             }
-            KeyCode::Char('T') if key.modifiers == KeyModifiers::SHIFT
-                || key.modifiers == KeyModifiers::NONE =>
+            KeyCode::Char('T')
+                if key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::NONE =>
             {
-                if let Some(snap) = snap_opt { self.toggle_thinking(&snap); }
+                if let Some(snap) = snap_opt {
+                    self.toggle_thinking(&snap);
+                }
                 true
             }
             KeyCode::PageUp => {
                 let half = (self.area.height / 2).max(1) as isize;
-                if let Some(snap) = snap_opt { self.cursor_by(&snap, -half); }
+                if let Some(snap) = snap_opt {
+                    self.cursor_by(&snap, -half);
+                }
                 true
             }
             KeyCode::PageDown => {
                 let half = (self.area.height / 2).max(1) as isize;
-                if let Some(snap) = snap_opt { self.cursor_by(&snap, half); }
+                if let Some(snap) = snap_opt {
+                    self.cursor_by(&snap, half);
+                }
                 true
             }
             _ => false,
@@ -270,11 +286,15 @@ impl TranscriptPane {
         let snap_opt = self.rx.as_ref().map(|rx| rx.borrow().clone());
         match ev.kind {
             MouseEventKind::ScrollUp => {
-                if let Some(snap) = snap_opt { self.cursor_prev(&snap); }
+                if let Some(snap) = snap_opt {
+                    self.cursor_prev(&snap);
+                }
                 true
             }
             MouseEventKind::ScrollDown => {
-                if let Some(snap) = snap_opt { self.cursor_next(&snap); }
+                if let Some(snap) = snap_opt {
+                    self.cursor_next(&snap);
+                }
                 true
             }
             MouseEventKind::Down(_) => {
@@ -406,7 +426,9 @@ impl TranscriptPane {
 
     fn cursor_by(&mut self, snap: &TranscriptSnapshot, delta: isize) {
         let nav = snap.navigable_entries(self.interaction.show_thinking);
-        if nav.is_empty() { return; }
+        if nav.is_empty() {
+            return;
+        }
         let pos = nav
             .iter()
             .position(|&i| i == self.interaction.cursor)
@@ -470,6 +492,48 @@ impl TranscriptPane {
         self.active_session_id.as_deref()
     }
 
+    // ── Jump-to-latest-turn ───────────────────────────────────────────────────
+
+    /// Positions the transcript cursor on the most-recent operator-submitted
+    /// user message and disables tail-following.
+    ///
+    /// Returns `true` if a jump was performed (i.e. the snapshot contained at
+    /// least one [`TranscriptEntry::UserMessage`]).  Returns `false` when there
+    /// is no live receiver yet or the snapshot has no user messages.
+    ///
+    /// This method only updates cursor/following state.  The next `render` call
+    /// recomputes the layout and `scroll_to_cursor` brings the entry into view —
+    /// no direct `scroll_offset` manipulation is needed here.
+    pub fn jump_to_latest_user_message(&mut self) -> bool {
+        let Some(rx) = self.rx.as_ref() else {
+            return false;
+        };
+        let snap = rx.borrow().clone();
+        if let Some(idx) = snap.latest_user_message_index() {
+            self.interaction.cursor = idx;
+            self.interaction.following = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Opens the transcript pane if it is closed, then jumps to the latest
+    /// operator user message.
+    ///
+    /// This is the entry point for the global Ctrl-J handler.  When the pane
+    /// was not yet open it calls `toggle_visible()` (which starts the reader)
+    /// before jumping.  If no user message exists yet the pane remains open and
+    /// shows the reader's placeholder — this is the intentional graceful no-op.
+    ///
+    /// Returns `true` if a jump to a user message was performed.
+    pub fn open_and_jump_to_latest(&mut self) -> bool {
+        if !self.visible {
+            self.toggle_visible();
+        }
+        self.jump_to_latest_user_message()
+    }
+
     // ── Test helpers ──────────────────────────────────────────────────────────
 
     /// Returns the current interaction state (for tests).
@@ -482,6 +546,17 @@ impl TranscriptPane {
     #[cfg(test)]
     pub fn has_reader(&self) -> bool {
         self.reader.is_some()
+    }
+
+    /// Constructs a `TranscriptPane` backed by a pre-built watch receiver.
+    ///
+    /// Only available in tests — avoids needing a live filesystem reader.
+    #[cfg(test)]
+    pub fn with_rx(rx: watch::Receiver<TranscriptSnapshot>) -> Self {
+        let mut pane = Self::new();
+        pane.rx = Some(rx);
+        pane.visible = true;
+        pane
     }
 }
 
@@ -497,3 +572,59 @@ fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
+// ── unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::transcript::snapshot::{TranscriptEntry, TranscriptSnapshot};
+
+    fn make_snapshot(entries: Vec<TranscriptEntry>) -> TranscriptSnapshot {
+        TranscriptSnapshot {
+            entries: Arc::new(entries),
+            path: PathBuf::from("/tmp/test.jsonl"),
+            session_id: "test-session".to_string(),
+        }
+    }
+
+    fn make_pane(entries: Vec<TranscriptEntry>) -> TranscriptPane {
+        let snap = make_snapshot(entries);
+        let (tx, rx) = watch::channel(snap);
+        std::mem::forget(tx);
+        TranscriptPane::with_rx(rx)
+    }
+
+    // ── jump_to_latest_user_message ───────────────────────────────────────────
+
+    #[test]
+    fn jump_sets_cursor_to_latest_user_message_index() {
+        let mut pane = make_pane(vec![
+            TranscriptEntry::UserMessage("First".to_string()),  // 0
+            TranscriptEntry::AssistantText("Reply 1".to_string()), // 1
+            TranscriptEntry::TurnEnd,                            // 2
+            TranscriptEntry::UserMessage("Second".to_string()), // 3
+            TranscriptEntry::AssistantText("Reply 2".to_string()), // 4
+            TranscriptEntry::TurnEnd,                            // 5
+        ]);
+        let jumped = pane.jump_to_latest_user_message();
+        assert!(jumped, "should return true when a user message exists");
+        assert_eq!(pane.interaction.cursor, 3, "cursor should land on index 3");
+        assert!(
+            !pane.interaction.following,
+            "tail-following should be disabled after a jump"
+        );
+    }
+
+    #[test]
+    fn jump_returns_false_when_no_user_messages() {
+        let mut pane = make_pane(vec![
+            TranscriptEntry::AssistantText("Hello".to_string()),
+            TranscriptEntry::TurnEnd,
+        ]);
+        let jumped = pane.jump_to_latest_user_message();
+        assert!(!jumped, "should return false when snapshot has no user messages");
+    }
+}

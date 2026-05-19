@@ -81,7 +81,11 @@ pub struct Toast {
 impl Toast {
     pub fn new(text: String, level: crate::mcp::command::NotifyLevel) -> Self {
         let expires_at = chrono::Utc::now().timestamp() + TOAST_TTL_SECS;
-        Self { text, level, expires_at }
+        Self {
+            text,
+            level,
+            expires_at,
+        }
     }
 }
 
@@ -332,30 +336,56 @@ pub async fn run(
     {
         let mut views_meta = mcp_state.views_meta.write().await;
         *views_meta = vec![
-            ViewMeta { id: "fred",    title: "Fred".to_string(),    pane_ids: vec!["mailbox", "calendar", "repl"] },
-            ViewMeta { id: "perri",   title: "Perri".to_string(),   pane_ids: vec!["pr_queue", "diff", "repl"] },
-            ViewMeta { id: "claudia", title: "Claudia".to_string(), pane_ids: vec!["repl"] },
-            ViewMeta { id: "cody",    title: "Cody".to_string(),    pane_ids: vec!["repl"] },
-            ViewMeta { id: "kennedy", title: "Kennedy".to_string(), pane_ids: vec!["repl"] },
-            ViewMeta { id: "teri",    title: "Teri".to_string(),    pane_ids: vec!["todos", "repl"] },
-            ViewMeta { id: "mother",  title: "Mother".to_string(),  pane_ids: vec!["job_list", "log", "preview"] },
+            ViewMeta {
+                id: "fred",
+                title: "Fred".to_string(),
+                pane_ids: vec!["mailbox", "calendar", "repl"],
+            },
+            ViewMeta {
+                id: "perri",
+                title: "Perri".to_string(),
+                pane_ids: vec!["pr_queue", "diff", "repl"],
+            },
+            ViewMeta {
+                id: "claudia",
+                title: "Claudia".to_string(),
+                pane_ids: vec!["repl"],
+            },
+            ViewMeta {
+                id: "cody",
+                title: "Cody".to_string(),
+                pane_ids: vec!["repl"],
+            },
+            ViewMeta {
+                id: "kennedy",
+                title: "Kennedy".to_string(),
+                pane_ids: vec!["repl"],
+            },
+            ViewMeta {
+                id: "teri",
+                title: "Teri".to_string(),
+                pane_ids: vec!["todos", "repl"],
+            },
+            ViewMeta {
+                id: "mother",
+                title: "Mother".to_string(),
+                pane_ids: vec!["job_list", "log", "preview"],
+            },
         ];
     }
 
     // Bind MCP server (best-effort: failure logs a warning but doesn't crash).
-    let _mcp_server = match McpServer::bind(
-        crate::mcp::default_socket_path(),
-        (*mcp_state).clone(),
-    ).await {
-        Ok(srv) => {
-            info!(socket = ?srv.socket_path(), "MCP server bound");
-            Some(srv)
-        }
-        Err(e) => {
-            warn!("MCP server bind failed (continuing without MCP): {e:#}");
-            None
-        }
-    };
+    let _mcp_server =
+        match McpServer::bind(crate::mcp::default_socket_path(), (*mcp_state).clone()).await {
+            Ok(srv) => {
+                info!(socket = ?srv.socket_path(), "MCP server bound");
+                Some(srv)
+            }
+            Err(e) => {
+                warn!("MCP server bind failed (continuing without MCP): {e:#}");
+                None
+            }
+        };
 
     // Construct PtyFactory; also spawn Mother pollers or daemon bridge.
     let pty_factory: Arc<dyn PtyFactory> = if let Some(client) = daemon_client {
@@ -569,7 +599,8 @@ pub async fn run(
                 &mut state,
                 PERRI_IDX,
                 MOTHER_IDX,
-            ).await;
+            )
+            .await;
             continue;
         }
 
@@ -660,6 +691,14 @@ pub async fn run(
                 // Ctrl-T: toggle markdown transcript pane on the focused view.
                 if k.code == KeyCode::Char('t') && k.modifiers.contains(KeyModifiers::CONTROL) {
                     views[focused_view_idx].toggle_transcript();
+                    continue;
+                }
+
+                // Ctrl-J: jump to the latest operator turn on the focused view's
+                // transcript pane.  Opens the pane first if it is closed.
+                // Universal — fires regardless of pty_capturing, like Ctrl-T.
+                if k.code == KeyCode::Char('j') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    views[focused_view_idx].jump_to_latest_turn();
                     continue;
                 }
 
@@ -1197,7 +1236,11 @@ async fn handle_mcp_command(
 
     match cmd {
         // ── SetPaneFocus ─────────────────────────────────────────────────────
-        McpCommand::SetPaneFocus { view_id, pane_id: _, reply } => {
+        McpCommand::SetPaneFocus {
+            view_id,
+            pane_id: _,
+            reply,
+        } => {
             // For now, interpret SetPaneFocus as switching the active view.
             match views.iter().position(|v| v.id() == view_id) {
                 Some(idx) => {
@@ -1213,31 +1256,42 @@ async fn handle_mcp_command(
                     }
                     let _ = reply.send(Ok(()));
                 }
-                None => { let _ = reply.send(Err("unknown_view".into())); }
+                None => {
+                    let _ = reply.send(Err("unknown_view".into()));
+                }
             }
         }
 
         // ── SetPaneContent ───────────────────────────────────────────────────
-        McpCommand::SetPaneContent { view_id, pane_id, content, reply } => {
-            match views.iter_mut().position(|v| v.id() == view_id.as_str()) {
-                Some(idx) => {
-                    let result = views[idx].apply_pane_content(&pane_id, &content);
-                    let _ = reply.send(result);
-                }
-                None => { let _ = reply.send(Err("unknown_view".into())); }
+        McpCommand::SetPaneContent {
+            view_id,
+            pane_id,
+            content,
+            reply,
+        } => match views.iter_mut().position(|v| v.id() == view_id.as_str()) {
+            Some(idx) => {
+                let result = views[idx].apply_pane_content(&pane_id, &content);
+                let _ = reply.send(result);
             }
-        }
+            None => {
+                let _ = reply.send(Err("unknown_view".into()));
+            }
+        },
 
         // ── SetPaneLayout ────────────────────────────────────────────────────
-        McpCommand::SetPaneLayout { view_id, ratios, reply } => {
-            match views.iter_mut().position(|v| v.id() == view_id.as_str()) {
-                Some(idx) => {
-                    let result = views[idx].apply_pane_layout(&ratios);
-                    let _ = reply.send(result);
-                }
-                None => { let _ = reply.send(Err("unknown_view".into())); }
+        McpCommand::SetPaneLayout {
+            view_id,
+            ratios,
+            reply,
+        } => match views.iter_mut().position(|v| v.id() == view_id.as_str()) {
+            Some(idx) => {
+                let result = views[idx].apply_pane_layout(&ratios);
+                let _ = reply.send(result);
             }
-        }
+            None => {
+                let _ = reply.send(Err("unknown_view".into()));
+            }
+        },
 
         // ── SwitchActiveView ─────────────────────────────────────────────────
         McpCommand::SwitchActiveView { view_id, reply } => {
@@ -1255,12 +1309,19 @@ async fn handle_mcp_command(
                     }
                     let _ = reply.send(Ok(()));
                 }
-                None => { let _ = reply.send(Err("unknown_view".into())); }
+                None => {
+                    let _ = reply.send(Err("unknown_view".into()));
+                }
             }
         }
 
         // ── PerriLoadPr ──────────────────────────────────────────────────────
-        McpCommand::PerriLoadPr { number, repo, highlights, reply } => {
+        McpCommand::PerriLoadPr {
+            number,
+            repo,
+            highlights,
+            reply,
+        } => {
             if let Some(pv) = views[perri_idx]
                 .as_any_mut()
                 .downcast_mut::<views::perri::PerriView>()
@@ -1318,10 +1379,7 @@ async fn handle_mcp_command(
         // ── MotherEnqueue ─────────────────────────────────────────────────────
         McpCommand::MotherEnqueue { plan_path, reply } => {
             if !plan_path.exists() || !plan_path.is_file() {
-                let _ = reply.send(Err(format!(
-                    "plan_not_found: {}",
-                    plan_path.display()
-                )));
+                let _ = reply.send(Err(format!("plan_not_found: {}", plan_path.display())));
                 return;
             }
             if let Err(e) = mother::add_plan(&plan_path).await {
@@ -1365,49 +1423,73 @@ async fn handle_mcp_command(
         }
 
         // ── MotherCancel ──────────────────────────────────────────────────────
-        McpCommand::MotherCancel { job_id, reply } => {
-            match mother::cancel(&job_id).await {
-                Ok(()) => { let _ = reply.send(Ok(())); }
-                Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
+        McpCommand::MotherCancel { job_id, reply } => match mother::cancel(&job_id).await {
+            Ok(()) => {
+                let _ = reply.send(Ok(()));
             }
-        }
+            Err(e) => {
+                let _ = reply.send(Err(format!("mother_cli_error: {e}")));
+            }
+        },
 
         // ── MotherArchive ─────────────────────────────────────────────────────
-        McpCommand::MotherArchive { job_id, reply } => {
-            match mother::archive(&job_id).await {
-                Ok(()) => { let _ = reply.send(Ok(())); }
-                Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
+        McpCommand::MotherArchive { job_id, reply } => match mother::archive(&job_id).await {
+            Ok(()) => {
+                let _ = reply.send(Ok(()));
             }
-        }
+            Err(e) => {
+                let _ = reply.send(Err(format!("mother_cli_error: {e}")));
+            }
+        },
 
         // ── MotherResume ──────────────────────────────────────────────────────
-        McpCommand::MotherResume { job_id, answer, reply } => {
-            match mother::resume(&job_id, &answer).await {
-                Ok(()) => { let _ = reply.send(Ok(())); }
-                Err(e) => { let _ = reply.send(Err(format!("mother_cli_error: {e}"))); }
+        McpCommand::MotherResume {
+            job_id,
+            answer,
+            reply,
+        } => match mother::resume(&job_id, &answer).await {
+            Ok(()) => {
+                let _ = reply.send(Ok(()));
             }
-        }
+            Err(e) => {
+                let _ = reply.send(Err(format!("mother_cli_error: {e}")));
+            }
+        },
 
         // ── Phase 4: notifications & status segments ──────────────────────────
 
         // ── Notify ────────────────────────────────────────────────────────────
-        McpCommand::Notify { message, level, source_view: _, reply } => {
+        McpCommand::Notify {
+            message,
+            level,
+            source_view: _,
+            reply,
+        } => {
             let toast = Toast::new(message, level);
             state.toasts.push_back(toast);
             let _ = reply.send(Ok(()));
         }
 
         // ── RegisterStatusSegment ─────────────────────────────────────────────
-        McpCommand::RegisterStatusSegment { view_id, segment_id, text, color, reply } => {
-            state.mcp_status_segments.insert(
-                (view_id, segment_id),
-                McpStatusSegment { text, color },
-            );
+        McpCommand::RegisterStatusSegment {
+            view_id,
+            segment_id,
+            text,
+            color,
+            reply,
+        } => {
+            state
+                .mcp_status_segments
+                .insert((view_id, segment_id), McpStatusSegment { text, color });
             let _ = reply.send(Ok(()));
         }
 
         // ── ClearStatusSegment ────────────────────────────────────────────────
-        McpCommand::ClearStatusSegment { view_id, segment_id, reply } => {
+        McpCommand::ClearStatusSegment {
+            view_id,
+            segment_id,
+            reply,
+        } => {
             state.mcp_status_segments.remove(&(view_id, segment_id));
             let _ = reply.send(Ok(()));
         }

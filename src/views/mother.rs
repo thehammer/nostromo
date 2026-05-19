@@ -1055,7 +1055,9 @@ impl View for MotherView {
                             // Re-seed from CWD in case a new session appeared.
                             if self.transcript.active_session_id().is_none() {
                                 if let Ok(cwd) = std::env::current_dir() {
-                                    if let Some(sid) = crate::transcript::find_latest_session_id_for_cwd(&cwd) {
+                                    if let Some(sid) =
+                                        crate::transcript::find_latest_session_id_for_cwd(&cwd)
+                                    {
                                         self.transcript.set_session_context(cwd, sid);
                                     }
                                 }
@@ -1260,6 +1262,10 @@ impl View for MotherView {
         }
         self.transcript.toggle_visible();
         true
+    }
+
+    fn jump_to_latest_turn(&mut self) -> bool {
+        self.transcript.open_and_jump_to_latest()
     }
 
     fn apply_pane_content(

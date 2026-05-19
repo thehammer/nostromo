@@ -76,11 +76,14 @@ impl GenericView {
         // Restore session context for Ctrl+T transcript bring-up.
         if let Some(entry) = stored_entry {
             let sid_opt = entry.session_id.clone().or_else(|| {
-                entry.cwd.as_deref()
+                entry
+                    .cwd
+                    .as_deref()
                     .and_then(crate::transcript::find_latest_session_id_for_cwd)
             });
             if let Some(sid) = sid_opt {
-                let cwd = entry.cwd
+                let cwd = entry
+                    .cwd
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
                 transcript.set_session_context(cwd, sid);
@@ -276,7 +279,8 @@ impl View for GenericView {
                         self.pty_capturing = true;
                         let cwd = std::env::current_dir()
                             .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-                        self.transcript.set_session_context(cwd.clone(), sid.clone());
+                        self.transcript
+                            .set_session_context(cwd.clone(), sid.clone());
                         let mut store = crate::sessions::SessionStore::load();
                         store.record(self.id, "claude", &args, Some(cwd), Some(sid));
                     }
@@ -354,6 +358,10 @@ impl View for GenericView {
     fn toggle_transcript(&mut self) -> bool {
         self.transcript.toggle_visible();
         true
+    }
+
+    fn jump_to_latest_turn(&mut self) -> bool {
+        self.transcript.open_and_jump_to_latest()
     }
 
     fn apply_pane_content(

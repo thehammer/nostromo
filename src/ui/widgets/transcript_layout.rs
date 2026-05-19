@@ -13,12 +13,15 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use ratatui::text::{Line, Span};
 use ratatui::style::Modifier;
+use ratatui::text::{Line, Span};
 
 use crate::{
     transcript::snapshot::{TranscriptEntry, TranscriptSnapshot},
-    ui::{theme, widgets::{markdown::render_markdown, syntect_cache::SyntectCache}},
+    ui::{
+        theme,
+        widgets::{markdown::render_markdown, syntect_cache::SyntectCache},
+    },
 };
 
 // ── Interaction state ─────────────────────────────────────────────────────────
@@ -104,16 +107,25 @@ pub fn compute(
             TranscriptEntry::UserMessage(text) => {
                 let start = all_lines.len() as u16;
                 for (i, part) in text.lines().enumerate() {
-                    let prefix = if i == 0 { "▸ " } else { "  " };
+                    let (prefix_style, body_modifier) = if i == 0 {
+                        (
+                            ratatui::style::Style::default()
+                                .fg(theme::SAGE)
+                                .add_modifier(Modifier::BOLD),
+                            Modifier::empty(),
+                        )
+                    } else {
+                        (theme::style_sage(), Modifier::empty())
+                    };
                     all_lines.push(gutter_line(
                         Line::from(vec![
+                            Span::styled("┃ ".to_string(), prefix_style),
                             Span::styled(
-                                prefix.to_string(),
+                                part.to_string(),
                                 ratatui::style::Style::default()
                                     .fg(theme::SAGE)
-                                    .add_modifier(Modifier::BOLD),
+                                    .add_modifier(body_modifier),
                             ),
-                            Span::styled(part.to_string(), theme::style_normal()),
                         ]),
                         is_cursor,
                     ));
@@ -123,9 +135,9 @@ pub fn compute(
             }
 
             TranscriptEntry::AssistantText(md) => {
-                let cached = cache.entry((idx, false)).or_insert_with(|| {
-                    render_markdown(md, syntect, width.saturating_sub(2))
-                });
+                let cached = cache
+                    .entry((idx, false))
+                    .or_insert_with(|| render_markdown(md, syntect, width.saturating_sub(2)));
                 let start = all_lines.len() as u16;
                 for line in cached.clone() {
                     all_lines.push(gutter_line(line, is_cursor));
@@ -215,7 +227,10 @@ pub fn compute(
                 entry_rows.insert(idx, start..end);
             }
 
-            TranscriptEntry::ToolResult { tool_use_id, content } => {
+            TranscriptEntry::ToolResult {
+                tool_use_id,
+                content,
+            } => {
                 let start = all_lines.len() as u16;
 
                 if is_expanded {
@@ -276,7 +291,10 @@ pub fn compute(
         )));
     }
 
-    LayoutPlan { lines: all_lines, entry_rows }
+    LayoutPlan {
+        lines: all_lines,
+        entry_rows,
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -285,10 +303,7 @@ pub fn compute(
 /// blank gutter cell.
 fn gutter_line(mut line: Line<'static>, is_cursor: bool) -> Line<'static> {
     let gutter = if is_cursor {
-        Span::styled(
-            "▎",
-            ratatui::style::Style::default().fg(theme::CURSOR),
-        )
+        Span::styled("▎", ratatui::style::Style::default().fg(theme::CURSOR))
     } else {
         Span::raw(" ")
     };

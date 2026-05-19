@@ -53,4 +53,21 @@ impl TranscriptSnapshot {
             })
             .collect()
     }
+
+    /// Returns the index of the highest-indexed [`TranscriptEntry::UserMessage`]
+    /// entry, or `None` if no user messages exist in the snapshot.
+    ///
+    /// This is the surface-agnostic "latest operator turn" primitive — future
+    /// Mac/iPad clients can reuse it without knowing anything about pane layout
+    /// or scroll state.
+    pub fn latest_user_message_index(&self) -> Option<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, e)| match e {
+                TranscriptEntry::UserMessage(_) => Some(i),
+                _ => None,
+            })
+    }
 }

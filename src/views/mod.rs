@@ -19,7 +19,11 @@ use std::sync::Arc;
 use ratatui::{layout::Rect, Frame};
 use tokio::sync::mpsc;
 
-use crate::{event::AppEvent, mcp::{command::PaneContent, state::McpSharedState}, pty::PtyFactory};
+use crate::{
+    event::AppEvent,
+    mcp::{command::PaneContent, state::McpSharedState},
+    pty::PtyFactory,
+};
 
 /// Shared wiring passed to every view that can host a PTY.
 pub struct ViewCtx {
@@ -87,6 +91,18 @@ pub trait View: Send + Any {
     /// Toggle the rich-markdown transcript pane, if this view has one.
     /// Returns `true` if the view handled it. Default no-op (returns false).
     fn toggle_transcript(&mut self) -> bool {
+        false
+    }
+
+    /// Open the transcript pane (if closed) and jump to the most-recent
+    /// operator-submitted user message.
+    ///
+    /// Views that have a transcript pane should override this to delegate to
+    /// [`TranscriptPane::open_and_jump_to_latest`].  The default is a no-op so
+    /// views without a transcript pane don't need to opt in.
+    ///
+    /// Returns `true` if a jump to a user message was performed.
+    fn jump_to_latest_turn(&mut self) -> bool {
         false
     }
 
