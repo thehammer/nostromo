@@ -154,8 +154,13 @@ impl PtyHost {
                     }
                     Ok(n) => {
                         let chunk = &buf[..n];
+                        let flags_before = kitty_tracker.flags().load(Ordering::Relaxed);
                         // Track kitty flag escapes (does not mutate chunk).
                         kitty_tracker.feed(chunk);
+                        let flags_after = kitty_tracker.flags().load(Ordering::Relaxed);
+                        if flags_after != flags_before {
+                            debug!(view_id, flags_before, flags_after, "kitty flags changed");
+                        }
                         let filtered = filter.process(chunk);
                         parser_clone.lock().unwrap().process(&filtered);
                         let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
@@ -227,13 +232,14 @@ impl PtyHost {
         }) {
             warn!("PTY resize error: {e}");
         }
-        self.parser.lock().unwrap().set_size(rows, cols);
+        self.parser.lock().unwrap().screen_mut().set_size(rows, cols);
     }
 
     /// Forward a crossterm key event to the PTY child.
     pub fn send_key(&mut self, key: &KeyEvent) {
         let flags = self.kitty_flags.load(Ordering::Relaxed);
         if let Some(bytes) = crate::pty::keys::key_to_bytes_for(key, flags) {
+            tracing::trace!(?key, flags, ?bytes, "send_key");
             use std::io::ErrorKind;
             if let Err(e) = self.writer.write_all(&bytes) {
                 if !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) {
