@@ -728,6 +728,10 @@ impl View for FredView {
                     "--dangerously-skip-permissions",
                     "--agent",
                     "fred",
+                    "--remote-control",
+                    "Fred",
+                    "-n",
+                    "Fred",
                     "--session-id",
                     &sid_clone,
                 ];

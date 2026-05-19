@@ -502,6 +502,10 @@ impl View for PerriView {
                         "--dangerously-skip-permissions",
                         "--agent",
                         "perri",
+                        "--remote-control",
+                        "Perri",
+                        "-n",
+                        "Perri",
                         "--session-id",
                         &sid_clone,
                     ];

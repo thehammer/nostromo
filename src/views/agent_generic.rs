@@ -257,6 +257,10 @@ impl View for GenericView {
                     "--dangerously-skip-permissions",
                     "--agent",
                     self.id,
+                    "--remote-control",
+                    self.title,
+                    "-n",
+                    self.title,
                     "--session-id",
                     &sid_clone,
                 ];

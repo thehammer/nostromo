@@ -384,6 +384,10 @@ impl View for TeriView {
                     "--dangerously-skip-permissions",
                     "--agent",
                     "teri",
+                    "--remote-control",
+                    "Teri",
+                    "-n",
+                    "Teri",
                     "--session-id",
                     &sid_clone,
                 ];
