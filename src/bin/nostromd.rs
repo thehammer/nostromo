@@ -191,8 +191,9 @@ async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
                 match tx.send(ServerMsg::MotherJobs(jobs)) {
                     Ok(n) => tracing::debug!(receivers = n, "MotherJobs broadcast sent"),
                     Err(_) => {
-                        tracing::warn!("MotherJobs broadcast: no receivers, channel closed");
-                        break;
+                        // No current subscribers — Nostromo may be closed. Keep
+                        // polling so the data is ready when a client reconnects.
+                        tracing::debug!("MotherJobs broadcast: no receivers, continuing");
                     }
                 }
             }
