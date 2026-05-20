@@ -65,6 +65,8 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::PtyIdentity { .. } => {
             // Ignored here — PTY consumers subscribe independently.
         }
+        // DaemonReconnected is handled by individual DaemonPtyClient subscribers.
+        ServerMsg::DaemonReconnected => {}
         // Control messages — no action needed.
         ServerMsg::Welcome { .. } | ServerMsg::Pong => {}
         ServerMsg::Error { message } => {

@@ -364,6 +364,9 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherJobs { .. } => topics.contains(&Topic::MotherJobs),
         ServerMsg::MotherStatusline(_) => topics.contains(&Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => topics.contains(&Topic::MotherJobs),
+        // This variant is TUI-internal; the daemon never produces it and should
+        // never forward it even if it somehow appears.
+        ServerMsg::DaemonReconnected => false,
         // PTY + control messages are always forwarded (handled via targeted channel).
         _ => true,
     }

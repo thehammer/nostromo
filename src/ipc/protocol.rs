@@ -220,4 +220,11 @@ pub enum ServerMsg {
         /// Value of `NOSTROMO_SESSION_ID` injected into the child env.
         nostromo_session_id: String,
     },
+
+    /// TUI-internal pseudo-event — **never produced by the daemon**.
+    ///
+    /// Injected locally by the [`DaemonClient`] supervisor immediately after a
+    /// successful reconnect so subscribers (e.g. `DaemonPtyClient`) can
+    /// re-issue their attach/subscribe commands.
+    DaemonReconnected,
 }

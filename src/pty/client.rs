@@ -122,6 +122,12 @@ impl DaemonPtyClient {
                         warn!(view_id, "PtySpawn error: {message}");
                         return;
                     }
+                    Ok(ServerMsg::DaemonReconnected) => {
+                        // The daemon restarted before PtySpawned arrived — the
+                        // spawn was lost.  The caller must re-create the agent.
+                        warn!(view_id, "daemon reconnected before PtySpawned; spawn lost");
+                        return;
+                    }
                     Ok(_) => continue,
                     Err(_) => return,
                 }
@@ -162,7 +168,8 @@ impl DaemonPtyClient {
 
             // Stream output.
             run_output_loop(
-                &spawned_id,
+                spawned_id,
+                client_clone,
                 rx,
                 parser_clone,
                 event_tx,
@@ -208,19 +215,30 @@ impl DaemonPtyClient {
         let mut rx = client.subscribe();
         let pty_id_clone = pty_id.clone();
         let parser_clone = Arc::clone(&parser);
+        let client_for_task = client.clone();
 
         let reader_task = tokio::spawn(async move {
             // Wait for PtyAttached to learn the canonical size.
             loop {
                 match rx.recv().await {
                     Ok(ServerMsg::PtyAttached { pty_id, .. }) if pty_id == pty_id_clone => break,
+                    Ok(ServerMsg::DaemonReconnected) => {
+                        // Daemon restarted while we were waiting for PtyAttached.
+                        // Re-issue PtyAttach so the daemon resumes the stream.
+                        debug!(pty_id = %pty_id_clone, "daemon reconnected before PtyAttached; re-attaching");
+                        let _ = client_for_task.send(ClientMsg::PtyAttach {
+                            pty_id: pty_id_clone.clone(),
+                        });
+                        continue;
+                    }
                     Ok(_) => continue,
                     Err(_) => return,
                 }
             }
 
             run_output_loop(
-                &pty_id_clone,
+                pty_id_clone,
+                client_for_task,
                 rx,
                 parser_clone,
                 event_tx,
@@ -315,8 +333,12 @@ impl Drop for DaemonPtyClient {
 ///
 /// `kitty_tracker` observes the byte stream so that `DaemonPtyClient::send_key`
 /// can encode keys correctly when the inner app pushes kitty flags.
+///
+/// `client` is used to re-issue `PtyAttach` when a `DaemonReconnected` event
+/// arrives, so the daemon resumes streaming after a daemon restart.
 async fn run_output_loop(
-    pty_id: &str,
+    pty_id: String,
+    client: DaemonClient,
     mut rx: broadcast::Receiver<ServerMsg>,
     parser: Arc<Mutex<vt100::Parser>>,
     event_tx: mpsc::UnboundedSender<AppEvent>,
@@ -356,6 +378,10 @@ async fn run_output_loop(
                 // Another client stole attach; stop streaming.
                 debug!(pty_id, "received PtyDetach; stopping output loop");
                 break;
+            }
+            Ok(ServerMsg::DaemonReconnected) => {
+                tracing::info!(pty_id, "daemon reconnected; re-attaching PTY");
+                let _ = client.send(ClientMsg::PtyAttach { pty_id: pty_id.clone() });
             }
             Ok(_) => continue,
             Err(broadcast::error::RecvError::Lagged(n)) => {
