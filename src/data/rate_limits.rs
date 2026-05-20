@@ -225,7 +225,7 @@ impl PostureSnapshot {
         };
         let five_hour = parse_window_pace(&v, "five_hour");
         let seven_day = parse_window_pace(&v, "seven_day");
-        let sonnet_seven_day = parse_sonnet_window(&v, seven_day.as_ref());
+        let sonnet_seven_day = parse_sonnet_window(&v);
         Some(PostureSnapshot {
             posture,
             five_hour,
@@ -238,36 +238,44 @@ impl PostureSnapshot {
 
 /// Build a `WindowPace` for the Sonnet model's 7-day window.
 ///
-/// `models.sonnet` only carries `used_pct` and `resets_at`; we inherit
-/// `elapsed_pct` from the shared 7-day window so the bar length means the
-/// same thing as the other rails. `pace = used_pct / elapsed_pct`.
-fn parse_sonnet_window(
-    v: &serde_json::Value,
-    seven_day: Option<&WindowPace>,
-) -> Option<WindowPace> {
+/// `models.sonnet` only carries `used_pct`, `resets_at`, and `status`; we
+/// inherit `elapsed_pct` from the shared 7-day window so the bar length means
+/// the same thing as the other rails. `pace = used_pct / elapsed_pct`.
+///
+/// Special case: when `status == "exhausted"` the window is fully consumed,
+/// so we force `elapsed_pct = 100.0` (full bar) and `pace = 1.5` (red tip)
+/// rather than inheriting a partial elapsed percentage from the 7-day window
+/// that would render the bar short and orange.
+fn parse_sonnet_window(v: &serde_json::Value) -> Option<WindowPace> {
     let s = v.get("models")?.get("sonnet")?;
     if !s.is_object() {
         return None;
     }
     let used_pct = s.get("used_pct")?.as_f64()? as f32;
     let resets_at = s.get("resets_at")?.as_i64()?;
-    let elapsed_pct = seven_day.map(|sd| sd.elapsed_pct).unwrap_or(0.0);
-    let pace = if elapsed_pct > 0.0 {
-        used_pct / elapsed_pct
-    } else {
-        0.0
-    };
-    let level = s
+    let status = s
         .get("status")
         .and_then(|v| v.as_str())
-        .unwrap_or("normal")
-        .to_string();
+        .unwrap_or("normal");
+    let (elapsed_pct, pace) = if status == "exhausted" {
+        (100.0_f32, 1.5_f32)
+    } else {
+        let seven_day_elapsed = parse_window_pace(v, "seven_day")
+            .map(|sd| sd.elapsed_pct)
+            .unwrap_or(0.0);
+        let p = if seven_day_elapsed > 0.0 {
+            used_pct / seven_day_elapsed
+        } else {
+            0.0
+        };
+        (seven_day_elapsed, p)
+    };
     Some(WindowPace {
         used_pct,
         elapsed_pct,
         pace,
         resets_at,
-        level,
+        level: status.to_string(),
     })
 }
 
@@ -415,6 +423,41 @@ mod tests {
     fn posture_snapshot_missing_posture_returns_none() {
         assert!(PostureSnapshot::parse_json(r#"{"5h":{}}"#).is_none());
         assert!(PostureSnapshot::parse_json("not json").is_none());
+    }
+
+    #[test]
+    fn parse_sonnet_window_exhausted_is_full_and_red() {
+        // When status == "exhausted", elapsed_pct must be 100.0 (full bar)
+        // and pace must be >= 1.5 (red tip in pace_color).
+        let json = r#"{
+            "posture": "normal",
+            "seven_day": {
+                "used_pct": 80.0,
+                "elapsed_pct": 79.5,
+                "pace": 1.006,
+                "resets_at": 1715800000,
+                "level": "normal"
+            },
+            "models": {
+                "sonnet": {
+                    "used_pct": 100.0,
+                    "resets_at": 1715800000,
+                    "status": "exhausted"
+                }
+            }
+        }"#;
+        let snap = PostureSnapshot::parse_json(json).expect("should parse");
+        let sonnet = snap.sonnet_seven_day.expect("sonnet window should be present");
+        assert!(
+            (sonnet.elapsed_pct - 100.0).abs() < 0.01,
+            "exhausted should force elapsed_pct=100.0, got {}",
+            sonnet.elapsed_pct
+        );
+        assert!(
+            sonnet.pace >= 1.5,
+            "exhausted should force pace >= 1.5 (red), got {}",
+            sonnet.pace
+        );
     }
 
     #[test]
