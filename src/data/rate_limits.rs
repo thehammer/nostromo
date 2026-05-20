@@ -243,7 +243,7 @@ impl PostureSnapshot {
 /// the same thing as the other rails. `pace = used_pct / elapsed_pct`.
 ///
 /// Special case: when `status == "exhausted"` the window is fully consumed,
-/// so we force `elapsed_pct = 100.0` (full bar) and `pace = 1.5` (red tip)
+/// so we force `pace = 1.5` (red tip) while keeping `elapsed_pct` from the
 /// rather than inheriting a partial elapsed percentage from the 7-day window
 /// that would render the bar short and orange.
 fn parse_sonnet_window(v: &serde_json::Value) -> Option<WindowPace> {
@@ -257,18 +257,21 @@ fn parse_sonnet_window(v: &serde_json::Value) -> Option<WindowPace> {
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("normal");
-    let (elapsed_pct, pace) = if status == "exhausted" {
-        (100.0_f32, 1.5_f32)
+    // Sonnet shares the 7-day window, so elapsed_pct (bar fill = time position)
+    // is always inherited from that window — even when exhausted. This keeps
+    // the Sonnet bar aligned with the 7d bar at "right now" on the timeline.
+    let seven_day_elapsed = parse_window_pace(v, "seven_day")
+        .map(|sd| sd.elapsed_pct)
+        .unwrap_or(0.0);
+    let elapsed_pct = seven_day_elapsed;
+    let pace = if status == "exhausted" {
+        // Force pace to 1.5 so pace_color() renders the tip red (#D50000),
+        // regardless of the arithmetic (which would give 1.0 or ∞).
+        1.5_f32
+    } else if seven_day_elapsed > 0.0 {
+        used_pct / seven_day_elapsed
     } else {
-        let seven_day_elapsed = parse_window_pace(v, "seven_day")
-            .map(|sd| sd.elapsed_pct)
-            .unwrap_or(0.0);
-        let p = if seven_day_elapsed > 0.0 {
-            used_pct / seven_day_elapsed
-        } else {
-            0.0
-        };
-        (seven_day_elapsed, p)
+        0.0
     };
     Some(WindowPace {
         used_pct,
@@ -426,9 +429,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_sonnet_window_exhausted_is_full_and_red() {
-        // When status == "exhausted", elapsed_pct must be 100.0 (full bar)
-        // and pace must be >= 1.5 (red tip in pace_color).
+    fn parse_sonnet_window_exhausted_is_aligned_and_red() {
+        // When status == "exhausted":
+        // - elapsed_pct must equal the 7-day elapsed (bar position = "right now",
+        //   aligned with the 7d bar, NOT forced to 100%)
+        // - pace must be >= 1.5 (tip renders red in pace_color)
         let json = r#"{
             "posture": "normal",
             "seven_day": {
@@ -449,8 +454,8 @@ mod tests {
         let snap = PostureSnapshot::parse_json(json).expect("should parse");
         let sonnet = snap.sonnet_seven_day.expect("sonnet window should be present");
         assert!(
-            (sonnet.elapsed_pct - 100.0).abs() < 0.01,
-            "exhausted should force elapsed_pct=100.0, got {}",
+            (sonnet.elapsed_pct - 79.5).abs() < 0.01,
+            "exhausted should inherit 7d elapsed_pct (79.5) not force 100.0, got {}",
             sonnet.elapsed_pct
         );
         assert!(
