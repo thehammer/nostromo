@@ -9,6 +9,8 @@ release:
 install: release
 	cargo install --path .
 	@echo "nostromo installed to $$(which nostromo)"
+	@# Restart the daemon if it's registered with launchd so the new binary takes effect.
+	@launchctl kickstart -k "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null && echo "nostromd restarted" || echo "nostromd not registered with launchd (skipping restart)"
 
 test:
 	cargo test
