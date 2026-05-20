@@ -82,9 +82,15 @@ impl PerriView {
         // Try to recover a persisted session id from the session store so that
         // Ctrl+T works after Nostromo restarts without re-spawning the REPL.
         let mut transcript = TranscriptPane::new();
+        let ratios = pane_ratios::load();
+
+        let mut pty: Option<PtyHost> = None;
+        let mut pty_capturing = false;
+
         {
             let store = crate::sessions::SessionStore::load();
             if let Some(entry) = store.get(PERRI_PTY_TAG) {
+                // Restore transcript context.
                 let sid_opt = entry.session_id.clone().or_else(|| {
                     entry
                         .cwd
@@ -99,10 +105,32 @@ impl PerriView {
                         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
                     transcript.set_session_context(cwd, sid);
                 }
+
+                // Auto-spawn the REPL at the correct dimensions.
+                // Perri's REPL occupies rows[1] — (1 - top_row_ratio) of terminal height.
+                // Guard: skip in non-async contexts (e.g. snapshot tests) where PtyHost::spawn
+                // would panic because no Tokio reactor is running.
+                if tokio::runtime::Handle::try_current().is_ok() {
+                if let Ok((term_cols, term_rows)) = crossterm::terminal::size() {
+                    let repl_rows = ((term_rows as f32) * (1.0 - ratios.perri.top_row)) as u16;
+                    let cols = term_cols.max(20);
+                    let rows = repl_rows.saturating_sub(2).max(5); // borders
+                    let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
+                    match PtyHost::spawn(&entry.cmd, &args, (cols, rows), ctx.event_tx.clone(), PERRI_PTY_TAG) {
+                        Ok(host) => {
+                            tracing::info!("perri: auto-spawned PTY at ({cols}x{rows})");
+                            pty = Some(host);
+                            pty_capturing = true;
+                        }
+                        Err(e) => {
+                            tracing::warn!("perri: auto-spawn failed: {e}");
+                        }
+                    }
+                }
+                } // tokio runtime guard
             }
         }
 
-        let ratios = pane_ratios::load();
         Self {
             queue_rx,
             pr_rx,
@@ -110,8 +138,8 @@ impl PerriView {
             config,
             ctx,
             syntect,
-            pty: None,
-            pty_capturing: false,
+            pty,
+            pty_capturing,
             repl_area: Rect::new(0, 0, 80, 10),
             pr_list_area: Rect::new(0, 0, 40, 10),
             repl_scroll: 0,

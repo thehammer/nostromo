@@ -271,6 +271,17 @@ impl DaemonPtyClient {
         self.size
     }
 
+    /// Write raw bytes to the daemon PTY's stdin.
+    ///
+    /// Sends `ClientMsg::PtyInput` with the given bytes. Used for control
+    /// sequences such as XTWINOPS `\x1b[8;{rows};{cols}t` on reattach.
+    pub fn send_bytes(&mut self, bytes: &[u8]) {
+        let _ = self.client.send(ClientMsg::PtyInput {
+            pty_id: self.pty_id.clone(),
+            bytes: bytes.to_vec(),
+        });
+    }
+
     /// Explicitly kill the child process in the daemon.
     pub fn kill(&self) {
         let _ = self.client.send(ClientMsg::PtyKill {

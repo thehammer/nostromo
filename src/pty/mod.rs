@@ -61,4 +61,15 @@ impl PtyBackend {
             PtyBackend::Daemon(c) => c.size(),
         }
     }
+
+    /// Write raw bytes directly to the PTY child's stdin.
+    ///
+    /// Used to send control sequences such as XTWINOPS `\x1b[8;{rows};{cols}t`
+    /// on reattach so the child process reflows to the new terminal size.
+    pub fn send_bytes(&mut self, bytes: &[u8]) {
+        match self {
+            PtyBackend::InProcess(h) => h.send_bytes(bytes),
+            PtyBackend::Daemon(c) => c.send_bytes(bytes),
+        }
+    }
 }
