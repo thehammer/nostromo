@@ -43,23 +43,68 @@ pub struct GenericView {
     pending_auto_spawn: Option<crate::sessions::SessionEntry>,
 }
 
+/// Compute `(cols, rows)` for the REPL pane given explicit terminal dimensions.
+///
+/// Exported so it can be tested without mocking `crossterm::terminal::size()`.
+/// Callers that want the real terminal size should call `crossterm::terminal::size()`
+/// and pass the result in; on failure they should fall back to the deferred-spawn path.
+pub fn compute_repl_dims(term_cols: u16, term_rows: u16, has_transcript_session: bool) -> (u16, u16) {
+    // 3 rows of chrome: status bar + top/bottom borders.
+    let rows = term_rows.saturating_sub(3).max(5);
+    // If a transcript session exists, the REPL pane will get ~50% of the width.
+    let cols = if has_transcript_session {
+        (term_cols / 2).max(20)
+    } else {
+        term_cols.max(20)
+    };
+    (cols, rows)
+}
+
 impl GenericView {
     pub fn new(id: &'static str, title: &'static str, ctx: ViewCtx) -> Self {
-        // Attempt to reattach to an existing daemon PTY for this view.
-        let pty = Self::try_reattach(id, &ctx);
-
         // Recover session context for the transcript pane.
         let mut transcript = TranscriptPane::new();
         let store = crate::sessions::SessionStore::load();
         let stored_entry = store.get(id).cloned();
 
-        // Defer auto-spawn from the session store until the first render, when
-        // the real pane dimensions are known. Spawning at hardcoded 80×24 here
-        // causes welcome-screen content to overflow narrower split panes.
-        let pending_auto_spawn = if pty.is_none() {
-            stored_entry.clone()
+        // Determine if a transcript session is available (affects REPL width computation).
+        let has_transcript_session = stored_entry
+            .as_ref()
+            .map(|e| e.session_id.is_some())
+            .unwrap_or(false);
+
+        // Compute desired REPL dimensions from the current terminal size.
+        // On failure we fall back to the deferred-spawn path in render_repl().
+        let want_dims: Option<(u16, u16)> = crossterm::terminal::size()
+            .ok()
+            .map(|(tc, tr)| compute_repl_dims(tc, tr, has_transcript_session));
+
+        // Attempt to reattach to an existing daemon PTY for this view.
+        // Pass want_dims so try_reattach can resize and send XTWINOPS if needed.
+        let pty = Self::try_reattach(id, &ctx, want_dims);
+
+        // If no live PTY and we have a session store entry + known dims, spawn eagerly
+        // at the correct size rather than deferring to the first render.
+        let (pty, pending_auto_spawn) = if pty.is_none() {
+            if let (Some(entry), Some((cols, rows))) = (stored_entry.clone(), want_dims) {
+                let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
+                match ctx.pty_factory.spawn(id, &entry.cmd, &args, (cols, rows), ctx.event_tx.clone()) {
+                    Ok(backend) => {
+                        tracing::info!(view_tag = id, "eager auto-spawn PTY at ({cols}x{rows})");
+                        (Some(backend), None)
+                    }
+                    Err(e) => {
+                        tracing::warn!("eager auto-spawn failed for {id}: {e}");
+                        // Fall back to deferred path.
+                        (None, Some(entry))
+                    }
+                }
+            } else {
+                // No dims yet — use deferred path as fallback.
+                (None, stored_entry.clone())
+            }
         } else {
-            None
+            (pty, None)
         };
 
         // Restore session context for Ctrl+T transcript bring-up.
@@ -96,7 +141,11 @@ impl GenericView {
     }
 
     /// Reattach to a live daemon PTY if one exists for this view's tag.
-    fn try_reattach(view_tag: &'static str, ctx: &ViewCtx) -> Option<PtyBackend> {
+    ///
+    /// `want_dims` is the desired `(cols, rows)` for the reattached PTY.
+    /// If the PTY is currently sized differently, it is resized and an XTWINOPS
+    /// escape `\x1b[8;{rows};{cols}t` is sent so the child process reflows.
+    fn try_reattach(view_tag: &'static str, ctx: &ViewCtx, want_dims: Option<(u16, u16)>) -> Option<PtyBackend> {
         let existing = ctx.pty_factory.list_existing(view_tag);
         let info = existing.into_iter().find(|p| p.alive)?;
 
@@ -106,14 +155,32 @@ impl GenericView {
             "GenericView reattaching to existing daemon PTY"
         );
 
-        ctx.pty_factory
+        // Attach at the current daemon size; we'll correct it immediately after.
+        let mut pty = ctx.pty_factory
             .attach(
                 &info.pty_id,
                 (info.cols, info.rows),
                 ctx.event_tx.clone(),
                 view_tag,
             )
-            .ok()
+            .ok()?;
+
+        // If we know the correct dimensions, resize the PTY and tell the child.
+        if let Some((want_cols, want_rows)) = want_dims {
+            let (cur_cols, cur_rows) = pty.size();
+            if (cur_cols, cur_rows) != (want_cols, want_rows) {
+                tracing::info!(
+                    view_tag,
+                    cur_cols, cur_rows, want_cols, want_rows,
+                    "reattach: resizing PTY and sending XTWINOPS"
+                );
+                pty.resize(want_cols, want_rows);
+                let seq = format!("\x1b[8;{};{}t", want_rows, want_cols);
+                pty.send_bytes(seq.as_bytes());
+            }
+        }
+
+        Some(pty)
     }
 
     fn render_repl(&mut self, f: &mut Frame, area: Rect) {

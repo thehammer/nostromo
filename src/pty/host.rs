@@ -253,6 +253,23 @@ impl PtyHost {
     pub fn size(&self) -> (u16, u16) {
         self.size
     }
+
+    /// Write raw bytes directly to the PTY child's stdin.
+    ///
+    /// Used to send control sequences such as XTWINOPS `\x1b[8;{rows};{cols}t`
+    /// on reattach so the child process reflows to the new terminal size.
+    pub fn send_bytes(&mut self, bytes: &[u8]) {
+        use std::io::ErrorKind;
+        if let Err(e) = self.writer.write_all(bytes) {
+            if !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) {
+                warn!("PTY send_bytes error: {e}");
+            }
+        } else if let Err(e) = self.writer.flush() {
+            if !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) {
+                warn!("PTY send_bytes flush error: {e}");
+            }
+        }
+    }
 }
 
 impl Drop for PtyHost {
