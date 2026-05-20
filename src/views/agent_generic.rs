@@ -22,6 +22,29 @@ use crate::{
     views::{EventOutcome, View, ViewCtx},
 };
 
+/// Strip any existing `--session-id <value>` pair from `args` and append a
+/// freshly-generated UUID.  This prevents auto-spawn from reusing a stale
+/// session ID that may still be registered in Claude Code.
+fn freshen_session_id(args: &[String]) -> (Vec<String>, String) {
+    let new_sid = uuid::Uuid::new_v4().to_string();
+    let mut out: Vec<String> = Vec::with_capacity(args.len() + 2);
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--session-id" {
+            skip_next = true;
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out.push("--session-id".to_string());
+    out.push(new_sid.clone());
+    (out, new_sid)
+}
+
 pub struct GenericView {
     id: &'static str,
     title: &'static str,
@@ -87,10 +110,15 @@ impl GenericView {
         // at the correct size rather than deferring to the first render.
         let (pty, pending_auto_spawn) = if pty.is_none() {
             if let (Some(entry), Some((cols, rows))) = (stored_entry.clone(), want_dims) {
-                let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
+                let (fresh_args, new_sid) = freshen_session_id(&entry.args);
+                let args: Vec<&str> = fresh_args.iter().map(String::as_str).collect();
                 match ctx.pty_factory.spawn(id, &entry.cmd, &args, (cols, rows), ctx.event_tx.clone()) {
                     Ok(backend) => {
                         tracing::info!(view_tag = id, "eager auto-spawn PTY at ({cols}x{rows})");
+                        // Persist the fresh session ID so transcript lookup works.
+                        let mut store = crate::sessions::SessionStore::load();
+                        let cwd = entry.cwd.clone().or_else(|| std::env::current_dir().ok());
+                        store.record(id, &entry.cmd, &args, cwd, Some(new_sid));
                         (Some(backend), None)
                     }
                     Err(e) => {
@@ -209,7 +237,8 @@ impl GenericView {
         if self.pty.is_none() {
             if let Some(entry) = self.pending_auto_spawn.take() {
                 let (cols, rows) = (inner.width.max(20), inner.height.max(5));
-                let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
+                let (fresh_args, new_sid) = freshen_session_id(&entry.args);
+                let args: Vec<&str> = fresh_args.iter().map(String::as_str).collect();
                 match self.ctx.pty_factory.spawn(
                     self.id,
                     &entry.cmd,
@@ -222,6 +251,10 @@ impl GenericView {
                             view_tag = self.id,
                             "deferred auto-spawn PTY at ({cols}x{rows})"
                         );
+                        // Persist the fresh session ID so transcript lookup works.
+                        let mut store = crate::sessions::SessionStore::load();
+                        let cwd = entry.cwd.clone().or_else(|| std::env::current_dir().ok());
+                        store.record(self.id, &entry.cmd, &args, cwd, Some(new_sid));
                         self.pty = Some(backend);
                         self.pty_capturing = true;
                     }
