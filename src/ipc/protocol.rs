@@ -152,7 +152,7 @@ pub enum ServerMsg {
         daemon_pid: u32,
     },
     Activity(ActivityEvent),
-    MotherJobs(Vec<MotherJob>),
+    MotherJobs { jobs: Vec<MotherJob> },
     MotherStatusline(MotherStatus),
     /// A job transitioned into `awaiting` — daemon fires this once per
     /// transition (same logic as the in-process `mother_poll`).

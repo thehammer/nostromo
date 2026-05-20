@@ -188,7 +188,7 @@ async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
                     last_states.insert(job.id.clone(), job.state.clone());
                 }
 
-                match tx.send(ServerMsg::MotherJobs(jobs)) {
+                match tx.send(ServerMsg::MotherJobs { jobs }) {
                     Ok(n) => tracing::debug!(receivers = n, "MotherJobs broadcast sent"),
                     Err(_) => {
                         // No current subscribers — Nostromo may be closed. Keep

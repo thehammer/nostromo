@@ -44,7 +44,7 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         ServerMsg::Activity(ev) => {
             bus.push_external(ev);
         }
-        ServerMsg::MotherJobs(jobs) => {
+        ServerMsg::MotherJobs { jobs } => {
             let _ = app_tx.send(AppEvent::MotherJobs(jobs));
         }
         ServerMsg::MotherStatusline(status) => {

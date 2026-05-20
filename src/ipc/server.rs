@@ -361,7 +361,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
     }
     match msg {
         ServerMsg::Activity(_) => topics.contains(&Topic::Activity),
-        ServerMsg::MotherJobs(_) => topics.contains(&Topic::MotherJobs),
+        ServerMsg::MotherJobs { .. } => topics.contains(&Topic::MotherJobs),
         ServerMsg::MotherStatusline(_) => topics.contains(&Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => topics.contains(&Topic::MotherJobs),
         // PTY + control messages are always forwarded (handled via targeted channel).
