@@ -115,10 +115,20 @@ impl PerriView {
                     let repl_rows = ((term_rows as f32) * (1.0 - ratios.perri.top_row)) as u16;
                     let cols = term_cols.max(20);
                     let rows = repl_rows.saturating_sub(2).max(5); // borders
-                    let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
+                    // Strip the stale --session-id and inject a fresh UUID so Claude
+                    // Code doesn't reject the spawn with "Session ID already in use".
+                    let (fresh_args, new_sid) = crate::views::agent_generic::freshen_session_id(&entry.args);
+                    let args: Vec<&str> = fresh_args.iter().map(String::as_str).collect();
                     match PtyHost::spawn(&entry.cmd, &args, (cols, rows), ctx.event_tx.clone(), PERRI_PTY_TAG) {
                         Ok(host) => {
                             tracing::info!("perri: auto-spawned PTY at ({cols}x{rows})");
+                            // Persist the fresh session ID and update transcript context.
+                            let cwd = entry.cwd.clone().or_else(|| std::env::current_dir().ok());
+                            let mut store = crate::sessions::SessionStore::load();
+                            store.record(PERRI_PTY_TAG, &entry.cmd, &args, cwd.clone(), Some(new_sid.clone()));
+                            if let Some(cwd) = cwd {
+                                transcript.set_session_context(cwd, new_sid);
+                            }
                             pty = Some(host);
                             pty_capturing = true;
                         }

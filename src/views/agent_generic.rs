@@ -25,7 +25,7 @@ use crate::{
 /// Strip any existing `--session-id <value>` pair from `args` and append a
 /// freshly-generated UUID.  This prevents auto-spawn from reusing a stale
 /// session ID that may still be registered in Claude Code.
-fn freshen_session_id(args: &[String]) -> (Vec<String>, String) {
+pub fn freshen_session_id(args: &[String]) -> (Vec<String>, String) {
     let new_sid = uuid::Uuid::new_v4().to_string();
     let mut out: Vec<String> = Vec::with_capacity(args.len() + 2);
     let mut skip_next = false;
