@@ -349,6 +349,16 @@ async fn run_output_loop(
     loop {
         match rx.recv().await {
             Ok(ServerMsg::PtyScrollback { pty_id: id, bytes }) if id == pty_id => {
+                // Reset parser and altscreen filter before replaying scrollback.
+                // Scrollback is a full replay from the ring-buffer start.
+                // Stale terminal state (e.g. after a daemon reconnect) would
+                // corrupt the render by placing content at the wrong offset.
+                {
+                    let mut p = parser.lock().unwrap();
+                    let (rows, cols) = p.screen().size();
+                    *p = vt100::Parser::new(rows, cols, 1000);
+                }
+                filter = crate::pty::altscreen::AltScreenFilter::new();
                 let flags_before = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
                 kitty_tracker.feed(&bytes);
                 let flags_after = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
