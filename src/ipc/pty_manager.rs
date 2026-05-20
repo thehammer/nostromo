@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -68,6 +69,9 @@ struct ManagedPty {
     forwarder_handle: Option<tokio::task::AbortHandle>,
     /// Reader task (keep alive until PTY exits).
     _reader_task: tokio::task::JoinHandle<()>,
+    /// Current top-of-stack kitty keyboard flags observed in this PTY's output.
+    /// Shared with the reader task via `KittyFlagsTracker`.
+    kitty_flags: Arc<AtomicU32>,
 }
 
 // SAFETY: ManagedPty is only accessed under PtyManager's Mutex.
@@ -143,6 +147,14 @@ impl PtyManager {
         cmd_builder.env(ENV_SESSION_ID, &nostromo_session_id);
         cmd_builder.env(ENV_MCP_SOCKET, &mcp_socket);
 
+        // Normalize TERM so inner processes don't inherit xterm-ghostty or
+        // other host-specific values that suppress kitty keyboard negotiation.
+        cmd_builder.env("TERM", "xterm-256color");
+        cmd_builder.env("COLORTERM", "truecolor");
+        cmd_builder.env_remove("TERM_PROGRAM");
+        cmd_builder.env_remove("TERM_PROGRAM_VERSION");
+        cmd_builder.env("NOSTROMO_PTY", "1");
+
         let child = pair.slave.spawn_command(cmd_builder)?;
         drop(pair.slave);
 
@@ -156,6 +168,9 @@ impl PtyManager {
         let scrollback_clone = Arc::clone(&scrollback);
         let pty_id_for_task = pty_id.clone();
 
+        let mut kitty_tracker = crate::pty::kitty::KittyFlagsTracker::new();
+        let kitty_flags = kitty_tracker.flags();
+
         let reader_task = tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let mut buf = [0u8; 4096];
@@ -168,6 +183,17 @@ impl PtyManager {
                     }
                     Ok(n) => {
                         let chunk = buf[..n].to_vec();
+                        let flags_before = kitty_tracker.flags().load(Ordering::Relaxed);
+                        kitty_tracker.feed(&chunk);
+                        let flags_after = kitty_tracker.flags().load(Ordering::Relaxed);
+                        if flags_after != flags_before {
+                            debug!(
+                                pty_id = %pty_id_for_task,
+                                flags_before,
+                                flags_after,
+                                "kitty flags changed"
+                            );
+                        }
                         scrollback_clone.lock().unwrap().push(chunk.clone());
                         // Ignore send errors — no subscribers yet is fine.
                         let _ = output_tx_clone.send(PtyChunk::Bytes(chunk));
@@ -207,6 +233,7 @@ impl PtyManager {
                 attached_client: None,
                 forwarder_handle: None,
                 _reader_task: reader_task,
+                kitty_flags,
             },
         );
 
@@ -436,6 +463,19 @@ impl PtyManager {
                 client_tag: p.client_tag.clone(),
             })
             .collect()
+    }
+
+    // ── kitty flags ───────────────────────────────────────────────────────────
+
+    /// Return the current top-of-stack kitty keyboard flags for `pty_id`,
+    /// or `None` if the PTY is not known.
+    ///
+    /// The value is updated lock-free by the reader task as the child process
+    /// pushes / pops kitty protocol escapes.  Useful for diagnostics and tests.
+    pub fn kitty_flags(&self, pty_id: &str) -> Option<u32> {
+        self.ptys
+            .get(pty_id)
+            .map(|p| p.kitty_flags.load(Ordering::Relaxed))
     }
 
     // ── shutdown ──────────────────────────────────────────────────────────────

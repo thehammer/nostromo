@@ -131,6 +131,15 @@ impl PtyHost {
         cmd_builder.env(ENV_SESSION_ID, &nostromo_session_id);
         cmd_builder.env(ENV_MCP_SOCKET, mcp_socket);
 
+        // Normalize TERM so inner processes (e.g. Claude Code) don't inherit
+        // `xterm-ghostty` or other host-specific values that would suppress
+        // kitty keyboard protocol negotiation.
+        cmd_builder.env("TERM", "xterm-256color");
+        cmd_builder.env("COLORTERM", "truecolor");
+        cmd_builder.env_remove("TERM_PROGRAM");
+        cmd_builder.env_remove("TERM_PROGRAM_VERSION");
+        cmd_builder.env("NOSTROMO_PTY", "1");
+
         let child = pair.slave.spawn_command(cmd_builder)?;
         drop(pair.slave);
 
