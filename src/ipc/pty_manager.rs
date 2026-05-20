@@ -34,7 +34,7 @@ use super::{
     scrollback::ScrollbackBuf,
 };
 
-use crate::pty::host::{ENV_MCP_SOCKET, ENV_PTY_ID, ENV_SESSION_ID, ENV_VIEW_ID};
+use crate::pty::host::{ENV_MCP_SOCKET, ENV_NOSTROMO_PTY, ENV_PTY_ID, ENV_SESSION_ID, ENV_VIEW_ID};
 
 // ── PTY chunk ─────────────────────────────────────────────────────────────────
 
@@ -153,7 +153,7 @@ impl PtyManager {
         cmd_builder.env("COLORTERM", "truecolor");
         cmd_builder.env_remove("TERM_PROGRAM");
         cmd_builder.env_remove("TERM_PROGRAM_VERSION");
-        cmd_builder.env("NOSTROMO_PTY", "1");
+        cmd_builder.env(ENV_NOSTROMO_PTY, "1");
 
         let child = pair.slave.spawn_command(cmd_builder)?;
         drop(pair.slave);

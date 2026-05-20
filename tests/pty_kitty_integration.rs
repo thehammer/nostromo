@@ -182,7 +182,8 @@ async fn daemon_spawn_sets_term_xterm_256color() {
         )
         .expect("PtyManager::spawn_pty must succeed");
 
-    // Give the child time to run and fill the scrollback buffer.
+    // Give the child time to run, write output, and exit so the full result
+    // lands in the scrollback buffer before we attach.
     tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
 
     // Attach: daemon drains scrollback into client_rx.
@@ -190,8 +191,9 @@ async fn daemon_spawn_sets_term_xterm_256color() {
         .attach(&pty_id, "test-client")
         .expect("attach must succeed");
 
-    // Drain messages — collect all scrollback bytes.
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // Give the forwarder task time to deliver any remaining PtyOutput frames
+    // (in case the child hadn't fully exited at attach time).
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
     let mut output = Vec::new();
     while let Ok(msg) = client_rx.try_recv() {
         if let ServerMsg::PtyScrollback { bytes, .. }
@@ -230,9 +232,9 @@ async fn kitty_flags_tracked_in_daemon_pty() {
             "sh",
             &[
                 "-c".to_string(),
-                // Print kitty push then sleep so the reader task has time to
-                // process the chunk before we check.
-                "printf '\\033[>1u'; sleep 1".to_string(),
+                // Print kitty push then hold briefly so the reader task has
+                // time to process the chunk before we check.
+                "printf '\\033[>1u'; sleep 0.2".to_string(),
             ],
             80,
             24,

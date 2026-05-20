@@ -19,6 +19,9 @@ pub const ENV_VIEW_ID: &str = "NOSTROMO_VIEW_ID";
 pub const ENV_PTY_ID: &str = "NOSTROMO_PTY_ID";
 pub const ENV_SESSION_ID: &str = "NOSTROMO_SESSION_ID";
 pub const ENV_MCP_SOCKET: &str = "NOSTROMO_MCP_SOCKET";
+/// Set to `"1"` in every Nostromo-spawned PTY so inner processes can detect
+/// they are running inside Nostromo rather than a bare terminal.
+pub const ENV_NOSTROMO_PTY: &str = "NOSTROMO_PTY";
 
 /// Identifiers returned from a successful [`PtyHost::spawn`].
 ///
@@ -138,7 +141,7 @@ impl PtyHost {
         cmd_builder.env("COLORTERM", "truecolor");
         cmd_builder.env_remove("TERM_PROGRAM");
         cmd_builder.env_remove("TERM_PROGRAM_VERSION");
-        cmd_builder.env("NOSTROMO_PTY", "1");
+        cmd_builder.env(ENV_NOSTROMO_PTY, "1");
 
         let child = pair.slave.spawn_command(cmd_builder)?;
         drop(pair.slave);
