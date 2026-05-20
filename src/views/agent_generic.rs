@@ -193,7 +193,11 @@ impl GenericView {
             )
             .ok()?;
 
-        // If we know the correct dimensions, resize the PTY and tell the child.
+        // Always force a resize after reattach to trigger SIGWINCH so the child
+        // process redraws its full UI.  Even when dimensions match, we nudge
+        // by one row then back so Claude Code gets two SIGWINCH signals and
+        // redraws cleanly rather than showing stale scrollback state at the
+        // bottom of the pane.
         if let Some((want_cols, want_rows)) = want_dims {
             let (cur_cols, cur_rows) = pty.size();
             if (cur_cols, cur_rows) != (want_cols, want_rows) {
@@ -205,6 +209,11 @@ impl GenericView {
                 pty.resize(want_cols, want_rows);
                 let seq = format!("\x1b[8;{};{}t", want_rows, want_cols);
                 pty.send_bytes(seq.as_bytes());
+            } else {
+                // Same size — nudge to force a full redraw.
+                tracing::debug!(view_tag, want_cols, want_rows, "reattach: nudging size to force redraw");
+                pty.resize(want_cols, want_rows.saturating_sub(1).max(1));
+                pty.resize(want_cols, want_rows);
             }
         }
 
