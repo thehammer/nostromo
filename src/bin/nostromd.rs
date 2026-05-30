@@ -22,7 +22,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use nostromo::{
     agent_bus::{tail_activity_jsonl, ActivityEvent},
-    ipc::{protocol::ServerMsg, PtyManager, Server},
+    ipc::{protocol::ServerMsg, PtyManager, Server, SessionManager},
     mother::{self, statusline_cache_path, MotherStatus},
 };
 
@@ -51,10 +51,26 @@ async fn main() -> Result<()> {
     // ── PTY manager ───────────────────────────────────────────────────────────
     let pty_mgr: Arc<Mutex<PtyManager>> = Arc::new(Mutex::new(PtyManager::new()));
 
+    // ── Session manager (persistent stream-json sessions) ──────────────────────
+    let session_mgr: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
+
     // ── IPC server ────────────────────────────────────────────────────────────
     let socket_path = nostromo::ipc::default_socket_path();
-    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr))
+    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr))
         .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
+
+    // ── Session crash-recovery supervisor ──────────────────────────────────────
+    {
+        let session_mgr = Arc::clone(&session_mgr);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                session_mgr.lock().unwrap().reap_and_recover();
+            }
+        });
+    }
 
     let broadcast_tx = server.tx.clone();
 
@@ -87,11 +103,15 @@ async fn main() -> Result<()> {
         _ = sigint.recv()  => info!("received SIGINT"),
     }
 
-    info!("nostromd shutting down; killing all PTYs");
+    info!("nostromd shutting down; killing all PTYs and sessions");
 
     // Kill all child processes cleanly before exiting.
     {
         let mut mgr = pty_mgr.lock().unwrap();
+        mgr.kill_all_on_shutdown();
+    }
+    {
+        let mut mgr = session_mgr.lock().unwrap();
         mgr.kill_all_on_shutdown();
     }
 

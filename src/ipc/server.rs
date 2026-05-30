@@ -26,8 +26,9 @@ use tracing::{debug, info, warn};
 
 use super::{
     codec::{read_frame, write_frame},
-    protocol::{ClientMsg, ServerMsg, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
+    protocol::{ClientMsg, SessionAction, ServerMsg, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
     pty_manager::PtyManager,
+    session_manager::SessionManager,
 };
 
 /// Handle to the running IPC server.  Drop to shut down.
@@ -39,8 +40,13 @@ pub struct Server {
 impl Server {
     /// Bind a `UnixListener` at `socket_path`.
     ///
-    /// `pty_mgr` is shared with every client handler for PTY command routing.
-    pub fn bind(socket_path: &Path, pty_mgr: Arc<Mutex<PtyManager>>) -> Result<Self> {
+    /// `pty_mgr` and `session_mgr` are shared with every client handler for PTY
+    /// and persistent-session command routing respectively.
+    pub fn bind(
+        socket_path: &Path,
+        pty_mgr: Arc<Mutex<PtyManager>>,
+        session_mgr: Arc<Mutex<SessionManager>>,
+    ) -> Result<Self> {
         // Remove stale socket file so bind doesn't fail.
         let _ = std::fs::remove_file(socket_path);
 
@@ -61,7 +67,7 @@ impl Server {
         let path = socket_path.to_path_buf();
 
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr).await {
+            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr).await {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -92,14 +98,16 @@ async fn accept_loop(
     listener: UnixListener,
     tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
+    session_mgr: Arc<Mutex<SessionManager>>,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let rx = tx.subscribe();
                 let pty_mgr = Arc::clone(&pty_mgr);
+                let session_mgr = Arc::clone(&session_mgr);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, pty_mgr).await {
+                    if let Err(e) = handle_client(stream, rx, pty_mgr, session_mgr).await {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -117,6 +125,7 @@ async fn handle_client(
     stream: UnixStream,
     mut broadcast_rx: broadcast::Receiver<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
+    session_mgr: Arc<Mutex<SessionManager>>,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -186,6 +195,14 @@ async fn handle_client(
         let mut senders = registry.lock().unwrap();
         senders.insert(client_id.clone(), targeted_tx.clone());
     }
+    {
+        // The session manager keeps its own client-sender registry for session
+        // attach fan-out.
+        let mgr = session_mgr.lock().unwrap();
+        let registry = mgr.client_sender_registry();
+        let mut senders = registry.lock().unwrap();
+        senders.insert(client_id.clone(), targeted_tx.clone());
+    }
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
 
@@ -237,7 +254,7 @@ async fn handle_client(
                                 continue;
                             }
                         };
-                        handle_client_msg(msg, &client_id, &pty_mgr, &targeted_tx);
+                        handle_client_msg(msg, &client_id, &pty_mgr, &session_mgr, &targeted_tx);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -250,9 +267,13 @@ async fn handle_client(
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
-    debug!(client_id, "client handler exiting; detaching PTYs");
+    debug!(client_id, "client handler exiting; detaching PTYs + sessions");
     {
         let mut mgr = pty_mgr.lock().unwrap();
+        mgr.on_client_disconnect(&client_id);
+    }
+    {
+        let mut mgr = session_mgr.lock().unwrap();
         mgr.on_client_disconnect(&client_id);
     }
 
@@ -265,6 +286,7 @@ fn handle_client_msg(
     msg: ClientMsg,
     client_id: &str,
     pty_mgr: &Arc<Mutex<PtyManager>>,
+    session_mgr: &Arc<Mutex<SessionManager>>,
     targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
 ) {
     match msg {
@@ -346,6 +368,87 @@ fn handle_client_msg(
             let mgr = pty_mgr.lock().unwrap();
             let ptys = mgr.list_with_ids();
             let _ = targeted_tx.send(ServerMsg::PtyListResp { ptys });
+        }
+
+        // ── persistent session commands (protocol v3) ─────────────────────────
+        ClientMsg::SessionSpawn {
+            tag,
+            agent_name,
+            view_name,
+            cwd,
+            session_id,
+            remote_control,
+        } => {
+            let result = {
+                let mut mgr = session_mgr.lock().unwrap();
+                mgr.spawn_session(tag.clone(), agent_name, view_name, cwd, session_id, remote_control)
+            };
+            match result {
+                Ok(session_id) => {
+                    let _ = targeted_tx.send(ServerMsg::SessionSpawned { tag, session_id });
+                }
+                Err(e) => {
+                    warn!(client_id, %tag, "SessionSpawn failed: {e:#}");
+                    let _ = targeted_tx.send(ServerMsg::Error {
+                        message: format!("SessionSpawn failed: {e}"),
+                    });
+                }
+            }
+        }
+
+        ClientMsg::SessionAttach { tag } => {
+            let result = {
+                let mut mgr = session_mgr.lock().unwrap();
+                mgr.attach(&tag, client_id)
+            };
+            if let Err(e) = result {
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: format!("SessionAttach failed: {e}"),
+                });
+            }
+        }
+
+        ClientMsg::SessionDetach { tag } => {
+            let mut mgr = session_mgr.lock().unwrap();
+            mgr.detach(&tag, client_id);
+        }
+
+        ClientMsg::SessionSend { tag, text } => {
+            let mut mgr = session_mgr.lock().unwrap();
+            if let Err(e) = mgr.send_user_message(&tag, &text) {
+                warn!(client_id, %tag, "SessionSend error: {e}");
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: format!("SessionSend failed: {e}"),
+                });
+            }
+        }
+
+        ClientMsg::SessionControl { tag, action } => {
+            let mut mgr = session_mgr.lock().unwrap();
+            match action {
+                SessionAction::Stop => mgr.stop(&tag),
+                SessionAction::Restart => {
+                    if let Err(e) = mgr.restart(&tag) {
+                        warn!(client_id, %tag, "SessionControl restart error: {e}");
+                    }
+                }
+                SessionAction::NewSession => mgr.new_session(&tag),
+            }
+        }
+
+        ClientMsg::SessionAnswerPermission { tag, .. } => {
+            // No stdout-answerable permission path surfaced in the spiked
+            // binary; the default posture is bypass and any prompt is answered
+            // natively on the phone via remote control. Accepted as a no-op so
+            // future binaries / the Swift client can wire it without a protocol
+            // change.
+            debug!(client_id, %tag, "SessionAnswerPermission received (no-op in v1)");
+        }
+
+        ClientMsg::SessionList => {
+            let mgr = session_mgr.lock().unwrap();
+            let sessions = mgr.list();
+            let _ = targeted_tx.send(ServerMsg::SessionListResp { sessions });
         }
 
         // These are already handled during handshake; ignore duplicates.
