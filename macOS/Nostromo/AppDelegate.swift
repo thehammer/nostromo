@@ -1,0 +1,89 @@
+import AppKit
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+
+    private(set) var windows: [NostromoWindow] = []
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        setupMenu()
+        AppStore.shared.start()
+        for (index, screen) in NSScreen.screens.enumerated() {
+            openWindow(for: screen, index: index)
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        windows.forEach { $0.makeKeyAndOrderFront(nil) }
+        return false
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return true
+    }
+
+    // MARK: - Private
+
+    private func setupMenu() {
+        let mainMenu = NSMenu()
+
+        // App menu
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+        appMenu.addItem(NSMenuItem(
+            title: "Quit Nostromo",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        ))
+
+        // Edit menu — required for Cmd+C/V/A/X to route correctly to NSTextView
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenuItem.submenu = editMenu
+        editMenu.addItem(NSMenuItem(title: "Cut",        action: #selector(NSText.cut(_:)),       keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy",       action: #selector(NSText.copy(_:)),      keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste",      action: #selector(NSText.paste(_:)),     keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenu.addItem(.separator())
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
+
+        NSApplication.shared.mainMenu = mainMenu
+    }
+
+    private func openWindow(for screen: NSScreen, index: Int) {
+        let win = NostromoWindow(
+            contentRect: screen.frame,
+            styleMask: [.titled, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+
+        win.titlebarAppearsTransparent = true
+        win.titleVisibility = .hidden
+        win.standardWindowButton(.closeButton)?.isHidden = true
+        win.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        win.standardWindowButton(.zoomButton)?.isHidden = true
+
+        win.collectionBehavior = [.fullScreenPrimary, .managed]
+        win.backgroundColor = NSColor(calibratedWhite: 0.05, alpha: 1.0)
+        win.isMovable = false
+        win.contentView = MainLayout(windowIndex: index)
+        win.delegate = win
+
+        // Position on the target screen before entering full-screen so the
+        // Space is created on the right display.
+        win.setFrameOrigin(screen.frame.origin)
+
+        win.alphaValue = 0.0
+        win.makeKeyAndOrderFront(nil)
+
+        if !win.styleMask.contains(.fullScreen) {
+            win.toggleFullScreen(nil)
+        }
+
+        windows.append(win)
+    }
+}
