@@ -78,6 +78,16 @@ class ChatSession: ObservableObject {
 
         var args: [String] = [
             "--dangerously-skip-permissions",
+            // Authoritative permission bypass for headless sessions. `-p` has no UI to
+            // answer a permission prompt, so any gate that fires dead-loops
+            // ("Claude requested permissions to use Bash…"). `--dangerously-skip-permissions`
+            // covers the top-level turn but can be silently dropped on `--resume` or for
+            // spawned sub-agents/parallel tool calls, which is where the loops came from.
+            // A `--settings` permissions policy is inherited by resumed sessions AND
+            // sub-agents and isn't subject to that silent refusal — and because it's passed
+            // inline here it's scoped to Nostromo's sessions only, never the user's global
+            // ~/.claude/settings.json.
+            "--settings", #"{"permissions":{"defaultMode":"bypassPermissions"}}"#,
             "--output-format", "stream-json",
             "--verbose",
             "--agent", agentName,
