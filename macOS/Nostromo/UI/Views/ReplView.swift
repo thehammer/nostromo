@@ -104,8 +104,13 @@ class ReplView: NSView {
         scrollView.documentView = stackView
         NSLayoutConstraint.activate([
             stackView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            // Pin leading AND trailing to the clip view rather than binding
+            // stackView.width == clipView.width. The clip view's width is frame-driven
+            // by the scroll view (tile()), so pinning both edges clamps the stack to the
+            // visible width and lets the scroll view ABSORB long content (wrap/truncate)
+            // instead of propagating its required width up and ballooning the window.
             stackView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            stackView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            stackView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             // Ensure document view height is at least the visible area when empty,
             // preventing ambiguous height that causes scroll flicker on first layout.
             stackView.bottomAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.bottomAnchor),
@@ -633,6 +638,10 @@ private class UserBubbleView: NSView {
         label.textColor            = Theme.fg
         label.lineBreakMode        = .byWordWrapping
         label.maximumNumberOfLines = 0
+        // Yield horizontally so the label wraps to the available width instead of
+        // demanding its full single-line width (which would balloon the scroll view
+        // and, ultimately, the whole window past the screen edge).
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.translatesAutoresizingMaskIntoConstraints = false
 
         super.init(frame: .zero)
@@ -678,6 +687,7 @@ private class TextBlockView: NSView {
                 label.textColor            = Theme.fg
                 label.lineBreakMode        = .byWordWrapping
                 label.maximumNumberOfLines = 0
+                label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
                 view = label
             case .table(let headers, let rows):
                 view = MarkdownTableView(headers: headers, rows: rows)
@@ -903,6 +913,7 @@ private class ToolCallView: NSView {
         summaryLabel.font          = Theme.monoFont
         summaryLabel.textColor     = Theme.fg
         summaryLabel.lineBreakMode = .byTruncatingMiddle
+        summaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let row = NSStackView(views: [iconLabel, nameLabel, dotLabel, summaryLabel])
         row.orientation = .horizontal
@@ -975,6 +986,9 @@ private class ToolResultView: NSView {
         label.textColor            = data.isError ? Theme.redSweater : Theme.fgMuted
         label.lineBreakMode        = .byCharWrapping
         label.maximumNumberOfLines = 0
+        // Biggest balloon driver: long single-line tool output (JSON, git status) had
+        // an intrinsic width of ~8600pt. Yield horizontally so it wraps to the pane.
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.translatesAutoresizingMaskIntoConstraints = false
         contentWrap.addSubview(label)
         contentWrap.translatesAutoresizingMaskIntoConstraints = false
@@ -1113,6 +1127,7 @@ private class AskQuestionView: NSView {
         qLabel.textColor            = Theme.fg
         qLabel.lineBreakMode        = .byWordWrapping
         qLabel.maximumNumberOfLines = 0
+        qLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         qLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(qLabel)
         NSLayoutConstraint.activate([
@@ -1321,6 +1336,7 @@ private class ErrorBlockView: NSView {
         label.textColor           = Theme.redSweater
         label.lineBreakMode       = .byWordWrapping
         label.maximumNumberOfLines = 0
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
 
