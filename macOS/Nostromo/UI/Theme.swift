@@ -64,11 +64,25 @@ enum Theme {
 
     // MARK: - Helpers
 
-    /// Map a pace value to a color: ≥1.5 → red, ≥1.1 → amber, else sage.
+    /// Map a pace value to a vivid tip color: ≥1.5 → red, ≥1.1 → amber, else green.
     static func paceColor(_ pace: Float) -> NSColor {
         if pace >= 1.5 { return redSweater }
         if pace >= 1.1 { return amber }
         return sage
+    }
+
+    /// Gradient stops for a pace bar. All bars start vivid green; critical bars
+    /// show the full journey green → amber → red.
+    static func paceGradientStops(_ pace: Float) -> ([NSColor], [CGFloat]) {
+        if pace >= 1.5 {
+            return ([sage, amber, redSweater], [0, 0.5, 1.0])
+        } else if pace >= 1.1 {
+            return ([sage, amber], [0, 1.0])
+        } else {
+            // Subtle: slightly deeper green start so there's still a visible gradient
+            let dimGreen = NSColor(red: 0.04, green: 0.30, blue: 0.13, alpha: 1)
+            return ([dimGreen, sage], [0, 1.0])
+        }
     }
 
     /// Percent-to-color for rate-limit bars: ≥80% → red, ≥50% → amber, else sage.

@@ -64,7 +64,22 @@ class NostromodClient {
     private let encoder = JSONEncoder()
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
+        // nostromd timestamps include microseconds ("2026-05-30T09:30:56.510874Z").
+        // Swift's built-in .iso8601 strategy rejects fractional seconds, so the
+        // entire MotherJob silently fails to decode. Use a custom strategy that
+        // handles both formats.
+        let fmtFrac = ISO8601DateFormatter()
+        fmtFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fmtBasic = ISO8601DateFormatter()
+        fmtBasic.formatOptions = [.withInternetDateTime]
+        d.dateDecodingStrategy = .custom { decoder in
+            let c   = try decoder.singleValueContainer()
+            let str = try c.decode(String.self)
+            if let date = fmtFrac.date(from: str)  { return date }
+            if let date = fmtBasic.date(from: str) { return date }
+            throw DecodingError.dataCorruptedError(in: c,
+                debugDescription: "Cannot parse date: \(str)")
+        }
         return d
     }()
 
@@ -188,11 +203,9 @@ class NostromodClient {
             }
 
         case "mother_jobs":
-            if let jobsRaw = json["jobs"],
-               let jobsData = try? JSONSerialization.data(withJSONObject: jobsRaw),
-               let jobs = try? decoder.decode([MotherJob].self, from: jobsData) {
-                return .motherJobs(jobs)
-            }
+            // Jobs are now sourced via `mother list --format json` polling in AppStore.
+            // IPC mother_jobs is ignored to avoid the fractional-seconds date decode issue.
+            break
 
         case "mother_statusline":
             return .motherStatusline(MotherStatus(

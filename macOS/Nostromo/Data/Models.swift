@@ -47,7 +47,7 @@ struct MotherStatus {
     }
 }
 
-struct MotherJob: Decodable, Identifiable {
+struct MotherJob: Identifiable {
     let id:              String
     let state:           String
     let repo:            String
@@ -61,17 +61,62 @@ struct MotherJob: Decodable, Identifiable {
     let pausedReason:    String?
     let adherenceStatus: String?
     let currentTier:     String?
+}
+
+/// Slim decoder for `mother list --format json` output. The CLI shape has
+/// ISO8601 timestamps with fractional seconds; we parse them manually.
+struct MotherJobSlim: Decodable {
+    let id:              String
+    let state:           String
+    let repo:            String
+    let isolation:       String
+    let title:           String
+    let createdAt:       String?
+    let startedAt:       String?
+    let finishedAt:      String?
+    let planPath:        String?
+    let question:        String?
+    let pausedReason:    String?
+    let adherenceStatus: String?
+    let currentTier:     String?
 
     enum CodingKeys: String, CodingKey {
-        case id, state, repo, isolation, title
+        case id, state, repo, isolation, title, question
         case createdAt       = "created_at"
         case startedAt       = "started_at"
         case finishedAt      = "finished_at"
         case planPath        = "plan_path"
-        case question
         case pausedReason    = "paused_reason"
         case adherenceStatus = "adherence_status"
         case currentTier     = "current_tier"
+    }
+
+    private static let fmtFrac: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let fmtBasic: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+    private static func parseDate(_ s: String?) -> Date? {
+        guard let s else { return nil }
+        return fmtFrac.date(from: s) ?? fmtBasic.date(from: s)
+    }
+
+    func toMotherJob() -> MotherJob {
+        MotherJob(id: id, state: state, repo: repo, isolation: isolation,
+                  title: title,
+                  createdAt:       Self.parseDate(createdAt),
+                  startedAt:       Self.parseDate(startedAt),
+                  finishedAt:      Self.parseDate(finishedAt),
+                  planPath:        planPath,
+                  question:        question,
+                  pausedReason:    pausedReason,
+                  adherenceStatus: adherenceStatus,
+                  currentTier:     currentTier)
     }
 }
 
@@ -136,11 +181,13 @@ enum BudgetPosture: String {
     /// Display chip label — empty string means hidden (Normal/Cruise).
     var chipLabel: String {
         switch self {
-        case .flush, .putTheHammerDown: return "FLUSH"
+        case .putTheHammerDown:         return "Put the hammer down"
+        case .flush:                    return "Flush"
         case .normal, .cruise:          return ""
-        case .elevated, .push:          return "ELEVATED"
-        case .conservative, .easeUp:    return "CONSERVATIVE"
-        case .critical, .pumpTheBrakes: return "CRITICAL"
+        case .elevated, .push:          return "Push"
+        case .conservative, .easeUp:    return "Ease up"
+        case .pumpTheBrakes:            return "Pump the brakes"
+        case .critical:                 return "Critical"
         }
     }
 
@@ -186,9 +233,11 @@ struct PostureSnapshot {
         guard let d = v as? [String: Any] else { return nil }
         guard let used    = (d["used_pct"]    as? NSNumber).map({ Float($0.doubleValue) }),
               let elapsed = (d["elapsed_pct"] as? NSNumber).map({ Float($0.doubleValue) }),
-              let pace    = (d["pace"]        as? NSNumber).map({ Float($0.doubleValue) }),
               let resets  = (d["resets_at"]   as? NSNumber).map({ TimeInterval($0.doubleValue) })
         else { return nil }
+        // bishop omits pace when the window is too new; compute from used/elapsed.
+        let pace: Float = (d["pace"] as? NSNumber).map({ Float($0.doubleValue) })
+                          ?? (elapsed > 0 ? used / elapsed : 0)
         return WindowPace(usedPct: used, elapsedPct: elapsed, pace: pace,
                           resetsAt: resets, level: d["level"] as? String ?? "normal")
     }

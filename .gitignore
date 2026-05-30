@@ -2,3 +2,12 @@
 *.log
 .DS_Store
 .env
+
+# Xcode
+macOS/build/
+macOS/*.xcodeproj/xcuserdata/
+macOS/*.xcodeproj/project.xcworkspace/xcuserdata/
+macOS/*.xcworkspace/xcuserdata/
+DerivedData/
+*.xccheckout
+*.moved-aside

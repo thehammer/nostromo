@@ -35,6 +35,7 @@ class AppStore: ObservableObject {
     private let client = NostromodClient()
     private var cancellables        = Set<AnyCancellable>()
     private var perriQueueTimer:    Timer?
+    private var motherJobsTimer:    Timer?
 
     /// Shared ChatSession instances keyed by agent tag.
     /// Multiple windows showing the same tag observe the same session (mirrored).
@@ -93,13 +94,59 @@ class AppStore: ObservableObject {
         FileWatchers.shared.start()
         client.start()
 
+        // Poll mother jobs directly via `mother list --format json`.
+        pollMotherJobs()
+        motherJobsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.pollMotherJobs()
+        }
+
         // Fire a background refresh on startup so data is fresh, then every 5 min.
-        // The refresh runs perri-queue-pane which updates the cache file; the watcher
-        // picks up the change and publishes the new items.
         triggerPerriQueueRefresh()
         perriQueueTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             self?.triggerPerriQueueRefresh()
         }
+    }
+
+    private func pollMotherJobs() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let mother = Self.findMother() else { return }
+            let proc = Process()
+            proc.executableURL = mother
+            proc.arguments = ["list", "--format", "json"]
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError  = Pipe()
+            guard (try? proc.run()) != nil else { return }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            guard let jobs = try? JSONDecoder().decode([MotherJobSlim].self, from: data) else { return }
+            var status = MotherStatus()
+            for job in jobs {
+                switch job.state {
+                case "running":  status.running  += 1
+                case "queued":   status.queued   += 1
+                case "awaiting": status.awaiting += 1
+                case "failed":   status.failed   += 1
+                default: break
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.motherJobs   = jobs.map { $0.toMotherJob() }
+                self.motherStatus = status
+            }
+        }
+    }
+
+    private static func findMother() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = [
+            "/usr/local/bin/mother",
+            "/opt/homebrew/bin/mother",
+            "\(home)/.local/bin/mother",
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
     }
 
     // MARK: - Perri queue

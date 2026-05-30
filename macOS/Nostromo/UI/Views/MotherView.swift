@@ -430,10 +430,6 @@ private class MotherJobDetail: NSView {
     // Stored once, toggled via isHidden
     private let emptyLabel = NSTextField(labelWithString: "Select a job")
 
-    // Scroll container
-    private let scrollView  = NSScrollView()
-    private let contentView = NSView()
-
     // Content fields
     private let titleLabel       = NSTextField(labelWithString: "")
     private let stateLabel       = NSTextField(labelWithString: "")
@@ -452,33 +448,8 @@ private class MotherJobDetail: NSView {
         wantsLayer = true
         layer?.backgroundColor = Theme.bg.cgColor
 
-        // Flipped clip view so content anchors to the top (same fix as MotherJobList)
-        let detailClipView = FlippedClipView()
-        detailClipView.drawsBackground = false
-        scrollView.contentView = detailClipView
-
-        // Scroll view fills the pane
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers  = true
-        scrollView.drawsBackground     = false
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(scrollView)
-
-        // Content view inside scroll — width-tracks, height is natural
-        contentView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = contentView
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            contentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            contentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-        ])
-
-        // Content subview configuration
+        // No outer scroll wrapper — metadata is bounded in height so we pin
+        // all views directly to the pane, letting logScrollView fill the rest.
         titleLabel.font               = .systemFont(ofSize: 16, weight: .medium)
         titleLabel.textColor          = Theme.fg
         titleLabel.lineBreakMode      = .byWordWrapping
@@ -511,29 +482,29 @@ private class MotherJobDetail: NSView {
 
         for v in [titleLabel, stateLabel, metaStack, logSectionLabel, logScrollView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
-            contentView.addSubview(v)
+            addSubview(v)
         }
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 20),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
             stateLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
-            stateLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
             metaStack.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 16),
-            metaStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            metaStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            metaStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            metaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
             logSectionLabel.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 20),
-            logSectionLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            logSectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
+            // Log fills all remaining space — no fixed height.
             logScrollView.topAnchor.constraint(equalTo: logSectionLabel.bottomAnchor, constant: 6),
-            logScrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            logScrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            logScrollView.heightAnchor.constraint(equalToConstant: 280),
-            logScrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
+            logScrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            logScrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            logScrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
         ])
 
         // Empty hint — added AFTER scroll view (higher Z-order), shown when no selection
@@ -559,7 +530,7 @@ private class MotherJobDetail: NSView {
 
         guard let job else { showEmpty(); return }
 
-        scrollView.isHidden = false
+        [titleLabel, stateLabel, metaStack, logSectionLabel, logScrollView].forEach { $0.isHidden = false }
         emptyLabel.isHidden = true
 
         titleLabel.stringValue = job.title.isEmpty ? job.id : job.title
@@ -580,7 +551,7 @@ private class MotherJobDetail: NSView {
     // MARK: Private
 
     private func showEmpty() {
-        scrollView.isHidden = true
+        [titleLabel, stateLabel, metaStack, logSectionLabel, logScrollView].forEach { $0.isHidden = true }
         emptyLabel.isHidden = false
     }
 

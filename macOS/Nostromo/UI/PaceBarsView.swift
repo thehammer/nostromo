@@ -97,30 +97,17 @@ class PaceBarsView: NSView {
             let fillRect = NSRect(x: railX, y: railY, width: fillW, height: barH)
             let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: barCorner, yRadius: barCorner)
 
-            // Draw the full green→yellow→orange→red spectrum scaled to the whole
-            // rail, clipped to the fill region.  The visible tip naturally shows
-            // where in the budget you sit — no need to pick a tip color manually.
-            NSGraphicsContext.saveGraphicsState()
-            fillPath.addClip()
-            let spectrumColors: [NSColor] = [
-                NSColor(red: 0.04, green: 0.30, blue: 0.16, alpha: 1),  // deep forest
-                NSColor(red: 0.13, green: 0.77, blue: 0.37, alpha: 1),  // vivid green
-                NSColor(red: 0.92, green: 0.70, blue: 0.03, alpha: 1),  // yellow
-                NSColor(red: 0.95, green: 0.35, blue: 0.08, alpha: 1),  // orange
-                NSColor(red: 0.94, green: 0.27, blue: 0.27, alpha: 1),  // red
-            ]
-            let stops: [CGFloat] = [0, 0.38, 0.65, 0.82, 1.0]
-            if let gradient = NSGradient(colors: spectrumColors,
-                                         atLocations: stops,
+            // All bars start vivid green; tip color reflects current pace.
+            // Critical bars show the full journey: green → amber → red.
+            let (colors, stops) = Theme.paceGradientStops(window.pace)
+            if let gradient = NSGradient(colors: colors, atLocations: stops,
                                          colorSpace: .genericRGB) {
-                gradient.draw(in: NSRect(x: railX, y: railY, width: railW, height: barH),
-                              angle: 0)
+                gradient.draw(in: fillPath, angle: 0)
             }
-            NSGraphicsContext.restoreGraphicsState()
         }
 
         // ── Pace value ─────────────────────────────────────────────────────
-        let paceStr   = String(format: "%.2f", window.pace)
+        let paceStr   = String(format: "%.1fx", window.pace)
         let paceColor = Theme.paceColor(window.pace)
         let paceAttrs: [NSAttributedString.Key: Any] = [
             .font:            Theme.paceBarFont,

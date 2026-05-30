@@ -50,3 +50,25 @@ uninstall-daemon:
 	rm -f "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
 	rm -f "$(HOME)/.local/bin/nostromd"
 	@echo "nostromd uninstalled"
+
+# ── macOS GUI ──────────────────────────────────────────────────────────────────
+
+APP_DERIVED = $(HOME)/Library/Developer/Xcode/DerivedData/Nostromo-ciqaoqxunjzisvdagpitruomymcr
+APP_BUNDLE  = $(APP_DERIVED)/Build/Products/Debug/Nostromo.app
+
+.PHONY: mac mac-run mac-kill
+
+## Build the macOS GUI app
+mac:
+	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo -configuration Debug build 2>&1 | grep -E "error:|warning:|BUILD"
+
+## Kill any running Nostromo instance (handles debugserver wedge)
+mac-kill:
+	@pkill -9 -f "debugserver" 2>/dev/null || true
+	@pkill -9 -f "Nostromo.app" 2>/dev/null || true
+	@sleep 0.5
+
+## Build and launch the macOS GUI app (kills any running instance first)
+mac-run: mac mac-kill
+	open -n "$(APP_BUNDLE)"
+	@echo "Nostromo launched."

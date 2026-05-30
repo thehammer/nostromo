@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "callimachus-apple-docs": {
+      "command": "calli",
+      "args": [
+        "--pinakes",
+        "/Users/hammer/Library/Application Support/callimachus/apple-docs-macos-26.pinakes",
+        "mcp"
+      ]
+    }
+  }
+}
