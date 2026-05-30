@@ -26,6 +26,7 @@ class MainLayout: NSView {
     private var udKey: String { "nostromo.window\(windowIndex).activeTab" }
 
     private var cancellables = Set<AnyCancellable>()
+    private var presentedSheet: CreateFocusSheet?  // retained for sheet lifetime
 
     // MARK: - Init
 
@@ -132,9 +133,11 @@ class MainLayout: NSView {
         case "fred":   v = AgentView(tag: "fred",  label: "Fred")
         case "teri":   v = AgentView(tag: "teri",  label: "Teri")
         default:
-            v = AgentView(tag: focus.sessionTag,
-                          label: focus.displayName,
-                          workingDirectory: focus.projectPath)
+            // Dynamic focuses: full-screen REPL, no split pane.
+            // sessionTag keys the session; agentTag is the --agent name.
+            v = ReplView(tag: focus.sessionTag,
+                         agentName: focus.agentTag,
+                         workingDirectory: focus.projectPath)
         }
         viewCache[focus.id] = v
         return v
@@ -161,8 +164,12 @@ class MainLayout: NSView {
         let sheet = CreateFocusSheet { [weak self] focus in
             FocusStore.shared.add(focus)
             self?.switchFocus(focus)
+            self?.presentedSheet = nil
         }
-        window.beginSheet(sheet.window!) { _ in }
+        presentedSheet = sheet  // retain for the sheet's lifetime
+        window.beginSheet(sheet.window!) { [weak self] _ in
+            self?.presentedSheet = nil
+        }
     }
 }
 
@@ -174,11 +181,13 @@ private class AgentView: NSView, NSSplitViewDelegate {
 
     private let split    = DarkSplitView()
     private let agentTag: String
+    private let agentName: String
     private var didSetInitialPosition = false
     private var isReadyToSave        = false
 
-    init(tag: String, label: String, workingDirectory: String? = nil) {
-        self.agentTag = tag
+    init(tag: String, label: String, agentName: String? = nil, workingDirectory: String? = nil) {
+        self.agentTag  = tag
+        self.agentName = agentName ?? tag
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -198,7 +207,7 @@ private class AgentView: NSView, NSSplitViewDelegate {
             hintLabel.centerYAnchor.constraint(equalTo: hud.centerYAnchor),
         ])
 
-        let repl = ReplView(tag: agentTag, workingDirectory: workingDirectory)
+        let repl = ReplView(tag: agentTag, agentName: agentName, workingDirectory: workingDirectory)
 
         split.isVertical   = false     // horizontal divider (top / bottom)
         split.dividerStyle = .thin

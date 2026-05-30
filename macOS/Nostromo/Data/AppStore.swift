@@ -45,9 +45,9 @@ class AppStore: ObservableObject {
 
     // MARK: - Session registry
 
-    func session(for tag: String, workingDirectory: String? = nil) -> ChatSession {
+    func session(for tag: String, agentName: String? = nil, workingDirectory: String? = nil) -> ChatSession {
         if let s = sessionRegistry[tag] { return s }
-        let s = ChatSession(tag: tag, workingDirectory: workingDirectory)
+        let s = ChatSession(tag: tag, agentName: agentName, workingDirectory: workingDirectory)
         sessionRegistry[tag] = s
         return s
     }

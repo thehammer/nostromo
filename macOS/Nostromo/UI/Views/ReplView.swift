@@ -19,10 +19,10 @@ class ReplView: NSView {
     private var turnViews:   [UUID: ChatTurnView] = [:]
     private var cancellables = Set<AnyCancellable>()
 
-    init(tag: String, workingDirectory: String? = nil) {
+    init(tag: String, agentName: String? = nil, workingDirectory: String? = nil) {
         // Use the shared registry so multiple windows showing the same tag
         // observe the same session and stay in sync (mirrored).
-        session = AppStore.shared.session(for: tag, workingDirectory: workingDirectory)
+        session = AppStore.shared.session(for: tag, agentName: agentName, workingDirectory: workingDirectory)
         super.init(frame: .zero)
         setup()
     }

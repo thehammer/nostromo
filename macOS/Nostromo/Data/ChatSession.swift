@@ -14,7 +14,8 @@ private let log = Logger(subsystem: "com.hammer.nostromo", category: "chat")
 /// GUI restarts (the Claude Code conversation history is stored server-side by session_id).
 class ChatSession: ObservableObject {
 
-    let tag: String
+    let tag: String            // session persistence key (unique per focus)
+    let agentName: String      // passed to --agent flag (just the agent filename stem)
     let workingDirectory: String?
 
     @Published private(set) var turns:        [ChatTurn] = []
@@ -26,8 +27,9 @@ class ChatSession: ObservableObject {
     private var lineBuffer:      String = ""
     private var pendingMessages: [String] = []
 
-    init(tag: String, workingDirectory: String? = nil) {
+    init(tag: String, agentName: String? = nil, workingDirectory: String? = nil) {
         self.tag              = tag
+        self.agentName        = agentName ?? tag  // built-ins: tag == agentName
         self.workingDirectory = workingDirectory
         self.sessionId        = Self.loadId(tag)
         log.info("ChatSession[\(tag, privacy: .public)] init sid=\(self.sessionId ?? "none", privacy: .public)")
@@ -78,7 +80,7 @@ class ChatSession: ObservableObject {
             "--dangerously-skip-permissions",
             "--output-format", "stream-json",
             "--verbose",
-            "--agent", tag,
+            "--agent", agentName,
             "-p", trimmed,
         ]
         if let sid = sessionId { args += ["--resume", sid] }
@@ -238,10 +240,30 @@ class ChatSession: ObservableObject {
     // MARK: - Scrollback
 
     /// Replays the last `maxTurns` turns from the persisted session JSONL.
-    /// Sessions without a project directory live at ~/.claude/projects/-/<sessionId>.jsonl.
+    ///
+    /// Sessions are stored under ~/.claude/projects/<encoded-path>/<sessionId>.jsonl
+    /// where the encoded path depends on the working directory the session was started in.
+    /// Sessions without a project use the literal subdirectory "-".
+    /// We search all subdirectories so dynamic focuses (which have a workingDirectory)
+    /// are found even when the encoded path isn't known at load time.
     private static func loadScrollback(sessionId: String, maxTurns: Int = 30) -> [ChatTurn] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let path = home.appendingPathComponent(".claude/projects/-/\(sessionId).jsonl")
+        let home        = FileManager.default.homeDirectoryForCurrentUser
+        let projectsDir = home.appendingPathComponent(".claude/projects")
+
+        // Search every immediate subdirectory for <sessionId>.jsonl
+        let subdirs = (try? FileManager.default.contentsOfDirectory(
+            at: projectsDir, includingPropertiesForKeys: [.isDirectoryKey],
+            options: .skipsHiddenFiles)) ?? []
+        let fm = FileManager.default
+        var path: URL? = nil
+        for sub in subdirs {
+            guard (try? sub.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            else { continue }
+            let candidate = sub.appendingPathComponent("\(sessionId).jsonl")
+            if fm.fileExists(atPath: candidate.path) { path = candidate; break }
+        }
+        guard let path else { return [] }
+
         guard
             let data    = try? Data(contentsOf: path),
             let content = String(data: data, encoding: .utf8)

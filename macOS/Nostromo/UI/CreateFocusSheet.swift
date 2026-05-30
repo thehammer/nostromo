@@ -150,14 +150,30 @@ final class CreateFocusSheet: NSWindowController {
 
         agentPopup.removeAllItems()
         agentPopup.addItems(withTitles: agents)
+        // Default to claudia if present
+        if let idx = agents.firstIndex(of: "claudia") {
+            agentPopup.selectItem(at: idx)
+        }
 
-        // Projects: ~/Code/ subdirectories
+        // Projects: ~/Code/ subdirectories, excluding git worktrees.
+        // A worktree has `.git` as a plain file; a normal repo has `.git` as a directory.
         let codeDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Code")
-        projects = (try? FileManager.default.contentsOfDirectory(
+        let fm = FileManager.default
+        projects = (try? fm.contentsOfDirectory(
             at: codeDir,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: .skipsHiddenFiles))?
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
+            .filter { url in
+                guard (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+                else { return false }
+                // Exclude worktrees — their .git is a file, not a directory
+                let gitPath = url.appendingPathComponent(".git").path
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: gitPath, isDirectory: &isDir) {
+                    return isDir.boolValue  // true = real repo, false = worktree
+                }
+                return true  // no .git at all — include (e.g. non-git project dirs)
+            }
             .map { $0.path }
             .sorted() ?? []
 
