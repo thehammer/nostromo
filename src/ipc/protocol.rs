@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent_bus::ActivityEvent,
+    ipc::stream_json::{SessionState, Turn, TurnDelta},
     mother::{MotherJob, MotherStatus},
 };
 
@@ -17,11 +18,18 @@ use crate::{
 pub const SOCKET_PATH_ENV: &str = "NOSTROMOD_SOCKET";
 
 /// Current protocol version — bump when messages change in a breaking way.
-/// Phase 5b introduces PTY ownership in the daemon; clients announcing < 2
-/// will be rejected.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Phase 5b introduced PTY ownership in the daemon (v2). v3 adds the
+/// daemon-hosted persistent stream-json session protocol (`Session*` messages).
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Minimum client version accepted by the daemon.
+///
+/// Held at 2 deliberately: every v3 addition (the `Session*` message family) is
+/// *additive* and opt-in — a v2 client simply never sends or receives them — so
+/// a not-yet-migrated v2 GUI keeps working against a v3 daemon. This avoids
+/// stranding the running GUI in the window between the daemon-core milestone and
+/// the Swift thin-client milestone. (Confirm with the operator before raising
+/// this to 3 once the Swift client speaks v3.)
 pub const MIN_CLIENT_VERSION: u32 = 2;
 
 /// Maximum accepted frame body size (4 MiB).
@@ -60,6 +68,44 @@ pub struct PtyInfo {
     pub last_activity: Option<SystemTime>,
     /// Tag identifying which view/agent owns this PTY (e.g. `"fred"`, `"cody"`).
     pub client_tag: String,
+}
+
+// ── persistent session metadata ──────────────────────────────────────────────
+
+/// Lifecycle action for a daemon-hosted session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAction {
+    /// Kill the child but keep the persisted session id (resumable).
+    Stop,
+    /// Stop then respawn with `--resume <session_id>`.
+    Restart,
+    /// Drop the persisted session id; the next spawn starts fresh.
+    NewSession,
+}
+
+/// Operator decision on a permission request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecision {
+    Allow,
+    Deny,
+}
+
+/// Metadata about a daemon-hosted persistent session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// Focus tag — the stable local IPC address for the session.
+    pub tag: String,
+    /// Agent passed to `--agent`.
+    pub agent_name: String,
+    /// Human-facing name passed to `-n` / `--remote-control`.
+    pub view_name: String,
+    /// Persisted `claude` session id, once known.
+    pub session_id: Option<String>,
+    pub alive: bool,
+    pub remote_control: bool,
+    pub state: SessionState,
 }
 
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────
@@ -139,6 +185,50 @@ pub enum ClientMsg {
 
     /// Request a snapshot of all live PTYs owned by this daemon.
     PtyList,
+
+    // ── persistent session commands (protocol v3) ─────────────────────────────
+    /// Start (or resume) a focus's persistent stream-json session. Idempotent:
+    /// spawning an already-live tag is a no-op that still succeeds.
+    SessionSpawn {
+        /// Focus tag — stable local key for the session.
+        tag: String,
+        /// Agent passed to `--agent`.
+        agent_name: String,
+        /// Human-facing name passed to `-n` (and `--remote-control` when on).
+        view_name: String,
+        cwd: Option<PathBuf>,
+        /// Resume this `claude` session id if supplied; otherwise the daemon
+        /// uses its persisted id for the tag, or assigns a fresh one.
+        session_id: Option<String>,
+        /// Spawn with `--remote-control <view_name>` for native cross-device
+        /// (phone) control via Anthropic's relay.
+        remote_control: bool,
+    },
+
+    /// Attach to a session: daemon replies with a `SessionTurns` snapshot then
+    /// streams `SessionTurnDelta` / `SessionState`. Multiple clients may attach
+    /// to the same tag (broadcast fan-out — mirroring).
+    SessionAttach { tag: String },
+
+    /// Stop receiving deltas for a session without stopping the child.
+    SessionDetach { tag: String },
+
+    /// Enqueue a user message; the daemon writes it to the child's stdin.
+    SessionSend { tag: String, text: String },
+
+    /// Lifecycle control (stop / restart / new_session).
+    SessionControl { tag: String, action: SessionAction },
+
+    /// Answer a `SessionPermissionRequest` (only used if a stdout-answerable
+    /// permission path is available; the default posture is bypass).
+    SessionAnswerPermission {
+        tag: String,
+        request_id: String,
+        decision: PermissionDecision,
+    },
+
+    /// Request a snapshot of all daemon-hosted sessions.
+    SessionList,
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -221,10 +311,175 @@ pub enum ServerMsg {
         nostromo_session_id: String,
     },
 
+    // ── persistent session responses (protocol v3) ───────────────────────────
+    /// A session was spawned (or was already live). Carries the resolved
+    /// `claude` session id once known.
+    SessionSpawned {
+        tag: String,
+        session_id: Option<String>,
+    },
+
+    /// Full turn snapshot, sent immediately on attach.
+    SessionTurns { tag: String, turns: Vec<Turn> },
+
+    /// Incremental turn update.
+    SessionTurnDelta { tag: String, delta: TurnDelta },
+
+    /// Session lifecycle state changed.
+    SessionState { tag: String, state: SessionState },
+
+    /// A permission request surfaced on the stream (only emitted if the binary
+    /// surfaces an answerable request; otherwise permissions are bypassed or
+    /// answered natively on the phone).
+    SessionPermissionRequest {
+        tag: String,
+        request_id: String,
+        tool: String,
+        input: serde_json::Value,
+    },
+
+    /// The session's child process exited.
+    SessionExited {
+        tag: String,
+        exit_code: Option<i32>,
+    },
+
+    /// Response to `SessionList`.
+    SessionListResp { sessions: Vec<SessionInfo> },
+
     /// TUI-internal pseudo-event — **never produced by the daemon**.
     ///
     /// Injected locally by the [`DaemonClient`] supervisor immediately after a
     /// successful reconnect so subscribers (e.g. `DaemonPtyClient`) can
     /// re-issue their attach/subscribe commands.
     DaemonReconnected,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::stream_json::{Turn, TurnDelta};
+
+    /// Round-trip a ClientMsg through JSON and back, asserting equality of the
+    /// re-serialised form (ClientMsg isn't PartialEq, so compare JSON).
+    fn round_trip_client(msg: ClientMsg) {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ClientMsg = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&back).unwrap();
+        assert_eq!(json, json2, "client msg round trip mismatch: {json}");
+    }
+
+    fn round_trip_server(msg: ServerMsg) {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&back).unwrap();
+        assert_eq!(json, json2, "server msg round trip mismatch: {json}");
+    }
+
+    #[test]
+    fn session_client_messages_round_trip() {
+        round_trip_client(ClientMsg::SessionSpawn {
+            tag: "fred".into(),
+            agent_name: "fred".into(),
+            view_name: "Fred".into(),
+            cwd: Some("/tmp".into()),
+            session_id: Some("sid-1".into()),
+            remote_control: true,
+        });
+        round_trip_client(ClientMsg::SessionAttach { tag: "fred".into() });
+        round_trip_client(ClientMsg::SessionDetach { tag: "fred".into() });
+        round_trip_client(ClientMsg::SessionSend {
+            tag: "fred".into(),
+            text: "hello".into(),
+        });
+        round_trip_client(ClientMsg::SessionControl {
+            tag: "fred".into(),
+            action: SessionAction::Restart,
+        });
+        round_trip_client(ClientMsg::SessionAnswerPermission {
+            tag: "fred".into(),
+            request_id: "r1".into(),
+            decision: PermissionDecision::Allow,
+        });
+        round_trip_client(ClientMsg::SessionList);
+    }
+
+    #[test]
+    fn session_server_messages_round_trip() {
+        round_trip_server(ServerMsg::SessionSpawned {
+            tag: "fred".into(),
+            session_id: Some("sid".into()),
+        });
+        round_trip_server(ServerMsg::SessionTurns {
+            tag: "fred".into(),
+            turns: vec![Turn {
+                id: "t0".into(),
+                user_input: "hi".into(),
+                timestamp: None,
+                blocks: vec![],
+                is_complete: false,
+            }],
+        });
+        round_trip_server(ServerMsg::SessionTurnDelta {
+            tag: "fred".into(),
+            delta: TurnDelta::TurnStarted {
+                turn: Turn {
+                    id: "t0".into(),
+                    user_input: "hi".into(),
+                    timestamp: None,
+                    blocks: vec![],
+                    is_complete: false,
+                },
+            },
+        });
+        round_trip_server(ServerMsg::SessionState {
+            tag: "fred".into(),
+            state: SessionState::MidTurn,
+        });
+        round_trip_server(ServerMsg::SessionPermissionRequest {
+            tag: "fred".into(),
+            request_id: "r1".into(),
+            tool: "Bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        round_trip_server(ServerMsg::SessionExited {
+            tag: "fred".into(),
+            exit_code: Some(0),
+        });
+        round_trip_server(ServerMsg::SessionListResp {
+            sessions: vec![SessionInfo {
+                tag: "fred".into(),
+                agent_name: "fred".into(),
+                view_name: "Fred".into(),
+                session_id: None,
+                alive: true,
+                remote_control: false,
+                state: SessionState::Idle,
+            }],
+        });
+    }
+
+    #[test]
+    fn session_action_is_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SessionAction::NewSession).unwrap(),
+            "\"new_session\""
+        );
+    }
+
+    #[test]
+    fn client_msg_uses_type_tag() {
+        let v = serde_json::to_value(ClientMsg::SessionSend {
+            tag: "t".into(),
+            text: "x".into(),
+        })
+        .unwrap();
+        assert_eq!(v.get("type").unwrap(), "session_send");
+    }
+
+    #[test]
+    fn protocol_version_is_v3() {
+        assert_eq!(PROTOCOL_VERSION, 3);
+        assert!(MIN_CLIENT_VERSION <= PROTOCOL_VERSION);
+    }
 }

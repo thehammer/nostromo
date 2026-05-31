@@ -1,0 +1,1151 @@
+//! Daemon-side persistent stream-json session manager.
+//!
+//! `SessionManager` is to stream-json sessions what [`super::pty_manager::PtyManager`]
+//! is to PTYs: it owns long-lived `claude` child processes on behalf of
+//! `nostromd` so a session survives the GUI disconnecting, crashing, or
+//! restarting. It is the daemon-side home of the persistent
+//! `--input-format stream-json --output-format stream-json` session host.
+//!
+//! ## One process per focus
+//!
+//! Each focus `tag` is backed by **one** long-lived child:
+//!
+//! ```text
+//! claude --settings '{"permissions":{"defaultMode":"bypassPermissions"}}' \
+//!        --input-format stream-json --output-format stream-json --verbose \
+//!        --replay-user-messages --agent <agent> -n <view> \
+//!        [--remote-control <view>] (--session-id <uuid> | --resume <uuid>)
+//! ```
+//!
+//! `--replay-user-messages` is always passed so every stdin-origin user message
+//! is re-emitted on stdout tagged `"isReplay": true`. The daemon therefore
+//! renders **all** user messages off the output stream (the unified input
+//! model) — `send_user_message` only injects to stdin and never separately
+//! broadcasts the local message; it comes back on the output stream like any
+//! other turn. (Spike-confirmed against `claude` 2.1.158.)
+//!
+//! ## Output fan-out
+//!
+//! A blocking reader thread parses the child's stdout line-by-line into the
+//! shared [`SessionTranscript`] and broadcasts [`SessionEvent`]s. A per-attached
+//! client forwarder converts events into `ServerMsg::SessionTurnDelta` /
+//! `SessionState` / `SessionExited` and writes them to the client's
+//! per-connection sender — exactly mirroring `PtyManager`'s pattern, except
+//! **multiple** clients may attach to one tag (mirroring is a broadcast).
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use anyhow::{anyhow, Result};
+use tokio::sync::{broadcast, mpsc};
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+use super::protocol::{SessionInfo, ServerMsg};
+use super::stream_json::{load_scrollback, SessionState, SessionTranscript, TurnDelta};
+
+/// Env var overriding the resolved `claude` binary path (used by tests and by
+/// operators with a non-standard install).
+pub const CLAUDE_BIN_ENV: &str = "NOSTROMO_CLAUDE_BIN";
+
+/// How many scrollback turns to replay when resuming a session.
+const SCROLLBACK_TURNS: usize = 30;
+
+/// Crash-loop guard: at most this many auto-restarts within the window.
+const MAX_RESTARTS: u32 = 3;
+const RESTART_WINDOW_SECS: u64 = 30;
+
+// ── broadcast event ─────────────────────────────────────────────────────────
+
+/// Output unit broadcast by a session's reader thread.
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    Delta(TurnDelta),
+    State(SessionState),
+    Exited { exit_code: Option<i32> },
+}
+
+// ── shared, reader-thread-visible session state ───────────────────────────────
+
+/// State shared between the manager (under its Mutex) and the detached reader
+/// thread. Cloneable `Arc` handles only — no back-reference to the manager.
+struct Shared {
+    transcript: Arc<Mutex<SessionTranscript>>,
+    /// Child stdin for writing user-message frames (manager + reader drain).
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    /// Queued user messages awaiting an idle turn.
+    pending: Arc<Mutex<VecDeque<String>>>,
+    /// Single source of truth for the live turn state.
+    state: Arc<Mutex<SessionState>>,
+    /// Set by the reader on stdout EOF (child exited / stream closed).
+    exited: Arc<AtomicBool>,
+    event_tx: broadcast::Sender<SessionEvent>,
+}
+
+impl Shared {
+    fn broadcast(&self, ev: SessionEvent) {
+        let _ = self.event_tx.send(ev);
+    }
+
+    fn set_state(&self, s: SessionState) {
+        *self.state.lock().unwrap() = s;
+        self.broadcast(SessionEvent::State(s));
+    }
+}
+
+// ── managed session ───────────────────────────────────────────────────────────
+
+struct ManagedSession {
+    tag: String,
+    agent_name: String,
+    view_name: String,
+    cwd: Option<PathBuf>,
+    remote_control: bool,
+    /// Resolved `claude` session id (persisted in the id store).
+    session_id: Option<String>,
+    child: Child,
+    shared: Shared,
+    /// How to respawn on restart. `None` → a real `claude` session (rebuild
+    /// args with `--resume`). `Some((program, args))` → replay this exact
+    /// program/args verbatim (used by tests to inject a stub child so restart
+    /// never touches the real `claude` binary or the network).
+    respawn_fixed: Option<(PathBuf, Vec<String>)>,
+    /// Set true immediately before an intentional kill so the supervisor does
+    /// not treat the resulting EOF as a crash to recover from.
+    intentional_stop: Arc<AtomicBool>,
+    attached_clients: HashSet<String>,
+    /// Per-client forwarder abort handles.
+    forwarders: HashMap<String, tokio::task::AbortHandle>,
+    _reader_task: tokio::task::JoinHandle<()>,
+    restart_count: u32,
+    restart_window_start: Instant,
+}
+
+impl ManagedSession {
+    fn alive(&self) -> bool {
+        !self.shared.exited.load(Ordering::SeqCst)
+    }
+
+    fn state(&self) -> SessionState {
+        *self.shared.state.lock().unwrap()
+    }
+
+    fn info(&self) -> SessionInfo {
+        SessionInfo {
+            tag: self.tag.clone(),
+            agent_name: self.agent_name.clone(),
+            view_name: self.view_name.clone(),
+            session_id: self.session_id.clone(),
+            alive: self.alive(),
+            remote_control: self.remote_control,
+            state: self.state(),
+        }
+    }
+}
+
+// ── SessionManager ────────────────────────────────────────────────────────────
+
+/// Shared daemon-side registry of running stream-json sessions.
+///
+/// All public methods take `&mut self` — callers hold the wrapping Mutex.
+pub struct SessionManager {
+    sessions: HashMap<String, ManagedSession>,
+    client_senders: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ServerMsg>>>>,
+    /// Path to the daemon-owned `tag -> session_id` store.
+    store_path: PathBuf,
+}
+
+impl SessionManager {
+    pub fn new() -> Self {
+        Self::with_store_path(default_store_path())
+    }
+
+    pub fn with_store_path(store_path: PathBuf) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            client_senders: Arc::new(Mutex::new(HashMap::new())),
+            store_path,
+        }
+    }
+
+    pub fn client_sender_registry(
+        &self,
+    ) -> Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ServerMsg>>>> {
+        Arc::clone(&self.client_senders)
+    }
+
+    // ── spawn ───────────────────────────────────────────────────────────────
+
+    /// Spawn (or resume) a focus's persistent session. Idempotent: if the tag
+    /// already has a live child this is a no-op returning the known session id.
+    pub fn spawn_session(
+        &mut self,
+        tag: String,
+        agent_name: String,
+        view_name: String,
+        cwd: Option<PathBuf>,
+        session_id: Option<String>,
+        remote_control: bool,
+    ) -> Result<Option<String>> {
+        if let Some(existing) = self.sessions.get(&tag) {
+            if existing.alive() {
+                return Ok(existing.session_id.clone());
+            }
+        }
+
+        // Resolve the session id: explicit arg › persisted store › fresh uuid.
+        let store = load_id_store(&self.store_path);
+        let resolved = session_id.or_else(|| store.get(&tag).cloned());
+        let (effective_id, resume) = match resolved {
+            Some(id) => (id, true),
+            None => (Uuid::new_v4().to_string(), false),
+        };
+
+        let program = resolve_claude()?;
+        let args = build_claude_args(&agent_name, &view_name, remote_control, &effective_id, resume);
+
+        let managed = self.spawn_managed(
+            tag.clone(),
+            agent_name,
+            view_name,
+            cwd,
+            remote_control,
+            effective_id.clone(),
+            resume,
+            program,
+            args,
+            None,
+        )?;
+
+        self.sessions.insert(tag.clone(), managed);
+
+        // Persist the (possibly freshly generated) id for the tag.
+        save_id(&self.store_path, &tag, Some(&effective_id));
+        info!(tag, session_id = %effective_id, resume, "session spawned");
+        Ok(Some(effective_id))
+    }
+
+    /// Spawn an arbitrary program as a session child. Factored out so tests can
+    /// inject a stub program in place of `claude`.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_managed(
+        &self,
+        tag: String,
+        agent_name: String,
+        view_name: String,
+        cwd: Option<PathBuf>,
+        remote_control: bool,
+        session_id: String,
+        resume: bool,
+        program: PathBuf,
+        args: Vec<String>,
+        respawn_fixed: Option<(PathBuf, Vec<String>)>,
+    ) -> Result<ManagedSession> {
+        // Pre-populate the transcript from stored scrollback when resuming.
+        let transcript = if resume {
+            load_scrollback(&session_id, SCROLLBACK_TURNS)
+        } else {
+            SessionTranscript::new()
+        };
+
+        let mut cmd = Command::new(&program);
+        cmd.args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(dir) = cwd.clone().or_else(|| std::env::current_dir().ok()) {
+            cmd.current_dir(dir);
+        }
+        augment_path(&mut cmd);
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow!("failed to spawn {}: {e}", program.display()))?;
+
+        let stdin = child.stdin.take();
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("child has no stdout"))?;
+
+        let (event_tx, _) = broadcast::channel::<SessionEvent>(512);
+        let shared = Shared {
+            transcript: Arc::new(Mutex::new(transcript)),
+            stdin: Arc::new(Mutex::new(stdin)),
+            pending: Arc::new(Mutex::new(VecDeque::new())),
+            state: Arc::new(Mutex::new(SessionState::Idle)),
+            exited: Arc::new(AtomicBool::new(false)),
+            event_tx,
+        };
+
+        // Reader thread: parse stdout → transcript → broadcast deltas; drain
+        // the pending queue on turn completion; signal exit on EOF.
+        let reader_shared = Shared {
+            transcript: Arc::clone(&shared.transcript),
+            stdin: Arc::clone(&shared.stdin),
+            pending: Arc::clone(&shared.pending),
+            state: Arc::clone(&shared.state),
+            exited: Arc::clone(&shared.exited),
+            event_tx: shared.event_tx.clone(),
+        };
+        let tag_for_reader = tag.clone();
+        let reader_task =
+            tokio::task::spawn_blocking(move || run_reader(tag_for_reader, stdout, reader_shared));
+
+        Ok(ManagedSession {
+            tag,
+            agent_name,
+            view_name,
+            cwd,
+            remote_control,
+            session_id: Some(session_id),
+            child,
+            shared,
+            respawn_fixed,
+            intentional_stop: Arc::new(AtomicBool::new(false)),
+            attached_clients: HashSet::new(),
+            forwarders: HashMap::new(),
+            _reader_task: reader_task,
+            restart_count: 0,
+            restart_window_start: Instant::now(),
+        })
+    }
+
+    // ── send ──────────────────────────────────────────────────────────────────
+
+    /// Enqueue a user message. Writes immediately to stdin if the session is
+    /// idle, otherwise queues it to drain after the current turn completes.
+    pub fn send_user_message(&mut self, tag: &str, text: &str) -> Result<()> {
+        let session = self
+            .sessions
+            .get(tag)
+            .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
+        if !session.alive() {
+            anyhow::bail!("session {tag} is not alive");
+        }
+
+        // Decide under the state lock, then release it BEFORE touching stdin.
+        // The reader's drain path locks stdin then state; if we held state while
+        // acquiring stdin we'd risk an AB-BA deadlock. Acquiring each lock in a
+        // separate, non-overlapping critical section avoids that entirely.
+        let should_write = {
+            let mut state = session.shared.state.lock().unwrap();
+            if *state == SessionState::Idle {
+                // Optimistically mark mid-turn so a follow-up send queues rather
+                // than racing a second message onto stdin before the echo lands.
+                *state = SessionState::MidTurn;
+                true
+            } else {
+                false
+            }
+        };
+
+        if should_write {
+            if let Err(e) = write_user_frame(&session.shared.stdin, text) {
+                // The optimistic MidTurn would otherwise wedge the session.
+                *session.shared.state.lock().unwrap() = SessionState::Idle;
+                return Err(e);
+            }
+            session
+                .shared
+                .broadcast(SessionEvent::State(SessionState::MidTurn));
+        } else {
+            session.shared.pending.lock().unwrap().push_back(text.to_string());
+        }
+        Ok(())
+    }
+
+    // ── attach / detach ─────────────────────────────────────────────────────
+
+    /// Attach `client_id` to `tag`: send a `SessionTurns` snapshot + current
+    /// `SessionState`, then forward live events. Multiple clients may attach.
+    pub fn attach(&mut self, tag: &str, client_id: &str) -> Result<()> {
+        let (turns, state, event_rx) = {
+            let session = self
+                .sessions
+                .get_mut(tag)
+                .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
+            session.attached_clients.insert(client_id.to_string());
+            let turns = session.shared.transcript.lock().unwrap().snapshot();
+            let state = session.state();
+            let rx = session.shared.event_tx.subscribe();
+            (turns, state, rx)
+        };
+
+        self.send_to_client(client_id, ServerMsg::SessionTurns { tag: tag.to_string(), turns });
+        self.send_to_client(client_id, ServerMsg::SessionState { tag: tag.to_string(), state });
+
+        // Forwarder task: SessionEvent → targeted ServerMsg.
+        let senders = Arc::clone(&self.client_senders);
+        let tag_s = tag.to_string();
+        let client_s = client_id.to_string();
+        let mut rx = event_rx;
+        let task = tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        let msg = match ev {
+                            SessionEvent::Delta(delta) => ServerMsg::SessionTurnDelta {
+                                tag: tag_s.clone(),
+                                delta,
+                            },
+                            SessionEvent::State(state) => ServerMsg::SessionState {
+                                tag: tag_s.clone(),
+                                state,
+                            },
+                            SessionEvent::Exited { exit_code } => ServerMsg::SessionExited {
+                                tag: tag_s.clone(),
+                                exit_code,
+                            },
+                        };
+                        let guard = senders.lock().unwrap();
+                        match guard.get(&client_s) {
+                            Some(tx) => {
+                                let _ = tx.send(msg);
+                            }
+                            None => break, // client disconnected
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(tag = %tag_s, client = %client_s, "session forwarder lagged {n}");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        if let Some(session) = self.sessions.get_mut(tag) {
+            session.forwarders.insert(client_id.to_string(), task.abort_handle());
+        }
+        info!(tag, client_id, "session attach");
+        Ok(())
+    }
+
+    /// Detach `client_id` from `tag` (the child keeps running).
+    pub fn detach(&mut self, tag: &str, client_id: &str) {
+        if let Some(session) = self.sessions.get_mut(tag) {
+            session.attached_clients.remove(client_id);
+            if let Some(h) = session.forwarders.remove(client_id) {
+                h.abort();
+            }
+        }
+    }
+
+    // ── lifecycle control ─────────────────────────────────────────────────────
+
+    /// Stop the child but keep the persisted session id (resumable).
+    pub fn stop(&mut self, tag: &str) {
+        if let Some(session) = self.sessions.get_mut(tag) {
+            session.intentional_stop.store(true, Ordering::SeqCst);
+            let _ = session.child.kill();
+            session.shared.exited.store(true, Ordering::SeqCst);
+            for (_, h) in session.forwarders.drain() {
+                h.abort();
+            }
+            debug!(tag, "session stopped");
+        }
+    }
+
+    /// Stop then respawn with `--resume <session_id>`, preserving the set of
+    /// attached clients (mirroring survives a restart).
+    pub fn restart(&mut self, tag: &str) -> Result<()> {
+        let (agent, view, cwd, sid, rc, fixed, attached) = {
+            let s = self
+                .sessions
+                .get(tag)
+                .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
+            (
+                s.agent_name.clone(),
+                s.view_name.clone(),
+                s.cwd.clone(),
+                s.session_id.clone(),
+                s.remote_control,
+                s.respawn_fixed.clone(),
+                s.attached_clients.iter().cloned().collect::<Vec<_>>(),
+            )
+        };
+        self.stop(tag);
+        self.sessions.remove(tag);
+
+        match fixed {
+            // Real claude session: resolve the binary and resume.
+            None => {
+                self.spawn_session(tag.to_string(), agent, view, cwd, sid, rc)?;
+            }
+            // Test stub / fixed program: replay it verbatim.
+            Some((program, args)) => {
+                let effective_id = sid.unwrap_or_else(|| Uuid::new_v4().to_string());
+                let managed = self.spawn_managed(
+                    tag.to_string(),
+                    agent,
+                    view,
+                    cwd,
+                    rc,
+                    effective_id,
+                    true,
+                    program.clone(),
+                    args.clone(),
+                    Some((program, args)),
+                )?;
+                self.sessions.insert(tag.to_string(), managed);
+            }
+        }
+
+        // Re-attach previously attached clients so the GUI re-syncs after a
+        // transparent restart.
+        for client_id in attached {
+            let _ = self.attach(tag, &client_id);
+        }
+        Ok(())
+    }
+
+    /// Drop the persisted session id and stop the child; the next spawn starts
+    /// a fresh conversation.
+    pub fn new_session(&mut self, tag: &str) {
+        self.stop(tag);
+        self.sessions.remove(tag);
+        save_id(&self.store_path, tag, None);
+        debug!(tag, "session id cleared — next spawn is fresh");
+    }
+
+    /// Periodic supervisor pass (driven by the daemon): detect crashed children
+    /// and auto-restart those still wanted (attached or with queued messages),
+    /// subject to the crash-loop guard.
+    pub fn reap_and_recover(&mut self) {
+        let crashed: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| {
+                s.shared.exited.load(Ordering::SeqCst)
+                    && !s.intentional_stop.load(Ordering::SeqCst)
+            })
+            .map(|(tag, _)| tag.clone())
+            .collect();
+
+        for tag in crashed {
+            let wants_recovery;
+            let within_budget;
+            {
+                let s = self.sessions.get_mut(&tag).unwrap();
+                // Mark the in-flight turn errored and announce the crash once.
+                let delta = s.shared.transcript.lock().unwrap().mark_current_errored(
+                    "session process exited unexpectedly",
+                );
+                if let Some(d) = delta {
+                    s.shared.broadcast(SessionEvent::Delta(d));
+                }
+                s.shared.set_state(SessionState::Crashed);
+
+                let has_pending = !s.shared.pending.lock().unwrap().is_empty();
+                wants_recovery = !s.attached_clients.is_empty() || has_pending;
+
+                // Reset the restart window if it has elapsed.
+                //
+                // NOTE (fixed-window limitation): this is a fixed window, not a
+                // sliding one. A session that crashes just under RESTART_WINDOW_SECS
+                // apart resets the counter each time and can restart indefinitely
+                // without tripping MAX_RESTARTS. That's acceptable here — a genuinely
+                // broken `claude` child crash-loops far faster than the window, so the
+                // guard catches the real case; this only permits a slow, intermittent
+                // recrash, which is the behavior we'd want anyway. If that ever proves
+                // too lenient, switch to a sliding window (VecDeque<Instant> of recent
+                // crash times).
+                if s.restart_window_start.elapsed().as_secs() >= RESTART_WINDOW_SECS {
+                    s.restart_count = 0;
+                    s.restart_window_start = Instant::now();
+                }
+                within_budget = s.restart_count < MAX_RESTARTS;
+            }
+
+            if wants_recovery && within_budget {
+                let prev_restarts = self.sessions.get(&tag).map(|s| s.restart_count).unwrap_or(0);
+                warn!(tag, restart = prev_restarts + 1, "auto-restarting crashed session");
+                if let Err(e) = self.restart(&tag) {
+                    warn!(tag, "auto-restart failed: {e:#}");
+                } else if let Some(s) = self.sessions.get_mut(&tag) {
+                    s.restart_count = prev_restarts + 1;
+                }
+            } else if !within_budget {
+                warn!(tag, "crash-loop guard tripped; leaving session crashed");
+                // Prevent repeated recovery attempts: treat as intentional.
+                if let Some(s) = self.sessions.get_mut(&tag) {
+                    s.intentional_stop.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    // ── list ──────────────────────────────────────────────────────────────────
+
+    pub fn list(&self) -> Vec<SessionInfo> {
+        self.sessions.values().map(|s| s.info()).collect()
+    }
+
+    // ── shutdown ────────────────────────────────────────────────────────────
+
+    /// Kill all children. Called on SIGTERM.
+    pub fn kill_all_on_shutdown(&mut self) {
+        for (tag, session) in &mut self.sessions {
+            session.intentional_stop.store(true, Ordering::SeqCst);
+            let _ = session.child.kill();
+            for (_, h) in session.forwarders.drain() {
+                h.abort();
+            }
+            info!(tag = %tag, "session killed on shutdown");
+        }
+        self.sessions.clear();
+    }
+
+    /// Detach all of a disconnecting client's sessions (children keep running).
+    pub fn on_client_disconnect(&mut self, client_id: &str) {
+        for session in self.sessions.values_mut() {
+            session.attached_clients.remove(client_id);
+            if let Some(h) = session.forwarders.remove(client_id) {
+                h.abort();
+            }
+        }
+        self.client_senders.lock().unwrap().remove(client_id);
+    }
+
+    // ── helpers ─────────────────────────────────────────────────────────────
+
+    fn send_to_client(&self, client_id: &str, msg: ServerMsg) {
+        let senders = self.client_senders.lock().unwrap();
+        if let Some(tx) = senders.get(client_id) {
+            let _ = tx.send(msg);
+        }
+    }
+
+    #[cfg(test)]
+    fn session_state(&self, tag: &str) -> Option<SessionState> {
+        self.sessions.get(tag).map(|s| s.state())
+    }
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── reader loop ───────────────────────────────────────────────────────────────
+
+/// Blocking stdout reader: parse each line into the transcript, broadcast
+/// deltas, drive turn state, drain the pending queue, and signal EOF.
+fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
+    let reader = BufReader::new(stdout);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                debug!(tag = %tag, "session reader error: {e}");
+                break;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let deltas = shared.transcript.lock().unwrap().ingest_line(&line);
+        for delta in deltas {
+            match &delta {
+                TurnDelta::TurnStarted { .. } => {
+                    shared.set_state(SessionState::MidTurn);
+                }
+                TurnDelta::TurnCompleted { .. } | TurnDelta::TurnErrored { .. } => {
+                    shared.broadcast(SessionEvent::Delta(delta.clone()));
+                    drain_or_idle(&shared);
+                    continue;
+                }
+                _ => {}
+            }
+            shared.broadcast(SessionEvent::Delta(delta));
+        }
+    }
+
+    // stdout closed → child exited / stream ended.
+    shared.exited.store(true, Ordering::SeqCst);
+    shared.broadcast(SessionEvent::Exited { exit_code: None });
+    debug!(tag = %tag, "session reader EOF");
+}
+
+/// After a turn completes, send the next queued message (staying mid-turn) or
+/// fall back to idle.
+fn drain_or_idle(shared: &Shared) {
+    let next = shared.pending.lock().unwrap().pop_front();
+    match next {
+        Some(text) => {
+            if write_user_frame(&shared.stdin, &text).is_ok() {
+                shared.set_state(SessionState::MidTurn);
+            } else {
+                shared.set_state(SessionState::Idle);
+            }
+        }
+        None => shared.set_state(SessionState::Idle),
+    }
+}
+
+/// Write one stream-json user-message frame to the child's stdin.
+fn write_user_frame(stdin: &Arc<Mutex<Option<ChildStdin>>>, text: &str) -> Result<()> {
+    let frame = serde_json::json!({
+        "type": "user",
+        "message": { "role": "user", "content": text }
+    });
+    let mut line = serde_json::to_string(&frame)?;
+    line.push('\n');
+
+    let mut guard = stdin.lock().unwrap();
+    let stdin = guard.as_mut().ok_or_else(|| anyhow!("session stdin closed"))?;
+    stdin.write_all(line.as_bytes())?;
+    stdin.flush()?;
+    Ok(())
+}
+
+// ── claude resolution + arg construction ──────────────────────────────────────
+
+/// Build the `claude` argument vector for a persistent stream-json session.
+pub fn build_claude_args(
+    agent_name: &str,
+    view_name: &str,
+    remote_control: bool,
+    session_id: &str,
+    resume: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        // Authoritative permission bypass, scoped to this session only (never
+        // the operator's global ~/.claude/settings.json). This is the
+        // load-bearing safety net carried from fix/repl-headless-permissions.
+        "--settings".into(),
+        r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#.into(),
+        "--input-format".into(),
+        "stream-json".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+        // Re-emit stdin-origin user messages on stdout (tagged isReplay) so the
+        // daemon renders every user message off the output stream.
+        "--replay-user-messages".into(),
+        "--agent".into(),
+        agent_name.into(),
+        "-n".into(),
+        view_name.into(),
+    ];
+    if remote_control {
+        args.push("--remote-control".into());
+        args.push(view_name.into());
+    }
+    if resume {
+        args.push("--resume".into());
+        args.push(session_id.into());
+    } else {
+        args.push("--session-id".into());
+        args.push(session_id.into());
+    }
+    args
+}
+
+/// Resolve the `claude` binary: `$NOSTROMO_CLAUDE_BIN`, then common install
+/// locations (port of the Swift `findClaude`), then `which`.
+pub fn resolve_claude() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var(CLAUDE_BIN_ENV) {
+        if !p.is_empty() {
+            return Ok(PathBuf::from(p));
+        }
+    }
+    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let candidates = [
+        PathBuf::from("/usr/local/bin/claude"),
+        PathBuf::from("/opt/homebrew/bin/claude"),
+        home.join(".npm/bin/claude"),
+        home.join(".nvm/versions/node/current/bin/claude"),
+        home.join(".nvm/versions/node/lts/bin/claude"),
+        home.join(".local/bin/claude"),
+    ];
+    for c in candidates {
+        if is_executable(&c) {
+            return Ok(c);
+        }
+    }
+    // Last resort: `which claude`.
+    if let Ok(out) = Command::new("which").arg("claude").output() {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() {
+                return Ok(PathBuf::from(p));
+            }
+        }
+    }
+    Err(anyhow!(
+        "cannot find the `claude` binary (set {CLAUDE_BIN_ENV} or install Claude Code)"
+    ))
+}
+
+fn is_executable(p: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
+/// Augment PATH so `claude` can find its node/helpers (mirror of the Swift env
+/// augmentation).
+fn augment_path(cmd: &mut Command) {
+    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let extra = [
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        home.join(".npm/bin"),
+        home.join(".nvm/versions/node/current/bin"),
+    ];
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    for e in extra {
+        path.push(':');
+        path.push_str(&e.to_string_lossy());
+    }
+    cmd.env("PATH", path);
+}
+
+// ── session-id store ────────────────────────────────────────────────────────
+
+/// Daemon-owned `tag -> session_id` store path.
+///
+/// `~/.nostromo/daemon-sessions.json`. Kept separate from the Swift one-shot
+/// fallback's `gui-sessions.json`; the Swift thin-client milestone reconciles
+/// the two so a feature-flag flip doesn't fork the conversation.
+pub fn default_store_path() -> PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".nostromo")
+        .join("daemon-sessions.json")
+}
+
+fn load_id_store(path: &std::path::Path) -> HashMap<String, String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Serializes the read-modify-write of the id store so concurrent session
+/// spawns can't clobber each other's entries (the store maps focus tag →
+/// claude session_id, used to `--resume` a conversation).
+static SAVE_ID_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn save_id(path: &std::path::Path, tag: &str, sid: Option<&str>) {
+    // Hold the lock across the whole read-modify-write so two simultaneous
+    // spawns serialize instead of racing (one reads stale, the other
+    // overwrites and drops the first's entry). Recover from a poisoned lock
+    // rather than panicking the daemon.
+    let _guard = SAVE_ID_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = load_id_store(path);
+    match sid {
+        Some(s) => {
+            map.insert(tag.to_string(), s.to_string());
+        }
+        None => {
+            map.remove(tag);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
+        // Atomic replace: write a sibling temp file, then rename over the
+        // store. A crash mid-write leaves the temp file behind, never a
+        // truncated/zero-byte store — so a resumable session_id is never
+        // silently lost (which would make the next spawn start a fresh
+        // conversation with no error). rename(2) within one dir is atomic.
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            if std::fs::rename(&tmp, path).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn tmp_store() -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let unique = format!("nostromo-test-{}.json", Uuid::new_v4());
+        p.push(unique);
+        p
+    }
+
+    // ── arg construction ──────────────────────────────────────────────────────
+
+    #[test]
+    fn args_fresh_session_uses_session_id_flag() {
+        let args = build_claude_args("fred", "Fred", false, "sid-1", false);
+        assert!(args.windows(2).any(|w| w == ["--session-id", "sid-1"]));
+        assert!(!args.iter().any(|a| a == "--resume"));
+        assert!(!args.iter().any(|a| a == "--remote-control"));
+        // bypass settings + stream-json + replay always present.
+        assert!(args.iter().any(|a| a.contains("bypassPermissions")));
+        assert!(args.windows(2).any(|w| w == ["--input-format", "stream-json"]));
+        assert!(args.windows(2).any(|w| w == ["--output-format", "stream-json"]));
+        assert!(args.iter().any(|a| a == "--replay-user-messages"));
+        assert!(args.windows(2).any(|w| w == ["--agent", "fred"]));
+        assert!(args.windows(2).any(|w| w == ["-n", "Fred"]));
+    }
+
+    #[test]
+    fn args_resume_uses_resume_flag() {
+        let args = build_claude_args("teri", "Teri", false, "sid-2", true);
+        assert!(args.windows(2).any(|w| w == ["--resume", "sid-2"]));
+        assert!(!args.iter().any(|a| a == "--session-id"));
+    }
+
+    #[test]
+    fn args_remote_control_adds_flag() {
+        let args = build_claude_args("perri", "Perri", true, "sid-3", false);
+        assert!(args.windows(2).any(|w| w == ["--remote-control", "Perri"]));
+    }
+
+    // ── id store ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn id_store_round_trips_and_clears() {
+        let path = tmp_store();
+        save_id(&path, "fred", Some("sid-xyz"));
+        assert_eq!(load_id_store(&path).get("fred").map(String::as_str), Some("sid-xyz"));
+        save_id(&path, "teri", Some("sid-teri"));
+        assert_eq!(load_id_store(&path).len(), 2);
+        save_id(&path, "fred", None);
+        assert!(load_id_store(&path).get("fred").is_none());
+        assert_eq!(load_id_store(&path).get("teri").map(String::as_str), Some("sid-teri"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn id_store_survives_concurrent_writes() {
+        // Regression: concurrent spawns must not clobber each other's entries
+        // (the read-modify-write is serialized) and the store is never left
+        // truncated (atomic temp+rename). Hammer N threads each writing a
+        // distinct tag at the same path; all entries must survive.
+        let path = tmp_store();
+        let n = 24;
+        let handles: Vec<_> = (0..n)
+            .map(|i| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    save_id(&p, &format!("focus-{i}"), Some(&format!("sid-{i}")));
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let map = load_id_store(&path);
+        assert_eq!(map.len(), n, "every concurrent write must be preserved");
+        for i in 0..n {
+            assert_eq!(map.get(&format!("focus-{i}")).map(String::as_str), Some(format!("sid-{i}").as_str()));
+        }
+        // No stray temp file left behind.
+        assert!(!path.with_extension("json.tmp").exists(), "temp file must be renamed away");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resolve_claude_honours_env_override() {
+        std::env::set_var(CLAUDE_BIN_ENV, "/custom/path/to/claude");
+        let p = resolve_claude().unwrap();
+        assert_eq!(p, PathBuf::from("/custom/path/to/claude"));
+        std::env::remove_var(CLAUDE_BIN_ENV);
+    }
+
+    // ── manager mechanics with a stub child ───────────────────────────────────
+    //
+    // These tests drive the reader → transcript → broadcast → exit path with a
+    // stub `sh -c` program emitting canned stream-json, so they exercise the
+    // real process/pipe/thread machinery without `claude` or the network.
+
+    /// Spawn a stub session that prints `script` to stdout then exits. The
+    /// fixed program (`/bin/sh -c <script>`) is also recorded as the respawn
+    /// spec so an auto-restart re-runs the stub rather than the real `claude`.
+    fn spawn_stub(mgr: &mut SessionManager, tag: &str, script: &str) {
+        let program = PathBuf::from("/bin/sh");
+        let args = vec!["-c".to_string(), script.to_string()];
+        let managed = mgr
+            .spawn_managed(
+                tag.to_string(),
+                "agent".into(),
+                "View".into(),
+                None,
+                false,
+                "stub-sid".into(),
+                false,
+                program.clone(),
+                args.clone(),
+                Some((program, args)),
+            )
+            .expect("spawn stub");
+        mgr.sessions.insert(tag.to_string(), managed);
+    }
+
+    async fn collect_events(
+        rx: &mut broadcast::Receiver<SessionEvent>,
+        max: usize,
+    ) -> Vec<SessionEvent> {
+        let mut out = vec![];
+        for _ in 0..max {
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    let done = matches!(ev, SessionEvent::Exited { .. });
+                    out.push(ev);
+                    if done {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn stub_session_streams_turn_then_exits() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        // One turn: replayed user message + assistant text + result, then EOF.
+        let script = r#"printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"},"isReplay":true}' '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01}'"#;
+        let mut rx = {
+            spawn_stub(&mut mgr, "fred", script);
+            mgr.sessions.get("fred").unwrap().shared.event_tx.subscribe()
+        };
+
+        let events = collect_events(&mut rx, 20).await;
+
+        // Must see a TurnStarted, a BlockAppended(text), a TurnCompleted, and Exited.
+        let has_started = events.iter().any(|e| {
+            matches!(e, SessionEvent::Delta(TurnDelta::TurnStarted { .. }))
+        });
+        let has_completed = events.iter().any(|e| {
+            matches!(e, SessionEvent::Delta(TurnDelta::TurnCompleted { .. }))
+        });
+        let has_exit = events.iter().any(|e| matches!(e, SessionEvent::Exited { .. }));
+        assert!(has_started, "expected TurnStarted: {events:?}");
+        assert!(has_completed, "expected TurnCompleted: {events:?}");
+        assert!(has_exit, "expected Exited: {events:?}");
+
+        // The transcript holds one completed turn.
+        let turns = mgr
+            .sessions
+            .get("fred")
+            .unwrap()
+            .shared
+            .transcript
+            .lock()
+            .unwrap()
+            .snapshot();
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].is_complete);
+        assert_eq!(turns[0].user_input, "hi");
+    }
+
+    #[tokio::test]
+    async fn attach_delivers_snapshot_then_state() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        let script =
+            r#"printf '%s\n' '{"type":"user","message":{"role":"user","content":"q"},"isReplay":true}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}'; sleep 1"#;
+        spawn_stub(&mut mgr, "teri", script);
+
+        // Register a client sender, then attach.
+        let (tx, mut crx) = mpsc::unbounded_channel::<ServerMsg>();
+        mgr.client_senders.lock().unwrap().insert("c1".into(), tx);
+
+        // Give the reader a moment to process the first turn.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        mgr.attach("teri", "c1").unwrap();
+
+        // First two targeted messages must be SessionTurns then SessionState.
+        let m1 = tokio::time::timeout(Duration::from_secs(2), crx.recv()).await.unwrap().unwrap();
+        let m2 = tokio::time::timeout(Duration::from_secs(2), crx.recv()).await.unwrap().unwrap();
+        assert!(matches!(m1, ServerMsg::SessionTurns { .. }), "first msg {m1:?}");
+        assert!(matches!(m2, ServerMsg::SessionState { .. }), "second msg {m2:?}");
+    }
+
+    #[tokio::test]
+    async fn crash_loop_guard_stops_recovery() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        // Stub exits immediately (no output) — looks like a crash.
+        spawn_stub(&mut mgr, "crashy", "true");
+        // Pretend a client is attached so recovery is wanted.
+        mgr.sessions
+            .get_mut("crashy")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
+
+        // Let the child exit.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Each reap recovers once; after MAX_RESTARTS the guard trips.
+        for _ in 0..(MAX_RESTARTS + 2) {
+            mgr.reap_and_recover();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+
+        let s = mgr.sessions.get("crashy").expect("session still tracked");
+        assert!(
+            s.restart_count <= MAX_RESTARTS,
+            "restart count {} exceeded guard {MAX_RESTARTS}",
+            s.restart_count
+        );
+        assert!(
+            s.intentional_stop.load(Ordering::SeqCst),
+            "guard should mark the session to stop retrying"
+        );
+    }
+
+    #[tokio::test]
+    async fn second_send_queues_while_mid_turn() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        // Long-lived stub that ignores stdin; stays Idle until we send.
+        spawn_stub(&mut mgr, "q", "sleep 5");
+
+        // First send (idle → writes, optimistically MidTurn).
+        mgr.send_user_message("q", "first").unwrap();
+        assert_eq!(mgr.session_state("q"), Some(SessionState::MidTurn));
+
+        // Second send while mid-turn → queued, not written.
+        mgr.send_user_message("q", "second").unwrap();
+        let pending = mgr.sessions.get("q").unwrap().shared.pending.lock().unwrap();
+        assert_eq!(pending.len(), 1, "second message must queue while mid-turn");
+        assert_eq!(pending.front().map(String::as_str), Some("second"));
+    }
+
+    #[tokio::test]
+    async fn send_to_dead_session_errors() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        spawn_stub(&mut mgr, "d", "true"); // exits immediately
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(mgr.send_user_message("d", "hi").is_err());
+        assert!(mgr.send_user_message("missing", "hi").is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_marks_session_not_alive() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        spawn_stub(&mut mgr, "longlived", "sleep 30");
+        assert!(mgr.sessions.get("longlived").unwrap().alive());
+        mgr.stop("longlived");
+        assert!(!mgr.sessions.get("longlived").unwrap().alive());
+        assert_eq!(mgr.session_state("longlived"), Some(SessionState::Idle));
+    }
+}

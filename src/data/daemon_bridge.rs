@@ -65,6 +65,15 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::PtyIdentity { .. } => {
             // Ignored here — PTY consumers subscribe independently.
         }
+        // Persistent stream-json session messages (protocol v3) are consumed by
+        // the Swift thin-client, not the Rust TUI. Ignored here.
+        ServerMsg::SessionSpawned { .. }
+        | ServerMsg::SessionTurns { .. }
+        | ServerMsg::SessionTurnDelta { .. }
+        | ServerMsg::SessionState { .. }
+        | ServerMsg::SessionPermissionRequest { .. }
+        | ServerMsg::SessionExited { .. }
+        | ServerMsg::SessionListResp { .. } => {}
         // DaemonReconnected is handled by individual DaemonPtyClient subscribers.
         ServerMsg::DaemonReconnected => {}
         // Control messages — no action needed.
