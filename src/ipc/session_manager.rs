@@ -545,6 +545,16 @@ impl SessionManager {
                 wants_recovery = !s.attached_clients.is_empty() || has_pending;
 
                 // Reset the restart window if it has elapsed.
+                //
+                // NOTE (fixed-window limitation): this is a fixed window, not a
+                // sliding one. A session that crashes just under RESTART_WINDOW_SECS
+                // apart resets the counter each time and can restart indefinitely
+                // without tripping MAX_RESTARTS. That's acceptable here — a genuinely
+                // broken `claude` child crash-loops far faster than the window, so the
+                // guard catches the real case; this only permits a slow, intermittent
+                // recrash, which is the behavior we'd want anyway. If that ever proves
+                // too lenient, switch to a sliding window (VecDeque<Instant> of recent
+                // crash times).
                 if s.restart_window_start.elapsed().as_secs() >= RESTART_WINDOW_SECS {
                     s.restart_count = 0;
                     s.restart_window_start = Instant::now();
@@ -828,7 +838,17 @@ fn load_id_store(path: &std::path::Path) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+/// Serializes the read-modify-write of the id store so concurrent session
+/// spawns can't clobber each other's entries (the store maps focus tag →
+/// claude session_id, used to `--resume` a conversation).
+static SAVE_ID_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn save_id(path: &std::path::Path, tag: &str, sid: Option<&str>) {
+    // Hold the lock across the whole read-modify-write so two simultaneous
+    // spawns serialize instead of racing (one reads stale, the other
+    // overwrites and drops the first's entry). Recover from a poisoned lock
+    // rather than panicking the daemon.
+    let _guard = SAVE_ID_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut map = load_id_store(path);
     match sid {
         Some(s) => {
@@ -842,7 +862,17 @@ fn save_id(path: &std::path::Path, tag: &str, sid: Option<&str>) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
-        let _ = std::fs::write(path, bytes);
+        // Atomic replace: write a sibling temp file, then rename over the
+        // store. A crash mid-write leaves the temp file behind, never a
+        // truncated/zero-byte store — so a resumable session_id is never
+        // silently lost (which would make the next spawn start a fresh
+        // conversation with no error). rename(2) within one dir is atomic.
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            if std::fs::rename(&tmp, path).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
     }
 }
 
@@ -900,6 +930,35 @@ mod tests {
         save_id(&path, "fred", None);
         assert!(load_id_store(&path).get("fred").is_none());
         assert_eq!(load_id_store(&path).get("teri").map(String::as_str), Some("sid-teri"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn id_store_survives_concurrent_writes() {
+        // Regression: concurrent spawns must not clobber each other's entries
+        // (the read-modify-write is serialized) and the store is never left
+        // truncated (atomic temp+rename). Hammer N threads each writing a
+        // distinct tag at the same path; all entries must survive.
+        let path = tmp_store();
+        let n = 24;
+        let handles: Vec<_> = (0..n)
+            .map(|i| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    save_id(&p, &format!("focus-{i}"), Some(&format!("sid-{i}")));
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let map = load_id_store(&path);
+        assert_eq!(map.len(), n, "every concurrent write must be preserved");
+        for i in 0..n {
+            assert_eq!(map.get(&format!("focus-{i}")).map(String::as_str), Some(format!("sid-{i}").as_str()));
+        }
+        // No stray temp file left behind.
+        assert!(!path.with_extension("json.tmp").exists(), "temp file must be renamed away");
         let _ = std::fs::remove_file(&path);
     }
 
