@@ -9,6 +9,9 @@ struct ChatTurn: Identifiable {
     let timestamp:   Date
     var blocks:      [TurnBlock] = []
     var isComplete:  Bool        = false
+    /// The daemon's stable turn id (monotonic per transcript), used to apply
+    /// incremental `TurnDelta`s to the right turn. Nil for locally-built turns.
+    var daemonId:    String?     = nil
 }
 
 // MARK: - Block types

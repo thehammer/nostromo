@@ -4,50 +4,64 @@ import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "chat")
 
-/// Manages a persistent Claude Code session for one agent tag (fred / perri / teri).
+/// Thin client over a **nostromod-hosted** persistent session for one focus.
 ///
-/// Each `send(_:)` call spawns:
-///   claude --dangerously-skip-permissions --output-format stream-json --no-color \
-///          -p <text> [--resume <session_id>]
+/// The daemon owns the long-lived `claude --input-format stream-json` child,
+/// parses the stream, maintains the canonical transcript, and broadcasts turn
+/// deltas to every attached client (mirroring = daemon broadcast). This type:
+///   - spawns/attaches the focus's session over IPC (idempotent),
+///   - sends user input (`session_send` → the daemon writes the child's stdin),
+///   - maps the daemon's `Turn`/`TurnBlock`/`TurnDelta` into the GUI's
+///     `ChatTurn`/`TurnBlock` so `ReplView` renders unchanged.
 ///
-/// The session_id is persisted to ~/.nostromo/gui-sessions.json so sessions survive
-/// GUI restarts (the Claude Code conversation history is stored server-side by session_id).
+/// Replaces the previous model of spawning a fresh `claude -p` per message.
+/// Conversation persistence + session-id management now live in the daemon.
 class ChatSession: ObservableObject {
 
-    let tag: String            // session persistence key (unique per focus)
-    let agentName: String      // passed to --agent flag (just the agent filename stem)
+    let tag: String            // local IPC address for this focus's session
+    let agentName: String      // passed to the daemon → claude `--agent`
     let workingDirectory: String?
 
     @Published private(set) var turns:        [ChatTurn] = []
-    @Published private(set) var isRunning:   Bool        = false
-    @Published private(set) var pendingCount: Int        = 0
+    @Published private(set) var isRunning:    Bool       = false
+    @Published private(set) var pendingCount: Int        = 0  // daemon queues; reserved
 
-    private var sessionId:       String?
-    private var currentProcess:  Process?
-    private var lineBuffer:      String = ""
-    private var pendingMessages: [String] = []
+    private let client: NostromodClient
+    private var cancellables = Set<AnyCancellable>()
 
-    init(tag: String, agentName: String? = nil, workingDirectory: String? = nil) {
+    init(tag: String, agentName: String? = nil, workingDirectory: String? = nil,
+         client: NostromodClient) {
         self.tag              = tag
-        self.agentName        = agentName ?? tag  // built-ins: tag == agentName
+        self.agentName        = agentName ?? tag
         self.workingDirectory = workingDirectory
-        self.sessionId        = Self.loadId(tag)
-        log.info("ChatSession[\(tag, privacy: .public)] init sid=\(self.sessionId ?? "none", privacy: .public)")
-        // Pre-populate turns from the persisted session JSONL so the scrollback
-        // is visible immediately on app launch / tab switch.
-        if let sid = sessionId {
-            turns = Self.loadScrollback(sessionId: sid)
-        }
+        self.client           = client
+        log.info("ChatSession[\(tag, privacy: .public)] init (daemon-hosted)")
+
+        client.messages
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.handle($0) }
+            .store(in: &cancellables)
+
+        // Attempt immediately (covers the common case where the daemon socket is
+        // already connected); the `.welcome` handler re-issues on (re)connect and
+        // daemon restart, so this is robust to ordering.
+        spawnAndAttach()
     }
 
-    /// Clear local display and start a fresh Claude session (new session_id on next send).
+    /// Spawn (or resume) this focus's session and attach for turn deltas.
+    /// Both calls are idempotent daemon-side, so re-issuing on reconnect is safe.
+    private func spawnAndAttach() {
+        client.sessionSpawn(tag: tag, agentName: agentName, viewName: agentName,
+                            cwd: workingDirectory, sessionId: nil, remoteControl: false)
+        client.sessionAttach(tag: tag)
+    }
+
+    /// Clear the local display and start a fresh daemon session (new claude
+    /// session id on the next message).
     func newSession() {
-        turns          = []
-        sessionId      = nil
-        pendingMessages = []
-        pendingCount   = 0
-        Self.saveId(nil, tag)
-        log.info("ChatSession[\(self.tag, privacy: .public)] cleared — next send starts fresh session")
+        turns = []
+        client.sessionControl(tag: tag, action: "new_session")
+        log.info("ChatSession[\(self.tag, privacy: .public)] new_session requested")
     }
 
     // MARK: - Send
@@ -55,321 +69,101 @@ class ChatSession: ObservableObject {
     func send(_ text: String, images: [URL] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // Optimistic — the daemon's SessionState(mid_turn) reconciles this; it
+        // keeps the input bar responsive without waiting for the round-trip.
+        isRunning = true
+        client.sessionSend(tag: tag, text: trimmed)
+        // NOTE: images are surfaced in the UI but not yet forwarded to the
+        // daemon/child (same known gap as before; tracked separately).
+    }
 
-        // Queue if a turn is already in-flight — drain after finishTurn.
-        // (Images can only be sent immediately, not queued; they're discarded if queued.)
-        if isRunning {
-            pendingMessages.append(trimmed)
-            pendingCount = pendingMessages.count
-            return
+    // MARK: - Inbound (daemon broadcast)
+
+    private func handle(_ msg: ServerMsg) {
+        switch msg {
+        case .welcome:
+            // Daemon connected (or reconnected after a restart). Re-spawn +
+            // re-attach so the GUI re-syncs; the daemon's session outlived us.
+            spawnAndAttach()
+
+        case .sessionTurns(let t, let daemonTurns) where t == tag:
+            turns = daemonTurns.map(Self.mapTurn)
+
+        case .sessionTurnDelta(let t, let delta) where t == tag:
+            apply(delta)
+
+        case .sessionState(let t, let state) where t == tag:
+            isRunning = (state == .midTurn || state == .awaitingPermission)
+
+        case .sessionExited(let t, _) where t == tag:
+            isRunning = false
+
+        default:
+            break
         }
+    }
 
-        let turn = ChatTurn(userInput: trimmed, timestamp: Date())
-        turns.append(turn)
-        let turnId = turn.id
-        isRunning  = true
-        lineBuffer = ""
+    private func apply(_ delta: DaemonTurnDelta) {
+        switch delta {
+        case .turnStarted(let turn):
+            turns.append(Self.mapTurn(turn))
 
-        guard let claude = Self.findClaude() else {
-            fail(turnId: turnId,
-                 message: "Cannot find `claude` binary.\nInstall Claude Code CLI and make sure it's on PATH.")
-            return
-        }
+        case .blockAppended(let turnId, let block):
+            if let i = turns.firstIndex(where: { $0.daemonId == turnId }) {
+                turns[i].blocks.append(Self.mapBlock(block))
+            }
 
-        var args: [String] = [
-            "--dangerously-skip-permissions",
-            // Authoritative permission bypass for headless sessions. `-p` has no UI to
-            // answer a permission prompt, so any gate that fires dead-loops
-            // ("Claude requested permissions to use Bash…"). `--dangerously-skip-permissions`
-            // covers the top-level turn but can be silently dropped on `--resume` or for
-            // spawned sub-agents/parallel tool calls, which is where the loops came from.
-            // A `--settings` permissions policy is inherited by resumed sessions AND
-            // sub-agents and isn't subject to that silent refusal — and because it's passed
-            // inline here it's scoped to Nostromo's sessions only, never the user's global
-            // ~/.claude/settings.json.
-            "--settings", #"{"permissions":{"defaultMode":"bypassPermissions"}}"#,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--agent", agentName,
-            "-p", trimmed,
-        ]
-        if let sid = sessionId { args += ["--resume", sid] }
-        // NOTE: `--image` is not a valid claude CLI flag. Image forwarding via
-        // `--file` (the CLI's actual flag) needs investigation; for now images
-        // are surfaced in the UI but not forwarded to the subprocess.
+        case .turnCompleted(let turnId, let summary):
+            if let i = turns.firstIndex(where: { $0.daemonId == turnId }) {
+                turns[i].blocks.append(.resultSummary(ResultSummaryData(
+                    durationMs: summary.durationMs,
+                    costUSD:    summary.costUsd,
+                    isError:    summary.isError)))
+                turns[i].isComplete = true
+            }
 
-        let proc = Process()
-        proc.executableURL = claude
-        proc.arguments     = args
-        if let dir = workingDirectory {
-            proc.currentDirectoryURL = URL(fileURLWithPath: dir)
-        }
-
-        // Augment PATH so claude can find its own helpers
-        var env  = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let extra = [
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            "\(home)/.npm/bin",
-            "\(home)/.nvm/versions/node/current/bin",
-        ].joined(separator: ":")
-        env["PATH"] = (env["PATH"] ?? "") + ":" + extra
-        proc.environment = env
-
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError  = errPipe
-
-        outPipe.fileHandleForReading.readabilityHandler = { [weak self] fh in
-            let data = fh.availableData
-            guard !data.isEmpty, let self else { return }
-            if let chunk = String(data: data, encoding: .utf8) {
-                DispatchQueue.main.async { self.processChunk(chunk, turnId: turnId) }
+        case .turnErrored(let turnId, let message):
+            if let i = turns.firstIndex(where: { $0.daemonId == turnId }) {
+                turns[i].blocks.append(.errorMessage(message))
+                turns[i].isComplete = true
             }
         }
-
-        // Drain stderr asynchronously to prevent the kernel pipe buffer from filling
-        // and blocking the child process before it exits (which would deadlock
-        // terminationHandler). readabilityHandler fires on a background thread and
-        // accumulates data safely; terminationHandler just reads the accumulated buffer.
-        var errBuffer = Data()
-        errPipe.fileHandleForReading.readabilityHandler = { fh in
-            let data = fh.availableData
-            if data.isEmpty {
-                fh.readabilityHandler = nil   // EOF
-            } else {
-                errBuffer.append(data)
-            }
-        }
-
-        proc.terminationHandler = { [weak self] p in
-            guard let self else { return }
-            errPipe.fileHandleForReading.readabilityHandler = nil
-            let errStr = String(data: errBuffer, encoding: .utf8) ?? ""
-            DispatchQueue.main.async {
-                // Flush any partial final line
-                if !self.lineBuffer.isEmpty {
-                    self.processLine(self.lineBuffer, turnId: turnId)
-                    self.lineBuffer = ""
-                }
-                if p.terminationStatus != 0, !errStr.isEmpty {
-                    let msg = errStr.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self.appendBlock(.errorMessage(msg), to: turnId)
-                }
-                self.finishTurn(turnId)
-            }
-        }
-
-        currentProcess = proc
-        do    { try proc.run() }
-        catch { fail(turnId: turnId, message: "Failed to launch claude: \(error.localizedDescription)") }
     }
 
-    // MARK: - Stream processing
+    // MARK: - Mapping (daemon model → GUI model)
 
-    private func processChunk(_ chunk: String, turnId: UUID) {
-        lineBuffer += chunk
-        var lines  = lineBuffer.components(separatedBy: "\n")
-        lineBuffer = lines.removeLast()  // keep incomplete trailing fragment
-        for line in lines where !line.trimmingCharacters(in: .whitespaces).isEmpty {
-            processLine(line, turnId: turnId)
-        }
-    }
-
-    private func processLine(_ line: String, turnId: UUID) {
-        guard let result = TurnBlock.parse(line: line) else { return }
-        switch result {
-        case .sessionId(let sid):
-            log.info("ChatSession[\(self.tag, privacy: .public)] session_id=\(sid, privacy: .public)")
-            sessionId = sid
-            Self.saveId(sid, tag)
-        case .blocks(let blocks):
-            blocks.forEach { appendBlock($0, to: turnId) }
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func appendBlock(_ block: TurnBlock, to turnId: UUID) {
-        guard let idx = turns.firstIndex(where: { $0.id == turnId }) else { return }
-        turns[idx].blocks.append(block)
-    }
-
-    private func finishTurn(_ id: UUID) {
-        if let idx = turns.firstIndex(where: { $0.id == id }) {
-            turns[idx].isComplete = true
-        }
-        isRunning      = false
-        currentProcess = nil
-
-        // Drain one queued message if any.
-        if !pendingMessages.isEmpty {
-            let next = pendingMessages.removeFirst()
-            pendingCount = pendingMessages.count
-            send(next)
-        }
-    }
-
-    private func fail(turnId: UUID, message: String) {
-        appendBlock(.errorMessage(message), to: turnId)
-        finishTurn(turnId)
-    }
-
-    // MARK: - Session ID persistence
-
-    private static var storageURL: URL = {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".nostromo")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("gui-sessions.json")
+    private static let iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
     }()
 
-    private static func loadId(_ tag: String) -> String? {
-        guard
-            let data = try? Data(contentsOf: storageURL),
-            let dict = try? JSONDecoder().decode([String: String].self, from: data)
-        else { return nil }
-        return dict[tag]
+    private static func mapTurn(_ t: DaemonTurn) -> ChatTurn {
+        ChatTurn(userInput:  t.userInput,
+                 timestamp:  t.timestamp.flatMap { iso.date(from: $0) } ?? Date(),
+                 blocks:     t.blocks.map(mapBlock),
+                 isComplete: t.isComplete,
+                 daemonId:   t.id)
     }
 
-    private static func saveId(_ sid: String?, _ tag: String) {
-        var dict: [String: String] = (try? Data(contentsOf: storageURL))
-            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
-        if let sid {
-            dict[tag] = sid
-        } else {
-            dict.removeValue(forKey: tag)
+    private static func mapBlock(_ b: DaemonTurnBlock) -> TurnBlock {
+        switch b {
+        case .text(let s):
+            return .text(s)
+        case .toolCall(let name, let summary, let full):
+            return .toolCall(ToolCallData(toolName: name, inputSummary: summary, inputFull: full))
+        case .toolResult(let content, let isError):
+            return .toolResult(ToolResultData(content: content, isError: isError))
+        case .resultSummary(let d, let c, let e):
+            return .resultSummary(ResultSummaryData(durationMs: d, costUSD: c, isError: e))
+        case .errorMessage(let m):
+            return .errorMessage(m)
+        case .askQuestion(let q, let h, let opts, let multi):
+            return .askQuestion(AskQuestionData(
+                question: q,
+                header:   h,
+                options:  opts.map { AskQuestionData.Option(label: $0.label, description: $0.description) },
+                multiSelect: multi))
         }
-        if let data = try? JSONEncoder().encode(dict) {
-            try? data.write(to: storageURL, options: .atomic)
-        }
-    }
-
-    // MARK: - Scrollback
-
-    /// Replays the last `maxTurns` turns from the persisted session JSONL.
-    ///
-    /// Sessions are stored under ~/.claude/projects/<encoded-path>/<sessionId>.jsonl
-    /// where the encoded path depends on the working directory the session was started in.
-    /// Sessions without a project use the literal subdirectory "-".
-    /// We search all subdirectories so dynamic focuses (which have a workingDirectory)
-    /// are found even when the encoded path isn't known at load time.
-    private static func loadScrollback(sessionId: String, maxTurns: Int = 30) -> [ChatTurn] {
-        let home        = FileManager.default.homeDirectoryForCurrentUser
-        let projectsDir = home.appendingPathComponent(".claude/projects")
-
-        // Search every immediate subdirectory for <sessionId>.jsonl
-        let subdirs = (try? FileManager.default.contentsOfDirectory(
-            at: projectsDir, includingPropertiesForKeys: [.isDirectoryKey],
-            options: .skipsHiddenFiles)) ?? []
-        let fm = FileManager.default
-        var path: URL? = nil
-        for sub in subdirs {
-            guard (try? sub.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
-            else { continue }
-            let candidate = sub.appendingPathComponent("\(sessionId).jsonl")
-            if fm.fileExists(atPath: candidate.path) { path = candidate; break }
-        }
-        guard let path else { return [] }
-
-        guard
-            let data    = try? Data(contentsOf: path),
-            let content = String(data: data, encoding: .utf8)
-        else { return [] }
-
-        let isoFormatter = ISO8601DateFormatter()
-        var turns:       [ChatTurn] = []
-        var pendingTurn: ChatTurn?  = nil
-
-        func flushPending() {
-            guard let t = pendingTurn, !t.blocks.isEmpty else { return }
-            var completed = t; completed.isComplete = true
-            turns.append(completed)
-            pendingTurn = nil
-        }
-
-        for rawLine in content.components(separatedBy: "\n") {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty,
-                  let lineData = line.data(using: .utf8),
-                  let json     = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
-            else { continue }
-
-            switch json["type"] as? String ?? "" {
-
-            case "user":
-                let msg        = json["message"] as? [String: Any]
-                let rawContent = msg?["content"]
-                let ts = (json["timestamp"] as? String)
-                    .flatMap { isoFormatter.date(from: $0) } ?? Date()
-
-                if let text = rawContent as? String, !text.isEmpty {
-                    // Plain string → new human turn
-                    flushPending()
-                    pendingTurn = ChatTurn(userInput: text, timestamp: ts)
-                } else if let arr = rawContent as? [[String: Any]] {
-                    let allToolResults = arr.allSatisfy { $0["type"] as? String == "tool_result" }
-                    if allToolResults {
-                        // Tool result → belongs to current turn
-                        if case .blocks(let blocks) = TurnBlock.parse(line: line) {
-                            blocks.forEach { pendingTurn?.blocks.append($0) }
-                        }
-                    } else {
-                        // Text-array user message → new human turn
-                        let text = arr.compactMap {
-                            $0["type"] as? String == "text" ? $0["text"] as? String : nil
-                        }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !text.isEmpty {
-                            flushPending()
-                            pendingTurn = ChatTurn(userInput: text, timestamp: ts)
-                        }
-                    }
-                }
-
-            case "assistant":
-                if let result = TurnBlock.parse(line: line), case .blocks(let blocks) = result {
-                    blocks.forEach { pendingTurn?.blocks.append($0) }
-                }
-
-            default:
-                break
-            }
-        }
-        flushPending()
-
-        return Array(turns.suffix(maxTurns))
-    }
-
-    // MARK: - Binary discovery
-
-    /// Searches common install locations for the `claude` CLI binary.
-    static func findClaude() -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "/usr/local/bin/claude",
-            "/opt/homebrew/bin/claude",
-            "\(home)/.npm/bin/claude",
-            "\(home)/.nvm/versions/node/current/bin/claude",
-            "\(home)/.nvm/versions/node/lts/bin/claude",
-            "\(home)/.local/bin/claude",
-        ]
-        if let hit = candidates.first(where: {
-            FileManager.default.isExecutableFile(atPath: $0)
-        }) {
-            return URL(fileURLWithPath: hit)
-        }
-        // Last resort: ask `which`
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        proc.arguments     = ["claude"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        try? proc.run()
-        proc.waitUntilExit()
-        let p = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return p.isEmpty ? nil : URL(fileURLWithPath: p)
     }
 }
