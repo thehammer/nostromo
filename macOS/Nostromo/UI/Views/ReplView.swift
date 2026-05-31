@@ -19,10 +19,10 @@ class ReplView: NSView {
     private var turnViews:   [UUID: ChatTurnView] = [:]
     private var cancellables = Set<AnyCancellable>()
 
-    init(tag: String, agentName: String? = nil, workingDirectory: String? = nil) {
+    init(tag: String, agentName: String? = nil, displayName: String? = nil, workingDirectory: String? = nil) {
         // Use the shared registry so multiple windows showing the same tag
         // observe the same session and stay in sync (mirrored).
-        session = AppStore.shared.session(for: tag, agentName: agentName, workingDirectory: workingDirectory)
+        session = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
         super.init(frame: .zero)
         setup()
     }
@@ -189,6 +189,10 @@ class ReplView: NSView {
 
     private func scrollToBottom() {
         guard let doc = scrollView.documentView else { return }
+        // Force pending layout so a just-appended turn (e.g. the optimistic echo)
+        // has its real height before we compute the offset — otherwise we scroll
+        // short and the newest message hides behind the input bar.
+        doc.layoutSubtreeIfNeeded()
         let bottom = NSPoint(x: 0, y: max(0, doc.frame.height - scrollView.contentView.bounds.height))
         scrollView.contentView.scroll(to: bottom)
         scrollView.reflectScrolledClipView(scrollView.contentView)

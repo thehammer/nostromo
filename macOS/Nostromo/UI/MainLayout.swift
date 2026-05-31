@@ -137,6 +137,7 @@ class MainLayout: NSView {
             // sessionTag keys the session; agentTag is the --agent name.
             v = ReplView(tag: focus.sessionTag,
                          agentName: focus.agentTag,
+                         displayName: focus.displayName,
                          workingDirectory: focus.projectPath)
         }
         viewCache[focus.id] = v
@@ -207,7 +208,7 @@ private class AgentView: NSView, NSSplitViewDelegate {
             hintLabel.centerYAnchor.constraint(equalTo: hud.centerYAnchor),
         ])
 
-        let repl = ReplView(tag: agentTag, agentName: agentName, workingDirectory: workingDirectory)
+        let repl = ReplView(tag: agentTag, agentName: agentName, displayName: label, workingDirectory: workingDirectory)
 
         split.isVertical   = false     // horizontal divider (top / bottom)
         split.dividerStyle = .thin

@@ -45,10 +45,10 @@ class AppStore: ObservableObject {
 
     // MARK: - Session registry
 
-    func session(for tag: String, agentName: String? = nil, workingDirectory: String? = nil) -> ChatSession {
+    func session(for tag: String, agentName: String? = nil, displayName: String? = nil, workingDirectory: String? = nil) -> ChatSession {
         if let s = sessionRegistry[tag] { return s }
         // Daemon-hosted: ChatSession is a thin client over the shared NostromodClient.
-        let s = ChatSession(tag: tag, agentName: agentName, workingDirectory: workingDirectory, client: client)
+        let s = ChatSession(tag: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory, client: client)
         sessionRegistry[tag] = s
         return s
     }

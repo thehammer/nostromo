@@ -29,7 +29,7 @@ class PerriView: NSView, NSSplitViewDelegate {
         split.translatesAutoresizingMaskIntoConstraints = false
 
         split.addSubview(PerriHUD())
-        split.addSubview(ReplView(tag: "perri"))
+        split.addSubview(ReplView(tag: "perri", displayName: "Perri"))
         addSubview(split)
 
         NSLayoutConstraint.activate([

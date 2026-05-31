@@ -20,6 +20,7 @@ class ChatSession: ObservableObject {
 
     let tag: String            // local IPC address for this focus's session
     let agentName: String      // passed to the daemon → claude `--agent`
+    let displayName: String    // `-n` / `--remote-control` name (phone-facing label)
     let workingDirectory: String?
 
     @Published private(set) var turns:        [ChatTurn] = []
@@ -29,10 +30,11 @@ class ChatSession: ObservableObject {
     private let client: NostromodClient
     private var cancellables = Set<AnyCancellable>()
 
-    init(tag: String, agentName: String? = nil, workingDirectory: String? = nil,
-         client: NostromodClient) {
+    init(tag: String, agentName: String? = nil, displayName: String? = nil,
+         workingDirectory: String? = nil, client: NostromodClient) {
         self.tag              = tag
         self.agentName        = agentName ?? tag
+        self.displayName      = displayName ?? (agentName ?? tag)
         self.workingDirectory = workingDirectory
         self.client           = client
         log.info("ChatSession[\(tag, privacy: .public)] init (daemon-hosted)")
@@ -59,8 +61,13 @@ class ChatSession: ObservableObject {
     /// Spawn (or resume) this focus's session and attach for turn deltas.
     /// Both calls are idempotent daemon-side, so re-issuing on reconnect is safe.
     private func spawnAndAttach() {
-        client.sessionSpawn(tag: tag, agentName: agentName, viewName: agentName,
-                            cwd: workingDirectory, sessionId: nil, remoteControl: false)
+        // remoteControl: true → daemon spawns with `--remote-control <displayName>`,
+        // making the focus drivable from the Claude mobile/web app via Anthropic's
+        // relay (and phone-typed messages mirror back into this ReplView).
+        // displayName is the phone-facing label and the relay session name, so it
+        // must be recognizable + distinct per focus (not the shared agent name).
+        client.sessionSpawn(tag: tag, agentName: agentName, viewName: displayName,
+                            cwd: workingDirectory, sessionId: nil, remoteControl: true)
         client.sessionAttach(tag: tag)
     }
 
