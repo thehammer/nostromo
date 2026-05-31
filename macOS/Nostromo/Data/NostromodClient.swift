@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import Combine
 import os
 
@@ -219,7 +218,9 @@ class NostromodClient {
     /// Publishes decoded server messages on the main queue.
     let messages = PassthroughSubject<ServerMsg, Never>()
 
-    private var connection: NWConnection?
+    private var fd: Int32 = -1            // POSIX AF_UNIX socket (NWConnection's
+                                         // .unix endpoint fails with ENETDOWN).
+    private let sendLock = NSLock()
     private let socketPath: String
     private let q = DispatchQueue(label: "com.hammer.nostromo.ipc", qos: .utility)
     private var reconnectDelay: TimeInterval = 1.0
@@ -257,29 +258,49 @@ class NostromodClient {
     // MARK: - Connection lifecycle
 
     private func connect() {
-        let endpoint = NWEndpoint.unix(path: socketPath)
-        let conn = NWConnection(to: endpoint, using: NWParameters())
-        connection = conn
+        // Run the blocking connect off any caller thread.
+        q.async { [weak self] in self?.doConnect() }
+    }
 
-        conn.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            switch state {
-            case .ready:
-                log.info("Connected to nostromd at \(self.socketPath, privacy: .public)")
-                self.reconnectDelay = 1.0
-                self.sendHello()
-                self.readLength()
-            case .failed(let err):
-                log.warning("Connection failed: \(err, privacy: .public) — retrying in \(self.reconnectDelay, privacy: .public)s")
-                self.scheduleReconnect()
-            case .cancelled:
-                break
-            default:
-                break
-            }
+    private func doConnect() {
+        let sock = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard sock >= 0 else {
+            log.warning("socket() failed errno=\(errno, privacy: .public)")
+            scheduleReconnect(); return
         }
 
-        conn.start(queue: q)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let cap = MemoryLayout.size(ofValue: addr.sun_path)   // 104 on Darwin
+        let pathBytes = socketPath.utf8CString                 // includes NUL
+        guard pathBytes.count <= cap else {
+            log.error("socket path too long: \(self.socketPath, privacy: .public)")
+            Darwin.close(sock); return
+        }
+        withUnsafeMutablePointer(to: &addr.sun_path) { p in
+            p.withMemoryRebound(to: CChar.self, capacity: cap) { dst in
+                pathBytes.withUnsafeBufferPointer { src in
+                    dst.update(from: src.baseAddress!, count: src.count)
+                }
+            }
+        }
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let r = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(sock, $0, len)
+            }
+        }
+        guard r == 0 else {
+            log.warning("connect failed errno=\(errno, privacy: .public) — retrying in \(self.reconnectDelay, privacy: .public)s")
+            Darwin.close(sock); scheduleReconnect(); return
+        }
+
+        log.info("Connected to nostromd at \(self.socketPath, privacy: .public)")
+        fd = sock
+        reconnectDelay = 1.0
+        sendHello()
+        // Blocking frame reader on a dedicated background queue.
+        DispatchQueue.global(qos: .utility).async { [weak self] in self?.readLoop(sock) }
     }
 
     private func scheduleReconnect() {
@@ -324,41 +345,59 @@ class NostromodClient {
     }
 
     private func send(_ msg: some Encodable) {
-        guard let conn = connection,
-              let body = try? encoder.encode(msg)
-        else { return }
+        guard fd >= 0, let body = try? encoder.encode(msg)
+        else { log.debug("send dropped — not connected (fd=\(self.fd, privacy: .public))"); return }
 
         var bigEndianLen = UInt32(body.count).bigEndian
-        let frame = Data(bytes: &bigEndianLen, count: 4) + body
-        conn.send(content: frame, completion: .idempotent)
+        var frame = Data(bytes: &bigEndianLen, count: 4)
+        frame.append(body)
+
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { return }
+        frame.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            var off = 0
+            while off < raw.count {
+                let n = Darwin.write(curFd, base.advanced(by: off), raw.count - off)
+                if n <= 0 { log.warning("write failed errno=\(errno, privacy: .public)"); break }
+                off += n
+            }
+        }
     }
 
     // MARK: - Frame reading
 
-    private func readLength() {
-        connection?.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, _, error in
-            guard let self else { return }
-            guard error == nil, let data, data.count == 4 else {
-                if error != nil { self.scheduleReconnect() }
-                return
-            }
-            let length = data.withUnsafeBytes { ptr in
-                UInt32(bigEndian: ptr.loadUnaligned(as: UInt32.self))
-            }
-            guard length > 0, length <= 4 * 1024 * 1024 else {
-                self.readLength()
-                return
-            }
-            self.readBody(length: Int(length))
+    /// Blocking frame reader: 4-byte big-endian length prefix + JSON body.
+    /// Runs on a background queue; on EOF/error it closes the fd and reconnects.
+    private func readLoop(_ sock: Int32) {
+        while true {
+            guard let header = readN(sock, 4) else { break }
+            let length = header.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
+            guard length > 0, length <= 4 * 1024 * 1024 else { break }
+            guard let body = readN(sock, Int(length)) else { break }
+            dispatch(body)   // hops to main internally
         }
+        log.info("read loop ended (fd=\(sock, privacy: .public)) — reconnecting")
+        Darwin.close(sock)
+        if fd == sock { fd = -1 }
+        scheduleReconnect()
     }
 
-    private func readBody(length: Int) {
-        connection?.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, _, _ in
-            guard let self else { return }
-            if let data { self.dispatch(data) }
-            self.readLength()
+    /// Read exactly `count` bytes, or nil on EOF/error.
+    private func readN(_ sock: Int32, _ count: Int) -> Data? {
+        var buf = Data(count: count)
+        let ok = buf.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            var got = 0
+            while got < count {
+                let n = Darwin.read(sock, base.advanced(by: got), count - got)
+                if n <= 0 { return false }
+                got += n
+            }
+            return true
         }
+        return ok ? buf : nil
     }
 
     // MARK: - Decoding
