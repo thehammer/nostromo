@@ -72,17 +72,63 @@ controllable from the Claude app** via `--remote-control`.
 restarts, and multi-window mirroring all work and shipped. Only the
 *native-phone-RC* leg is closed.
 
-**Paths to phone control (future, pick one):**
+### Follow-up finding — interactive `--resume` DOES register RC (2026-05-31)
+
+A `-p`/stream-json-born session **can be resumed in interactive mode, and that
+interactive process registers remote control.** Verified with a pty harness:
+`claude --resume <uuid> --remote-control <name>` on a session created via `-p`
+loaded the prior conversation AND printed a live relay URL —
+`/remote-control is active · Continue here, on your phone, or at
+https://claude.ai/code/session_…`. So the thing that is inert in stream-json
+mode *does* work when the same conversation is resumed interactively. (Also
+confirmed the hard conflict: `--output-format stream-json` forces `--print`, so
+interactive + structured-JSON on one process is impossible.)
+
+**This unlocks a real path with zero reverse-engineering — a HANDOFF model:**
+the daemon owns the session id. Normally it runs the focus as stream-json
+(structured local rendering — what shipped). On demand ("send this focus to my
+phone"), the daemon **stops the stream-json process and spawns
+`claude --remote-control --resume <same id>`** (interactive) → it registers on
+the relay → the operator drives it from the Claude app. On return, the daemon
+stops the interactive process and resumes stream-json, re-syncing the new turns
+from the session's JSONL. One conversation, preserved across the swap.
+
+- **Caveat — handoff, not simultaneous.** Two *live* processes on one session id
+  would diverge (sessions are single-writer; each appends its own continuation).
+  So it's an explicit swap, not always-on dual control.
+- **Possible refinement toward true mirroring:** while the interactive-RC process
+  is the single writer (phone-driven), have the daemon **tail that session's
+  JSONL read-only** and render it live on the Mac — phone activity would stream
+  into the GUI in real time; the Mac just can't *type* until handed back. Needs
+  verifying the interactive process writes back to the JSONL the daemon tails.
+- **Likely UI vehicle:** a per-focus toggle/button ("hand to phone" / "bring
+  back") — GUI affordances as alternatives to slash commands. Introducing the
+  handoff is a natural moment to add those controls.
+
+### North star (operator) — Nostromo-native on iPhone / iPad
+
+The ultimate goal is **Nostromo running natively on iPhone and iPad**, owning
+the **full session lifecycle and remote access end-to-end** — i.e. a Nostromo
+client that attaches to `nostromod` (or its successor) over the network and
+renders the same structured turn model on mobile, NOT the Claude app. The
+handoff model above is an explicit **stopgap** to get phone access sooner; the
+"build our own remote client over nostromd" path below is the first real step
+toward the native mobile client.
+
+**Other phone-access options (for reference):**
 - The **Rust TUI** already runs interactive `--remote-control` PTY sessions that
-  *do* register on the relay — that is the phone vehicle today, separate from
-  the GUI.
+  register on the relay — a phone vehicle today, separate from the GUI.
 - **Build our own remote client** over `nostromd` (the network transport set
-  aside at planning time) — the only way to get phone control *with* structured
-  rendering. This is now its own project, not a flag.
+  aside at planning time) — keeps structured rendering; the path toward the
+  native iPhone/iPad app.
 - **Dispatch / Channels** for fire-and-forget from the phone (not live steering).
 
 The `displayName` plumbing and the `remote_control` spawn parameter are kept
-(harmless, default off) in case a focus is ever driven in interactive mode.
+(harmless, default off) — they are exactly what the handoff path would use.
+
+**Status: PARKED.** No implementation now. Revisit when introducing GUI
+toggles/buttons (the handoff's natural home), and track the native iPhone/iPad
+client as the north star this all builds toward.
 
 ## Resolved decisions (operator)
 
