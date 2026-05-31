@@ -69,9 +69,13 @@ class ChatSession: ObservableObject {
     func send(_ text: String, images: [URL] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        // Optimistic — the daemon's SessionState(mid_turn) reconciles this; it
-        // keeps the input bar responsive without waiting for the round-trip.
-        isRunning = true
+        isRunning = true   // optimistic; SessionState(mid_turn) reconciles
+        // Optimistic echo: show the user's message instantly instead of waiting
+        // for the daemon to parse + replay it back over IPC (that round-trip is
+        // what felt laggy). The local turn has no daemonId; apply(.turnStarted)
+        // adopts it when the daemon's matching turn arrives (dedupe by text), so
+        // subsequent block deltas attach to it.
+        turns.append(ChatTurn(userInput: trimmed, timestamp: Date()))
         client.sessionSend(tag: tag, text: trimmed)
         // NOTE: images are surfaced in the UI but not yet forwarded to the
         // daemon/child (same known gap as before; tracked separately).
@@ -106,7 +110,15 @@ class ChatSession: ObservableObject {
     private func apply(_ delta: DaemonTurnDelta) {
         switch delta {
         case .turnStarted(let turn):
-            turns.append(Self.mapTurn(turn))
+            // Reconcile with an optimistic local echo (same text, not yet bound
+            // to a daemon id). If none (e.g. a phone-originated message), append.
+            if let i = turns.lastIndex(where: { $0.daemonId == nil && $0.userInput == turn.userInput }) {
+                turns[i].daemonId   = turn.id
+                turns[i].isComplete = turn.isComplete
+                if !turn.blocks.isEmpty { turns[i].blocks = turn.blocks.map(Self.mapBlock) }
+            } else {
+                turns.append(Self.mapTurn(turn))
+            }
 
         case .blockAppended(let turnId, let block):
             if let i = turns.firstIndex(where: { $0.daemonId == turnId }) {
