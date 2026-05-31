@@ -1,6 +1,6 @@
 # Daemon-hosted focuses without a project run at `/` (filesystem root)
 
-**Type:** bug · **Repo:** nostromo (nostromd) · **Status:** open
+**Type:** bug · **Repo:** nostromo (nostromd) · **Status:** fixed (default child cwd → $HOME when no project)
 
 ## Symptom
 

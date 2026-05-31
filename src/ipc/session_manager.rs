@@ -258,7 +258,16 @@ impl SessionManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        if let Some(dir) = cwd.clone().or_else(|| std::env::current_dir().ok()) {
+        // Child working directory. When the focus carries no project dir, default
+        // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
+        // is `/` (filesystem root). Running an agent at `/` has no git context, so
+        // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
+        // in ways they never do when launched from a real dir. $HOME matches what a
+        // terminal-launched agent would typically see.
+        let dir = cwd.clone()
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .or_else(|| std::env::current_dir().ok());
+        if let Some(dir) = dir {
             cmd.current_dir(dir);
         }
         augment_path(&mut cmd);
