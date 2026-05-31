@@ -218,6 +218,12 @@ class NostromodClient {
     /// Publishes decoded server messages on the main queue.
     let messages = PassthroughSubject<ServerMsg, Never>()
 
+    /// Current connection state. CurrentValueSubject replays the latest value to
+    /// new subscribers, so a ChatSession created while already connected spawns
+    /// exactly once, and a reconnect (false→true) re-triggers spawn/attach —
+    /// without the init+welcome double that caused duplicate-rendered turns.
+    let connected = CurrentValueSubject<Bool, Never>(false)
+
     private var fd: Int32 = -1            // POSIX AF_UNIX socket (NWConnection's
                                          // .unix endpoint fails with ENETDOWN).
     private let sendLock = NSLock()
@@ -299,6 +305,7 @@ class NostromodClient {
         fd = sock
         reconnectDelay = 1.0
         sendHello()
+        connected.send(true)
         // Blocking frame reader on a dedicated background queue.
         DispatchQueue.global(qos: .utility).async { [weak self] in self?.readLoop(sock) }
     }
@@ -381,6 +388,7 @@ class NostromodClient {
         log.info("read loop ended (fd=\(sock, privacy: .public)) — reconnecting")
         Darwin.close(sock)
         if fd == sock { fd = -1 }
+        connected.send(false)
         scheduleReconnect()
     }
 

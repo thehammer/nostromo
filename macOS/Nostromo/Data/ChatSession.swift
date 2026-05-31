@@ -42,10 +42,18 @@ class ChatSession: ObservableObject {
             .sink { [weak self] in self?.handle($0) }
             .store(in: &cancellables)
 
-        // Attempt immediately (covers the common case where the daemon socket is
-        // already connected); the `.welcome` handler re-issues on (re)connect and
-        // daemon restart, so this is robust to ordering.
-        spawnAndAttach()
+        // Spawn/attach exactly once per connection. `connected` replays its
+        // current value, so a session created while already connected fires
+        // immediately; a reconnect (incl. daemon restart) flips false→true and
+        // re-issues. This replaces the old init+welcome pair that double-attached
+        // (which double-rendered every turn).
+        client.connected
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isConnected in
+                guard let self, isConnected else { return }
+                self.spawnAndAttach()
+            }
+            .store(in: &cancellables)
     }
 
     /// Spawn (or resume) this focus's session and attach for turn deltas.
@@ -85,11 +93,6 @@ class ChatSession: ObservableObject {
 
     private func handle(_ msg: ServerMsg) {
         switch msg {
-        case .welcome:
-            // Daemon connected (or reconnected after a restart). Re-spawn +
-            // re-attach so the GUI re-syncs; the daemon's session outlived us.
-            spawnAndAttach()
-
         case .sessionTurns(let t, let daemonTurns) where t == tag:
             turns = daemonTurns.map(Self.mapTurn)
 
