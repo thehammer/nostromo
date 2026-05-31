@@ -40,7 +40,14 @@ install-daemon: daemon
 		dist/launchd/com.hammer.nostromd.plist \
 		> "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
 	@echo "Installed plist to $(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
-	launchctl bootout "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null || true
+	@launchctl bootout "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null || true
+	@# bootout is asynchronous — the service keeps tearing down after the command
+	@# returns. Bootstrapping immediately races it and fails with "Input/output
+	@# error" (5). Poll until the old instance is fully unloaded (max ~5s) first.
+	@for i in $$(seq 1 20); do \
+		launchctl print "gui/$$(id -u)/com.hammer.nostromd" >/dev/null 2>&1 || break; \
+		sleep 0.25; \
+	done
 	launchctl bootstrap "gui/$$(id -u)" "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
 	@echo "nostromd loaded — check status with: launchctl print gui/$$(id -u)/com.hammer.nostromd"
 

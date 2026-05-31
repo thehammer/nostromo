@@ -108,6 +108,16 @@ constraint.
   native selection, copy, markdown, code highlighting, foldable tool calls.
   If headless `claude -p --output-format stream-json` matures further, the
   transcript pane becomes the upgrade path.
+
+  > **Update (2026-05-31): this upgrade path was taken — and the design
+  > diverged from the PTY-pane sketch above.** Sessions are now hosted in
+  > `nostromd` as one persistent, bidirectional `--input-format stream-json`
+  > process per focus (the daemon owns parsing + the turn model; the GUI is a
+  > thin attach-client), not a PTY running the real `claude` TUI. Shipped:
+  > survival across daemon restarts, multi-window mirroring via daemon
+  > broadcast, optimistic echo. Native phone remote control was found
+  > incompatible with stream-json mode (interactive-only) and is parked. Full
+  > design + findings: `docs/prds/persistent-bidirectional-session-host.md`.
 - **Status-bar item v1 scope: Mother + Posture only.** Mother counts via the
   daemon broadcast (W1). Posture via the existing `~/.claude/budget-posture.json`
   read path. **Calendar deferred** — needs EventKit permission flow and is
@@ -115,9 +125,9 @@ constraint.
 
 ## Still open
 
-- **Daemon ownership / multi-client IPC.** nostromd already serves the TUI.
-  Confirm the IPC layer handles a second client (the Mac app) cleanly —
-  W1 should verify this as part of stabilising the broadcast API.
+- ~~**Daemon ownership / multi-client IPC.**~~ **RESOLVED (2026-05-31):** the
+  protocol-v3 `Session*` IPC handles multiple clients cleanly; multiple GUI
+  windows attach to one daemon-hosted session and mirror via broadcast.
 - **Distribution**: notarised DMG outside the App Store vs. Mac App Store.
   Default to DMG for the personal-leverage phase; revisit if the product
   pivot happens.
