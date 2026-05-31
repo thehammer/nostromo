@@ -66,7 +66,6 @@ pub struct MotherJobLite {
 #[derive(Debug)]
 pub enum McpCommand {
     // ── Pane / view mutations ─────────────────────────────────────────────────
-
     /// Set the focused pane within a view, or switch the active view.
     SetPaneFocus {
         view_id: String,
@@ -96,7 +95,6 @@ pub enum McpCommand {
     },
 
     // ── Perri-specific mutations ───────────────────────────────────────────────
-
     /// Load a PR into Perri's diff pane.
     PerriLoadPr {
         number: u64,
@@ -122,7 +120,6 @@ pub enum McpCommand {
     },
 
     // ── Mother job control ────────────────────────────────────────────────────
-
     /// Enqueue a plan file; returns a minimal job record.
     MotherEnqueue {
         plan_path: PathBuf,
@@ -148,8 +145,13 @@ pub enum McpCommand {
         reply: oneshot::Sender<McpReply<()>>,
     },
 
-    // ── Phase 4: notifications & status segments ──────────────────────────────
+    /// In-place retry a failed/cancelled job by id (broker `retry` command).
+    MotherRetry {
+        job_id: String,
+        reply: oneshot::Sender<McpReply<()>>,
+    },
 
+    // ── Phase 4: notifications & status segments ──────────────────────────────
     /// Post a transient status-bar toast.  Fades after 5 s.
     Notify {
         message: String,

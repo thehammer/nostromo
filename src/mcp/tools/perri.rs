@@ -32,9 +32,9 @@ pub fn list_pr_queue(state: &McpSharedState) -> Value {
 pub fn get_current_pr(state: &McpSharedState) -> Value {
     let borrow = state.perri_pr_rx.borrow();
     match borrow.as_ref() {
-        Some(snap) => serde_json::to_value(snap).unwrap_or_else(|e| {
-            json!({ "error": "serialization_failed", "detail": e.to_string() })
-        }),
+        Some(snap) => serde_json::to_value(snap).unwrap_or_else(
+            |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+        ),
         None => Value::Null,
     }
 }

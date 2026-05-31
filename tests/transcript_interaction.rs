@@ -25,19 +25,21 @@ use nostromo::{
 /// user, assistant-text, tool-use, tool-result, thinking, assistant-text, turn-end.
 fn make_snapshot() -> TranscriptSnapshot {
     let entries = vec![
-        TranscriptEntry::UserMessage("Hello world".to_string()),                    // 0
-        TranscriptEntry::AssistantText("Sure, let me help.".to_string()),           // 1
-        TranscriptEntry::ToolUse {                                                   // 2
+        TranscriptEntry::UserMessage("Hello world".to_string()), // 0
+        TranscriptEntry::AssistantText("Sure, let me help.".to_string()), // 1
+        TranscriptEntry::ToolUse {
+            // 2
             name: "Bash".to_string(),
             input: serde_json::json!({"command": "ls -la", "description": "list"}),
         },
-        TranscriptEntry::ToolResult {                                                // 3
+        TranscriptEntry::ToolResult {
+            // 3
             tool_use_id: "toolu_abc123xyz".to_string(),
             content: "total 0\ndrwxr-xr-x  2 user group  64 Jan 1 00:00 .".to_string(),
         },
         TranscriptEntry::Thinking("Let me reason about this step by step.".to_string()), // 4
-        TranscriptEntry::AssistantText("Done! Here is the result.".to_string()),    // 5
-        TranscriptEntry::TurnEnd,                                                    // 6
+        TranscriptEntry::AssistantText("Done! Here is the result.".to_string()),         // 5
+        TranscriptEntry::TurnEnd,                                                        // 6
     ];
     TranscriptSnapshot {
         entries: Arc::new(entries),
@@ -67,7 +69,11 @@ fn test_navigable_entries_show_thinking() {
 
     // With show_thinking=true: include Thinking (4), skip TurnEnd (6).
     let nav = snap.navigable_entries(true);
-    assert_eq!(nav, vec![0, 1, 2, 3, 4, 5], "should include Thinking but skip TurnEnd");
+    assert_eq!(
+        nav,
+        vec![0, 1, 2, 3, 4, 5],
+        "should include Thinking but skip TurnEnd"
+    );
 }
 
 // ── Test 2: cursor navigation ─────────────────────────────────────────────────
@@ -126,11 +132,17 @@ fn test_expansion_toggle_membership() {
     // Toggle in.
     let idx = 2; // ToolUse entry
     expanded.insert(idx);
-    assert!(expanded.contains(&idx), "expanded should contain entry after first toggle");
+    assert!(
+        expanded.contains(&idx),
+        "expanded should contain entry after first toggle"
+    );
 
     // Toggle out.
     expanded.remove(&idx);
-    assert!(!expanded.contains(&idx), "expanded should not contain entry after second toggle");
+    assert!(
+        !expanded.contains(&idx),
+        "expanded should not contain entry after second toggle"
+    );
 }
 
 #[test]
@@ -200,12 +212,18 @@ fn test_thinking_toggle_off_advances_cursor_from_thinking() {
 
     // navigable with show_thinking=true includes 4.
     let nav_on = snap.navigable_entries(true);
-    assert!(nav_on.contains(&4), "thinking entry should be navigable when shown");
+    assert!(
+        nav_on.contains(&4),
+        "thinking entry should be navigable when shown"
+    );
 
     // After turning off, cursor was on 4 — it must advance to the next visible entry.
     // With show_thinking=false, navigable doesn't include 4.
     let nav_off = snap.navigable_entries(false);
-    assert!(!nav_off.contains(&4), "thinking entry should not be navigable when hidden");
+    assert!(
+        !nav_off.contains(&4),
+        "thinking entry should not be navigable when hidden"
+    );
 
     // Simulate the advance: find next entry after 4 in nav_off.
     let next_after_thinking = nav_off.iter().find(|&&i| i > 4).copied();
@@ -269,5 +287,8 @@ fn test_auto_scroll_no_change_when_in_view() {
 
     // Large pane — entry 0 is always in view.
     let offset = scroll_to_cursor(&plan.entry_rows, 0, 50, 0);
-    assert_eq!(offset, 0, "cursor at top with large pane should not change offset");
+    assert_eq!(
+        offset, 0,
+        "cursor at top with large pane should not change offset"
+    );
 }

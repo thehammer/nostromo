@@ -12,8 +12,8 @@ pub mod get_view_state;
 pub mod list_views;
 pub mod mother;
 pub mod mother_mutators;
-pub mod notify;
 pub mod nostromo_meta;
+pub mod notify;
 pub mod perri;
 pub mod perri_mutators;
 pub mod set_pane;
@@ -292,6 +292,17 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "required": ["id", "answer"]
             }
         }),
+        json!({
+            "name": "mother.retry_job",
+            "description": "In-place retry a failed or cancelled Mother job by id (broker retry command — preserves dependency chains).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Job id to retry" }
+                },
+                "required": ["id"]
+            }
+        }),
         // ── Phase 4: notifications & status segments ───────────────────────
         json!({
             "name": "nostromo.notify",
@@ -361,14 +372,10 @@ pub async fn dispatch(
 ) -> ToolResult {
     let content = match name {
         // ── Phase 1 ────────────────────────────────────────────────────────
-        "nostromo.get_self" => {
-            get_self::handle(state, pty_id).await
-        }
+        "nostromo.get_self" => get_self::handle(state, pty_id).await,
 
         // ── Phase 2: global ────────────────────────────────────────────────
-        "nostromo.list_views" => {
-            list_views::handle(state).await
-        }
+        "nostromo.list_views" => list_views::handle(state).await,
         "nostromo.get_view_state" => {
             let input = parse_args::<get_view_state::GetViewStateInput>(arguments);
             match input {
@@ -382,12 +389,8 @@ pub async fn dispatch(
             // up per-PTY cwd tracking.
             nostromo_meta::get_worktree_info(None).await
         }
-        "nostromo.get_rate_limits" => {
-            nostromo_meta::get_rate_limits(state)
-        }
-        "nostromo.get_budget_posture" => {
-            nostromo_meta::get_budget_posture(state)
-        }
+        "nostromo.get_rate_limits" => nostromo_meta::get_rate_limits(state),
+        "nostromo.get_budget_posture" => nostromo_meta::get_budget_posture(state),
 
         // ── Phase 2: Perri ────────────────────────────────────────────────
         "perri.list_pr_queue" => perri::list_pr_queue(state),
@@ -409,24 +412,18 @@ pub async fn dispatch(
                 .unwrap_or_else(|_| mother::ListJobsInput::default());
             mother::list_jobs(state, &input).await
         }
-        "mother.get_job" => {
-            match parse_args::<mother::GetJobInput>(arguments) {
-                Ok(inp) => mother::get_job(state, &inp),
-                Err(e) => e,
-            }
-        }
-        "mother.tail_log" => {
-            match parse_args::<mother::TailLogInput>(arguments) {
-                Ok(inp) => mother::tail_log(state, &inp).await,
-                Err(e) => e,
-            }
-        }
-        "mother.peek" => {
-            match parse_args::<mother::PeekInput>(arguments) {
-                Ok(inp) => mother::peek(state, &inp).await,
-                Err(e) => e,
-            }
-        }
+        "mother.get_job" => match parse_args::<mother::GetJobInput>(arguments) {
+            Ok(inp) => mother::get_job(state, &inp),
+            Err(e) => e,
+        },
+        "mother.tail_log" => match parse_args::<mother::TailLogInput>(arguments) {
+            Ok(inp) => mother::tail_log(state, &inp).await,
+            Err(e) => e,
+        },
+        "mother.peek" => match parse_args::<mother::PeekInput>(arguments) {
+            Ok(inp) => mother::peek(state, &inp).await,
+            Err(e) => e,
+        },
         "mother.get_status" => mother::get_status(state),
 
         // ── Phase 2: Teri ─────────────────────────────────────────────────
@@ -455,9 +452,7 @@ pub async fn dispatch(
             let args = arguments.cloned().unwrap_or_default();
             perri_mutators::load_pr(state, &args).await
         }
-        "perri.clear_current_pr" => {
-            perri_mutators::clear_current_pr(state).await
-        }
+        "perri.clear_current_pr" => perri_mutators::clear_current_pr(state).await,
         "perri.set_selected_index" => {
             let args = arguments.cloned().unwrap_or_default();
             perri_mutators::set_selected_index(state, &args).await
@@ -479,6 +474,10 @@ pub async fn dispatch(
         "mother.resume_job" => {
             let args = arguments.cloned().unwrap_or_default();
             mother_mutators::resume_job(state, &args).await
+        }
+        "mother.retry_job" => {
+            let args = arguments.cloned().unwrap_or_default();
+            mother_mutators::retry_job(state, &args).await
         }
 
         // ── Phase 4: notifications & status segments ────────────────────────
@@ -505,8 +504,9 @@ pub async fn dispatch(
 
 /// Deserialize tool arguments, returning `{"error":"invalid_args"}` on failure.
 fn parse_args<T: serde::de::DeserializeOwned>(arguments: Option<&Value>) -> Result<T, Value> {
-    let v = arguments.cloned().unwrap_or(Value::Object(Default::default()));
-    serde_json::from_value(v).map_err(|e| {
-        json!({ "error": "invalid_args", "detail": e.to_string() })
-    })
+    let v = arguments
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+    serde_json::from_value(v)
+        .map_err(|e| json!({ "error": "invalid_args", "detail": e.to_string() }))
 }

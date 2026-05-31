@@ -73,14 +73,20 @@ async fn call_tool(
     name: &str,
     args: Value,
 ) -> Value {
-    write_frame(writer, &json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "tools/call",
-        "params": { "name": name, "arguments": args }
-    })).await;
+    write_frame(
+        writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        }),
+    )
+    .await;
     let resp = read_frame(reader).await;
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("{}");
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("{}");
     serde_json::from_str(text).unwrap_or_else(|_| json!({"raw": text}))
 }
 
@@ -94,7 +100,9 @@ async fn switch_active_view_dispatches_command() {
     let socket_path = dir.path().join("mcp_switch.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     // Fake event loop: drain one command and reply Ok.
     let fake_loop = tokio::spawn(async move {
@@ -109,10 +117,19 @@ async fn switch_active_view_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "nostromo.switch_active_view",
-        json!({ "view_id": "mother" })).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.switch_active_view",
+        json!({ "view_id": "mother" }),
+    )
+    .await;
 
-    assert!(fake_loop.await.unwrap(), "fake loop should have seen SwitchActiveView");
+    assert!(
+        fake_loop.await.unwrap(),
+        "fake loop should have seen SwitchActiveView"
+    );
     assert_eq!(result["ok"], true, "tool should return ok=true");
 }
 
@@ -123,11 +140,18 @@ async fn set_pane_focus_dispatches_command() {
     let socket_path = dir.path().join("mcp_focus.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
-            if let nostromo::mcp::McpCommand::SetPaneFocus { view_id, pane_id, reply } = *cmd {
+            if let nostromo::mcp::McpCommand::SetPaneFocus {
+                view_id,
+                pane_id,
+                reply,
+            } = *cmd
+            {
                 assert_eq!(view_id, "perri");
                 assert_eq!(pane_id, "diff");
                 let _ = reply.send(Ok(()));
@@ -138,8 +162,14 @@ async fn set_pane_focus_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "nostromo.set_pane_focus",
-        json!({ "view_id": "perri", "pane_id": "diff" })).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.set_pane_focus",
+        json!({ "view_id": "perri", "pane_id": "diff" }),
+    )
+    .await;
 
     assert!(fake_loop.await.unwrap());
     assert_eq!(result["ok"], true);
@@ -152,11 +182,19 @@ async fn set_pane_content_text_dispatches_command() {
     let socket_path = dir.path().join("mcp_content.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
-            if let nostromo::mcp::McpCommand::SetPaneContent { view_id, pane_id, content, reply } = *cmd {
+            if let nostromo::mcp::McpCommand::SetPaneContent {
+                view_id,
+                pane_id,
+                content,
+                reply,
+            } = *cmd
+            {
                 assert_eq!(view_id, "perri");
                 assert_eq!(pane_id, "diff");
                 if let nostromo::mcp::PaneContent::Text(t) = content {
@@ -170,12 +208,18 @@ async fn set_pane_content_text_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "nostromo.set_pane_content",
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.set_pane_content",
         json!({
             "view_id": "perri",
             "pane_id": "diff",
             "content": { "type": "text", "text": "diff --git a/foo b/foo" }
-        })).await;
+        }),
+    )
+    .await;
 
     assert!(fake_loop.await.unwrap());
     assert_eq!(result["ok"], true);
@@ -188,11 +232,18 @@ async fn set_pane_layout_dispatches_command() {
     let socket_path = dir.path().join("mcp_layout.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
-            if let nostromo::mcp::McpCommand::SetPaneLayout { view_id, ratios, reply } = *cmd {
+            if let nostromo::mcp::McpCommand::SetPaneLayout {
+                view_id,
+                ratios,
+                reply,
+            } = *cmd
+            {
                 assert_eq!(view_id, "perri");
                 assert!((ratios["top_row"].as_f64().unwrap() - 0.6).abs() < 0.001);
                 let _ = reply.send(Ok(()));
@@ -203,8 +254,14 @@ async fn set_pane_layout_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "nostromo.set_pane_layout",
-        json!({ "view_id": "perri", "ratios": { "top_row": 0.6, "queue": 0.35 } })).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.set_pane_layout",
+        json!({ "view_id": "perri", "ratios": { "top_row": 0.6, "queue": 0.35 } }),
+    )
+    .await;
 
     assert!(fake_loop.await.unwrap());
     assert_eq!(result["ok"], true);
@@ -217,11 +274,19 @@ async fn perri_load_pr_dispatches_command() {
     let socket_path = dir.path().join("mcp_load_pr.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
-            if let nostromo::mcp::McpCommand::PerriLoadPr { number, repo, highlights, reply } = *cmd {
+            if let nostromo::mcp::McpCommand::PerriLoadPr {
+                number,
+                repo,
+                highlights,
+                reply,
+            } = *cmd
+            {
                 assert_eq!(number, 42);
                 assert_eq!(repo, "thehammer/nostromo");
                 assert_eq!(highlights.as_deref(), Some("check the auth flow"));
@@ -233,9 +298,14 @@ async fn perri_load_pr_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "perri.load_pr",
-        json!({ "number": 42, "repo": "thehammer/nostromo", "highlights": "check the auth flow" }))
-        .await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "perri.load_pr",
+        json!({ "number": 42, "repo": "thehammer/nostromo", "highlights": "check the auth flow" }),
+    )
+    .await;
 
     assert!(fake_loop.await.unwrap());
     assert_eq!(result["ok"], true);
@@ -248,7 +318,9 @@ async fn perri_clear_current_pr_dispatches_command() {
     let socket_path = dir.path().join("mcp_clear_pr.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
@@ -261,7 +333,14 @@ async fn perri_clear_current_pr_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "perri.clear_current_pr", json!({})).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "perri.clear_current_pr",
+        json!({}),
+    )
+    .await;
 
     assert!(fake_loop.await.unwrap());
     assert_eq!(result["ok"], true);
@@ -274,7 +353,9 @@ async fn perri_set_selected_index_dispatches_command() {
     let socket_path = dir.path().join("mcp_sel_idx.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
@@ -288,8 +369,14 @@ async fn perri_set_selected_index_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "perri.set_selected_index",
-        json!({ "index": 3 })).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "perri.set_selected_index",
+        json!({ "index": 3 }),
+    )
+    .await;
 
     assert!(fake_loop.await.unwrap());
     assert_eq!(result["ok"], true);
@@ -304,7 +391,9 @@ async fn mother_enqueue_job_dispatches_command() {
     std::fs::write(&plan_path, b"# Test plan").unwrap();
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let plan_path_clone = plan_path.clone();
     let fake_loop = tokio::spawn(async move {
@@ -323,8 +412,14 @@ async fn mother_enqueue_job_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "mother.enqueue_job",
-        json!({ "plan_path": plan_path.to_str().unwrap() })).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "mother.enqueue_job",
+        json!({ "plan_path": plan_path.to_str().unwrap() }),
+    )
+    .await;
 
     assert!(fake_loop.await.unwrap());
     assert_eq!(result["id"], "test-job-id");
@@ -338,7 +433,9 @@ async fn mother_cancel_job_dispatches_command() {
     let socket_path = dir.path().join("mcp_cancel.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
@@ -352,8 +449,14 @@ async fn mother_cancel_job_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "mother.cancel_job",
-        json!({ "id": "abc-123" })).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "mother.cancel_job",
+        json!({ "id": "abc-123" }),
+    )
+    .await;
 
     assert!(fake_loop.await.unwrap());
     assert_eq!(result["ok"], true);
@@ -366,11 +469,18 @@ async fn mother_resume_job_dispatches_command() {
     let socket_path = dir.path().join("mcp_resume.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
-            if let nostromo::mcp::McpCommand::MotherResume { job_id, answer, reply } = *cmd {
+            if let nostromo::mcp::McpCommand::MotherResume {
+                job_id,
+                answer,
+                reply,
+            } = *cmd
+            {
                 assert_eq!(job_id, "def-456");
                 assert_eq!(answer, "yes, proceed with the migration");
                 let _ = reply.send(Ok(()));
@@ -381,8 +491,14 @@ async fn mother_resume_job_dispatches_command() {
     });
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "mother.resume_job",
-        json!({ "id": "def-456", "answer": "yes, proceed with the migration" })).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "mother.resume_job",
+        json!({ "id": "def-456", "answer": "yes, proceed with the migration" }),
+    )
+    .await;
 
     assert!(fake_loop.await.unwrap());
     assert_eq!(result["ok"], true);
@@ -398,11 +514,19 @@ async fn switch_active_view_returns_error_on_closed_channel() {
     let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
     drop(rx);
     let state = Arc::new(McpSharedState::for_test(tx));
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let (mut reader, mut writer) = mcp_connect(&socket_path).await;
-    let result = call_tool(&mut reader, &mut writer, 2, "nostromo.switch_active_view",
-        json!({ "view_id": "fred" })).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.switch_active_view",
+        json!({ "view_id": "fred" }),
+    )
+    .await;
 
     assert!(result.get("error").is_some(), "should return error");
     // Could be event_loop_closed or event_loop_timeout — both are acceptable.
@@ -411,4 +535,43 @@ async fn switch_active_view_returns_error_on_closed_channel() {
         err == "event_loop_closed" || err == "event_loop_timeout",
         "unexpected error: {err}"
     );
+}
+
+/// `mother.retry_job` dispatches MotherRetry with the job id.
+#[tokio::test]
+async fn mother_retry_job_dispatches_command() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("mcp_retry.sock");
+
+    let (state, mut rx) = make_state_with_channel().await;
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
+
+    let fake_loop = tokio::spawn(async move {
+        if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
+            if let nostromo::mcp::McpCommand::MotherRetry { job_id, reply } = *cmd {
+                assert_eq!(job_id, "retry-job-xyz");
+                let _ = reply.send(Ok(()));
+                return true;
+            }
+        }
+        false
+    });
+
+    let (mut reader, mut writer) = mcp_connect(&socket_path).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "mother.retry_job",
+        json!({ "id": "retry-job-xyz" }),
+    )
+    .await;
+
+    assert!(
+        fake_loop.await.unwrap(),
+        "fake loop should have seen MotherRetry"
+    );
+    assert_eq!(result["ok"], true);
 }

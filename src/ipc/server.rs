@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     codec::{read_frame, write_frame},
-    protocol::{ClientMsg, SessionAction, ServerMsg, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
+    protocol::{ClientMsg, ServerMsg, SessionAction, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
     pty_manager::PtyManager,
     session_manager::SessionManager,
 };
@@ -267,7 +267,10 @@ async fn handle_client(
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
-    debug!(client_id, "client handler exiting; detaching PTYs + sessions");
+    debug!(
+        client_id,
+        "client handler exiting; detaching PTYs + sessions"
+    );
     {
         let mut mgr = pty_mgr.lock().unwrap();
         mgr.on_client_disconnect(&client_id);
@@ -381,7 +384,14 @@ fn handle_client_msg(
         } => {
             let result = {
                 let mut mgr = session_mgr.lock().unwrap();
-                mgr.spawn_session(tag.clone(), agent_name, view_name, cwd, session_id, remote_control)
+                mgr.spawn_session(
+                    tag.clone(),
+                    agent_name,
+                    view_name,
+                    cwd,
+                    session_id,
+                    remote_control,
+                )
             };
             match result {
                 Ok(session_id) => {

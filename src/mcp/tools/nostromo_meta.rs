@@ -48,10 +48,8 @@ pub async fn get_worktree_info(cwd: Option<&str>) -> Value {
     // In a linked worktree, `--git-dir` is inside `.git/worktrees/<name>` but
     // `--git-common-dir` points to the main `.git`.  They differ iff we're in a
     // linked worktree.
-    let is_worktree = !common_dir.is_empty()
-        && !git_dir.is_empty()
-        && common_dir != git_dir
-        && common_dir != ".";
+    let is_worktree =
+        !common_dir.is_empty() && !git_dir.is_empty() && common_dir != git_dir && common_dir != ".";
 
     // Parent repo: the toplevel of the main worktree, which is one level up from
     // the common .git dir when it ends with `.git`.
@@ -76,9 +74,9 @@ pub async fn get_worktree_info(cwd: Option<&str>) -> Value {
 /// Handle `nostromo.get_rate_limits()`.
 pub fn get_rate_limits(state: &McpSharedState) -> Value {
     match state.rate_limits_rx.borrow().as_ref() {
-        Some(rl) => serde_json::to_value(rl).unwrap_or_else(|e| {
-            json!({ "error": "serialization_failed", "detail": e.to_string() })
-        }),
+        Some(rl) => serde_json::to_value(rl).unwrap_or_else(
+            |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+        ),
         None => Value::Null,
     }
 }
@@ -86,9 +84,9 @@ pub fn get_rate_limits(state: &McpSharedState) -> Value {
 /// Handle `nostromo.get_budget_posture()`.
 pub fn get_budget_posture(state: &McpSharedState) -> Value {
     match state.budget_posture_rx.borrow().as_ref() {
-        Some(p) => serde_json::to_value(p).unwrap_or_else(|e| {
-            json!({ "error": "serialization_failed", "detail": e.to_string() })
-        }),
+        Some(p) => serde_json::to_value(p).unwrap_or_else(
+            |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+        ),
         None => Value::Null,
     }
 }

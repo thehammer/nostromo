@@ -50,7 +50,12 @@ impl PerriPrNativeSource {
     /// - `refresh_tx`  — send `()` to trigger an immediate re-fetch (direct
     ///   MCP push path introduced in Phase 4).  The dirty-file watcher remains
     ///   active as a fallback for the shell-script deprecation window.
-    pub fn spawn(config: Config) -> (watch::Receiver<Option<PrSnapshot>>, mpsc::UnboundedSender<()>) {
+    pub fn spawn(
+        config: Config,
+    ) -> (
+        watch::Receiver<Option<PrSnapshot>>,
+        mpsc::UnboundedSender<()>,
+    ) {
         let (tx, rx) = watch::channel(None);
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
         let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
@@ -62,7 +67,9 @@ impl PerriPrNativeSource {
 
         tokio::spawn(async move {
             let source = PerriPrNativeSource { config };
-            source.run(tx, &mut dirty_rx, &mut refresh_rx, interval_secs).await;
+            source
+                .run(tx, &mut dirty_rx, &mut refresh_rx, interval_secs)
+                .await;
         });
 
         (rx, refresh_tx)

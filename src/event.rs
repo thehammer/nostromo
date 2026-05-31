@@ -60,6 +60,10 @@ pub enum AppEvent {
     ///
     /// Boxed to keep `AppEvent` size uniform — `McpCommand` can carry large strings.
     McpCommand(Box<McpCommand>),
+    /// A status note to surface in the chrome (e.g. broker mutation errors).
+    ///
+    /// Sets `AppState::status_note`; displayed above the active view.
+    StatusNote(String),
 }
 
 /// Tick interval for the event loop.

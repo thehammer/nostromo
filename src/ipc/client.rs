@@ -260,7 +260,8 @@ async fn supervisor_task(
     cfg: ReconnectConfig,
 ) {
     // Run the first generation (socket already open from `connect()`).
-    let shutdown = run_generation(initial_reader, initial_writer, &mut write_rx, &all_msgs_tx).await;
+    let shutdown =
+        run_generation(initial_reader, initial_writer, &mut write_rx, &all_msgs_tx).await;
     if shutdown {
         return;
     }
@@ -274,7 +275,11 @@ async fn supervisor_task(
             attempt,
             backoff_secs: backoff.as_secs() as u32,
         });
-        debug!(attempt, backoff_ms = backoff.as_millis(), "will reconnect to nostromd");
+        debug!(
+            attempt,
+            backoff_ms = backoff.as_millis(),
+            "will reconnect to nostromd"
+        );
 
         tokio::time::sleep(backoff).await;
 
@@ -399,8 +404,10 @@ mod tests {
     /// through `Reconnecting` → `Connected`, and emits `DaemonReconnected`.
     #[tokio::test]
     async fn reconnect_roundtrips_send_and_receive() {
-        let sock_path = std::env::temp_dir()
-            .join(format!("nostromo_reconnect_test_{}.sock", std::process::id()));
+        let sock_path = std::env::temp_dir().join(format!(
+            "nostromo_reconnect_test_{}.sock",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&sock_path);
 
         let listener = UnixListener::bind(&sock_path).unwrap();

@@ -20,6 +20,7 @@ fn make_test_job() -> MotherJob {
         paused_reason: Some("user".to_string()),
         adherence_status: None,
         current_tier: Some("tier_0".to_string()),
+        current_activity: None,
     }
 }
 

@@ -13,6 +13,7 @@ pub mod fred_mailbox;
 pub mod fred_mailbox_native;
 pub mod github_client;
 pub mod graph_client;
+pub mod mother_broker_source;
 pub mod mother_poll;
 pub mod perri_pr;
 pub mod perri_pr_native;

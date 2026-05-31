@@ -26,7 +26,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -38,7 +38,7 @@ use crate::{
         fred_calendar_native::FredCalendarNativeSource,
         fred_mailbox::{FredMailboxSource, MailboxSnapshot},
         fred_mailbox_native::FredMailboxNativeSource,
-        mother_poll,
+        mother_broker_source,
         perri_pr::PerriPrSource,
         perri_pr_native::PerriPrNativeSource,
         perri_queue::PerriQueueSource,
@@ -51,6 +51,7 @@ use crate::{
     event::{self, AppEvent},
     layout::{self, LayoutNode, Side, SplitDir},
     mcp::{McpServer, McpSharedState, ViewMeta},
+    mother::broker_client::{BrokerClient, BrokerConnState},
     mother::{self, MotherJob},
     pty::{DaemonPtyFactory, InProcessPtyFactory, PtyFactory},
     ui,
@@ -112,10 +113,9 @@ pub enum ModalState {
         job_id: String,
         modal: ConfirmModal,
     },
-    /// Confirm a `mother add --plan <path>` retry operation.
+    /// Confirm an in-place broker `retry` operation.
     ConfirmRetry {
         job_id: String,
-        plan_path: String,
         modal: ConfirmModal,
     },
     /// Command palette overlay (Ctrl-P).
@@ -166,6 +166,12 @@ pub struct AppState {
     pub daemon_connected: bool,
     /// Path to the nostromd Unix socket.
     pub daemon_socket_path: std::path::PathBuf,
+    /// Mother broker IPC client (always present; supervisor keeps retrying).
+    pub broker_client: BrokerClient,
+    /// Watch receiver for the broker connection state (for UI indicator).
+    pub broker_conn_rx: watch::Receiver<BrokerConnState>,
+    /// Event sender: used by spawned tasks to post errors back to the main loop.
+    pub event_tx: mpsc::UnboundedSender<AppEvent>,
 
     // ── Status bar data ───────────────────────────────────────────────────────
     /// Latest Claude rate-limit snapshot (populated via `AppEvent::RateLimitsChanged`).
@@ -208,6 +214,9 @@ impl AppState {
         mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
         calendar_rx: tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
         picker: ratatui_image::picker::Picker,
+        broker_client: BrokerClient,
+        broker_conn_rx: watch::Receiver<BrokerConnState>,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Self {
         Self {
             right_panel_visible: false,
@@ -227,6 +236,9 @@ impl AppState {
             status_hitmap: Vec::new(),
             daemon_connected: false,
             daemon_socket_path: std::path::PathBuf::new(),
+            broker_client,
+            broker_conn_rx,
+            event_tx,
             rate_limits: None,
             budget_posture: None,
             posture_snapshot: None,
@@ -387,15 +399,18 @@ pub async fn run(
             }
         };
 
+    // Construct the Mother broker client (always present; supervisor keeps retrying).
+    let broker = BrokerClient::new(crate::mother::broker_sock_path());
+
     // Construct PtyFactory; also spawn Mother pollers or daemon bridge.
     let pty_factory: Arc<dyn PtyFactory> = if let Some(client) = daemon_client {
-        info!("using daemon bridge for Mother + activity events");
+        info!("using daemon bridge for PTY + activity events; broker handles Mother mutations");
         crate::data::daemon_bridge::spawn(client.clone(), tx.clone(), Arc::clone(&bus));
         let factory = DaemonPtyFactory::new_with_refresh(client, Arc::clone(&mcp_state)).await;
         Arc::new(factory)
     } else {
-        // In-process fallback: spawn Mother pollers as before.
-        mother_poll::spawn(tx.clone());
+        // In-process fallback: broker source replaces the old 2-second poller.
+        mother_broker_source::spawn(broker.clone(), tx.clone());
         Arc::new(InProcessPtyFactory::new(Arc::clone(&mcp_state)))
     };
 
@@ -488,7 +503,15 @@ pub async fn run(
         ViewArg::All => 0,
     };
 
-    let mut state = AppState::new(mailbox_rx_state, calendar_rx_state, picker.clone());
+    let broker_conn_rx = broker.connection_state();
+    let mut state = AppState::new(
+        mailbox_rx_state,
+        calendar_rx_state,
+        picker.clone(),
+        broker.clone(),
+        broker_conn_rx,
+        tx.clone(),
+    );
     state.daemon_connected = daemon_was_connected;
     state.daemon_socket_path = crate::ipc::default_socket_path();
     state.perri_pr_refresh_tx = perri_pr_refresh_tx_opt;
@@ -862,6 +885,30 @@ pub async fn run(
                 // Garbage-collect expired toasts.
                 let now = chrono::Utc::now().timestamp();
                 state.toasts.retain(|t| t.expires_at > now);
+                // Update broker connection indicator on state change.
+                if state.broker_conn_rx.has_changed().unwrap_or(false) {
+                    let conn = state.broker_conn_rx.borrow_and_update().clone();
+                    match conn {
+                        BrokerConnState::Connected => {
+                            if state
+                                .status_note
+                                .as_deref()
+                                .map(|s| s.starts_with("⚠ mother broker"))
+                                .unwrap_or(false)
+                            {
+                                state.status_note = None;
+                            }
+                        }
+                        BrokerConnState::Reconnecting { .. } | BrokerConnState::Connecting => {
+                            state.status_note = Some("⚠ mother broker: reconnecting".to_string());
+                        }
+                    }
+                }
+            }
+
+            AppEvent::StatusNote(msg) => {
+                state.status_note = Some(msg.clone());
+                continue;
             }
 
             _ => {
@@ -994,17 +1041,25 @@ fn handle_modal_key(
             }
             AwaitAction::Approve(answer) => {
                 let id = m.job.id.clone();
+                let broker = state.broker_client.clone();
+                let event_tx = state.event_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = mother::resume(&id, &answer).await {
-                        warn!("mother resume failed: {e:#}");
+                    let cmd = crate::mother::protocol::cmd_answer(&id, &answer);
+                    if let Err(e) = broker.send_command(cmd).await {
+                        let msg = e.operator_message("answer");
+                        let _ = event_tx.send(AppEvent::StatusNote(msg));
                     }
                 });
             }
             AwaitAction::Deny => {
                 let id = m.job.id.clone();
+                let broker = state.broker_client.clone();
+                let event_tx = state.event_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = mother::cancel(&id).await {
-                        warn!("mother cancel failed: {e:#}");
+                    let cmd = crate::mother::protocol::cmd_cancel(&id);
+                    if let Err(e) = broker.send_command(cmd).await {
+                        let msg = e.operator_message("cancel");
+                        let _ = event_tx.send(AppEvent::StatusNote(msg));
                     }
                 });
             }
@@ -1043,9 +1098,13 @@ fn handle_modal_key(
 
         ModalState::ConfirmCancel { job_id, modal: m } => match m.on_key(k) {
             ConfirmAction::Yes => {
+                let broker = state.broker_client.clone();
+                let event_tx = state.event_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = mother::cancel(&job_id).await {
-                        warn!("mother cancel failed: {e:#}");
+                    let cmd = crate::mother::protocol::cmd_cancel(&job_id);
+                    if let Err(e) = broker.send_command(cmd).await {
+                        let msg = e.operator_message("cancel");
+                        let _ = event_tx.send(AppEvent::StatusNote(msg));
                     }
                 });
             }
@@ -1055,27 +1114,21 @@ fn handle_modal_key(
             }
         },
 
-        ModalState::ConfirmRetry {
-            job_id,
-            plan_path,
-            modal: m,
-        } => match m.on_key(k) {
+        ModalState::ConfirmRetry { job_id, modal: m } => match m.on_key(k) {
             ConfirmAction::Yes => {
-                let path = PathBuf::from(plan_path);
-                let _job_id = job_id;
+                let broker = state.broker_client.clone();
+                let event_tx = state.event_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = mother::add_plan(&path).await {
-                        warn!("mother add --plan failed: {e:#}");
+                    let cmd = crate::mother::protocol::cmd_retry(&job_id);
+                    if let Err(e) = broker.send_command(cmd).await {
+                        let msg = e.operator_message("retry");
+                        let _ = event_tx.send(AppEvent::StatusNote(msg));
                     }
                 });
             }
             ConfirmAction::No | ConfirmAction::Dismiss => {}
             ConfirmAction::Consumed => {
-                state.modal = Some(ModalState::ConfirmRetry {
-                    job_id,
-                    plan_path,
-                    modal: m,
-                });
+                state.modal = Some(ModalState::ConfirmRetry { job_id, modal: m });
             }
         },
     }
@@ -1189,26 +1242,13 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
             });
         }
 
-        MotherAction::RetryJob(job) => match &job.plan_path {
-            Some(path) if !path.is_empty() => {
-                let prompt = format!("Retry job \"{}\" by re-adding its plan? [y/n]", job.title);
-                state.modal = Some(ModalState::ConfirmRetry {
-                    job_id: job.id,
-                    plan_path: path.clone(),
-                    modal: ConfirmModal::new(prompt),
-                });
-            }
-            _ => {
-                warn!(
-                    "retry requested for job {} but plan_path absent; cannot retry",
-                    job.id
-                );
-                state.status_note = Some(format!(
-                    "⚠ Cannot retry {}: no plan_path in job record",
-                    &job.id[..8.min(job.id.len())]
-                ));
-            }
-        },
+        MotherAction::RetryJob(job) => {
+            let prompt = format!("Retry job \"{}\"? [y/n]", job.title);
+            state.modal = Some(ModalState::ConfirmRetry {
+                job_id: job.id,
+                modal: ConfirmModal::new(prompt),
+            });
+        }
 
         MotherAction::OpenAwaitModal(job) => {
             state.modal = Some(ModalState::Await(Box::new(AwaitModal::new(job))));
@@ -1232,7 +1272,7 @@ async fn handle_mcp_command(
 ) {
     use crate::mcp::command::McpCommand;
 
-    let _ = mother_idx; // used for context; Mother mutations are CLI-based
+    let _ = mother_idx; // Mother mutations now go through state.broker_client
 
     match cmd {
         // ── SetPaneFocus ─────────────────────────────────────────────────────
@@ -1423,14 +1463,17 @@ async fn handle_mcp_command(
         }
 
         // ── MotherCancel ──────────────────────────────────────────────────────
-        McpCommand::MotherCancel { job_id, reply } => match mother::cancel(&job_id).await {
-            Ok(()) => {
-                let _ = reply.send(Ok(()));
+        McpCommand::MotherCancel { job_id, reply } => {
+            let cmd = crate::mother::protocol::cmd_cancel(&job_id);
+            match state.broker_client.send_command(cmd).await {
+                Ok(_) => {
+                    let _ = reply.send(Ok(()));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e.operator_message("cancel")));
+                }
             }
-            Err(e) => {
-                let _ = reply.send(Err(format!("mother_cli_error: {e}")));
-            }
-        },
+        }
 
         // ── MotherArchive ─────────────────────────────────────────────────────
         McpCommand::MotherArchive { job_id, reply } => match mother::archive(&job_id).await {
@@ -1447,14 +1490,30 @@ async fn handle_mcp_command(
             job_id,
             answer,
             reply,
-        } => match mother::resume(&job_id, &answer).await {
-            Ok(()) => {
-                let _ = reply.send(Ok(()));
+        } => {
+            let cmd = crate::mother::protocol::cmd_answer(&job_id, &answer);
+            match state.broker_client.send_command(cmd).await {
+                Ok(_) => {
+                    let _ = reply.send(Ok(()));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e.operator_message("answer")));
+                }
             }
-            Err(e) => {
-                let _ = reply.send(Err(format!("mother_cli_error: {e}")));
+        }
+
+        // ── MotherRetry ───────────────────────────────────────────────────────
+        McpCommand::MotherRetry { job_id, reply } => {
+            let cmd = crate::mother::protocol::cmd_retry(&job_id);
+            match state.broker_client.send_command(cmd).await {
+                Ok(_) => {
+                    let _ = reply.send(Ok(()));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e.operator_message("retry")));
+                }
             }
-        },
+        }
 
         // ── Phase 4: notifications & status segments ──────────────────────────
 

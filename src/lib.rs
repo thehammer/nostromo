@@ -3,13 +3,13 @@
 use clap::ValueEnum;
 
 pub mod agent_bus;
-pub mod mcp;
 pub mod app;
 pub mod config;
 pub mod data;
 pub mod event;
 pub mod ipc;
 pub mod layout;
+pub mod mcp;
 pub mod mother;
 pub mod pty;
 pub mod sessions;

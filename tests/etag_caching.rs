@@ -95,13 +95,16 @@ async fn fetch_check_suites_sends_if_none_match_on_second_call() {
     let body_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // First call — 200, should return false (success suite, not failure).
-    let result1 = fetch_check_suites_failure(&client, "acme/repo", "sha-xyz", &etags, &body_cache)
-        .await;
-    assert!(!result1, "success-only suite must return false on first call");
+    let result1 =
+        fetch_check_suites_failure(&client, "acme/repo", "sha-xyz", &etags, &body_cache).await;
+    assert!(
+        !result1,
+        "success-only suite must return false on first call"
+    );
 
     // Second call — should trigger 304, serve body from cache, still false.
-    let result2 = fetch_check_suites_failure(&client, "acme/repo", "sha-xyz", &etags, &body_cache)
-        .await;
+    let result2 =
+        fetch_check_suites_failure(&client, "acme/repo", "sha-xyz", &etags, &body_cache).await;
     assert!(
         !result2,
         "cached body on 304 must still return false (no failures)"

@@ -13,9 +13,9 @@ use crate::mcp::state::McpSharedState;
 pub fn list_todos(state: &McpSharedState) -> Value {
     let borrow = state.teri_todos_rx.borrow();
     match borrow.as_ref() {
-        Some(snap) => serde_json::to_value(snap).unwrap_or_else(|e| {
-            json!({ "error": "serialization_failed", "detail": e.to_string() })
-        }),
+        Some(snap) => serde_json::to_value(snap).unwrap_or_else(
+            |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+        ),
         None => json!({ "generated_at": null, "items": [], "stale": false, "error": null }),
     }
 }

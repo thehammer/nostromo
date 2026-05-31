@@ -67,17 +67,10 @@ fn main() {
 
     // Also print info per rendering so the operator knows which is which.
     for (h, img) in &renders {
-        println!(
-            "{} row(s): {}×{} pixels",
-            h,
-            img.width(),
-            img.height()
-        );
+        println!("{} row(s): {}×{} pixels", h, img.width(), img.height());
     }
 
     let path = "/tmp/pace_bars_preview.png";
-    DynamicImage::ImageRgba8(out)
-        .save(path)
-        .expect("save PNG");
+    DynamicImage::ImageRgba8(out).save(path).expect("save PNG");
     println!("wrote {path}");
 }

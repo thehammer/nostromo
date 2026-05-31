@@ -107,7 +107,10 @@ pub enum TurnDelta {
     /// A block was appended to an in-flight turn.
     BlockAppended { turn_id: String, block: TurnBlock },
     /// A `result` event completed a turn.
-    TurnCompleted { turn_id: String, summary: ResultSummary },
+    TurnCompleted {
+        turn_id: String,
+        summary: ResultSummary,
+    },
     /// The in-flight turn was aborted (e.g. the child crashed).
     TurnErrored { turn_id: String, message: String },
 }
@@ -167,7 +170,10 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
                 .get("total_cost_usd")
                 .and_then(|x| x.as_f64())
                 .unwrap_or(0.0),
-            is_error: obj.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false),
+            is_error: obj
+                .get("is_error")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
         })),
 
         // rate_limit_event and any other type render nothing.
@@ -186,7 +192,10 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
         }
         return Some(ParsedLine::UserPrompt {
             text: s,
-            is_replay: obj.get("isReplay").and_then(|x| x.as_bool()).unwrap_or(false),
+            is_replay: obj
+                .get("isReplay")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
             timestamp: obj
                 .get("timestamp")
                 .and_then(|x| x.as_str())
@@ -231,7 +240,10 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
     }
     Some(ParsedLine::UserPrompt {
         text,
-        is_replay: obj.get("isReplay").and_then(|x| x.as_bool()).unwrap_or(false),
+        is_replay: obj
+            .get("isReplay")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
         timestamp: obj
             .get("timestamp")
             .and_then(|x| x.as_str())
@@ -252,7 +264,10 @@ fn parse_content_block(b: &Value) -> Option<TurnBlock> {
 
         "tool_use" => {
             let name = b.get("name").and_then(|x| x.as_str()).unwrap_or("Tool");
-            let input = b.get("input").cloned().unwrap_or(Value::Object(Default::default()));
+            let input = b
+                .get("input")
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
 
             // AskUserQuestion → a structured card instead of a generic tool row.
             if name == "AskUserQuestion" {
@@ -280,7 +295,10 @@ fn parse_content_block(b: &Value) -> Option<TurnBlock> {
             if text.is_empty() && !is_error {
                 return None;
             }
-            Some(TurnBlock::ToolResult { content: text, is_error })
+            Some(TurnBlock::ToolResult {
+                content: text,
+                is_error,
+            })
         }
 
         // thinking and any other block type are dropped (parity with Swift).
@@ -398,8 +416,16 @@ fn expand_confirm(block: TurnBlock) -> Vec<TurnBlock> {
 /// Parse the compact JSON the submit-review skill emits on a `CONFIRM:` line.
 /// Keys: `q` (question), `h` (header), `opts` (array of `{l, d}`).
 fn parse_confirm_json(json: &Value) -> Option<TurnBlock> {
-    let question = json.get("q").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let header = json.get("h").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let question = json
+        .get("q")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let header = json
+        .get("h")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let options: Vec<AskOption> = json
         .get("opts")
         .and_then(|x| x.as_array())
@@ -412,7 +438,11 @@ fn parse_confirm_json(json: &Value) -> Option<TurnBlock> {
                     }
                     Some(AskOption {
                         label: label.to_string(),
-                        description: opt.get("d").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        description: opt
+                            .get("d")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     })
                 })
                 .collect()
@@ -517,7 +547,9 @@ impl SessionTranscript {
                 vec![]
             }
 
-            ParsedLine::UserPrompt { text, timestamp, .. } => {
+            ParsedLine::UserPrompt {
+                text, timestamp, ..
+            } => {
                 // Flush any still-open turn (defensive; stored JSONL has no
                 // `result` lines and delimits turns by the next user prompt).
                 if let Some(last) = self.turns.last_mut() {
@@ -680,7 +712,12 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#;
         match parse_line(line) {
             Some(ParsedLine::Blocks(blocks)) => {
-                assert_eq!(blocks, vec![TurnBlock::Text { text: "hello".into() }]);
+                assert_eq!(
+                    blocks,
+                    vec![TurnBlock::Text {
+                        text: "hello".into()
+                    }]
+                );
             }
             other => panic!("expected Blocks, got {other:?}"),
         }
@@ -691,7 +728,12 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"answer"}]}}"#;
         match parse_line(line) {
             Some(ParsedLine::Blocks(blocks)) => {
-                assert_eq!(blocks, vec![TurnBlock::Text { text: "answer".into() }]);
+                assert_eq!(
+                    blocks,
+                    vec![TurnBlock::Text {
+                        text: "answer".into()
+                    }]
+                );
             }
             other => panic!("expected Blocks, got {other:?}"),
         }
@@ -808,9 +850,19 @@ mod tests {
         match parse_line(line) {
             Some(ParsedLine::Blocks(b)) => {
                 assert_eq!(b.len(), 3);
-                assert_eq!(b[0], TurnBlock::Text { text: "before".into() });
+                assert_eq!(
+                    b[0],
+                    TurnBlock::Text {
+                        text: "before".into()
+                    }
+                );
                 assert!(matches!(b[1], TurnBlock::AskQuestion { .. }));
-                assert_eq!(b[2], TurnBlock::Text { text: "after".into() });
+                assert_eq!(
+                    b[2],
+                    TurnBlock::Text {
+                        text: "after".into()
+                    }
+                );
             }
             other => panic!("expected Blocks, got {other:?}"),
         }
@@ -853,10 +905,16 @@ mod tests {
         let turns = t.snapshot();
         assert_eq!(turns.len(), 1);
         let blocks = &turns[0].blocks;
-        assert!(blocks.iter().any(|b| matches!(b, TurnBlock::ToolCall { .. })));
         assert!(blocks
             .iter()
-            .any(|b| matches!(b, TurnBlock::ToolResult { is_error: false, .. })));
+            .any(|b| matches!(b, TurnBlock::ToolCall { .. })));
+        assert!(blocks.iter().any(|b| matches!(
+            b,
+            TurnBlock::ToolResult {
+                is_error: false,
+                ..
+            }
+        )));
         assert!(turns[0].is_complete);
     }
 
@@ -866,7 +924,9 @@ mod tests {
         ingest_all(&mut t, REPLAY_BLOCKED);
         let turns = t.snapshot();
         assert_eq!(turns.len(), 1, "the isReplay user message opens the turn");
-        assert!(turns[0].user_input.starts_with("Write a file named hello.txt"));
+        assert!(turns[0]
+            .user_input
+            .starts_with("Write a file named hello.txt"));
         // The blocked write surfaces an errored tool_result.
         assert!(turns[0]
             .blocks
@@ -952,9 +1012,8 @@ mod tests {
     #[test]
     fn mark_current_errored_aborts_open_turn() {
         let mut t = SessionTranscript::new();
-        let _ = t.ingest_line(
-            r#"{"type":"user","message":{"content":"do a thing"},"isReplay":true}"#,
-        );
+        let _ =
+            t.ingest_line(r#"{"type":"user","message":{"content":"do a thing"},"isReplay":true}"#);
         assert!(t.is_mid_turn());
         let delta = t.mark_current_errored("child crashed");
         assert!(matches!(delta, Some(TurnDelta::TurnErrored { .. })));
@@ -993,7 +1052,9 @@ mod tests {
                 cost_usd: 0.1,
                 is_error: false,
             },
-            TurnBlock::ErrorMessage { message: "boom".into() },
+            TurnBlock::ErrorMessage {
+                message: "boom".into(),
+            },
             TurnBlock::AskQuestion {
                 question: "q".into(),
                 header: "h".into(),

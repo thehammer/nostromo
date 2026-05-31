@@ -8,8 +8,8 @@
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
-use crate::mcp::{command::McpCommand, state::McpSharedState};
 use crate::event::AppEvent;
+use crate::mcp::{command::McpCommand, state::McpSharedState};
 
 const COMMAND_TIMEOUT_SECS: u64 = 5;
 
@@ -25,13 +25,23 @@ pub async fn load_pr(state: &McpSharedState, args: &Value) -> Value {
         Some(s) => s.to_string(),
         None => return json!({ "error": "invalid_args", "detail": "missing repo" }),
     };
-    let highlights = args.get("highlights")
+    let highlights = args
+        .get("highlights")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
     let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::PerriLoadPr { number, repo, highlights, reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    let cmd = McpCommand::PerriLoadPr {
+        number,
+        repo,
+        highlights,
+        reply: tx,
+    };
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
@@ -46,7 +56,11 @@ pub async fn load_pr(state: &McpSharedState, args: &Value) -> Value {
 pub async fn clear_current_pr(state: &McpSharedState) -> Value {
     let (tx, rx) = oneshot::channel();
     let cmd = McpCommand::PerriClearCurrentPr { reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
@@ -65,7 +79,11 @@ pub async fn set_selected_index(state: &McpSharedState, args: &Value) -> Value {
     };
     let (tx, rx) = oneshot::channel();
     let cmd = McpCommand::SetPerriSelectedIndex { index, reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
@@ -80,7 +98,11 @@ pub async fn set_selected_index(state: &McpSharedState, args: &Value) -> Value {
 pub async fn get_selected_index(state: &McpSharedState) -> Value {
     let (tx, rx) = oneshot::channel();
     let cmd = McpCommand::GetPerriSelectedIndex { reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {

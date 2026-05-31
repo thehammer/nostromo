@@ -73,7 +73,11 @@ async fn get_self_known_pty_returns_identity() {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
 
-    write_frame(&mut write_half, &json!({"type":"hello","pty_id":"test-pty-id"})).await;
+    write_frame(
+        &mut write_half,
+        &json!({"type":"hello","pty_id":"test-pty-id"}),
+    )
+    .await;
 
     // MCP initialize.
     write_frame(
@@ -118,7 +122,10 @@ async fn get_self_known_pty_returns_identity() {
     .await;
 
     let call_resp = read_frame(&mut reader).await;
-    assert!(call_resp.get("error").is_none(), "should not be a JSON-RPC error");
+    assert!(
+        call_resp.get("error").is_none(),
+        "should not be a JSON-RPC error"
+    );
 
     let text = call_resp["result"]["content"][0]["text"].as_str().unwrap();
     let self_info: Value = serde_json::from_str(text).expect("content text should be JSON");
@@ -180,7 +187,10 @@ async fn get_self_unknown_pty_returns_structured_error() {
 
     let call_resp = read_frame(&mut reader).await;
     // Should NOT be a JSON-RPC protocol error — the tool returns a structured result.
-    assert!(call_resp.get("error").is_none(), "should not be a JSON-RPC error; got: {call_resp}");
+    assert!(
+        call_resp.get("error").is_none(),
+        "should not be a JSON-RPC error; got: {call_resp}"
+    );
 
     let text = call_resp["result"]["content"][0]["text"].as_str().unwrap();
     let self_info: Value = serde_json::from_str(text).expect("content text should be JSON");

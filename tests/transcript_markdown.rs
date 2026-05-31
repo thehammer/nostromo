@@ -18,7 +18,12 @@ fn sc() -> SyntectCache {
 fn line_text(lines: &[ratatui::text::Line]) -> Vec<String> {
     lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
         .collect()
 }
 
@@ -72,7 +77,9 @@ fn nested_bullet_list() {
     let nested_line = text.iter().find(|l| l.contains("nested")).unwrap();
     let top_line = text.iter().find(|l| l.contains("item one")).unwrap();
     assert!(
-        nested_line.len() > top_line.len() || nested_line.starts_with(' ') || nested_line.starts_with("  "),
+        nested_line.len() > top_line.len()
+            || nested_line.starts_with(' ')
+            || nested_line.starts_with("  "),
         "nested item not visually indented; nested={:?} top={:?}",
         nested_line,
         top_line
@@ -86,9 +93,21 @@ fn ordered_list() {
     let lines = render_markdown(src, &sc, 80);
     let text = line_text(&lines);
 
-    assert!(text.iter().any(|l| l.contains("first")), "first missing; got: {:?}", text);
-    assert!(text.iter().any(|l| l.contains("second")), "second missing; got: {:?}", text);
-    assert!(text.iter().any(|l| l.contains("1.")), "1. marker missing; got: {:?}", text);
+    assert!(
+        text.iter().any(|l| l.contains("first")),
+        "first missing; got: {:?}",
+        text
+    );
+    assert!(
+        text.iter().any(|l| l.contains("second")),
+        "second missing; got: {:?}",
+        text
+    );
+    assert!(
+        text.iter().any(|l| l.contains("1.")),
+        "1. marker missing; got: {:?}",
+        text
+    );
 }
 
 // ── Fenced code block (Rust) ─────────────────────────────────────────────────
@@ -111,7 +130,8 @@ fn rust_code_block_text() {
 #[test]
 fn rust_code_block_has_multiple_styles() {
     // Core acceptance criterion: syntect produces >1 distinct style.
-    let src = "```rust\nfn hello(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n```";
+    let src =
+        "```rust\nfn hello(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n```";
     let sc = sc();
     let lines = render_markdown(src, &sc, 80);
 
@@ -138,13 +158,29 @@ fn table_3x3() {
     let text = line_text(&lines);
 
     // Headers and cells should appear.
-    assert!(text.iter().any(|l| l.contains('A')), "col A missing; got: {:?}", text);
-    assert!(text.iter().any(|l| l.contains('1')), "cell 1 missing; got: {:?}", text);
-    assert!(text.iter().any(|l| l.contains('6')), "cell 6 missing; got: {:?}", text);
+    assert!(
+        text.iter().any(|l| l.contains('A')),
+        "col A missing; got: {:?}",
+        text
+    );
+    assert!(
+        text.iter().any(|l| l.contains('1')),
+        "cell 1 missing; got: {:?}",
+        text
+    );
+    assert!(
+        text.iter().any(|l| l.contains('6')),
+        "cell 6 missing; got: {:?}",
+        text
+    );
 
     // At width=80, the natural table fits so box-drawing chars should appear.
     let has_box = text.iter().any(|l| l.contains('┌') || l.contains('│'));
-    assert!(has_box, "expected unicode box-drawing at width=80; got: {:?}", text);
+    assert!(
+        has_box,
+        "expected unicode box-drawing at width=80; got: {:?}",
+        text
+    );
 }
 
 #[test]
@@ -156,7 +192,11 @@ fn table_fallback_narrow_width() {
     let lines = render_markdown(src, &sc, 20);
     let text = line_text(&lines);
 
-    assert!(text.iter().any(|l| l.contains("Column A")), "header missing in fallback; got: {:?}", text);
+    assert!(
+        text.iter().any(|l| l.contains("Column A")),
+        "header missing in fallback; got: {:?}",
+        text
+    );
 }
 
 // ── Block quote with emphasis ─────────────────────────────────────────────────
@@ -309,7 +349,11 @@ fn cache_does_not_recompute_on_same_snapshot() {
             .render(area, &mut buf);
     }
     // AssistantText is cached under (idx=0, is_expanded=false).
-    assert_eq!(cache.len(), 1, "cache should have 1 entry after first render");
+    assert_eq!(
+        cache.len(),
+        1,
+        "cache should have 1 entry after first render"
+    );
 
     // Second render: should NOT add new entries (count stays the same).
     let cache_len_before = cache.len();

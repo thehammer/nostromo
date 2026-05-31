@@ -208,16 +208,26 @@ pub enum ClientMsg {
     /// Attach to a session: daemon replies with a `SessionTurns` snapshot then
     /// streams `SessionTurnDelta` / `SessionState`. Multiple clients may attach
     /// to the same tag (broadcast fan-out — mirroring).
-    SessionAttach { tag: String },
+    SessionAttach {
+        tag: String,
+    },
 
     /// Stop receiving deltas for a session without stopping the child.
-    SessionDetach { tag: String },
+    SessionDetach {
+        tag: String,
+    },
 
     /// Enqueue a user message; the daemon writes it to the child's stdin.
-    SessionSend { tag: String, text: String },
+    SessionSend {
+        tag: String,
+        text: String,
+    },
 
     /// Lifecycle control (stop / restart / new_session).
-    SessionControl { tag: String, action: SessionAction },
+    SessionControl {
+        tag: String,
+        action: SessionAction,
+    },
 
     /// Answer a `SessionPermissionRequest` (only used if a stdout-answerable
     /// permission path is available; the default posture is bypass).
@@ -242,7 +252,9 @@ pub enum ServerMsg {
         daemon_pid: u32,
     },
     Activity(ActivityEvent),
-    MotherJobs { jobs: Vec<MotherJob> },
+    MotherJobs {
+        jobs: Vec<MotherJob>,
+    },
     MotherStatusline(MotherStatus),
     /// A job transitioned into `awaiting` — daemon fires this once per
     /// transition (same logic as the in-process `mother_poll`).
@@ -320,13 +332,22 @@ pub enum ServerMsg {
     },
 
     /// Full turn snapshot, sent immediately on attach.
-    SessionTurns { tag: String, turns: Vec<Turn> },
+    SessionTurns {
+        tag: String,
+        turns: Vec<Turn>,
+    },
 
     /// Incremental turn update.
-    SessionTurnDelta { tag: String, delta: TurnDelta },
+    SessionTurnDelta {
+        tag: String,
+        delta: TurnDelta,
+    },
 
     /// Session lifecycle state changed.
-    SessionState { tag: String, state: SessionState },
+    SessionState {
+        tag: String,
+        state: SessionState,
+    },
 
     /// A permission request surfaced on the stream (only emitted if the binary
     /// surfaces an answerable request; otherwise permissions are bypassed or
@@ -345,7 +366,9 @@ pub enum ServerMsg {
     },
 
     /// Response to `SessionList`.
-    SessionListResp { sessions: Vec<SessionInfo> },
+    SessionListResp {
+        sessions: Vec<SessionInfo>,
+    },
 
     /// TUI-internal pseudo-event — **never produced by the daemon**.
     ///

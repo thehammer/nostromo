@@ -67,7 +67,11 @@ fn pack_tokens(tokens: Vec<Token>, width: usize, indent_w: usize) -> Vec<Line<'s
     if tokens.is_empty() {
         return vec![Line::from(vec![])];
     }
-    let eff = if width > indent_w { width - indent_w } else { 1 };
+    let eff = if width > indent_w {
+        width - indent_w
+    } else {
+        1
+    };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut cur: Vec<Span<'static>> = Vec::new();
@@ -91,7 +95,11 @@ fn pack_tokens(tokens: Vec<Token>, width: usize, indent_w: usize) -> Vec<Line<'s
         } else {
             // Flush and start new line.
             // Trim trailing spaces from current line.
-            while cur.last().map(|s: &Span| s.content.trim().is_empty()).unwrap_or(false) {
+            while cur
+                .last()
+                .map(|s: &Span| s.content.trim().is_empty())
+                .unwrap_or(false)
+            {
                 cur.pop();
             }
             lines.push(Line::from(std::mem::take(&mut cur)));
@@ -100,7 +108,11 @@ fn pack_tokens(tokens: Vec<Token>, width: usize, indent_w: usize) -> Vec<Line<'s
         }
     }
 
-    while cur.last().map(|s: &Span| s.content.trim().is_empty()).unwrap_or(false) {
+    while cur
+        .last()
+        .map(|s: &Span| s.content.trim().is_empty())
+        .unwrap_or(false)
+    {
         cur.pop();
     }
     if !cur.is_empty() {
@@ -120,20 +132,36 @@ fn tokenise(text: &str, style: Style) -> Vec<Token> {
         if ch.is_whitespace() {
             // Collect the whitespace run.
             let mut end = start + ch.len_utf8();
-            while chars.peek().map(|(_, c)| c.is_whitespace()).unwrap_or(false) {
+            while chars
+                .peek()
+                .map(|(_, c)| c.is_whitespace())
+                .unwrap_or(false)
+            {
                 let (_, nc) = chars.next().unwrap();
                 end += nc.len_utf8();
             }
-            out.push(Token { text: " ".to_string(), style, is_space: true });
+            out.push(Token {
+                text: " ".to_string(),
+                style,
+                is_space: true,
+            });
             let _ = end; // consumed
         } else {
             // Collect a word.
             let mut end = start + ch.len_utf8();
-            while chars.peek().map(|(_, c)| !c.is_whitespace()).unwrap_or(false) {
+            while chars
+                .peek()
+                .map(|(_, c)| !c.is_whitespace())
+                .unwrap_or(false)
+            {
                 let (_, nc) = chars.next().unwrap();
                 end += nc.len_utf8();
             }
-            out.push(Token { text: text[start..end].to_string(), style, is_space: false });
+            out.push(Token {
+                text: text[start..end].to_string(),
+                style,
+                is_space: false,
+            });
         }
     }
     out
@@ -222,7 +250,10 @@ impl<'a> Ctx<'a> {
     // ── Current inline style ──────────────────────────────────────────────────
 
     fn cur_style(&self) -> Style {
-        self.style_stack.last().copied().unwrap_or_else(theme::style_normal)
+        self.style_stack
+            .last()
+            .copied()
+            .unwrap_or_else(theme::style_normal)
     }
 
     // ── Push inline token ─────────────────────────────────────────────────────
@@ -314,9 +345,7 @@ impl<'a> Ctx<'a> {
         let natural: usize = col_widths.iter().sum::<usize>() + num_cols * 3 + 1;
         let unicode = natural <= self.width;
 
-        let h_style = Style::default()
-            .fg(theme::FG)
-            .add_modifier(Modifier::BOLD);
+        let h_style = Style::default().fg(theme::FG).add_modifier(Modifier::BOLD);
         let border_style = theme::style_muted();
         let cell_style = theme::style_normal();
 
@@ -330,9 +359,11 @@ impl<'a> Ctx<'a> {
 
             // Header row.
             if !self.table_headers.is_empty() {
-                let row_line = build_cell_line(&self.table_headers, &col_widths, h_style, border_style);
+                let row_line =
+                    build_cell_line(&self.table_headers, &col_widths, h_style, border_style);
                 self.out.push(row_line);
-                self.out.push(Line::from(Span::styled(mid.clone(), border_style)));
+                self.out
+                    .push(Line::from(Span::styled(mid.clone(), border_style)));
             }
 
             // Data rows.
@@ -397,7 +428,9 @@ impl<'a> Ctx<'a> {
             Event::Start(Tag::CodeBlock(kind)) => {
                 self.in_code_block = true;
                 self.code_lang = match kind {
-                    CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_string(),
+                    CodeBlockKind::Fenced(info) => {
+                        info.split_whitespace().next().unwrap_or("").to_string()
+                    }
                     CodeBlockKind::Indented => String::new(),
                 };
                 self.code_buf.clear();
@@ -455,7 +488,8 @@ impl<'a> Ctx<'a> {
             }
             Event::Start(Tag::Strikethrough) => {
                 let base = self.cur_style();
-                self.style_stack.push(base.add_modifier(Modifier::CROSSED_OUT));
+                self.style_stack
+                    .push(base.add_modifier(Modifier::CROSSED_OUT));
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 self.link_dest = Some(dest_url.to_string());
@@ -625,7 +659,8 @@ impl<'a> Ctx<'a> {
                 self.flush_inline();
                 let w = self.width.max(1);
                 let rule = "─".repeat(w);
-                self.out.push(Line::from(Span::styled(rule, theme::style_muted())));
+                self.out
+                    .push(Line::from(Span::styled(rule, theme::style_muted())));
                 self.blank_line();
             }
             Event::TaskListMarker(checked) => {
@@ -642,7 +677,12 @@ impl<'a> Ctx<'a> {
     fn finish(mut self) -> Vec<Line<'static>> {
         self.flush_inline();
         // Remove trailing blank lines.
-        while self.out.last().map(|l: &Line| l.spans.is_empty()).unwrap_or(false) {
+        while self
+            .out
+            .last()
+            .map(|l: &Line| l.spans.is_empty())
+            .unwrap_or(false)
+        {
             self.out.pop();
         }
         if self.out.is_empty() {
@@ -698,7 +738,11 @@ fn build_cell_line(
     for (i, w) in col_widths.iter().enumerate() {
         let content = cells.get(i).cloned().unwrap_or_default();
         let cw = UnicodeWidthStr::width(content.as_str());
-        let pad = if cw < *w { " ".repeat(*w - cw) } else { String::new() };
+        let pad = if cw < *w {
+            " ".repeat(*w - cw)
+        } else {
+            String::new()
+        };
         spans.push(Span::styled(" ", border_style));
         spans.push(Span::styled(content, cell_style));
         spans.push(Span::styled(pad + " ", border_style));
@@ -769,7 +813,10 @@ mod tests {
     fn short_text_no_wrap() {
         let sc = mk_syntect();
         let lines = render_markdown("Hello world", &sc, 40);
-        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect();
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
         assert!(text.contains("Hello"));
         assert!(text.contains("world"));
         assert_eq!(lines.len(), 1);

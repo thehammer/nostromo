@@ -11,39 +11,41 @@ fn records_to_entries(records: Vec<Record>) -> Vec<TranscriptEntry> {
     let mut out = Vec::new();
     for rec in records {
         match &rec {
-            Record::User { message, .. } => {
-                match &message.content {
-                    UserContent::Text(s) => {
-                        if !s.is_empty() {
-                            out.push(TranscriptEntry::UserMessage(s.clone()));
-                        }
+            Record::User { message, .. } => match &message.content {
+                UserContent::Text(s) => {
+                    if !s.is_empty() {
+                        out.push(TranscriptEntry::UserMessage(s.clone()));
                     }
-                    UserContent::Blocks(blocks) => {
-                        let text = blocks
-                            .iter()
-                            .filter_map(|b| {
-                                if let ContentBlock::Text { text } = b {
-                                    Some(text.as_str())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if !text.is_empty() {
-                            out.push(TranscriptEntry::UserMessage(text));
-                        }
-                        for block in blocks {
-                            if let ContentBlock::ToolResult { tool_use_id, content } = block {
-                                out.push(TranscriptEntry::ToolResult {
-                                    tool_use_id: tool_use_id.clone(),
-                                    content: content.as_display(),
-                                });
+                }
+                UserContent::Blocks(blocks) => {
+                    let text = blocks
+                        .iter()
+                        .filter_map(|b| {
+                            if let ContentBlock::Text { text } = b {
+                                Some(text.as_str())
+                            } else {
+                                None
                             }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
+                        out.push(TranscriptEntry::UserMessage(text));
+                    }
+                    for block in blocks {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                        } = block
+                        {
+                            out.push(TranscriptEntry::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                content: content.as_display(),
+                            });
                         }
                     }
                 }
-            }
+            },
             Record::Assistant { message, .. } => {
                 for block in &message.content {
                     match block {
@@ -59,7 +61,10 @@ fn records_to_entries(records: Vec<Record>) -> Vec<TranscriptEntry> {
                                 input: input.clone(),
                             });
                         }
-                        ContentBlock::ToolResult { tool_use_id, content } => {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                        } => {
                             out.push(TranscriptEntry::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
                                 content: content.as_display(),
