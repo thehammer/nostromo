@@ -61,13 +61,18 @@ class ChatSession: ObservableObject {
     /// Spawn (or resume) this focus's session and attach for turn deltas.
     /// Both calls are idempotent daemon-side, so re-issuing on reconnect is safe.
     private func spawnAndAttach() {
-        // remoteControl: true → daemon spawns with `--remote-control <displayName>`,
-        // making the focus drivable from the Claude mobile/web app via Anthropic's
-        // relay (and phone-typed messages mirror back into this ReplView).
-        // displayName is the phone-facing label and the relay session name, so it
-        // must be recognizable + distinct per focus (not the shared agent name).
+        // remoteControl: false. EMPIRICAL FINDING (2026-05-31): `--remote-control`
+        // is INERT in `--input-format stream-json`/`--print` mode — it's accepted
+        // but never registers a session with Anthropic's relay (claude's own
+        // --debug-file shows zero remote-control activity), so the focus never
+        // appears in the Claude mobile/web app. Native phone control requires an
+        // INTERACTIVE session, which is incompatible with the structured stream-json
+        // rendering this GUI needs. Enabling it only spawned dead relay connections.
+        // The `displayName` is still threaded as the `-n` label (and is the relay
+        // name if/when we ever drive a focus in interactive mode). See the PRD's
+        // "Remote control — disproven" note for the path forward (our own client).
         client.sessionSpawn(tag: tag, agentName: agentName, viewName: displayName,
-                            cwd: workingDirectory, sessionId: nil, remoteControl: true)
+                            cwd: workingDirectory, sessionId: nil, remoteControl: false)
         client.sessionAttach(tag: tag)
     }
 
