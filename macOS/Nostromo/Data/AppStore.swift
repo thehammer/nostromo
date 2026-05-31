@@ -245,6 +245,12 @@ class AppStore: ObservableObject {
         case .error(let msg):
             log.error("Daemon error: \(msg, privacy: .public)")
 
+        // Persistent session responses (protocol v3). Routed to per-focus
+        // ChatSessions in the thin-client cutover; ignored here until then.
+        case .sessionSpawned, .sessionTurns, .sessionTurnDelta,
+             .sessionState, .sessionPermissionRequest, .sessionExited:
+            break
+
         case .pong, .unknown:
             break
         }

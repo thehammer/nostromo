@@ -36,7 +36,169 @@ enum ServerMsg {
     case motherStatusline(MotherStatus)
     case pong
     case error(String)
+    // ── persistent session responses (protocol v3) ──────────────────────────
+    case sessionSpawned(tag: String, sessionId: String?)
+    case sessionTurns(tag: String, turns: [DaemonTurn])
+    case sessionTurnDelta(tag: String, delta: DaemonTurnDelta)
+    case sessionState(tag: String, state: DaemonSessionState)
+    case sessionPermissionRequest(tag: String, requestId: String, tool: String)
+    case sessionExited(tag: String, exitCode: Int?)
     case unknown
+}
+
+// MARK: - Session wire types (mirror src/ipc/stream_json.rs; snake_case/tagged)
+
+enum DaemonSessionState: String, Decodable {
+    case idle
+    case midTurn            = "mid_turn"
+    case awaitingPermission = "awaiting_permission"
+    case crashed
+}
+
+struct DaemonAskOption: Decodable {
+    let label: String
+    let description: String
+}
+
+/// Mirrors `stream_json::TurnBlock` — tagged by `kind`.
+enum DaemonTurnBlock: Decodable {
+    case text(String)
+    case toolCall(toolName: String, inputSummary: String, inputFull: String)
+    case toolResult(content: String, isError: Bool)
+    case resultSummary(durationMs: Int, costUsd: Double, isError: Bool)
+    case errorMessage(String)
+    case askQuestion(question: String, header: String, options: [DaemonAskOption], multiSelect: Bool)
+
+    private enum K: String, CodingKey {
+        case kind, text
+        case toolName = "tool_name", inputSummary = "input_summary", inputFull = "input_full"
+        case content, isError = "is_error"
+        case durationMs = "duration_ms", costUsd = "cost_usd"
+        case message, question, header, options, multiSelect = "multi_select"
+    }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "text":
+            self = .text(try c.decode(String.self, forKey: .text))
+        case "tool_call":
+            self = .toolCall(toolName: try c.decode(String.self, forKey: .toolName),
+                             inputSummary: try c.decode(String.self, forKey: .inputSummary),
+                             inputFull: try c.decode(String.self, forKey: .inputFull))
+        case "tool_result":
+            self = .toolResult(content: try c.decode(String.self, forKey: .content),
+                               isError: try c.decode(Bool.self, forKey: .isError))
+        case "result_summary":
+            self = .resultSummary(durationMs: try c.decode(Int.self, forKey: .durationMs),
+                                  costUsd: try c.decode(Double.self, forKey: .costUsd),
+                                  isError: try c.decode(Bool.self, forKey: .isError))
+        case "error_message":
+            self = .errorMessage(try c.decode(String.self, forKey: .message))
+        case "ask_question":
+            self = .askQuestion(question: try c.decode(String.self, forKey: .question),
+                                header: try c.decode(String.self, forKey: .header),
+                                options: try c.decode([DaemonAskOption].self, forKey: .options),
+                                multiSelect: try c.decode(Bool.self, forKey: .multiSelect))
+        case let other:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
+                debugDescription: "unknown TurnBlock kind: \(other)")
+        }
+    }
+}
+
+struct DaemonResultSummary: Decodable {
+    let durationMs: Int
+    let costUsd: Double
+    let isError: Bool
+    enum CodingKeys: String, CodingKey {
+        case durationMs = "duration_ms", costUsd = "cost_usd", isError = "is_error"
+    }
+}
+
+struct DaemonTurn: Decodable {
+    let id: String
+    let userInput: String
+    let timestamp: String?
+    let blocks: [DaemonTurnBlock]
+    let isComplete: Bool
+    enum CodingKeys: String, CodingKey {
+        case id, userInput = "user_input", timestamp, blocks, isComplete = "is_complete"
+    }
+}
+
+/// Mirrors `stream_json::TurnDelta` — tagged by `delta`.
+enum DaemonTurnDelta: Decodable {
+    case turnStarted(DaemonTurn)
+    case blockAppended(turnId: String, block: DaemonTurnBlock)
+    case turnCompleted(turnId: String, summary: DaemonResultSummary)
+    case turnErrored(turnId: String, message: String)
+
+    private enum K: String, CodingKey {
+        case delta, turn, turnId = "turn_id", block, summary, message
+    }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        switch try c.decode(String.self, forKey: .delta) {
+        case "turn_started":
+            self = .turnStarted(try c.decode(DaemonTurn.self, forKey: .turn))
+        case "block_appended":
+            self = .blockAppended(turnId: try c.decode(String.self, forKey: .turnId),
+                                  block: try c.decode(DaemonTurnBlock.self, forKey: .block))
+        case "turn_completed":
+            self = .turnCompleted(turnId: try c.decode(String.self, forKey: .turnId),
+                                  summary: try c.decode(DaemonResultSummary.self, forKey: .summary))
+        case "turn_errored":
+            self = .turnErrored(turnId: try c.decode(String.self, forKey: .turnId),
+                                message: try c.decode(String.self, forKey: .message))
+        case let other:
+            throw DecodingError.dataCorruptedError(forKey: .delta, in: c,
+                debugDescription: "unknown TurnDelta: \(other)")
+        }
+    }
+}
+
+// MARK: - Outbound session commands (ClientMsg, protocol v3)
+
+private struct SessionSpawnMsg: Encodable {
+    let type_ = "session_spawn"
+    let tag: String
+    let agentName: String
+    let viewName: String
+    let cwd: String?
+    let sessionId: String?
+    let remoteControl: Bool
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", tag, agentName = "agent_name", viewName = "view_name"
+        case cwd, sessionId = "session_id", remoteControl = "remote_control"
+    }
+}
+
+private struct SessionAttachMsg: Encodable {
+    let type_ = "session_attach"
+    let tag: String
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+}
+
+private struct SessionDetachMsg: Encodable {
+    let type_ = "session_detach"
+    let tag: String
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+}
+
+private struct SessionSendMsg: Encodable {
+    let type_ = "session_send"
+    let tag: String
+    let text: String
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, text }
+}
+
+private struct SessionControlMsg: Encodable {
+    let type_ = "session_control"
+    let tag: String
+    let action: String
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, action }
 }
 
 // MARK: - NostromodClient
@@ -131,8 +293,34 @@ class NostromodClient {
     // MARK: - Handshake
 
     private func sendHello() {
-        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 2))
+        // protocol v3 adds the persistent Session* family. The daemon holds
+        // MIN_CLIENT_VERSION at 2, so this is safe either way, but we speak v3.
+        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 3))
         send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline"]))
+    }
+
+    // MARK: - Session commands (protocol v3)
+
+    /// Spawn (or resume) a focus's persistent daemon-hosted session. Idempotent.
+    func sessionSpawn(tag: String, agentName: String, viewName: String,
+                      cwd: String?, sessionId: String?, remoteControl: Bool) {
+        send(SessionSpawnMsg(tag: tag, agentName: agentName, viewName: viewName,
+                             cwd: cwd, sessionId: sessionId, remoteControl: remoteControl))
+    }
+
+    /// Attach to a session — daemon replies with a `SessionTurns` snapshot then
+    /// streams `SessionTurnDelta`/`SessionState`.
+    func sessionAttach(tag: String) { send(SessionAttachMsg(tag: tag)) }
+
+    /// Stop receiving deltas for a session without stopping the child.
+    func sessionDetach(tag: String) { send(SessionDetachMsg(tag: tag)) }
+
+    /// Enqueue a user message; the daemon writes it to the child's stdin.
+    func sessionSend(tag: String, text: String) { send(SessionSendMsg(tag: tag, text: text)) }
+
+    /// Lifecycle control: "stop" | "restart" | "new_session".
+    func sessionControl(tag: String, action: String) {
+        send(SessionControlMsg(tag: tag, action: action))
     }
 
     private func send(_ msg: some Encodable) {
@@ -221,6 +409,39 @@ class NostromodClient {
         case "error":
             return .error(json["message"] as? String ?? "unknown error")
 
+        // ── persistent session responses (protocol v3) ──────────────────────
+        case "session_spawned":
+            if let m = try? decoder.decode(SessionSpawnedResp.self, from: raw) {
+                return .sessionSpawned(tag: m.tag, sessionId: m.session_id)
+            }
+
+        case "session_turns":
+            if let m = try? decoder.decode(SessionTurnsResp.self, from: raw) {
+                return .sessionTurns(tag: m.tag, turns: m.turns)
+            }
+
+        case "session_turn_delta":
+            if let m = try? decoder.decode(SessionTurnDeltaResp.self, from: raw) {
+                return .sessionTurnDelta(tag: m.tag, delta: m.delta)
+            } else {
+                log.error("failed to decode session_turn_delta")
+            }
+
+        case "session_state":
+            if let m = try? decoder.decode(SessionStateResp.self, from: raw) {
+                return .sessionState(tag: m.tag, state: m.state)
+            }
+
+        case "session_permission_request":
+            if let m = try? decoder.decode(SessionPermResp.self, from: raw) {
+                return .sessionPermissionRequest(tag: m.tag, requestId: m.request_id, tool: m.tool)
+            }
+
+        case "session_exited":
+            if let m = try? decoder.decode(SessionExitedResp.self, from: raw) {
+                return .sessionExited(tag: m.tag, exitCode: m.exit_code)
+            }
+
         default:
             break
         }
@@ -228,3 +449,12 @@ class NostromodClient {
         return .unknown
     }
 }
+
+// MARK: - Inbound session response wrappers (decoded from the raw frame)
+
+private struct SessionSpawnedResp: Decodable { let tag: String; let session_id: String? }
+private struct SessionTurnsResp:   Decodable { let tag: String; let turns: [DaemonTurn] }
+private struct SessionTurnDeltaResp: Decodable { let tag: String; let delta: DaemonTurnDelta }
+private struct SessionStateResp:   Decodable { let tag: String; let state: DaemonSessionState }
+private struct SessionPermResp:    Decodable { let tag: String; let request_id: String; let tool: String }
+private struct SessionExitedResp:  Decodable { let tag: String; let exit_code: Int? }
