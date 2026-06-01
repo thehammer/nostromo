@@ -431,15 +431,27 @@ private class MotherJobDetail: NSView {
     private let emptyLabel = NSTextField(labelWithString: "Select a job")
 
     // Content fields
-    private let titleLabel       = NSTextField(labelWithString: "")
-    private let stateLabel       = NSTextField(labelWithString: "")
-    private let metaStack        = NSStackView()
-    private let logSectionLabel  = NSTextField(labelWithString: "LOG TAIL")
-    private let logScrollView    = NSScrollView()
-    private let logTextView      = NSTextView()
+    private let titleLabel      = NSTextField(labelWithString: "")
+    private let stateLabel      = NSTextField(labelWithString: "")
+    private let metaStack       = NSStackView()
+    private let actionsContainer = NSView()  // rebuilt per job state
+    private let logSectionLabel = NSTextField(labelWithString: "LOG TAIL")
+    private let logScrollView   = NSScrollView()
+    private let logTextView     = NSTextView()
 
-    private var logTimer:   Timer?
-    private var currentJob: MotherJob?
+    // Action widgets (created once, shown/hidden as needed)
+    private let brokerBanner    = NSTextField(labelWithString: "⚠ Mother broker offline")
+    private let replyScrollView = NSScrollView()
+    private let replyTextView   = NSTextView()
+    private let answerButton    = NSButton(title: "Answer", target: nil, action: nil)
+    private let cancelButton    = NSButton(title: "Cancel job", target: nil, action: nil)
+    private let retryButton     = NSButton(title: "Retry", target: nil, action: nil)
+    private let actionErrorLabel = NSTextField(labelWithString: "")
+
+    private var logTimer:         Timer?
+    private var actionErrorTimer: Timer?
+    private var currentJob:       MotherJob?
+    private var cancellables = Set<AnyCancellable>()
 
     override init(frame: NSRect) { super.init(frame: frame); setup() }
     required init?(coder: NSCoder) { super.init(coder: coder); setup() }
@@ -448,8 +460,6 @@ private class MotherJobDetail: NSView {
         wantsLayer = true
         layer?.backgroundColor = Theme.bg.cgColor
 
-        // No outer scroll wrapper — metadata is bounded in height so we pin
-        // all views directly to the pane, letting logScrollView fill the rest.
         titleLabel.font               = .systemFont(ofSize: 16, weight: .medium)
         titleLabel.textColor          = Theme.fg
         titleLabel.lineBreakMode      = .byWordWrapping
@@ -461,6 +471,9 @@ private class MotherJobDetail: NSView {
         metaStack.orientation = .vertical
         metaStack.spacing     = 4
         metaStack.alignment   = .leading
+
+        // Actions container (variable height, rebuilt per job state)
+        actionsContainer.translatesAutoresizingMaskIntoConstraints = false
 
         logSectionLabel.font      = .systemFont(ofSize: 9, weight: .semibold)
         logSectionLabel.textColor = Theme.fgMuted
@@ -480,7 +493,8 @@ private class MotherJobDetail: NSView {
         logScrollView.layer?.cornerRadius    = 4
         logScrollView.documentView = logTextView
 
-        for v in [titleLabel, stateLabel, metaStack, logSectionLabel, logScrollView] as [NSView] {
+        for v in [titleLabel, stateLabel, metaStack, actionsContainer,
+                  logSectionLabel, logScrollView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -497,17 +511,25 @@ private class MotherJobDetail: NSView {
             metaStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             metaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
-            logSectionLabel.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 20),
+            // actionsContainer sits between metaStack and logSectionLabel.
+            // Its height is determined by its content (zero when no actions).
+            actionsContainer.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 12),
+            actionsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            actionsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+
+            logSectionLabel.topAnchor.constraint(equalTo: actionsContainer.bottomAnchor, constant: 12),
             logSectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
-            // Log fills all remaining space — no fixed height.
             logScrollView.topAnchor.constraint(equalTo: logSectionLabel.bottomAnchor, constant: 6),
             logScrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             logScrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             logScrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
         ])
 
-        // Empty hint — added AFTER scroll view (higher Z-order), shown when no selection
+        // Configure action widgets
+        configureActionWidgets()
+
+        // Empty hint (higher Z-order than logScrollView, shown when no selection)
         emptyLabel.font      = .systemFont(ofSize: 13)
         emptyLabel.textColor = Theme.fgMuted
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -518,19 +540,79 @@ private class MotherJobDetail: NSView {
         ])
 
         showEmpty()
+
+        // Observe broker connection state for button enable/disable
+        AppStore.shared.$brokerConnected
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] connected in self?.updateBrokerBanner(connected) }
+            .store(in: &cancellables)
+
+        // Observe action errors from AppStore
+        AppStore.shared.$motherActionError
+            .receive(on: DispatchQueue.main)
+            .compactMap { $0 }
+            .sink { [weak self] msg in self?.showActionError(msg) }
+            .store(in: &cancellables)
+    }
+
+    private func configureActionWidgets() {
+        // Broker offline banner
+        brokerBanner.font      = .systemFont(ofSize: 10)
+        brokerBanner.textColor = Theme.amber
+        brokerBanner.isHidden  = true
+
+        // Reply text view (multi-line, ~3 lines tall)
+        replyTextView.isEditable         = true
+        replyTextView.isSelectable       = true
+        replyTextView.drawsBackground    = false
+        replyTextView.backgroundColor    = .clear
+        replyTextView.textContainerInset = NSSize(width: 4, height: 4)
+        replyTextView.font               = Theme.monoFont
+        replyTextView.textColor          = Theme.fg
+
+        replyScrollView.hasVerticalScroller   = true
+        replyScrollView.autohidesScrollers    = true
+        replyScrollView.drawsBackground       = true
+        replyScrollView.backgroundColor       = NSColor(white: 0.10, alpha: 1)
+        replyScrollView.wantsLayer            = true
+        replyScrollView.layer?.cornerRadius   = 4
+        replyScrollView.layer?.borderColor    = Theme.borderInactive.cgColor
+        replyScrollView.layer?.borderWidth    = 1
+        replyScrollView.documentView          = replyTextView
+
+        // Buttons
+        for btn in [answerButton, cancelButton, retryButton] {
+            btn.bezelStyle  = .rounded
+            btn.isBordered  = true
+            btn.font        = .systemFont(ofSize: 11)
+        }
+        answerButton.target = self
+        answerButton.action = #selector(didTapAnswer)
+        cancelButton.target = self
+        cancelButton.action = #selector(didTapCancel)
+        retryButton.target  = self
+        retryButton.action  = #selector(didTapRetry)
+
+        // Error label (shown inline below buttons, auto-clears)
+        actionErrorLabel.font      = .systemFont(ofSize: 10)
+        actionErrorLabel.textColor = Theme.redSweater
+        actionErrorLabel.lineBreakMode      = .byWordWrapping
+        actionErrorLabel.maximumNumberOfLines = 3
+        actionErrorLabel.isHidden  = true
     }
 
     // MARK: Public
 
     func show(_ job: MotherJob?) {
-        logTimer?.invalidate()
-        logTimer     = nil
+        logTimer?.invalidate(); logTimer = nil
         currentJob   = job
         currentJobId = job?.id
+        replyTextView.string = ""
 
         guard let job else { showEmpty(); return }
 
-        [titleLabel, stateLabel, metaStack, logSectionLabel, logScrollView].forEach { $0.isHidden = false }
+        [titleLabel, stateLabel, metaStack, actionsContainer,
+         logSectionLabel, logScrollView].forEach { $0.isHidden = false }
         emptyLabel.isHidden = true
 
         titleLabel.stringValue = job.title.isEmpty ? job.id : job.title
@@ -538,6 +620,7 @@ private class MotherJobDetail: NSView {
         stateLabel.textColor   = stateColor(job.state)
 
         rebuildMeta(job)
+        rebuildActions(job)
         loadLog(job)
 
         if job.state == "running" || job.state == "awaiting" {
@@ -551,8 +634,131 @@ private class MotherJobDetail: NSView {
     // MARK: Private
 
     private func showEmpty() {
-        [titleLabel, stateLabel, metaStack, logSectionLabel, logScrollView].forEach { $0.isHidden = true }
+        [titleLabel, stateLabel, metaStack, actionsContainer,
+         logSectionLabel, logScrollView].forEach { $0.isHidden = true }
         emptyLabel.isHidden = false
+    }
+
+    private func rebuildActions(_ job: MotherJob) {
+        // Remove all existing subviews and constraints from the container
+        actionsContainer.subviews.forEach { $0.removeFromSuperview() }
+
+        let connected = AppStore.shared.brokerConnected
+
+        // Build the stack of widgets for this state
+        var widgets: [NSView] = []
+
+        if !connected {
+            brokerBanner.isHidden = false
+            widgets.append(brokerBanner)
+        } else {
+            brokerBanner.isHidden = true
+        }
+
+        switch job.state {
+        case "awaiting":
+            replyScrollView.translatesAutoresizingMaskIntoConstraints = false
+            widgets.append(replyScrollView)
+
+            let btnRow = NSStackView(views: [answerButton, cancelButton])
+            btnRow.orientation = .horizontal
+            btnRow.spacing     = 8
+            btnRow.translatesAutoresizingMaskIntoConstraints = false
+            widgets.append(btnRow)
+
+        case "running", "queued", "ready":
+            widgets.append(cancelButton)
+
+        case "failed", "cancelled":
+            widgets.append(retryButton)
+
+        default:
+            break  // succeeded — no actions
+        }
+
+        widgets.append(actionErrorLabel)
+
+        // Disable action buttons when broker is offline
+        for btn in [answerButton, cancelButton, retryButton] {
+            btn.isEnabled = connected
+        }
+
+        guard !widgets.filter({ $0 !== actionErrorLabel || !$0.isHidden }).isEmpty else { return }
+
+        // Stack widgets vertically inside actionsContainer
+        let stack = NSStackView(views: widgets)
+        stack.orientation = .vertical
+        stack.spacing     = 8
+        stack.alignment   = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        actionsContainer.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: actionsContainer.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: actionsContainer.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: actionsContainer.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: actionsContainer.bottomAnchor),
+        ])
+
+        // Fix the reply scroll view height (~3 lines)
+        if job.state == "awaiting" {
+            replyScrollView.translatesAutoresizingMaskIntoConstraints = false
+            replyScrollView.heightAnchor.constraint(equalToConstant: 60).isActive = true
+            replyScrollView.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
+            replyScrollView.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+        }
+
+        // Separator line above actions (added before stack so it renders behind it)
+        let sep = NSView()
+        sep.wantsLayer = true
+        sep.layer?.backgroundColor = Theme.borderInactive.cgColor
+        sep.translatesAutoresizingMaskIntoConstraints = false
+        actionsContainer.addSubview(sep, positioned: .below, relativeTo: stack)
+        NSLayoutConstraint.activate([
+            sep.topAnchor.constraint(equalTo: actionsContainer.topAnchor),
+            sep.leadingAnchor.constraint(equalTo: actionsContainer.leadingAnchor),
+            sep.trailingAnchor.constraint(equalTo: actionsContainer.trailingAnchor),
+            sep.heightAnchor.constraint(equalToConstant: 1),
+        ])
+    }
+
+    private func updateBrokerBanner(_ connected: Bool) {
+        guard currentJob != nil else { return }
+        brokerBanner.isHidden = connected
+        for btn in [answerButton, cancelButton, retryButton] {
+            btn.isEnabled = connected
+        }
+    }
+
+    private func showActionError(_ message: String) {
+        actionErrorLabel.stringValue = message
+        actionErrorLabel.isHidden    = false
+        actionErrorTimer?.invalidate()
+        actionErrorTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+            self?.actionErrorLabel.isHidden = true
+            self?.actionErrorLabel.stringValue = ""
+            AppStore.shared.clearMotherActionError()
+        }
+    }
+
+    // MARK: - Button actions
+
+    @objc private func didTapAnswer() {
+        guard let job = currentJob else { return }
+        let text = replyTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        AppStore.shared.answerJob(job.id, text: text)
+        replyTextView.string = ""
+    }
+
+    @objc private func didTapCancel() {
+        guard let job = currentJob else { return }
+        AppStore.shared.cancelJob(job.id)
+    }
+
+    @objc private func didTapRetry() {
+        guard let job = currentJob else { return }
+        AppStore.shared.retryJob(job.id)
     }
 
     private func rebuildMeta(_ job: MotherJob) {

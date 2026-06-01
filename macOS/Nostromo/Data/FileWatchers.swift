@@ -17,7 +17,6 @@ class FileWatchers {
 
     let rateLimits   = CurrentValueSubject<RateLimits?,      Never>(nil)
     let posture      = CurrentValueSubject<PostureSnapshot?,  Never>(nil)
-    let motherStatus = CurrentValueSubject<MotherStatus,      Never>(MotherStatus())
     /// Items from ~/.claude/state/perri/.queue.cache.json — updated via FSEvents.
     let perriQueue   = CurrentValueSubject<[PRQueueItem],     Never>([])
 
@@ -25,10 +24,9 @@ class FileWatchers {
     /// History is NOT replayed on startup (seek-to-EOF or last-persisted offset).
     let thresholdEvents = PassthroughSubject<PostureThresholdEvent, Never>()
 
-    private var timer:            Timer?
-    private var lastRateLimits:   String?
-    private var lastPosture:      String?
-    private var lastMotherStatus: String?
+    private var timer:          Timer?
+    private var lastRateLimits: String?
+    private var lastPosture:    String?
 
     // FSEvent watcher for the perri queue cache file
     private var perriQueueSource: DispatchSourceFileSystemObject?
@@ -63,7 +61,6 @@ class FileWatchers {
     private func poll() {
         pollRateLimits()
         pollPosture()
-        pollMotherStatus()
     }
 
     private func pollRateLimits() {
@@ -84,15 +81,6 @@ class FileWatchers {
         let snap = PostureSnapshot.load()
         log.debug("budget-posture changed: \(snap?.posture.rawValue ?? "nil", privacy: .public)")
         posture.send(snap)
-    }
-
-    private func pollMotherStatus() {
-        let content = try? String(contentsOfFile: "/tmp/.mother-statusline", encoding: .utf8)
-        guard content != lastMotherStatus else { return }
-        lastMotherStatus = content
-        let status = content.map { MotherStatus.parse($0) } ?? MotherStatus()
-        log.debug("mother-statusline changed: ▶\(status.running, privacy: .public) ⏸\(status.queued, privacy: .public) ?\(status.awaiting, privacy: .public) !\(status.failed, privacy: .public)")
-        motherStatus.send(status)
     }
 
     // MARK: - Perri queue cache watcher
