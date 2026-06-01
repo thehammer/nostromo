@@ -31,6 +31,7 @@
 		BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000B1 /* MotherBrokerClientTests.swift */; };
 		BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000A1 /* MotherBrokerClient.swift */; };
 		BB00000000000000000000B4 /* Models.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000001 /* Models.swift */; };
+		BB00000000000000000000B5 /* PhaseRibbonTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000C2 /* PhaseRibbonTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -58,6 +59,7 @@
 		AA0000020000000000000024 /* CreateFocusSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateFocusSheet.swift; sourceTree = "<group>"; };
 		BB00000000000000000000A1 /* MotherBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherBrokerClient.swift; sourceTree = "<group>"; };
 		BB00000000000000000000B1 /* MotherBrokerClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherBrokerClientTests.swift; sourceTree = "<group>"; };
+		BB00000000000000000000C2 /* PhaseRibbonTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhaseRibbonTests.swift; sourceTree = "<group>"; };
 		BB00000000000000000000G1 /* NostromoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NostromoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -154,6 +156,7 @@
 			isa = PBXGroup;
 			children = (
 				BB00000000000000000000B1 /* MotherBrokerClientTests.swift */,
+				BB00000000000000000000C2 /* PhaseRibbonTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -269,6 +272,7 @@
 				BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */,
 				BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */,
 				BB00000000000000000000B4 /* Models.swift in TestSources */,
+				BB00000000000000000000B5 /* PhaseRibbonTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

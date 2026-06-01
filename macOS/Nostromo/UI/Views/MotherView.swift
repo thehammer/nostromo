@@ -421,6 +421,65 @@ private class MotherJobRow: NSView {
     }
 }
 
+// MARK: - PhaseRibbonView
+
+/// Compact phase-progress ribbon: `redd✓ cody⟳ marty· · cycle 2`
+///
+/// Hidden (zero height) when the job has no phase data — non-pipeline and
+/// pre-Wedge-C jobs are unaffected.
+private class PhaseRibbonView: NSView {
+
+    private let stack = NSStackView()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        stack.orientation = .horizontal
+        stack.spacing     = 6
+        stack.alignment   = .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Rebuild the ribbon from `model`.  Passing nil clears all tokens.
+    func update(_ model: PhaseRibbonModel?) {
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        guard let model else { return }
+
+        for token in model.tokens {
+            let lbl = NSTextField(labelWithString: token.text)
+            lbl.font      = .systemFont(ofSize: 11)
+            lbl.textColor = tokenColor(token.state)
+            stack.addArrangedSubview(lbl)
+        }
+
+        if let cycleLabel = model.cycleLabel {
+            let sep = NSTextField(labelWithString: "·")
+            sep.font      = .systemFont(ofSize: 11)
+            sep.textColor = Theme.fgMuted
+            stack.addArrangedSubview(sep)
+
+            let cLbl = NSTextField(labelWithString: cycleLabel)
+            cLbl.font      = .systemFont(ofSize: 10)
+            cLbl.textColor = Theme.fgMuted
+            stack.addArrangedSubview(cLbl)
+        }
+    }
+
+    private func tokenColor(_ state: JobPhaseState) -> NSColor {
+        switch state {
+        case .running:   return Theme.amber
+        case .completed: return Theme.sage
+        case .pending:   return Theme.fgMuted
+        }
+    }
+}
+
 // MARK: - MotherJobDetail
 
 private class MotherJobDetail: NSView {
@@ -433,6 +492,8 @@ private class MotherJobDetail: NSView {
     // Content fields
     private let titleLabel      = NSTextField(labelWithString: "")
     private let stateLabel      = NSTextField(labelWithString: "")
+    private let phaseRibbonView = PhaseRibbonView()
+    private var ribbonHeight:   NSLayoutConstraint!
     private let metaStack       = NSStackView()
     private let actionsContainer = NSView()  // rebuilt per job state
     private let logSectionLabel = NSTextField(labelWithString: "LOG TAIL")
@@ -493,11 +554,15 @@ private class MotherJobDetail: NSView {
         logScrollView.layer?.cornerRadius    = 4
         logScrollView.documentView = logTextView
 
-        for v in [titleLabel, stateLabel, metaStack, actionsContainer,
+        for v in [titleLabel, stateLabel, phaseRibbonView, metaStack, actionsContainer,
                   logSectionLabel, logScrollView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+
+        // Ribbon height toggles between 0 (hidden) and 22 (visible)
+        ribbonHeight = phaseRibbonView.heightAnchor.constraint(equalToConstant: 0)
+        ribbonHeight.isActive = true
 
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 20),
@@ -507,7 +572,12 @@ private class MotherJobDetail: NSView {
             stateLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
             stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
-            metaStack.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 16),
+            // Phase ribbon — sits between state label and meta; height is 0 when hidden
+            phaseRibbonView.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 8),
+            phaseRibbonView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            phaseRibbonView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+
+            metaStack.topAnchor.constraint(equalTo: phaseRibbonView.bottomAnchor, constant: 8),
             metaStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             metaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
@@ -619,6 +689,7 @@ private class MotherJobDetail: NSView {
         stateLabel.stringValue = job.state.uppercased()
         stateLabel.textColor   = stateColor(job.state)
 
+        updateRibbon(job)
         rebuildMeta(job)
         rebuildActions(job)
         loadLog(job)
@@ -634,9 +705,21 @@ private class MotherJobDetail: NSView {
     // MARK: Private
 
     private func showEmpty() {
-        [titleLabel, stateLabel, metaStack, actionsContainer,
+        [titleLabel, stateLabel, phaseRibbonView, metaStack, actionsContainer,
          logSectionLabel, logScrollView].forEach { $0.isHidden = true }
         emptyLabel.isHidden = false
+    }
+
+    private func updateRibbon(_ job: MotherJob) {
+        let model = job.phaseRibbonModel
+        phaseRibbonView.update(model)
+        if model != nil {
+            phaseRibbonView.isHidden = false
+            ribbonHeight.constant    = 22
+        } else {
+            phaseRibbonView.isHidden = true
+            ribbonHeight.constant    = 0
+        }
     }
 
     private func rebuildActions(_ job: MotherJob) {
