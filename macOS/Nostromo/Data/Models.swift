@@ -29,6 +29,93 @@ struct Focus: Codable, Hashable, Identifiable {
     ]
 }
 
+// MARK: - Mother — job phase types (Wedge C)
+
+/// State of one agent phase within a Mother job.
+/// Unknown strings (from future broker versions) silently decode as `.pending`.
+enum JobPhaseState: String, Equatable {
+    case pending, running, completed
+}
+
+/// One agent step within a Mother job or pipeline cycle.
+///
+/// All fields are decoded defensively: missing keys / unknown values never throw.
+struct JobPhase: Decodable {
+    let agent:       String
+    let requestType: String?
+    let state:       JobPhaseState
+    let startedAt:   Date?
+    let finishedAt:  Date?
+    /// Findings count (review phases only; nil for non-review or zero-findings phases).
+    let findings:    Int?
+
+    enum CodingKeys: String, CodingKey {
+        case agent
+        case requestType = "request_type"
+        case state
+        case startedAt   = "started_at"
+        case finishedAt  = "finished_at"
+        case findings
+    }
+
+    init(agent: String, requestType: String? = nil, state: JobPhaseState,
+         startedAt: Date? = nil, finishedAt: Date? = nil, findings: Int? = nil) {
+        self.agent       = agent
+        self.requestType = requestType
+        self.state       = state
+        self.startedAt   = startedAt
+        self.finishedAt  = finishedAt
+        self.findings    = findings
+    }
+
+    init(from decoder: Decoder) throws {
+        let c    = try decoder.container(keyedBy: CodingKeys.self)
+        agent       = (try? c.decode(String.self, forKey: .agent))       ?? ""
+        requestType = (try? c.decodeIfPresent(String.self, forKey: .requestType)) ?? nil
+        let raw  = (try? c.decode(String.self, forKey: .state))          ?? ""
+        state       = JobPhaseState(rawValue: raw)                        ?? .pending
+        startedAt   = (try? c.decodeIfPresent(Date.self, forKey: .startedAt))  ?? nil
+        finishedAt  = (try? c.decodeIfPresent(Date.self, forKey: .finishedAt)) ?? nil
+        let rawFindings = (try? c.decodeIfPresent(Int.self, forKey: .findings)) ?? nil
+        findings    = (rawFindings ?? 0) > 0 ? rawFindings : nil
+    }
+}
+
+/// One cycle within a pipeline Mother job.
+struct JobCycle: Decodable {
+    let cycle:  Int
+    let phases: [JobPhase]
+
+    init(cycle: Int, phases: [JobPhase]) {
+        self.cycle  = cycle
+        self.phases = phases
+    }
+
+    init(from decoder: Decoder) throws {
+        let c  = try decoder.container(keyedBy: CodingKeys.self)
+        cycle  = (try? c.decode(Int.self,         forKey: .cycle))  ?? 0
+        phases = (try? c.decode([JobPhase].self,  forKey: .phases)) ?? []
+    }
+
+    enum CodingKeys: String, CodingKey { case cycle, phases }
+}
+
+// MARK: - Phase ribbon view model
+
+/// One label+state token in the phase ribbon.
+struct PhaseRibbonToken: Equatable {
+    /// Display text, e.g. "redd✓", "cody⟳", "perri·", "ada✓(2)".
+    let text:  String
+    let state: JobPhaseState
+}
+
+/// Computed ribbon for a job's phase list, ready for the view to render.
+struct PhaseRibbonModel {
+    let tokens:     [PhaseRibbonToken]
+    /// "cycle N" for pipeline jobs; nil for flat-phase standard jobs.
+    let cycleLabel: String?
+}
+
 // MARK: - Mother
 
 struct MotherStatus {
@@ -76,6 +163,38 @@ struct MotherJob: Identifiable {
     let pausedReason:    String?
     let adherenceStatus: String?
     let currentTier:     String?
+    // Wedge C — phase-progress ribbon (broker-fed; absent/empty on pre-Wedge-C jobs)
+    var kind:   String?    = nil   // "pipeline" for multi-cycle jobs; nil for standard
+    var phases: [JobPhase] = []    // flat phase list (standard jobs)
+    var cycles: [JobCycle] = []    // per-cycle phases (pipeline jobs)
+
+    /// Computed ribbon model; nil when the job carries no phase data.
+    var phaseRibbonModel: PhaseRibbonModel? {
+        if !cycles.isEmpty {
+            guard let current = cycles.last else { return nil }
+            let tokens = current.phases.map { ribbonToken($0) }
+            return PhaseRibbonModel(tokens: tokens, cycleLabel: "cycle \(current.cycle)")
+        } else if !phases.isEmpty {
+            return PhaseRibbonModel(tokens: phases.map { ribbonToken($0) }, cycleLabel: nil)
+        }
+        return nil
+    }
+
+    private func ribbonToken(_ phase: JobPhase) -> PhaseRibbonToken {
+        let mark: String
+        switch phase.state {
+        case .completed: mark = "✓"
+        case .running:   mark = "⟳"
+        case .pending:   mark = "·"
+        }
+        let text: String
+        if let f = phase.findings, f > 0 {
+            text = "\(phase.agent)\(mark)(\(f))"
+        } else {
+            text = "\(phase.agent)\(mark)"
+        }
+        return PhaseRibbonToken(text: text, state: phase.state)
+    }
 }
 
 /// Slim decoder for `mother list --format json` output. The CLI shape has
@@ -94,9 +213,13 @@ struct MotherJobSlim: Decodable {
     let pausedReason:    String?
     let adherenceStatus: String?
     let currentTier:     String?
+    // Wedge C — decoded defensively: nil when absent (pre-Wedge-C jobs)
+    let kind:            String?
+    let phases:          [JobPhase]?   // nil → empty array in toMotherJob()
+    let cycles:          [JobCycle]?   // nil → empty array in toMotherJob()
 
     enum CodingKeys: String, CodingKey {
-        case id, state, repo, isolation, title, question
+        case id, state, repo, isolation, title, question, kind, phases, cycles
         case createdAt       = "created_at"
         case startedAt       = "started_at"
         case finishedAt      = "finished_at"
@@ -131,7 +254,10 @@ struct MotherJobSlim: Decodable {
                   question:        question,
                   pausedReason:    pausedReason,
                   adherenceStatus: adherenceStatus,
-                  currentTier:     currentTier)
+                  currentTier:     currentTier,
+                  kind:            kind,
+                  phases:          phases ?? [],
+                  cycles:          cycles ?? [])
     }
 }
 

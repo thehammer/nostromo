@@ -181,7 +181,10 @@ class AppStore: ObservableObject {
             title: job.title,
             createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt,
             planPath: job.planPath, question: q, pausedReason: pr,
-            adherenceStatus: job.adherenceStatus, currentTier: job.currentTier
+            adherenceStatus: job.adherenceStatus, currentTier: job.currentTier,
+            kind:   job.kind,
+            phases: job.phases,
+            cycles: job.cycles
         )
     }
 
