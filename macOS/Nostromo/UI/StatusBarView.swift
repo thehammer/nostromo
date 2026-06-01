@@ -78,6 +78,12 @@ class StatusBarView: NSView {
         .sink { [weak self] _ in self?.render() }
         .store(in: &cancellables)
 
+        // Re-render whenever the active focus changes (for per-tab attribution).
+        store.$activeFocusAgentTag
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &cancellables)
+
         render()
     }
 
@@ -141,6 +147,19 @@ class StatusBarView: NSView {
         let out = NSMutableAttributedString()
         let store = AppStore.shared
         let now = Date().timeIntervalSince1970
+
+        // Per-tab agent attribution — shown when the active focus's agent tag
+        // appears in the agents map.  Shows share of Mother-attributed tokens only.
+        if let tag  = store.activeFocusAgentTag,
+           let snap = store.posture,
+           !snap.agents.isEmpty {
+            let windowKey = snap.sevenDay != nil ? "7d" : "5h"
+            let shares    = snap.attributedShares(for: windowKey)
+            if let mine = shares.first(where: { $0.name == tag }), mine.fraction > 0 {
+                let pct = Int((mine.fraction * 100).rounded())
+                out.append(muted("\(tag) · \(pct)% attr  "))
+            }
+        }
 
         // Budget posture chip — hidden when normal
         if let p = store.posture?.posture, !p.isHidden {

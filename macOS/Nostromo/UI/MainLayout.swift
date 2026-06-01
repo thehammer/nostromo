@@ -12,6 +12,8 @@ class MainLayout: NSView {
     private let tabBar    = TabBarView()
     private let paceBars  = PaceBarsView()
     private let statusBar = StatusBarView()
+    /// Toast overlay — renders above all content, passes through non-toast clicks.
+    private let toastView = ToastBannerView()
 
     // MARK: - Content
 
@@ -80,6 +82,17 @@ class MainLayout: NSView {
             contentContainer.bottomAnchor.constraint(equalTo: paceBars.topAnchor),
         ])
 
+        // Toast overlay — covers content + pace bars, above all other subviews.
+        // hitTest passthrough means clicks reach views below for non-toast areas.
+        toastView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(toastView)   // added last → draws on top
+        NSLayoutConstraint.activate([
+            toastView.topAnchor.constraint(equalTo: topAnchor),
+            toastView.leadingAnchor.constraint(equalTo: tabBar.trailingAnchor),
+            toastView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            toastView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+        ])
+
         contentContainer.wantsLayer = true
         contentContainer.layer?.backgroundColor = Theme.bg.cgColor
 
@@ -98,6 +111,15 @@ class MainLayout: NSView {
             }
             .store(in: &cancellables)
 
+        // Threshold events → toast banners.
+        FileWatchers.shared.thresholdEvents
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in self?.toastView.showToast(event) }
+            .store(in: &cancellables)
+
+        // Publish the initial active focus so StatusBarView has a tag from the start.
+        AppStore.shared.setActiveFocusAgentTag(activeFocus.agentTag)
+
         showContent(for: activeFocus)
     }
 
@@ -108,6 +130,7 @@ class MainLayout: NSView {
         tabBar.activeFocus   = focus
         UserDefaults.standard.set(focus.id, forKey: udKey)
         UserDefaults.standard.synchronize()
+        AppStore.shared.setActiveFocusAgentTag(focus.agentTag)
         showContent(for: focus)
     }
 

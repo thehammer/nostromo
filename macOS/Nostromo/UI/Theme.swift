@@ -60,7 +60,8 @@ enum Theme {
     static let tabBarHeight:    CGFloat = 26   // legacy; kept for reference
     static let sidebarWidth:    CGFloat = 80
     static let statusBarHeight: CGFloat = 22
-    static let paceBarsHeight:  CGFloat = 28   // enough for 2 bars at ~10px each + padding
+    /// Tall enough for 2–3 pace bars (top ~30px) + agent attribution text row (~16px).
+    static let paceBarsHeight:  CGFloat = 46
 
     // MARK: - Helpers
 
