@@ -675,6 +675,27 @@ pub async fn run(
                 views[FRED_IDX].on_event(&ev);
                 continue;
             }
+            AppEvent::PostureThresholdCrossed(threshold_ev) => {
+                use crate::data::rate_limits::{threshold_severity, ThresholdSeverity};
+                use crate::mcp::command::NotifyLevel;
+
+                let severity = threshold_severity(&threshold_ev.trigger);
+                let level = match severity {
+                    ThresholdSeverity::Info => NotifyLevel::Info,
+                    ThresholdSeverity::Warn => NotifyLevel::Warn,
+                    ThresholdSeverity::Alert => NotifyLevel::Error,
+                };
+                let label = threshold_ev.trigger.replace('_', " ");
+                let text = if let Some(mins) = threshold_ev.minutes_remaining {
+                    format!("{}: {} ({:.0}m left)", threshold_ev.window, label, mins)
+                } else if let Some(pace) = threshold_ev.pace {
+                    format!("{}: {} ({:.1}×)", threshold_ev.window, label, pace)
+                } else {
+                    format!("{}: {}", threshold_ev.window, label)
+                };
+                state.toasts.push_back(Toast::new(text, level));
+                continue;
+            }
             _ => {}
         }
 

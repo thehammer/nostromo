@@ -30,6 +30,7 @@ fn make_snapshot() -> PostureSnapshot {
         }),
         sonnet_seven_day: None,
         loaded_at: std::time::Instant::now(),
+        agents: std::collections::BTreeMap::new(),
     }
 }
 
