@@ -45,6 +45,21 @@ struct MotherStatus {
         func get(_ i: Int) -> Int { Int(parts.indices.contains(i) ? String(parts[i]) : "0") ?? 0 }
         return MotherStatus(running: get(0), queued: get(1), failed: get(2), awaiting: get(3))
     }
+
+    /// Derive status counts directly from a live job list (broker-sourced).
+    static func from(jobs: [MotherJob]) -> MotherStatus {
+        var s = MotherStatus()
+        for job in jobs {
+            switch job.state {
+            case "running":  s.running  += 1
+            case "queued":   s.queued   += 1
+            case "awaiting": s.awaiting += 1
+            case "failed":   s.failed   += 1
+            default: break
+            }
+        }
+        return s
+    }
 }
 
 struct MotherJob: Identifiable {

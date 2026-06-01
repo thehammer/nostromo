@@ -27,6 +27,10 @@
 		AA0000020000000000000131 /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000031 /* ChatSession.swift */; };
 		AA0000020000000000000132 /* FocusStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000032 /* FocusStore.swift */; };
 		AA0000020000000000000124 /* CreateFocusSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000024 /* CreateFocusSheet.swift */; };
+		BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000A1 /* MotherBrokerClient.swift */; };
+		BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000B1 /* MotherBrokerClientTests.swift */; };
+		BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000A1 /* MotherBrokerClient.swift */; };
+		BB00000000000000000000B4 /* Models.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000001 /* Models.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -52,10 +56,20 @@
 		AA0000020000000000000031 /* ChatSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSession.swift; sourceTree = "<group>"; };
 		AA0000020000000000000032 /* FocusStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusStore.swift; sourceTree = "<group>"; };
 		AA0000020000000000000024 /* CreateFocusSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateFocusSheet.swift; sourceTree = "<group>"; };
+		BB00000000000000000000A1 /* MotherBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherBrokerClient.swift; sourceTree = "<group>"; };
+		BB00000000000000000000B1 /* MotherBrokerClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherBrokerClientTests.swift; sourceTree = "<group>"; };
+		BB00000000000000000000G1 /* NostromoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NostromoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		AA0000000000000000000032 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB00000000000000000000D3 /* Frameworks (NostromoTests) */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -69,6 +83,7 @@
 			isa = PBXGroup;
 			children = (
 				AA0000000000000000000021 /* Nostromo */,
+				BB00000000000000000000C1 /* NostromoTests */,
 				AA0000000000000000000022 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -90,6 +105,7 @@
 			isa = PBXGroup;
 			children = (
 				AA0000000000000000000006 /* Nostromo.app */,
+				BB00000000000000000000G1 /* NostromoTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -101,6 +117,7 @@
 				AA0000020000000000000002 /* NostromodClient.swift */,
 				AA0000020000000000000003 /* FileWatchers.swift */,
 				AA0000020000000000000004 /* AppStore.swift */,
+				BB00000000000000000000A1 /* MotherBrokerClient.swift */,
 				AA0000020000000000000030 /* ChatModels.swift */,
 				AA0000020000000000000031 /* ChatSession.swift */,
 				AA0000020000000000000032 /* FocusStore.swift */,
@@ -133,6 +150,14 @@
 			path = Views;
 			sourceTree = "<group>";
 		};
+		BB00000000000000000000C1 /* NostromoTests */ = {
+			isa = PBXGroup;
+			children = (
+				BB00000000000000000000B1 /* MotherBrokerClientTests.swift */,
+			);
+			path = NostromoTests;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -152,6 +177,22 @@
 			productName = Nostromo;
 			productReference = AA0000000000000000000006 /* Nostromo.app */;
 			productType = "com.apple.product-type.application";
+		};
+		BB00000000000000000000D1 /* NostromoTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB00000000000000000000F3 /* Build configuration list for PBXNativeTarget "NostromoTests" */;
+			buildPhases = (
+				BB00000000000000000000D2 /* Sources */,
+				BB00000000000000000000D3 /* Frameworks (NostromoTests) */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NostromoTests;
+			productName = NostromoTests;
+			productReference = BB00000000000000000000G1 /* NostromoTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -177,6 +218,7 @@
 			projectRoot = "";
 			targets = (
 				AA0000000000000000000040 /* Nostromo */,
+				BB00000000000000000000D1 /* NostromoTests */,
 			);
 		};
 /* End PBXProject section */
@@ -216,6 +258,17 @@
 				AA0000020000000000000131 /* ChatSession.swift in Sources */,
 				AA0000020000000000000132 /* FocusStore.swift in Sources */,
 				AA0000020000000000000124 /* CreateFocusSheet.swift in Sources */,
+				BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB00000000000000000000D2 /* Sources (NostromoTests) */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */,
+				BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */,
+				BB00000000000000000000B4 /* Models.swift in TestSources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -344,6 +397,35 @@
 			};
 			name = Release;
 		};
+		BB00000000000000000000F1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		BB00000000000000000000F2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -361,6 +443,15 @@
 			buildConfigurations = (
 				AA0000000000000000000062 /* Debug */,
 				AA0000000000000000000063 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BB00000000000000000000F3 /* Build configuration list for PBXNativeTarget "NostromoTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB00000000000000000000F1 /* Debug */,
+				BB00000000000000000000F2 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

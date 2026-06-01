@@ -6,16 +6,22 @@ private let log = Logger(subsystem: "com.hammer.nostromo", category: "store")
 
 /// Shared observable state for the whole app.
 ///
-/// Data flows: NostromodClient (IPC) and FileWatchers (flat files) → AppStore → UI.
-/// All mutations happen on the main queue; UI components can read directly.
+/// Data flows:
+///   - NostromodClient (IPC) → session/activity events
+///   - MotherBrokerClient (broker socket) → Mother job events + mutations
+///   - FileWatchers (flat files) → rate limits, posture, perri queue
 class AppStore: ObservableObject {
     static let shared = AppStore()
 
     // MARK: - Published state
 
     // Mother
-    @Published private(set) var motherStatus: MotherStatus = MotherStatus()
-    @Published private(set) var motherJobs:   [MotherJob]  = []
+    @Published private(set) var motherStatus:       MotherStatus = MotherStatus()
+    @Published private(set) var motherJobs:         [MotherJob]  = []
+    /// True while the broker socket is connected (hello received + subscribe sent).
+    @Published private(set) var brokerConnected:    Bool         = false
+    /// Set on action failure; UI observes and clears after display.
+    @Published private(set) var motherActionError:  String?      = nil
 
     // Budget
     @Published private(set) var rateLimits: RateLimits?     = nil
@@ -31,51 +37,50 @@ class AppStore: ObservableObject {
     @Published private(set) var perriQueueLoading: Bool           = false
 
     // Active focus agent tag — set by MainLayout on every focus switch.
-    // Used by StatusBarView to show per-tab attribution.
     @Published private(set) var activeFocusAgentTag: String?      = nil
 
     // MARK: - Internals
 
-    private let client = NostromodClient()
-    private var cancellables        = Set<AnyCancellable>()
-    private var perriQueueTimer:    Timer?
-    private var motherJobsTimer:    Timer?
+    private let client  = NostromodClient()
+    private let broker  = MotherBrokerClient()
+    private var cancellables     = Set<AnyCancellable>()
+    private var perriQueueTimer: Timer?
+
+    /// In-memory job map keyed by id — folded from broker snapshot + events.
+    private var jobMap: [String: MotherJob] = [:]
 
     /// Shared ChatSession instances keyed by agent tag.
-    /// Multiple windows showing the same tag observe the same session (mirrored).
     private var sessionRegistry: [String: ChatSession] = [:]
 
     private init() {}
 
     // MARK: - Session registry
 
-    func session(for tag: String, agentName: String? = nil, displayName: String? = nil, workingDirectory: String? = nil) -> ChatSession {
+    func session(for tag: String, agentName: String? = nil, displayName: String? = nil,
+                 workingDirectory: String? = nil) -> ChatSession {
         if let s = sessionRegistry[tag] { return s }
-        // Daemon-hosted: ChatSession is a thin client over the shared NostromodClient.
-        let s = ChatSession(tag: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory, client: client)
+        let s = ChatSession(tag: tag, agentName: agentName, displayName: displayName,
+                            workingDirectory: workingDirectory, client: client)
         sessionRegistry[tag] = s
         return s
     }
 
     // MARK: - Active focus
 
-    /// Called by MainLayout on every focus switch (and at setup) so consumers
-    /// such as StatusBarView can show per-tab attribution data.
-    func setActiveFocusAgentTag(_ tag: String?) {
-        activeFocusAgentTag = tag
-    }
+    func setActiveFocusAgentTag(_ tag: String?) { activeFocusAgentTag = tag }
 
     // MARK: - Startup
 
     func start() {
         log.info("AppStore starting")
-        // IPC messages
+
+        // IPC messages (session, activity)
         client.messages
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.handle($0) }
             .store(in: &cancellables)
 
-        // File-backed data
+        // File-backed data (rate limits, posture, perri queue)
         FileWatchers.shared.rateLimits
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.rateLimits = $0 }
@@ -86,14 +91,6 @@ class AppStore: ObservableObject {
             .sink { [weak self] in self?.posture = $0 }
             .store(in: &cancellables)
 
-        FileWatchers.shared.motherStatus
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.motherStatus = $0 }
-            .store(in: &cancellables)
-
-        // Subscribe to the perri queue cache watcher — this fires immediately with
-        // whatever's in ~/.claude/state/perri/.queue.cache.json, then updates whenever
-        // any process (Perri skill, TUI, ↺ button) writes a fresh cache.
         FileWatchers.shared.perriQueue
             .receive(on: DispatchQueue.main)
             .sink { [weak self] items in
@@ -104,68 +101,136 @@ class AppStore: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Broker connection state → brokerConnected
+        broker.connected
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.brokerConnected = $0 }
+            .store(in: &cancellables)
+
+        // Broker events → job map + derived status
+        broker.events
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.applyBrokerEvent($0) }
+            .store(in: &cancellables)
+
         FileWatchers.shared.start()
         client.start()
+        broker.start()
 
-        // Poll mother jobs directly via `mother list --format json`.
-        pollMotherJobs()
-        motherJobsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            self?.pollMotherJobs()
-        }
-
-        // Fire a background refresh on startup so data is fresh, then every 5 min.
+        // Perri queue: immediate refresh on startup, then every 5 min
         triggerPerriQueueRefresh()
         perriQueueTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             self?.triggerPerriQueueRefresh()
         }
     }
 
-    private func pollMotherJobs() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let mother = Self.findMother() else { return }
-            let proc = Process()
-            proc.executableURL = mother
-            proc.arguments = ["list", "--format", "json"]
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError  = Pipe()
-            guard (try? proc.run()) != nil else { return }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            guard let jobs = try? JSONDecoder().decode([MotherJobSlim].self, from: data) else { return }
-            var status = MotherStatus()
-            for job in jobs {
-                switch job.state {
-                case "running":  status.running  += 1
-                case "queued":   status.queued   += 1
-                case "awaiting": status.awaiting += 1
-                case "failed":   status.failed   += 1
-                default: break
-                }
+    // MARK: - Broker event fold
+
+    private func applyBrokerEvent(_ event: BrokerEvent) {
+        switch event {
+        case .hello:
+            break   // connection state already set via broker.connected
+
+        case .snapshot(let jobs):
+            jobMap = Dictionary(uniqueKeysWithValues: jobs.map { ($0.id, $0) })
+            publishJobsAndStatus()
+
+        case .stateChange(let jobId, let eventKind, let question, let pausedReason, let toState):
+            guard let existing = jobMap[jobId] else {
+                log.debug("broker stateChange for unknown job \(jobId.prefix(8), privacy: .public) — ignoring")
+                return
             }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.motherJobs   = jobs.map { $0.toMotherJob() }
-                self.motherStatus = status
-            }
+            jobMap[jobId] = foldJobState(existing, eventKind: eventKind,
+                                         question: question, pausedReason: pausedReason, toState: toState)
+            publishJobsAndStatus()
+
+        case .ping:
+            break
+
+        case .reconnected:
+            // Clear stale state; next snapshot will repopulate
+            jobMap.removeAll()
+            publishJobsAndStatus()
         }
     }
 
-    private static func findMother() -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "/usr/local/bin/mother",
-            "/opt/homebrew/bin/mother",
-            "\(home)/.local/bin/mother",
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-            .map { URL(fileURLWithPath: $0) }
+    /// Mirror of the broker's foldState: maps event kind → updated MotherJob.
+    private func foldJobState(_ job: MotherJob, eventKind: String,
+                               question: String?, pausedReason: String?, toState: String?) -> MotherJob {
+        var state = job.state
+        var q     = job.question
+        var pr    = job.pausedReason
+
+        switch eventKind {
+        case "queued", "ready", "running", "succeeded", "failed", "cancelled":
+            state = eventKind; q = nil; pr = nil
+        case "awaiting_input":
+            state = "awaiting"; q = question; pr = nil
+        case "paused_for_quota":
+            state = "awaiting"; q = nil; pr = pausedReason
+        case "resumed", "auto_resumed":
+            state = "ready"; q = nil; pr = nil
+        case "retried", "escalated":
+            state = toState ?? "ready"; q = nil; pr = nil
+        default:
+            break  // non-state-affecting (current_activity, etc.)
+        }
+
+        return MotherJob(
+            id: job.id, state: state, repo: job.repo, isolation: job.isolation,
+            title: job.title,
+            createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt,
+            planPath: job.planPath, question: q, pausedReason: pr,
+            adherenceStatus: job.adherenceStatus, currentTier: job.currentTier
+        )
+    }
+
+    private func publishJobsAndStatus() {
+        // Sort: awaiting → running → queued → failed → succeeded → other; then by startedAt desc
+        let order: [String: Int] = ["awaiting": 0, "running": 1, "queued": 2, "failed": 3, "succeeded": 4]
+        let jobs = jobMap.values.sorted {
+            let a = order[$0.state] ?? 5, b = order[$1.state] ?? 5
+            if a != b { return a < b }
+            return ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast)
+        }
+        motherJobs   = jobs
+        motherStatus = MotherStatus.from(jobs: jobs)
+    }
+
+    // MARK: - Mother action methods (called from MotherView)
+
+    func answerJob(_ id: String, text: String) {
+        broker.answer(job: id, text: text) { [weak self] result in
+            self?.handleActionResult(result, verb: "answer")
+        }
+    }
+
+    func cancelJob(_ id: String) {
+        broker.cancel(job: id) { [weak self] result in
+            self?.handleActionResult(result, verb: "cancel")
+        }
+    }
+
+    func retryJob(_ id: String) {
+        broker.retry(job: id) { [weak self] result in
+            self?.handleActionResult(result, verb: "retry")
+        }
+    }
+
+    func clearMotherActionError() { motherActionError = nil }
+
+    private func handleActionResult(_ result: Result<Void, BrokerError>, verb: String) {
+        switch result {
+        case .success:
+            log.info("broker \(verb) succeeded")
+        case .failure(let err):
+            log.warning("broker \(verb) failed: \(err.userFacingMessage, privacy: .public)")
+            motherActionError = err.userFacingMessage
+        }
     }
 
     // MARK: - Perri queue
 
-    /// Refresh the perri queue by running perri-queue-pane in the background.
-    /// The cache file write triggers the FileWatchers FSEvent, which publishes the result.
     func refreshPerriQueue() {
         guard !perriQueueLoading else { return }
         perriQueueLoading = true
@@ -184,9 +249,6 @@ class AppStore: ObservableObject {
         }
     }
 
-    /// Run `perri-queue-pane --json` as a side-effect: it writes a fresh result to
-    /// `~/.claude/state/perri/.queue.cache.json`, which the FileWatchers FSEvent
-    /// watcher picks up and publishes.  Return value is intentionally discarded.
     private static func runPerriQueuePane() {
         guard let binary = findBinary("perri-queue-pane") else {
             log.warning("perri-queue-pane not found — skipping refresh")
@@ -202,8 +264,8 @@ class AppStore: ObservableObject {
                      "\(home)/.npm/bin", "\(home)/.local/bin",
                      "\(home)/.claude/bin"].joined(separator: ":")
         env["PATH"] = (env["PATH"] ?? "") + ":" + extra
-        proc.environment   = env
-        proc.standardOutput = Pipe()   // discard — watcher reads the cache file
+        proc.environment    = env
+        proc.standardOutput = Pipe()
         proc.standardError  = Pipe()
 
         do    { try proc.run(); proc.waitUntilExit() }
@@ -223,7 +285,6 @@ class AppStore: ObservableObject {
         if let hit = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
             return URL(fileURLWithPath: hit)
         }
-        // Fallback: ask `which`
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         proc.arguments     = [name]
@@ -235,7 +296,7 @@ class AppStore: ObservableObject {
         return p.isEmpty ? nil : URL(fileURLWithPath: p)
     }
 
-    // MARK: - IPC handling
+    // MARK: - IPC handling (nostromd session/activity events)
 
     private func handle(_ msg: ServerMsg) {
         switch msg {
@@ -243,12 +304,13 @@ class AppStore: ObservableObject {
             log.info("nostromd v\(version, privacy: .public) pid \(pid, privacy: .public)")
 
         case .motherJobs(let jobs):
-            log.debug("mother_jobs: \(jobs.count, privacy: .public) jobs")
-            motherJobs = jobs
+            // Ignored — jobs now come from the broker
+            log.debug("mother_jobs IPC message ignored (broker is source of truth)")
+            _ = jobs
 
-        case .motherStatusline(let status):
-            log.debug("mother_statusline: ▶\(status.running, privacy: .public) ⏸\(status.queued, privacy: .public) ?\(status.awaiting, privacy: .public) !\(status.failed, privacy: .public)")
-            motherStatus = status
+        case .motherStatusline:
+            // Ignored — status now derived from broker job map
+            break
 
         case .activity(let ev):
             log.debug("activity: \(ev.agent, privacy: .public) — \(ev.summary, privacy: .public)")
@@ -258,8 +320,6 @@ class AppStore: ObservableObject {
         case .error(let msg):
             log.error("Daemon error: \(msg, privacy: .public)")
 
-        // Persistent session responses (protocol v3). Routed to per-focus
-        // ChatSessions in the thin-client cutover; ignored here until then.
         case .sessionSpawned, .sessionTurns, .sessionTurnDelta,
              .sessionState, .sessionPermissionRequest, .sessionExited:
             break
