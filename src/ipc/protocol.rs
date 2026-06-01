@@ -32,6 +32,11 @@ pub const PROTOCOL_VERSION: u32 = 3;
 /// this to 3 once the Swift client speaks v3.)
 pub const MIN_CLIENT_VERSION: u32 = 2;
 
+// Compile-time invariant: a client we still accept must not require a newer
+// protocol than the daemon speaks. Enforced at compile time (clippy rejects
+// the equivalent runtime `assert!` on constants as a tautology).
+const _: () = assert!(MIN_CLIENT_VERSION <= PROTOCOL_VERSION);
+
 /// Maximum accepted frame body size (4 MiB).
 pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
 
@@ -503,6 +508,7 @@ mod tests {
     #[test]
     fn protocol_version_is_v3() {
         assert_eq!(PROTOCOL_VERSION, 3);
-        assert!(MIN_CLIENT_VERSION <= PROTOCOL_VERSION);
+        // The MIN_CLIENT_VERSION <= PROTOCOL_VERSION invariant is enforced at
+        // compile time via a `const _` assertion near the constant definitions.
     }
 }

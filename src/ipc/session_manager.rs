@@ -980,7 +980,7 @@ mod tests {
         save_id(&path, "teri", Some("sid-teri"));
         assert_eq!(load_id_store(&path).len(), 2);
         save_id(&path, "fred", None);
-        assert!(load_id_store(&path).get("fred").is_none());
+        assert!(!load_id_store(&path).contains_key("fred"));
         assert_eq!(
             load_id_store(&path).get("teri").map(String::as_str),
             Some("sid-teri")
