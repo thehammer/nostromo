@@ -21,6 +21,9 @@ fn make_test_job() -> MotherJob {
         adherence_status: None,
         current_tier: Some("tier_0".to_string()),
         current_activity: None,
+        kind: None,
+        phases: vec![],
+        cycles: vec![],
     }
 }
 

@@ -51,7 +51,9 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
             let _ = app_tx.send(AppEvent::MotherStatusline(status));
         }
         ServerMsg::MotherAwaitDetected(job) => {
-            let _ = app_tx.send(AppEvent::AwaitDetected(Box::new(job)));
+            // `job` is already a Box<MotherJob>; AppEvent::AwaitDetected wants
+            // exactly that, so pass it through (no re-box).
+            let _ = app_tx.send(AppEvent::AwaitDetected(job));
         }
         // PTY messages are handled by DaemonPtyClient instances directly.
         ServerMsg::PtyOutput { .. }

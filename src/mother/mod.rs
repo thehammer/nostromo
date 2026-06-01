@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::warn;
 
@@ -121,6 +121,34 @@ impl MotherStatus {
     }
 }
 
+// ── Phase progress types ──────────────────────────────────────────────────────
+
+/// A single agent phase within a Mother job (pipeline cycle or flat sequence).
+///
+/// `state` is a plain `String` so unknown future values are tolerated without
+/// parse errors.  `findings` is present only on review-type phases.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PhaseInfo {
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub request_type: String,
+    #[serde(default)]
+    pub state: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub findings: Option<u32>,
+}
+
+/// One cycle within a pipeline Mother job.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct CycleInfo {
+    #[serde(default)]
+    pub cycle: u32,
+    #[serde(default)]
+    pub phases: Vec<PhaseInfo>,
+}
+
 // ── MotherJob ─────────────────────────────────────────────────────────────────
 
 /// A Mother job record, deserialised from `mother list --format json` or the
@@ -153,6 +181,20 @@ pub struct MotherJob {
     /// Most recent activity description from the broker `current_activity` event.
     #[serde(default)]
     pub current_activity: Option<String>,
+    /// Job kind — `"pipeline"` for multi-cycle jobs, absent for standard jobs.
+    pub kind: Option<String>,
+    /// Flat phase sequence for standard (non-pipeline) jobs.
+    ///
+    /// Absent in older/non-pipeline job records; decoded defensively via
+    /// `#[serde(default)]`.
+    #[serde(default)]
+    pub phases: Vec<PhaseInfo>,
+    /// Per-cycle phase sequences for pipeline jobs.
+    ///
+    /// Absent in non-pipeline job records; decoded defensively via
+    /// `#[serde(default)]`.
+    #[serde(default)]
+    pub cycles: Vec<CycleInfo>,
 }
 
 impl MotherJob {

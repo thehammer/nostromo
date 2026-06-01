@@ -99,6 +99,9 @@ fn handle_event(
                     adherence_status: None,
                     current_tier: None,
                     current_activity: None,
+                    kind: None,
+                    phases: Vec::new(),
+                    cycles: Vec::new(),
                 }
             });
 
