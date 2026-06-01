@@ -12,6 +12,13 @@ use tracing::warn;
 // ── storage path ──────────────────────────────────────────────────────────────
 
 fn ratios_path() -> PathBuf {
+    // Test/override hook: point the ratios file at an explicit path. Snapshot
+    // tests set this to a nonexistent temp path so `load()` falls back to
+    // hardcoded defaults instead of leaking the dev machine's dragged ratios
+    // (a non-hermetic-snapshot footgun — see tests/snapshot_perri.rs).
+    if let Ok(p) = std::env::var("NOSTROMO_PANE_RATIOS_PATH") {
+        return PathBuf::from(p);
+    }
     dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".nostromo")
