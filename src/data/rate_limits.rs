@@ -6,6 +6,11 @@
 //!
 //! Budget posture is written to `~/.claude/budget-posture.json` as
 //! `{"posture": "<flush|normal|elevated|conservative|critical>"}`.
+//!
+//! Threshold events are written to `~/.claude/budget-posture.events.jsonl`
+//! as append-only NDJSON lines by Bishop.
+
+use std::collections::BTreeMap;
 
 use ratatui::style::Color;
 
@@ -165,6 +170,107 @@ impl BudgetPosture {
     }
 }
 
+// ── AgentSpend ────────────────────────────────────────────────────────────────
+
+/// Token spend attributed to a single Mother-tracked agent for both budget
+/// windows, as emitted by Bishop in the `agents` map of `budget-posture.json`.
+///
+/// Counts are raw token integers, never 0–100 percentages.
+#[derive(Debug, Clone)]
+pub struct AgentSpend {
+    /// Input tokens consumed in the 5-hour window.
+    pub tokens_in_5h: u64,
+    /// Output tokens consumed in the 5-hour window.
+    pub tokens_out_5h: u64,
+    /// Input tokens consumed in the 7-day window.
+    pub tokens_in_7d: u64,
+    /// Output tokens consumed in the 7-day window.
+    pub tokens_out_7d: u64,
+}
+
+/// Which budget window to use when computing an agent's share of attributed
+/// tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentWindow {
+    FiveHour,
+    SevenDay,
+}
+
+// ── ThresholdSeverity / PostureThresholdEvent ─────────────────────────────────
+
+/// Display severity for a threshold-crossing event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThresholdSeverity {
+    /// Non-alarming informational change (e.g. `pace_recovered`).
+    Info,
+    /// Notable but not critical (e.g. `pace_warning`).
+    Warn,
+    /// Immediate attention required (e.g. `overage_started`, `pace_critical`).
+    Alert,
+}
+
+/// Map a Bishop `trigger` string to its display severity.
+///
+/// Unknown triggers default to `Warn` — visible but not alarm-fatigue-inducing
+/// on future Bishop vocabulary expansions.
+pub fn threshold_severity(trigger: &str) -> ThresholdSeverity {
+    match trigger {
+        "pace_recovered" => ThresholdSeverity::Info,
+        "pace_warning" => ThresholdSeverity::Warn,
+        "pace_critical" | "overage_started" | "exhaustion_imminent" => ThresholdSeverity::Alert,
+        _ => ThresholdSeverity::Warn,
+    }
+}
+
+/// A single `threshold_crossed` event from `~/.claude/budget-posture.events.jsonl`.
+#[derive(Debug, Clone)]
+pub struct PostureThresholdEvent {
+    /// ISO-8601 timestamp as emitted by Bishop.
+    pub ts: String,
+    /// Budget window: `"five_hour"` | `"seven_day"` | `"account"`.
+    pub window: String,
+    /// Trigger type: `"pace_warning"` | `"pace_critical"` | `"pace_recovered"` |
+    /// `"overage_started"` | `"exhaustion_imminent"`.
+    pub trigger: String,
+    /// Spend rate relative to uniform consumption (>1 = over-pacing).
+    /// Present on `pace_warning` and `pace_critical` events.
+    pub pace: Option<f64>,
+    /// Minutes until window exhaustion.  Present on `exhaustion_imminent` events.
+    pub minutes_remaining: Option<f64>,
+}
+
+impl PostureThresholdEvent {
+    /// Parse a single NDJSON line from the posture events file.
+    ///
+    /// Returns `None` if:
+    /// - The line is empty or not valid JSON.
+    /// - The `"type"` field is absent or is not `"threshold_crossed"`.
+    /// - Required fields (`ts`, `window`, `trigger`) are missing.
+    ///
+    /// Missing `pace` / `minutes_remaining` fields silently become `None`.
+    pub fn parse_line(line: &str) -> Option<Self> {
+        if line.is_empty() {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        if v.get("type")?.as_str()? != "threshold_crossed" {
+            return None;
+        }
+        let ts = v.get("ts")?.as_str()?.to_string();
+        let window = v.get("window")?.as_str()?.to_string();
+        let trigger = v.get("trigger")?.as_str()?.to_string();
+        let pace = v.get("pace").and_then(|p| p.as_f64());
+        let minutes_remaining = v.get("minutes_remaining").and_then(|m| m.as_f64());
+        Some(Self {
+            ts,
+            window,
+            trigger,
+            pace,
+            minutes_remaining,
+        })
+    }
+}
+
 // ── PostureSnapshot ───────────────────────────────────────────────────────────
 
 /// Per-window pace metrics from `~/.claude/budget-posture.json`.
@@ -202,6 +308,11 @@ pub struct PostureSnapshot {
     /// When the file was loaded — used by the widget to detect fresh reads
     /// and trigger image re-encoding.
     pub loaded_at: std::time::Instant,
+    /// Per-agent token spend keyed by agent name (e.g. `"cody"`, `"perri"`).
+    ///
+    /// Only Mother-attributable agents appear here; absent/empty → empty map.
+    /// Raw token counts — never treat these as percentages.
+    pub agents: BTreeMap<String, AgentSpend>,
 }
 
 impl PostureSnapshot {
@@ -226,14 +337,78 @@ impl PostureSnapshot {
         let five_hour = parse_window_pace(&v, "five_hour");
         let seven_day = parse_window_pace(&v, "seven_day");
         let sonnet_seven_day = parse_sonnet_window(&v);
+        let agents = parse_agents_map(&v);
         Some(PostureSnapshot {
             posture,
             five_hour,
             seven_day,
             sonnet_seven_day,
             loaded_at: std::time::Instant::now(),
+            agents,
         })
     }
+
+    /// Return an agent's share of total attributed tokens for a given window.
+    ///
+    /// "Attributed" means the sum of ALL agents' tokens in the map for that
+    /// window — not the window's total quota (which Bishop does not expose).
+    /// This is honest: it never implies agents sum to 100% of window spend.
+    ///
+    /// Returns `None` when:
+    /// - `self.agents` is empty (nothing to compare against).
+    /// - `agent` is not present in the map.
+    /// - All agents have zero tokens in that window (avoids 0/0).
+    ///
+    /// Returns `Some(0.0)` when the agent is present but has zero tokens and
+    /// other agents have non-zero tokens.
+    pub fn agent_share_of_attributed(&self, agent: &str, window: AgentWindow) -> Option<f32> {
+        if self.agents.is_empty() {
+            return None;
+        }
+        let spend = self.agents.get(agent)?;
+        let window_tokens = |s: &AgentSpend| match window {
+            AgentWindow::FiveHour => (s.tokens_in_5h + s.tokens_out_5h) as f64,
+            AgentWindow::SevenDay => (s.tokens_in_7d + s.tokens_out_7d) as f64,
+        };
+        let agent_tokens = window_tokens(spend);
+        let total: f64 = self.agents.values().map(window_tokens).sum();
+        if total == 0.0 {
+            return None;
+        }
+        Some((agent_tokens / total) as f32)
+    }
+}
+
+/// Parse the `agents` object from a posture JSON value.
+///
+/// Returns an empty `BTreeMap` when the key is absent, not an object, or
+/// contains malformed entries (defensive; never panics).
+fn parse_agents_map(v: &serde_json::Value) -> BTreeMap<String, AgentSpend> {
+    let mut map = BTreeMap::new();
+    let Some(obj) = v.get("agents").and_then(|a| a.as_object()) else {
+        return map;
+    };
+    for (name, entry) in obj {
+        if let Some(spend) = parse_agent_spend(entry) {
+            map.insert(name.clone(), spend);
+        }
+    }
+    map
+}
+
+/// Parse a single `AgentSpend` entry from JSON.  Returns `None` if any of
+/// the four required token fields is absent or not a valid u64.
+fn parse_agent_spend(v: &serde_json::Value) -> Option<AgentSpend> {
+    let tokens_in_5h = v.get("tokens_in_5h")?.as_u64()?;
+    let tokens_out_5h = v.get("tokens_out_5h")?.as_u64()?;
+    let tokens_in_7d = v.get("tokens_in_7d")?.as_u64()?;
+    let tokens_out_7d = v.get("tokens_out_7d")?.as_u64()?;
+    Some(AgentSpend {
+        tokens_in_5h,
+        tokens_out_5h,
+        tokens_in_7d,
+        tokens_out_7d,
+    })
 }
 
 /// Build a `WindowPace` for the Sonnet model's 7-day window.
@@ -260,7 +435,6 @@ fn parse_sonnet_window(v: &serde_json::Value) -> Option<WindowPace> {
     let seven_day_elapsed = parse_window_pace(v, "seven_day")
         .map(|sd| sd.elapsed_pct)
         .unwrap_or(0.0);
-    let elapsed_pct = seven_day_elapsed;
     let pace = if status == "exhausted" {
         // Force pace to 1.5 so pace_color() renders the tip red (#D50000),
         // regardless of the arithmetic (which would give 1.0 or ∞).
@@ -272,7 +446,7 @@ fn parse_sonnet_window(v: &serde_json::Value) -> Option<WindowPace> {
     };
     Some(WindowPace {
         used_pct,
-        elapsed_pct,
+        elapsed_pct: seven_day_elapsed,
         pace,
         resets_at,
         level: status.to_string(),
@@ -475,5 +649,275 @@ mod tests {
         let snap = PostureSnapshot::parse_json(json).unwrap();
         assert!(snap.five_hour.is_none());
         assert!(snap.seven_day.is_some());
+    }
+
+    // ── Wedge A: AgentSpend + agent_share_of_attributed ──────────────────────
+
+    const AGENTS_JSON: &str = r#"{
+        "posture": "normal",
+        "five_hour": {
+            "used_pct": 14.0,
+            "elapsed_pct": 11.8,
+            "pace": 1.18,
+            "resets_at": 1715200000,
+            "level": "normal"
+        },
+        "seven_day": {
+            "used_pct": 7.0,
+            "elapsed_pct": 6.6,
+            "pace": 1.06,
+            "resets_at": 1715800000,
+            "level": "normal"
+        },
+        "agents": {
+            "cody": {
+                "tokens_in_5h": 0,
+                "tokens_out_5h": 0,
+                "tokens_in_7d": 32892551,
+                "tokens_out_7d": 9168
+            },
+            "perri": {
+                "tokens_in_5h": 100,
+                "tokens_out_5h": 50,
+                "tokens_in_7d": 5000000,
+                "tokens_out_7d": 2000
+            }
+        }
+    }"#;
+
+    #[test]
+    fn agents_map_populated_from_json() {
+        let snap = PostureSnapshot::parse_json(AGENTS_JSON).expect("should parse");
+        assert_eq!(snap.agents.len(), 2, "should parse exactly two agents");
+        let cody = snap.agents.get("cody").expect("cody should be present");
+        assert_eq!(cody.tokens_in_7d, 32892551);
+        assert_eq!(cody.tokens_out_7d, 9168);
+        let perri = snap.agents.get("perri").expect("perri should be present");
+        assert_eq!(perri.tokens_in_5h, 100);
+        assert_eq!(perri.tokens_out_5h, 50);
+        assert_eq!(perri.tokens_in_7d, 5000000);
+        assert_eq!(perri.tokens_out_7d, 2000);
+    }
+
+    #[test]
+    fn agents_token_counts_are_raw_u64_not_percentages() {
+        // Counts must be stored as raw token integers, never 0–100 percentages.
+        let snap = PostureSnapshot::parse_json(AGENTS_JSON).expect("should parse");
+        let cody = snap.agents.get("cody").expect("cody should be present");
+        // 32892551 is well above 100 — if it were treated as a percentage it
+        // would have been clamped or rejected.
+        assert!(
+            cody.tokens_in_7d > 100,
+            "tokens_in_7d should be raw token count, not a percentage; got {}",
+            cody.tokens_in_7d
+        );
+    }
+
+    #[test]
+    fn agents_absent_from_json_gives_empty_map() {
+        // JSON without an "agents" key must not panic and must yield an empty map.
+        let json = r#"{"posture":"normal"}"#;
+        let snap = PostureSnapshot::parse_json(json).expect("should parse");
+        assert!(snap.agents.is_empty(), "absent agents key → empty map");
+    }
+
+    #[test]
+    fn agents_empty_object_gives_empty_map() {
+        let json = r#"{"posture":"normal","agents":{}}"#;
+        let snap = PostureSnapshot::parse_json(json).expect("should parse");
+        assert!(snap.agents.is_empty(), "empty agents object → empty map");
+    }
+
+    #[test]
+    fn agent_share_7d_is_fraction_of_attributed() {
+        // cody 7d total  = 32892551 + 9168   = 32901719
+        // perri 7d total = 5000000  + 2000   = 5002000
+        // all agents sum = 37903719
+        // cody share     = 32901719 / 37903719 ≈ 0.8680
+        let snap = PostureSnapshot::parse_json(AGENTS_JSON).expect("should parse");
+        let share = snap
+            .agent_share_of_attributed("cody", AgentWindow::SevenDay)
+            .expect("cody 7d share should be Some");
+        let cody_7d = (32892551u64 + 9168) as f64;
+        let total_7d = cody_7d + (5000000u64 + 2000) as f64;
+        let expected = (cody_7d / total_7d) as f32;
+        assert!(
+            (share - expected).abs() < 0.001,
+            "cody 7d share should be ~{expected}, got {share}"
+        );
+    }
+
+    #[test]
+    fn agent_share_5h_is_fraction_of_attributed() {
+        // cody 5h total  = 0   + 0   = 0
+        // perri 5h total = 100 + 50  = 150
+        // all agents sum = 150
+        // cody share     = 0 / 150   = 0.0
+        let snap = PostureSnapshot::parse_json(AGENTS_JSON).expect("should parse");
+        let share = snap
+            .agent_share_of_attributed("cody", AgentWindow::FiveHour)
+            .expect("cody 5h share should be Some even when 0");
+        assert!(
+            share.abs() < 0.001,
+            "cody 5h share should be 0.0, got {share}"
+        );
+    }
+
+    #[test]
+    fn agent_share_on_empty_map_returns_none() {
+        let json = r#"{"posture":"normal"}"#;
+        let snap = PostureSnapshot::parse_json(json).expect("should parse");
+        assert!(
+            snap.agent_share_of_attributed("cody", AgentWindow::SevenDay)
+                .is_none(),
+            "empty agents map must return None"
+        );
+    }
+
+    #[test]
+    fn agent_share_for_unknown_agent_returns_none() {
+        let snap = PostureSnapshot::parse_json(AGENTS_JSON).expect("should parse");
+        assert!(
+            snap.agent_share_of_attributed("marty", AgentWindow::SevenDay)
+                .is_none(),
+            "unknown agent must return None"
+        );
+    }
+
+    #[test]
+    fn agent_share_is_not_share_of_window_quota() {
+        // agent_share_of_attributed is the share of tokens among *known agents*,
+        // not the agent's tokens as a fraction of the window budget.
+        // Cody's 7d share must be < 1.0 (other agents also have tokens).
+        let snap = PostureSnapshot::parse_json(AGENTS_JSON).expect("should parse");
+        let share = snap
+            .agent_share_of_attributed("cody", AgentWindow::SevenDay)
+            .expect("should be Some");
+        assert!(
+            share < 1.0,
+            "share must be < 1.0 when other agents are present, got {share}"
+        );
+        assert!(
+            share > 0.0,
+            "cody has nonzero 7d tokens, share must be > 0.0, got {share}"
+        );
+    }
+
+    // ── Wedge B: PostureThresholdEvent parse + severity ───────────────────────
+
+    #[test]
+    fn parse_threshold_crossed_no_optional_fields() {
+        let line = r#"{"ts":"2026-05-31T21:52:12Z","type":"threshold_crossed","window":"account","trigger":"overage_started"}"#;
+        let ev = PostureThresholdEvent::parse_line(line).expect("should parse");
+        assert_eq!(ev.ts, "2026-05-31T21:52:12Z");
+        assert_eq!(ev.window, "account");
+        assert_eq!(ev.trigger, "overage_started");
+        assert!(ev.pace.is_none(), "pace should be None when absent");
+        assert!(
+            ev.minutes_remaining.is_none(),
+            "minutes_remaining should be None when absent"
+        );
+    }
+
+    #[test]
+    fn parse_threshold_crossed_with_pace() {
+        let line = r#"{"ts":"2026-06-01T02:22:48Z","type":"threshold_crossed","window":"seven_day","trigger":"pace_warning","pace":1.3}"#;
+        let ev = PostureThresholdEvent::parse_line(line).expect("should parse");
+        assert_eq!(ev.trigger, "pace_warning");
+        let pace = ev.pace.expect("pace should be Some(1.3)");
+        assert!((pace - 1.3).abs() < 0.001, "pace should be 1.3, got {pace}");
+    }
+
+    #[test]
+    fn parse_threshold_crossed_with_minutes_remaining() {
+        let line = r#"{"ts":"2026-06-01T02:22:48Z","type":"threshold_crossed","window":"seven_day","trigger":"exhaustion_imminent","minutes_remaining":8.5}"#;
+        let ev = PostureThresholdEvent::parse_line(line).expect("should parse");
+        let minutes = ev.minutes_remaining.expect("minutes_remaining should be Some(8.5)");
+        assert!(
+            (minutes - 8.5).abs() < 0.001,
+            "minutes_remaining should be 8.5, got {minutes}"
+        );
+    }
+
+    #[test]
+    fn parse_line_unknown_type_returns_none() {
+        // Lines with a "type" other than "threshold_crossed" must be ignored.
+        let line = r#"{"ts":"2026-06-01T00:00:00Z","type":"budget_reset","window":"five_hour"}"#;
+        assert!(
+            PostureThresholdEvent::parse_line(line).is_none(),
+            "non-threshold_crossed type must return None"
+        );
+    }
+
+    #[test]
+    fn parse_line_empty_string_returns_none() {
+        assert!(
+            PostureThresholdEvent::parse_line("").is_none(),
+            "empty input must return None"
+        );
+    }
+
+    #[test]
+    fn parse_line_malformed_json_returns_none() {
+        assert!(
+            PostureThresholdEvent::parse_line("{not valid json}").is_none(),
+            "malformed JSON must return None without panicking"
+        );
+    }
+
+    #[test]
+    fn parse_line_partial_json_returns_none() {
+        // Truncated line (e.g. write in progress) must not panic.
+        assert!(
+            PostureThresholdEvent::parse_line(r#"{"ts":"2026-06"#).is_none(),
+            "truncated JSON must return None without panicking"
+        );
+    }
+
+    #[test]
+    fn severity_pace_warning_is_warn() {
+        assert_eq!(threshold_severity("pace_warning"), ThresholdSeverity::Warn);
+    }
+
+    #[test]
+    fn severity_pace_critical_is_alert() {
+        assert_eq!(
+            threshold_severity("pace_critical"),
+            ThresholdSeverity::Alert
+        );
+    }
+
+    #[test]
+    fn severity_overage_started_is_alert() {
+        assert_eq!(
+            threshold_severity("overage_started"),
+            ThresholdSeverity::Alert
+        );
+    }
+
+    #[test]
+    fn severity_exhaustion_imminent_is_alert() {
+        assert_eq!(
+            threshold_severity("exhaustion_imminent"),
+            ThresholdSeverity::Alert
+        );
+    }
+
+    #[test]
+    fn severity_pace_recovered_is_info() {
+        // Recovery is explicitly non-alarming — must be Info, not Warn or Alert.
+        assert_eq!(
+            threshold_severity("pace_recovered"),
+            ThresholdSeverity::Info
+        );
+    }
+
+    #[test]
+    fn severity_unknown_trigger_defaults_to_warn() {
+        // Unknown triggers default to Warn (safe, visible, not alarm-fatigue-inducing).
+        assert_eq!(
+            threshold_severity("some_future_trigger"),
+            ThresholdSeverity::Warn
+        );
     }
 }

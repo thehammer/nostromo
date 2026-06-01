@@ -1,8 +1,9 @@
 //! File-system watcher for Claude rate-limit and budget-posture files.
 //!
-//! Watches two on-disk files:
-//! - `/tmp/.claude-rate-limits`         → `AppEvent::RateLimitsChanged`
-//! - `~/.claude/budget-posture.json`    → `AppEvent::PostureChanged`
+//! Watches three on-disk files:
+//! - `/tmp/.claude-rate-limits`                   → `AppEvent::RateLimitsChanged`
+//! - `~/.claude/budget-posture.json`              → `AppEvent::PostureChanged`
+//! - `~/.claude/budget-posture.events.jsonl`      → `AppEvent::PostureThresholdCrossed`
 //!
 //! Modelled on the `mother_poll` notify-watcher pattern.
 
@@ -16,13 +17,15 @@ use crate::{
     event::AppEvent,
 };
 
-/// Spawn background watchers for both rate-limit files.
+/// Spawn background watchers for rate-limit and posture files.
 ///
 /// Emits initial values on startup (if the files exist) then re-reads on every
-/// file-change event.
+/// file-change event.  The posture events watcher tails from EOF — no history
+/// replay on startup.
 pub fn spawn(tx: mpsc::UnboundedSender<AppEvent>) {
     spawn_rate_limits_watcher(tx.clone());
-    spawn_posture_watcher(tx);
+    spawn_posture_watcher(tx.clone());
+    super::posture_events_watcher::spawn(tx);
 }
 
 // ── rate-limits watcher ───────────────────────────────────────────────────────

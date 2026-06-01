@@ -23,7 +23,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{AppState, Toast},
-    data::rate_limits::BudgetPosture,
+    data::rate_limits::{AgentWindow, BudgetPosture},
     mcp::command::NotifyLevel,
     ui::theme,
 };
@@ -333,9 +333,37 @@ fn parse_segment_color(s: Option<&str>) -> Color {
 
 // ── right segment ─────────────────────────────────────────────────────────────
 
+/// Per-agent spend segment: `{agent} · {pct}% attr 7d`.
+///
+/// Shown when the active view's id matches an agent in the posture agents map.
+/// Uses the 7-day window as the primary reference (longer horizon is more
+/// meaningful than the 5-hour window for a status bar glance).
+///
+/// Deliberately shows "% of attributed" (share among Mother-tracked agents),
+/// NOT "% of window quota" — Bishop does not emit a per-agent quota fraction.
+fn agent_spend_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
+    let snap = state.posture_snapshot.as_ref()?;
+    if snap.agents.is_empty() {
+        return None;
+    }
+    let agent = &state.active_view_id;
+    let share = snap.agent_share_of_attributed(agent, AgentWindow::SevenDay)?;
+    let pct = (share * 100.0).round() as u32;
+    Some(vec![Span::styled(
+        format!("{agent} · {pct}% attr 7d"),
+        Style::default().fg(theme::FG_MUTED),
+    )])
+}
+
 fn right_segment(state: &AppState) -> Vec<Span<'_>> {
     let mut spans: Vec<Span> = Vec::new();
     let now_epoch = Utc::now().timestamp();
+
+    // Per-agent spend chip for the active tab.
+    if let Some(seg) = agent_spend_segment(state) {
+        spans.extend(seg);
+        spans.push(Span::styled("  ", Style::default()));
+    }
 
     // Posture chip — hidden when Normal.
     if let Some(posture) = &state.budget_posture {

@@ -15,7 +15,7 @@ use tracing::warn;
 use crate::{
     data::{
         break_glass::BreakGlassRequest,
-        rate_limits::{BudgetPosture, PostureSnapshot, RateLimits},
+        rate_limits::{BudgetPosture, PostureSnapshot, PostureThresholdEvent, RateLimits},
         right_panel_source::RightPanelSnapshot,
     },
     mcp::command::McpCommand,
@@ -56,6 +56,11 @@ pub enum AppEvent {
     PostureChanged(BudgetPosture),
     /// Full posture snapshot including per-window pace data.
     PostureSnapshot(PostureSnapshot),
+    /// A threshold-crossing event read from `~/.claude/budget-posture.events.jsonl`.
+    ///
+    /// Emitted by `posture_events_watcher` when a new `threshold_crossed` line
+    /// is appended to the file after startup (no history replay on start).
+    PostureThresholdCrossed(PostureThresholdEvent),
     /// A command from the MCP server intended for the main event loop.
     ///
     /// Boxed to keep `AppEvent` size uniform — `McpCommand` can carry large strings.
