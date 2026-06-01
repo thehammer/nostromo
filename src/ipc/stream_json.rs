@@ -381,8 +381,12 @@ fn expand_confirm(block: TurnBlock) -> Vec<TurnBlock> {
     let mut did_split = false;
 
     for line in text.split('\n') {
-        let trimmed = line.trim();
+        // Tolerate agents wrapping the directive in markdown code formatting —
+        // `CONFIRM:{…}` or ```CONFIRM:{…}``` — by stripping surrounding backticks
+        // before matching; otherwise it renders as a raw code span, not a dialog.
+        let trimmed = line.trim().trim_matches('`').trim();
         if let Some(json_str) = trimmed.strip_prefix("CONFIRM:") {
+            let json_str = json_str.trim().trim_end_matches('`').trim();
             let pre = pending.join("\n").trim().to_string();
             if !pre.is_empty() {
                 result.push(TurnBlock::Text { text: pre });
@@ -863,6 +867,22 @@ mod tests {
                         text: "after".into()
                     }
                 );
+            }
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_line_wrapped_in_backticks_still_splits() {
+        // Agents sometimes emit the directive as markdown code: `CONFIRM:{…}`.
+        // It must still render as a card, not raw text.
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"before\n`CONFIRM:{\"q\":\"OK?\",\"h\":\"Review\",\"opts\":[{\"l\":\"Yes\",\"d\":\"do it\"}]}`\nafter"}]}}"#;
+        match parse_line(line) {
+            Some(ParsedLine::Blocks(b)) => {
+                assert_eq!(b.len(), 3);
+                assert_eq!(b[0], TurnBlock::Text { text: "before".into() });
+                assert!(matches!(b[1], TurnBlock::AskQuestion { .. }));
+                assert_eq!(b[2], TurnBlock::Text { text: "after".into() });
             }
             other => panic!("expected Blocks, got {other:?}"),
         }
