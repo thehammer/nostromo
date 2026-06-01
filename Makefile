@@ -63,7 +63,13 @@ uninstall-daemon:
 APP_DERIVED = $(HOME)/Library/Developer/Xcode/DerivedData/Nostromo-ciqaoqxunjzisvdagpitruomymcr
 APP_BUNDLE  = $(APP_DERIVED)/Build/Products/Debug/Nostromo.app
 
-.PHONY: mac mac-run mac-kill
+.PHONY: mac mac-run mac-kill mac-icon mac-release mac-install
+
+# Release build uses an explicit derived-data path so the product location is
+# predictable (no DerivedData hash dependency). Ad-hoc signed so the arm64
+# binary runs locally without a developer account.
+APP_RELEASE = macOS/build/Build/Products/Release/Nostromo.app
+INSTALLED   = /Applications/Nostromo.app
 
 ## Build the macOS GUI app
 mac:
@@ -79,3 +85,31 @@ mac-kill:
 mac-run: mac mac-kill
 	open -n "$(APP_BUNDLE)"
 	@echo "Nostromo launched."
+
+## Regenerate the app icon from macOS/icon/nostromo-icon.svg
+mac-icon:
+	macOS/icon/build-icon.sh
+	@if [ -d macOS/Nostromo/Assets.xcassets ]; then \
+	  rm -rf macOS/Nostromo/Assets.xcassets/AppIcon.appiconset; \
+	  cp -R macOS/icon/AppIcon.appiconset macOS/Nostromo/Assets.xcassets/AppIcon.appiconset; \
+	  echo "synced AppIcon.appiconset → Assets.xcassets"; \
+	else \
+	  echo "NOTE: Assets.xcassets not wired into the project yet — icon built, run again after wiring."; \
+	fi
+
+## Release build of the GUI (ad-hoc signed, predictable output path)
+mac-release:
+	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo \
+	  -configuration Release -derivedDataPath build \
+	  CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build \
+	  2>&1 | grep -E "error:|warning:|BUILD" || true
+	@test -d "$(APP_RELEASE)" && echo "built → $(APP_RELEASE)" || { echo "release build failed"; exit 1; }
+
+## Install the Release build into /Applications (run at milestones). This is a
+## real, standalone app — it survives Xcode cmd-R debug runs (which live in
+## DerivedData), and you replace it here when you cut a milestone.
+mac-install: mac-release
+	@rm -rf "$(INSTALLED)"
+	@cp -R "$(APP_RELEASE)" "$(INSTALLED)"
+	@xattr -cr "$(INSTALLED)" 2>/dev/null || true
+	@echo "installed → $(INSTALLED)  (launch from Spotlight/Launchpad like any app)"

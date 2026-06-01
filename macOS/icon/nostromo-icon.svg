@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Nostromo app icon — "HUD for AI".
+  Four HUD corner-brackets framing a glowing focal node (the focused agent).
+  Original art (no Alien-franchise imagery). The four brackets are ONE path
+  rotated 0/90/180/270° about the exact canvas center (512,512), so the frame
+  is mathematically symmetric — perfectly squared, not eyeballed.
+  Master is 1024×1024; macOS rounds it to the system squircle via the iconset.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#141B22"/>
+      <stop offset="1" stop-color="#080B0E"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0"    stop-color="#F5B23E" stop-opacity="0.55"/>
+      <stop offset="0.55" stop-color="#F5B23E" stop-opacity="0.18"/>
+      <stop offset="1"    stop-color="#F5B23E" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!-- One top-left corner bracket; arm length 150, square corner at (288,288). -->
+    <path id="bracket" d="M 288 438 L 288 288 L 438 288"
+          fill="none" stroke="#34E2C2" stroke-width="46"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </defs>
+
+  <!-- background squircle (macOS corner-radius ratio ≈ 0.2237 × 1024 ≈ 229) -->
+  <rect x="0" y="0" width="1024" height="1024" rx="229" ry="229" fill="url(#bg)"/>
+
+  <!-- HUD frame: identical bracket rotated about the exact center → perfect symmetry -->
+  <g filter="url(#glow)">
+    <use href="#bracket"/>
+    <use href="#bracket" transform="rotate(90 512 512)"/>
+    <use href="#bracket" transform="rotate(180 512 512)"/>
+    <use href="#bracket" transform="rotate(270 512 512)"/>
+  </g>
+
+  <!-- focal node (the focused agent) -->
+  <circle cx="512" cy="512" r="172" fill="url(#halo)"/>
+  <circle cx="512" cy="512" r="80" fill="#F5B23E" filter="url(#glow)"/>
+  <circle cx="512" cy="512" r="80" fill="none" stroke="#FFE6B0" stroke-width="6" opacity="0.7"/>
+</svg>
