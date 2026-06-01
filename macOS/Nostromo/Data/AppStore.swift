@@ -30,6 +30,10 @@ class AppStore: ObservableObject {
     @Published private(set) var perriQueueError:   String?        = nil
     @Published private(set) var perriQueueLoading: Bool           = false
 
+    // Active focus agent tag — set by MainLayout on every focus switch.
+    // Used by StatusBarView to show per-tab attribution.
+    @Published private(set) var activeFocusAgentTag: String?      = nil
+
     // MARK: - Internals
 
     private let client = NostromodClient()
@@ -51,6 +55,14 @@ class AppStore: ObservableObject {
         let s = ChatSession(tag: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory, client: client)
         sessionRegistry[tag] = s
         return s
+    }
+
+    // MARK: - Active focus
+
+    /// Called by MainLayout on every focus switch (and at setup) so consumers
+    /// such as StatusBarView can show per-tab attribution data.
+    func setActiveFocusAgentTag(_ tag: String?) {
+        activeFocusAgentTag = tag
     }
 
     // MARK: - Startup

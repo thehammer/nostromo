@@ -11,11 +11,14 @@ class PaceBarsView: NSView {
 
     // MARK: - Layout
 
-    private let labelWidth:  CGFloat = 28
-    private let valueWidth:  CGFloat = 36
-    private let barHPad:     CGFloat = 4
-    private let barVPad:     CGFloat = 3
-    private let barCorner:   CGFloat = 2
+    private let labelWidth:      CGFloat = 28
+    private let valueWidth:      CGFloat = 36
+    private let barHPad:         CGFloat = 4
+    private let barVPad:         CGFloat = 3
+    private let barCorner:       CGFloat = 2
+    /// Height reserved at the bottom of the view for agent attribution text.
+    /// When no agent data is present the area is simply empty.
+    private let agentLineHeight: CGFloat = 16
 
     // MARK: - State
 
@@ -62,16 +65,52 @@ class PaceBarsView: NSView {
 
         guard !bars.isEmpty else { return }
 
-        let totalVPad = barVPad * CGFloat(bars.count + 1)
-        let barHeight = max(4, (bounds.height - totalVPad) / CGFloat(bars.count))
-        let railX     = labelWidth
-        let railW     = bounds.width - labelWidth - valueWidth - barHPad * 2
+        // Reserve the bottom agentLineHeight pixels for attribution text.
+        let barsRegion = bounds.height - agentLineHeight
+        let totalVPad  = barVPad * CGFloat(bars.count + 1)
+        let barHeight  = max(4, (barsRegion - totalVPad) / CGFloat(bars.count))
+        let railX      = labelWidth
+        let railW      = bounds.width - labelWidth - valueWidth - barHPad * 2
 
         for (i, (label, window)) in bars.enumerated() {
-            let y = bounds.height - barVPad * CGFloat(i + 1) - barHeight * CGFloat(i + 1)
+            let y = agentLineHeight + barsRegion
+                  - barVPad   * CGFloat(i + 1)
+                  - barHeight * CGFloat(i + 1)
             drawBar(label: label, window: window,
                     railX: railX, railY: y, railW: railW, barH: barHeight)
         }
+
+        // Agent attribution row (bottom strip).
+        drawAgentLine(posture)
+    }
+
+    // MARK: - Agent attribution row
+
+    /// Draws a compact agent attribution line in the bottom agentLineHeight pixels.
+    ///
+    /// Shows each agent's share of the Mother-attributed token total for the
+    /// preferred window — "cody 58%  archie 31%  perri 11%  (attr)" — so the
+    /// operator can see where the budget is going.
+    ///
+    /// ⚠️  These are shares of **attributed** usage only, not shares of the full
+    /// window budget.  Non-Mother usage is not included.
+    private func drawAgentLine(_ posture: PostureSnapshot) {
+        guard !posture.agents.isEmpty else { return }
+
+        // Prefer 7d window; fall back to 5h.
+        let windowKey = posture.sevenDay != nil ? "7d" : "5h"
+        let shares    = posture.attributedShares(for: windowKey)
+        guard !shares.isEmpty else { return }
+
+        // Show at most 5 agents to avoid overflow.
+        let parts = shares.prefix(5).map { "\($0.name) \(Int(($0.fraction * 100).rounded()))%" }
+        let text  = parts.joined(separator: "  ") + "  (attr \(windowKey))"
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font:            Theme.firaCode(size: 9),
+            .foregroundColor: Theme.fgMuted,
+        ]
+        text.draw(at: NSPoint(x: labelWidth, y: 3), withAttributes: attrs)
     }
 
     private func drawBar(label: String, window: WindowPace,

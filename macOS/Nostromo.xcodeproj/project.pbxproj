@@ -19,6 +19,7 @@
 		AA0000020000000000000107 /* StatusBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000007 /* StatusBarView.swift */; };
 		AA0000020000000000000108 /* PaceBarsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000008 /* PaceBarsView.swift */; };
 		AA0000020000000000000109 /* MainLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000009 /* MainLayout.swift */; };
+		AA0000020000000000000110 /* ToastBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000040 /* ToastBannerView.swift */; };
 		AA0000020000000000000120 /* MotherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000020 /* MotherView.swift */; };
 		AA0000020000000000000122 /* PerriView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000022 /* PerriView.swift */; };
 		AA0000020000000000000123 /* ReplView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000023 /* ReplView.swift */; };
@@ -43,6 +44,7 @@
 		AA0000020000000000000007 /* StatusBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000008 /* PaceBarsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaceBarsView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000009 /* MainLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainLayout.swift; sourceTree = "<group>"; };
+		AA0000020000000000000040 /* ToastBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastBannerView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000020 /* MotherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000022 /* PerriView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000023 /* ReplView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplView.swift; sourceTree = "<group>"; };
@@ -114,6 +116,7 @@
 				AA0000020000000000000007 /* StatusBarView.swift */,
 				AA0000020000000000000008 /* PaceBarsView.swift */,
 				AA0000020000000000000009 /* MainLayout.swift */,
+				AA0000020000000000000040 /* ToastBannerView.swift */,
 				AA0000020000000000000024 /* CreateFocusSheet.swift */,
 				AA0000020000000000000021 /* Views */,
 			);
@@ -205,6 +208,7 @@
 				AA0000020000000000000107 /* StatusBarView.swift in Sources */,
 				AA0000020000000000000108 /* PaceBarsView.swift in Sources */,
 				AA0000020000000000000109 /* MainLayout.swift in Sources */,
+				AA0000020000000000000110 /* ToastBannerView.swift in Sources */,
 			AA0000020000000000000120 /* MotherView.swift in Sources */,
 				AA0000020000000000000122 /* PerriView.swift in Sources */,
 				AA0000020000000000000123 /* ReplView.swift in Sources */,
