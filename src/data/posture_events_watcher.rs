@@ -61,10 +61,11 @@ async fn run(tx: mpsc::UnboundedSender<AppEvent>) -> anyhow::Result<()> {
     }
 
     // Seek to EOF — do NOT replay history accumulated before this session.
-    let mut offset: u64 = path
-        .exists()
-        .then(|| std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0))
-        .unwrap_or(0);
+    let mut offset: u64 = if path.exists() {
+        std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
 
     // Bytes from the last incomplete (unterminated) line, carried across cycles.
     let mut partial: Vec<u8> = Vec::new();
