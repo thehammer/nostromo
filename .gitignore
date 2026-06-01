@@ -11,3 +11,4 @@ macOS/*.xcworkspace/xcuserdata/
 DerivedData/
 *.xccheckout
 *.moved-aside
+macOS/icon/build/
