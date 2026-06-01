@@ -11,7 +11,7 @@
 //! Each focus `tag` is backed by **one** long-lived child:
 //!
 //! ```text
-//! claude --settings '{"permissions":{"defaultMode":"bypassPermissions"}}' \
+//! claude --dangerously-skip-permissions \
 //!        --input-format stream-json --output-format stream-json --verbose \
 //!        --replay-user-messages --agent <agent> -n <view> \
 //!        [--remote-control <view>] (--session-id <uuid> | --resume <uuid>)
@@ -764,11 +764,15 @@ pub fn build_claude_args(
     resume: bool,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
-        // Authoritative permission bypass, scoped to this session only (never
-        // the operator's global ~/.claude/settings.json). This is the
-        // load-bearing safety net carried from fix/repl-headless-permissions.
-        "--settings".into(),
-        r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#.into(),
+        // Full permission bypass for daemon-hosted sessions. A headless
+        // stream-json session has no way to answer an interactive permission
+        // prompt, so the softer `--settings {defaultMode:bypassPermissions}`
+        // would dead-end on prompts it still raises (notably compound `a && b`
+        // commands). `--dangerously-skip-permissions` skips the checks outright
+        // — matching sessions.toml and the in-process TUI views — so agents
+        // like Perri can run their gh/compound commands. Scoped to this child
+        // process; never touches the operator's global ~/.claude/settings.json.
+        "--dangerously-skip-permissions".into(),
         "--input-format".into(),
         "stream-json".into(),
         "--output-format".into(),
@@ -941,8 +945,8 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--session-id", "sid-1"]));
         assert!(!args.iter().any(|a| a == "--resume"));
         assert!(!args.iter().any(|a| a == "--remote-control"));
-        // bypass settings + stream-json + replay always present.
-        assert!(args.iter().any(|a| a.contains("bypassPermissions")));
+        // permission bypass + stream-json + replay always present.
+        assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
         assert!(args
             .windows(2)
             .any(|w| w == ["--input-format", "stream-json"]));
