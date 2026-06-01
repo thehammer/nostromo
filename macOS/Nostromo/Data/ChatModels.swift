@@ -189,8 +189,16 @@ extension TurnBlock {
         var pending: [String]   = []
         var didSplit             = false
 
+        let backticks = CharacterSet(charactersIn: "`")
         for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Tolerate agents wrapping the directive in markdown code
+            // formatting — e.g. `CONFIRM:{…}` or ```CONFIRM:{…}``` — by stripping
+            // surrounding backticks before matching. Without this the directive
+            // renders as a raw code span instead of an interactive dialog.
+            let trimmed = line
+                .trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: backticks)
+                .trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("CONFIRM:") {
                 // Flush any preceding text as its own block
                 let pre = pending.joined(separator: "\n")
@@ -198,8 +206,11 @@ extension TurnBlock {
                 if !pre.isEmpty { result.append(.text(pre)) }
                 pending = []
 
-                // Parse the JSON that follows the prefix
+                // Parse the JSON that follows the prefix (strip any trailing
+                // backticks/space that survived the unwrap).
                 let jsonStr = String(trimmed.dropFirst("CONFIRM:".count))
+                    .trimmingCharacters(in: backticks)
+                    .trimmingCharacters(in: .whitespaces)
                 if let data = jsonStr.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let card = parseConfirmJSON(json) {
