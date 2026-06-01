@@ -80,8 +80,14 @@ class ChatSession: ObservableObject {
     /// session id on the next message).
     func newSession() {
         turns = []
+        // The daemon's `new_session` stops the child, drops the session from its
+        // registry, and clears the stored id ("next spawn is fresh"). If we don't
+        // re-spawn, the tag becomes unknown and every subsequent send fails with
+        // "unknown session tag". So immediately spawn+attach a fresh session
+        // (sessionSpawn with id=nil → new uuid since the id was just cleared).
         client.sessionControl(tag: tag, action: "new_session")
-        log.info("ChatSession[\(self.tag, privacy: .public)] new_session requested")
+        spawnAndAttach()
+        log.info("ChatSession[\(self.tag, privacy: .public)] new_session requested — respawned")
     }
 
     // MARK: - Send
