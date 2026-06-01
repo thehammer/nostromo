@@ -263,7 +263,10 @@ pub enum ServerMsg {
     MotherStatusline(MotherStatus),
     /// A job transitioned into `awaiting` — daemon fires this once per
     /// transition (same logic as the in-process `mother_poll`).
-    MotherAwaitDetected(MotherJob),
+    /// Boxed: `MotherJob` is the largest payload in this enum (esp. with
+    /// `cycles`/`phases`), so boxing keeps `ServerMsg`'s size down
+    /// (clippy::large_enum_variant).
+    MotherAwaitDetected(Box<MotherJob>),
     Pong,
     Error {
         message: String,

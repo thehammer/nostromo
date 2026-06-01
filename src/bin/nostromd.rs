@@ -198,7 +198,7 @@ async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
                         && (prev_state != "awaiting" || !last_states.contains_key(&job.id))
                     {
                         seen_awaiting.insert(job.id.clone());
-                        let _ = tx.send(ServerMsg::MotherAwaitDetected(job.clone()));
+                        let _ = tx.send(ServerMsg::MotherAwaitDetected(Box::new(job.clone())));
                     }
 
                     if !job.is_awaiting() {

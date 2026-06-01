@@ -755,9 +755,8 @@ fn render_phase_ribbon(
                 .add_modifier(Modifier::BOLD)
         } else if token.contains('✓') {
             Style::default().fg(theme::SAGE)
-        } else if token == "·" || token.starts_with("cycle") {
-            Style::default().fg(theme::FG_MUTED)
         } else {
+            // separators ("·"), cycle labels, and pending phases are all muted
             Style::default().fg(theme::FG_MUTED)
         };
         spans.push(Span::styled(token.to_owned(), style));
