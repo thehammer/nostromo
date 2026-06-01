@@ -471,7 +471,11 @@ impl MotherView {
 
         let peek = self.peek_data.lock().unwrap().clone();
 
-        // Dynamic layout: summary + [todos] + activity + log
+        // Compute the optional phase ribbon for this job.
+        let ribbon = phase_ribbon(&job);
+        let ribbon_height: u16 = if ribbon.is_some() { 1 } else { 0 };
+
+        // Dynamic layout: summary + [ribbon] + [todos] + activity + log
         let todo_count = peek.as_ref().map(|p| p.todos.len()).unwrap_or(0).min(8);
         let todo_height = if todo_count > 0 {
             (todo_count as u16) + 1
@@ -482,10 +486,13 @@ impl MotherView {
         let summary_height: u16 = 2; // status line + blank separator
 
         let log_min: u16 = 4;
-        let used = summary_height + todo_height + activity_height + 1; // +1 for "Log" label
+        let used = summary_height + ribbon_height + todo_height + activity_height + 1; // +1 for "Log" label
         let log_height = inner.height.saturating_sub(used).max(log_min);
 
         let mut constraints = vec![Constraint::Length(summary_height)];
+        if ribbon_height > 0 {
+            constraints.push(Constraint::Length(ribbon_height));
+        }
         if todo_height > 0 {
             constraints.push(Constraint::Length(todo_height));
         }
@@ -503,6 +510,12 @@ impl MotherView {
         // ── Summary ───────────────────────────────────────────────────────────
         self.render_summary_line(f, chunks[idx], &job);
         idx += 1;
+
+        // ── Phase ribbon ──────────────────────────────────────────────────────
+        if let Some(ref ribbon_text) = ribbon {
+            render_phase_ribbon(f, chunks[idx], ribbon_text, &job);
+            idx += 1;
+        }
 
         // ── Todos ─────────────────────────────────────────────────────────────
         if todo_height > 0 {
@@ -705,6 +718,55 @@ impl MotherView {
 }
 
 // ── detail pane sub-renderers (free fns, borrow only what they need) ─────────
+
+fn render_phase_ribbon(
+    f: &mut Frame,
+    area: Rect,
+    ribbon: &str,
+    job: &crate::mother::MotherJob,
+) {
+    use ratatui::style::Color;
+
+    // Determine which agent is currently running (for highlight).
+    let running_agent: Option<&str> = if job.kind.as_deref() == Some("pipeline") {
+        job.cycles
+            .last()
+            .and_then(|c| c.phases.iter().find(|p| p.state == "running"))
+            .map(|p| p.agent.as_str())
+    } else {
+        job.phases
+            .iter()
+            .find(|p| p.state == "running")
+            .map(|p| p.agent.as_str())
+    };
+
+    // Build per-token spans so the running agent is highlighted.
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, token) in ribbon.split(' ').enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let is_running = running_agent
+            .map(|a| token.starts_with(a) && token.contains('⟳'))
+            .unwrap_or(false);
+        let style = if is_running {
+            Style::default()
+                .fg(theme::AMBER)
+                .add_modifier(Modifier::BOLD)
+        } else if token.contains('✓') {
+            Style::default().fg(theme::SAGE)
+        } else if token == "·" || token.starts_with("cycle") {
+            Style::default().fg(theme::FG_MUTED)
+        } else {
+            Style::default().fg(theme::FG_MUTED)
+        };
+        spans.push(Span::styled(token.to_owned(), style));
+    }
+
+    // Tint the whole area slightly when any phase is running.
+    let _bg_hint = Color::Reset; // reserved for future highlight
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
 
 fn render_todos(f: &mut Frame, area: Rect, todos: &[crate::mother::PeekTodo]) {
     let completed = todos.iter().filter(|t| t.status == "completed").count();
@@ -1288,6 +1350,64 @@ impl View for MotherView {
     }
 }
 
+// ── phase ribbon ─────────────────────────────────────────────────────────────
+
+/// Produce a compact phase-progress ribbon string for a job.
+///
+/// Returns `None` when the job carries no phase data (non-pipeline / pre-wedge C
+/// jobs), so the caller can skip rendering the row entirely.
+///
+/// Format examples:
+/// - Pipeline:  `redd✓ cody⟳ marty○ · cycle 2`
+/// - Standard:  `redd✓ cody⟳`
+/// - Findings:  `ada✓(1)` — appended when a phase has `findings > 0`
+pub fn phase_ribbon(job: &crate::mother::MotherJob) -> Option<String> {
+    let is_pipeline = job.kind.as_deref() == Some("pipeline");
+
+    let phases: &[crate::mother::PhaseInfo] = if is_pipeline {
+        // Use the last (most recent) cycle.
+        job.cycles.last().map(|c| c.phases.as_slice()).unwrap_or(&[])
+    } else {
+        job.phases.as_slice()
+    };
+
+    if phases.is_empty() {
+        return None;
+    }
+
+    let parts: Vec<String> = phases
+        .iter()
+        .map(|p| {
+            let glyph = phase_state_glyph(&p.state);
+            let findings = match p.findings {
+                Some(n) if n > 0 => format!("({n})"),
+                _ => String::new(),
+            };
+            format!("{}{glyph}{findings}", p.agent)
+        })
+        .collect();
+
+    let mut ribbon = parts.join(" ");
+
+    if is_pipeline {
+        if let Some(cycle) = job.cycles.last() {
+            ribbon.push_str(&format!(" · cycle {}", cycle.cycle));
+        }
+    }
+
+    Some(ribbon)
+}
+
+/// Map a phase `state` string to a single display glyph.
+fn phase_state_glyph(state: &str) -> &'static str {
+    match state {
+        "completed" => "✓",
+        "running" => "⟳",
+        "pending" => "○",
+        _ => "?",
+    }
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
@@ -1301,5 +1421,242 @@ fn shrink_border(r: Rect) -> Rect {
         y: r.y.saturating_add(1),
         width: r.width.saturating_sub(2),
         height: r.height.saturating_sub(2),
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use crate::mother::{CycleInfo, MotherJob, PhaseInfo};
+
+    use super::phase_ribbon;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    /// Build a minimal MotherJob with all required fields set to inert defaults.
+    fn bare_job() -> MotherJob {
+        MotherJob {
+            id: "test-job".into(),
+            state: "running".into(),
+            repo: String::new(),
+            isolation: String::new(),
+            title: String::new(),
+            created_at: None,
+            started_at: None,
+            finished_at: None,
+            plan_path: None,
+            question: None,
+            paused_reason: None,
+            adherence_status: None,
+            current_tier: None,
+            current_activity: None,
+            kind: None,
+            phases: vec![],
+            cycles: vec![],
+        }
+    }
+
+    fn phase(agent: &str, state: &str) -> PhaseInfo {
+        PhaseInfo {
+            agent: agent.into(),
+            request_type: "build".into(),
+            state: state.into(),
+            started_at: None,
+            finished_at: None,
+            findings: None,
+        }
+    }
+
+    fn phase_with_findings(agent: &str, state: &str, findings: u32) -> PhaseInfo {
+        PhaseInfo {
+            findings: Some(findings),
+            ..phase(agent, state)
+        }
+    }
+
+    // ── render tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn phase_ribbon_returns_none_when_no_phases() {
+        // A job with no phases and no cycles should produce no ribbon.
+        let job = bare_job();
+        assert_eq!(phase_ribbon(&job), None);
+    }
+
+    #[test]
+    fn phase_ribbon_pipeline_all_completed() {
+        // Pipeline job with one cycle of three completed phases renders all
+        // agents with ✓ glyph and a "· cycle N" suffix.
+        let job = MotherJob {
+            kind: Some("pipeline".into()),
+            cycles: vec![CycleInfo {
+                cycle: 1,
+                phases: vec![
+                    phase("redd", "completed"),
+                    phase("cody", "completed"),
+                    phase("marty", "completed"),
+                ],
+            }],
+            ..bare_job()
+        };
+        assert_eq!(
+            phase_ribbon(&job),
+            Some("redd✓ cody✓ marty✓ · cycle 1".into())
+        );
+    }
+
+    #[test]
+    fn phase_ribbon_pipeline_running_phase() {
+        // A mix of completed / running / pending phases in the current cycle.
+        let job = MotherJob {
+            kind: Some("pipeline".into()),
+            cycles: vec![CycleInfo {
+                cycle: 2,
+                phases: vec![
+                    phase("redd", "completed"),
+                    phase("cody", "running"),
+                    phase("marty", "pending"),
+                ],
+            }],
+            ..bare_job()
+        };
+        let ribbon = phase_ribbon(&job).expect("should produce a ribbon");
+        assert!(ribbon.contains("redd✓"), "completed phase should use ✓");
+        assert!(ribbon.contains("cody⟳"), "running phase should use ⟳");
+        assert!(ribbon.contains("marty○"), "pending phase should use ○");
+        assert!(ribbon.ends_with("· cycle 2"), "pipeline ribbon should have cycle suffix");
+    }
+
+    #[test]
+    fn phase_ribbon_pipeline_findings_count() {
+        // A completed review phase with findings > 0 appends (N) after the glyph.
+        let job = MotherJob {
+            kind: Some("pipeline".into()),
+            cycles: vec![CycleInfo {
+                cycle: 1,
+                phases: vec![phase_with_findings("ada", "completed", 2)],
+            }],
+            ..bare_job()
+        };
+        let ribbon = phase_ribbon(&job).expect("should produce a ribbon");
+        assert!(
+            ribbon.contains("ada✓(2)"),
+            "findings count should appear as (N): got {ribbon:?}"
+        );
+    }
+
+    #[test]
+    fn phase_ribbon_flat_phases() {
+        // Standard (non-pipeline) job with flat phases — no cycle suffix.
+        let job = MotherJob {
+            kind: None,
+            phases: vec![
+                phase("redd", "completed"),
+                phase("cody", "running"),
+            ],
+            ..bare_job()
+        };
+        let ribbon = phase_ribbon(&job).expect("should produce a ribbon");
+        assert!(ribbon.contains("redd✓"));
+        assert!(ribbon.contains("cody⟳"));
+        assert!(
+            !ribbon.contains("cycle"),
+            "non-pipeline ribbon must not include cycle suffix: got {ribbon:?}"
+        );
+    }
+
+    #[test]
+    fn phase_ribbon_unknown_state_renders_question_mark() {
+        // An unrecognised state string must not panic and must render '?'.
+        let job = MotherJob {
+            phases: vec![phase("ada", "error")],
+            ..bare_job()
+        };
+        let ribbon = phase_ribbon(&job).expect("should produce a ribbon even for unknown state");
+        assert!(
+            ribbon.contains("ada?"),
+            "unknown state should render '?': got {ribbon:?}"
+        );
+    }
+
+    // ── decode tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn decode_pipeline_job_from_json() {
+        // A full pipeline job JSON with a cycles array should deserialise without
+        // error.  The first phase of the first cycle should carry the expected
+        // agent name, and a review phase should carry findings.
+        let json = r#"{
+            "id": "abc123",
+            "state": "running",
+            "kind": "pipeline",
+            "cycles": [
+                {
+                    "cycle": 1,
+                    "phases": [
+                        {"agent":"redd","request_type":"test","state":"completed","started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:01:00Z"},
+                        {"agent":"cody","request_type":"build","state":"completed","started_at":"2026-01-01T00:01:00Z","finished_at":"2026-01-01T00:02:00Z"},
+                        {"agent":"ada","request_type":"review","state":"completed","started_at":"2026-01-01T00:02:00Z","finished_at":"2026-01-01T00:03:00Z","findings":1}
+                    ]
+                }
+            ]
+        }"#;
+
+        let job: MotherJob = serde_json::from_str(json).expect("must parse");
+        assert_eq!(job.kind.as_deref(), Some("pipeline"));
+        assert_eq!(job.cycles.len(), 1);
+        assert_eq!(job.cycles[0].phases[0].agent, "redd");
+
+        let ada_phase = &job.cycles[0].phases[2];
+        assert_eq!(ada_phase.agent, "ada");
+        assert_eq!(ada_phase.findings, Some(1));
+    }
+
+    #[test]
+    fn decode_standard_job_from_json() {
+        // A non-pipeline job with a flat phases array should deserialise to
+        // MotherJob.phases with cycles left empty.
+        let json = r#"{
+            "id": "def456",
+            "state": "running",
+            "phases": [
+                {"agent":"redd","request_type":"test","state":"completed"},
+                {"agent":"cody","request_type":"build","state":"running"}
+            ]
+        }"#;
+
+        let job: MotherJob = serde_json::from_str(json).expect("must parse");
+        assert_eq!(job.phases.len(), 2);
+        assert_eq!(job.phases[0].agent, "redd");
+        assert_eq!(job.phases[1].state, "running");
+        assert!(job.cycles.is_empty());
+    }
+
+    #[test]
+    fn decode_job_missing_phases_does_not_error() {
+        // A job JSON with neither phases nor cycles keys must parse successfully
+        // and produce empty vecs — the #[serde(default)] annotation guards this.
+        let json = r#"{"id":"ghi789","state":"queued"}"#;
+
+        let job: MotherJob = serde_json::from_str(json).expect("must parse");
+        assert!(job.phases.is_empty());
+        assert!(job.cycles.is_empty());
+    }
+
+    #[test]
+    fn decode_job_unknown_state_string_tolerated() {
+        // A phase with a state value not in the known set must not cause a parse
+        // error — state is a plain String, so any value is acceptable.
+        let json = r#"{
+            "id": "jkl012",
+            "state": "running",
+            "phases": [
+                {"agent":"ada","request_type":"review","state":"future_unknown_value"}
+            ]
+        }"#;
+
+        let job: MotherJob = serde_json::from_str(json).expect("must parse");
+        assert_eq!(job.phases[0].state, "future_unknown_value");
     }
 }

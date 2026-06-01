@@ -145,6 +145,9 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             adherence_status: None,
             current_tier: None,
             current_activity: None,
+            kind: None,
+            phases: vec![],
+            cycles: vec![],
         },
         MotherJob {
             id: "job-queued-2".to_string(),
@@ -161,6 +164,9 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             adherence_status: None,
             current_tier: None,
             current_activity: None,
+            kind: None,
+            phases: vec![],
+            cycles: vec![],
         },
         MotherJob {
             id: "job-awaiting-3".to_string(),
@@ -177,6 +183,9 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             adherence_status: None,
             current_tier: None,
             current_activity: None,
+            kind: None,
+            phases: vec![],
+            cycles: vec![],
         },
     ]
 }
