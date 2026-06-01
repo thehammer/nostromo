@@ -10,11 +10,7 @@
 
 use std::sync::Arc;
 
-use nostromo::{
-    config::Config,
-    mcp::McpSharedState,
-    views::perri::PerriView,
-};
+use nostromo::{config::Config, mcp::McpSharedState, views::perri::PerriView};
 use tempfile::TempDir;
 use tokio::sync::{mpsc, watch};
 
@@ -43,8 +39,7 @@ fn make_perri_view(state_dir: &std::path::Path) -> PerriView {
     drop(pr_tx);
 
     let syntect = Arc::new(
-        nostromo::ui::widgets::syntect_cache::SyntectCache::load()
-            .expect("syntect should load"),
+        nostromo::ui::widgets::syntect_cache::SyntectCache::load().expect("syntect should load"),
     );
 
     PerriView::new(queue_rx, pr_rx, config, ctx, syntect)
@@ -58,7 +53,12 @@ fn load_pr_writes_json_file() {
     let dir = TempDir::new().unwrap();
     let mut view = make_perri_view(dir.path());
 
-    view.load_pr(42, "thehammer/nostromo".to_string(), Some("check auth".to_string())).unwrap();
+    view.load_pr(
+        42,
+        "thehammer/nostromo".to_string(),
+        Some("check auth".to_string()),
+    )
+    .unwrap();
 
     let json_path = dir.path().join("current-pr.json");
     assert!(json_path.exists(), "current-pr.json should be written");
@@ -95,7 +95,10 @@ fn load_pr_no_highlights_writes_null() {
     let content = std::fs::read_to_string(&json_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-    assert!(parsed["highlights"].is_null(), "highlights should be null when not provided");
+    assert!(
+        parsed["highlights"].is_null(),
+        "highlights should be null when not provided"
+    );
     assert_eq!(parsed["repo"], "acme/widget");
 }
 
@@ -112,8 +115,14 @@ fn clear_current_pr_removes_file_and_touches_dirty() {
     // Then clear it.
     view.clear_current_pr().unwrap();
 
-    assert!(!dir.path().join("current-pr.json").exists(), "json should be removed");
-    assert!(dir.path().join("current-pr.dirty").exists(), "dirty should still exist");
+    assert!(
+        !dir.path().join("current-pr.json").exists(),
+        "json should be removed"
+    );
+    assert!(
+        dir.path().join("current-pr.dirty").exists(),
+        "dirty should still exist"
+    );
 }
 
 /// clear_current_pr is a no-op when current-pr.json doesn't exist.

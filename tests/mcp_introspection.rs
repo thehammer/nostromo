@@ -28,11 +28,9 @@ use tokio::sync::{mpsc, watch};
 
 // ── fixture data ──────────────────────────────────────────────────────────────
 
-const PERRI_QUEUE_JSON: &str =
-    include_str!("fixtures/mcp_perri_queue.json");
+const PERRI_QUEUE_JSON: &str = include_str!("fixtures/mcp_perri_queue.json");
 
-const FRED_MAILBOX_JSON: &str =
-    include_str!("fixtures/mcp_fred_mailbox.json");
+const FRED_MAILBOX_JSON: &str = include_str!("fixtures/mcp_fred_mailbox.json");
 
 // ── state builders ────────────────────────────────────────────────────────────
 
@@ -146,6 +144,7 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             paused_reason: None,
             adherence_status: None,
             current_tier: None,
+            current_activity: None,
         },
         MotherJob {
             id: "job-queued-2".to_string(),
@@ -161,6 +160,7 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             paused_reason: None,
             adherence_status: None,
             current_tier: None,
+            current_activity: None,
         },
         MotherJob {
             id: "job-awaiting-3".to_string(),
@@ -176,6 +176,7 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             paused_reason: Some("user".to_string()),
             adherence_status: None,
             current_tier: None,
+            current_activity: None,
         },
     ]
 }
@@ -188,14 +189,19 @@ async fn list_views_returns_seven_views() {
     seed_views(&state).await;
 
     let result = list_views::handle(&state).await;
-    let views = result.as_array().expect("list_views should return an array");
+    let views = result
+        .as_array()
+        .expect("list_views should return an array");
 
     assert_eq!(views.len(), 7, "expected exactly 7 registered views");
 
     for view in views {
         assert!(view.get("id").is_some(), "each view must have an id");
         assert!(view.get("title").is_some(), "each view must have a title");
-        assert!(view.get("pane_ids").is_some(), "each view must have pane_ids");
+        assert!(
+            view.get("pane_ids").is_some(),
+            "each view must have pane_ids"
+        );
     }
 }
 
@@ -217,7 +223,10 @@ async fn list_views_perri_summary_has_pr_count() {
 
     let result = list_views::handle(&state).await;
     let views = result.as_array().unwrap();
-    let perri = views.iter().find(|v| v["id"] == "perri").expect("perri view should be present");
+    let perri = views
+        .iter()
+        .find(|v| v["id"] == "perri")
+        .expect("perri view should be present");
 
     assert_eq!(
         perri["summary"]["open_pr_count"], 3,
@@ -243,7 +252,10 @@ async fn list_views_fred_summary_has_unread_count() {
 
     let result = list_views::handle(&state).await;
     let views = result.as_array().unwrap();
-    let fred = views.iter().find(|v| v["id"] == "fred").expect("fred view should be present");
+    let fred = views
+        .iter()
+        .find(|v| v["id"] == "fred")
+        .expect("fred view should be present");
 
     assert_eq!(
         fred["summary"]["unread_email_count"], 2,
@@ -254,17 +266,7 @@ async fn list_views_fred_summary_has_unread_count() {
 #[tokio::test]
 async fn list_views_mother_summary_has_job_counts() {
     let jobs = sample_mother_jobs(); // 1 running, 1 queued, 1 awaiting
-    let state = seeded_state(
-        None,
-        None,
-        None,
-        None,
-        None,
-        jobs,
-        None,
-        None,
-        None,
-    );
+    let state = seeded_state(None, None, None, None, None, jobs, None, None, None);
     seed_views(&state).await;
 
     let result = list_views::handle(&state).await;
@@ -297,7 +299,9 @@ async fn perri_list_pr_queue_returns_items() {
     );
 
     let result = perri::list_pr_queue(&state);
-    let items = result.as_array().expect("list_pr_queue should return an array");
+    let items = result
+        .as_array()
+        .expect("list_pr_queue should return an array");
     assert_eq!(items.len(), 3, "should return all 3 items from fixture");
 }
 
@@ -327,17 +331,17 @@ async fn perri_list_pr_queue_fields_match() {
     assert_eq!(first["author"], "alice");
     assert_eq!(first["bucket"], "requested");
     assert_eq!(first["new_activity"], false);
-    assert_eq!(
-        first["url"],
-        "https://github.com/acme/web-app/pull/42"
-    );
+    assert_eq!(first["url"], "https://github.com/acme/web-app/pull/42");
 }
 
 #[tokio::test]
 async fn perri_get_current_pr_returns_null_when_none() {
     let state = empty_state();
     let result = perri::get_current_pr(&state);
-    assert!(result.is_null(), "get_current_pr should return null when channel holds None");
+    assert!(
+        result.is_null(),
+        "get_current_pr should return null when channel holds None"
+    );
 }
 
 #[tokio::test]
@@ -352,20 +356,13 @@ async fn perri_get_current_pr_returns_snapshot() {
         stale: false,
         error: None,
     };
-    let state = seeded_state(
-        None,
-        Some(snap),
-        None,
-        None,
-        None,
-        vec![],
-        None,
-        None,
-        None,
-    );
+    let state = seeded_state(None, Some(snap), None, None, None, vec![], None, None, None);
 
     let result = perri::get_current_pr(&state);
-    assert!(!result.is_null(), "get_current_pr should not be null when snapshot is set");
+    assert!(
+        !result.is_null(),
+        "get_current_pr should not be null when snapshot is set"
+    );
     assert_eq!(result["pr_number"], 42);
     assert_eq!(result["repo"], "acme/web-app");
     assert_eq!(result["author"], "alice");
@@ -397,7 +394,9 @@ async fn perri_get_state_composite() {
     );
 
     let result = perri::get_state(&state);
-    let queue_arr = result["queue"].as_array().expect("queue should be an array");
+    let queue_arr = result["queue"]
+        .as_array()
+        .expect("queue should be an array");
     assert_eq!(queue_arr.len(), 3);
 
     assert!(!result["current_pr"].is_null(), "current_pr should be set");
@@ -411,7 +410,9 @@ async fn perri_list_pr_queue_empty_when_no_snapshot() {
     // for_test state — all channels hold None.
     let state = empty_state();
     let result = perri::list_pr_queue(&state);
-    let items = result.as_array().expect("should return an array even with no snapshot");
+    let items = result
+        .as_array()
+        .expect("should return an array even with no snapshot");
     assert!(items.is_empty(), "empty channel should yield []");
 }
 
@@ -529,7 +530,11 @@ async fn fred_list_calendar_events_with_date_filters() {
     };
     let result = fred::list_calendar_events(&state, &input);
     let events = result.as_array().expect("should return array");
-    assert_eq!(events.len(), 1, "date filter should keep only events on that date");
+    assert_eq!(
+        events.len(),
+        1,
+        "date filter should keep only events on that date"
+    );
     assert_eq!(events[0]["title"], "Today's standup");
 }
 
@@ -537,15 +542,13 @@ async fn fred_list_calendar_events_with_date_filters() {
 async fn fred_get_state_fields() {
     let mailbox = fred_mailbox_fixture(); // unread_count: 2, 3 items total
     let calendar = CalendarSnapshot {
-        events: vec![
-            CalendarEvent {
-                start: Some("2026-05-14T09:00:00Z".parse().unwrap()),
-                end: None,
-                title: "Standup".to_string(),
-                status: "accepted".to_string(),
-                is_now: true,
-            },
-        ],
+        events: vec![CalendarEvent {
+            start: Some("2026-05-14T09:00:00Z".parse().unwrap()),
+            end: None,
+            title: "Standup".to_string(),
+            status: "accepted".to_string(),
+            is_now: true,
+        }],
         next: None,
         sweater: "sage".to_string(),
         stale: false,
@@ -571,7 +574,11 @@ async fn fred_get_state_fields() {
     assert!(result["calendar"].is_array(), "calendar should be an array");
 
     let mailbox_arr = result["mailbox"].as_array().unwrap();
-    assert_eq!(mailbox_arr.len(), 3, "mailbox should include all 3 items (read + unread)");
+    assert_eq!(
+        mailbox_arr.len(),
+        3,
+        "mailbox should include all 3 items (read + unread)"
+    );
 
     let cal_arr = result["calendar"].as_array().unwrap();
     assert_eq!(cal_arr.len(), 1);
@@ -582,17 +589,7 @@ async fn fred_get_state_fields() {
 #[tokio::test]
 async fn mother_list_jobs_no_filter() {
     let jobs = sample_mother_jobs(); // 3 jobs
-    let state = seeded_state(
-        None,
-        None,
-        None,
-        None,
-        None,
-        jobs,
-        None,
-        None,
-        None,
-    );
+    let state = seeded_state(None, None, None, None, None, jobs, None, None, None);
 
     let input = mother::ListJobsInput {
         include_archived: false,
@@ -606,17 +603,7 @@ async fn mother_list_jobs_no_filter() {
 #[tokio::test]
 async fn mother_list_jobs_filter_by_status() {
     let jobs = sample_mother_jobs(); // 1 running, 1 queued, 1 awaiting
-    let state = seeded_state(
-        None,
-        None,
-        None,
-        None,
-        None,
-        jobs,
-        None,
-        None,
-        None,
-    );
+    let state = seeded_state(None, None, None, None, None, jobs, None, None, None);
 
     let input = mother::ListJobsInput {
         include_archived: false,
@@ -624,7 +611,11 @@ async fn mother_list_jobs_filter_by_status() {
     };
     let result = mother::list_jobs(&state, &input).await;
     let arr = result.as_array().expect("should return array");
-    assert_eq!(arr.len(), 1, "status filter should keep only the running job");
+    assert_eq!(
+        arr.len(),
+        1,
+        "status filter should keep only the running job"
+    );
     assert_eq!(arr[0]["state"], "running");
     assert_eq!(arr[0]["id"], "job-running-1");
 }
@@ -632,17 +623,7 @@ async fn mother_list_jobs_filter_by_status() {
 #[tokio::test]
 async fn mother_get_job_returns_job() {
     let jobs = sample_mother_jobs();
-    let state = seeded_state(
-        None,
-        None,
-        None,
-        None,
-        None,
-        jobs,
-        None,
-        None,
-        None,
-    );
+    let state = seeded_state(None, None, None, None, None, jobs, None, None, None);
 
     let input = mother::GetJobInput {
         id: "job-awaiting-3".to_string(),
@@ -662,7 +643,10 @@ async fn mother_get_job_returns_null_when_not_found() {
         id: "no-such-job".to_string(),
     };
     let result = mother::get_job(&state, &input);
-    assert!(result.is_null(), "get_job should return null for an unknown id");
+    assert!(
+        result.is_null(),
+        "get_job should return null for an unknown id"
+    );
 }
 
 #[tokio::test]
@@ -732,7 +716,9 @@ async fn teri_list_todos_returns_items() {
     );
 
     let result = teri::list_todos(&state);
-    let items = result["items"].as_array().expect("items should be an array");
+    let items = result["items"]
+        .as_array()
+        .expect("items should be an array");
     assert_eq!(items.len(), 2);
 
     // Spot-check field shapes.
@@ -756,17 +742,7 @@ async fn nostromo_get_rate_limits_returns_snapshot() {
         pct_7d: 17,
         reset_7d: 1715800000,
     };
-    let state = seeded_state(
-        None,
-        None,
-        None,
-        None,
-        None,
-        vec![],
-        None,
-        Some(rl),
-        None,
-    );
+    let state = seeded_state(None, None, None, None, None, vec![], None, Some(rl), None);
 
     let result = nostromo_meta::get_rate_limits(&state);
     assert_eq!(result["pct_5h"], 42);
@@ -807,12 +783,23 @@ async fn nostromo_get_worktree_info_in_git_repo() {
 
     // Required keys must be present.
     assert!(result.get("cwd").is_some(), "response must include cwd");
-    assert!(result.get("branch").is_some(), "response must include branch");
-    assert!(result.get("is_worktree").is_some(), "response must include is_worktree");
-    assert!(result.get("parent_repo").is_some(), "response must include parent_repo");
+    assert!(
+        result.get("branch").is_some(),
+        "response must include branch"
+    );
+    assert!(
+        result.get("is_worktree").is_some(),
+        "response must include is_worktree"
+    );
+    assert!(
+        result.get("parent_repo").is_some(),
+        "response must include parent_repo"
+    );
 
     // branch must be a non-empty string.
-    let branch = result["branch"].as_str().expect("branch should be a string");
+    let branch = result["branch"]
+        .as_str()
+        .expect("branch should be a string");
     assert!(!branch.is_empty(), "branch should not be empty");
 
     // is_worktree must be a bool.
@@ -845,9 +832,18 @@ async fn get_view_state_dispatches_perri() {
     let result = get_view_state::handle(&state, &input).await;
 
     // get_view_state("perri") returns perri::get_state — must have queue, current_pr, stale.
-    assert!(result.get("queue").is_some(), "perri state must include queue");
-    assert!(result.get("current_pr").is_some(), "perri state must include current_pr");
-    assert!(result.get("stale").is_some(), "perri state must include stale");
+    assert!(
+        result.get("queue").is_some(),
+        "perri state must include queue"
+    );
+    assert!(
+        result.get("current_pr").is_some(),
+        "perri state must include current_pr"
+    );
+    assert!(
+        result.get("stale").is_some(),
+        "perri state must include stale"
+    );
 }
 
 #[tokio::test]

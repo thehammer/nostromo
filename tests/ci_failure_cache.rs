@@ -91,10 +91,8 @@ async fn cache_hit_skips_check_suites_call() {
 
     let head_sha_cache: Arc<Mutex<HashMap<(String, u64), String>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let endpoint_etags: Arc<Mutex<HashMap<String, String>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
+    let endpoint_etags: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
@@ -210,10 +208,8 @@ async fn new_sha_triggers_exactly_one_check_suites_call() {
 
     let head_sha_cache: Arc<Mutex<HashMap<(String, u64), String>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let endpoint_etags: Arc<Mutex<HashMap<String, String>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
+    let endpoint_etags: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
@@ -228,7 +224,10 @@ async fn new_sha_triggers_exactly_one_check_suites_call() {
         &endpoint_body_cache,
     )
     .await;
-    assert!(result1, "sha-old has a failure suite — result should be true");
+    assert!(
+        result1,
+        "sha-old has a failure suite — result should be true"
+    );
 
     // Second call — sha-new (different SHA), cache miss on sha-new, should
     // fetch check-suites for the new SHA.

@@ -67,7 +67,16 @@ impl DaemonPtyClient {
         view_id: &'static str,
         client_tag: &str,
     ) -> Self {
-        Self::spawn_new_with_mcp(client, cmd, args, (cols, rows), event_tx, view_id, client_tag, None)
+        Self::spawn_new_with_mcp(
+            client,
+            cmd,
+            args,
+            (cols, rows),
+            event_tx,
+            view_id,
+            client_tag,
+            None,
+        )
     }
 
     /// Like [`spawn_new`] but registers the PTY with `mcp_state` when the
@@ -136,8 +145,7 @@ impl DaemonPtyClient {
             // Opportunistically wait a short time for the PtyIdentity follow-up.
             // The daemon sends it immediately after PtySpawned so this window is
             // always sufficient; we don't block the attach if it doesn't arrive.
-            let deadline = tokio::time::Instant::now()
-                + tokio::time::Duration::from_millis(100);
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(100);
             if let Ok(Ok(ServerMsg::PtyIdentity {
                 pty_id: identity_pty_id,
                 nostromo_pty_id: nid,
@@ -359,20 +367,31 @@ async fn run_output_loop(
                     *p = vt100::Parser::new(rows, cols, 1000);
                 }
                 filter = crate::pty::altscreen::AltScreenFilter::new();
-                let flags_before = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
+                let flags_before = kitty_tracker
+                    .flags()
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 kitty_tracker.feed(&bytes);
-                let flags_after = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
+                let flags_after = kitty_tracker
+                    .flags()
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if flags_after != flags_before {
-                    debug!(pty_id, flags_before, flags_after, "kitty flags changed (scrollback)");
+                    debug!(
+                        pty_id,
+                        flags_before, flags_after, "kitty flags changed (scrollback)"
+                    );
                 }
                 let filtered = filter.process(&bytes);
                 parser.lock().unwrap().process(&filtered);
                 let _ = event_tx.send(AppEvent::AgentUpdate { view_id });
             }
             Ok(ServerMsg::PtyOutput { pty_id: id, bytes }) if id == pty_id => {
-                let flags_before = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
+                let flags_before = kitty_tracker
+                    .flags()
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 kitty_tracker.feed(&bytes);
-                let flags_after = kitty_tracker.flags().load(std::sync::atomic::Ordering::Relaxed);
+                let flags_after = kitty_tracker
+                    .flags()
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if flags_after != flags_before {
                     debug!(pty_id, flags_before, flags_after, "kitty flags changed");
                 }
@@ -391,7 +410,9 @@ async fn run_output_loop(
             }
             Ok(ServerMsg::DaemonReconnected) => {
                 tracing::info!(pty_id, "daemon reconnected; re-attaching PTY");
-                let _ = client.send(ClientMsg::PtyAttach { pty_id: pty_id.clone() });
+                let _ = client.send(ClientMsg::PtyAttach {
+                    pty_id: pty_id.clone(),
+                });
             }
             Ok(_) => continue,
             Err(broadcast::error::RecvError::Lagged(n)) => {

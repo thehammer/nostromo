@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use nostromo::{
     event::AppEvent,
-    mcp::{McpServer, McpSharedState},
     mcp::command::NotifyLevel,
+    mcp::{McpServer, McpSharedState},
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -72,14 +72,20 @@ async fn call_tool(
     name: &str,
     args: Value,
 ) -> Value {
-    write_frame(writer, &json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "tools/call",
-        "params": { "name": name, "arguments": args }
-    })).await;
+    write_frame(
+        writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        }),
+    )
+    .await;
     let resp = read_frame(reader).await;
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("{}");
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("{}");
     serde_json::from_str(text).unwrap_or_else(|_| json!({"raw": text}))
 }
 
@@ -93,11 +99,19 @@ async fn notify_dispatches_command_and_returns_ok() {
     let socket_path = dir.path().join("mcp_notify_info.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
-            if let nostromo::mcp::McpCommand::Notify { message, level, reply, .. } = *cmd {
+            if let nostromo::mcp::McpCommand::Notify {
+                message,
+                level,
+                reply,
+                ..
+            } = *cmd
+            {
                 assert_eq!(message, "hello world");
                 assert_eq!(level, NotifyLevel::Info);
                 let _ = reply.send(Ok(()));
@@ -114,9 +128,13 @@ async fn notify_dispatches_command_and_returns_ok() {
         2,
         "nostromo.notify",
         json!({ "message": "hello world", "level": "info" }),
-    ).await;
+    )
+    .await;
 
-    assert!(fake_loop.await.unwrap(), "fake loop should have seen Notify with Info level");
+    assert!(
+        fake_loop.await.unwrap(),
+        "fake loop should have seen Notify with Info level"
+    );
     assert_eq!(result["ok"], true, "tool should return ok=true");
 }
 
@@ -128,11 +146,19 @@ async fn notify_with_warn_level() {
     let socket_path = dir.path().join("mcp_notify_warn.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
-            if let nostromo::mcp::McpCommand::Notify { message, level, reply, .. } = *cmd {
+            if let nostromo::mcp::McpCommand::Notify {
+                message,
+                level,
+                reply,
+                ..
+            } = *cmd
+            {
                 assert_eq!(message, "disk usage above 90%");
                 assert_eq!(level, NotifyLevel::Warn);
                 let _ = reply.send(Ok(()));
@@ -149,9 +175,13 @@ async fn notify_with_warn_level() {
         2,
         "nostromo.notify",
         json!({ "message": "disk usage above 90%", "level": "warn" }),
-    ).await;
+    )
+    .await;
 
-    assert!(fake_loop.await.unwrap(), "fake loop should have seen Notify with Warn level");
+    assert!(
+        fake_loop.await.unwrap(),
+        "fake loop should have seen Notify with Warn level"
+    );
     assert_eq!(result["ok"], true, "tool should return ok=true");
 }
 
@@ -163,11 +193,19 @@ async fn notify_with_error_level() {
     let socket_path = dir.path().join("mcp_notify_error.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
-            if let nostromo::mcp::McpCommand::Notify { message, level, reply, .. } = *cmd {
+            if let nostromo::mcp::McpCommand::Notify {
+                message,
+                level,
+                reply,
+                ..
+            } = *cmd
+            {
                 assert_eq!(message, "build failed");
                 assert_eq!(level, NotifyLevel::Error);
                 let _ = reply.send(Ok(()));
@@ -184,8 +222,12 @@ async fn notify_with_error_level() {
         2,
         "nostromo.notify",
         json!({ "message": "build failed", "level": "error" }),
-    ).await;
+    )
+    .await;
 
-    assert!(fake_loop.await.unwrap(), "fake loop should have seen Notify with Error level");
+    assert!(
+        fake_loop.await.unwrap(),
+        "fake loop should have seen Notify with Error level"
+    );
     assert_eq!(result["ok"], true, "tool should return ok=true");
 }

@@ -70,7 +70,11 @@ pub async fn register(state: &McpSharedState, args: &Value) -> Value {
         reply: reply_tx,
     };
 
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_gone" });
     }
 
@@ -96,7 +100,11 @@ pub async fn clear(state: &McpSharedState, args: &Value) -> Value {
         reply: reply_tx,
     };
 
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_gone" });
     }
 

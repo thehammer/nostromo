@@ -253,10 +253,7 @@ fn parse_sonnet_window(v: &serde_json::Value) -> Option<WindowPace> {
     }
     let used_pct = s.get("used_pct")?.as_f64()? as f32;
     let resets_at = s.get("resets_at")?.as_i64()?;
-    let status = s
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("normal");
+    let status = s.get("status").and_then(|v| v.as_str()).unwrap_or("normal");
     // Sonnet shares the 7-day window, so elapsed_pct (bar fill = time position)
     // is always inherited from that window — even when exhausted. This keeps
     // the Sonnet bar aligned with the 7d bar at "right now" on the timeline.
@@ -452,7 +449,9 @@ mod tests {
             }
         }"#;
         let snap = PostureSnapshot::parse_json(json).expect("should parse");
-        let sonnet = snap.sonnet_seven_day.expect("sonnet window should be present");
+        let sonnet = snap
+            .sonnet_seven_day
+            .expect("sonnet window should be present");
         assert!(
             (sonnet.elapsed_pct - 79.5).abs() < 0.01,
             "exhausted should inherit 7d elapsed_pct (79.5) not force 100.0, got {}",

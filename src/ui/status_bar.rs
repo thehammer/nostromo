@@ -282,7 +282,10 @@ fn mcp_status_segments(state: &AppState) -> Vec<Vec<Span<'static>>> {
 
     for (_, seg) in pairs {
         let color = parse_segment_color(seg.color.as_deref());
-        out.push(vec![Span::styled(seg.text.clone(), Style::default().fg(color))]);
+        out.push(vec![Span::styled(
+            seg.text.clone(),
+            Style::default().fg(color),
+        )]);
     }
 
     out
@@ -292,16 +295,12 @@ fn mcp_status_segments(state: &AppState) -> Vec<Vec<Span<'static>>> {
 fn toast_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
     let now = Utc::now().timestamp();
     // Find the most recently pushed toast that hasn't expired.
-    let toast: Option<&Toast> = state
-        .toasts
-        .iter()
-        .rev()
-        .find(|t| t.expires_at > now);
+    let toast: Option<&Toast> = state.toasts.iter().rev().find(|t| t.expires_at > now);
 
     let toast = toast?;
     let (icon, color) = match toast.level {
-        NotifyLevel::Info  => ("ℹ ", theme::SAGE),
-        NotifyLevel::Warn  => ("⚠ ", theme::AMBER),
+        NotifyLevel::Info => ("ℹ ", theme::SAGE),
+        NotifyLevel::Warn => ("⚠ ", theme::AMBER),
         NotifyLevel::Error => ("✕ ", theme::RED_SWEATER),
     };
     Some(vec![
@@ -316,12 +315,12 @@ fn toast_segment(state: &AppState) -> Option<Vec<Span<'static>>> {
 /// 6-digit hex with leading `#` (e.g. `#ff8800`).
 fn parse_segment_color(s: Option<&str>) -> Color {
     match s {
-        None           => theme::FG_MUTED,
-        Some("red")    => theme::RED_SWEATER,
-        Some("amber")  => theme::AMBER,
-        Some("sage")   => theme::SAGE,
-        Some("blue")   => Color::Rgb(100, 149, 237),
-        Some("muted")  => theme::FG_MUTED,
+        None => theme::FG_MUTED,
+        Some("red") => theme::RED_SWEATER,
+        Some("amber") => theme::AMBER,
+        Some("sage") => theme::SAGE,
+        Some("blue") => Color::Rgb(100, 149, 237),
+        Some("muted") => theme::FG_MUTED,
         Some(hex) if hex.starts_with('#') && hex.len() == 7 => {
             let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(180);
             let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(180);

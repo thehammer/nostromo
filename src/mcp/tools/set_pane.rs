@@ -9,14 +9,13 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use tracing::warn;
 
+use crate::event::AppEvent;
 use crate::mcp::{
     command::{McpCommand, PaneContent},
     state::McpSharedState,
 };
-use crate::event::AppEvent;
 
 const COMMAND_TIMEOUT_SECS: u64 = 5;
-
 
 // ── handlers ─────────────────────────────────────────────────────────────────
 
@@ -38,15 +37,21 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
     };
 
     let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::SetPaneContent { view_id, pane_id, content, reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    let cmd = McpCommand::SetPaneContent {
+        view_id,
+        pane_id,
+        content,
+        reply: tx,
+    };
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         warn!("set_pane_content: event_tx closed");
         return json!({ "error": "event_loop_closed" });
     }
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS),
-        rx,
-    ).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
         Ok(Ok(Ok(()))) => json!({ "ok": true }),
         Ok(Ok(Err(e))) => json!({ "error": e }),
         Ok(Err(_)) => json!({ "error": "event_loop_closed" }),
@@ -66,8 +71,16 @@ pub async fn set_pane_focus(state: &McpSharedState, args: &Value) -> Value {
     };
 
     let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::SetPaneFocus { view_id, pane_id, reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    let cmd = McpCommand::SetPaneFocus {
+        view_id,
+        pane_id,
+        reply: tx,
+    };
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
@@ -90,8 +103,16 @@ pub async fn set_pane_layout(state: &McpSharedState, args: &Value) -> Value {
     };
 
     let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::SetPaneLayout { view_id, ratios, reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    let cmd = McpCommand::SetPaneLayout {
+        view_id,
+        ratios,
+        reply: tx,
+    };
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
@@ -118,7 +139,8 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
     let type_str = v.get("type").and_then(|t| t.as_str()).unwrap_or("text");
     match type_str {
         "text" => {
-            let text = v.get("text")
+            let text = v
+                .get("text")
                 .or_else(|| v.get("value"))
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
@@ -126,7 +148,8 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
             Ok(PaneContent::Text(text))
         }
         "json_snapshot" => {
-            let snap = v.get("value")
+            let snap = v
+                .get("value")
                 .or_else(|| v.get("snapshot"))
                 .cloned()
                 .unwrap_or(Value::Null);

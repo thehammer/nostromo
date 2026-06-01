@@ -37,7 +37,9 @@ impl<'a> Widget for PtyWidget<'a> {
     fn render(mut self, area: Rect, buf: &mut Buffer) {
         // Shift the parser's view into the scrollback buffer for this render.
         // We reset to 0 afterwards so the live view is restored between frames.
-        self.guard.screen_mut().set_scrollback(self.scroll_offset as usize);
+        self.guard
+            .screen_mut()
+            .set_scrollback(self.scroll_offset as usize);
 
         let (cursor_row, cursor_col, show_cursor) = {
             let screen = self.guard.screen();

@@ -72,7 +72,15 @@ impl PtyHost {
         view_id: &'static str,
     ) -> Result<Self> {
         let mcp_socket = crate::mcp::socket::default_socket_path();
-        Self::spawn_with_env(cmd, args, (cols, rows), event_tx, view_id, &mcp_socket, None)
+        Self::spawn_with_env(
+            cmd,
+            args,
+            (cols, rows),
+            event_tx,
+            view_id,
+            &mcp_socket,
+            None,
+        )
     }
 
     /// Like [`spawn`] but registers the spawned PTY with `mcp_state`.
@@ -244,7 +252,11 @@ impl PtyHost {
         }) {
             warn!("PTY resize error: {e}");
         }
-        self.parser.lock().unwrap().screen_mut().set_size(rows, cols);
+        self.parser
+            .lock()
+            .unwrap()
+            .screen_mut()
+            .set_size(rows, cols);
     }
 
     /// Forward a crossterm key event to the PTY child.

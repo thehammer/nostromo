@@ -40,10 +40,7 @@ impl TranscriptReader {
     /// Spawn a background task that tails `(cwd, session_id)` and publishes
     /// snapshots.  Returns `(reader, rx)` — keep `reader` alive to keep the
     /// task running; read updates from `rx`.
-    pub fn spawn(
-        cwd: PathBuf,
-        session_id: String,
-    ) -> (Self, watch::Receiver<TranscriptSnapshot>) {
+    pub fn spawn(cwd: PathBuf, session_id: String) -> (Self, watch::Receiver<TranscriptSnapshot>) {
         let path = jsonl_path(&cwd, &session_id);
         let initial = TranscriptSnapshot {
             entries: Arc::new(Vec::new()),
@@ -55,7 +52,12 @@ impl TranscriptReader {
 
         tokio::spawn(run_reader(path, session_id, tx, shutdown_rx));
 
-        (Self { _shutdown_tx: shutdown_tx }, rx)
+        (
+            Self {
+                _shutdown_tx: shutdown_tx,
+            },
+            rx,
+        )
     }
 }
 
@@ -161,16 +163,17 @@ async fn read_new_lines(path: &PathBuf, byte_offset: u64) -> anyhow::Result<(Vec
         }
         // Only keep lines that are terminated (not a partial write).
         if line.ends_with('\n') {
-            lines.push(line.trim_end_matches('\n').trim_end_matches('\r').to_string());
+            lines.push(
+                line.trim_end_matches('\n')
+                    .trim_end_matches('\r')
+                    .to_string(),
+            );
         }
         // else: partial line, stop — we'll re-read it next time.
     }
 
     // Compute new offset: original + bytes consumed.
-    let bytes_consumed: u64 = lines
-        .iter()
-        .map(|l| l.len() as u64 + 1 /* newline */)
-        .sum();
+    let bytes_consumed: u64 = lines.iter().map(|l| l.len() as u64 + 1 /* newline */).sum();
     Ok((lines, byte_offset + bytes_consumed))
 }
 
@@ -204,7 +207,11 @@ fn record_to_entries(record: &Record, out: &mut Vec<TranscriptEntry>) -> bool {
                     // Also emit ToolResult entries — tool results travel in
                     // user messages as the response to assistant tool calls.
                     for block in blocks {
-                        if let ContentBlock::ToolResult { tool_use_id, content } = block {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                        } = block
+                        {
                             out.push(TranscriptEntry::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
                                 content: content.as_display(),
@@ -235,7 +242,10 @@ fn record_to_entries(record: &Record, out: &mut Vec<TranscriptEntry>) -> bool {
                             input: input.clone(),
                         });
                     }
-                    ContentBlock::ToolResult { tool_use_id, content } => {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                    } => {
                         out.push(TranscriptEntry::ToolResult {
                             tool_use_id: tool_use_id.clone(),
                             content: content.as_display(),
@@ -259,12 +269,15 @@ fn record_to_entries(record: &Record, out: &mut Vec<TranscriptEntry>) -> bool {
 
 type BoxedWatcher = Box<dyn notify::Watcher + Send>;
 
-fn install_watcher(path: &PathBuf, notify_tx: tokio::sync::mpsc::Sender<()>) -> Option<BoxedWatcher> {
+fn install_watcher(
+    path: &PathBuf,
+    notify_tx: tokio::sync::mpsc::Sender<()>,
+) -> Option<BoxedWatcher> {
     use notify::{RecursiveMode, Watcher};
 
     let target = path.clone();
-    let watcher_result = notify::recommended_watcher(
-        move |res: notify::Result<notify::Event>| match res {
+    let watcher_result =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
             Ok(ev) => {
                 if ev.paths.iter().any(|p| p == &target) {
                     let _ = notify_tx.blocking_send(());
@@ -273,8 +286,7 @@ fn install_watcher(path: &PathBuf, notify_tx: tokio::sync::mpsc::Sender<()>) -> 
             Err(e) => {
                 warn!("transcript notify error: {e}");
             }
-        },
-    );
+        });
 
     match watcher_result {
         Ok(mut watcher) => {

@@ -23,11 +23,7 @@ async fn reader_tails_appended_records() {
     // The reader computes: project_dir(cwd) / "test-sid.jsonl"
     // project_dir replaces '/' with '-', so we replicate that:
     let sanitized = cwd.to_string_lossy().replace('/', "-");
-    let project_dir = dir
-        .path()
-        .join(".claude")
-        .join("projects")
-        .join(&sanitized);
+    let project_dir = dir.path().join(".claude").join("projects").join(&sanitized);
     std::fs::create_dir_all(&project_dir).unwrap();
     let log_path = project_dir.join("test-sid.jsonl");
 
@@ -60,7 +56,11 @@ async fn reader_tails_appended_records() {
         loop {
             rx.changed().await.unwrap();
             let snap = rx.borrow().clone();
-            if snap.entries.iter().any(|e| matches!(e, TranscriptEntry::UserMessage(_))) {
+            if snap
+                .entries
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::UserMessage(_)))
+            {
                 return snap;
             }
         }
@@ -68,7 +68,10 @@ async fn reader_tails_appended_records() {
     .await
     .expect("timed out waiting for user message");
 
-    assert!(snap.entries.iter().any(|e| matches!(e, TranscriptEntry::UserMessage(_))));
+    assert!(snap
+        .entries
+        .iter()
+        .any(|e| matches!(e, TranscriptEntry::UserMessage(_))));
 
     // Append the assistant line.
     {
@@ -85,7 +88,11 @@ async fn reader_tails_appended_records() {
         loop {
             rx.changed().await.unwrap();
             let snap = rx.borrow().clone();
-            if snap.entries.iter().any(|e| matches!(e, TranscriptEntry::TurnEnd)) {
+            if snap
+                .entries
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::TurnEnd))
+            {
                 return snap;
             }
         }

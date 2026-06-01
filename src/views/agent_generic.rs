@@ -71,7 +71,11 @@ pub struct GenericView {
 /// Exported so it can be tested without mocking `crossterm::terminal::size()`.
 /// Callers that want the real terminal size should call `crossterm::terminal::size()`
 /// and pass the result in; on failure they should fall back to the deferred-spawn path.
-pub fn compute_repl_dims(term_cols: u16, term_rows: u16, has_transcript_session: bool) -> (u16, u16) {
+pub fn compute_repl_dims(
+    term_cols: u16,
+    term_rows: u16,
+    has_transcript_session: bool,
+) -> (u16, u16) {
     // 3 rows of chrome: status bar + top/bottom borders.
     let rows = term_rows.saturating_sub(3).max(5);
     // If a transcript session exists, the REPL pane will get ~50% of the width.
@@ -112,7 +116,13 @@ impl GenericView {
             if let (Some(entry), Some((cols, rows))) = (stored_entry.clone(), want_dims) {
                 let (fresh_args, new_sid) = freshen_session_id(&entry.args);
                 let args: Vec<&str> = fresh_args.iter().map(String::as_str).collect();
-                match ctx.pty_factory.spawn(id, &entry.cmd, &args, (cols, rows), ctx.event_tx.clone()) {
+                match ctx.pty_factory.spawn(
+                    id,
+                    &entry.cmd,
+                    &args,
+                    (cols, rows),
+                    ctx.event_tx.clone(),
+                ) {
                     Ok(backend) => {
                         tracing::info!(view_tag = id, "eager auto-spawn PTY at ({cols}x{rows})");
                         // Persist the fresh session ID so transcript lookup works.
@@ -173,7 +183,11 @@ impl GenericView {
     /// `want_dims` is the desired `(cols, rows)` for the reattached PTY.
     /// If the PTY is currently sized differently, it is resized and an XTWINOPS
     /// escape `\x1b[8;{rows};{cols}t` is sent so the child process reflows.
-    fn try_reattach(view_tag: &'static str, ctx: &ViewCtx, want_dims: Option<(u16, u16)>) -> Option<PtyBackend> {
+    fn try_reattach(
+        view_tag: &'static str,
+        ctx: &ViewCtx,
+        want_dims: Option<(u16, u16)>,
+    ) -> Option<PtyBackend> {
         let existing = ctx.pty_factory.list_existing(view_tag);
         let info = existing.into_iter().find(|p| p.alive)?;
 
@@ -184,7 +198,8 @@ impl GenericView {
         );
 
         // Attach at the current daemon size; we'll correct it immediately after.
-        let mut pty = ctx.pty_factory
+        let mut pty = ctx
+            .pty_factory
             .attach(
                 &info.pty_id,
                 (info.cols, info.rows),
@@ -203,7 +218,10 @@ impl GenericView {
             if (cur_cols, cur_rows) != (want_cols, want_rows) {
                 tracing::info!(
                     view_tag,
-                    cur_cols, cur_rows, want_cols, want_rows,
+                    cur_cols,
+                    cur_rows,
+                    want_cols,
+                    want_rows,
                     "reattach: resizing PTY and sending XTWINOPS"
                 );
                 pty.resize(want_cols, want_rows);
@@ -211,7 +229,12 @@ impl GenericView {
                 pty.send_bytes(seq.as_bytes());
             } else {
                 // Same size — nudge to force a full redraw.
-                tracing::debug!(view_tag, want_cols, want_rows, "reattach: nudging size to force redraw");
+                tracing::debug!(
+                    view_tag,
+                    want_cols,
+                    want_rows,
+                    "reattach: nudging size to force redraw"
+                );
                 pty.resize(want_cols, want_rows.saturating_sub(1).max(1));
                 pty.resize(want_cols, want_rows);
             }

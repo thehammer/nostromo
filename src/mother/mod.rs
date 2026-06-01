@@ -4,7 +4,11 @@
 //! **Env overrides:**
 //! - `MOTHER_BIN`             — path to the `mother` binary (default: `mother`)
 //! - `MOTHER_ROOT`            — state root (default: `$HOME/.mother`)
+//! - `MOTHER_BROKER_SOCK`     — broker socket (default: `$MOTHER_ROOT/broker.sock`)
 //! - `MOTHER_STATUSLINE_CACHE`— statusline cache file (default: `/tmp/.mother-statusline`)
+
+pub mod broker_client;
+pub mod protocol;
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +38,15 @@ pub fn statusline_cache_path() -> PathBuf {
     std::env::var("MOTHER_STATUSLINE_CACHE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp/.mother-statusline"))
+}
+
+/// Path to the Mother broker Unix socket.
+///
+/// Resolution order: `MOTHER_BROKER_SOCK` env → `$MOTHER_ROOT/broker.sock`.
+pub fn broker_sock_path() -> PathBuf {
+    std::env::var("MOTHER_BROKER_SOCK")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| mother_root().join("broker.sock"))
 }
 
 // ── MotherStatus ─────────────────────────────────────────────────────────────
@@ -79,6 +92,23 @@ impl MotherStatus {
         }
     }
 
+    /// Derive status counts from a live job slice.
+    ///
+    /// Replaces `MotherStatus::load()` when the broker source feeds live state.
+    pub fn from_jobs(jobs: &[MotherJob]) -> Self {
+        let mut status = Self::default();
+        for job in jobs {
+            match job.state.as_str() {
+                "running" => status.running += 1,
+                "queued" | "ready" => status.queued += 1,
+                "failed" => status.failed += 1,
+                "awaiting" => status.awaiting += 1,
+                _ => {}
+            }
+        }
+        status
+    }
+
     /// Short string suitable for the global status bar.
     pub fn status_line(&self) -> String {
         if self.awaiting > 0 {
@@ -93,7 +123,8 @@ impl MotherStatus {
 
 // ── MotherJob ─────────────────────────────────────────────────────────────────
 
-/// A Mother job record, deserialised from `mother list --format json`.
+/// A Mother job record, deserialised from `mother list --format json` or the
+/// broker snapshot/event stream.
 ///
 /// All optional fields are `None` when absent in the JSON; extra fields added
 /// by future Mother versions are silently ignored via `#[serde(default)]`.
@@ -119,6 +150,9 @@ pub struct MotherJob {
     pub adherence_status: Option<String>,
     /// Which escalation tier spawned the current worker.
     pub current_tier: Option<String>,
+    /// Most recent activity description from the broker `current_activity` event.
+    #[serde(default)]
+    pub current_activity: Option<String>,
 }
 
 impl MotherJob {
@@ -164,32 +198,6 @@ pub async fn tail_log(id: &str, n: usize) -> Result<String> {
     Ok(lines[start..].join("\n"))
 }
 
-/// Cancel any non-terminal job (queued, ready, running, awaiting).
-pub async fn cancel(id: &str) -> Result<()> {
-    let out = Command::new(mother_bin())
-        .args(["cancel", id])
-        .output()
-        .await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother cancel {id} failed: {stderr}");
-    }
-    Ok(())
-}
-
-/// Resume an `awaiting` job by providing the operator's answer.
-pub async fn resume(id: &str, answer: &str) -> Result<()> {
-    let out = Command::new(mother_bin())
-        .args(["resume", id, answer])
-        .output()
-        .await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother resume {id} failed: {stderr}");
-    }
-    Ok(())
-}
-
 /// Archive a single terminal-state job by id.
 pub async fn archive(id: &str) -> Result<()> {
     let out = Command::new(mother_bin())
@@ -203,7 +211,10 @@ pub async fn archive(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Re-enqueue a plan file (used to retry failed jobs via `mother add --plan`).
+/// Re-enqueue a plan file (used for new-plan enqueue via `mother add --plan`).
+///
+/// This is the MCP `MotherEnqueue` path only. Cancel/answer/retry operations
+/// use the broker client (`BrokerClient::send_command`).
 pub async fn add_plan(plan_path: &Path) -> Result<()> {
     let out = Command::new(mother_bin())
         .args(["add", "--plan", plan_path.to_str().unwrap_or_default()])

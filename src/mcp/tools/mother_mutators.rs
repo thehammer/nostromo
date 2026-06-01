@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
-use crate::mcp::{command::McpCommand, state::McpSharedState};
 use crate::event::AppEvent;
+use crate::mcp::{command::McpCommand, state::McpSharedState};
 
 const COMMAND_TIMEOUT_SECS: u64 = 5;
 
@@ -26,8 +26,15 @@ pub async fn enqueue_job(state: &McpSharedState, args: &Value) -> Value {
     };
 
     let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::MotherEnqueue { plan_path, reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    let cmd = McpCommand::MotherEnqueue {
+        plan_path,
+        reply: tx,
+    };
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
@@ -48,7 +55,11 @@ pub async fn cancel_job(state: &McpSharedState, args: &Value) -> Value {
 
     let (tx, rx) = oneshot::channel();
     let cmd = McpCommand::MotherCancel { job_id, reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
@@ -68,7 +79,35 @@ pub async fn archive_job(state: &McpSharedState, args: &Value) -> Value {
 
     let (tx, rx) = oneshot::channel();
     let cmd = McpCommand::MotherArchive { job_id, reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
+        return json!({ "error": "event_loop_closed" });
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
+        Ok(Ok(Ok(()))) => json!({ "ok": true }),
+        Ok(Ok(Err(e))) => json!({ "error": e }),
+        Ok(Err(_)) => json!({ "error": "event_loop_closed" }),
+        Err(_) => json!({ "error": "event_loop_timeout" }),
+    }
+}
+
+/// Handle `mother.retry_job({ id })`.
+pub async fn retry_job(state: &McpSharedState, args: &Value) -> Value {
+    let job_id = match args.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return json!({ "error": "invalid_args", "detail": "missing id" }),
+    };
+
+    let (tx, rx) = oneshot::channel();
+    let cmd = McpCommand::MotherRetry { job_id, reply: tx };
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
@@ -91,8 +130,16 @@ pub async fn resume_job(state: &McpSharedState, args: &Value) -> Value {
     };
 
     let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::MotherResume { job_id, answer, reply: tx };
-    if state.event_tx.send(AppEvent::McpCommand(Box::new(cmd))).is_err() {
+    let cmd = McpCommand::MotherResume {
+        job_id,
+        answer,
+        reply: tx,
+    };
+    if state
+        .event_tx
+        .send(AppEvent::McpCommand(Box::new(cmd)))
+        .is_err()
+    {
         return json!({ "error": "event_loop_closed" });
     }
     match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {

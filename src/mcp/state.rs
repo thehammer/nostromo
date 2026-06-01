@@ -68,7 +68,6 @@ pub struct McpSharedState {
     pub ptys: Arc<RwLock<HashMap<String, PtyIdentity>>>,
 
     // ── per-view data receivers (Phase 2) ─────────────────────────────────────
-
     /// Live Perri PR queue snapshot.
     pub perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
 
@@ -88,7 +87,6 @@ pub struct McpSharedState {
     // These wrap AppEvent-driven data (Mother jobs/status, rate limits, posture)
     // in watch channels so MCP tool handlers can read them without going through
     // the event loop.
-
     /// Mirror of the most recent `AppEvent::MotherJobs`.
     pub mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
 

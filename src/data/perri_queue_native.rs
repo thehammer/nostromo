@@ -130,7 +130,12 @@ impl PerriQueueNativeSource {
     ///
     /// Phase 4: `refresh_tx` allows MCP tools to request an immediate queue
     /// re-fetch without touching the dirty-file sentinel.
-    pub fn spawn(config: Config) -> (watch::Receiver<Option<PrQueueSnapshot>>, mpsc::UnboundedSender<()>) {
+    pub fn spawn(
+        config: Config,
+    ) -> (
+        watch::Receiver<Option<PrQueueSnapshot>>,
+        mpsc::UnboundedSender<()>,
+    ) {
         let (tx, rx) = watch::channel(None);
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
         let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
@@ -142,7 +147,9 @@ impl PerriQueueNativeSource {
 
         tokio::spawn(async move {
             let source = PerriQueueNativeSource { config };
-            source.run(tx, &mut dirty_rx, &mut refresh_rx, interval_secs).await;
+            source
+                .run(tx, &mut dirty_rx, &mut refresh_rx, interval_secs)
+                .await;
         });
 
         (rx, refresh_tx)
@@ -353,12 +360,8 @@ impl PerriQueueNativeSource {
         // Prune ci_failure_cache: remove SHA entries that are no longer referenced
         // by any current PR head.  Runs after every cycle — the set is tiny.
         {
-            let current_shas: std::collections::HashSet<String> = head_sha_cache
-                .lock()
-                .unwrap()
-                .values()
-                .cloned()
-                .collect();
+            let current_shas: std::collections::HashSet<String> =
+                head_sha_cache.lock().unwrap().values().cloned().collect();
             ci_failure_cache
                 .lock()
                 .unwrap()
@@ -668,7 +671,8 @@ pub async fn ci_has_failure_cached(
     endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
     endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> bool {
-    let sha = match get_pr_head_sha(client, repo, number, endpoint_etags, endpoint_body_cache).await {
+    let sha = match get_pr_head_sha(client, repo, number, endpoint_etags, endpoint_body_cache).await
+    {
         Some(s) => s,
         None => return false,
     };
@@ -767,7 +771,10 @@ async fn etag_get(
 
     // Brief lock — update ETag from response.
     if let Some(etag) = resp.headers().get("etag").and_then(|v| v.to_str().ok()) {
-        etags.lock().unwrap().insert(url.to_owned(), etag.to_owned());
+        etags
+            .lock()
+            .unwrap()
+            .insert(url.to_owned(), etag.to_owned());
     }
 
     if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
@@ -781,7 +788,10 @@ async fn etag_get(
     }
 
     let body = resp.text().await.ok()?;
-    body_cache.lock().unwrap().insert(url.to_owned(), body.clone());
+    body_cache
+        .lock()
+        .unwrap()
+        .insert(url.to_owned(), body.clone());
     Some(body)
 }
 
@@ -876,7 +886,9 @@ mod tests {
             title: "Test PR".to_owned(),
             html_url: "https://github.com/Carefeed/care/pull/1".to_owned(),
             repository_url: "https://api.github.com/repos/Carefeed/care".to_owned(),
-            user: Some(GhUser { login: login.to_owned() }),
+            user: Some(GhUser {
+                login: login.to_owned(),
+            }),
             draft: Some(draft),
             updated_at: updated_at.map(|s| s.to_owned()),
         }
@@ -891,7 +903,10 @@ mod tests {
         let mut last_seen: HashMap<(String, u64), String> = HashMap::new();
         last_seen.insert(key.clone(), ts.clone());
         let mut rev_cache: HashMap<(String, u64), (String, Option<String>)> = HashMap::new();
-        rev_cache.insert(key.clone(), ("CHANGES_REQUESTED".to_owned(), Some(ts.clone())));
+        rev_cache.insert(
+            key.clone(),
+            ("CHANGES_REQUESTED".to_owned(), Some(ts.clone())),
+        );
 
         let result = review_from_cache(&key, Some(&ts), &last_seen, &rev_cache);
         assert!(result.is_some());

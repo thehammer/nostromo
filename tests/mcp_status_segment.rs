@@ -72,14 +72,20 @@ async fn call_tool(
     name: &str,
     args: Value,
 ) -> Value {
-    write_frame(writer, &json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "tools/call",
-        "params": { "name": name, "arguments": args }
-    })).await;
+    write_frame(
+        writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        }),
+    )
+    .await;
     let resp = read_frame(reader).await;
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("{}");
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("{}");
     serde_json::from_str(text).unwrap_or_else(|_| json!({"raw": text}))
 }
 
@@ -94,7 +100,9 @@ async fn register_segment_dispatches_command() {
     let socket_path = dir.path().join("mcp_reg_seg.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
@@ -129,7 +137,8 @@ async fn register_segment_dispatches_command() {
             "text": "3 PRs",
             "color": "amber"
         }),
-    ).await;
+    )
+    .await;
 
     assert!(
         fake_loop.await.unwrap(),
@@ -146,7 +155,9 @@ async fn clear_segment_dispatches_command() {
     let socket_path = dir.path().join("mcp_clear_seg.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
@@ -175,7 +186,8 @@ async fn clear_segment_dispatches_command() {
             "view_id": "perri",
             "segment_id": "pending_review"
         }),
-    ).await;
+    )
+    .await;
 
     assert!(
         fake_loop.await.unwrap(),
@@ -195,7 +207,9 @@ async fn register_then_clear_segment() {
     let socket_path = dir.path().join("mcp_lifecycle_seg.sock");
 
     let (state, mut rx) = make_state_with_channel().await;
-    let _server = McpServer::bind(socket_path.clone(), (*state).clone()).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
 
     // Fake event loop: handles two commands in sequence.
     let fake_loop = tokio::spawn(async move {
@@ -254,7 +268,8 @@ async fn register_then_clear_segment() {
             "text": "passing",
             "color": "sage"
         }),
-    ).await;
+    )
+    .await;
 
     let clear_result = call_tool(
         &mut reader,
@@ -265,11 +280,15 @@ async fn register_then_clear_segment() {
             "view_id": "perri",
             "segment_id": "build_status"
         }),
-    ).await;
+    )
+    .await;
 
     let (first_ok, second_ok) = fake_loop.await.unwrap();
     assert!(first_ok, "fake loop should have seen RegisterStatusSegment");
     assert!(second_ok, "fake loop should have seen ClearStatusSegment");
-    assert_eq!(register_result["ok"], true, "register tool should return ok=true");
+    assert_eq!(
+        register_result["ok"], true,
+        "register tool should return ok=true"
+    );
     assert_eq!(clear_result["ok"], true, "clear tool should return ok=true");
 }

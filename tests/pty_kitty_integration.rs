@@ -13,18 +13,9 @@
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    backend::TestBackend,
-    layout::Rect,
-    style::Modifier,
-    Terminal,
-};
+use ratatui::{backend::TestBackend, layout::Rect, style::Modifier, Terminal};
 
-use nostromo::pty::{
-    keys::key_to_bytes_for,
-    kitty::KittyFlagsTracker,
-    PtyWidget,
-};
+use nostromo::pty::{keys::key_to_bytes_for, kitty::KittyFlagsTracker, PtyWidget};
 
 // ── Test 1 ───────────────────────────────────────────────────────────────────
 
@@ -158,8 +149,7 @@ async fn daemon_spawn_sets_term_xterm_256color() {
     let mut manager = PtyManager::new();
 
     // Register a fake client sender so `attach` can deliver scrollback.
-    let (client_tx, mut client_rx) =
-        tokio::sync::mpsc::unbounded_channel::<ServerMsg>();
+    let (client_tx, mut client_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMsg>();
     manager
         .client_sender_registry()
         .lock()
@@ -196,9 +186,7 @@ async fn daemon_spawn_sets_term_xterm_256color() {
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
     let mut output = Vec::new();
     while let Ok(msg) = client_rx.try_recv() {
-        if let ServerMsg::PtyScrollback { bytes, .. }
-        | ServerMsg::PtyOutput { bytes, .. } = msg
-        {
+        if let ServerMsg::PtyScrollback { bytes, .. } | ServerMsg::PtyOutput { bytes, .. } = msg {
             output.extend_from_slice(&bytes);
         }
     }
@@ -249,7 +237,10 @@ async fn kitty_flags_tracked_in_daemon_pty() {
     let flags = manager
         .kitty_flags(&pty_id)
         .expect("pty_id must be known to manager");
-    assert_eq!(flags, 1, "kitty flags should be 1 after push escape in output");
+    assert_eq!(
+        flags, 1,
+        "kitty flags should be 1 after push escape in output"
+    );
 
     // With flags == 1, Enter must be encoded in kitty form.
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);

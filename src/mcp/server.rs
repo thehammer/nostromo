@@ -67,8 +67,8 @@ impl McpServer {
                 .with_context(|| format!("create MCP socket directory {:?}", parent))?;
         }
 
-        let listener = UnixListener::bind(&path)
-            .with_context(|| format!("bind MCP socket at {:?}", path))?;
+        let listener =
+            UnixListener::bind(&path).with_context(|| format!("bind MCP socket at {:?}", path))?;
 
         info!(socket = ?path, "MCP server listening");
 
@@ -138,7 +138,10 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
     // Step 2: JSON-RPC 2.0 loop.
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await.context("read JSON-RPC frame")?;
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .context("read JSON-RPC frame")?;
         if n == 0 {
             break; // EOF
         }
@@ -165,9 +168,7 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
             "notifications/initialized" => None, // notification; no response
             "ping" => id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
             "tools/list" => Some(handle_tools_list(id)),
-            "tools/call" => {
-                Some(handle_tools_call(id, &req, &state, pty_id.as_deref()).await)
-            }
+            "tools/call" => Some(handle_tools_call(id, &req, &state, pty_id.as_deref()).await),
             other => {
                 debug!("MCP: unknown method {other:?}");
                 id.map(|id| json_rpc_error(Some(id), -32601, "Method not found"))
@@ -255,7 +256,10 @@ async fn handle_tools_call(
 async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
     let mut bytes = serde_json::to_vec(value).context("serialise JSON-RPC frame")?;
     bytes.push(b'\n');
-    writer.write_all(&bytes).await.context("write JSON-RPC frame")?;
+    writer
+        .write_all(&bytes)
+        .await
+        .context("write JSON-RPC frame")?;
     Ok(())
 }
 

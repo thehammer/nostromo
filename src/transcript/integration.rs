@@ -602,12 +602,12 @@ mod tests {
     #[test]
     fn jump_sets_cursor_to_latest_user_message_index() {
         let mut pane = make_pane(vec![
-            TranscriptEntry::UserMessage("First".to_string()),  // 0
+            TranscriptEntry::UserMessage("First".to_string()), // 0
             TranscriptEntry::AssistantText("Reply 1".to_string()), // 1
-            TranscriptEntry::TurnEnd,                            // 2
+            TranscriptEntry::TurnEnd,                          // 2
             TranscriptEntry::UserMessage("Second".to_string()), // 3
             TranscriptEntry::AssistantText("Reply 2".to_string()), // 4
-            TranscriptEntry::TurnEnd,                            // 5
+            TranscriptEntry::TurnEnd,                          // 5
         ]);
         let jumped = pane.jump_to_latest_user_message();
         assert!(jumped, "should return true when a user message exists");
@@ -625,6 +625,9 @@ mod tests {
             TranscriptEntry::TurnEnd,
         ]);
         let jumped = pane.jump_to_latest_user_message();
-        assert!(!jumped, "should return false when snapshot has no user messages");
+        assert!(
+            !jumped,
+            "should return false when snapshot has no user messages"
+        );
     }
 }

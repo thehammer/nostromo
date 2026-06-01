@@ -56,13 +56,24 @@ impl<'a> TranscriptWidget<'a> {
         width: u16,
         interaction: &'a TranscriptInteraction,
     ) -> Self {
-        Self { snapshot, scroll_offset, syntect, cache, width, interaction }
+        Self {
+            snapshot,
+            scroll_offset,
+            syntect,
+            cache,
+            width,
+            interaction,
+        }
     }
 }
 
 impl Widget for TranscriptWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let thinking_hint = if self.interaction.show_thinking { " [T]" } else { " [T off]" };
+        let thinking_hint = if self.interaction.show_thinking {
+            " [T]"
+        } else {
+            " [T off]"
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(ratatui::style::Style::default().fg(theme::BORDER_ACTIVE))

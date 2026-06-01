@@ -25,9 +25,9 @@ pub fn list_unread_emails(state: &McpSharedState) -> Value {
     match borrow.as_ref() {
         Some(snap) => {
             let unread: Vec<_> = snap.items.iter().filter(|i| !i.is_read).collect();
-            serde_json::to_value(&unread).unwrap_or_else(|e| {
-                json!({ "error": "serialization_failed", "detail": e.to_string() })
-            })
+            serde_json::to_value(&unread).unwrap_or_else(
+                |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+            )
         }
         None => Value::Array(vec![]),
     }
@@ -55,17 +55,15 @@ pub fn list_calendar_events(state: &McpSharedState, input: &CalendarEventsInput)
                 .iter()
                 .filter(|ev| {
                     if let Some(td) = target_date {
-                        ev.start
-                            .map(|s| s.date_naive() == td)
-                            .unwrap_or(false)
+                        ev.start.map(|s| s.date_naive() == td).unwrap_or(false)
                     } else {
                         true
                     }
                 })
                 .collect();
-            serde_json::to_value(&events).unwrap_or_else(|e| {
-                json!({ "error": "serialization_failed", "detail": e.to_string() })
-            })
+            serde_json::to_value(&events).unwrap_or_else(
+                |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+            )
         }
         None => Value::Array(vec![]),
     }

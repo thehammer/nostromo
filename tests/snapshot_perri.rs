@@ -63,6 +63,16 @@ fn perri_layout_renders_without_panic() {
     use ratatui::layout::Rect;
     use tokio::sync::{mpsc, watch};
 
+    // Hermeticity: force default pane ratios. PerriView::new calls
+    // pane_ratios::load(), which otherwise reads ~/.nostromo/pane_ratios.toml —
+    // so a dev machine with dragged panes would bake a non-default split into
+    // this snapshot and fail on CI (which has no such file). Point the loader at
+    // a nonexistent path so it falls back to hardcoded defaults everywhere.
+    std::env::set_var(
+        "NOSTROMO_PANE_RATIOS_PATH",
+        "/nonexistent/nostromo-snapshot-test-pane-ratios.toml",
+    );
+
     let (q_tx, q_rx) = watch::channel(Some(fake_queue()));
     let (pr_tx, pr_rx) = watch::channel(Some(fake_pr()));
     drop(q_tx);

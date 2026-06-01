@@ -24,5 +24,5 @@ pub mod stream_json;
 pub use client::{ConnectionState, DaemonClient};
 pub use protocol::{default_socket_path, ClientMsg, ServerMsg, Topic};
 pub use pty_manager::PtyManager;
-pub use session_manager::SessionManager;
 pub use server::Server;
+pub use session_manager::SessionManager;

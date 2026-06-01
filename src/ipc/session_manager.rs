@@ -46,7 +46,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use super::protocol::{SessionInfo, ServerMsg};
+use super::protocol::{ServerMsg, SessionInfo};
 use super::stream_json::{load_scrollback, SessionState, SessionTranscript, TurnDelta};
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
@@ -207,7 +207,13 @@ impl SessionManager {
         };
 
         let program = resolve_claude()?;
-        let args = build_claude_args(&agent_name, &view_name, remote_control, &effective_id, resume);
+        let args = build_claude_args(
+            &agent_name,
+            &view_name,
+            remote_control,
+            &effective_id,
+            resume,
+        );
 
         let managed = self.spawn_managed(
             tag.clone(),
@@ -264,7 +270,8 @@ impl SessionManager {
         // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
         // in ways they never do when launched from a real dir. $HOME matches what a
         // terminal-launched agent would typically see.
-        let dir = cwd.clone()
+        let dir = cwd
+            .clone()
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .or_else(|| std::env::current_dir().ok());
         if let Some(dir) = dir {
@@ -364,7 +371,12 @@ impl SessionManager {
                 .shared
                 .broadcast(SessionEvent::State(SessionState::MidTurn));
         } else {
-            session.shared.pending.lock().unwrap().push_back(text.to_string());
+            session
+                .shared
+                .pending
+                .lock()
+                .unwrap()
+                .push_back(text.to_string());
         }
         Ok(())
     }
@@ -386,8 +398,20 @@ impl SessionManager {
             (turns, state, rx)
         };
 
-        self.send_to_client(client_id, ServerMsg::SessionTurns { tag: tag.to_string(), turns });
-        self.send_to_client(client_id, ServerMsg::SessionState { tag: tag.to_string(), state });
+        self.send_to_client(
+            client_id,
+            ServerMsg::SessionTurns {
+                tag: tag.to_string(),
+                turns,
+            },
+        );
+        self.send_to_client(
+            client_id,
+            ServerMsg::SessionState {
+                tag: tag.to_string(),
+                state,
+            },
+        );
 
         // Forwarder task: SessionEvent → targeted ServerMsg.
         let senders = Arc::clone(&self.client_senders);
@@ -429,7 +453,9 @@ impl SessionManager {
         });
 
         if let Some(session) = self.sessions.get_mut(tag) {
-            session.forwarders.insert(client_id.to_string(), task.abort_handle());
+            session
+                .forwarders
+                .insert(client_id.to_string(), task.abort_handle());
         }
         info!(tag, client_id, "session attach");
         Ok(())
@@ -530,8 +556,7 @@ impl SessionManager {
             .sessions
             .iter()
             .filter(|(_, s)| {
-                s.shared.exited.load(Ordering::SeqCst)
-                    && !s.intentional_stop.load(Ordering::SeqCst)
+                s.shared.exited.load(Ordering::SeqCst) && !s.intentional_stop.load(Ordering::SeqCst)
             })
             .map(|(tag, _)| tag.clone())
             .collect();
@@ -542,9 +567,12 @@ impl SessionManager {
             {
                 let s = self.sessions.get_mut(&tag).unwrap();
                 // Mark the in-flight turn errored and announce the crash once.
-                let delta = s.shared.transcript.lock().unwrap().mark_current_errored(
-                    "session process exited unexpectedly",
-                );
+                let delta = s
+                    .shared
+                    .transcript
+                    .lock()
+                    .unwrap()
+                    .mark_current_errored("session process exited unexpectedly");
                 if let Some(d) = delta {
                     s.shared.broadcast(SessionEvent::Delta(d));
                 }
@@ -572,8 +600,16 @@ impl SessionManager {
             }
 
             if wants_recovery && within_budget {
-                let prev_restarts = self.sessions.get(&tag).map(|s| s.restart_count).unwrap_or(0);
-                warn!(tag, restart = prev_restarts + 1, "auto-restarting crashed session");
+                let prev_restarts = self
+                    .sessions
+                    .get(&tag)
+                    .map(|s| s.restart_count)
+                    .unwrap_or(0);
+                warn!(
+                    tag,
+                    restart = prev_restarts + 1,
+                    "auto-restarting crashed session"
+                );
                 if let Err(e) = self.restart(&tag) {
                     warn!(tag, "auto-restart failed: {e:#}");
                 } else if let Some(s) = self.sessions.get_mut(&tag) {
@@ -709,7 +745,9 @@ fn write_user_frame(stdin: &Arc<Mutex<Option<ChildStdin>>>, text: &str) -> Resul
     line.push('\n');
 
     let mut guard = stdin.lock().unwrap();
-    let stdin = guard.as_mut().ok_or_else(|| anyhow!("session stdin closed"))?;
+    let stdin = guard
+        .as_mut()
+        .ok_or_else(|| anyhow!("session stdin closed"))?;
     stdin.write_all(line.as_bytes())?;
     stdin.flush()?;
     Ok(())
@@ -877,10 +915,8 @@ fn save_id(path: &std::path::Path, tag: &str, sid: Option<&str>) {
         // silently lost (which would make the next spawn start a fresh
         // conversation with no error). rename(2) within one dir is atomic.
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, &bytes).is_ok() {
-            if std::fs::rename(&tmp, path).is_err() {
-                let _ = std::fs::remove_file(&tmp);
-            }
+        if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }
@@ -907,8 +943,12 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--remote-control"));
         // bypass settings + stream-json + replay always present.
         assert!(args.iter().any(|a| a.contains("bypassPermissions")));
-        assert!(args.windows(2).any(|w| w == ["--input-format", "stream-json"]));
-        assert!(args.windows(2).any(|w| w == ["--output-format", "stream-json"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--input-format", "stream-json"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--output-format", "stream-json"]));
         assert!(args.iter().any(|a| a == "--replay-user-messages"));
         assert!(args.windows(2).any(|w| w == ["--agent", "fred"]));
         assert!(args.windows(2).any(|w| w == ["-n", "Fred"]));
@@ -933,12 +973,18 @@ mod tests {
     fn id_store_round_trips_and_clears() {
         let path = tmp_store();
         save_id(&path, "fred", Some("sid-xyz"));
-        assert_eq!(load_id_store(&path).get("fred").map(String::as_str), Some("sid-xyz"));
+        assert_eq!(
+            load_id_store(&path).get("fred").map(String::as_str),
+            Some("sid-xyz")
+        );
         save_id(&path, "teri", Some("sid-teri"));
         assert_eq!(load_id_store(&path).len(), 2);
         save_id(&path, "fred", None);
-        assert!(load_id_store(&path).get("fred").is_none());
-        assert_eq!(load_id_store(&path).get("teri").map(String::as_str), Some("sid-teri"));
+        assert!(!load_id_store(&path).contains_key("fred"));
+        assert_eq!(
+            load_id_store(&path).get("teri").map(String::as_str),
+            Some("sid-teri")
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -964,10 +1010,16 @@ mod tests {
         let map = load_id_store(&path);
         assert_eq!(map.len(), n, "every concurrent write must be preserved");
         for i in 0..n {
-            assert_eq!(map.get(&format!("focus-{i}")).map(String::as_str), Some(format!("sid-{i}").as_str()));
+            assert_eq!(
+                map.get(&format!("focus-{i}")).map(String::as_str),
+                Some(format!("sid-{i}").as_str())
+            );
         }
         // No stray temp file left behind.
-        assert!(!path.with_extension("json.tmp").exists(), "temp file must be renamed away");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "temp file must be renamed away"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1035,19 +1087,26 @@ mod tests {
         let script = r#"printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"},"isReplay":true}' '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01}'"#;
         let mut rx = {
             spawn_stub(&mut mgr, "fred", script);
-            mgr.sessions.get("fred").unwrap().shared.event_tx.subscribe()
+            mgr.sessions
+                .get("fred")
+                .unwrap()
+                .shared
+                .event_tx
+                .subscribe()
         };
 
         let events = collect_events(&mut rx, 20).await;
 
         // Must see a TurnStarted, a BlockAppended(text), a TurnCompleted, and Exited.
-        let has_started = events.iter().any(|e| {
-            matches!(e, SessionEvent::Delta(TurnDelta::TurnStarted { .. }))
-        });
-        let has_completed = events.iter().any(|e| {
-            matches!(e, SessionEvent::Delta(TurnDelta::TurnCompleted { .. }))
-        });
-        let has_exit = events.iter().any(|e| matches!(e, SessionEvent::Exited { .. }));
+        let has_started = events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Delta(TurnDelta::TurnStarted { .. })));
+        let has_completed = events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Delta(TurnDelta::TurnCompleted { .. })));
+        let has_exit = events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Exited { .. }));
         assert!(has_started, "expected TurnStarted: {events:?}");
         assert!(has_completed, "expected TurnCompleted: {events:?}");
         assert!(has_exit, "expected Exited: {events:?}");
@@ -1070,8 +1129,7 @@ mod tests {
     #[tokio::test]
     async fn attach_delivers_snapshot_then_state() {
         let mut mgr = SessionManager::with_store_path(tmp_store());
-        let script =
-            r#"printf '%s\n' '{"type":"user","message":{"role":"user","content":"q"},"isReplay":true}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}'; sleep 1"#;
+        let script = r#"printf '%s\n' '{"type":"user","message":{"role":"user","content":"q"},"isReplay":true}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}'; sleep 1"#;
         spawn_stub(&mut mgr, "teri", script);
 
         // Register a client sender, then attach.
@@ -1083,10 +1141,22 @@ mod tests {
         mgr.attach("teri", "c1").unwrap();
 
         // First two targeted messages must be SessionTurns then SessionState.
-        let m1 = tokio::time::timeout(Duration::from_secs(2), crx.recv()).await.unwrap().unwrap();
-        let m2 = tokio::time::timeout(Duration::from_secs(2), crx.recv()).await.unwrap().unwrap();
-        assert!(matches!(m1, ServerMsg::SessionTurns { .. }), "first msg {m1:?}");
-        assert!(matches!(m2, ServerMsg::SessionState { .. }), "second msg {m2:?}");
+        let m1 = tokio::time::timeout(Duration::from_secs(2), crx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let m2 = tokio::time::timeout(Duration::from_secs(2), crx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(m1, ServerMsg::SessionTurns { .. }),
+            "first msg {m1:?}"
+        );
+        assert!(
+            matches!(m2, ServerMsg::SessionState { .. }),
+            "second msg {m2:?}"
+        );
     }
 
     #[tokio::test]
@@ -1134,7 +1204,14 @@ mod tests {
 
         // Second send while mid-turn → queued, not written.
         mgr.send_user_message("q", "second").unwrap();
-        let pending = mgr.sessions.get("q").unwrap().shared.pending.lock().unwrap();
+        let pending = mgr
+            .sessions
+            .get("q")
+            .unwrap()
+            .shared
+            .pending
+            .lock()
+            .unwrap();
         assert_eq!(pending.len(), 1, "second message must queue while mid-turn");
         assert_eq!(pending.front().map(String::as_str), Some("second"));
     }

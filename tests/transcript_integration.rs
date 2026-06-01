@@ -21,10 +21,7 @@ fn user_line(sid: &str) -> String {
 /// We override HOME to point at our tempdir.
 fn write_session_file(home: &std::path::Path, cwd: &std::path::Path, sid: &str) {
     let sanitized = cwd.to_string_lossy().replace('/', "-");
-    let project_dir = home
-        .join(".claude")
-        .join("projects")
-        .join(&sanitized);
+    let project_dir = home.join(".claude").join("projects").join(&sanitized);
     std::fs::create_dir_all(&project_dir).unwrap();
     let log_path = project_dir.join(format!("{sid}.jsonl"));
     let mut f = std::fs::File::create(&log_path).unwrap();

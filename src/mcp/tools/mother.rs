@@ -48,9 +48,7 @@ pub async fn list_jobs(state: &McpSharedState, input: &ListJobsInput) -> Value {
         // Fetch the full list (including archived) directly from mother.
         match mother::list_jobs().await {
             Ok(j) => j,
-            Err(e) => {
-                return json!({ "error": "mother_list_failed", "detail": e.to_string() })
-            }
+            Err(e) => return json!({ "error": "mother_list_failed", "detail": e.to_string() }),
         }
     } else {
         state.mother_jobs_rx.borrow().clone()
@@ -58,27 +56,20 @@ pub async fn list_jobs(state: &McpSharedState, input: &ListJobsInput) -> Value {
 
     let filtered: Vec<_> = jobs
         .iter()
-        .filter(|j| {
-            input
-                .status
-                .as_ref()
-                .map(|s| j.state == *s)
-                .unwrap_or(true)
-        })
+        .filter(|j| input.status.as_ref().map(|s| j.state == *s).unwrap_or(true))
         .collect();
 
-    serde_json::to_value(&filtered).unwrap_or_else(|e| {
-        json!({ "error": "serialization_failed", "detail": e.to_string() })
-    })
+    serde_json::to_value(&filtered)
+        .unwrap_or_else(|e| json!({ "error": "serialization_failed", "detail": e.to_string() }))
 }
 
 /// Handle `mother.get_job({ id })`.
 pub fn get_job(state: &McpSharedState, input: &GetJobInput) -> Value {
     let borrow = state.mother_jobs_rx.borrow();
     match borrow.iter().find(|j| j.id == input.id) {
-        Some(job) => serde_json::to_value(job).unwrap_or_else(|e| {
-            json!({ "error": "serialization_failed", "detail": e.to_string() })
-        }),
+        Some(job) => serde_json::to_value(job).unwrap_or_else(
+            |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+        ),
         None => Value::Null,
     }
 }
@@ -88,10 +79,7 @@ pub fn get_job(state: &McpSharedState, input: &GetJobInput) -> Value {
 /// Returns the last `lines` lines of the job's log as a string.
 /// Bounded at [`MAX_TAIL_LINES`].
 pub async fn tail_log(_state: &McpSharedState, input: &TailLogInput) -> Value {
-    let n = input
-        .lines
-        .unwrap_or(50)
-        .min(MAX_TAIL_LINES) as usize;
+    let n = input.lines.unwrap_or(50).min(MAX_TAIL_LINES) as usize;
 
     match mother::tail_log(&input.id, n).await {
         Ok(text) => json!({ "id": input.id, "lines": n, "log": text }),
@@ -102,9 +90,9 @@ pub async fn tail_log(_state: &McpSharedState, input: &TailLogInput) -> Value {
 /// Handle `mother.peek({ id })`.
 pub async fn peek(_state: &McpSharedState, input: &PeekInput) -> Value {
     match mother::peek(&input.id).await {
-        Ok(snap) => serde_json::to_value(&snap).unwrap_or_else(|e| {
-            json!({ "error": "serialization_failed", "detail": e.to_string() })
-        }),
+        Ok(snap) => serde_json::to_value(&snap).unwrap_or_else(
+            |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+        ),
         Err(e) => json!({ "error": "peek_failed", "detail": e.to_string() }),
     }
 }
@@ -112,9 +100,9 @@ pub async fn peek(_state: &McpSharedState, input: &PeekInput) -> Value {
 /// Handle `mother.get_status()`.
 pub fn get_status(state: &McpSharedState) -> Value {
     match state.mother_status_rx.borrow().as_ref() {
-        Some(status) => serde_json::to_value(status).unwrap_or_else(|e| {
-            json!({ "error": "serialization_failed", "detail": e.to_string() })
-        }),
+        Some(status) => serde_json::to_value(status).unwrap_or_else(
+            |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+        ),
         None => Value::Null,
     }
 }
