@@ -156,13 +156,12 @@ fn calendar_view_path() -> String {
     // Start at midnight local time today so events earlier in the day are included.
     // Uses plain calendarView (not delta) to get expanded instances with correct dates.
     let today_local = chrono::Local::now().date_naive();
-    let start_local = today_local
-        .and_hms_opt(0, 0, 0)
-        .expect("midnight is valid");
-    let start_utc: DateTime<Utc> = chrono::TimeZone::from_local_datetime(&chrono::Local, &start_local)
-        .single()
-        .unwrap_or_else(|| Utc::now().with_timezone(&chrono::Local))
-        .with_timezone(&Utc);
+    let start_local = today_local.and_hms_opt(0, 0, 0).expect("midnight is valid");
+    let start_utc: DateTime<Utc> =
+        chrono::TimeZone::from_local_datetime(&chrono::Local, &start_local)
+            .single()
+            .unwrap_or_else(|| Utc::now().with_timezone(&chrono::Local))
+            .with_timezone(&Utc);
     let end_utc = start_utc + ChronoDuration::hours(24);
     format!(
         "/me/calendarView?startDateTime={}&endDateTime={}&$select=subject,start,end,responseStatus,isCancelled&$top=50",
@@ -213,7 +212,13 @@ fn build_snapshot(raw_events: Vec<GraphEvent>) -> CalendarSnapshot {
 
             // Normalize Graph's "Canceled: Foo" title prefix → strip prefix, force status.
             let (title, forced_cancelled) = if raw_title.starts_with("Canceled: ") {
-                (raw_title.strip_prefix("Canceled: ").unwrap_or(&raw_title).to_owned(), true)
+                (
+                    raw_title
+                        .strip_prefix("Canceled: ")
+                        .unwrap_or(&raw_title)
+                        .to_owned(),
+                    true,
+                )
             } else {
                 (raw_title, false)
             };
@@ -287,4 +292,3 @@ fn sweater_for_minutes(mins: i64) -> String {
         "sage".to_owned()
     }
 }
-

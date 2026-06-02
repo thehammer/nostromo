@@ -97,12 +97,24 @@ impl FredView {
 
         // If no live daemon PTY exists, check the session store and auto-spawn.
         if pty.is_none() {
-            if let Some(entry) = crate::sessions::SessionStore::load().get(FRED_PTY_TAG).cloned() {
+            if let Some(entry) = crate::sessions::SessionStore::load()
+                .get(FRED_PTY_TAG)
+                .cloned()
+            {
                 let (cols, rows) = (80u16, 24u16);
                 let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
-                match ctx.pty_factory.spawn(FRED_PTY_TAG, &entry.cmd, &args, (cols, rows), ctx.event_tx.clone()) {
+                match ctx.pty_factory.spawn(
+                    FRED_PTY_TAG,
+                    &entry.cmd,
+                    &args,
+                    (cols, rows),
+                    ctx.event_tx.clone(),
+                ) {
                     Ok(backend) => {
-                        tracing::info!(view_tag = FRED_PTY_TAG, "auto-spawned PTY from session store");
+                        tracing::info!(
+                            view_tag = FRED_PTY_TAG,
+                            "auto-spawned PTY from session store"
+                        );
                         pty = Some(backend);
                     }
                     Err(e) => {
@@ -475,19 +487,15 @@ impl View for FredView {
         if self.pty.is_some() {
             if let AppEvent::Key(k) = ev {
                 let scroll_up = k.code == KeyCode::PageUp
-                    || (k.code == KeyCode::Up
-                        && k.modifiers.contains(KeyModifiers::SHIFT));
+                    || (k.code == KeyCode::Up && k.modifiers.contains(KeyModifiers::SHIFT));
                 let scroll_down = k.code == KeyCode::PageDown
-                    || (k.code == KeyCode::Down
-                        && k.modifiers.contains(KeyModifiers::SHIFT));
+                    || (k.code == KeyCode::Down && k.modifiers.contains(KeyModifiers::SHIFT));
 
                 if scroll_up {
-                    self.repl_scroll =
-                        self.repl_scroll.saturating_add(self.repl_area.height / 2);
+                    self.repl_scroll = self.repl_scroll.saturating_add(self.repl_area.height / 2);
                     return EventOutcome::Consumed;
                 } else if scroll_down {
-                    self.repl_scroll =
-                        self.repl_scroll.saturating_sub(self.repl_area.height / 2);
+                    self.repl_scroll = self.repl_scroll.saturating_sub(self.repl_area.height / 2);
                     return EventOutcome::Consumed;
                 } else if self.repl_scroll > 0 {
                     // Any other key resets to live view and falls through.
@@ -520,7 +528,12 @@ impl View for FredView {
                         self.pty = Some(backend);
                         self.pty_capturing = true;
                         let mut store = crate::sessions::SessionStore::load();
-                        store.record(FRED_PTY_TAG, "claude", &["--agent", "fred"], std::env::current_dir().ok());
+                        store.record(
+                            FRED_PTY_TAG,
+                            "claude",
+                            &["--agent", "fred"],
+                            std::env::current_dir().ok(),
+                        );
                         // TODO: remove session entry on PTY exit (no AppEvent::PtyExited today)
                     }
                     Err(e) => {

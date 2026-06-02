@@ -217,8 +217,7 @@ impl MotherView {
         let path = match self.selected_job().and_then(|j| j.plan_path.clone()) {
             Some(p) => p,
             None => {
-                *self.plan_text.lock().unwrap() =
-                    "(no plan file recorded for this job)".to_owned();
+                *self.plan_text.lock().unwrap() = "(no plan file recorded for this job)".to_owned();
                 return;
             }
         };
@@ -415,7 +414,10 @@ impl MotherView {
             } else {
                 theme::BORDER_INACTIVE
             }))
-            .title(Span::styled(" Detail ", Style::default().fg(theme::FG_MUTED)));
+            .title(Span::styled(
+                " Detail ",
+                Style::default().fg(theme::FG_MUTED),
+            ));
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -437,7 +439,11 @@ impl MotherView {
 
         // Dynamic layout: summary + [todos] + activity + log
         let todo_count = peek.as_ref().map(|p| p.todos.len()).unwrap_or(0).min(8);
-        let todo_height = if todo_count > 0 { (todo_count as u16) + 1 } else { 0 }; // rows + header
+        let todo_height = if todo_count > 0 {
+            (todo_count as u16) + 1
+        } else {
+            0
+        }; // rows + header
         let activity_height: u16 = 5; // header + 3 calls + blank
         let summary_height: u16 = 2; // status line + blank separator
 
@@ -506,13 +512,20 @@ impl MotherView {
             .unwrap_or_default();
         let time_str = format!("{created}{arrow}{finished}");
 
-        let repo = if job.repo.is_empty() { "—" } else { &job.repo };
+        let repo = if job.repo.is_empty() {
+            "—"
+        } else {
+            &job.repo
+        };
         let tier = job.current_tier.as_deref().unwrap_or("—");
 
         let id_short = &job.id[..job.id.len().min(12)];
 
         let spans = vec![
-            Span::styled(format!("{glyph} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{glyph} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(job.state.as_str(), Style::default().fg(color)),
             Span::styled("  ", Style::default()),
             Span::styled(repo, Style::default().fg(theme::FG_MUTED)),
@@ -677,10 +690,15 @@ fn render_todos(f: &mut Frame, area: Rect, todos: &[crate::mother::PeekTodo]) {
 
     for todo in todos.iter().take(8) {
         let (icon, icon_style) = match todo.status.as_str() {
-            "completed"   => ("✓", Style::default().fg(theme::SAGE)),
-            "in_progress" => ("▶", Style::default().fg(theme::AMBER).add_modifier(Modifier::BOLD)),
-            "cancelled"   => ("✗", Style::default().fg(theme::FG_MUTED)),
-            _             => ("○", Style::default().fg(theme::FG_MUTED)),
+            "completed" => ("✓", Style::default().fg(theme::SAGE)),
+            "in_progress" => (
+                "▶",
+                Style::default()
+                    .fg(theme::AMBER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            "cancelled" => ("✗", Style::default().fg(theme::FG_MUTED)),
+            _ => ("○", Style::default().fg(theme::FG_MUTED)),
         };
         let text_style = if todo.status == "in_progress" {
             Style::default().fg(theme::FG)
@@ -758,7 +776,10 @@ fn format_log_as_conversation(raw: &str) -> Vec<Line<'static>> {
         // === key: value === Mother metadata headers
         if line.starts_with("===") && line.ends_with("===") {
             let inner = line.trim_matches('=').trim().to_owned();
-            out.push(Line::from(Span::styled(inner, Style::default().fg(theme::FG_MUTED))));
+            out.push(Line::from(Span::styled(
+                inner,
+                Style::default().fg(theme::FG_MUTED),
+            )));
             continue;
         }
 
@@ -771,9 +792,7 @@ fn format_log_as_conversation(raw: &str) -> Vec<Line<'static>> {
 
                     // ── assistant message ─────────────────────────────────────
                     Some("assistant") => {
-                        let content = val
-                            .pointer("/message/content")
-                            .and_then(|c| c.as_array());
+                        let content = val.pointer("/message/content").and_then(|c| c.as_array());
                         if let Some(blocks) = content {
                             for block in blocks {
                                 match block.get("type").and_then(|t| t.as_str()) {

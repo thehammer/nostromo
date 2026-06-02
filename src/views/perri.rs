@@ -124,10 +124,7 @@ impl PerriView {
                         //   needs_review → plain ○ (needs at least one approval)
                         //   changes_req  → amber ● (author responded to our request)
                         let (req_glyph, req_style) = match pr.bucket.as_str() {
-                            "requested" => (
-                                "● ",
-                                Style::default().fg(theme::BORDER_ACTIVE),
-                            ),
+                            "requested" => ("● ", Style::default().fg(theme::BORDER_ACTIVE)),
                             "changes_req" => ("● ", theme::style_amber()),
                             _ => ("○ ", theme::style_normal()),
                         };
@@ -375,7 +372,12 @@ impl View for PerriView {
         if let AppEvent::Mouse(m) = ev {
             let in_repl = rect_contains(self.repl_area, m.column, m.row);
             let in_list = rect_contains(self.pr_list_area, m.column, m.row);
-            let len = self.queue_rx.borrow().as_ref().map(|s| s.items.len()).unwrap_or(0);
+            let len = self
+                .queue_rx
+                .borrow()
+                .as_ref()
+                .map(|s| s.items.len())
+                .unwrap_or(0);
             match m.kind {
                 MouseEventKind::ScrollUp => {
                     if in_repl {
