@@ -62,6 +62,11 @@ enum BrokerEvent {
     case hello(protocolVersion: Int, capabilities: [String])
     /// Atomic full-queue snapshot after subscribe.
     case snapshot([MotherJob])
+    /// A new job that arrived after the initial snapshot. The broker embeds
+    /// the full job payload in the "queued" event detail so subscribers
+    /// connected before this job existed can construct a MotherJob without
+    /// a reconnect or round-trip.
+    case newJob(MotherJob)
     /// A state or detail change on one job (state fold applied by AppStore).
     case stateChange(
         jobId:        String,
@@ -494,6 +499,19 @@ class MotherBrokerClient {
         default:
             // State/activity/await/current_activity/quota events
             guard let jobId = dataDict["job"] as? String, !jobId.isEmpty else { return }
+
+            // "queued" events carry the full job snapshot in their detail (the
+            // broker embeds it so subscribers connected before this job existed
+            // can construct a MotherJob without reconnecting). Try to decode it;
+            // if that fails fall through to the normal stateChange path.
+            if t == "queued", let job = decodeJob(dataDict) {
+                log.debug("broker queued event decoded as new job \(jobId.prefix(8), privacy: .public)")
+                DispatchQueue.main.async { [weak self] in
+                    self?.events.send(.newJob(job))
+                }
+                return
+            }
+
             let question     = dataDict["question"]      as? String
             let pausedReason = dataDict["paused_reason"] as? String
             let toState      = dataDict["to_state"]      as? String

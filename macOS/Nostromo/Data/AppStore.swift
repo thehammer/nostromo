@@ -135,6 +135,13 @@ class AppStore: ObservableObject {
             jobMap = Dictionary(uniqueKeysWithValues: jobs.map { ($0.id, $0) })
             publishJobsAndStatus()
 
+        case .newJob(let job):
+            // A job that was queued after the initial snapshot arrived.
+            // The broker embeds the full payload in the "queued" event so
+            // we can insert it directly rather than reconnecting.
+            jobMap[job.id] = job
+            publishJobsAndStatus()
+
         case .stateChange(let jobId, let eventKind, let question, let pausedReason, let toState):
             guard let existing = jobMap[jobId] else {
                 log.debug("broker stateChange for unknown job \(jobId.prefix(8), privacy: .public) — ignoring")
