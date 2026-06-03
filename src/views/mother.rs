@@ -1183,7 +1183,7 @@ impl View for MotherView {
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 if let Some(job) = self.selected_job().cloned() {
                                     // Only for non-terminal states.
-                                    if !matches!(job.state.as_str(), "succeeded" | "cancelled") {
+                                    if !matches!(job.state.as_str(), "succeeded" | "failed" | "cancelled") {
                                         self.pending_action = Some(MotherAction::CancelJob(job));
                                     }
                                 }

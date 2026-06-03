@@ -223,6 +223,7 @@ pub struct EventData {
     // ── await events ──────────────────────────────────────────────────────────
     pub question: Option<String>,
     pub paused_reason: Option<String>,
+    pub adherence_notes: Option<String>,
     // ── current_activity events ───────────────────────────────────────────────
     pub activity: Option<String>,
     // ── retried / escalated ───────────────────────────────────────────────────
