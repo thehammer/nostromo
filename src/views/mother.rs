@@ -55,6 +55,8 @@ pub enum MotherAction {
     RetryJob(MotherJob),
     /// `a` on an awaiting job — open await modal.
     OpenAwaitModal(MotherJob),
+    /// `f` on a ready/queued job — cost-warning confirm then broker force-start.
+    ForceStartJob(MotherJob),
 }
 
 // ── view ──────────────────────────────────────────────────────────────────────
@@ -683,7 +685,9 @@ impl MotherView {
                     Span::styled("r", Style::default().fg(theme::AMBER)),
                     Span::styled(" retry  ", Style::default().fg(theme::FG_MUTED)),
                     Span::styled("a", Style::default().fg(theme::AMBER)),
-                    Span::styled(" await", Style::default().fg(theme::FG_MUTED)),
+                    Span::styled(" await  ", Style::default().fg(theme::FG_MUTED)),
+                    Span::styled("f", Style::default().fg(theme::SAGE)),
+                    Span::styled(" force  ", Style::default().fg(theme::FG_MUTED)),
                 ],
             ),
             Focus::LogTail => (
@@ -1204,6 +1208,16 @@ impl View for MotherView {
                                     if job.is_awaiting() {
                                         self.pending_action =
                                             Some(MotherAction::OpenAwaitModal(job));
+                                    }
+                                }
+                                return EventOutcome::Consumed;
+                            }
+
+                            KeyCode::Char('f') | KeyCode::Char('F') => {
+                                if let Some(job) = self.selected_job().cloned() {
+                                    if matches!(job.state.as_str(), "ready" | "queued") {
+                                        self.pending_action =
+                                            Some(MotherAction::ForceStartJob(job));
                                     }
                                 }
                                 return EventOutcome::Consumed;
