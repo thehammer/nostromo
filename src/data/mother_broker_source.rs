@@ -81,6 +81,7 @@ fn handle_event(
             new_state,
             question,
             paused_reason,
+            adherence_notes,
         } => {
             let job = jobs.entry(job_id.clone()).or_insert_with(|| {
                 // New job seen after snapshot (race). Create a minimal record.
@@ -96,6 +97,7 @@ fn handle_event(
                     plan_path: None,
                     question: None,
                     paused_reason: None,
+                    adherence_notes: None,
                     adherence_status: None,
                     current_tier: None,
                     current_activity: None,
@@ -110,6 +112,7 @@ fn handle_event(
             if new_state == "awaiting" {
                 job.question = question;
                 job.paused_reason = paused_reason;
+                job.adherence_notes = adherence_notes;
 
                 if !seen_awaiting.contains(&job_id) {
                     seen_awaiting.insert(job_id.clone());
@@ -120,6 +123,7 @@ fn handle_event(
                 if new_state != "awaiting" {
                     job.question = None;
                     job.paused_reason = None;
+                    job.adherence_notes = None;
                 }
                 seen_awaiting.remove(&job_id);
             }

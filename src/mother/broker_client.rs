@@ -77,6 +77,7 @@ pub enum BrokerEvent {
         /// Set when the job transitioned into `awaiting`.
         question: Option<String>,
         paused_reason: Option<String>,
+        adherence_notes: Option<String>,
     },
     /// A job reported a `current_activity` update.
     CurrentActivity { job_id: String, activity: String },
@@ -618,11 +619,17 @@ fn dispatch_event(env: Envelope, events_tx: &broadcast::Sender<BrokerEvent>) {
                         } else {
                             None
                         };
+                        let adherence_notes = if new_state == "awaiting" {
+                            data.adherence_notes.clone()
+                        } else {
+                            None
+                        };
                         let _ = events_tx.send(BrokerEvent::StateChange {
                             job_id,
                             new_state,
                             question,
                             paused_reason,
+                            adherence_notes,
                         });
                     }
                     // NoStateChange events (e.g. quota category) are ignored.

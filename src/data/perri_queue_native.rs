@@ -291,6 +291,14 @@ impl PerriQueueNativeSource {
         let needs_items = search_issues(client, &q_needs, etags, item_cache).await?;
         let reviewed_items = search_issues(client, &q_reviewed, etags, item_cache).await?;
 
+        debug!(
+            me,
+            requested = requested_items.len(),
+            needs = needs_items.len(),
+            reviewed = reviewed_items.len(),
+            "perri queue search results"
+        );
+
         // ── Build bucket 1 & 2 candidates (dedup, basic filters) ─────────────
         // requested takes priority; needs_review fills in the rest.
         let requested_urls: std::collections::HashSet<&str> = requested_items
@@ -307,8 +315,21 @@ impl PerriQueueNativeSource {
                     .filter(|i| !requested_urls.contains(i.html_url.as_str()))
                     .map(|i| (i.clone(), "needs_review")),
             )
-            .filter(|(i, _)| !is_filtered(i, me))
+            .filter(|(i, _)| {
+                let filtered = is_filtered(i, me);
+                if filtered {
+                    debug!(
+                        url = %i.html_url,
+                        author = i.user.as_ref().map(|u| u.login.as_str()).unwrap_or("(none)"),
+                        draft = i.draft.unwrap_or(false),
+                        "is_filtered: dropping"
+                    );
+                }
+                !filtered
+            })
             .collect();
+
+        debug!(b12_candidates = b12_candidates.len(), "after is_filtered");
 
         // ── CI-filter buckets 1 & 2 concurrently ─────────────────────────────
         let b12_futures: Vec<_> = b12_candidates
@@ -356,6 +377,8 @@ impl PerriQueueNativeSource {
             .into_iter()
             .flatten()
             .collect();
+
+        debug!(b12_items = b12_items.len(), "after CI filter");
 
         // Prune ci_failure_cache: remove SHA entries that are no longer referenced
         // by any current PR head.  Runs after every cycle — the set is tiny.
