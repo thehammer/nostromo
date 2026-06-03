@@ -719,12 +719,7 @@ impl MotherView {
 
 // ── detail pane sub-renderers (free fns, borrow only what they need) ─────────
 
-fn render_phase_ribbon(
-    f: &mut Frame,
-    area: Rect,
-    ribbon: &str,
-    job: &crate::mother::MotherJob,
-) {
+fn render_phase_ribbon(f: &mut Frame, area: Rect, ribbon: &str, job: &crate::mother::MotherJob) {
     use ratatui::style::Color;
 
     // Determine which agent is currently running (for highlight).
@@ -1365,7 +1360,10 @@ pub fn phase_ribbon(job: &crate::mother::MotherJob) -> Option<String> {
 
     let phases: &[crate::mother::PhaseInfo] = if is_pipeline {
         // Use the last (most recent) cycle.
-        job.cycles.last().map(|c| c.phases.as_slice()).unwrap_or(&[])
+        job.cycles
+            .last()
+            .map(|c| c.phases.as_slice())
+            .unwrap_or(&[])
     } else {
         job.phases.as_slice()
     };
@@ -1524,7 +1522,10 @@ mod tests {
         assert!(ribbon.contains("redd✓"), "completed phase should use ✓");
         assert!(ribbon.contains("cody⟳"), "running phase should use ⟳");
         assert!(ribbon.contains("marty○"), "pending phase should use ○");
-        assert!(ribbon.ends_with("· cycle 2"), "pipeline ribbon should have cycle suffix");
+        assert!(
+            ribbon.ends_with("· cycle 2"),
+            "pipeline ribbon should have cycle suffix"
+        );
     }
 
     #[test]
@@ -1550,10 +1551,7 @@ mod tests {
         // Standard (non-pipeline) job with flat phases — no cycle suffix.
         let job = MotherJob {
             kind: None,
-            phases: vec![
-                phase("redd", "completed"),
-                phase("cody", "running"),
-            ],
+            phases: vec![phase("redd", "completed"), phase("cody", "running")],
             ..bare_job()
         };
         let ribbon = phase_ribbon(&job).expect("should produce a ribbon");

@@ -880,9 +880,19 @@ mod tests {
         match parse_line(line) {
             Some(ParsedLine::Blocks(b)) => {
                 assert_eq!(b.len(), 3);
-                assert_eq!(b[0], TurnBlock::Text { text: "before".into() });
+                assert_eq!(
+                    b[0],
+                    TurnBlock::Text {
+                        text: "before".into()
+                    }
+                );
                 assert!(matches!(b[1], TurnBlock::AskQuestion { .. }));
-                assert_eq!(b[2], TurnBlock::Text { text: "after".into() });
+                assert_eq!(
+                    b[2],
+                    TurnBlock::Text {
+                        text: "after".into()
+                    }
+                );
             }
             other => panic!("expected Blocks, got {other:?}"),
         }

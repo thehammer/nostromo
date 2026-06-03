@@ -832,7 +832,9 @@ mod tests {
     fn parse_threshold_crossed_with_minutes_remaining() {
         let line = r#"{"ts":"2026-06-01T02:22:48Z","type":"threshold_crossed","window":"seven_day","trigger":"exhaustion_imminent","minutes_remaining":8.5}"#;
         let ev = PostureThresholdEvent::parse_line(line).expect("should parse");
-        let minutes = ev.minutes_remaining.expect("minutes_remaining should be Some(8.5)");
+        let minutes = ev
+            .minutes_remaining
+            .expect("minutes_remaining should be Some(8.5)");
         assert!(
             (minutes - 8.5).abs() < 0.001,
             "minutes_remaining should be 8.5, got {minutes}"
