@@ -96,6 +96,7 @@ fn handle_event(
                     plan_path: None,
                     question: None,
                     paused_reason: None,
+                    adherence_notes: None,
                     adherence_status: None,
                     current_tier: None,
                     current_activity: None,
