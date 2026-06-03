@@ -176,6 +176,11 @@ class MotherBrokerClient {
         sendCommand(type: "retry", jobId: job, extra: [:], completion: completion)
     }
 
+    func forceStart(job: String,
+                    completion: @escaping (Result<Void, BrokerError>) -> Void) {
+        sendCommand(type: "force-start", jobId: job, extra: [:], completion: completion)
+    }
+
     // MARK: - Connection lifecycle (private)
 
     private func connect() {

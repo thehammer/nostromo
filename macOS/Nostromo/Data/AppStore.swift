@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Combine
 import os
@@ -225,6 +226,44 @@ class AppStore: ObservableObject {
         broker.retry(job: id) { [weak self] result in
             self?.handleActionResult(result, verb: "retry")
         }
+    }
+
+    func forceStartJob(_ id: String) {
+        broker.forceStart(job: id) { [weak self] result in
+            self?.handleActionResult(result, verb: "force-start")
+        }
+    }
+
+    func archiveJob(_ id: String) {
+        guard let bin = AppStore.findBinary("mother") else {
+            motherActionError = "mother binary not found"
+            return
+        }
+        DispatchQueue.global(qos: .utility).async {
+            let proc = Process()
+            proc.executableURL = bin
+            proc.arguments = ["archive", id]
+            try? proc.run()
+            proc.waitUntilExit()
+        }
+    }
+
+    func archiveAllJobs() {
+        guard let bin = AppStore.findBinary("mother") else {
+            motherActionError = "mother binary not found"
+            return
+        }
+        DispatchQueue.global(qos: .utility).async {
+            let proc = Process()
+            proc.executableURL = bin
+            proc.arguments = ["archive", "--older-than", "0"]
+            try? proc.run()
+            proc.waitUntilExit()
+        }
+    }
+
+    func openPlan(path: String) {
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
     func clearMotherActionError() { motherActionError = nil }

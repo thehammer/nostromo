@@ -403,6 +403,60 @@ private class MotherJobRow: NSView {
 
     @objc private func didClick() { onClick?(job) }
 
+    override func rightMouseDown(with event: NSEvent) {
+        let menu = NSMenu()
+        // Always available
+        if let planPath = job.planPath, !planPath.isEmpty {
+            menu.addItem(NSMenuItem(title: "View Plan", action: #selector(contextViewPlan), keyEquivalent: ""))
+        }
+        menu.addItem(NSMenuItem(title: "View Log", action: #selector(contextViewLog), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
+        // State-specific
+        switch job.state {
+        case "awaiting":
+            menu.addItem(NSMenuItem(title: "Answer…", action: #selector(contextAnswer), keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "Cancel", action: #selector(contextCancel), keyEquivalent: ""))
+        case "running", "queued", "ready":
+            menu.addItem(NSMenuItem(title: "Force-start", action: #selector(contextForceStart), keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "Cancel", action: #selector(contextCancel), keyEquivalent: ""))
+        case "failed", "cancelled":
+            menu.addItem(NSMenuItem(title: "Retry", action: #selector(contextRetry), keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "Archive", action: #selector(contextArchive), keyEquivalent: ""))
+        case "succeeded":
+            menu.addItem(NSMenuItem(title: "Archive", action: #selector(contextArchive), keyEquivalent: ""))
+        default: break
+        }
+        // Set targets
+        for item in menu.items { item.target = self }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    @objc private func contextViewPlan() {
+        onClick?(job)
+        if let path = job.planPath { AppStore.shared.openPlan(path: path) }
+    }
+
+    @objc private func contextViewLog() { onClick?(job) }
+
+    @objc private func contextAnswer() { onClick?(job) }
+
+    @objc private func contextForceStart() {
+        onClick?(job)
+        let alert = NSAlert()
+        alert.messageText = "Force-start this job?"
+        alert.informativeText = "Runs now, ignoring quota cap and conservative posture."
+        alert.addButton(withTitle: "Force-start")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        if alert.runModal() == .alertFirstButtonReturn {
+            AppStore.shared.forceStartJob(job.id)
+        }
+    }
+
+    @objc private func contextCancel()  { onClick?(job); AppStore.shared.cancelJob(job.id) }
+    @objc private func contextRetry()   { onClick?(job); AppStore.shared.retryJob(job.id) }
+    @objc private func contextArchive() { onClick?(job); AppStore.shared.archiveJob(job.id) }
+
     private func stateColor(_ state: String) -> NSColor {
         switch state {
         case "running":  return Theme.sage
@@ -501,12 +555,16 @@ private class MotherJobDetail: NSView {
     private let logTextView     = NSTextView()
 
     // Action widgets (created once, shown/hidden as needed)
-    private let brokerBanner    = NSTextField(labelWithString: "⚠ Mother broker offline")
-    private let replyScrollView = NSScrollView()
-    private let replyTextView   = NSTextView()
-    private let answerButton    = NSButton(title: "Answer", target: nil, action: nil)
-    private let cancelButton    = NSButton(title: "Cancel job", target: nil, action: nil)
-    private let retryButton     = NSButton(title: "Retry", target: nil, action: nil)
+    private let brokerBanner     = NSTextField(labelWithString: "⚠ Mother broker offline")
+    private let replyScrollView  = NSScrollView()
+    private let replyTextView    = NSTextView()
+    private let answerButton     = NSButton(title: "Answer",      target: nil, action: nil)
+    private let cancelButton     = NSButton(title: "Cancel job",  target: nil, action: nil)
+    private let retryButton      = NSButton(title: "Retry",       target: nil, action: nil)
+    private let forceStartButton = NSButton(title: "Force-start", target: nil, action: nil)
+    private let archiveButton    = NSButton(title: "Archive",     target: nil, action: nil)
+    private let archiveAllButton = NSButton(title: "Archive All", target: nil, action: nil)
+    private let viewPlanButton   = NSButton(title: "View Plan",   target: nil, action: nil)
     private let actionErrorLabel = NSTextField(labelWithString: "")
 
     private var logTimer:         Timer?
@@ -651,17 +709,26 @@ private class MotherJobDetail: NSView {
         replyScrollView.documentView          = replyTextView
 
         // Buttons
-        for btn in [answerButton, cancelButton, retryButton] {
+        for btn in [answerButton, cancelButton, retryButton,
+                    forceStartButton, archiveButton, archiveAllButton, viewPlanButton] {
             btn.bezelStyle  = .rounded
             btn.isBordered  = true
             btn.font        = .systemFont(ofSize: 11)
         }
-        answerButton.target = self
-        answerButton.action = #selector(didTapAnswer)
-        cancelButton.target = self
-        cancelButton.action = #selector(didTapCancel)
-        retryButton.target  = self
-        retryButton.action  = #selector(didTapRetry)
+        answerButton.target     = self
+        answerButton.action     = #selector(didTapAnswer)
+        cancelButton.target     = self
+        cancelButton.action     = #selector(didTapCancel)
+        retryButton.target      = self
+        retryButton.action      = #selector(didTapRetry)
+        forceStartButton.target = self
+        forceStartButton.action = #selector(didForceStart)
+        archiveButton.target    = self
+        archiveButton.action    = #selector(didArchive)
+        archiveAllButton.target = self
+        archiveAllButton.action = #selector(didArchiveAll)
+        viewPlanButton.target   = self
+        viewPlanButton.action   = #selector(didViewPlan)
 
         // Error label (shown inline below buttons, auto-clears)
         actionErrorLabel.font      = .systemFont(ofSize: 10)
@@ -750,21 +817,45 @@ private class MotherJobDetail: NSView {
             widgets.append(btnRow)
 
         case "running", "queued", "ready":
-            widgets.append(cancelButton)
+            let btnRow = NSStackView(views: [cancelButton, forceStartButton])
+            btnRow.orientation = .horizontal
+            btnRow.spacing     = 8
+            btnRow.translatesAutoresizingMaskIntoConstraints = false
+            widgets.append(btnRow)
 
         case "failed", "cancelled":
-            widgets.append(retryButton)
+            let btnRow = NSStackView(views: [retryButton, archiveButton])
+            btnRow.orientation = .horizontal
+            btnRow.spacing     = 8
+            btnRow.translatesAutoresizingMaskIntoConstraints = false
+            widgets.append(btnRow)
+
+        case "succeeded":
+            widgets.append(archiveButton)
 
         default:
-            break  // succeeded — no actions
+            break
         }
+
+        // View Plan — show whenever planPath is set
+        if let planPath = job.planPath, !planPath.isEmpty {
+            widgets.append(viewPlanButton)
+        }
+
+        // Archive All — always present
+        widgets.append(archiveAllButton)
 
         widgets.append(actionErrorLabel)
 
         // Disable action buttons when broker is offline
-        for btn in [answerButton, cancelButton, retryButton] {
+        for btn in [answerButton, cancelButton, retryButton,
+                    forceStartButton, archiveButton, archiveAllButton, viewPlanButton] {
             btn.isEnabled = connected
         }
+        // Archive and View Plan don't require broker — always enabled
+        archiveButton.isEnabled    = true
+        archiveAllButton.isEnabled = true
+        viewPlanButton.isEnabled   = true
 
         guard !widgets.filter({ $0 !== actionErrorLabel || !$0.isHidden }).isEmpty else { return }
 
@@ -808,9 +899,13 @@ private class MotherJobDetail: NSView {
     private func updateBrokerBanner(_ connected: Bool) {
         guard currentJob != nil else { return }
         brokerBanner.isHidden = connected
-        for btn in [answerButton, cancelButton, retryButton] {
+        for btn in [answerButton, cancelButton, retryButton, forceStartButton] {
             btn.isEnabled = connected
         }
+        // Archive and View Plan don't use the broker — always enabled
+        archiveButton.isEnabled    = true
+        archiveAllButton.isEnabled = true
+        viewPlanButton.isEnabled   = true
     }
 
     private func showActionError(_ message: String) {
@@ -842,6 +937,40 @@ private class MotherJobDetail: NSView {
     @objc private func didTapRetry() {
         guard let job = currentJob else { return }
         AppStore.shared.retryJob(job.id)
+    }
+
+    @objc private func didForceStart() {
+        guard let job = currentJob else { return }
+        let alert = NSAlert()
+        alert.messageText = "Force-start \"\(job.title.isEmpty ? job.id : job.title)\"?"
+        alert.informativeText = "This runs the job now even if quota is over cap, at full tier (ignoring conservative posture). It consumes headroom shared with other jobs and interactive sessions."
+        alert.addButton(withTitle: "Force-start")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        if alert.runModal() == .alertFirstButtonReturn {
+            AppStore.shared.forceStartJob(job.id)
+        }
+    }
+
+    @objc private func didArchive() {
+        guard let job = currentJob else { return }
+        AppStore.shared.archiveJob(job.id)
+    }
+
+    @objc private func didArchiveAll() {
+        let alert = NSAlert()
+        alert.messageText = "Archive all terminal-state jobs?"
+        alert.informativeText = "This archives every succeeded, failed, and cancelled job immediately."
+        alert.addButton(withTitle: "Archive All")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            AppStore.shared.archiveAllJobs()
+        }
+    }
+
+    @objc private func didViewPlan() {
+        guard let path = currentJob?.planPath, !path.isEmpty else { return }
+        AppStore.shared.openPlan(path: path)
     }
 
     private func rebuildMeta(_ job: MotherJob) {
