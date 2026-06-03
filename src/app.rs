@@ -122,6 +122,11 @@ pub enum ModalState {
     ConfirmArchiveAll {
         modal: ConfirmModal,
     },
+    /// Force-start cost-warning confirm.
+    ConfirmForceStart {
+        job_id: String,
+        modal: ConfirmModal,
+    },
     /// Command palette overlay (Ctrl-P).
     Palette(Box<CommandPalette>),
 }
@@ -1181,6 +1186,25 @@ fn handle_modal_key(
                 state.modal = Some(ModalState::ConfirmArchiveAll { modal: m });
             }
         },
+
+        ModalState::ConfirmForceStart { job_id, modal: m } => match m.on_key(k) {
+            ConfirmAction::Yes => {
+                let broker = state.broker_client.clone();
+                let event_tx = state.event_tx.clone();
+                let id = job_id.clone();
+                tokio::spawn(async move {
+                    let cmd = crate::mother::protocol::cmd_force_start(&id);
+                    if let Err(e) = broker.send_command(cmd).await {
+                        let msg = e.operator_message("force-start");
+                        let _ = event_tx.send(AppEvent::StatusNote(msg));
+                    }
+                });
+            }
+            ConfirmAction::No | ConfirmAction::Dismiss => {}
+            ConfirmAction::Consumed => {
+                state.modal = Some(ModalState::ConfirmForceStart { job_id, modal: m });
+            }
+        },
     }
 
     new_active
@@ -1319,6 +1343,18 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
                 modal: ConfirmModal::new(
                     "Archive ALL terminal-state jobs? [y/n]".to_string(),
                 ),
+            });
+        }
+
+        MotherAction::ForceStartJob(job) => {
+            state.modal = Some(ModalState::ConfirmForceStart {
+                job_id: job.id.clone(),
+                modal: ConfirmModal::new(format!(
+                    "Force-start \"{}\"? Runs now ignoring quota cap \
+                     and conservative posture. Uses headroom shared with \
+                     other jobs and sessions. [y] confirm  [n] cancel",
+                    if job.title.is_empty() { &job.id } else { &job.title }
+                )),
             });
         }
     }

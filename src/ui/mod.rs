@@ -162,6 +162,7 @@ fn render_modal(f: &mut Frame, area: Rect, modal: &ModalState) {
         ModalState::ConfirmCancel { modal: m, .. } => m.render(f, area),
         ModalState::ConfirmRetry { modal: m, .. } => m.render(f, area),
         ModalState::ConfirmArchiveAll { modal: m } => m.render(f, area),
+        ModalState::ConfirmForceStart { modal: m, .. } => m.render(f, area),
         ModalState::Palette(p) => p.render(f, area),
     }
 }

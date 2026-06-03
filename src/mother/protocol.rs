@@ -95,6 +95,11 @@ pub fn cmd_retry(job: &str) -> Envelope {
     Envelope::command("retry", serde_json::json!({ "job": job }))
 }
 
+/// Build a `force-start` command — bypasses quota cap and conservative posture.
+pub fn cmd_force_start(job: &str) -> Envelope {
+    Envelope::command("force-start", serde_json::json!({ "job": job }))
+}
+
 /// Build a `subscribe` command, filtering requested categories to only those
 /// advertised by the broker in its `hello` event.
 ///
