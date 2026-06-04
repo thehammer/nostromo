@@ -15,7 +15,10 @@ use tokio::sync::watch;
 
 use crate::{
     config::Config,
-    data::{perri_pr::PrSnapshot, perri_queue::PrQueueSnapshot},
+    data::{
+        perri_pr::PrSnapshot,
+        perri_queue::{CiState, PrQueueSnapshot},
+    },
     event::AppEvent,
     pty::{PtyHost, PtyWidget},
     transcript::TranscriptPane,
@@ -303,12 +306,23 @@ impl PerriView {
                         let selected_glyph = if i == self.selected_pr { "▶ " } else { "  " };
                         let number_str = format!("#{}", pr.number);
                         let repo_short = pr.repo.split('/').next_back().unwrap_or(&pr.repo);
-                        let label_width = inner.width as usize - 16;
+                        // -18: 2 (selected) + 2 (bucket) + 2 (ci glyph) + 7 (number) + 1 (space)
+                        // + 4 (repo short min) = leaves remaining for title
+                        let label_width = (inner.width as usize).saturating_sub(18);
                         let title_str = truncate(&pr.title, label_width);
+
+                        let ci_glyph = pr.ci_state.glyph();
+                        let ci_style = match pr.ci_state {
+                            CiState::Failure => theme::style_red(),
+                            CiState::Pending => theme::style_amber(),
+                            CiState::Success => theme::style_sage(),
+                            CiState::Unknown => theme::style_muted(),
+                        };
 
                         Line::from(vec![
                             Span::styled(selected_glyph, theme::style_muted()),
                             Span::styled(req_glyph, req_style),
+                            Span::styled(format!("{ci_glyph} "), ci_style),
                             Span::styled(
                                 format!("{number_str:<6} "),
                                 Style::default().fg(theme::BORDER_ACTIVE),
@@ -391,7 +405,87 @@ impl PerriView {
         f.render_widget(block, area);
 
         if let Some(s) = snap {
-            if s.diff.is_empty() {
+            // D6: skip CI block when there's nothing to show.
+            let has_ci_data = !s.ci_checks.is_empty()
+                || s.additions > 0
+                || s.deletions > 0
+                || s.changed_files > 0;
+
+            if has_ci_data {
+                // Build CI paragraph lines.
+                let mut ci_lines: Vec<Line> = Vec::new();
+
+                // Size header line.
+                let file_word = if s.changed_files == 1 {
+                    "file"
+                } else {
+                    "files"
+                };
+                ci_lines.push(Line::from(vec![
+                    Span::styled(format!("+{}", s.additions), theme::style_sage()),
+                    Span::styled(" / ", theme::style_muted()),
+                    Span::styled(format!("-{}", s.deletions), theme::style_red()),
+                    Span::styled(
+                        format!(" · {} {} changed", s.changed_files, file_word),
+                        theme::style_muted(),
+                    ),
+                ]));
+
+                // Per-check lines.
+                for check in &s.ci_checks {
+                    let check_style = match check.state {
+                        CiState::Failure => theme::style_red(),
+                        CiState::Pending => theme::style_amber(),
+                        CiState::Success => theme::style_sage(),
+                        CiState::Unknown => theme::style_muted(),
+                    };
+                    ci_lines.push(Line::from(Span::styled(
+                        format!("{} {}", check.state.glyph(), check.name),
+                        check_style,
+                    )));
+
+                    // Expand failure log if present.
+                    if let Some(detail) = &check.detail {
+                        for log_line in detail.lines() {
+                            ci_lines.push(Line::from(Span::styled(
+                                log_line.to_owned(),
+                                theme::style_muted(),
+                            )));
+                        }
+                    }
+                }
+
+                // Separator line.
+                let sep_width = inner.width as usize;
+                ci_lines.push(Line::from(Span::styled(
+                    "─".repeat(sep_width),
+                    theme::style_muted(),
+                )));
+
+                // Cap CI block height at inner height - 3 (leave room for diff).
+                let ci_height = (ci_lines.len() as u16).min(inner.height.saturating_sub(3));
+
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(ci_height), Constraint::Min(1)])
+                    .split(inner);
+
+                f.render_widget(Paragraph::new(ci_lines), chunks[0]);
+
+                if s.diff.is_empty() {
+                    let p = Paragraph::new(Line::from(Span::styled(
+                        " No diff available",
+                        theme::style_muted(),
+                    )));
+                    f.render_widget(p, chunks[1]);
+                } else {
+                    f.render_widget(
+                        SyntectDiff::new(&s.diff, Arc::clone(&self.syntect))
+                            .max_lines(chunks[1].height as usize),
+                        chunks[1],
+                    );
+                }
+            } else if s.diff.is_empty() {
                 let p = Paragraph::new(Line::from(Span::styled(
                     " No diff available",
                     theme::style_muted(),

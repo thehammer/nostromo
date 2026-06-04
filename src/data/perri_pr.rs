@@ -20,7 +20,17 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
-use crate::{config::Config, data::dirty_file};
+use crate::{config::Config, data::dirty_file, data::perri_queue::CiState};
+
+/// A single CI check-run result attached to a PR snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CiCheck {
+    pub name: String,
+    pub state: CiState,
+    /// For failing checks: the truncated failure-log tail (see D3).
+    /// `None` for passing / pending / unknown checks.
+    pub detail: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PrSnapshot {
@@ -33,6 +43,24 @@ pub struct PrSnapshot {
     pub diff: String,
     pub stale: bool,
     pub error: Option<String>,
+    /// Per-check CI results (empty when unknown / not yet fetched).
+    #[serde(default)]
+    pub ci_checks: Vec<CiCheck>,
+    /// PR additions from the GitHub API.
+    #[serde(default)]
+    pub additions: u64,
+    /// PR deletions from the GitHub API.
+    #[serde(default)]
+    pub deletions: u64,
+    /// Number of files changed in this PR.
+    #[serde(default)]
+    pub changed_files: u64,
+    /// HEAD SHA this snapshot was fetched at — lets the GUI match cache to queue.
+    #[serde(default)]
+    pub head_sha: String,
+    /// True when the diff exceeded the render threshold; `diff` is blanked.
+    #[serde(default)]
+    pub diff_too_large: bool,
 }
 
 pub struct PerriPrSource {

@@ -4,6 +4,27 @@ import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "perri-view")
 
+// MARK: - CiState display extensions (AppKit colours live here, not in Models.swift)
+
+extension CiState {
+    var glyph: String {
+        switch self {
+        case .success: return "✓"
+        case .pending: return "⟳"
+        case .failure: return "✗"
+        case .unknown: return "-"
+        }
+    }
+    var color: NSColor {
+        switch self {
+        case .success: return Theme.sage
+        case .pending: return Theme.amber
+        case .failure: return Theme.redSweater
+        case .unknown: return Theme.fgMuted
+        }
+    }
+}
+
 // MARK: - PerriView
 
 /// Perri agent view — PR dashboard (top) + Perri REPL (bottom), draggable split.
@@ -109,7 +130,13 @@ private class PerriHUD: NSView, NSSplitViewDelegate {
             split.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
-        prList.onSelect = { [weak self] pr in self?.prDetail.show(pr) }
+        prList.onSelect = { [weak self] pr in
+            guard let pr else { return }
+            // Reset enriched content immediately so the prior PR's detail is never visible.
+            self?.prDetail.showStatic(pr)
+            // Ask AppStore to populate the enriched detail pane.
+            AppStore.shared.selectPR(pr)
+        }
 
         // Subscribe to real queue data
         AppStore.shared.$perriQueue
@@ -120,6 +147,16 @@ private class PerriHUD: NSView, NSSplitViewDelegate {
         AppStore.shared.$perriQueueError
             .receive(on: DispatchQueue.main)
             .sink { [weak self] err in self?.prList.setError(err) }
+            .store(in: &cancellables)
+
+        AppStore.shared.$perriDetail
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] detail in self?.prDetail.updateDetail(detail) }
+            .store(in: &cancellables)
+
+        AppStore.shared.$perriDetailLoading
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] loading in self?.prDetail.setLoading(loading) }
             .store(in: &cancellables)
     }
 
@@ -394,6 +431,12 @@ private class PerriPRRow: NSView {
         dot.textColor = bucketColor(pr.bucket)
         dot.setContentHuggingPriority(.required, for: .horizontal)
 
+        // CI state glyph — between bucket dot and PR number.
+        let ci = NSTextField(labelWithString: pr.ciState.glyph)
+        ci.font      = .systemFont(ofSize: 10, weight: .semibold)
+        ci.textColor = pr.ciState.color
+        ci.setContentHuggingPriority(.required, for: .horizontal)
+
         let numLabel = NSTextField(labelWithString: "#\(pr.number)")
         numLabel.font      = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         numLabel.textColor = Theme.fgMuted
@@ -410,7 +453,7 @@ private class PerriPRRow: NSView {
         titleLabel.textColor     = Theme.fg
         titleLabel.lineBreakMode = .byTruncatingTail
 
-        let topRow = NSStackView(views: [dot, numLabel, titleLabel])
+        let topRow = NSStackView(views: [dot, ci, numLabel, titleLabel])
         topRow.orientation = .horizontal
         topRow.spacing     = 5
         topRow.alignment   = .centerY
@@ -465,6 +508,109 @@ private class PerriPRRow: NSView {
     }
 }
 
+// MARK: - PerriCICheckRow
+
+private class PerriCICheckRow: NSView {
+
+    private let check: CiCheck
+    private var popover: NSPopover?
+
+    init(check: CiCheck) {
+        self.check = check
+        super.init(frame: .zero)
+        setup()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setup() {
+        let glyph = NSTextField(labelWithString: check.state.glyph)
+        glyph.font      = .systemFont(ofSize: 10, weight: .semibold)
+        glyph.textColor = check.state.color
+        glyph.setContentHuggingPriority(.required, for: .horizontal)
+
+        let name = NSTextField(labelWithString: check.name)
+        name.font          = Theme.monoFont
+        name.textColor     = Theme.fg
+        name.lineBreakMode = .byTruncatingTail
+
+        let row = NSStackView(views: [glyph, name])
+        row.orientation = .horizontal
+        row.spacing     = 6
+        row.alignment   = .centerY
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 20),
+        ])
+
+        if check.state == .failure && !(check.detail ?? "").isEmpty {
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self, userInfo: nil
+            ))
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        guard check.state == .failure, !(check.detail ?? "").isEmpty else { return }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self, userInfo: nil
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard check.state == .failure, let log = check.detail, !log.isEmpty else { return }
+        let pop = NSPopover()
+        pop.behavior = .transient
+        pop.contentViewController = makeLogVC(log)
+        pop.show(relativeTo: bounds, of: self, preferredEdge: .maxX)
+        popover = pop
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        popover?.performClose(nil)
+        popover = nil
+    }
+
+    private func makeLogVC(_ text: String) -> NSViewController {
+        let vc = NSViewController()
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        scroll.hasVerticalScroller   = true
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers    = true
+        scroll.drawsBackground       = true
+        scroll.backgroundColor       = NSColor(white: 0.08, alpha: 1)
+        scroll.borderType            = .noBorder
+
+        let tv = NSTextView(frame: scroll.bounds)
+        tv.isEditable       = false
+        tv.isSelectable     = true
+        tv.drawsBackground  = true
+        tv.backgroundColor  = NSColor(white: 0.08, alpha: 1)
+        tv.textColor        = Theme.fg
+        tv.font             = Theme.monoFont
+        tv.string           = text
+        tv.autoresizingMask = [.width, .height]
+
+        scroll.documentView = tv
+        vc.view = scroll
+        vc.preferredContentSize = NSSize(width: 480, height: 320)
+        return vc
+    }
+}
+
 // MARK: - PerriPRDetail
 
 private class PerriPRDetail: NSView {
@@ -473,11 +619,28 @@ private class PerriPRDetail: NSView {
     private let scrollView  = NSScrollView()
     private let contentView = NSView()
 
+    // Static header (always visible once a PR is selected)
     private let numberLabel  = NSTextField(labelWithString: "")
     private let titleLabel   = NSTextField(labelWithString: "")
     private let bucketLabel  = NSTextField(labelWithString: "")
     private let metaStack    = NSStackView()
     private let openButton   = NSButton()
+
+    // Enriched sections (shown after detail loads)
+    private let sizeLabel    = NSTextField(labelWithString: "")
+    private let ciSection    = NSStackView()
+    private let diffView     = NSTextView()
+    private let diffScroll   = NSScrollView()
+    private let diffPlaceholder = NSTextField(labelWithString: "")
+    private let loadingSpinner  = NSProgressIndicator()
+    private let errorBanner     = NSTextField(labelWithString: "")
+
+    // Bottom-of-content anchor constraint — rebuilt when layout changes.
+    private var bottomConstraint: NSLayoutConstraint?
+
+    // Currently shown static PR (for stale-fetch guard in updateDetail).
+    private var currentPR: PRQueueItem?
+    private var currentURL: String?
 
     override init(frame: NSRect) { super.init(frame: frame); setup() }
     required init?(coder: NSCoder) { super.init(coder: coder); setup() }
@@ -502,12 +665,12 @@ private class PerriPRDetail: NSView {
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-
             contentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             contentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
         ])
 
+        // Static header fields
         numberLabel.font      = Theme.monoFont
         numberLabel.textColor = Theme.fgMuted
 
@@ -523,15 +686,67 @@ private class PerriPRDetail: NSView {
         metaStack.spacing     = 4
         metaStack.alignment   = .leading
 
-        openButton.title       = "Open in GitHub  ↗"
-        openButton.bezelStyle  = .rounded
-        openButton.isBordered  = true
-        openButton.target      = self
-        openButton.action      = #selector(openInGitHub)
-        openButton.font        = .systemFont(ofSize: 11)
+        openButton.title            = "Open in GitHub  ↗"
+        openButton.bezelStyle       = .rounded
+        openButton.isBordered       = true
+        openButton.target           = self
+        openButton.action           = #selector(openInGitHub)
+        openButton.font             = .systemFont(ofSize: 11)
         openButton.contentTintColor = Theme.cornflower
 
-        for v in [numberLabel, titleLabel, bucketLabel, metaStack, openButton] as [NSView] {
+        // Size header
+        sizeLabel.font      = Theme.monoFont
+        sizeLabel.textColor = Theme.fgMuted
+        sizeLabel.isHidden  = true
+
+        // CI section (vertical stack of PerriCICheckRow)
+        ciSection.orientation = .vertical
+        ciSection.spacing     = 0
+        ciSection.alignment   = .leading
+        ciSection.isHidden    = true
+
+        // Diff view
+        diffScroll.hasVerticalScroller   = true
+        diffScroll.hasHorizontalScroller = true
+        diffScroll.autohidesScrollers    = true
+        diffScroll.drawsBackground       = true
+        diffScroll.backgroundColor       = NSColor(white: 0.04, alpha: 1)
+        diffScroll.borderType            = .noBorder
+
+        diffView.isEditable      = false
+        diffView.isSelectable    = true
+        diffView.drawsBackground = true
+        diffView.backgroundColor = NSColor(white: 0.04, alpha: 1)
+        diffView.font            = Theme.monoFont
+        diffView.isHidden        = true
+
+        diffScroll.documentView  = diffView
+        diffScroll.isHidden      = true
+
+        diffPlaceholder.font      = Theme.monoFont
+        diffPlaceholder.textColor = Theme.fgMuted
+        diffPlaceholder.stringValue = "Diff too large to display"
+        diffPlaceholder.isHidden  = true
+
+        // Loading spinner
+        loadingSpinner.style                  = .spinning
+        loadingSpinner.controlSize            = .small
+        loadingSpinner.isDisplayedWhenStopped = false
+        loadingSpinner.isHidden               = true
+
+        // Error banner
+        errorBanner.font          = Theme.monoFont
+        errorBanner.textColor     = Theme.redSweater
+        errorBanner.lineBreakMode = .byWordWrapping
+        errorBanner.maximumNumberOfLines = 4
+        errorBanner.isHidden      = true
+
+        let allViews: [NSView] = [
+            numberLabel, titleLabel, bucketLabel, metaStack, openButton,
+            sizeLabel, ciSection, diffScroll, diffPlaceholder,
+            loadingSpinner, errorBanner,
+        ]
+        for v in allViews {
             v.translatesAutoresizingMaskIntoConstraints = false
             contentView.addSubview(v)
         }
@@ -551,11 +766,38 @@ private class PerriPRDetail: NSView {
             metaStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             metaStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
 
-            openButton.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 20),
+            openButton.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 16),
             openButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            openButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
-        ])
 
+            sizeLabel.topAnchor.constraint(equalTo: openButton.bottomAnchor, constant: 20),
+            sizeLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            sizeLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+
+            ciSection.topAnchor.constraint(equalTo: sizeLabel.bottomAnchor, constant: 12),
+            ciSection.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            ciSection.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+
+            diffScroll.topAnchor.constraint(equalTo: ciSection.bottomAnchor, constant: 12),
+            diffScroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            diffScroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            diffScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100),
+
+            diffPlaceholder.topAnchor.constraint(equalTo: ciSection.bottomAnchor, constant: 12),
+            diffPlaceholder.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            diffPlaceholder.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+
+            loadingSpinner.topAnchor.constraint(equalTo: openButton.bottomAnchor, constant: 20),
+            loadingSpinner.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            loadingSpinner.widthAnchor.constraint(equalToConstant: 20),
+            loadingSpinner.heightAnchor.constraint(equalToConstant: 20),
+
+            errorBanner.topAnchor.constraint(equalTo: openButton.bottomAnchor, constant: 20),
+            errorBanner.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            errorBanner.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+        ])
+        rebuildBottomConstraint(anchor: openButton)
+
+        // Empty state overlay
         emptyLabel.font      = .systemFont(ofSize: 13)
         emptyLabel.textColor = Theme.fgMuted
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -568,14 +810,15 @@ private class PerriPRDetail: NSView {
         showEmpty()
     }
 
-    private var currentURL: String?
+    // MARK: - Public API
 
-    func show(_ pr: PRQueueItem?) {
-        guard let pr else { showEmpty(); return }
+    /// Show the static PR header immediately; clears enriched sections.
+    func showStatic(_ pr: PRQueueItem) {
+        currentPR  = pr
+        currentURL = pr.url
 
         scrollView.isHidden = false
         emptyLabel.isHidden = true
-        currentURL = pr.url
 
         let shortRepo = (pr.repo as NSString).lastPathComponent
         numberLabel.stringValue = "#\(pr.number) · \(shortRepo)"
@@ -584,26 +827,104 @@ private class PerriPRDetail: NSView {
         bucketLabel.textColor   = bucketColor(pr.bucket)
 
         rebuildMeta(pr)
+
+        // Clear enriched sections until detail arrives.
+        sizeLabel.isHidden = true
+        ciSection.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        ciSection.isHidden = true
+        diffScroll.isHidden = true
+        diffPlaceholder.isHidden = true
+        errorBanner.isHidden = true
+        rebuildBottomConstraint(anchor: openButton)
     }
+
+    /// Apply enriched detail (size, CI, diff) when available.
+    func updateDetail(_ detail: PRDetail?) {
+        guard let detail,
+              let pr = currentPR,
+              detail.repo == pr.repo,
+              (detail.prNumber.map { Int($0) } ?? -1) == pr.number
+        else { return }
+
+        loadingSpinner.stopAnimation(nil)
+        loadingSpinner.isHidden = true
+
+        if let err = detail.error, !err.isEmpty {
+            errorBanner.stringValue = "Error: \(err)"
+            errorBanner.isHidden    = false
+            rebuildBottomConstraint(anchor: errorBanner)
+            return
+        }
+
+        // Size header
+        sizeLabel.stringValue = "+\(detail.additions) / -\(detail.deletions) · \(detail.changedFiles) files changed"
+        sizeLabel.isHidden    = false
+
+        // CI checks
+        ciSection.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if !detail.ciChecks.isEmpty {
+            for check in detail.ciChecks {
+                let row = PerriCICheckRow(check: check)
+                row.translatesAutoresizingMaskIntoConstraints = false
+                ciSection.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalTo: ciSection.widthAnchor).isActive = true
+            }
+            ciSection.isHidden = false
+        }
+
+        // Diff
+        var lastAnchor: NSView = ciSection.isHidden ? sizeLabel : ciSection
+        if detail.diffTooLarge || detail.diff.isEmpty {
+            if detail.diffTooLarge {
+                diffPlaceholder.isHidden = false
+                lastAnchor = diffPlaceholder
+            }
+        } else {
+            // Build attributed string off-main, then assign.
+            let rawDiff = detail.diff
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let attrStr = buildDiffAttributedString(rawDiff)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.diffView.textStorage?.setAttributedString(attrStr)
+                    self.diffScroll.isHidden = false
+                    self.rebuildBottomConstraint(anchor: self.diffScroll)
+                }
+            }
+            lastAnchor = diffScroll
+        }
+        rebuildBottomConstraint(anchor: lastAnchor)
+    }
+
+    /// Show / hide the loading spinner.
+    func setLoading(_ loading: Bool) {
+        if loading {
+            loadingSpinner.isHidden = false
+            loadingSpinner.startAnimation(nil)
+        } else {
+            loadingSpinner.stopAnimation(nil)
+            loadingSpinner.isHidden = true
+        }
+    }
+
+    // MARK: - Private helpers
 
     private func showEmpty() {
         scrollView.isHidden = true
         emptyLabel.isHidden = false
         currentURL = nil
+        currentPR  = nil
     }
 
     private func rebuildMeta(_ pr: PRQueueItem) {
         metaStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let shortRepo = (pr.repo as NSString).lastPathComponent
-        let pairs: [(String, String)] = [
-            ("Repo",    shortRepo),
-            ("Author",  pr.author),
-            ("Bucket",  pr.bucket),
-        ]
         if pr.newActivity {
-            metaStack.addArrangedSubview(metaRow(key: "Activity", value: "New activity since your review", highlight: true))
+            metaStack.addArrangedSubview(metaRow(key: "Activity",
+                                                  value: "New activity since your review",
+                                                  highlight: true))
         }
-        for (k, v) in pairs {
+        for (k, v) in [("Repo", shortRepo), ("Author", pr.author), ("Bucket", pr.bucket)] {
             metaStack.addArrangedSubview(metaRow(key: k, value: v, highlight: false))
         }
     }
@@ -626,6 +947,14 @@ private class PerriPRDetail: NSView {
         return row
     }
 
+    /// Update the content-view bottom constraint so the scroll view sizes correctly.
+    private func rebuildBottomConstraint(anchor: NSView) {
+        bottomConstraint?.isActive = false
+        let c = contentView.bottomAnchor.constraint(equalTo: anchor.bottomAnchor, constant: 20)
+        c.isActive = true
+        bottomConstraint = c
+    }
+
     @objc private func openInGitHub() {
         guard let urlString = currentURL, let url = URL(string: urlString) else { return }
         NSWorkspace.shared.open(url)
@@ -633,9 +962,9 @@ private class PerriPRDetail: NSView {
 
     private func bucketDisplay(_ bucket: String) -> String {
         switch bucket {
-        case "requested":   return "REVIEW REQUESTED"
+        case "requested":    return "REVIEW REQUESTED"
         case "needs_review": return "NEEDS REVIEW"
-        case "changes_req": return "CHANGES REQUESTED"
+        case "changes_req":  return "CHANGES REQUESTED"
         default:             return bucket.uppercased()
         }
     }
@@ -647,4 +976,26 @@ private class PerriPRDetail: NSView {
         default:             return Theme.cornflower
         }
     }
+}
+
+// MARK: - Diff attributed string builder
+
+/// Build a syntax-coloured attributed string from a raw unified diff.
+/// Pure function — safe to call off the main thread.
+private func buildDiffAttributedString(_ diff: String) -> NSAttributedString {
+    let font = Theme.monoFont
+    let result = NSMutableAttributedString()
+    let lines = diff.components(separatedBy: "\n")
+    for (i, line) in lines.enumerated() {
+        let color = diffLineColor(line)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font:            font,
+            .foregroundColor: color,
+        ]
+        result.append(NSAttributedString(string: line, attributes: attrs))
+        if i < lines.count - 1 {
+            result.append(NSAttributedString(string: "\n", attributes: attrs))
+        }
+    }
+    return result
 }

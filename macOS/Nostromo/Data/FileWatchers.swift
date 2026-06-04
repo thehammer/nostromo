@@ -20,6 +20,13 @@ class FileWatchers {
     /// Items from ~/.claude/state/perri/.queue.cache.json — updated via FSEvents.
     let perriQueue   = CurrentValueSubject<[PRQueueItem],     Never>([])
 
+    /// Full PR detail decoded from current-pr-detail.json — updated via FSEvents.
+    let perriDetail  = CurrentValueSubject<PRDetail?,         Never>(nil)
+
+    /// Fires when any file in the pr-cache/ directory changes (add/update).
+    /// Subscribers re-check the cache for a pending selection.
+    let prCacheChanged = PassthroughSubject<Void, Never>()
+
     /// Fires once per new threshold_crossed line appended to budget-posture.events.jsonl.
     /// History is NOT replayed on startup (seek-to-EOF or last-persisted offset).
     let thresholdEvents = PassthroughSubject<PostureThresholdEvent, Never>()
@@ -31,6 +38,14 @@ class FileWatchers {
     // FSEvent watcher for the perri queue cache file
     private var perriQueueSource: DispatchSourceFileSystemObject?
     private var perriQueueFd:     Int32 = -1
+
+    // FSEvent watcher for current-pr-detail.json
+    private var perriDetailSource: DispatchSourceFileSystemObject?
+    private var perriDetailFd:     Int32 = -1
+
+    // FSEvent watcher for pr-cache/ directory
+    private var prCacheSource: DispatchSourceFileSystemObject?
+    private var prCacheFd:     Int32 = -1
 
     // FSEvent watcher for budget-posture.events.jsonl
     private var thresholdSource:  DispatchSourceFileSystemObject?
@@ -53,6 +68,8 @@ class FileWatchers {
         }
         RunLoop.main.add(timer!, forMode: .common)
         startPerriQueueWatcher()
+        startPerriDetailWatcher()
+        startPrCacheWatcher()
         startThresholdWatcher()
     }
 
@@ -129,6 +146,83 @@ class FileWatchers {
         DispatchQueue.main.async { [weak self] in
             self?.perriQueue.send(items)
         }
+    }
+
+    // MARK: - Perri detail file watcher
+
+    private static var detailURL: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/state/perri/current-pr-detail.json")
+    }()
+
+    private func startPerriDetailWatcher() {
+        let path = Self.detailURL.path
+        let fd   = open(path, O_EVTONLY)
+        guard fd >= 0 else {
+            log.warning("perri detail file not found at \(path, privacy: .public) — watcher skipped (will be created on first selection)")
+            return
+        }
+        perriDetailFd = fd
+
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask:      [.write, .rename, .delete],
+            queue:          .global(qos: .utility)
+        )
+        src.setEventHandler { [weak self] in
+            guard let self else { return }
+            Thread.sleep(forTimeInterval: 0.05)
+            guard let data = try? Data(contentsOf: Self.detailURL),
+                  let detail = try? JSONDecoder().decode(PRDetail.self, from: data)
+            else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.perriDetail.send(detail)
+            }
+        }
+        src.setCancelHandler { [weak self] in
+            if let fd = self?.perriDetailFd, fd >= 0 { close(fd) }
+        }
+        src.resume()
+        perriDetailSource = src
+        log.info("perri detail watcher active: \(path, privacy: .public)")
+    }
+
+    // MARK: - pr-cache/ directory watcher
+
+    private static var prCacheDirURL: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/state/perri/pr-cache")
+    }()
+
+    private func startPrCacheWatcher() {
+        // Ensure the directory exists before opening.
+        let dir = Self.prCacheDirURL.path
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+
+        let fd = open(dir, O_EVTONLY)
+        guard fd >= 0 else {
+            log.warning("pr-cache dir not accessible at \(dir, privacy: .public) — watcher skipped")
+            return
+        }
+        prCacheFd = fd
+
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask:      [.write],
+            queue:          .global(qos: .utility)
+        )
+        src.setEventHandler { [weak self] in
+            guard let self else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.prCacheChanged.send()
+            }
+        }
+        src.setCancelHandler { [weak self] in
+            if let fd = self?.prCacheFd, fd >= 0 { close(fd) }
+        }
+        src.resume()
+        prCacheSource = src
+        log.info("pr-cache dir watcher active: \(dir, privacy: .public)")
     }
 
     // MARK: - Threshold events watcher (FSEvents, append-only)
@@ -286,7 +380,9 @@ class FileWatchers {
             return PRQueueItem(repo: repo, number: number, title: title,
                                author: author, bucket: bucket,
                                newActivity: d["new_activity"] as? Bool ?? false,
-                               url: url)
+                               url: url,
+                               ciState: CiState.from(ciStateString: d["ci_state"] as? String),
+                               headSha: d["head_sha"] as? String ?? "")
         }
     }
 }

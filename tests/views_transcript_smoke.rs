@@ -104,6 +104,7 @@ async fn perri_view_ctrl_t_toggles_transcript() {
             bucket: "needs_review".into(),
             new_activity: false,
             url: "https://github.com/a/b/pull/1".into(),
+            ci_state: Default::default(),
         }],
         stale: false,
         error: None,
@@ -117,6 +118,10 @@ async fn perri_view_ctrl_t_toggles_transcript() {
         diff: "+hello".into(),
         stale: false,
         error: None,
+        ci_checks: vec![],
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
     }));
     drop(q_tx);
     drop(pr_tx);

@@ -32,10 +32,14 @@ class AppStore: ObservableObject {
     @Published private(set) var recentActivity: [ActivityEvent] = []
 
     // Perri PR queue
-    @Published private(set) var perriQueue:        [PRQueueItem]  = []
-    @Published private(set) var perriQueueStale:   Bool           = false
-    @Published private(set) var perriQueueError:   String?        = nil
-    @Published private(set) var perriQueueLoading: Bool           = false
+    @Published private(set) var perriQueue:          [PRQueueItem]  = []
+    @Published private(set) var perriQueueStale:     Bool           = false
+    @Published private(set) var perriQueueError:     String?        = nil
+    @Published private(set) var perriQueueLoading:   Bool           = false
+
+    // Perri PR detail pane
+    @Published private(set) var perriDetail:         PRDetail?      = nil
+    @Published private(set) var perriDetailLoading:  Bool           = false
 
     // Active focus agent tag — set by MainLayout on every focus switch.
     @Published private(set) var activeFocusAgentTag: String?      = nil
@@ -45,7 +49,10 @@ class AppStore: ObservableObject {
     private let client  = NostromodClient()
     private let broker  = MotherBrokerClient()
     private var cancellables     = Set<AnyCancellable>()
-    private var perriQueueTimer: Timer?
+    /// Per-PR detail cache keyed by "{repo-with-dashes}-{number}".
+    private var prDetailCache: [String: PRDetail] = [:]
+    /// The item whose detail the user most recently requested; used to ignore stale fetches.
+    private var pendingSelection: PRQueueItem?
 
     /// In-memory job map keyed by id — folded from broker snapshot + events.
     private var jobMap: [String: MotherJob] = [:]
@@ -102,6 +109,18 @@ class AppStore: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Perri detail — arrives when current-pr-detail.json is written by the daemon.
+        FileWatchers.shared.perriDetail
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] detail in self?.handleDetailUpdate(detail) }
+            .store(in: &cancellables)
+
+        // pr-cache dir changed — re-check if pending selection is now warm.
+        FileWatchers.shared.prCacheChanged
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.checkPrCacheForPendingSelection() }
+            .store(in: &cancellables)
+
         // Broker connection state → brokerConnected
         broker.connected
             .receive(on: DispatchQueue.main)
@@ -118,11 +137,10 @@ class AppStore: ObservableObject {
         client.start()
         broker.start()
 
-        // Perri queue: immediate refresh on startup, then every 5 min
-        triggerPerriQueueRefresh()
-        perriQueueTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            self?.triggerPerriQueueRefresh()
-        }
+        // Perri queue: the Rust daemon (nostromd) is the authoritative writer of
+        // .queue.cache.json via the native queue source.  Swift reads it via
+        // FSEvents (FileWatchers.perriQueue above) — no periodic bash shell-out needed.
+        // The refresh button writes queue.dirty to ask the daemon for an immediate cycle.
     }
 
     // MARK: - Broker event fold
@@ -280,49 +298,101 @@ class AppStore: ObservableObject {
 
     // MARK: - Perri queue
 
+    /// Ask the Rust daemon for an immediate queue re-fetch by writing the dirty sentinel.
     func refreshPerriQueue() {
-        guard !perriQueueLoading else { return }
-        perriQueueLoading = true
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            Self.runPerriQueuePane()
-            DispatchQueue.main.async { self?.perriQueueLoading = false }
+        let home    = FileManager.default.homeDirectoryForCurrentUser.path
+        let dirty   = "\(home)/.claude/state/perri/queue.dirty"
+        DispatchQueue.global(qos: .userInitiated).async {
+            try? FileManager.default.createDirectory(atPath: "\(home)/.claude/state/perri",
+                                                     withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: dirty, contents: nil)
+            log.debug("wrote queue.dirty sentinel")
         }
     }
 
-    private func triggerPerriQueueRefresh() {
-        guard !perriQueueLoading else { return }
-        perriQueueLoading = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            Self.runPerriQueuePane()
-            DispatchQueue.main.async { self?.perriQueueLoading = false }
-        }
-    }
+    // MARK: - Perri PR detail
 
-    private static func runPerriQueuePane() {
-        guard let binary = findBinary("perri-queue-pane") else {
-            log.warning("perri-queue-pane not found — skipping refresh")
+    /// Called when the user selects a PR row.
+    func selectPR(_ item: PRQueueItem) {
+        pendingSelection = item
+        let key = prDetailCacheKey(item)
+
+        // Cache hit: SHA matches (or we don't have a SHA yet — accept on TTL grounds).
+        if let cached = prDetailCache[key],
+           (item.headSha.isEmpty || cached.headSha == item.headSha) {
+            perriDetail        = cached
+            perriDetailLoading = false
             return
         }
-        let proc = Process()
-        proc.executableURL = binary
-        proc.arguments     = ["--json"]
 
-        var env = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let extra = ["/usr/local/bin", "/opt/homebrew/bin",
-                     "\(home)/.npm/bin", "\(home)/.local/bin",
-                     "\(home)/.claude/bin"].joined(separator: ":")
-        env["PATH"] = (env["PATH"] ?? "") + ":" + extra
-        proc.environment    = env
-        proc.standardOutput = Pipe()
-        proc.standardError  = Pipe()
+        // Cache miss: show loading state and ask the daemon.
+        perriDetail        = nil
+        perriDetailLoading = true
 
-        do    { try proc.run(); proc.waitUntilExit() }
-        catch { log.warning("perri-queue-pane launch failed: \(error.localizedDescription, privacy: .public)") }
-
-        if proc.terminationStatus != 0 {
-            log.warning("perri-queue-pane exited \(proc.terminationStatus, privacy: .public)")
+        let home    = FileManager.default.homeDirectoryForCurrentUser.path
+        let stateDir = "\(home)/.claude/state/perri"
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try FileManager.default.createDirectory(atPath: stateDir,
+                                                        withIntermediateDirectories: true)
+                // Write current-pr.json (single-slot signal to the daemon).
+                let pointer: [String: Any] = ["number": item.number, "repo": item.repo]
+                let data = try JSONSerialization.data(withJSONObject: pointer,
+                                                      options: [.prettyPrinted])
+                try data.write(to: URL(fileURLWithPath: "\(stateDir)/current-pr.json"),
+                               options: .atomic)
+                // Write the dirty sentinel so the daemon fetches immediately.
+                FileManager.default.createFile(atPath: "\(stateDir)/current-pr.dirty",
+                                               contents: nil)
+            } catch {
+                log.warning("selectPR signal write failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
+    }
+
+    /// Called when FileWatchers receives an updated PRDetail from current-pr-detail.json.
+    private func handleDetailUpdate(_ detail: PRDetail?) {
+        guard let detail else { return }
+        let key = "\(detail.repo.replacingOccurrences(of: "/", with: "-"))-\(detail.prNumber ?? 0)"
+        prDetailCache[key] = detail
+
+        // Only publish if this matches the currently-pending selection.
+        guard let pending = pendingSelection,
+              detail.repo == pending.repo,
+              (detail.prNumber.map { Int($0) } ?? -1) == pending.number
+        else { return }
+
+        perriDetail        = detail
+        perriDetailLoading = false
+    }
+
+    /// Called when the pr-cache/ directory changes — re-check if pending selection is warm.
+    private func checkPrCacheForPendingSelection() {
+        guard let pending = pendingSelection, perriDetailLoading else { return }
+        let key  = prDetailCacheKey(pending)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = "\(home)/.claude/state/perri/pr-cache/\(key).json"
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let data   = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let detail = try? JSONDecoder().decode(PRDetail.self, from: data)
+            else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.prDetailCache[key] = detail
+                // Only satisfy if still pending for this item.
+                guard let still = self.pendingSelection,
+                      detail.repo == still.repo,
+                      (detail.prNumber.map { Int($0) } ?? -1) == still.number
+                else { return }
+                self.perriDetail        = detail
+                self.perriDetailLoading = false
+            }
+        }
+    }
+
+    private func prDetailCacheKey(_ item: PRQueueItem) -> String {
+        "\(item.repo.replacingOccurrences(of: "/", with: "-"))-\(item.number)"
     }
 
     private static func findBinary(_ name: String) -> URL? {

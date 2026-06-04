@@ -18,6 +18,7 @@ fn make_test_job() -> MotherJob {
         plan_path: Some("/tmp/plan.md".to_string()),
         question: Some("Should we use option A or option B for the migration?".to_string()),
         paused_reason: Some("user".to_string()),
+        adherence_notes: None,
         adherence_status: None,
         current_tier: Some("tier_0".to_string()),
         current_activity: None,

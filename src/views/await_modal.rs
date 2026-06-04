@@ -131,7 +131,7 @@ impl AwaitModal {
             .job
             .question
             .as_deref()
-            .or_else(|| self.job.adherence_notes.as_deref())
+            .or(self.job.adherence_notes.as_deref())
             .unwrap_or(if is_adherence {
                 "(adherence review blocked — no notes recorded)"
             } else {
@@ -170,10 +170,7 @@ impl AwaitModal {
                 let hint = if is_adherence {
                     Line::from(vec![
                         Span::styled("[a] ", Style::default().fg(theme::SAGE)),
-                        Span::styled(
-                            "override → PASS  ",
-                            Style::default().fg(theme::FG_MUTED),
-                        ),
+                        Span::styled("override → PASS  ", Style::default().fg(theme::FG_MUTED)),
                         Span::styled("[d] ", Style::default().fg(theme::RED_SWEATER)),
                         Span::styled("cancel job  ", Style::default().fg(theme::FG_MUTED)),
                         Span::styled("[v] ", Style::default().fg(theme::AMBER)),
