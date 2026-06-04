@@ -25,6 +25,7 @@ fn fake_queue() -> PrQueueSnapshot {
                 bucket: "requested".into(),
                 new_activity: false,
                 url: "https://github.com/acme/web-app/pull/42".into(),
+                ci_state: Default::default(),
             },
             PrQueueItem {
                 repo: "acme/api".into(),
@@ -34,6 +35,7 @@ fn fake_queue() -> PrQueueSnapshot {
                 bucket: "needs_review".into(),
                 new_activity: false,
                 url: "https://github.com/acme/api/pull/17".into(),
+                ci_state: Default::default(),
             },
         ],
         stale: false,
@@ -53,6 +55,10 @@ fn fake_pr() -> PrSnapshot {
                 .into(),
         stale: false,
         error: None,
+        ci_checks: vec![],
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
     }
 }
 

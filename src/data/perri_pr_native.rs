@@ -20,8 +20,42 @@ use tracing::{debug, warn};
 
 use crate::{
     config::Config,
-    data::{dirty_file, github_client::GithubClient, perri_pr::PrSnapshot},
+    data::{
+        dirty_file,
+        github_client::GithubClient,
+        perri_pr::{CiCheck, PrSnapshot},
+        perri_queue::CiState,
+    },
 };
+
+// ── Check-runs API response shapes ───────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CheckRunsResponse {
+    check_runs: Vec<PrCheckRun>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrCheckRun {
+    name: String,
+    status: Option<String>,
+    conclusion: Option<String>,
+    id: Option<u64>,
+    app: Option<PrCheckRunApp>,
+    output: Option<PrCheckRunOutput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrCheckRunApp {
+    slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PrCheckRunOutput {
+    title: Option<String>,
+    summary: Option<String>,
+    text: Option<String>,
+}
 
 // ── current-pr.json shape ─────────────────────────────────────────────────────
 
@@ -170,6 +204,15 @@ impl PerriPrNativeSource {
         // Fetch the raw diff.
         let diff = fetch_diff(client, &owner, &repo_name, pointer.number).await?;
 
+        // D5: size fields from pr_meta (octocrab PullRequest exposes these).
+        let additions = pr_meta.additions.unwrap_or(0);
+        let deletions = pr_meta.deletions.unwrap_or(0);
+        let changed_files = pr_meta.changed_files.unwrap_or(0);
+
+        // D2/D3: fetch check-runs for the PR head SHA and build CiCheck list.
+        let head_sha = pr_meta.head.sha.clone();
+        let ci_checks = fetch_ci_checks(client, &owner, &repo_name, &head_sha).await;
+
         Ok(PrSnapshot {
             pr_number: Some(pointer.number),
             repo: pointer.repo.clone(),
@@ -179,6 +222,10 @@ impl PerriPrNativeSource {
             diff,
             stale: false,
             error: None,
+            ci_checks,
+            additions,
+            deletions,
+            changed_files,
         })
     }
 
@@ -213,6 +260,146 @@ async fn fetch_diff(client: &GithubClient, owner: &str, repo: &str, number: u64)
     }
 
     resp.text().await.context("reading diff body")
+}
+
+// ── CI check-runs fetch ───────────────────────────────────────────────────────
+
+/// Fetch check-runs for the PR head SHA and build the `CiCheck` list.
+/// On any error, logs a warning and returns an empty vec (diff is primary).
+async fn fetch_ci_checks(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    head_sha: &str,
+) -> Vec<CiCheck> {
+    let url = format!(
+        "https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs?per_page=100"
+    );
+
+    let resp = client
+        .http
+        .get(&url)
+        .header(ACCEPT, "application/vnd.github+json")
+        .header(AUTHORIZATION, format!("Bearer {}", client.token()))
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await;
+
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("check-runs fetch failed: {e:#}");
+            return vec![];
+        }
+    };
+
+    if !resp.status().is_success() {
+        warn!("check-runs fetch non-2xx: {}", resp.status());
+        return vec![];
+    }
+
+    let body: CheckRunsResponse = match resp.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("check-runs parse failed: {e:#}");
+            return vec![];
+        }
+    };
+
+    let mut checks = Vec::with_capacity(body.check_runs.len());
+    for run in body.check_runs {
+        let state = CiState::from_check(run.status.as_deref(), run.conclusion.as_deref());
+        let detail = if state == CiState::Failure {
+            Some(fetch_failure_detail(client, owner, repo, &run).await)
+        } else {
+            None
+        };
+        checks.push(CiCheck {
+            name: run.name,
+            state,
+            detail,
+        });
+    }
+    checks
+}
+
+/// Fetch the failure log for a failing check-run (D3).
+/// For GitHub Actions runs, gets the job log tail (last 50 lines).
+/// For others (or on failure), falls back to output text/summary/title.
+async fn fetch_failure_detail(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    run: &PrCheckRun,
+) -> String {
+    let is_actions = run.app.as_ref().and_then(|a| a.slug.as_deref()) == Some("github-actions");
+
+    if is_actions {
+        if let Some(id) = run.id {
+            let log_url =
+                format!("https://api.github.com/repos/{owner}/{repo}/actions/jobs/{id}/logs");
+            let resp = client
+                .http
+                .get(&log_url)
+                .header(ACCEPT, "application/vnd.github+json")
+                .header(AUTHORIZATION, format!("Bearer {}", client.token()))
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send()
+                .await;
+
+            if let Ok(r) = resp {
+                if r.status().is_success() {
+                    if let Ok(text) = r.text().await {
+                        if !text.is_empty() {
+                            return truncate_tail(&text, 50);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: use output fields (head, since they're short).
+    let text = run
+        .output
+        .as_ref()
+        .and_then(|o| o.text.as_deref().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            run.output
+                .as_ref()
+                .and_then(|o| o.summary.as_deref().filter(|s| !s.is_empty()))
+        })
+        .or_else(|| {
+            run.output
+                .as_ref()
+                .and_then(|o| o.title.as_deref().filter(|s| !s.is_empty()))
+        })
+        .unwrap_or("");
+
+    truncate_tail(text, 50)
+}
+
+/// Take the last `max_lines` lines of `text`, indent each by 4 spaces,
+/// and append a truncation marker when lines are dropped.
+fn truncate_tail(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let (start, dropped) = if total > max_lines {
+        (total - max_lines, total - max_lines)
+    } else {
+        (0, 0)
+    };
+
+    let mut out = String::new();
+    for line in &lines[start..] {
+        out.push_str("    ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    if dropped > 0 {
+        out.push_str(&format!("    … (truncated, {dropped} more lines)\n"));
+    }
+    out
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

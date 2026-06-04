@@ -32,7 +32,7 @@ use crate::{
     data::{
         dirty_file,
         github_client::GithubClient,
-        perri_queue::{PrQueueItem, PrQueueSnapshot},
+        perri_queue::{CiState, PrQueueItem, PrQueueSnapshot},
     },
 };
 
@@ -90,6 +90,27 @@ struct ReviewItem {
     submitted_at: Option<String>,
     user: Option<GhUser>,
 }
+
+// ── Check-runs API response shapes ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CheckRunsResponse {
+    check_runs: Vec<CheckRun>,
+}
+
+#[derive(Deserialize)]
+struct CheckRun {
+    status: Option<String>,
+    conclusion: Option<String>,
+    app: Option<CheckRunApp>,
+}
+
+#[derive(Deserialize)]
+struct CheckRunApp {
+    slug: Option<String>,
+}
+
+// ── Legacy check-suites shapes (kept for fetch_check_suites_failure) ─────────
 
 #[derive(Deserialize)]
 struct CheckSuitesResponse {
@@ -187,13 +208,14 @@ impl PerriQueueNativeSource {
         // Authenticated user login — fetched once and reused.
         let mut me: Option<String> = None;
         // CI caches — persist across loop iterations so successive cycles skip
-        // the check-suites call when the HEAD SHA hasn't changed.
+        // the check-runs call when the HEAD SHA hasn't changed.
         let head_sha_cache: Arc<Mutex<HashMap<(String, u64), String>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> =
+        // Maps HEAD SHA → (display CiState, Actions-failure filter bool).
+        let ci_state_cache: Arc<Mutex<HashMap<String, (CiState, bool)>>> =
             Arc::new(Mutex::new(HashMap::new()));
         // ETag + body caches for per-endpoint conditional GETs (get_pr_head_sha,
-        // fetch_check_suites_failure, get_our_last_review).  Keyed by full URL so
+        // fetch_check_runs_state, get_our_last_review).  Keyed by full URL so
         // a single map covers all three endpoints without collisions.
         let endpoint_etags: Arc<Mutex<HashMap<String, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -229,7 +251,7 @@ impl PerriQueueNativeSource {
                     &mut last_seen_updated,
                     &mut review_state_cache,
                     &head_sha_cache,
-                    &ci_failure_cache,
+                    &ci_state_cache,
                     &endpoint_etags,
                     &endpoint_body_cache,
                 )
@@ -275,7 +297,7 @@ impl PerriQueueNativeSource {
         last_seen_updated: &mut HashMap<(String, u64), String>,
         review_state_cache: &mut HashMap<(String, u64), (String, Option<String>)>,
         head_sha_cache: &Arc<Mutex<HashMap<(String, u64), String>>>,
-        ci_failure_cache: &Arc<Mutex<HashMap<String, bool>>>,
+        ci_state_cache: &Arc<Mutex<HashMap<String, (CiState, bool)>>>,
         endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
         endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
     ) -> Result<PrQueueSnapshot> {
@@ -337,22 +359,22 @@ impl PerriQueueNativeSource {
             .map(|(item, bucket)| {
                 let client = client.clone();
                 let head_sha_cache = Arc::clone(head_sha_cache);
-                let ci_failure_cache = Arc::clone(ci_failure_cache);
+                let ci_state_cache = Arc::clone(ci_state_cache);
                 let endpoint_etags = Arc::clone(endpoint_etags);
                 let endpoint_body_cache = Arc::clone(endpoint_body_cache);
                 async move {
                     let repo = repo_from_url(&item.repository_url);
-                    if ci_has_failure_cached(
+                    let (ci_state, failed) = ci_state_cached(
                         &client,
                         &repo,
                         item.number,
                         &head_sha_cache,
-                        &ci_failure_cache,
+                        &ci_state_cache,
                         &endpoint_etags,
                         &endpoint_body_cache,
                     )
-                    .await
-                    {
+                    .await;
+                    if failed {
                         return None;
                     }
                     Some(PrQueueItem {
@@ -367,6 +389,7 @@ impl PerriQueueNativeSource {
                         bucket: bucket.to_owned(),
                         new_activity: false,
                         url: item.html_url.clone(),
+                        ci_state,
                     })
                 }
             })
@@ -380,12 +403,12 @@ impl PerriQueueNativeSource {
 
         debug!(b12_items = b12_items.len(), "after CI filter");
 
-        // Prune ci_failure_cache: remove SHA entries that are no longer referenced
+        // Prune ci_state_cache: remove SHA entries that are no longer referenced
         // by any current PR head.  Runs after every cycle — the set is tiny.
         {
             let current_shas: std::collections::HashSet<String> =
                 head_sha_cache.lock().unwrap().values().cloned().collect();
-            ci_failure_cache
+            ci_state_cache
                 .lock()
                 .unwrap()
                 .retain(|sha, _| current_shas.contains(sha));
@@ -424,7 +447,7 @@ impl PerriQueueNativeSource {
                 );
 
                 let head_sha_cache = Arc::clone(head_sha_cache);
-                let ci_failure_cache = Arc::clone(ci_failure_cache);
+                let ci_state_cache = Arc::clone(ci_state_cache);
                 let endpoint_etags = Arc::clone(endpoint_etags);
                 let endpoint_body_cache = Arc::clone(endpoint_body_cache);
                 async move {
@@ -474,17 +497,17 @@ impl PerriQueueNativeSource {
                         return (key, None, new_cache_entry);
                     }
 
-                    if ci_has_failure_cached(
+                    let (ci_state, failed) = ci_state_cached(
                         &client,
                         &repo,
                         item.number,
                         &head_sha_cache,
-                        &ci_failure_cache,
+                        &ci_state_cache,
                         &endpoint_etags,
                         &endpoint_body_cache,
                     )
-                    .await
-                    {
+                    .await;
+                    if failed {
                         return (key, None, new_cache_entry);
                     }
 
@@ -500,6 +523,7 @@ impl PerriQueueNativeSource {
                         bucket: "changes_req".to_owned(),
                         new_activity: true,
                         url: item.html_url.clone(),
+                        ci_state,
                     };
                     (key, Some(pr_item), new_cache_entry)
                 }
@@ -678,26 +702,27 @@ async fn get_our_last_review(
         .map(|r| (r.state, r.submitted_at))
 }
 
-/// Returns `true` if any GitHub Actions check suite on the PR's HEAD commit
-/// has `conclusion = "failure"`.  Results are cached by HEAD SHA so that
-/// successive cycles skip the check-suites HTTP call when the PR hasn't
-/// received a new push.
+/// Fetch the check-runs for the PR head SHA and return:
+///   - the display `CiState` (rollup over ALL runs, D1)
+///   - whether a GitHub Actions run has `conclusion == "failure"` (the
+///     filter bool — identical semantics to the old check-suites filter, D2)
 ///
-/// The Mutex guards are held only for brief HashMap operations — never across
-/// an `.await` point.
-pub async fn ci_has_failure_cached(
+/// Results are cached by HEAD SHA so successive cycles skip the API call when
+/// the PR hasn't received a new push.  Mutex guards are never held across
+/// `.await` points.
+pub async fn ci_state_cached(
     client: &GithubClient,
     repo: &str,
     number: u64,
     head_sha_cache: &Arc<Mutex<HashMap<(String, u64), String>>>,
-    ci_failure_cache: &Arc<Mutex<HashMap<String, bool>>>,
+    ci_state_cache: &Arc<Mutex<HashMap<String, (CiState, bool)>>>,
     endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
     endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> bool {
+) -> (CiState, bool) {
     let sha = match get_pr_head_sha(client, repo, number, endpoint_etags, endpoint_body_cache).await
     {
         Some(s) => s,
-        None => return false,
+        None => return (CiState::Unknown, false),
     };
 
     // Record current head SHA (brief lock, no await).
@@ -708,18 +733,88 @@ pub async fn ci_has_failure_cached(
 
     // Return cached result if the SHA hasn't changed since last cycle.
     {
-        let lock = ci_failure_cache.lock().unwrap();
+        let lock = ci_state_cache.lock().unwrap();
         if let Some(&cached) = lock.get(&sha) {
-            debug!(%repo, number, "ci_failure cache hit (sha unchanged)");
+            debug!(%repo, number, "ci_state cache hit (sha unchanged)");
             return cached;
         }
     }
 
-    // Cache miss — fetch check suites and store the result.
+    // Cache miss — fetch check-runs and store the result.
     let result =
-        fetch_check_suites_failure(client, repo, &sha, endpoint_etags, endpoint_body_cache).await;
-    ci_failure_cache.lock().unwrap().insert(sha, result);
+        fetch_check_runs_state(client, repo, &sha, endpoint_etags, endpoint_body_cache).await;
+    ci_state_cache.lock().unwrap().insert(sha, result);
     result
+}
+
+/// Fetch and parse check-runs for a known HEAD SHA.
+///
+/// Returns `(display_state, actions_failure_filter)`:
+/// - `display_state` — rolled-up `CiState` over all check-runs (D1)
+/// - `actions_failure_filter` — `true` iff a GitHub Actions run has
+///   `conclusion == "failure"` (preserves the old check-suites filter
+///   semantics, D2)
+async fn fetch_check_runs_state(
+    client: &GithubClient,
+    repo: &str,
+    sha: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> (CiState, bool) {
+    let url = format!(
+        "{}/repos/{repo}/commits/{sha}/check-runs?per_page=100",
+        api_base()
+    );
+    let body = match etag_get(client, &url, etags, body_cache).await {
+        Some(b) => b,
+        None => return (CiState::Unknown, false),
+    };
+
+    let resp: CheckRunsResponse = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(_) => return (CiState::Unknown, false),
+    };
+
+    let display_state = CiState::rollup(
+        resp.check_runs
+            .iter()
+            .map(|r| CiState::from_check(r.status.as_deref(), r.conclusion.as_deref())),
+    );
+
+    let actions_failure = resp.check_runs.iter().any(|r| {
+        r.app.as_ref().and_then(|a| a.slug.as_deref()) == Some("github-actions")
+            && CiState::from_check(r.status.as_deref(), r.conclusion.as_deref()) == CiState::Failure
+    });
+
+    (display_state, actions_failure)
+}
+
+/// Thin wrapper kept for backwards-compatibility with `tests/ci_failure_cache.rs`.
+///
+/// The test imports this function directly; rather than update the test we keep
+/// this public function that delegates to `ci_state_cached` and returns only
+/// the filter bool.  The `ci_state_cache` parameter mirrors the new internal
+/// type — callers in the test create a fresh cache of the new type.
+pub async fn ci_has_failure_cached(
+    client: &GithubClient,
+    repo: &str,
+    number: u64,
+    head_sha_cache: &Arc<Mutex<HashMap<(String, u64), String>>>,
+    ci_state_cache: &Arc<Mutex<HashMap<String, (CiState, bool)>>>,
+    endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
+    endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> bool {
+    ci_state_cached(
+        client,
+        repo,
+        number,
+        head_sha_cache,
+        ci_state_cache,
+        endpoint_etags,
+        endpoint_body_cache,
+    )
+    .await
+    .1
 }
 
 /// Fetch the check-suites result for a known HEAD SHA.

@@ -1,6 +1,6 @@
 //! Behavioral tests for the CI failure cache in `perri_queue_native`.
 //!
-//! These tests verify that `ci_has_failure_cached` skips the check-suites API
+//! These tests verify that `ci_has_failure_cached` skips the check-runs API
 //! call when the SHA is already in the cache, and makes exactly one call when
 //! the SHA is new.
 //!
@@ -15,6 +15,7 @@ use serde_json::json;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use nostromo::data::perri_queue::CiState;
 use nostromo::data::perri_queue_native::ci_has_failure_cached;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -46,19 +47,17 @@ fn set_api_base(uri: &str) {
     });
 }
 
-// ── Test 1: cache hit — check-suites is never called ─────────────────────────
+// ── Test 1: cache hit — check-runs is never called a second time ──────────────
 
 /// When the CI failure cache already contains a result for the PR's HEAD SHA,
 /// `ci_has_failure_cached` must return the cached result without making a
-/// check-suites API call.
+/// check-runs API call.
 ///
-/// We prove this by mounting the check-suites mock `up_to_n_times(1)` so that
-/// a second HTTP request would fall through to wiremock's default 404 (which
-/// would return `false`, masking an incorrect call).  Instead we assert on
-/// `received_requests()` — exactly one check-suites call on the first cycle,
+/// We prove this by mounting the check-runs mock and asserting on
+/// `received_requests()` — exactly one check-runs call on the first cycle,
 /// zero on the second cycle (cache hit).
 #[tokio::test]
-async fn cache_hit_skips_check_suites_call() {
+async fn cache_hit_skips_check_runs_call() {
     let server = MockServer::start().await;
     set_api_base(&server.uri());
 
@@ -73,16 +72,18 @@ async fn cache_hit_skips_check_suites_call() {
         .mount(&server)
         .await;
 
-    // Check-suites endpoint — only allowed once.  A second call would still
-    // return 200 (wiremock falls through to the next matching mock), but we
-    // count requests below to assert zero additional calls.
+    // Check-runs endpoint — mocked to return a passing Actions run.
     Mock::given(method("GET"))
-        .and(path_regex(r".*/commits/sha-abc/check-suites"))
+        .and(path_regex(r".*/commits/sha-abc/check-runs"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "check_suites": [
+            "check_runs": [
                 {
-                    "app": { "name": "GitHub Actions" },
-                    "conclusion": "success"
+                    "name": "build",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "id": 1,
+                    "app": { "slug": "github-actions" },
+                    "output": {}
                 }
             ]
         })))
@@ -91,41 +92,42 @@ async fn cache_hit_skips_check_suites_call() {
 
     let head_sha_cache: Arc<Mutex<HashMap<(String, u64), String>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
+    let ci_state_cache: Arc<Mutex<HashMap<String, (CiState, bool)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let endpoint_etags: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // First call — cache miss, should fetch check-suites once.
+    // First call — cache miss, should fetch check-runs once.
     let result1 = ci_has_failure_cached(
         &client,
         "acme/repo",
         42,
         &head_sha_cache,
-        &ci_failure_cache,
+        &ci_state_cache,
         &endpoint_etags,
         &endpoint_body_cache,
     )
     .await;
-    assert!(!result1, "no failure suite — result should be false");
+    assert!(!result1, "no failure run — result should be false");
 
     let requests_after_first = server.received_requests().await.unwrap();
-    let check_suites_count_after_first = requests_after_first
+    let check_runs_count_after_first = requests_after_first
         .iter()
-        .filter(|r| r.url.path().contains("check-suites"))
+        .filter(|r| r.url.path().contains("check-runs"))
         .count();
     assert_eq!(
-        check_suites_count_after_first, 1,
-        "first call should hit check-suites exactly once"
+        check_runs_count_after_first, 1,
+        "first call should hit check-runs exactly once"
     );
 
-    // Second call — SHA unchanged, must be served from ci_failure_cache.
+    // Second call — SHA unchanged, must be served from ci_state_cache.
     let result2 = ci_has_failure_cached(
         &client,
         "acme/repo",
         42,
         &head_sha_cache,
-        &ci_failure_cache,
+        &ci_state_cache,
         &endpoint_etags,
         &endpoint_body_cache,
     )
@@ -133,28 +135,26 @@ async fn cache_hit_skips_check_suites_call() {
     assert!(!result2, "cached result should still be false");
 
     let requests_after_second = server.received_requests().await.unwrap();
-    let check_suites_count_after_second = requests_after_second
+    let check_runs_count_after_second = requests_after_second
         .iter()
-        .filter(|r| r.url.path().contains("check-suites"))
+        .filter(|r| r.url.path().contains("check-runs"))
         .count();
     assert_eq!(
-        check_suites_count_after_second, 1,
-        "second call with unchanged SHA must not hit check-suites again (cache hit)"
+        check_runs_count_after_second, 1,
+        "second call with unchanged SHA must not hit check-runs again (cache hit)"
     );
 }
 
-// ── Test 2: new SHA — exactly one fresh check-suites call ────────────────────
+// ── Test 2: new SHA — exactly one fresh check-runs call ──────────────────────
 
 /// When the PR's HEAD SHA changes between cycles, `ci_has_failure_cached` must
-/// call the check-suites API exactly once for the new SHA and cache the result.
+/// call the check-runs API exactly once for the new SHA and cache the result.
 ///
 /// We simulate a SHA rotation: the PR detail endpoint returns "sha-old" on the
-/// first call, then "sha-new" on the second call.  The check-suites mock is
-/// mounted once per SHA.  After both calls we assert that two total
-/// check-suites requests were made (one per distinct SHA), confirming a fresh
-/// fetch on SHA change.
+/// first call, then "sha-new" on the second call.  After both calls we assert
+/// that two total check-runs requests were made (one per distinct SHA).
 #[tokio::test]
-async fn new_sha_triggers_exactly_one_check_suites_call() {
+async fn new_sha_triggers_exactly_one_check_runs_call() {
     let server = MockServer::start().await;
     set_api_base(&server.uri());
 
@@ -178,28 +178,36 @@ async fn new_sha_triggers_exactly_one_check_suites_call() {
         .mount(&server)
         .await;
 
-    // Check-suites for sha-old — indicates a failure.
+    // Check-runs for sha-old — indicates a GitHub Actions failure.
     Mock::given(method("GET"))
-        .and(path_regex(r".*/commits/sha-old/check-suites"))
+        .and(path_regex(r".*/commits/sha-old/check-runs"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "check_suites": [
+            "check_runs": [
                 {
-                    "app": { "name": "GitHub Actions" },
-                    "conclusion": "failure"
+                    "name": "build",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "id": 1,
+                    "app": { "slug": "github-actions" },
+                    "output": {}
                 }
             ]
         })))
         .mount(&server)
         .await;
 
-    // Check-suites for sha-new — all passing.
+    // Check-runs for sha-new — all passing.
     Mock::given(method("GET"))
-        .and(path_regex(r".*/commits/sha-new/check-suites"))
+        .and(path_regex(r".*/commits/sha-new/check-runs"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "check_suites": [
+            "check_runs": [
                 {
-                    "app": { "name": "GitHub Actions" },
-                    "conclusion": "success"
+                    "name": "build",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "id": 2,
+                    "app": { "slug": "github-actions" },
+                    "output": {}
                 }
             ]
         })))
@@ -208,7 +216,8 @@ async fn new_sha_triggers_exactly_one_check_suites_call() {
 
     let head_sha_cache: Arc<Mutex<HashMap<(String, u64), String>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let ci_failure_cache: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
+    let ci_state_cache: Arc<Mutex<HashMap<String, (CiState, bool)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let endpoint_etags: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -219,24 +228,21 @@ async fn new_sha_triggers_exactly_one_check_suites_call() {
         "acme/repo",
         7,
         &head_sha_cache,
-        &ci_failure_cache,
+        &ci_state_cache,
         &endpoint_etags,
         &endpoint_body_cache,
     )
     .await;
-    assert!(
-        result1,
-        "sha-old has a failure suite — result should be true"
-    );
+    assert!(result1, "sha-old has a failure run — result should be true");
 
     // Second call — sha-new (different SHA), cache miss on sha-new, should
-    // fetch check-suites for the new SHA.
+    // fetch check-runs for the new SHA.
     let result2 = ci_has_failure_cached(
         &client,
         "acme/repo",
         7,
         &head_sha_cache,
-        &ci_failure_cache,
+        &ci_state_cache,
         &endpoint_etags,
         &endpoint_body_cache,
     )
@@ -244,28 +250,28 @@ async fn new_sha_triggers_exactly_one_check_suites_call() {
     assert!(!result2, "sha-new has no failures — result should be false");
 
     let all_requests = server.received_requests().await.unwrap();
-    let check_suites_calls: Vec<_> = all_requests
+    let check_runs_calls: Vec<_> = all_requests
         .iter()
-        .filter(|r| r.url.path().contains("check-suites"))
+        .filter(|r| r.url.path().contains("check-runs"))
         .collect();
 
     assert_eq!(
-        check_suites_calls.len(),
+        check_runs_calls.len(),
         2,
-        "each distinct SHA must trigger exactly one check-suites call (got {})",
-        check_suites_calls.len()
+        "each distinct SHA must trigger exactly one check-runs call (got {})",
+        check_runs_calls.len()
     );
 
     // Verify each SHA was fetched once specifically.
-    let old_calls = check_suites_calls
+    let old_calls = check_runs_calls
         .iter()
         .filter(|r| r.url.path().contains("sha-old"))
         .count();
-    let new_calls = check_suites_calls
+    let new_calls = check_runs_calls
         .iter()
         .filter(|r| r.url.path().contains("sha-new"))
         .count();
 
-    assert_eq!(old_calls, 1, "sha-old check-suites should be called once");
-    assert_eq!(new_calls, 1, "sha-new check-suites should be called once");
+    assert_eq!(old_calls, 1, "sha-old check-runs should be called once");
+    assert_eq!(new_calls, 1, "sha-new check-runs should be called once");
 }

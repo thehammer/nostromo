@@ -34,6 +34,72 @@ use tracing::{debug, warn};
 
 use crate::{config::Config, data::dirty_file};
 
+// ── CI state ──────────────────────────────────────────────────────────────────
+
+/// Four-way CI state shared between queue items and PR detail checks.
+/// Derived from GitHub check-run `status` + `conclusion` fields (see D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CiState {
+    #[default]
+    Unknown,
+    Pending,
+    Success,
+    Failure,
+}
+
+impl CiState {
+    /// Map a GitHub check-run (status, conclusion) onto a `CiState`. See D1.
+    pub fn from_check(status: Option<&str>, conclusion: Option<&str>) -> Self {
+        match conclusion {
+            Some("failure" | "timed_out" | "action_required" | "stale") => CiState::Failure,
+            Some("success") => CiState::Success,
+            Some("skipped" | "cancelled" | "neutral") => CiState::Unknown,
+            Some(_) => CiState::Unknown,
+            None => match status {
+                Some("queued" | "in_progress" | "waiting" | "pending" | "requested") => {
+                    CiState::Pending
+                }
+                _ => CiState::Unknown,
+            },
+        }
+    }
+
+    /// Roll up many check states into one glyph state. Precedence: Failure >
+    /// Pending > Success > Unknown.  Empty input → Unknown.
+    pub fn rollup(states: impl IntoIterator<Item = CiState>) -> Self {
+        let mut any_success = false;
+        let mut any_pending = false;
+        for s in states {
+            match s {
+                CiState::Failure => return CiState::Failure,
+                CiState::Pending => any_pending = true,
+                CiState::Success => any_success = true,
+                CiState::Unknown => {}
+            }
+        }
+        if any_pending {
+            CiState::Pending
+        } else if any_success {
+            CiState::Success
+        } else {
+            CiState::Unknown
+        }
+    }
+
+    /// 1-char glyph for the queue column and detail lines.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            CiState::Failure => "✗",
+            CiState::Pending => "⟳",
+            CiState::Success => "✓",
+            CiState::Unknown => "-",
+        }
+    }
+}
+
+// ── Queue items ───────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PrQueueItem {
     pub repo: String,
@@ -48,6 +114,9 @@ pub struct PrQueueItem {
     #[serde(default)]
     pub new_activity: bool,
     pub url: String,
+    /// Rolled-up CI state for this PR (display only; does not affect filtering).
+    #[serde(default)]
+    pub ci_state: CiState,
 }
 
 fn default_bucket() -> String {

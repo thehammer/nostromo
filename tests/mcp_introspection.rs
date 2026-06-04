@@ -142,6 +142,7 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             plan_path: None,
             question: None,
             paused_reason: None,
+            adherence_notes: None,
             adherence_status: None,
             current_tier: None,
             current_activity: None,
@@ -161,6 +162,7 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             plan_path: None,
             question: None,
             paused_reason: None,
+            adherence_notes: None,
             adherence_status: None,
             current_tier: None,
             current_activity: None,
@@ -180,6 +182,7 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             plan_path: None,
             question: Some("Proceed with breaking change?".to_string()),
             paused_reason: Some("user".to_string()),
+            adherence_notes: None,
             adherence_status: None,
             current_tier: None,
             current_activity: None,
@@ -364,6 +367,10 @@ async fn perri_get_current_pr_returns_snapshot() {
         diff: "--- a/src/main.rs\n+++ b/src/main.rs".to_string(),
         stale: false,
         error: None,
+        ci_checks: vec![],
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
     };
     let state = seeded_state(None, Some(snap), None, None, None, vec![], None, None, None);
 
@@ -389,6 +396,10 @@ async fn perri_get_state_composite() {
         diff: String::new(),
         stale: false,
         error: None,
+        ci_checks: vec![],
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
     };
     let state = seeded_state(
         Some(queue),

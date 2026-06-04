@@ -191,30 +191,20 @@ impl MotherView {
         let mut order: Vec<String> = Vec::new();
 
         for state in ["awaiting", "running", "ready", "queued"] {
-            let mut group: Vec<&MotherJob> = self
-                .jobs
-                .iter()
-                .filter(|j| j.state == state)
-                .collect();
+            let mut group: Vec<&MotherJob> =
+                self.jobs.iter().filter(|j| j.state == state).collect();
             group.sort_by_key(|j| std::cmp::Reverse(j.created_at));
             order.extend(group.iter().map(|j| j.id.clone()));
         }
 
         // Recent succeeded (last 10, newest first) — excluding hidden.
-        let mut succeeded: Vec<&MotherJob> = self
-            .jobs
-            .iter()
-            .filter(|j| j.is_succeeded())
-            .collect();
+        let mut succeeded: Vec<&MotherJob> =
+            self.jobs.iter().filter(|j| j.is_succeeded()).collect();
         succeeded.sort_by_key(|j| std::cmp::Reverse(j.finished_at));
         order.extend(succeeded.iter().take(10).map(|j| j.id.clone()));
 
         // Recent failed (last 10, newest first) — excluding hidden.
-        let mut failed: Vec<&MotherJob> = self
-            .jobs
-            .iter()
-            .filter(|j| j.is_failed())
-            .collect();
+        let mut failed: Vec<&MotherJob> = self.jobs.iter().filter(|j| j.is_failed()).collect();
         failed.sort_by_key(|j| std::cmp::Reverse(j.finished_at));
         order.extend(failed.iter().take(10).map(|j| j.id.clone()));
 
@@ -1171,8 +1161,7 @@ impl View for MotherView {
                                         job.state.as_str(),
                                         "succeeded" | "failed" | "cancelled"
                                     ) {
-                                        self.pending_action =
-                                            Some(MotherAction::ArchiveJob(job));
+                                        self.pending_action = Some(MotherAction::ArchiveJob(job));
                                     }
                                 }
                                 return EventOutcome::Consumed;
@@ -1187,7 +1176,10 @@ impl View for MotherView {
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 if let Some(job) = self.selected_job().cloned() {
                                     // Only for non-terminal states.
-                                    if !matches!(job.state.as_str(), "succeeded" | "failed" | "cancelled") {
+                                    if !matches!(
+                                        job.state.as_str(),
+                                        "succeeded" | "failed" | "cancelled"
+                                    ) {
                                         self.pending_action = Some(MotherAction::CancelJob(job));
                                     }
                                 }
@@ -1459,6 +1451,7 @@ mod tests {
             plan_path: None,
             question: None,
             paused_reason: None,
+            adherence_notes: None,
             adherence_status: None,
             current_tier: None,
             current_activity: None,
