@@ -55,6 +55,12 @@ pub struct PrSnapshot {
     /// Number of files changed in this PR.
     #[serde(default)]
     pub changed_files: u64,
+    /// HEAD SHA this snapshot was fetched at — lets the GUI match cache to queue.
+    #[serde(default)]
+    pub head_sha: String,
+    /// True when the diff exceeded the render threshold; `diff` is blanked.
+    #[serde(default)]
+    pub diff_too_large: bool,
 }
 
 pub struct PerriPrSource {

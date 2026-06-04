@@ -10,7 +10,7 @@
 //! dirty-file sentinel.  The sentinel watcher is kept as a fallback for the
 //! deprecation window.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use reqwest::header::{ACCEPT, AUTHORIZATION};
@@ -27,6 +27,66 @@ use crate::{
         perri_queue::CiState,
     },
 };
+
+// ── Large-diff thresholds ─────────────────────────────────────────────────────
+
+const MAX_DIFF_BYTES: usize = 500_000;
+const MAX_DIFF_LINES: usize = 2_000;
+const MAX_CHANGED_FILES: u64 = 100;
+
+/// Returns `true` when the diff exceeds the render threshold.  Unit-testable
+/// free function so thresholds can be verified without network calls.
+pub fn diff_is_too_large(diff: &str, changed_files: u64) -> bool {
+    changed_files > MAX_CHANGED_FILES
+        || diff.len() > MAX_DIFF_BYTES
+        || diff.lines().count() > MAX_DIFF_LINES
+}
+
+// ── Per-PR cache path ─────────────────────────────────────────────────────────
+
+fn pr_cache_path(state_dir: &Path, repo: &str, number: u64) -> PathBuf {
+    // repo is "owner/name"; sanitize the slash so it's one flat filename.
+    let safe = repo.replace('/', "-");
+    state_dir
+        .join("pr-cache")
+        .join(format!("{safe}-{number}.json"))
+}
+
+/// Write `json` to `path` atomically via a temp-file + rename so a concurrent
+/// reader never sees a partial write.
+fn write_json_atomic(path: &Path, json: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)
+}
+
+// ── Pre-fetch entry point (called from perri_queue_native) ────────────────────
+
+/// Fetch the PR detail for `(repo, number)` and write it to the per-PR cache
+/// file.  Never reads or writes `current-pr.json`.  Errors are returned so the
+/// caller can log them; they do not affect the queue source's cycle.
+pub async fn prefetch_into_cache(
+    config: &Config,
+    client: &GithubClient,
+    repo: &str,
+    number: u64,
+) -> Result<()> {
+    let source = PerriPrNativeSource {
+        config: config.clone(),
+    };
+    let snap = source.fetch_pr(client, repo, number).await?;
+    let json = serde_json::to_string(&snap).context("serializing prefetch snapshot")?;
+    let cache = pr_cache_path(&config.perri_state_dir(), repo, number);
+    write_json_atomic(&cache, &json).context("writing prefetch cache file")?;
+    debug!(
+        "perri prefetch {repo}#{number} cached at {}",
+        cache.display()
+    );
+    Ok(())
+}
 
 // ── Check-runs API response shapes ───────────────────────────────────────────
 
@@ -159,6 +219,8 @@ impl PerriPrNativeSource {
         }
     }
 
+    /// Main fetch: reads `current-pr.json`, fetches the PR, writes BOTH
+    /// `current-pr-detail.json` and the per-PR cache file.
     async fn fetch(&self, client: &GithubClient) -> Result<PrSnapshot> {
         let pointer_path = self.current_pr_path();
 
@@ -176,57 +238,105 @@ impl PerriPrNativeSource {
         let pointer: CurrentPrPointer =
             serde_json::from_str(&raw).context("parsing current-pr.json")?;
 
-        let (owner, repo_name) = split_repo(&pointer.repo)?;
+        let snap = self.fetch_pr(client, &pointer.repo, pointer.number).await?;
+
+        // Write both files; log and swallow errors (the watch channel still feeds the TUI).
+        let state_dir = self.config.perri_state_dir();
+        match serde_json::to_string(&snap) {
+            Ok(json) => {
+                // Single-slot selected-PR file.
+                let detail_path = state_dir.join("current-pr-detail.json");
+                if let Err(e) = write_json_atomic(&detail_path, &json) {
+                    warn!("perri detail write (current-pr-detail.json) failed: {e:#}");
+                }
+                // Per-PR cache file.
+                let cache = pr_cache_path(&state_dir, &pointer.repo, pointer.number);
+                if let Err(e) = write_json_atomic(&cache, &json) {
+                    warn!("perri detail write (pr-cache) failed: {e:#}");
+                }
+            }
+            Err(e) => warn!("perri detail serialize failed: {e:#}"),
+        }
+
+        Ok(snap)
+    }
+
+    /// Fetch `(repo, number)` via GitHub API and return a `PrSnapshot`.
+    /// Does NOT read or write any files — all I/O is the caller's responsibility.
+    async fn fetch_pr(&self, client: &GithubClient, repo: &str, number: u64) -> Result<PrSnapshot> {
+        let (owner, repo_name) = split_repo(repo)?;
 
         // Fetch PR metadata via octocrab for authoritative fields.
         let pr_meta = client
             .octocrab
             .pulls(&owner, &repo_name)
-            .get(pointer.number)
+            .get(number)
             .await
-            .with_context(|| format!("fetching PR {}/{} #{}", owner, repo_name, pointer.number))?;
+            .with_context(|| format!("fetching PR {owner}/{repo_name} #{number}"))?;
 
-        let title = pr_meta
-            .title
-            .clone()
-            .unwrap_or_else(|| pointer.title.clone().unwrap_or_default());
+        let title = pr_meta.title.clone().unwrap_or_default();
         let author = pr_meta
             .user
             .as_ref()
             .map(|u| u.login.clone())
-            .unwrap_or_else(|| pointer.author.clone().unwrap_or_default());
+            .unwrap_or_default();
         let url = pr_meta
             .html_url
             .as_ref()
             .map(|u| u.to_string())
-            .unwrap_or_else(|| pointer.url.clone().unwrap_or_default());
-
-        // Fetch the raw diff.
-        let diff = fetch_diff(client, &owner, &repo_name, pointer.number).await?;
+            .unwrap_or_default();
 
         // D5: size fields from pr_meta (octocrab PullRequest exposes these).
         let additions = pr_meta.additions.unwrap_or(0);
         let deletions = pr_meta.deletions.unwrap_or(0);
         let changed_files = pr_meta.changed_files.unwrap_or(0);
+        let head_sha = pr_meta.head.sha.clone();
+
+        // Fetch the raw diff.
+        let raw_diff = fetch_diff(client, &owner, &repo_name, number).await?;
+
+        // Apply large-diff threshold: blank the diff and set the flag.
+        let (diff, diff_too_large) = if diff_is_too_large(&raw_diff, changed_files) {
+            (String::new(), true)
+        } else {
+            (raw_diff, false)
+        };
 
         // D2/D3: fetch check-runs for the PR head SHA and build CiCheck list.
-        let head_sha = pr_meta.head.sha.clone();
         let ci_checks = fetch_ci_checks(client, &owner, &repo_name, &head_sha).await;
 
         Ok(PrSnapshot {
-            pr_number: Some(pointer.number),
-            repo: pointer.repo.clone(),
+            pr_number: Some(number),
+            repo: repo.to_owned(),
             title,
             author,
             url,
             diff,
+            diff_too_large,
             stale: false,
             error: None,
             ci_checks,
             additions,
             deletions,
             changed_files,
+            head_sha,
         })
+    }
+
+    /// Fetch for cache only: fetches the PR and writes the per-PR cache file.
+    /// Never reads or writes `current-pr.json` or `current-pr-detail.json`.
+    pub async fn fetch_for_cache(
+        &self,
+        client: &GithubClient,
+        repo: &str,
+        number: u64,
+    ) -> Result<()> {
+        let snap = self.fetch_pr(client, repo, number).await?;
+        let json = serde_json::to_string(&snap).context("serializing snapshot for cache")?;
+        let cache = pr_cache_path(&self.config.perri_state_dir(), repo, number);
+        write_json_atomic(&cache, &json).context("writing per-PR cache file")?;
+        debug!("perri pr cache written: {}", cache.display());
+        Ok(())
     }
 
     fn current_pr_path(&self) -> PathBuf {
@@ -415,4 +525,64 @@ fn split_repo(repo: &str) -> Result<(String, String)> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("invalid repo format: {repo}"))?;
     Ok((owner.to_owned(), name.to_owned()))
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── diff_is_too_large ──────────────────────────────────────────────────────
+
+    #[test]
+    fn diff_not_too_large_below_all_thresholds() {
+        // 99 files, 1_000 lines, 100 bytes — all below threshold.
+        let diff = "a\n".repeat(1_000);
+        assert!(!diff_is_too_large(&diff, 99));
+    }
+
+    #[test]
+    fn diff_too_large_by_changed_files() {
+        let diff = "a\n".repeat(10);
+        assert!(diff_is_too_large(&diff, 101));
+    }
+
+    #[test]
+    fn diff_too_large_at_exactly_101_files() {
+        let diff = "short diff";
+        assert!(diff_is_too_large(diff, 101));
+    }
+
+    #[test]
+    fn diff_not_too_large_at_exactly_100_files() {
+        let diff = "short diff";
+        assert!(!diff_is_too_large(diff, 100));
+    }
+
+    #[test]
+    fn diff_too_large_by_byte_count() {
+        // 500_001 bytes, 1 line, 0 files changed — bytes threshold triggers.
+        let diff = "x".repeat(500_001);
+        assert!(diff_is_too_large(&diff, 0));
+    }
+
+    #[test]
+    fn diff_not_too_large_at_exactly_500_000_bytes() {
+        let diff = "x".repeat(500_000);
+        assert!(!diff_is_too_large(&diff, 0));
+    }
+
+    #[test]
+    fn diff_too_large_by_line_count() {
+        // 2_001 lines, few bytes, 0 files — line threshold triggers.
+        let diff = "a\n".repeat(2_001);
+        assert!(diff_is_too_large(&diff, 0));
+    }
+
+    #[test]
+    fn diff_not_too_large_at_exactly_2000_lines() {
+        let diff = "a\n".repeat(2_000);
+        assert!(!diff_is_too_large(&diff, 0));
+    }
 }

@@ -33,6 +33,10 @@
 		BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000A1 /* MotherBrokerClient.swift */; };
 		BB00000000000000000000B4 /* Models.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000001 /* Models.swift */; };
 		BB00000000000000000000B5 /* PhaseRibbonTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000C2 /* PhaseRibbonTests.swift */; };
+		CC00000000000000000000A1 /* PerriModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000A0 /* PerriModelTests.swift */; };
+		CC00000000000000000000A3 /* Theme.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000005 /* Theme.swift */; };
+		CC00000000000000000000A4 /* DiffColoring.swift in TestSources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000B0 /* DiffColoring.swift */; };
+		CC00000000000000000000A5 /* DiffColoring.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000B0 /* DiffColoring.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -62,6 +66,8 @@
 		BB00000000000000000000A1 /* MotherBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherBrokerClient.swift; sourceTree = "<group>"; };
 		BB00000000000000000000B1 /* MotherBrokerClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherBrokerClientTests.swift; sourceTree = "<group>"; };
 		BB00000000000000000000C2 /* PhaseRibbonTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhaseRibbonTests.swift; sourceTree = "<group>"; };
+		CC00000000000000000000A0 /* PerriModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriModelTests.swift; sourceTree = "<group>"; };
+		CC00000000000000000000B0 /* DiffColoring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffColoring.swift; sourceTree = "<group>"; };
 		BB00000000000000000000G1 /* NostromoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NostromoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -140,6 +146,7 @@
 				AA0000020000000000000009 /* MainLayout.swift */,
 				AA0000020000000000000040 /* ToastBannerView.swift */,
 				AA0000020000000000000024 /* CreateFocusSheet.swift */,
+				CC00000000000000000000B0 /* DiffColoring.swift */,
 				AA0000020000000000000021 /* Views */,
 			);
 			path = UI;
@@ -160,6 +167,7 @@
 			children = (
 				BB00000000000000000000B1 /* MotherBrokerClientTests.swift */,
 				BB00000000000000000000C2 /* PhaseRibbonTests.swift */,
+				CC00000000000000000000A0 /* PerriModelTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -266,6 +274,7 @@
 				AA0000020000000000000132 /* FocusStore.swift in Sources */,
 				AA0000020000000000000124 /* CreateFocusSheet.swift in Sources */,
 				BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */,
+				CC00000000000000000000A5 /* DiffColoring.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -277,6 +286,9 @@
 				BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */,
 				BB00000000000000000000B4 /* Models.swift in TestSources */,
 				BB00000000000000000000B5 /* PhaseRibbonTests.swift in Sources */,
+				CC00000000000000000000A1 /* PerriModelTests.swift in Sources */,
+				CC00000000000000000000A3 /* Theme.swift in TestSources */,
+				CC00000000000000000000A4 /* DiffColoring.swift in TestSources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

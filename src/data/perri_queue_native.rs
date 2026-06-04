@@ -18,7 +18,9 @@
 //! response reuses the in-memory cache without re-processing.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -32,6 +34,7 @@ use crate::{
     data::{
         dirty_file,
         github_client::GithubClient,
+        perri_pr_native::prefetch_into_cache,
         perri_queue::{CiState, PrQueueItem, PrQueueSnapshot},
     },
 };
@@ -259,6 +262,44 @@ impl PerriQueueNativeSource {
             {
                 Ok(snap) => {
                     debug!(prs = snap.items.len(), "perri queue refreshed");
+
+                    // Write the queue cache atomically so Swift reads a complete file.
+                    let state_dir = self.config.perri_state_dir();
+                    let cache_path = state_dir.join(".queue.cache.json");
+                    match serde_json::to_string(&snap) {
+                        Ok(json) => {
+                            if let Err(e) = write_json_atomic(&cache_path, &json) {
+                                warn!("perri queue cache write failed: {e:#}");
+                            } else {
+                                debug!("perri queue cache written: {}", cache_path.display());
+                            }
+                        }
+                        Err(e) => warn!("perri queue cache serialize failed: {e:#}"),
+                    }
+
+                    // Pre-fetch detail for the top-3 PRs in bucket-priority order.
+                    let top_three = top_three_items(&snap.items);
+                    for item in top_three {
+                        let cfg = self.config.clone();
+                        let client_clone = client.clone();
+                        let repo = item.repo.clone();
+                        let number = item.number;
+                        let sha = item.head_sha.clone();
+                        let sd = state_dir.clone();
+                        tokio::spawn(async move {
+                            // Skip if a fresh cache file already exists for this (repo, number, sha).
+                            if cache_is_fresh(&sd, &repo, number, &sha) {
+                                debug!("perri prefetch {repo}#{number} cache fresh — skipping");
+                                return;
+                            }
+                            if let Err(e) =
+                                prefetch_into_cache(&cfg, &client_clone, &repo, number).await
+                            {
+                                debug!("perri prefetch {repo}#{number} failed: {e:#}");
+                            }
+                        });
+                    }
+
                     let _ = tx.send(Some(snap));
                 }
                 Err(e) => {
@@ -364,7 +405,7 @@ impl PerriQueueNativeSource {
                 let endpoint_body_cache = Arc::clone(endpoint_body_cache);
                 async move {
                     let repo = repo_from_url(&item.repository_url);
-                    let (ci_state, failed) = ci_state_cached(
+                    let (ci_state, failed, head_sha) = ci_state_cached(
                         &client,
                         &repo,
                         item.number,
@@ -390,6 +431,7 @@ impl PerriQueueNativeSource {
                         new_activity: false,
                         url: item.html_url.clone(),
                         ci_state,
+                        head_sha,
                     })
                 }
             })
@@ -497,7 +539,7 @@ impl PerriQueueNativeSource {
                         return (key, None, new_cache_entry);
                     }
 
-                    let (ci_state, failed) = ci_state_cached(
+                    let (ci_state, failed, head_sha) = ci_state_cached(
                         &client,
                         &repo,
                         item.number,
@@ -524,6 +566,7 @@ impl PerriQueueNativeSource {
                         new_activity: true,
                         url: item.html_url.clone(),
                         ci_state,
+                        head_sha,
                     };
                     (key, Some(pr_item), new_cache_entry)
                 }
@@ -706,6 +749,7 @@ async fn get_our_last_review(
 ///   - the display `CiState` (rollup over ALL runs, D1)
 ///   - whether a GitHub Actions run has `conclusion == "failure"` (the
 ///     filter bool — identical semantics to the old check-suites filter, D2)
+///   - the resolved HEAD SHA (empty string on failure to resolve)
 ///
 /// Results are cached by HEAD SHA so successive cycles skip the API call when
 /// the PR hasn't received a new push.  Mutex guards are never held across
@@ -718,11 +762,11 @@ pub async fn ci_state_cached(
     ci_state_cache: &Arc<Mutex<HashMap<String, (CiState, bool)>>>,
     endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
     endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> (CiState, bool) {
+) -> (CiState, bool, String) {
     let sha = match get_pr_head_sha(client, repo, number, endpoint_etags, endpoint_body_cache).await
     {
         Some(s) => s,
-        None => return (CiState::Unknown, false),
+        None => return (CiState::Unknown, false, String::new()),
     };
 
     // Record current head SHA (brief lock, no await).
@@ -734,17 +778,17 @@ pub async fn ci_state_cached(
     // Return cached result if the SHA hasn't changed since last cycle.
     {
         let lock = ci_state_cache.lock().unwrap();
-        if let Some(&cached) = lock.get(&sha) {
+        if let Some(&(state, failed)) = lock.get(&sha) {
             debug!(%repo, number, "ci_state cache hit (sha unchanged)");
-            return cached;
+            return (state, failed, sha);
         }
     }
 
     // Cache miss — fetch check-runs and store the result.
     let result =
         fetch_check_runs_state(client, repo, &sha, endpoint_etags, endpoint_body_cache).await;
-    ci_state_cache.lock().unwrap().insert(sha, result);
-    result
+    ci_state_cache.lock().unwrap().insert(sha.clone(), result);
+    (result.0, result.1, sha)
 }
 
 /// Fetch and parse check-runs for a known HEAD SHA.
@@ -814,7 +858,7 @@ pub async fn ci_has_failure_cached(
         endpoint_body_cache,
     )
     .await
-    .1
+    .1 // .1 is the actions-failure filter bool (index unchanged in the new 3-tuple)
 }
 
 /// Fetch the check-suites result for a known HEAD SHA.
@@ -923,6 +967,74 @@ fn base_headers(client: &GithubClient) -> HeaderMap {
         format!("Bearer {}", client.token()).parse().unwrap(),
     );
     headers
+}
+
+// ── Queue file helpers ────────────────────────────────────────────────────────
+
+/// Write `json` to `path` atomically via a temp-file + rename so a concurrent
+/// reader never sees a partial write.
+pub(crate) fn write_json_atomic(path: &Path, json: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Select the top-3 PRs in bucket-priority order:
+/// `requested` → `needs_review` → `changes_req`; preserve within-bucket order.
+fn top_three_items(items: &[PrQueueItem]) -> Vec<&PrQueueItem> {
+    let bucket_order = |b: &str| match b {
+        "requested" => 0usize,
+        "needs_review" => 1,
+        "changes_req" => 2,
+        _ => 3,
+    };
+    let mut sorted: Vec<&PrQueueItem> = items.iter().collect();
+    sorted.sort_by_key(|i| bucket_order(&i.bucket));
+    sorted.into_iter().take(3).collect()
+}
+
+/// Returns `true` iff the per-PR cache file for `(repo, number)` exists, its
+/// `head_sha` matches `sha`, and it was written within the last 10 minutes.
+fn cache_is_fresh(state_dir: &Path, repo: &str, number: u64, sha: &str) -> bool {
+    if sha.is_empty() {
+        return false;
+    }
+    let safe = repo.replace('/', "-");
+    let path = state_dir
+        .join("pr-cache")
+        .join(format!("{safe}-{number}.json"));
+
+    // Check mtime first (fast).
+    let mtime_ok = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .map(|mt| {
+            SystemTime::now()
+                .duration_since(mt)
+                .map(|d| d.as_secs() < 600)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+
+    if !mtime_ok {
+        return false;
+    }
+
+    // Decode the cached `head_sha` field and compare.
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    // We only need the head_sha field; use a lightweight partial decode.
+    #[derive(Deserialize)]
+    struct HeadShaOnly {
+        #[serde(default)]
+        head_sha: String,
+    }
+    let cached: HeadShaOnly = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    cached.head_sha == sha
 }
 
 // ── URL encoding ──────────────────────────────────────────────────────────────

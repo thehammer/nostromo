@@ -263,7 +263,19 @@ struct MotherJobSlim: Decodable {
 
 // MARK: - Perri PR queue
 
-/// One item from `perri-queue-pane --json` output.
+/// Rolled-up CI state for a PR row or individual check.
+/// Raw values match the Rust `CiState` serde encoding (`lowercase`).
+enum CiState: String, Decodable {
+    case unknown, pending, success, failure
+
+    /// Tolerant decode: any unknown or missing string maps to `.unknown`.
+    static func from(ciStateString s: String?) -> CiState {
+        guard let s else { return .unknown }
+        return CiState(rawValue: s.lowercased()) ?? .unknown
+    }
+}
+
+/// One item from the perri queue cache.
 struct PRQueueItem: Identifiable {
     var id: String { "\(repo)#\(number)" }
     let repo:        String
@@ -274,6 +286,75 @@ struct PRQueueItem: Identifiable {
     let bucket:      String
     let newActivity: Bool
     let url:         String
+    /// Rolled-up CI state — defaults to `.unknown` when absent from the cache.
+    let ciState:     CiState
+    /// HEAD commit SHA — used by the GUI to validate its detail cache.
+    let headSha:     String
+}
+
+/// A single CI check-run result decoded from the PR detail JSON.
+struct CiCheck: Decodable, Identifiable {
+    var id: String { name }
+    let name:   String
+    let state:  CiState
+    /// Truncated failure log; nil unless the check is failing.
+    let detail: String?
+
+    enum CodingKeys: String, CodingKey { case name, state, detail }
+
+    init(from d: Decoder) throws {
+        let c  = try d.container(keyedBy: CodingKeys.self)
+        name   = (try? c.decode(String.self, forKey: .name)) ?? ""
+        let s  = try? c.decode(String.self, forKey: .state)
+        state  = CiState.from(ciStateString: s)
+        detail = try? c.decodeIfPresent(String.self, forKey: .detail)
+    }
+}
+
+/// Full PR detail decoded from `current-pr-detail.json` or a per-PR cache file.
+/// Field names are mapped from Rust's snake_case via `CodingKeys`.
+struct PRDetail: Decodable {
+    let prNumber:     Int?
+    let repo:         String
+    let title:        String
+    let author:       String
+    let url:          String
+    let diff:         String
+    let diffTooLarge: Bool
+    let ciChecks:     [CiCheck]
+    let additions:    Int
+    let deletions:    Int
+    let changedFiles: Int
+    let headSha:      String
+    let error:        String?
+
+    enum CodingKeys: String, CodingKey {
+        case prNumber    = "pr_number"
+        case repo, title, author, url, diff
+        case diffTooLarge = "diff_too_large"
+        case ciChecks     = "ci_checks"
+        case additions, deletions
+        case changedFiles = "changed_files"
+        case headSha      = "head_sha"
+        case error
+    }
+
+    init(from d: Decoder) throws {
+        let c        = try d.container(keyedBy: CodingKeys.self)
+        prNumber     = try? c.decodeIfPresent(Int.self,      forKey: .prNumber)
+        repo         = (try? c.decode(String.self,           forKey: .repo))         ?? ""
+        title        = (try? c.decode(String.self,           forKey: .title))        ?? ""
+        author       = (try? c.decode(String.self,           forKey: .author))       ?? ""
+        url          = (try? c.decode(String.self,           forKey: .url))          ?? ""
+        diff         = (try? c.decode(String.self,           forKey: .diff))         ?? ""
+        diffTooLarge = (try? c.decode(Bool.self,             forKey: .diffTooLarge)) ?? false
+        ciChecks     = (try? c.decode([CiCheck].self,        forKey: .ciChecks))     ?? []
+        additions    = (try? c.decode(Int.self,              forKey: .additions))    ?? 0
+        deletions    = (try? c.decode(Int.self,              forKey: .deletions))    ?? 0
+        changedFiles = (try? c.decode(Int.self,              forKey: .changedFiles)) ?? 0
+        headSha      = (try? c.decode(String.self,           forKey: .headSha))      ?? ""
+        error        = try? c.decodeIfPresent(String.self,   forKey: .error)
+    }
 }
 
 // MARK: - Activity
