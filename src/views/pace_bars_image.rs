@@ -141,24 +141,25 @@ fn render_bar(
     let Some(wp) = window else { return };
 
     // Gradient fill: length encodes elapsed_pct.
+    // Each pixel samples pace_color(t * pace) so the gradient always runs
+    // from the dark anchor at the left edge to the pace colour at the right
+    // edge, regardless of which bar is being drawn.
     let fill_w = ((wp.elapsed_pct.clamp(0.0, 100.0) / 100.0) * rail_w as f32).round() as u32;
     if fill_w > 0 {
-        let tip_rgb = pace_color(wp.pace);
-        let green = (0u8, 200u8, 83u8);
-
         for px in 0..fill_w {
             let t = if fill_w <= 1 {
                 0.0f32
             } else {
                 px as f32 / (fill_w - 1) as f32
             };
-            let (r, g, b) = oklab_lerp(green, tip_rgb, t);
+            let (r, g, b) = pace_color(t * wp.pace);
             fill_rect(pixmap, rail_x + px, bar_y, 1, bar_h, (r, g, b, 255));
         }
     }
 
     // Pace number — right-aligned, overlaid in tip color at the right of the rail.
-    let tip_rgb = pace_color(wp.pace);
+    // Ensure the text is always at least as bright as green so it's legible.
+    let tip_rgb = pace_color(wp.pace.max(0.6));
     let pace_str = format!("{:.2}", wp.pace);
     // Estimate text width (~font_px * 0.6 per char) to right-align.
     let approx_text_w = (pace_str.len() as f32 * font_px * 0.6) as i32;
@@ -177,22 +178,30 @@ fn render_bar(
 
 // ── Colour helpers ────────────────────────────────────────────────────────────
 
-/// Map a pace value to an RGB colour via two-segment OKLab interpolation.
+/// Map a pace value to an RGB colour via three-segment OKLab interpolation.
 ///
 /// Anchors:
-/// - `0.0` → `#00C853` (vivid green)
-/// - `1.0` → `#FFD600` (amber yellow)
-/// - `1.5` → `#D50000` (vivid red)
+/// - `0.0` → `#0A1460` (dark blue — start anchor, same for every bar)
+/// - `0.6` → `#00C853` (vivid green — on-pace)
+/// - `1.0` → `#FFD600` (amber yellow — elevated)
+/// - `1.5` → `#D50000` (vivid red — critical)
+///
+/// Using `pace_color(t * pace)` over a fill produces a gradient that always
+/// starts from the dark anchor and ends at the colour for that bar's pace,
+/// so every bar shares the same visual origin regardless of pace value.
 ///
 /// Pace is clamped to `[0.0, 1.5]` before mapping.
 pub fn pace_color(pace: f32) -> (u8, u8, u8) {
+    let dark = (10u8, 20u8, 90u8); // dark blue anchor
     let green = (0u8, 200u8, 83u8);
     let yellow = (255u8, 214u8, 0u8);
     let red = (213u8, 0u8, 0u8);
 
     let pace = pace.clamp(0.0, 1.5);
-    if pace <= 1.0 {
-        oklab_lerp(green, yellow, pace)
+    if pace <= 0.6 {
+        oklab_lerp(dark, green, pace / 0.6)
+    } else if pace <= 1.0 {
+        oklab_lerp(green, yellow, (pace - 0.6) / 0.4)
     } else {
         oklab_lerp(yellow, red, (pace - 1.0) / 0.5)
     }
@@ -399,15 +408,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pace_color_green_at_zero() {
+    fn pace_color_dark_at_zero() {
+        // pace=0 maps to the dark blue anchor — blue dominant, red/green low
         let (r, g, b) = pace_color(0.0);
+        assert!(r < 40, "red should be low for dark anchor: {r}");
+        assert!(g < 50, "green should be low for dark anchor: {g}");
+        assert!(b > 60, "blue should be dominant for dark anchor: {b}");
+    }
+
+    #[test]
+    fn pace_color_green_at_zero_point_six() {
+        // pace=0.6 maps to vivid green
+        let (r, g, b) = pace_color(0.6);
         assert!(r < 50, "red should be low for green: {r}");
         assert!(g > 180, "green should be high for green: {g}");
-        // #00C853 has B=83; green-dominant means R and B both low relative to G
-        assert!(
-            b < 110,
-            "blue should be significantly lower than green: {b}"
-        );
+        assert!(b < 110, "blue should be lower than green: {b}");
     }
 
     #[test]

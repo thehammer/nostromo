@@ -126,6 +126,10 @@ struct ManagedSession {
     /// Set true immediately before an intentional kill so the supervisor does
     /// not treat the resulting EOF as a crash to recover from.
     intentional_stop: Arc<AtomicBool>,
+    /// Set by the stderr drain when the child emits "No conversation found",
+    /// signalling a stale persisted session id. `reap_and_recover` checks this
+    /// before the crash-loop guard and spawns fresh rather than retrying --resume.
+    stale_session_id: Arc<AtomicBool>,
     attached_clients: HashSet<String>,
     /// Per-client forwarder abort handles.
     forwarders: HashMap<String, tokio::task::AbortHandle>,
@@ -283,7 +287,7 @@ impl SessionManager {
         cmd.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped()); // piped for crash diagnostics (was null)
         // Child working directory. When the focus carries no project dir, default
         // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
         // is `/` (filesystem root). Running an agent at `/` has no git context, so
@@ -308,6 +312,7 @@ impl SessionManager {
             .stdout
             .take()
             .ok_or_else(|| anyhow!("child has no stdout"))?;
+        let stderr = child.stderr.take();
 
         let (event_tx, _) = broadcast::channel::<SessionEvent>(512);
         let shared = Shared {
@@ -318,6 +323,33 @@ impl SessionManager {
             exited: Arc::new(AtomicBool::new(false)),
             event_tx,
         };
+
+        // Stderr drain thread: read and log stderr lines so crash output is
+        // visible in the nostromd log rather than silently discarded.
+        // Also detects the "No conversation found" permanent error and sets
+        // `stale_session_id` so `reap_and_recover` can clear the id and
+        // restart fresh rather than looping on the same stale id.
+        let stale_session_id = Arc::new(AtomicBool::new(false));
+        let stale_for_stderr = Arc::clone(&stale_session_id);
+        let tag_for_stderr = tag.clone();
+        if let Some(stderr_pipe) = stderr {
+            tokio::task::spawn_blocking(move || {
+                use std::io::BufRead as _;
+                let reader = std::io::BufReader::new(stderr_pipe);
+                for line in reader.lines().flatten() {
+                    let line = line.trim().to_owned();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if line.contains("No conversation found") {
+                        stale_for_stderr.store(true, Ordering::SeqCst);
+                        warn!(tag = %tag_for_stderr, "stale session id detected — will clear and restart fresh");
+                    } else {
+                        warn!(tag = %tag_for_stderr, "[stderr] {line}");
+                    }
+                }
+            });
+        }
 
         // Reader thread: parse stdout → transcript → broadcast deltas; drain
         // the pending queue on turn completion; signal exit on EOF.
@@ -344,6 +376,7 @@ impl SessionManager {
             shared,
             respawn_fixed,
             intentional_stop: Arc::new(AtomicBool::new(false)),
+            stale_session_id,
             attached_clients: HashSet::new(),
             forwarders: HashMap::new(),
             _reader_task: reader_task,
@@ -662,6 +695,7 @@ impl SessionManager {
             let wants_recovery;
             let guard_tripped;
             let exit_code;
+            let is_stale;
             let crash_times_snapshot;
             {
                 let s = self.sessions.get_mut(&tag).unwrap();
@@ -671,9 +705,43 @@ impl SessionManager {
                 guard_tripped = crash_count >= MAX_RESTARTS;
                 exit_code = s.last_exit_code;
                 crash_times_snapshot = s.crash_times.clone();
+                // NOTE: tiny race — the stderr drain sets this flag in a separate
+                // thread. It almost always fires before reap_and_recover ticks (the
+                // process exits within milliseconds of writing to stderr), but is
+                // not guaranteed. The worst case is one extra retry before the flag
+                // is seen; the crash-loop guard still trips eventually.
+                is_stale = s.stale_session_id.load(Ordering::SeqCst);
             }
 
-            if wants_recovery && guard_tripped {
+            if wants_recovery && is_stale {
+                // Permanent configuration error: the persisted session id is no
+                // longer valid. Clear it and spawn a fresh conversation. Bypass
+                // the crash-loop guard and backoff — this is not a misbehaving
+                // process, it's a stale pointer we can deterministically fix in
+                // one step.
+                warn!(tag, "clearing stale session id and restarting with fresh session");
+                let (agent, view, cwd, rc, attached) = {
+                    let s = self.sessions.get(&tag).unwrap();
+                    (
+                        s.agent_name.clone(),
+                        s.view_name.clone(),
+                        s.cwd.clone(),
+                        s.remote_control,
+                        s.attached_clients.iter().cloned().collect::<Vec<_>>(),
+                    )
+                };
+                self.stop(&tag);
+                self.sessions.remove(&tag);
+                save_id(&self.store_path, &tag, None);
+                match self.spawn_session(tag.to_string(), agent, view, cwd, None, rc) {
+                    Ok(_) => {
+                        for client_id in attached {
+                            let _ = self.attach(&tag, &client_id);
+                        }
+                    }
+                    Err(e) => warn!(tag, "fresh restart after stale id clear failed: {e:#}"),
+                }
+            } else if wants_recovery && guard_tripped {
                 warn!(tag, "crash-loop guard tripped; leaving session crashed");
                 // Prevent repeated recovery attempts: treat as intentional.
                 if let Some(s) = self.sessions.get_mut(&tag) {
@@ -813,7 +881,7 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
     // real code via child.try_wait() and re-broadcasts Exited with it.
     shared.exited.store(true, Ordering::SeqCst);
     shared.broadcast(SessionEvent::Exited { exit_code: None });
-    debug!(tag = %tag, "session reader EOF");
+    tracing::warn!(tag = %tag, "session reader EOF — child stdout closed (crash or clean exit)");
 }
 
 /// After a turn completes, send the next queued message (staying mid-turn) or

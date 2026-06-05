@@ -776,11 +776,15 @@ pub async fn ci_state_cached(
         .insert((repo.to_owned(), number), sha.clone());
 
     // Return cached result if the SHA hasn't changed since last cycle.
+    // Only cache terminal states (Success, Failure) — Pending is transitional
+    // and must re-fetch each cycle so we detect when checks complete.
     {
         let lock = ci_state_cache.lock().unwrap();
         if let Some(&(state, failed)) = lock.get(&sha) {
-            debug!(%repo, number, "ci_state cache hit (sha unchanged)");
-            return (state, failed, sha);
+            if state != CiState::Pending && state != CiState::Unknown {
+                debug!(%repo, number, "ci_state cache hit (sha unchanged)");
+                return (state, failed, sha);
+            }
         }
     }
 
