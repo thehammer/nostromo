@@ -105,6 +105,7 @@ async fn perri_view_ctrl_t_toggles_transcript() {
             new_activity: false,
             url: "https://github.com/a/b/pull/1".into(),
             ci_state: Default::default(),
+            head_sha: String::new(),
         }],
         stale: false,
         error: None,
@@ -122,6 +123,8 @@ async fn perri_view_ctrl_t_toggles_transcript() {
         additions: 0,
         deletions: 0,
         changed_files: 0,
+        head_sha: String::new(),
+        diff_too_large: false,
     }));
     drop(q_tx);
     drop(pr_tx);
