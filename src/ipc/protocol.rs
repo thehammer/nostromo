@@ -514,4 +514,63 @@ mod tests {
         // The MIN_CLIENT_VERSION <= PROTOCOL_VERSION invariant is enforced at
         // compile time via a `const _` assertion near the constant definitions.
     }
+
+    // ── StopReason / SessionDown / SessionInfo.stop_reason ───────────────────
+
+    #[test]
+    fn stop_reason_serializes_snake_case() {
+        use crate::ipc::session_manager::StopReason;
+        assert_eq!(
+            serde_json::to_string(&StopReason::CrashLoopGuard).unwrap(),
+            "\"crash_loop_guard\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StopReason::User).unwrap(),
+            "\"user\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StopReason::StaleId).unwrap(),
+            "\"stale_id\""
+        );
+    }
+
+    #[test]
+    fn session_down_server_message_round_trips() {
+        use crate::ipc::session_manager::StopReason;
+        round_trip_server(ServerMsg::SessionDown {
+            tag: "fred".into(),
+            reason: StopReason::CrashLoopGuard,
+        });
+    }
+
+    #[test]
+    fn session_info_stop_reason_round_trips() {
+        use crate::ipc::session_manager::StopReason;
+        // With a stop_reason set.
+        round_trip_server(ServerMsg::SessionListResp {
+            sessions: vec![SessionInfo {
+                tag: "fred".into(),
+                agent_name: "fred".into(),
+                view_name: "Fred".into(),
+                session_id: None,
+                alive: false,
+                remote_control: false,
+                state: SessionState::Idle,
+                stop_reason: Some(StopReason::CrashLoopGuard),
+            }],
+        });
+        // With no stop_reason.
+        round_trip_server(ServerMsg::SessionListResp {
+            sessions: vec![SessionInfo {
+                tag: "fred".into(),
+                agent_name: "fred".into(),
+                view_name: "Fred".into(),
+                session_id: None,
+                alive: true,
+                remote_control: false,
+                state: SessionState::Idle,
+                stop_reason: None,
+            }],
+        });
+    }
 }

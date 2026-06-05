@@ -1550,4 +1550,138 @@ mod tests {
         assert!(!mgr.sessions.get("longlived").unwrap().alive());
         assert_eq!(mgr.session_state("longlived"), Some(SessionState::Idle));
     }
+
+    // ── StopReason / PermanentlyDown ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stop_sets_stop_reason_and_broadcasts_permanently_down() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        spawn_stub(&mut mgr, "target", "sleep 30");
+        let mut rx = mgr
+            .sessions
+            .get("target")
+            .unwrap()
+            .shared
+            .event_tx
+            .subscribe();
+
+        mgr.stop("target");
+
+        assert_eq!(
+            mgr.sessions.get("target").unwrap().stop_reason,
+            Some(StopReason::User),
+            "stop() must set stop_reason to StopReason::User"
+        );
+
+        // Drain events looking for PermanentlyDown { reason: User }.
+        let mut found = false;
+        for _ in 0..20 {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(SessionEvent::PermanentlyDown {
+                    reason: StopReason::User,
+                })) => {
+                    found = true;
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(
+            found,
+            "stop() must broadcast SessionEvent::PermanentlyDown {{ reason: User }}"
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_trip_sets_stop_reason_and_broadcasts_permanently_down() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        spawn_stub(&mut mgr, "crashy2", "true");
+        mgr.sessions
+            .get_mut("crashy2")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
+
+        let mut rx = mgr
+            .sessions
+            .get("crashy2")
+            .unwrap()
+            .shared
+            .event_tx
+            .subscribe();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        for _ in 0..(MAX_RESTARTS + 2) {
+            mgr.reap_and_recover();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+
+        let s = mgr.sessions.get("crashy2").expect("session still tracked");
+        assert_eq!(
+            s.stop_reason,
+            Some(StopReason::CrashLoopGuard),
+            "crash-loop guard trip must set stop_reason to CrashLoopGuard"
+        );
+
+        // Drain for PermanentlyDown { reason: CrashLoopGuard }.
+        let mut found = false;
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(SessionEvent::PermanentlyDown {
+                    reason: StopReason::CrashLoopGuard,
+                })) => {
+                    found = true;
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(
+            found,
+            "guard trip must broadcast SessionEvent::PermanentlyDown {{ reason: CrashLoopGuard }}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_clears_stop_reason_and_crash_window() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        spawn_stub(&mut mgr, "crashy3", "true");
+        mgr.sessions
+            .get_mut("crashy3")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Trip the guard.
+        for _ in 0..(MAX_RESTARTS + 2) {
+            mgr.reap_and_recover();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+
+        assert_eq!(
+            mgr.sessions.get("crashy3").unwrap().stop_reason,
+            Some(StopReason::CrashLoopGuard),
+            "guard must have tripped before restart"
+        );
+
+        // User-initiated restart — should build a fresh ManagedSession.
+        mgr.restart("crashy3").unwrap();
+
+        let s = mgr.sessions.get("crashy3").expect("session present after restart");
+        assert_eq!(
+            s.stop_reason,
+            None,
+            "restarted session must have stop_reason == None"
+        );
+        assert!(
+            s.crash_times.is_empty(),
+            "restarted session must have an empty crash window"
+        );
+        assert!(s.alive(), "restarted session must be alive");
+    }
 }
