@@ -42,6 +42,9 @@ enum ServerMsg {
     case sessionState(tag: String, state: DaemonSessionState)
     case sessionPermissionRequest(tag: String, requestId: String, tool: String)
     case sessionExited(tag: String, exitCode: Int?)
+    /// The session has been permanently stopped and will not auto-restart.
+    /// `reason: .user` → benign user stop (clear indicator); `reason: .crashLoopGuard` → alarm.
+    case sessionDown(tag: String, reason: DaemonStopReason)
     case unknown
 }
 
@@ -52,6 +55,19 @@ enum DaemonSessionState: String, Decodable {
     case midTurn            = "mid_turn"
     case awaitingPermission = "awaiting_permission"
     case crashed
+}
+
+/// Mirrors `StopReason` in `session_manager.rs`. Unknown strings decode safely
+/// to `.user` (benign) so future variants never cause an alarm false-positive.
+enum DaemonStopReason: String, Decodable {
+    case user             = "user"
+    case crashLoopGuard   = "crash_loop_guard"
+    case staleId          = "stale_id"
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = DaemonStopReason(rawValue: raw) ?? .user
+    }
 }
 
 struct DaemonAskOption: Decodable {
@@ -489,6 +505,11 @@ class NostromodClient {
                 return .sessionExited(tag: m.tag, exitCode: m.exit_code)
             }
 
+        case "session_down":
+            if let m = try? decoder.decode(SessionDownResp.self, from: raw) {
+                return .sessionDown(tag: m.tag, reason: m.reason)
+            }
+
         default:
             break
         }
@@ -505,3 +526,4 @@ private struct SessionTurnDeltaResp: Decodable { let tag: String; let delta: Dae
 private struct SessionStateResp:   Decodable { let tag: String; let state: DaemonSessionState }
 private struct SessionPermResp:    Decodable { let tag: String; let request_id: String; let tool: String }
 private struct SessionExitedResp:  Decodable { let tag: String; let exit_code: Int? }
+private struct SessionDownResp:    Decodable { let tag: String; let reason: DaemonStopReason }

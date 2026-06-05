@@ -23,10 +23,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use nostromo::{
     agent_bus::{tail_activity_jsonl, ActivityEvent},
     config::Config,
-    data::{
-        perri_pr_native::PerriPrNativeSource,
-        perri_queue_native::PerriQueueNativeSource,
-    },
+    data::{perri_pr_native::PerriPrNativeSource, perri_queue_native::PerriQueueNativeSource},
     ipc::{protocol::ServerMsg, PtyManager, Server, SessionManager},
     mother::{self, statusline_cache_path, MotherStatus},
 };
@@ -101,8 +98,7 @@ async fn main() -> Result<()> {
     // ── Perri background sources ──────────────────────────────────────────────
     // These watch dirty-file sentinels and write cache files consumed by the
     // GUI (AppStore.swift).  They run independently of any TUI connection.
-    let (_perri_queue_rx, _perri_queue_refresh_tx) =
-        PerriQueueNativeSource::spawn(config.clone());
+    let (_perri_queue_rx, _perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
     let (_perri_pr_rx, _perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
 
     // ── Mother pollers ────────────────────────────────────────────────────────

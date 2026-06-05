@@ -78,6 +78,12 @@ class TabBarView: NSView {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateSweaters() }
             .store(in: &cancellables)
+
+        // Session health badges — update dots when any session's health changes
+        AppStore.shared.$sessionHealth
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateSweaters() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Focus list management
@@ -203,13 +209,36 @@ class TabBarView: NSView {
     }
 
     private func updateSweaters() {
-        let jobs = AppStore.shared.motherJobs
+        let jobs   = AppStore.shared.motherJobs
+        let health = AppStore.shared.sessionHealth
+
         let threshold: TimeInterval = 15 * 60
         let now = Date()
         let anyLong = jobs.contains {
             $0.state == "running" && $0.startedAt.map { now.timeIntervalSince($0) > threshold } == true
         }
-        items["mother"]?.sweaterColor = anyLong ? Theme.amber : nil
+
+        for (focusId, item) in items {
+            // Resolve the agent tag for this focus so we can look up health.
+            // The focus id is stable; the agent tag is what the daemon uses.
+            let agentTag = FocusStore.shared.focuses.first { $0.id == focusId }?.agentTag
+            let sessionH = agentTag.flatMap { health[$0] }
+
+            // Health takes precedence over Mother sweater.
+            switch sessionH {
+            case .permanentlyDown:
+                item.sweaterColor = Theme.redSweater
+            case .recovering:
+                item.sweaterColor = Theme.amber
+            case .healthy, .none:
+                // Fall back to Mother sweater for the Mother focus.
+                if focusId == "mother" {
+                    item.sweaterColor = anyLong ? Theme.amber : nil
+                } else {
+                    item.sweaterColor = nil
+                }
+            }
+        }
     }
 }
 

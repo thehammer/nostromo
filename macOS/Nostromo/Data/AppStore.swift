@@ -44,6 +44,12 @@ class AppStore: ObservableObject {
     // Active focus agent tag — set by MainLayout on every focus switch.
     @Published private(set) var activeFocusAgentTag: String?      = nil
 
+    // Session health — keyed by focus agent tag.
+    // Updated from the IPC stream for every tag the client sees events for,
+    // so the sidebar badge can render for any opened focus without the active
+    // focus view being visible. `.healthy` entries are omitted (implicitly healthy).
+    @Published private(set) var sessionHealth: [String: SessionHealth] = [:]
+
     // MARK: - Internals
 
     private let client  = NostromodClient()
@@ -76,6 +82,13 @@ class AppStore: ObservableObject {
     // MARK: - Active focus
 
     func setActiveFocusAgentTag(_ tag: String?) { activeFocusAgentTag = tag }
+
+    /// Return the ChatSession for `tag` if one has already been created (lazy —
+    /// does not create a new session). Used by health UI that needs to call
+    /// `restart()` / `dismissHealth()` without triggering a new spawn.
+    func sessionForHealthView(tag: String) -> ChatSession? {
+        sessionRegistry[tag]
+    }
 
     // MARK: - Startup
 
@@ -439,12 +452,39 @@ class AppStore: ObservableObject {
         case .error(let msg):
             log.error("Daemon error: \(msg, privacy: .public)")
 
+        case .sessionState(let tag, let state):
+            // Derive health for the sparse sidebar badge map (all focuses, not just
+            // the one with an active ChatSession view).
+            switch state {
+            case .idle, .midTurn, .awaitingPermission:
+                applySessionHealth(.healthy, for: tag)
+            case .crashed:
+                applySessionHealth(.recovering, for: tag)
+            }
+
+        case .sessionDown(let tag, let reason):
+            if reason == .user {
+                applySessionHealth(.healthy, for: tag)
+            } else {
+                applySessionHealth(.permanentlyDown(reason), for: tag)
+            }
+
         case .sessionSpawned, .sessionTurns, .sessionTurnDelta,
-             .sessionState, .sessionPermissionRequest, .sessionExited:
+             .sessionPermissionRequest, .sessionExited:
             break
 
         case .pong, .unknown:
             break
+        }
+    }
+
+    /// Update `sessionHealth` for `tag`. `.healthy` entries are removed to keep
+    /// the map sparse (healthy is the default / zero value).
+    private func applySessionHealth(_ health: SessionHealth, for tag: String) {
+        if health == .healthy {
+            sessionHealth.removeValue(forKey: tag)
+        } else {
+            sessionHealth[tag] = health
         }
     }
 }

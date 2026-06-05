@@ -46,6 +46,8 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use serde::{Deserialize, Serialize};
+
 use super::protocol::{ServerMsg, SessionInfo};
 use super::stream_json::{load_scrollback, SessionState, SessionTranscript, TurnDelta};
 
@@ -68,6 +70,23 @@ const BACKOFF_BASE_SECS: u64 = 1;
 /// absurd wait.
 const BACKOFF_MAX_SECS: u64 = 60;
 
+// ── stop reason ──────────────────────────────────────────────────────────────
+
+/// Why a session was intentionally stopped (`alive == false`, but not a crash
+/// the supervisor should recover from). Lets the GUI distinguish a benign
+/// user-requested stop from an alarm-worthy crash-loop-guard trip.
+///
+/// `StaleId` is defined for wire completeness and future use; the daemon does
+/// **not** set it today — the stale-id path clears the id and auto-respawns
+/// fresh, so the session is never left intentionally stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    User,
+    CrashLoopGuard,
+    StaleId,
+}
+
 // ── broadcast event ─────────────────────────────────────────────────────────
 
 /// Output unit broadcast by a session's reader thread.
@@ -75,7 +94,16 @@ const BACKOFF_MAX_SECS: u64 = 60;
 pub enum SessionEvent {
     Delta(TurnDelta),
     State(SessionState),
-    Exited { exit_code: Option<i32> },
+    Exited {
+        exit_code: Option<i32>,
+    },
+    /// The session has been permanently stopped and will not auto-restart.
+    /// Complements `Exited` (which fires on every exit) — this fires only when
+    /// the supervisor has decided it is done trying. Clients should show a
+    /// health indicator and offer recovery actions.
+    PermanentlyDown {
+        reason: StopReason,
+    },
 }
 
 // ── shared, reader-thread-visible session state ───────────────────────────────
@@ -148,6 +176,11 @@ struct ManagedSession {
     /// `reap_and_recover`. `None` = not yet reaped, killed by signal, or clean
     /// unknown. Surfaced through `SessionEvent::Exited { exit_code }`.
     last_exit_code: Option<i32>,
+    /// Why this session is intentionally stopped, if it is. Set by `stop()`
+    /// (User), the crash-loop guard in `reap_and_recover` (CrashLoopGuard), or
+    /// `kill_all_on_shutdown` (left None — daemon teardown). Cleared (reset to
+    /// None) whenever a new `ManagedSession` is spawned by `restart()`.
+    pub(crate) stop_reason: Option<StopReason>,
 }
 
 impl ManagedSession {
@@ -168,6 +201,7 @@ impl ManagedSession {
             alive: self.alive(),
             remote_control: self.remote_control,
             state: self.state(),
+            stop_reason: self.stop_reason,
         }
     }
 }
@@ -288,12 +322,12 @@ impl SessionManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()); // piped for crash diagnostics (was null)
-        // Child working directory. When the focus carries no project dir, default
-        // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
-        // is `/` (filesystem root). Running an agent at `/` has no git context, so
-        // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
-        // in ways they never do when launched from a real dir. $HOME matches what a
-        // terminal-launched agent would typically see.
+                                     // Child working directory. When the focus carries no project dir, default
+                                     // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
+                                     // is `/` (filesystem root). Running an agent at `/` has no git context, so
+                                     // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
+                                     // in ways they never do when launched from a real dir. $HOME matches what a
+                                     // terminal-launched agent would typically see.
         let dir = cwd
             .clone()
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
@@ -383,6 +417,7 @@ impl SessionManager {
             crash_times: VecDeque::new(),
             restart_at: None,
             last_exit_code: None,
+            stop_reason: None,
         })
     }
 
@@ -489,6 +524,10 @@ impl SessionManager {
                                 tag: tag_s.clone(),
                                 exit_code,
                             },
+                            SessionEvent::PermanentlyDown { reason } => ServerMsg::SessionDown {
+                                tag: tag_s.clone(),
+                                reason,
+                            },
                         };
                         let guard = senders.lock().unwrap();
                         match guard.get(&client_s) {
@@ -528,11 +567,19 @@ impl SessionManager {
     // ── lifecycle control ─────────────────────────────────────────────────────
 
     /// Stop the child but keep the persisted session id (resumable).
+    ///
+    /// Sets `stop_reason = User` and broadcasts `PermanentlyDown { reason: User }`
+    /// so attached clients can clear any crash-loop indicator (this was a benign
+    /// user-requested stop, not an alarm).
     pub fn stop(&mut self, tag: &str) {
         if let Some(session) = self.sessions.get_mut(tag) {
             session.intentional_stop.store(true, Ordering::SeqCst);
+            session.stop_reason = Some(StopReason::User);
             let _ = session.child.kill();
             session.shared.exited.store(true, Ordering::SeqCst);
+            session.shared.broadcast(SessionEvent::PermanentlyDown {
+                reason: StopReason::User,
+            });
             for (_, h) in session.forwarders.drain() {
                 h.abort();
             }
@@ -542,6 +589,13 @@ impl SessionManager {
 
     /// Stop then respawn with `--resume <session_id>`, preserving the set of
     /// attached clients (mirroring survives a restart).
+    ///
+    /// Explicitly resets the crash-loop guard: the new `ManagedSession` is built
+    /// by `spawn_managed` which starts with `crash_times = VecDeque::new()`,
+    /// `restart_at = None`, and `stop_reason = None` — so a user-initiated
+    /// Restart of a guard-tripped session always retries cleanly from a fresh
+    /// slate. This intent is preserved whether the crash-loop guard uses the
+    /// current fixed-window fields or future sliding-window fields.
     pub fn restart(&mut self, tag: &str) -> Result<()> {
         let (agent, view, cwd, sid, rc, fixed, attached) = {
             let s = self
@@ -719,7 +773,10 @@ impl SessionManager {
                 // the crash-loop guard and backoff — this is not a misbehaving
                 // process, it's a stale pointer we can deterministically fix in
                 // one step.
-                warn!(tag, "clearing stale session id and restarting with fresh session");
+                warn!(
+                    tag,
+                    "clearing stale session id and restarting with fresh session"
+                );
                 let (agent, view, cwd, rc, attached) = {
                     let s = self.sessions.get(&tag).unwrap();
                     (
@@ -744,8 +801,14 @@ impl SessionManager {
             } else if wants_recovery && guard_tripped {
                 warn!(tag, "crash-loop guard tripped; leaving session crashed");
                 // Prevent repeated recovery attempts: treat as intentional.
+                // Set stop_reason = CrashLoopGuard and broadcast PermanentlyDown
+                // so attached clients can show the alarm indicator.
                 if let Some(s) = self.sessions.get_mut(&tag) {
                     s.intentional_stop.store(true, Ordering::SeqCst);
+                    s.stop_reason = Some(StopReason::CrashLoopGuard);
+                    s.shared.broadcast(SessionEvent::PermanentlyDown {
+                        reason: StopReason::CrashLoopGuard,
+                    });
                 }
             } else if wants_recovery {
                 // Exit-code-aware restart policy:
@@ -1549,5 +1612,154 @@ mod tests {
         mgr.stop("longlived");
         assert!(!mgr.sessions.get("longlived").unwrap().alive());
         assert_eq!(mgr.session_state("longlived"), Some(SessionState::Idle));
+    }
+
+    // ── StopReason / PermanentlyDown ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stop_sets_stop_reason_and_broadcasts_permanently_down() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        spawn_stub(&mut mgr, "target", "sleep 30");
+        let mut rx = mgr
+            .sessions
+            .get("target")
+            .unwrap()
+            .shared
+            .event_tx
+            .subscribe();
+
+        mgr.stop("target");
+
+        assert_eq!(
+            mgr.sessions.get("target").unwrap().stop_reason,
+            Some(StopReason::User),
+            "stop() must set stop_reason to StopReason::User"
+        );
+
+        // Drain events looking for PermanentlyDown { reason: User }.
+        let mut found = false;
+        for _ in 0..20 {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(SessionEvent::PermanentlyDown {
+                    reason: StopReason::User,
+                })) => {
+                    found = true;
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(
+            found,
+            "stop() must broadcast SessionEvent::PermanentlyDown {{ reason: User }}"
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_trip_sets_stop_reason_and_broadcasts_permanently_down() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        spawn_stub(&mut mgr, "crashy2", "true");
+        mgr.sessions
+            .get_mut("crashy2")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
+
+        // Let the initial child exit.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Run MAX_RESTARTS - 1 reap cycles to accumulate (MAX_RESTARTS - 1) crashes
+        // with restarts (exit 0 → immediate restart). Each restart creates a new
+        // ManagedSession with a new event_tx — so we must subscribe AFTER the last
+        // restart and BEFORE the trip to capture the PermanentlyDown broadcast.
+        for _ in 0..(MAX_RESTARTS - 1) {
+            mgr.reap_and_recover();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+
+        // Subscribe to the CURRENT session's event_tx. The guard will trip on the
+        // very next reap (one more crash reaches MAX_RESTARTS), broadcasting on this
+        // channel.
+        let mut rx = mgr
+            .sessions
+            .get("crashy2")
+            .unwrap()
+            .shared
+            .event_tx
+            .subscribe();
+
+        // One more reap → guard trips → broadcasts PermanentlyDown on rx.
+        mgr.reap_and_recover();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Assert durable state: stop_reason == CrashLoopGuard.
+        let s = mgr.sessions.get("crashy2").expect("session still tracked");
+        assert_eq!(
+            s.stop_reason,
+            Some(StopReason::CrashLoopGuard),
+            "crash-loop guard trip must set stop_reason to CrashLoopGuard"
+        );
+
+        // Drain rx for PermanentlyDown { reason: CrashLoopGuard }.
+        let mut found = false;
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(SessionEvent::PermanentlyDown {
+                    reason: StopReason::CrashLoopGuard,
+                })) => {
+                    found = true;
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(
+            found,
+            "guard trip must broadcast SessionEvent::PermanentlyDown {{ reason: CrashLoopGuard }}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_clears_stop_reason_and_crash_window() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        spawn_stub(&mut mgr, "crashy3", "true");
+        mgr.sessions
+            .get_mut("crashy3")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Trip the guard.
+        for _ in 0..(MAX_RESTARTS + 2) {
+            mgr.reap_and_recover();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+
+        assert_eq!(
+            mgr.sessions.get("crashy3").unwrap().stop_reason,
+            Some(StopReason::CrashLoopGuard),
+            "guard must have tripped before restart"
+        );
+
+        // User-initiated restart — should build a fresh ManagedSession.
+        mgr.restart("crashy3").unwrap();
+
+        let s = mgr
+            .sessions
+            .get("crashy3")
+            .expect("session present after restart");
+        assert_eq!(
+            s.stop_reason, None,
+            "restarted session must have stop_reason == None"
+        );
+        assert!(
+            s.crash_times.is_empty(),
+            "restarted session must have an empty crash window"
+        );
+        assert!(s.alive(), "restarted session must be alive");
     }
 }

@@ -1,12 +1,15 @@
 import AppKit
 import Combine
 
-/// Native gradient pace bars — the macOS replacement for the TUI's pixel-rendered
-/// Kitty-graphics hack (pace_bars_image.rs).
+/// Pace-bars / health-status strip — the fixed-height row just above the status bar.
 ///
-/// Draws 2–3 horizontal bars (5h, 7d, Sonnet 7d) using NSGradient + NSBezierPath.
-/// Fill length = elapsed_pct; tip color = pace_color(pace).
-/// Hidden automatically when no PostureSnapshot is available.
+/// **Normal mode**: draws 2–3 horizontal gradient bars (5h, 7d, Sonnet 7d).
+/// **Health mode**: when the active focus session is unhealthy, replaces the bars
+/// with a plain-text status line and Restart / New session / Dismiss buttons.
+/// Switching the active focus re-evaluates which mode to show.
+///
+/// Health mode is exception-only: when all sessions are healthy, the view renders
+/// exactly as before.
 class PaceBarsView: NSView {
 
     // MARK: - Layout
@@ -22,7 +25,8 @@ class PaceBarsView: NSView {
 
     // MARK: - State
 
-    private var cancellables = Set<AnyCancellable>()
+    private var cancellables     = Set<AnyCancellable>()
+    private var healthView:      SessionHealthStatusView?
 
     // MARK: - Init
 
@@ -41,13 +45,69 @@ class PaceBarsView: NSView {
 
         AppStore.shared.$posture
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.needsDisplay = true }
+            .sink { [weak self] _ in self?.updateHealthOrBars() }
+            .store(in: &cancellables)
+
+        AppStore.shared.$sessionHealth
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateHealthOrBars() }
+            .store(in: &cancellables)
+
+        AppStore.shared.$activeFocusAgentTag
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateHealthOrBars() }
             .store(in: &cancellables)
     }
 
-    // MARK: - Drawing
+    // MARK: - Health vs. bars switching
+
+    /// Derive the active focus's health and update the view accordingly.
+    private func updateHealthOrBars() {
+        let activeTag    = AppStore.shared.activeFocusAgentTag
+        let chatSession  = activeTag.flatMap { AppStore.shared.sessionForHealthView(tag: $0) }
+        // `displayedHealth` folds the dismissed flag: returns .healthy when dismissed.
+        let activeHealth = chatSession?.displayedHealth
+                        ?? activeTag.flatMap { AppStore.shared.sessionHealth[$0] }
+                        ?? .healthy
+
+        if activeHealth == .healthy {
+            // Remove health overlay — restore normal bars drawing.
+            if let hv = healthView {
+                hv.removeFromSuperview()
+                healthView = nil
+                needsDisplay = true
+            }
+        } else {
+            // Show or update health status view.
+            if healthView == nil {
+                let hv = SessionHealthStatusView()
+                hv.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(hv)
+                NSLayoutConstraint.activate([
+                    hv.topAnchor.constraint(equalTo: topAnchor),
+                    hv.leadingAnchor.constraint(equalTo: leadingAnchor),
+                    hv.trailingAnchor.constraint(equalTo: trailingAnchor),
+                    hv.bottomAnchor.constraint(equalTo: bottomAnchor),
+                ])
+                healthView = hv
+                // Erase the pace-bars drawing underneath.
+                needsDisplay = true
+            }
+            healthView?.configure(health: activeHealth, chatSession: chatSession)
+        }
+    }
+
+    // MARK: - Drawing (normal mode)
 
     override func draw(_ dirtyRect: NSRect) {
+        // When the health overlay is active, just fill with bg so the bar drawing
+        // doesn't bleed through the transparent overlay.
+        if healthView != nil {
+            Theme.bg.setFill()
+            bounds.fill()
+            return
+        }
+
         guard let posture = AppStore.shared.posture else {
             // No data — fill with background so the row doesn't flash white.
             Theme.bg.setFill()

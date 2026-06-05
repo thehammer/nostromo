@@ -854,7 +854,10 @@ pub async fn run(
                 use crossterm::event::MouseEventKind;
                 // Log for Ctrl-D debug overlay.
                 {
-                    let entry = format!("{:?} col={} row={} view={}", m.kind, m.column, m.row, focused_view_idx);
+                    let entry = format!(
+                        "{:?} col={} row={} view={}",
+                        m.kind, m.column, m.row, focused_view_idx
+                    );
                     if state.mouse_event_log.len() >= 12 {
                         state.mouse_event_log.pop_front();
                     }
@@ -1340,9 +1343,7 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
 
         MotherAction::ArchiveAll => {
             state.modal = Some(ModalState::ConfirmArchiveAll {
-                modal: ConfirmModal::new(
-                    "Archive ALL terminal-state jobs? [y/n]".to_string(),
-                ),
+                modal: ConfirmModal::new("Archive ALL terminal-state jobs? [y/n]".to_string()),
             });
         }
 
@@ -1353,7 +1354,11 @@ fn handle_mother_action(action: MotherAction, state: &mut AppState) {
                     "Force-start \"{}\"? Runs now ignoring quota cap \
                      and conservative posture. Uses headroom shared with \
                      other jobs and sessions. [y] confirm  [n] cancel",
-                    if job.title.is_empty() { &job.id } else { &job.title }
+                    if job.title.is_empty() {
+                        &job.id
+                    } else {
+                        &job.title
+                    }
                 )),
             });
         }
