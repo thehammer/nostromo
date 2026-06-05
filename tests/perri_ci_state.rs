@@ -213,7 +213,7 @@ async fn ci_state_cached_non_actions_failure_does_not_set_filter_bool() {
     let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    let (display_state, filter_bool) = ci_state_cached(
+    let (display_state, filter_bool, _sha) = ci_state_cached(
         &client,
         "acme/repo",
         10,
@@ -280,7 +280,7 @@ async fn ci_state_cached_actions_failure_sets_filter_bool() {
     let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    let (display_state, filter_bool) = ci_state_cached(
+    let (display_state, filter_bool, _sha) = ci_state_cached(
         &client,
         "acme/repo",
         20,
@@ -347,7 +347,7 @@ async fn ci_state_cached_all_success() {
     let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    let (display_state, filter_bool) = ci_state_cached(
+    let (display_state, filter_bool, _sha) = ci_state_cached(
         &client,
         "acme/repo",
         30,
