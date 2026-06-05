@@ -104,23 +104,33 @@ pub fn render_calendar_to_image(
     // For each event, compute the local column count: how many columns are
     // needed among the group of events that overlap with it.  Events that don't
     // overlap with anything else get local_cols = 1 (full width).
-    let local_cols: Vec<usize> = snap.events.iter().enumerate().map(|(i, ev_i)| {
-        let max_col = snap.events.iter().enumerate()
-            .filter(|&(j, ev_j)| {
-                if j == i { return true; }
-                // Check temporal overlap.
-                let (s_i, e_i) = (ev_i.start, ev_i.end.or(ev_i.start));
-                let (s_j, e_j) = (ev_j.start, ev_j.end.or(ev_j.start));
-                match (s_i, e_i, s_j, e_j) {
-                    (Some(si), Some(ei), Some(sj), Some(ej)) => si < ej && sj < ei,
-                    _ => false,
-                }
-            })
-            .map(|(j, _)| col_indices[j])
-            .max()
-            .unwrap_or(0);
-        max_col + 1
-    }).collect();
+    let local_cols: Vec<usize> = snap
+        .events
+        .iter()
+        .enumerate()
+        .map(|(i, ev_i)| {
+            let max_col = snap
+                .events
+                .iter()
+                .enumerate()
+                .filter(|&(j, ev_j)| {
+                    if j == i {
+                        return true;
+                    }
+                    // Check temporal overlap.
+                    let (s_i, e_i) = (ev_i.start, ev_i.end.or(ev_i.start));
+                    let (s_j, e_j) = (ev_j.start, ev_j.end.or(ev_j.start));
+                    match (s_i, e_i, s_j, e_j) {
+                        (Some(si), Some(ei), Some(sj), Some(ej)) => si < ej && sj < ei,
+                        _ => false,
+                    }
+                })
+                .map(|(j, _)| col_indices[j])
+                .max()
+                .unwrap_or(0);
+            max_col + 1
+        })
+        .collect();
 
     // ── Hour grid lines & labels ───────────────────────────────────────────
     for hour in WORK_START_HOUR..=WORK_END_HOUR {

@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent_bus::ActivityEvent,
-    ipc::stream_json::{SessionState, Turn, TurnDelta},
+    ipc::{
+        session_manager::StopReason,
+        stream_json::{SessionState, Turn, TurnDelta},
+    },
     mother::{MotherJob, MotherStatus},
 };
 
@@ -111,6 +114,12 @@ pub struct SessionInfo {
     pub alive: bool,
     pub remote_control: bool,
     pub state: SessionState,
+    /// Why this session was intentionally stopped, if it was. `None` for live
+    /// sessions or sessions that were never explicitly stopped (e.g. auto-restarts).
+    /// Present on the wire even when `alive == true` (always `null`); this is
+    /// intentional so older peers decode it as `null` without breaking.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stop_reason: Option<StopReason>,
 }
 
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────
@@ -373,6 +382,21 @@ pub enum ServerMsg {
         exit_code: Option<i32>,
     },
 
+    /// The session has been permanently stopped and will not auto-restart.
+    ///
+    /// Fired by the daemon when:
+    /// - `stop()` is called (user-requested stop → `reason: user`), or
+    /// - the crash-loop guard trips (`reason: crash_loop_guard`).
+    ///
+    /// `reason: user` means the indicator should clear (intended stop, not an
+    /// alarm). `reason: crash_loop_guard` is the alarm case — the GUI should
+    /// show a recovery UI. Recovery uses the existing `SessionControl` message
+    /// with `action: restart` / `action: new_session`.
+    SessionDown {
+        tag: String,
+        reason: StopReason,
+    },
+
     /// Response to `SessionList`.
     SessionListResp {
         sessions: Vec<SessionInfo>,
@@ -486,6 +510,7 @@ mod tests {
                 alive: true,
                 remote_control: false,
                 state: SessionState::Idle,
+                stop_reason: None,
             }],
         });
     }

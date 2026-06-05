@@ -74,7 +74,12 @@ impl<'a> SyntectDiff<'a> {
         let mut highlighter = HighlightLines::new(syntax_ref, &self.cache.theme);
         let mut result: Vec<Line<'static>> = Vec::new();
 
-        for raw_line in self.diff.lines().skip(self.scroll_offset).take(self.max_lines) {
+        for raw_line in self
+            .diff
+            .lines()
+            .skip(self.scroll_offset)
+            .take(self.max_lines)
+        {
             // Determine the diff accent colour for this line prefix.
             let accent: Option<Color> = if raw_line.starts_with('+') && !raw_line.starts_with("+++")
             {

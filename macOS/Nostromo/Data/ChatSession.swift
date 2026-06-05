@@ -4,6 +4,22 @@ import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "chat")
 
+// MARK: - SessionHealth
+
+/// Observable health state of a daemon-hosted focus session.
+///
+/// Derivation rules (from daemon events):
+///   `.sessionState(.crashed)`         → `.recovering`  (supervisor may be retrying)
+///   `.sessionDown(.crashLoopGuard)`   → `.permanentlyDown(.crashLoopGuard)`  (alarm)
+///   `.sessionDown(.staleId)`          → `.permanentlyDown(.staleId)`         (alarm)
+///   `.sessionDown(.user)`             → `.healthy`     (benign user stop — clear indicator)
+///   `.sessionState(.idle/.midTurn/…)` → `.healthy`     (recovery succeeded)
+enum SessionHealth: Equatable {
+    case healthy
+    case recovering
+    case permanentlyDown(DaemonStopReason)
+}
+
 /// Thin client over a **nostromod-hosted** persistent session for one focus.
 ///
 /// The daemon owns the long-lived `claude --input-format stream-json` child,
@@ -23,9 +39,19 @@ class ChatSession: ObservableObject {
     let displayName: String    // `-n` / `--remote-control` name (phone-facing label)
     let workingDirectory: String?
 
-    @Published private(set) var turns:        [ChatTurn] = []
-    @Published private(set) var isRunning:    Bool       = false
-    @Published private(set) var pendingCount: Int        = 0  // daemon queues; reserved
+    @Published private(set) var turns:        [ChatTurn]     = []
+    @Published private(set) var isRunning:    Bool           = false
+    @Published private(set) var pendingCount: Int            = 0     // daemon queues; reserved
+    /// Derived from daemon health events. Drives the sidebar badge and pace-bars status strip.
+    @Published private(set) var health:       SessionHealth  = .healthy
+
+    /// When true, the health indicator is suppressed for the current `health` value.
+    /// Cleared automatically on the next health *change* so the indicator re-appears.
+    private(set) var isDismissed: Bool = false
+
+    /// The health value to show in the UI. Returns `.healthy` when the indicator
+    /// has been dismissed, so callers don't need to check `isDismissed` separately.
+    var displayedHealth: SessionHealth { isDismissed ? .healthy : health }
 
     private let client: NostromodClient
     private var cancellables = Set<AnyCancellable>()
@@ -107,6 +133,25 @@ class ChatSession: ObservableObject {
         // daemon/child (same known gap as before; tracked separately).
     }
 
+    // MARK: - Recovery
+
+    /// Request a daemon-side restart of this session (resumes with the same
+    /// session id). The health indicator clears naturally when the daemon
+    /// broadcasts `SessionState::Idle` after the new child is ready.
+    func restart() {
+        client.sessionControl(tag: tag, action: "restart")
+        log.info("ChatSession[\(self.tag, privacy: .public)] restart requested")
+    }
+
+    /// Suppress the health indicator for the current health value. The
+    /// suppression lifts automatically on the next health state change.
+    func dismissHealth() {
+        isDismissed = true
+        // Notify observers (the badge and pace-bars strip observe isDismissed
+        // indirectly via AppStore which re-publishes on every health update).
+        objectWillChange.send()
+    }
+
     // MARK: - Inbound (daemon broadcast)
 
     private func handle(_ msg: ServerMsg) {
@@ -119,13 +164,37 @@ class ChatSession: ObservableObject {
 
         case .sessionState(let t, let state) where t == tag:
             isRunning = (state == .midTurn || state == .awaitingPermission)
+            switch state {
+            case .idle, .midTurn, .awaitingPermission:
+                updateHealth(.healthy)   // recovery succeeded — clear indicator
+            case .crashed:
+                updateHealth(.recovering)
+            }
 
         case .sessionExited(let t, _) where t == tag:
             isRunning = false
 
+        case .sessionDown(let t, let reason) where t == tag:
+            isRunning = false
+            if reason == .user {
+                // Benign user-requested stop — clear any indicator.
+                updateHealth(.healthy)
+            } else {
+                // CrashLoopGuard or StaleId → alarm.
+                updateHealth(.permanentlyDown(reason))
+            }
+
         default:
             break
         }
+    }
+
+    /// Update health and clear the dismissed flag if the value changed.
+    private func updateHealth(_ newHealth: SessionHealth) {
+        if newHealth != health {
+            isDismissed = false
+        }
+        health = newHealth
     }
 
     private func apply(_ delta: DaemonTurnDelta) {

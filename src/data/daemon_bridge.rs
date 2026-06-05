@@ -75,6 +75,7 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::SessionState { .. }
         | ServerMsg::SessionPermissionRequest { .. }
         | ServerMsg::SessionExited { .. }
+        | ServerMsg::SessionDown { .. }
         | ServerMsg::SessionListResp { .. } => {}
         // DaemonReconnected is handled by individual DaemonPtyClient subscribers.
         ServerMsg::DaemonReconnected => {}
