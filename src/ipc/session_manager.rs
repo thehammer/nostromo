@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, mpsc};
@@ -56,9 +56,17 @@ pub const CLAUDE_BIN_ENV: &str = "NOSTROMO_CLAUDE_BIN";
 /// How many scrollback turns to replay when resuming a session.
 const SCROLLBACK_TURNS: usize = 30;
 
-/// Crash-loop guard: at most this many auto-restarts within the window.
+/// Crash-loop guard: at most this many auto-restarts within the sliding window.
 const MAX_RESTARTS: u32 = 3;
+/// Sliding-window span. A crash older than this falls off the back of the
+/// crash-timestamp deque and no longer counts toward the guard.
 const RESTART_WINDOW_SECS: u64 = 30;
+/// Exponential-backoff base: wait `BACKOFF_BASE_SECS * 2^(n-1)` before the nth
+/// transient restart (n = number of crashes already recorded this window).
+const BACKOFF_BASE_SECS: u64 = 1;
+/// Cap on a single backoff delay so a high crash count can't schedule an
+/// absurd wait.
+const BACKOFF_MAX_SECS: u64 = 60;
 
 // ── broadcast event ─────────────────────────────────────────────────────────
 
@@ -122,8 +130,20 @@ struct ManagedSession {
     /// Per-client forwarder abort handles.
     forwarders: HashMap<String, tokio::task::AbortHandle>,
     _reader_task: tokio::task::JoinHandle<()>,
-    restart_count: u32,
-    restart_window_start: Instant,
+    /// Sliding window of recent crash timestamps. On each detected crash we
+    /// push `Instant::now()`, then evict entries older than RESTART_WINDOW_SECS
+    /// from the front. `crash_times.len()` is the live crash count; when it
+    /// reaches MAX_RESTARTS the crash-loop guard trips. Replaces the old
+    /// fixed-window `restart_count` + `restart_window_start`.
+    crash_times: VecDeque<Instant>,
+    /// When set, `reap_and_recover` must not restart this session until
+    /// `Instant::now() >= restart_at` — the exponential-backoff deadline for a
+    /// transient (non-zero-exit) crash. `None` means "no pending backoff".
+    restart_at: Option<Instant>,
+    /// Last observed child exit code, captured via `child.try_wait()` in
+    /// `reap_and_recover`. `None` = not yet reaped, killed by signal, or clean
+    /// unknown. Surfaced through `SessionEvent::Exited { exit_code }`.
+    last_exit_code: Option<i32>,
 }
 
 impl ManagedSession {
@@ -327,8 +347,9 @@ impl SessionManager {
             attached_clients: HashSet::new(),
             forwarders: HashMap::new(),
             _reader_task: reader_task,
-            restart_count: 0,
-            restart_window_start: Instant::now(),
+            crash_times: VecDeque::new(),
+            restart_at: None,
+            last_exit_code: None,
         })
     }
 
@@ -551,6 +572,17 @@ impl SessionManager {
     /// Periodic supervisor pass (driven by the daemon): detect crashed children
     /// and auto-restart those still wanted (attached or with queued messages),
     /// subject to the crash-loop guard.
+    ///
+    /// Each crashed session goes through three phases per tick:
+    ///
+    /// 1. **Backoff check**: if we already scheduled a backoff deadline for this
+    ///    crash, skip this tick (still waiting) or clear it (deadline elapsed).
+    /// 2. **First-sighting bookkeeping** (only on the initial crash detection,
+    ///    not repeated while backing off): capture the exit code, re-broadcast
+    ///    `Exited` with the real code, mark the turn errored, record the crash
+    ///    in the sliding window.
+    /// 3. **Decision**: guard check, then exit-code-aware restart or backoff
+    ///    scheduling.
     pub fn reap_and_recover(&mut self) {
         let crashed: Vec<String> = self
             .sessions
@@ -562,11 +594,46 @@ impl SessionManager {
             .collect();
 
         for tag in crashed {
-            let wants_recovery;
-            let within_budget;
+            // ── phase 1: backoff check ────────────────────────────────────────
+            //
+            // A session can sit crashed across multiple 2s supervisor ticks
+            // while its backoff deadline counts down. Use restart_at as the
+            // "already-bookekept, waiting" sentinel: Some(future) → skip;
+            // Some(past) → deadline elapsed, clear it and proceed to restart;
+            // None → first sighting, run bookkeeping.
+            let backoff_served;
             {
                 let s = self.sessions.get_mut(&tag).unwrap();
-                // Mark the in-flight turn errored and announce the crash once.
+                match s.restart_at {
+                    Some(deadline) if Instant::now() < deadline => {
+                        continue; // still backing off; do nothing this tick
+                    }
+                    Some(_) => {
+                        // Deadline reached — clear and fall through to restart.
+                        // Bookkeeping was already done when we scheduled this.
+                        s.restart_at = None;
+                        backoff_served = true;
+                    }
+                    None => {
+                        backoff_served = false;
+                    }
+                }
+            }
+
+            // ── phase 2: first-sighting bookkeeping ───────────────────────────
+            if !backoff_served {
+                let s = self.sessions.get_mut(&tag).unwrap();
+
+                // Capture the real exit code (non-blocking; child has already
+                // closed stdout before the reader sets exited).
+                let code = capture_exit_code(&mut s.child);
+                s.last_exit_code = code;
+
+                // Re-broadcast Exited with the real exit code so clients see it.
+                // The reader's initial broadcast used None (it can't see the code).
+                s.shared.broadcast(SessionEvent::Exited { exit_code: code });
+
+                // Mark the in-flight turn errored and broadcast the delta.
                 let delta = s
                     .shared
                     .transcript
@@ -578,50 +645,78 @@ impl SessionManager {
                 }
                 s.shared.set_state(SessionState::Crashed);
 
-                let has_pending = !s.shared.pending.lock().unwrap().is_empty();
-                wants_recovery = !s.attached_clients.is_empty() || has_pending;
-
-                // Reset the restart window if it has elapsed.
-                //
-                // NOTE (fixed-window limitation): this is a fixed window, not a
-                // sliding one. A session that crashes just under RESTART_WINDOW_SECS
-                // apart resets the counter each time and can restart indefinitely
-                // without tripping MAX_RESTARTS. That's acceptable here — a genuinely
-                // broken `claude` child crash-loops far faster than the window, so the
-                // guard catches the real case; this only permits a slow, intermittent
-                // recrash, which is the behavior we'd want anyway. If that ever proves
-                // too lenient, switch to a sliding window (VecDeque<Instant> of recent
-                // crash times).
-                if s.restart_window_start.elapsed().as_secs() >= RESTART_WINDOW_SECS {
-                    s.restart_count = 0;
-                    s.restart_window_start = Instant::now();
+                // Sliding-window bookkeeping: push this crash, evict stale entries.
+                let now = Instant::now();
+                s.crash_times.push_back(now);
+                while s
+                    .crash_times
+                    .front()
+                    .map(|t| t.elapsed().as_secs() >= RESTART_WINDOW_SECS)
+                    .unwrap_or(false)
+                {
+                    s.crash_times.pop_front();
                 }
-                within_budget = s.restart_count < MAX_RESTARTS;
             }
 
-            if wants_recovery && within_budget {
-                let prev_restarts = self
-                    .sessions
-                    .get(&tag)
-                    .map(|s| s.restart_count)
-                    .unwrap_or(0);
-                warn!(
-                    tag,
-                    restart = prev_restarts + 1,
-                    "auto-restarting crashed session"
-                );
-                if let Err(e) = self.restart(&tag) {
-                    warn!(tag, "auto-restart failed: {e:#}");
-                } else if let Some(s) = self.sessions.get_mut(&tag) {
-                    s.restart_count = prev_restarts + 1;
-                }
-            } else if !within_budget {
+            // ── phase 3: decision ─────────────────────────────────────────────
+            let wants_recovery;
+            let guard_tripped;
+            let exit_code;
+            let crash_times_snapshot;
+            {
+                let s = self.sessions.get_mut(&tag).unwrap();
+                let has_pending = !s.shared.pending.lock().unwrap().is_empty();
+                wants_recovery = !s.attached_clients.is_empty() || has_pending;
+                let crash_count = s.crash_times.len() as u32;
+                guard_tripped = crash_count >= MAX_RESTARTS;
+                exit_code = s.last_exit_code;
+                crash_times_snapshot = s.crash_times.clone();
+            }
+
+            if wants_recovery && guard_tripped {
                 warn!(tag, "crash-loop guard tripped; leaving session crashed");
                 // Prevent repeated recovery attempts: treat as intentional.
                 if let Some(s) = self.sessions.get_mut(&tag) {
                     s.intentional_stop.store(true, Ordering::SeqCst);
                 }
+            } else if wants_recovery {
+                // Exit-code-aware restart policy:
+                //   exit 0 or signal (None) → restart immediately (clean shutdown).
+                //   non-zero exit → transient error; apply exponential backoff.
+                //   backoff already served → restart now regardless of code.
+                let restart_now = exit_code == Some(0) || exit_code.is_none() || backoff_served;
+                if restart_now {
+                    warn!(
+                        tag,
+                        restart = crash_times_snapshot.len(),
+                        exit_code = ?exit_code,
+                        "auto-restarting crashed session"
+                    );
+                    if let Err(e) = self.restart(&tag) {
+                        warn!(tag, "auto-restart failed: {e:#}");
+                    } else if let Some(s) = self.sessions.get_mut(&tag) {
+                        // Carry the crash window into the new session so the
+                        // guard accumulates across restarts (the old fixed-window
+                        // bug: restart() builds a fresh ManagedSession and resets
+                        // the counter; this re-instates it).
+                        s.crash_times = crash_times_snapshot;
+                    }
+                } else {
+                    // Non-zero exit and no backoff already served: schedule one.
+                    let crash_count = crash_times_snapshot.len() as u32;
+                    let delay = backoff_delay(crash_count);
+                    if let Some(s) = self.sessions.get_mut(&tag) {
+                        s.restart_at = Some(Instant::now() + delay);
+                        warn!(
+                            tag,
+                            exit_code = ?exit_code,
+                            delay_secs = delay.as_secs(),
+                            "crash exit; backing off before restart"
+                        );
+                    }
+                }
             }
+            // else: nobody wants recovery — leave it crashed (no-op).
         }
     }
 
@@ -713,7 +808,9 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
         }
     }
 
-    // stdout closed → child exited / stream ended.
+    // stdout closed → child exited / stream ended. The reader can't see the
+    // child's exit code (it owns only stdout); reap_and_recover captures the
+    // real code via child.try_wait() and re-broadcasts Exited with it.
     shared.exited.store(true, Ordering::SeqCst);
     shared.broadcast(SessionEvent::Exited { exit_code: None });
     debug!(tag = %tag, "session reader EOF");
@@ -754,6 +851,29 @@ fn write_user_frame(stdin: &Arc<Mutex<Option<ChildStdin>>>, text: &str) -> Resul
 }
 
 // ── claude resolution + arg construction ──────────────────────────────────────
+
+/// Exponential backoff for the nth transient restart. `crash_count` is the
+/// number of crashes recorded in the current sliding window *including* the one
+/// just observed (so the first transient restart waits BACKOFF_BASE_SECS).
+/// Capped at BACKOFF_MAX_SECS.
+fn backoff_delay(crash_count: u32) -> Duration {
+    let exp = crash_count.saturating_sub(1).min(16); // guard against shift overflow
+    let secs = BACKOFF_BASE_SECS
+        .saturating_mul(1u64 << exp)
+        .min(BACKOFF_MAX_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Non-blocking reap of a crashed child's exit code. Safe to call under the
+/// manager mutex: `try_wait()` never blocks. Returns the numeric exit code if
+/// the child exited with one, else `None` (killed by signal, already reaped,
+/// or still winding down — by the time `exited` is set this is rare).
+fn capture_exit_code(child: &mut Child) -> Option<i32> {
+    match child.try_wait() {
+        Ok(Some(status)) => status.code(),
+        _ => None,
+    }
+}
 
 /// Build the `claude` argument vector for a persistent stream-json session.
 pub fn build_claude_args(
@@ -1163,12 +1283,132 @@ mod tests {
         );
     }
 
+    // ── backoff and crash-loop guard tests ───────────────────────────────────
+
+    #[test]
+    fn backoff_delay_is_exponential_and_capped() {
+        assert_eq!(backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(backoff_delay(3), Duration::from_secs(4));
+        // Large count saturates at BACKOFF_MAX_SECS.
+        assert_eq!(backoff_delay(50), Duration::from_secs(BACKOFF_MAX_SECS));
+    }
+
     #[tokio::test]
-    async fn crash_loop_guard_stops_recovery() {
+    async fn nonzero_exit_schedules_backoff_before_restart() {
         let mut mgr = SessionManager::with_store_path(tmp_store());
-        // Stub exits immediately (no output) — looks like a crash.
+        // exit 1 → non-zero exit → should schedule backoff, not restart immediately.
+        spawn_stub(&mut mgr, "crashy1", "exit 1");
+        mgr.sessions
+            .get_mut("crashy1")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // First reap: should record the crash and schedule backoff.
+        mgr.reap_and_recover();
+
+        let s = mgr.sessions.get("crashy1").expect("session still tracked");
+        // Backoff must be scheduled (restart_at is Some).
+        assert!(
+            s.restart_at.is_some(),
+            "non-zero exit should schedule a backoff deadline"
+        );
+        // Exactly one crash in the sliding window.
+        assert_eq!(
+            s.crash_times.len(),
+            1,
+            "one crash should be recorded in sliding window"
+        );
+        // Child was NOT restarted yet (exited flag still true — no new child spawned).
+        assert!(
+            s.shared.exited.load(Ordering::SeqCst),
+            "session should remain crashed (not restarted) during backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_exit_restarts_immediately() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        // exit 0 → clean shutdown → should restart immediately, no backoff.
+        spawn_stub(&mut mgr, "clean", "exit 0");
+        mgr.sessions
+            .get_mut("clean")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // First reap: should restart immediately (no backoff for clean exit).
+        mgr.reap_and_recover();
+
+        let s = mgr.sessions.get("clean").expect("session still tracked");
+        // No backoff should be scheduled.
+        assert!(
+            s.restart_at.is_none(),
+            "clean exit should not schedule backoff"
+        );
+        // Crash window carries one entry (from the first crash, preserved across restart).
+        assert_eq!(
+            s.crash_times.len(),
+            1,
+            "crash window should survive restart with one entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_code_is_captured_and_broadcast() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        spawn_stub(&mut mgr, "exitcode", "exit 1");
+        let mut rx = mgr
+            .sessions
+            .get("exitcode")
+            .unwrap()
+            .shared
+            .event_tx
+            .subscribe();
+        mgr.sessions
+            .get_mut("exitcode")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        mgr.reap_and_recover();
+
+        // The re-broadcast from reap_and_recover should carry exit_code: Some(1).
+        // Drain events (timeout generously) looking for it.
+        let mut found = false;
+        for _ in 0..20 {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(SessionEvent::Exited { exit_code: Some(1) })) => {
+                    found = true;
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+
+        // Fallback: check the field directly (deterministic once try_wait has reaped).
+        let s = mgr.sessions.get("exitcode").expect("session still tracked");
+        let field_code = s.last_exit_code;
+
+        assert!(
+            found || field_code == Some(1),
+            "exit code 1 should be captured (broadcast found={found}, field={field_code:?})"
+        );
+    }
+
+    #[tokio::test]
+    async fn sliding_window_guard_trips_and_survives_restart() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        // "true" exits with code 0 → immediate restart, no backoff wait → fast test.
         spawn_stub(&mut mgr, "crashy", "true");
-        // Pretend a client is attached so recovery is wanted.
         mgr.sessions
             .get_mut("crashy")
             .unwrap()
@@ -1178,21 +1418,25 @@ mod tests {
         // Let the child exit.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Each reap recovers once; after MAX_RESTARTS the guard trips.
+        // Drive reap/sleep cycles: MAX_RESTARTS crashes trip the guard.
+        // Each cycle: crash detected → restart (code 0) → new child exits quickly.
         for _ in 0..(MAX_RESTARTS + 2) {
             mgr.reap_and_recover();
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
 
         let s = mgr.sessions.get("crashy").expect("session still tracked");
-        assert!(
-            s.restart_count <= MAX_RESTARTS,
-            "restart count {} exceeded guard {MAX_RESTARTS}",
-            s.restart_count
-        );
+        // Guard must have tripped: intentional_stop is set.
         assert!(
             s.intentional_stop.load(Ordering::SeqCst),
             "guard should mark the session to stop retrying"
+        );
+        // Crash window must have reached MAX_RESTARTS — proving the window
+        // survived across restarts (the bug we're fixing).
+        assert_eq!(
+            s.crash_times.len() as u32,
+            MAX_RESTARTS,
+            "sliding window should accumulate MAX_RESTARTS crashes across restarts"
         );
     }
 
