@@ -554,6 +554,10 @@ private class ChatTurnView: NSView {
     private let blocksStack   = NSStackView()
     private var renderedCount = 0
 
+    /// Reply text injected by the confirm card — suppress its bubble so the card
+    /// itself serves as the only visible acknowledgement of the user's choice.
+    private static let confirmReplySentinel = "(This answers your question:"
+
     /// Called when the user answers an in-turn `AskUserQuestion` card.
     /// Wired by `ReplView` to `session.send(_:)`.
     var onSend: ((String) -> Void)?
@@ -562,33 +566,48 @@ private class ChatTurnView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
 
-        // User bubble — trailing-pinned, width driven by intrinsicContentSize capped at 75%.
-        // No spacer/NSStackView needed: trailing anchor right-aligns it, intrinsicContentSize
-        // gives AutoLayout the natural width, and the ≤ constraint caps long messages.
-        let bubble = UserBubbleView(text: turn.userInput)
-        bubble.translatesAutoresizingMaskIntoConstraints = false
-
         // Blocks container — AI response, left-aligned at 82% width
         blocksStack.orientation = .vertical
         blocksStack.spacing     = 6
         blocksStack.alignment   = .width
         blocksStack.translatesAutoresizingMaskIntoConstraints = false
 
-        addSubview(bubble)
         addSubview(blocksStack)
 
-        NSLayoutConstraint.activate([
-            bubble.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            bubble.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            // Fixed 75 % width so AutoLayout never needs intrinsicContentSize — the
-            // unconstrained single-line NSTextField width overflowed the right edge.
-            bubble.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.75),
+        // Suppress the bubble when the reply was injected by the confirm card — the
+        // card's own chosen-state visuals already acknowledge the selection.
+        let suppressBubble = turn.userInput.contains(Self.confirmReplySentinel)
 
-            blocksStack.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 8),
-            blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            blocksStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
-            blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
-        ])
+        if suppressBubble {
+            // Pin blocksStack directly to the top so there is no gap where the bubble
+            // would have been.
+            NSLayoutConstraint.activate([
+                blocksStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+                blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+                blocksStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
+                blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+            ])
+        } else {
+            // User bubble — trailing-pinned, width driven by intrinsicContentSize capped at 75%.
+            // No spacer/NSStackView needed: trailing anchor right-aligns it, intrinsicContentSize
+            // gives AutoLayout the natural width, and the ≤ constraint caps long messages.
+            let bubble = UserBubbleView(text: turn.userInput)
+            bubble.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(bubble)
+
+            NSLayoutConstraint.activate([
+                bubble.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+                bubble.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+                // Fixed 75 % width so AutoLayout never needs intrinsicContentSize — the
+                // unconstrained single-line NSTextField width overflowed the right edge.
+                bubble.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.75),
+
+                blocksStack.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 8),
+                blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+                blocksStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
+                blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+            ])
+        }
 
         renderNewBlocks(turn.blocks)
     }
@@ -1097,6 +1116,7 @@ private class AskQuestionView: NSView {
 
     private let data: AskQuestionData
     private var answered = false
+    private var headerChip: NSTextField?
 
     init(data: AskQuestionData) {
         self.data = data
@@ -1121,6 +1141,7 @@ private class AskQuestionView: NSView {
                 chip.topAnchor.constraint(equalTo: topAnchor, constant: topConstant),
                 chip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             ])
+            headerChip  = chip
             prevAnchor  = chip.bottomAnchor
             topConstant = 6
         }
@@ -1208,10 +1229,19 @@ private class AskQuestionView: NSView {
     @objc private func optionTapped(_ sender: OptionButton) {
         guard !answered else { return }
         answered = true
-        // Dim all buttons to show selection
+        // Dim all buttons to show selection; disable all to prevent re-tapping.
         subviews.compactMap { $0 as? OptionButton }.forEach { btn in
             btn.alphaValue = btn === sender ? 1.0 : 0.35
             btn.isEnabled  = false
+        }
+        // Animate the chosen-state visuals: checkmark, row tint, chip label/color, card border.
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration    = 0.15
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            sender.markChosen()
+            headerChip?.stringValue = "APPROVED"
+            headerChip?.textColor   = Theme.sage
+            layer?.borderColor      = Theme.sage.withAlphaComponent(0.5).cgColor
         }
         // Claude's AskUserQuestion call always errors in -p mode ("Answer questions?").
         // The user's answer arrives as a new user turn, not a proper tool result.
@@ -1231,21 +1261,45 @@ private class AskQuestionView: NSView {
 
         let optionLabel: String
 
+        private var chosen = false
+        private let checkmark: NSImageView
+        private let label: NSTextField
+
         init(option: AskQuestionData.Option, tag: Int) {
             optionLabel = option.label
+
+            // Checkmark — hidden by default; space is always reserved so revealing
+            // it causes no layout shift (label leading is anchored to checkmark.trailing).
+            let check = NSImageView()
+            check.image = NSImage(systemSymbolName: "checkmark.circle.fill",
+                                  accessibilityDescription: "chosen")
+            check.contentTintColor = Theme.sage
+            check.isHidden  = true
+            check.alphaValue = 0
+            check.translatesAutoresizingMaskIntoConstraints = false
+            checkmark = check
+
+            let lbl = NSTextField(labelWithString: option.label)
+            lbl.font      = .systemFont(ofSize: 12, weight: .medium)
+            lbl.textColor = Theme.fg
+            lbl.translatesAutoresizingMaskIntoConstraints = false
+            label = lbl
+
             super.init(frame: .zero)
             self.tag      = tag
             isBordered    = false
             wantsLayer    = true
 
-            let label = NSTextField(labelWithString: option.label)
-            label.font      = .systemFont(ofSize: 12, weight: .medium)
-            label.textColor = Theme.fg
-            label.translatesAutoresizingMaskIntoConstraints = false
-
-            var subs: [NSView] = [label]
+            var subs: [NSView] = [checkmark, label]
             var constraints: [NSLayoutConstraint] = [
-                label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+                // Checkmark — leading edge, vertically centred, fixed 14×14
+                checkmark.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+                checkmark.centerYAnchor.constraint(equalTo: centerYAnchor),
+                checkmark.widthAnchor.constraint(equalToConstant: 14),
+                checkmark.heightAnchor.constraint(equalToConstant: 14),
+                // Label anchored to checkmark trailing so its position is stable
+                // regardless of checkmark visibility.
+                label.leadingAnchor.constraint(equalTo: checkmark.trailingAnchor, constant: 8),
                 label.centerYAnchor.constraint(equalTo: centerYAnchor),
             ]
 
@@ -1274,6 +1328,16 @@ private class AskQuestionView: NSView {
 
         required init?(coder: NSCoder) { fatalError() }
 
+        /// Applies chosen-state visuals: checkmark fade-in, semibold label, green row tint.
+        /// Must be called from within an `NSAnimationContext.runAnimationGroup` block.
+        func markChosen() {
+            chosen = true
+            checkmark.isHidden = false
+            checkmark.animator().alphaValue = 1
+            label.font = .systemFont(ofSize: 12, weight: .semibold)
+            layer?.backgroundColor = Theme.sage.withAlphaComponent(0.12).cgColor
+        }
+
         override func updateTrackingAreas() {
             super.updateTrackingAreas()
             trackingAreas.forEach { removeTrackingArea($0) }
@@ -1288,11 +1352,12 @@ private class AskQuestionView: NSView {
         }
 
         override func mouseEntered(with event: NSEvent) {
-            guard isEnabled else { return }
+            guard isEnabled, !chosen else { return }
             layer?.backgroundColor = Theme.cornflower.withAlphaComponent(0.12).cgColor
         }
 
         override func mouseExited(with event: NSEvent) {
+            guard !chosen else { return }
             layer?.backgroundColor = nil
         }
     }
