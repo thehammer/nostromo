@@ -423,9 +423,9 @@ fn handle_client_msg(
             mgr.detach(&tag, client_id);
         }
 
-        ClientMsg::SessionSend { tag, text } => {
+        ClientMsg::SessionSend { tag, text, images } => {
             let mut mgr = session_mgr.lock().unwrap();
-            if let Err(e) = mgr.send_user_message(&tag, &text) {
+            if let Err(e) = mgr.send_user_message(&tag, &text, &images) {
                 warn!(client_id, %tag, "SessionSend error: {e}");
                 let _ = targeted_tx.send(ServerMsg::Error {
                     message: format!("SessionSend failed: {e}"),

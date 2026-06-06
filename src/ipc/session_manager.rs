@@ -106,6 +106,17 @@ pub enum SessionEvent {
     },
 }
 
+// ── pending-message queue ─────────────────────────────────────────────────────
+
+/// A user message waiting in the pending queue, preserving image paths so they
+/// survive the queued-until-idle path without being dropped.
+#[derive(Clone)]
+struct PendingMessage {
+    text: String,
+    /// Absolute file paths; daemon reads + base64-encodes at drain time.
+    images: Vec<String>,
+}
+
 // ── shared, reader-thread-visible session state ───────────────────────────────
 
 /// State shared between the manager (under its Mutex) and the detached reader
@@ -115,7 +126,7 @@ struct Shared {
     /// Child stdin for writing user-message frames (manager + reader drain).
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     /// Queued user messages awaiting an idle turn.
-    pending: Arc<Mutex<VecDeque<String>>>,
+    pending: Arc<Mutex<VecDeque<PendingMessage>>>,
     /// Single source of truth for the live turn state.
     state: Arc<Mutex<SessionState>>,
     /// Set by the reader on stdout EOF (child exited / stream closed).
@@ -425,7 +436,12 @@ impl SessionManager {
 
     /// Enqueue a user message. Writes immediately to stdin if the session is
     /// idle, otherwise queues it to drain after the current turn completes.
-    pub fn send_user_message(&mut self, tag: &str, text: &str) -> Result<()> {
+    pub fn send_user_message(
+        &mut self,
+        tag: &str,
+        text: &str,
+        images: &[String],
+    ) -> Result<()> {
         let session = self
             .sessions
             .get(tag)
@@ -451,7 +467,7 @@ impl SessionManager {
         };
 
         if should_write {
-            if let Err(e) = write_user_frame(&session.shared.stdin, text) {
+            if let Err(e) = write_user_frame(&session.shared.stdin, text, images) {
                 // The optimistic MidTurn would otherwise wedge the session.
                 *session.shared.state.lock().unwrap() = SessionState::Idle;
                 return Err(e);
@@ -465,7 +481,10 @@ impl SessionManager {
                 .pending
                 .lock()
                 .unwrap()
-                .push_back(text.to_string());
+                .push_back(PendingMessage {
+                    text: text.to_string(),
+                    images: images.to_vec(),
+                });
         }
         Ok(())
     }
@@ -952,8 +971,8 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
 fn drain_or_idle(shared: &Shared) {
     let next = shared.pending.lock().unwrap().pop_front();
     match next {
-        Some(text) => {
-            if write_user_frame(&shared.stdin, &text).is_ok() {
+        Some(msg) => {
+            if write_user_frame(&shared.stdin, &msg.text, &msg.images).is_ok() {
                 shared.set_state(SessionState::MidTurn);
             } else {
                 shared.set_state(SessionState::Idle);
@@ -963,11 +982,73 @@ fn drain_or_idle(shared: &Shared) {
     }
 }
 
+// ── image encoding helpers ────────────────────────────────────────────────────
+
+struct EncodedImage {
+    media_type: String,
+    base64_data: String,
+}
+
+fn media_type_for(path: &str) -> &'static str {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    }
+}
+
+fn encode_images(paths: &[String]) -> Vec<EncodedImage> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    paths
+        .iter()
+        .filter_map(|p| match std::fs::read(p) {
+            Ok(bytes) => Some(EncodedImage {
+                media_type: media_type_for(p).to_string(),
+                base64_data: STANDARD.encode(bytes),
+            }),
+            Err(e) => {
+                tracing::warn!(path = %p, "skipping unreadable image: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
 /// Write one stream-json user-message frame to the child's stdin.
-fn write_user_frame(stdin: &Arc<Mutex<Option<ChildStdin>>>, text: &str) -> Result<()> {
+/// When `images` is non-empty, emits array content (text block + image blocks);
+/// when empty, emits a plain string — byte-identical to the pre-image wire format.
+fn write_user_frame(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    text: &str,
+    images: &[String],
+) -> Result<()> {
+    let encoded = encode_images(images);
+    let content = if encoded.is_empty() {
+        serde_json::json!(text)
+    } else {
+        let mut blocks = vec![serde_json::json!({ "type": "text", "text": text })];
+        for img in &encoded {
+            blocks.push(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.media_type,
+                    "data": img.base64_data,
+                }
+            }));
+        }
+        serde_json::json!(blocks)
+    };
     let frame = serde_json::json!({
         "type": "user",
-        "message": { "role": "user", "content": text }
+        "message": { "role": "user", "content": content }
     });
     let mut line = serde_json::to_string(&frame)?;
     line.push('\n');
@@ -1578,11 +1659,11 @@ mod tests {
         spawn_stub(&mut mgr, "q", "sleep 5");
 
         // First send (idle → writes, optimistically MidTurn).
-        mgr.send_user_message("q", "first").unwrap();
+        mgr.send_user_message("q", "first", &[]).unwrap();
         assert_eq!(mgr.session_state("q"), Some(SessionState::MidTurn));
 
         // Second send while mid-turn → queued, not written.
-        mgr.send_user_message("q", "second").unwrap();
+        mgr.send_user_message("q", "second", &[]).unwrap();
         let pending = mgr
             .sessions
             .get("q")
@@ -1592,7 +1673,7 @@ mod tests {
             .lock()
             .unwrap();
         assert_eq!(pending.len(), 1, "second message must queue while mid-turn");
-        assert_eq!(pending.front().map(String::as_str), Some("second"));
+        assert_eq!(pending.front().map(|m| m.text.as_str()), Some("second"));
     }
 
     #[tokio::test]
@@ -1600,8 +1681,8 @@ mod tests {
         let mut mgr = SessionManager::with_store_path(tmp_store());
         spawn_stub(&mut mgr, "d", "true"); // exits immediately
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(mgr.send_user_message("d", "hi").is_err());
-        assert!(mgr.send_user_message("missing", "hi").is_err());
+        assert!(mgr.send_user_message("d", "hi", &[]).is_err());
+        assert!(mgr.send_user_message("missing", "hi", &[]).is_err());
     }
 
     #[tokio::test]

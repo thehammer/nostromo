@@ -128,9 +128,7 @@ class ChatSession: ObservableObject {
         // adopts it when the daemon's matching turn arrives (dedupe by text), so
         // subsequent block deltas attach to it.
         turns.append(ChatTurn(userInput: trimmed, timestamp: Date()))
-        client.sessionSend(tag: tag, text: trimmed)
-        // NOTE: images are surfaced in the UI but not yet forwarded to the
-        // daemon/child (same known gap as before; tracked separately).
+        client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path })
     }
 
     // MARK: - Recovery

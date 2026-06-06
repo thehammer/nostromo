@@ -109,6 +109,7 @@ async fn session_round_trip_drives_real_claude() {
         &ClientMsg::SessionSend {
             tag: "it".into(),
             text: "Reply with exactly the word: pong".into(),
+            images: vec![],
         },
     )
     .await;
