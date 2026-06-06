@@ -551,8 +551,10 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
 
 private class ChatTurnView: NSView {
 
-    private let blocksStack   = NSStackView()
-    private var renderedCount = 0
+    private let blocksStack    = NSStackView()
+    private let subAgentStack  = NSStackView()
+    private var renderedCount  = 0
+    private var isGrouped      = false
 
     /// Reply text injected by the confirm card — suppress its bubble so the card
     /// itself serves as the only visible acknowledgement of the user's choice.
@@ -566,12 +568,18 @@ private class ChatTurnView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
 
+        // Sub-agent chip stack — zero-height when empty, sits above blocksStack
+        subAgentStack.orientation = .vertical
+        subAgentStack.spacing     = 4
+        subAgentStack.alignment   = .width
+        subAgentStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(subAgentStack)
+
         // Blocks container — AI response, left-aligned at 82% width
         blocksStack.orientation = .vertical
         blocksStack.spacing     = 6
         blocksStack.alignment   = .width
         blocksStack.translatesAutoresizingMaskIntoConstraints = false
-
         addSubview(blocksStack)
 
         // Suppress the bubble when the reply was injected by the confirm card — the
@@ -579,18 +587,19 @@ private class ChatTurnView: NSView {
         let suppressBubble = turn.userInput.contains(Self.confirmReplySentinel)
 
         if suppressBubble {
-            // Pin blocksStack directly to the top so there is no gap where the bubble
-            // would have been.
+            // Pin subAgentStack → blocksStack directly at the top.
             NSLayoutConstraint.activate([
-                blocksStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+                subAgentStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+                subAgentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+                subAgentStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
+
+                blocksStack.topAnchor.constraint(equalTo: subAgentStack.bottomAnchor),
                 blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
                 blocksStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
                 blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
             ])
         } else {
             // User bubble — trailing-pinned, width driven by intrinsicContentSize capped at 75%.
-            // No spacer/NSStackView needed: trailing anchor right-aligns it, intrinsicContentSize
-            // gives AutoLayout the natural width, and the ≤ constraint caps long messages.
             let bubble = UserBubbleView(text: turn.userInput)
             bubble.translatesAutoresizingMaskIntoConstraints = false
             addSubview(bubble)
@@ -602,22 +611,39 @@ private class ChatTurnView: NSView {
                 // unconstrained single-line NSTextField width overflowed the right edge.
                 bubble.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.75),
 
-                blocksStack.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 8),
+                subAgentStack.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 8),
+                subAgentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+                subAgentStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
+
+                blocksStack.topAnchor.constraint(equalTo: subAgentStack.bottomAnchor),
                 blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
                 blocksStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
                 blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
             ])
         }
 
-        renderNewBlocks(turn.blocks)
+        if turn.isComplete {
+            isGrouped = true
+            regroupBlocks(turn.blocks)
+        } else {
+            renderNewBlocks(turn.blocks)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     /// Called as the turn's blocks array grows during live streaming.
     func update(turn: ChatTurn) {
+        if turn.isComplete && !isGrouped {
+            isGrouped = true
+            clearSubAgentChips()
+            regroupBlocks(turn.blocks)
+            return
+        }
+        guard !isGrouped else { return }
         let newBlocks = Array(turn.blocks.dropFirst(renderedCount))
         renderNewBlocks(newBlocks)
+        updateSubAgentChips(turn.blocks)
     }
 
     private func renderNewBlocks(_ blocks: [TurnBlock]) {
@@ -632,6 +658,77 @@ private class ChatTurnView: NSView {
         }
     }
 
+    private func addToBlocksStack(_ v: NSView) {
+        v.translatesAutoresizingMaskIntoConstraints = false
+        blocksStack.addArrangedSubview(v)
+        v.widthAnchor.constraint(equalTo: blocksStack.widthAnchor).isActive = true
+    }
+
+    /// One-shot grouping pass run when a turn completes.
+    /// Replaces consecutive same-tool ToolCall runs (≥2) with a ToolCallGroupView.
+    private func regroupBlocks(_ blocks: [TurnBlock]) {
+        // Remove all existing arranged subviews
+        blocksStack.arrangedSubviews.forEach {
+            blocksStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        renderedCount = 0
+
+        var i = 0
+        while i < blocks.count {
+            // Look for a ToolCall block
+            guard case .toolCall(let firstCall) = blocks[i] else {
+                // Pass-through non-tool block unchanged
+                addToBlocksStack(makeBlockView(blocks[i]))
+                renderedCount += 1
+                i += 1
+                continue
+            }
+
+            // Find the maximal run of consecutive same-tool ToolCall blocks
+            let runStart = i
+            var j = i + 1
+            while j < blocks.count,
+                  case .toolCall(let next) = blocks[j],
+                  next.toolName == firstCall.toolName {
+                j += 1
+            }
+            // j is now the index after the last same-tool ToolCall in the run
+            let callRun = (runStart..<j).map { idx -> ToolCallData in
+                if case .toolCall(let d) = blocks[idx] { return d }
+                fatalError("unexpected block type in call run")
+            }
+
+            // Consume up to callRun.count immediately-following ToolResult blocks
+            var k = j
+            var resultRun: [ToolResultData?] = Array(repeating: nil, count: callRun.count)
+            var resultIdx = 0
+            while k < blocks.count, resultIdx < callRun.count,
+                  case .toolResult(let r) = blocks[k] {
+                resultRun[resultIdx] = r
+                resultIdx += 1
+                k += 1
+            }
+
+            let n = callRun.count
+            if n >= 2 {
+                // Emit a ToolCallGroupView
+                let pairs = callRun.indices.map { (callRun[$0], resultRun[$0]) }
+                addToBlocksStack(ToolCallGroupView(toolName: firstCall.toolName, calls: pairs))
+                renderedCount += n + resultIdx
+            } else {
+                // n == 1: emit individual ToolCallView + optional ToolResultView
+                addToBlocksStack(ToolCallView(data: callRun[0]))
+                renderedCount += 1
+                if let result = resultRun[0] {
+                    addToBlocksStack(ToolResultView(data: result))
+                    renderedCount += 1
+                }
+            }
+            i = k
+        }
+    }
+
     private func makeBlockView(_ block: TurnBlock) -> NSView {
         switch block {
         case .text(let t):           return TextBlockView(text: t)
@@ -643,6 +740,46 @@ private class ChatTurnView: NSView {
             let v = AskQuestionView(data: d)
             v.onAnswer = { [weak self] answer in self?.onSend?(answer) }
             return v
+        }
+    }
+
+    // MARK: Sub-agent chips (Part D)
+
+    /// Recompute in-flight Agent chips from the live block stream.
+    private func updateSubAgentChips(_ blocks: [TurnBlock]) {
+        clearSubAgentChips()
+
+        // Count total Agent ToolCalls and trailing unmatched ones.
+        // Strategy: scan forward; each Agent ToolCall is "in flight" if no
+        // ToolResult has been consumed for its position yet.
+        var agentCalls: [ToolCallData] = []
+        var agentResultCount = 0
+        var i = 0
+        while i < blocks.count {
+            if case .toolCall(let d) = blocks[i], d.toolName == "Agent" {
+                agentCalls.append(d)
+            } else if case .toolResult = blocks[i] {
+                if agentResultCount < agentCalls.count {
+                    agentResultCount += 1
+                }
+            }
+            i += 1
+        }
+
+        // In-flight = Agent calls with no matching result yet (trailing)
+        let inFlightCalls = agentCalls.dropFirst(agentResultCount)
+        for call in inFlightCalls {
+            let chip = SubAgentChipView(description: call.inputSummary)
+            chip.translatesAutoresizingMaskIntoConstraints = false
+            subAgentStack.addArrangedSubview(chip)
+            chip.widthAnchor.constraint(equalTo: subAgentStack.widthAnchor).isActive = true
+        }
+    }
+
+    private func clearSubAgentChips() {
+        subAgentStack.arrangedSubviews.forEach {
+            subAgentStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
         }
     }
 }
@@ -909,20 +1046,36 @@ private class MarkdownTableView: NSView {
 
 // MARK: - ToolCallView
 
+/// Tool call block — collapsed by default showing icon · name · summary.
+/// Click to expand and reveal the full tool input (or structured Agent-prompt view).
 private class ToolCallView: NSView {
 
+    private var isExpanded  = false
+    private let toolName:    String
+    private let inputFull:   String
+    private let caretLabel   = NSTextField(labelWithString: "▶")
+    private let detailWrap   = NSView()
+
     init(data: ToolCallData) {
+        self.toolName  = data.toolName
+        self.inputFull = data.inputFull
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
         layer?.cornerRadius    = 6
 
-        let iconLabel = NSTextField(labelWithString: icon(for: data.toolName))
+        // ── Caret ──────────────────────────────────────────────────────────
+        caretLabel.font      = .systemFont(ofSize: 10)
+        caretLabel.textColor = Theme.fgMuted
+        caretLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        // ── Header row labels ──────────────────────────────────────────────
+        let iconLabel = NSTextField(labelWithString: Self.icon(for: toolName))
         iconLabel.font      = .systemFont(ofSize: 12)
         iconLabel.textColor = Theme.fgMuted
         iconLabel.setContentHuggingPriority(.required, for: .horizontal)
 
-        let nameLabel = NSTextField(labelWithString: data.toolName)
+        let nameLabel = NSTextField(labelWithString: toolName)
         nameLabel.font      = .systemFont(ofSize: 11, weight: .semibold)
         nameLabel.textColor = Theme.fgMuted
         nameLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -938,24 +1091,148 @@ private class ToolCallView: NSView {
         summaryLabel.lineBreakMode = .byTruncatingMiddle
         summaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let row = NSStackView(views: [iconLabel, nameLabel, dotLabel, summaryLabel])
-        row.orientation = .horizontal
-        row.spacing     = 5
-        row.alignment   = .centerY
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        let headerRow = NSStackView(views: [caretLabel, iconLabel, nameLabel, dotLabel, summaryLabel])
+        headerRow.orientation = .horizontal
+        headerRow.spacing     = 5
+        headerRow.alignment   = .centerY
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+
+        // ── Transparent click button over the header row ───────────────────
+        let clickBtn = NSButton(frame: .zero)
+        clickBtn.isBordered = false
+        clickBtn.title      = ""
+        clickBtn.target     = self
+        clickBtn.action     = #selector(toggleExpand)
+        clickBtn.translatesAutoresizingMaskIntoConstraints = false
+
+        // ── Detail content ─────────────────────────────────────────────────
+        detailWrap.translatesAutoresizingMaskIntoConstraints = false
+        buildDetailContent()
+
+        // ── vStack (disclosure pattern matching ToolResultView) ────────────
+        let vStack = NSStackView(views: [headerRow, detailWrap])
+        vStack.orientation = .vertical
+        vStack.spacing     = 4
+        vStack.alignment   = .width
+        vStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(vStack)
+
+        // Overlay the click button on top of the header row so it receives taps
+        addSubview(clickBtn)
 
         NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 7),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+            vStack.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            vStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            vStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            vStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+            headerRow.widthAnchor.constraint(equalTo: vStack.widthAnchor),
+            detailWrap.widthAnchor.constraint(equalTo: vStack.widthAnchor),
+            // Click button covers the header row
+            clickBtn.topAnchor.constraint(equalTo: headerRow.topAnchor),
+            clickBtn.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor),
+            clickBtn.trailingAnchor.constraint(equalTo: headerRow.trailingAnchor),
+            clickBtn.bottomAnchor.constraint(equalTo: headerRow.bottomAnchor),
         ])
+
+        applyState()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private func icon(for name: String) -> String {
+    // MARK: Detail content
+
+    private func buildDetailContent() {
+        // For the Agent tool: parse inputFull and show a structured layout.
+        // For all other tools: show raw pretty JSON in a monospaced wrapping label.
+        if toolName == "Agent",
+           let jsonData = inputFull.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            buildAgentDetail(obj)
+        } else {
+            buildRawDetail(inputFull)
+        }
+    }
+
+    private func buildAgentDetail(_ obj: [String: Any]) {
+        let innerStack = NSStackView()
+        innerStack.orientation = .vertical
+        innerStack.spacing     = 4
+        innerStack.alignment   = .width
+        innerStack.translatesAutoresizingMaskIntoConstraints = false
+        detailWrap.addSubview(innerStack)
+        NSLayoutConstraint.activate([
+            innerStack.topAnchor.constraint(equalTo: detailWrap.topAnchor),
+            innerStack.leadingAnchor.constraint(equalTo: detailWrap.leadingAnchor),
+            innerStack.trailingAnchor.constraint(equalTo: detailWrap.trailingAnchor),
+            innerStack.bottomAnchor.constraint(equalTo: detailWrap.bottomAnchor),
+            innerStack.widthAnchor.constraint(equalTo: detailWrap.widthAnchor),
+        ])
+
+        // Sub-agent type header (if present)
+        if let agentType = obj["subagent_type"] as? String, !agentType.isEmpty {
+            let typeLabel = NSTextField(labelWithString: "Sub-agent: \(agentType)")
+            typeLabel.font      = .systemFont(ofSize: 11, weight: .semibold)
+            typeLabel.textColor = Theme.fgMuted
+            typeLabel.translatesAutoresizingMaskIntoConstraints = false
+            innerStack.addArrangedSubview(typeLabel)
+            typeLabel.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+        }
+
+        // Prompt content
+        let promptText: String
+        if let prompt = obj["prompt"] as? String {
+            promptText = prompt
+        } else {
+            promptText = inputFull   // fallback: raw JSON
+        }
+        let promptLabel = makeContentLabel(promptText)
+        innerStack.addArrangedSubview(promptLabel)
+        promptLabel.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+    }
+
+    private func buildRawDetail(_ text: String) {
+        let label = makeContentLabel(text)
+        detailWrap.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: detailWrap.topAnchor),
+            label.leadingAnchor.constraint(equalTo: detailWrap.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: detailWrap.trailingAnchor),
+            label.bottomAnchor.constraint(equalTo: detailWrap.bottomAnchor),
+        ])
+    }
+
+    private func makeContentLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font                 = Theme.monoFont
+        label.textColor            = Theme.fgMuted
+        label.lineBreakMode        = .byCharWrapping
+        label.maximumNumberOfLines = 0
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }
+
+    // MARK: Toggle
+
+    @objc private func toggleExpand() {
+        isExpanded.toggle()
+        applyState()
+        var v: NSView? = superview
+        while let sv = v {
+            sv.needsLayout = true
+            if sv is NSScrollView { break }
+            v = sv.superview
+        }
+    }
+
+    private func applyState() {
+        caretLabel.stringValue = isExpanded ? "▼" : "▶"
+        detailWrap.isHidden    = !isExpanded
+    }
+
+    // MARK: Icon
+
+    static func icon(for name: String) -> String {
         switch name {
         case "Read":                         return "📄"
         case "Write":                        return "📝"
@@ -969,6 +1246,167 @@ private class ToolCallView: NSView {
         default:                             return "⚙️"
         }
     }
+}
+
+// MARK: - ToolCallGroupView
+
+/// Collapsed header showing `icon  toolName (N)` for a run of ≥2 consecutive
+/// same-tool calls. Expanding reveals each call as an individual ToolCallView
+/// (itself expandable) plus its optional ToolResultView.
+private class ToolCallGroupView: NSView {
+
+    private var isExpanded = false
+    private let caretLabel = NSTextField(labelWithString: "▶")
+    private let detailWrap = NSView()
+
+    init(toolName: String, calls: [(ToolCallData, ToolResultData?)]) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
+        layer?.cornerRadius    = 6
+
+        // ── Caret ──────────────────────────────────────────────────────────
+        caretLabel.font      = .systemFont(ofSize: 10)
+        caretLabel.textColor = Theme.fgMuted
+        caretLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        // ── Header row ─────────────────────────────────────────────────────
+        let iconLabel = NSTextField(labelWithString: ToolCallView.icon(for: toolName))
+        iconLabel.font      = .systemFont(ofSize: 12)
+        iconLabel.textColor = Theme.fgMuted
+        iconLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        let nameLabel = NSTextField(labelWithString: toolName)
+        nameLabel.font      = .systemFont(ofSize: 11, weight: .semibold)
+        nameLabel.textColor = Theme.fgMuted
+        nameLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        let countLabel = NSTextField(labelWithString: "(\(calls.count))")
+        countLabel.font      = .systemFont(ofSize: 11)
+        countLabel.textColor = Theme.fgMuted
+        countLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Spacer fills remaining horizontal space
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let headerRow = NSStackView(views: [caretLabel, iconLabel, nameLabel, countLabel, spacer])
+        headerRow.orientation = .horizontal
+        headerRow.spacing     = 5
+        headerRow.alignment   = .centerY
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+
+        // ── Transparent click button ────────────────────────────────────────
+        let clickBtn = NSButton(frame: .zero)
+        clickBtn.isBordered = false
+        clickBtn.title      = ""
+        clickBtn.target     = self
+        clickBtn.action     = #selector(toggleExpand)
+        clickBtn.translatesAutoresizingMaskIntoConstraints = false
+
+        // ── Detail content — one ToolCallView (+ optional result) per call ──
+        detailWrap.translatesAutoresizingMaskIntoConstraints = false
+        let innerStack = NSStackView()
+        innerStack.orientation = .vertical
+        innerStack.spacing     = 6
+        innerStack.alignment   = .width
+        innerStack.translatesAutoresizingMaskIntoConstraints = false
+        detailWrap.addSubview(innerStack)
+        NSLayoutConstraint.activate([
+            innerStack.topAnchor.constraint(equalTo: detailWrap.topAnchor),
+            innerStack.leadingAnchor.constraint(equalTo: detailWrap.leadingAnchor),
+            innerStack.trailingAnchor.constraint(equalTo: detailWrap.trailingAnchor),
+            innerStack.bottomAnchor.constraint(equalTo: detailWrap.bottomAnchor),
+            innerStack.widthAnchor.constraint(equalTo: detailWrap.widthAnchor),
+        ])
+
+        for (call, result) in calls {
+            let callView = ToolCallView(data: call)
+            callView.translatesAutoresizingMaskIntoConstraints = false
+            innerStack.addArrangedSubview(callView)
+            callView.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+
+            if let r = result {
+                let resultView = ToolResultView(data: r)
+                resultView.translatesAutoresizingMaskIntoConstraints = false
+                innerStack.addArrangedSubview(resultView)
+                resultView.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+            }
+        }
+
+        // ── vStack ─────────────────────────────────────────────────────────
+        let vStack = NSStackView(views: [headerRow, detailWrap])
+        vStack.orientation = .vertical
+        vStack.spacing     = 4
+        vStack.alignment   = .width
+        vStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(vStack)
+        addSubview(clickBtn)
+
+        NSLayoutConstraint.activate([
+            vStack.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            vStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            vStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            vStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+            headerRow.widthAnchor.constraint(equalTo: vStack.widthAnchor),
+            detailWrap.widthAnchor.constraint(equalTo: vStack.widthAnchor),
+            clickBtn.topAnchor.constraint(equalTo: headerRow.topAnchor),
+            clickBtn.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor),
+            clickBtn.trailingAnchor.constraint(equalTo: headerRow.trailingAnchor),
+            clickBtn.bottomAnchor.constraint(equalTo: headerRow.bottomAnchor),
+        ])
+
+        applyState()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func toggleExpand() {
+        isExpanded.toggle()
+        applyState()
+        var v: NSView? = superview
+        while let sv = v {
+            sv.needsLayout = true
+            if sv is NSScrollView { break }
+            v = sv.superview
+        }
+    }
+
+    private func applyState() {
+        caretLabel.stringValue = isExpanded ? "▼" : "▶"
+        detailWrap.isHidden    = !isExpanded
+    }
+}
+
+// MARK: - SubAgentChipView
+
+/// Minimal indicator shown above the blocks of an in-flight turn for each
+/// active (unresolved) Agent tool call.
+private class SubAgentChipView: NSView {
+
+    init(description: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
+        layer?.cornerRadius    = 6
+
+        let label = NSTextField(labelWithString: "🤖 Spawning: \(description)…")
+        label.font                 = .systemFont(ofSize: 11)
+        label.textColor            = Theme.fgMuted
+        label.lineBreakMode        = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 // MARK: - ToolResultView

@@ -182,6 +182,15 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
 }
 
 fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
+    // Sub-agent prompts are emitted on the parent process's stdout as `user`
+    // events tagged `isSidechain: true`. They are NOT human input — dropping
+    // them here prevents a spurious cornflower user bubble / new turn. The
+    // sub-agent's prompt is still visible via the parent's `Agent` tool_use
+    // block (rendered expandable in the GUI).
+    if obj.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+        return None;
+    }
+
     let content = obj.get("message")?.get("content")?;
 
     // Plain-string content → a human prompt (new turn).
@@ -785,6 +794,25 @@ mod tests {
                 timestamp: Some("2026-05-30T22:00:00.000Z".into()),
             })
         );
+    }
+
+    #[test]
+    fn sidechain_user_event_is_dropped() {
+        // A sub-agent's prompt is emitted on the parent's stdout as a `user`
+        // event with isSidechain:true — it must NOT open a turn.
+        let line = r#"{"type":"user","message":{"role":"user","content":"You are a sub-agent. Do X."},"isSidechain":true}"#;
+        assert_eq!(parse_line(line), None);
+    }
+
+    #[test]
+    fn non_sidechain_user_event_still_parses() {
+        // Regression guard: a normal prompt (no isSidechain, or false) still parses.
+        let line =
+            r#"{"type":"user","message":{"role":"user","content":"hi"},"isSidechain":false}"#;
+        assert!(matches!(
+            parse_line(line),
+            Some(ParsedLine::UserPrompt { .. })
+        ));
     }
 
     #[test]

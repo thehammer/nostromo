@@ -78,6 +78,10 @@ extension TurnBlock {
             guard let sid = json["session_id"] as? String else { return nil }
             return .sessionId(sid)
 
+        // Note: sidechain filtering (isSidechain:true user events from sub-agent
+        // prompts) is handled in the Rust daemon parser (parse_user_event). String-
+        // content user events already yield nil here (content is not [[String:Any]]),
+        // so no additional guard is needed in this path.
         case "assistant", "user":
             guard
                 let msg     = json["message"] as? [String: Any],
