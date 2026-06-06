@@ -1,10 +1,13 @@
 import AppKit
 import Combine
 
-/// Vertical navigation sidebar — focus names stacked top-to-bottom, full window height.
+/// Vertical navigation sidebar — Org → Repo → Agent hierarchy, scrollable.
 ///
-/// Built-in focuses appear first, then a 1px separator, then dynamic focuses.
-/// A "+" button pinned to the sidebar bottom creates new dynamic focuses.
+/// Built-in and dynamic focuses are grouped by org ("Carefeed" / "Personal"),
+/// then by repo within each org, then by agent within each repo.  The grouped
+/// layout lives inside an NSScrollView so the list can grow beyond the window
+/// height without clipping or pushing the "+" button off-screen.
+///
 /// Active focus: 3px cornflower left-accent + subtle bg highlight + bold label.
 /// Sweater indicator: small colored dot to the right of the Mother label.
 /// Right border separates sidebar from content area.
@@ -27,9 +30,9 @@ class TabBarView: NSView {
     /// Called when the user selects "Remove Focus" from a dynamic item's context menu.
     var onRemove: ((Focus) -> Void)?
 
-    // Layout anchors we manage across reloads
-    private var dynamicSeparator: NSView?
+    // Layout sub-views managed across reloads
     private var addButton: NSView?
+    private var documentView: FlippedView!
 
     // MARK: - Init
 
@@ -49,7 +52,7 @@ class TabBarView: NSView {
         wantsLayer = true
         layer?.backgroundColor = Theme.bgBar.cgColor
 
-        // Right border
+        // Right border — 1px, full height, always on top
         let border = NSView()
         border.wantsLayer = true
         border.layer?.backgroundColor = Theme.borderInactive.cgColor
@@ -62,7 +65,7 @@ class TabBarView: NSView {
             border.widthAnchor.constraint(equalToConstant: 1),
         ])
 
-        // Add-focus button pinned to bottom
+        // Add-focus button pinned to bottom (set up first so scrollView can pin to it)
         let btn = makeAddButton()
         addSubview(btn)
         NSLayoutConstraint.activate([
@@ -72,6 +75,31 @@ class TabBarView: NSView {
             btn.heightAnchor.constraint(equalToConstant: 32),
         ])
         addButton = btn
+
+        // Scroll view — occupies the space between the top edge and the "+" button
+        let sv = NSScrollView()
+        sv.drawsBackground    = false
+        sv.hasVerticalScroller = true
+        sv.autohidesScrollers  = true
+        sv.verticalScrollElasticity   = .allowed
+        sv.hasHorizontalScroller      = false
+        sv.horizontalScrollElasticity = .none
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(sv)
+        NSLayoutConstraint.activate([
+            sv.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            sv.leadingAnchor.constraint(equalTo: leadingAnchor),
+            sv.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
+            sv.bottomAnchor.constraint(equalTo: btn.topAnchor),
+        ])
+
+        // Document view — flipped so the top-anchor chain runs top-to-bottom
+        let dv = FlippedView()
+        dv.translatesAutoresizingMaskIntoConstraints = false
+        sv.documentView = dv
+        // Width tracks the scroll view's content area; height driven by item chain.
+        dv.widthAnchor.constraint(equalTo: sv.contentView.widthAnchor).isActive = true
+        documentView = dv
 
         // Mother sweater dots — global state, same on all windows
         AppStore.shared.$motherJobs
@@ -88,83 +116,76 @@ class TabBarView: NSView {
 
     // MARK: - Focus list management
 
-    /// Tears down and rebuilds the item list from a new focuses array.
+    /// Tears down and rebuilds the grouped item list from a new focuses array.
     func setFocuses(_ focuses: [Focus]) {
-        // Remove old items
-        items.values.forEach { $0.removeFromSuperview() }
+        // Clear previous content
+        documentView.subviews.forEach { $0.removeFromSuperview() }
         items = [:]
-        dynamicSeparator?.removeFromSuperview()
-        dynamicSeparator = nil
 
-        let builtIns  = focuses.filter { $0.isBuiltIn }
-        let dynamics  = focuses.filter { !$0.isBuiltIn }
-
+        let rows = buildNavRows(focuses)
         var prev: NSView? = nil
+        var isFirstOrg = true
 
-        // Built-in items
-        for focus in builtIns {
-            let item = NavTabItem(focus: focus)
-            item.onTap = { [weak self] in self?.onSwitch?(focus) }
-            item.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(item)
-            NSLayoutConstraint.activate([
-                item.leadingAnchor.constraint(equalTo: leadingAnchor),
-                item.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
-                item.heightAnchor.constraint(equalToConstant: 40),
-            ])
-            if let p = prev {
-                item.topAnchor.constraint(equalTo: p.bottomAnchor).isActive = true
-            } else {
-                item.topAnchor.constraint(equalTo: topAnchor, constant: 8).isActive = true
-            }
-            items[focus.id] = item
-            prev = item
-        }
+        for row in rows {
+            let view: NSView
 
-        // Separator between built-ins and dynamic focuses
-        if !dynamics.isEmpty {
-            let sep = NSView()
-            sep.wantsLayer = true
-            sep.layer?.backgroundColor = Theme.borderInactive.cgColor
-            sep.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(sep)
-            NSLayoutConstraint.activate([
-                sep.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-                sep.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
-                sep.heightAnchor.constraint(equalToConstant: 1),
-                sep.topAnchor.constraint(equalTo: prev?.bottomAnchor ?? topAnchor, constant: 4),
-            ])
-            dynamicSeparator = sep
-            prev = sep
-        }
+            switch row {
+            case .orgHeader(let title):
+                view = OrgHeaderView(title: title, showTopSeparator: !isFirstOrg)
+                isFirstOrg = false
 
-        // Dynamic items with context menu
-        for focus in dynamics {
-            let item = NavTabItem(focus: focus)
-            item.onTap = { [weak self] in self?.onSwitch?(focus) }
-            item.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(item)
-            NSLayoutConstraint.activate([
-                item.leadingAnchor.constraint(equalTo: leadingAnchor),
-                item.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
-                item.heightAnchor.constraint(equalToConstant: 40),
-            ])
-            if let p = prev {
-                item.topAnchor.constraint(equalTo: p.bottomAnchor).isActive = true
-            } else {
-                item.topAnchor.constraint(equalTo: topAnchor, constant: 8).isActive = true
+            case .repoHeader(let name):
+                view = RepoGroupView(name: name)
+
+            case .focus(let focus, let label, let secondary, let indented):
+                let item = NavTabItem(focus: focus, label: label, secondary: secondary, indented: indented)
+                item.onTap = { [weak self] in self?.onSwitch?(focus) }
+
+                if !focus.isBuiltIn {
+                    let menu = NSMenu()
+                    let removeItem = NSMenuItem(
+                        title: "Remove Focus",
+                        action: #selector(removeFocusTapped(_:)),
+                        keyEquivalent: ""
+                    )
+                    removeItem.target = self
+                    removeItem.representedObject = focus
+                    menu.addItem(removeItem)
+                    item.menu = menu
+                }
+
+                items[focus.id] = item
+                view = item
             }
 
-            // Right-click context menu: "Remove Focus"
-            let menu = NSMenu()
-            let removeItem = NSMenuItem(title: "Remove Focus", action: #selector(removeFocusTapped(_:)), keyEquivalent: "")
-            removeItem.target = self
-            removeItem.representedObject = focus
-            menu.addItem(removeItem)
-            item.menu = menu
+            view.translatesAutoresizingMaskIntoConstraints = false
+            documentView.addSubview(view)
 
-            items[focus.id] = item
-            prev = item
+            // Height for this row type
+            let height: CGFloat
+            switch row {
+            case .orgHeader:  height = Theme.navOrgHeaderHeight
+            case .repoHeader: height = Theme.navRepoHeaderHeight
+            case .focus:      height = Theme.navItemHeight
+            }
+
+            NSLayoutConstraint.activate([
+                view.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+                view.heightAnchor.constraint(equalToConstant: height),
+            ])
+
+            if let p = prev {
+                view.topAnchor.constraint(equalTo: p.bottomAnchor).isActive = true
+            } else {
+                view.topAnchor.constraint(equalTo: documentView.topAnchor).isActive = true
+            }
+            prev = view
+        }
+
+        // Pin last row's bottom to documentView so the scroll view knows the content height
+        if let last = prev {
+            last.bottomAnchor.constraint(equalTo: documentView.bottomAnchor).isActive = true
         }
 
         updateStates()
@@ -220,7 +241,6 @@ class TabBarView: NSView {
 
         for (focusId, item) in items {
             // Resolve the agent tag for this focus so we can look up health.
-            // The focus id is stable; the agent tag is what the daemon uses.
             let agentTag = FocusStore.shared.focuses.first { $0.id == focusId }?.agentTag
             let sessionH = agentTag.flatMap { health[$0] }
 
@@ -242,6 +262,86 @@ class TabBarView: NSView {
     }
 }
 
+// MARK: - FlippedView
+
+/// NSView subclass with a flipped coordinate system so Auto Layout top-anchor chains
+/// read naturally top-to-bottom inside an NSScrollView's document view.
+private class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+// MARK: - OrgHeaderView
+
+/// Non-interactive org-section header (e.g. "CAREFEED").
+///
+/// Shows an optional 1px top separator — used for all org sections except the first.
+private class OrgHeaderView: NSView {
+
+    init(title: String, showTopSeparator: Bool) {
+        super.init(frame: .zero)
+        wantsLayer = true
+
+        if showTopSeparator {
+            let sep = NSView()
+            sep.wantsLayer = true
+            sep.layer?.backgroundColor = Theme.borderInactive.cgColor
+            sep.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(sep)
+            NSLayoutConstraint.activate([
+                sep.topAnchor.constraint(equalTo: topAnchor),
+                sep.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+                sep.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+                sep.heightAnchor.constraint(equalToConstant: 1),
+            ])
+        }
+
+        let label = NSTextField(labelWithString: title)
+        label.font          = Theme.navOrgFont
+        label.textColor     = Theme.fgMuted
+        label.alignment     = .left
+        label.isEditable    = false
+        label.isBordered    = false
+        label.drawsBackground = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+// MARK: - RepoGroupView
+
+/// Non-interactive repo-group header shown when a repo has ≥2 agent sessions.
+private class RepoGroupView: NSView {
+
+    init(name: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+
+        let label = NSTextField(labelWithString: name)
+        label.font          = Theme.navRepoFont
+        label.textColor     = Theme.fgMuted
+        label.alignment     = .left
+        label.isEditable    = false
+        label.isBordered    = false
+        label.drawsBackground = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10 + Theme.navChildIndent),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
 // MARK: - NavTabItem
 
 private class NavTabItem: NSView {
@@ -257,14 +357,28 @@ private class NavTabItem: NSView {
         didSet { updateAppearance() }
     }
 
-    private let accentBar = NSView()
-    private let label     = NSTextField(labelWithString: "")
-    private let dot       = NSView()
+    private let accentBar      = NSView()
+    private let label          = NSTextField(labelWithString: "")
+    private let dot            = NSView()
+    private let displayOverride: String
+    private let secondaryLabel: NSTextField?
 
-    init(focus: Focus) {
-        self.focus = focus
+    init(focus: Focus, label displayLabel: String, secondary: String?, indented: Bool) {
+        self.focus           = focus
+        self.displayOverride = displayLabel
+        self.secondaryLabel  = secondary.map { text in
+            let tf = NSTextField(labelWithString: text)
+            tf.font           = Theme.navSubFont
+            tf.textColor      = Theme.fgMuted
+            tf.alignment      = .left
+            tf.lineBreakMode  = .byTruncatingTail
+            tf.translatesAutoresizingMaskIntoConstraints = false
+            return tf
+        }
         super.init(frame: .zero)
         wantsLayer = true
+
+        let leadingInset: CGFloat = indented ? 6 + Theme.navChildIndent : 6
 
         // Left accent bar — 3px, full height
         accentBar.wantsLayer = true
@@ -278,20 +392,17 @@ private class NavTabItem: NSView {
             accentBar.widthAnchor.constraint(equalToConstant: 3),
         ])
 
-        // Label — centered in item
-        label.stringValue  = focus.displayName
-        label.font         = Theme.tabFont
-        label.textColor    = Theme.fgMuted
-        label.alignment    = .center
-        label.lineBreakMode = .byTruncatingTail
+        // Primary label — left-aligned
+        label.stringValue    = displayLabel
+        label.font           = Theme.tabFont
+        label.textColor      = Theme.fgMuted
+        label.alignment      = .left
+        label.lineBreakMode  = .byTruncatingTail
+        label.isEditable     = false
+        label.isBordered     = false
+        label.drawsBackground = false
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
-        NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 6),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
-        ])
 
         // Sweater dot — 6px circle, right-aligned, hidden by default
         dot.wantsLayer = true
@@ -304,6 +415,26 @@ private class NavTabItem: NSView {
             dot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             dot.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+
+        // Label constraints — different depending on whether secondary is shown
+        if let sl = secondaryLabel {
+            addSubview(sl)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: leadingInset),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -4),
+                label.bottomAnchor.constraint(equalTo: centerYAnchor, constant: -1),
+
+                sl.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: leadingInset),
+                sl.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -4),
+                sl.topAnchor.constraint(equalTo: centerYAnchor, constant: 3),
+            ])
+        } else {
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: leadingInset),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
+        }
 
         addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(tapped)))
 
@@ -320,18 +451,17 @@ private class NavTabItem: NSView {
             ? Theme.cornflower.withAlphaComponent(0.12).cgColor
             : NSColor.clear.cgColor
 
-        let displayName = focus.displayName
         if isActive {
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: Theme.tabFontBold, .foregroundColor: NSColor.white,
             ]
-            label.attributedStringValue = NSAttributedString(string: displayName, attributes: attrs)
+            label.attributedStringValue = NSAttributedString(string: displayOverride, attributes: attrs)
         } else {
             let color = sweaterColor ?? Theme.fgMuted
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: Theme.tabFont, .foregroundColor: color,
             ]
-            label.attributedStringValue = NSAttributedString(string: displayName, attributes: attrs)
+            label.attributedStringValue = NSAttributedString(string: displayOverride, attributes: attrs)
         }
 
         if let sc = sweaterColor {
