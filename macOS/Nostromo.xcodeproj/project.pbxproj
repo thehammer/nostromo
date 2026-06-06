@@ -43,9 +43,9 @@
 		DD00000000000000000000A2 /* NostromodClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002 /* NostromodClient.swift */; };
 		DD00000000000000000000A3 /* ChatModels.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000030 /* ChatModels.swift */; };
 		DD00000000000000000000A4 /* ChatSession.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000031 /* ChatSession.swift */; };
-		EE00000000000000000000A2 /* SidenavGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000A1 /* SidenavGrouping.swift */; };
-		EE00000000000000000000A3 /* SidenavGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000A1 /* SidenavGrouping.swift */; };
-		EE00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000B1 /* SidenavGroupingTests.swift */; };
+		FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
+		FF00000000000000000000A3 /* SidenavGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
+		FF00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000B1 /* SidenavGroupingTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -80,8 +80,8 @@
 		CC00000000000000000000A0 /* PerriModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriModelTests.swift; sourceTree = "<group>"; };
 		CC00000000000000000000B0 /* DiffColoring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffColoring.swift; sourceTree = "<group>"; };
 		DD00000000000000000000A0 /* SessionHealthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHealthTests.swift; sourceTree = "<group>"; };
-		EE00000000000000000000A1 /* SidenavGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGrouping.swift; sourceTree = "<group>"; };
-		EE00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
+		FF00000000000000000000A1 /* SidenavGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGrouping.swift; sourceTree = "<group>"; };
+		FF00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
 		BB00000000000000000000G1 /* NostromoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NostromoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -161,7 +161,7 @@
 				AA0000020000000000000040 /* ToastBannerView.swift */,
 				AA0000020000000000000041 /* SessionHealthStatusView.swift */,
 				AA0000020000000000000024 /* CreateFocusSheet.swift */,
-				EE00000000000000000000A1 /* SidenavGrouping.swift */,
+				FF00000000000000000000A1 /* SidenavGrouping.swift */,
 				CC00000000000000000000B0 /* DiffColoring.swift */,
 				AA0000020000000000000021 /* Views */,
 			);
@@ -186,7 +186,7 @@
 				BB00000000000000000000C2 /* PhaseRibbonTests.swift */,
 				CC00000000000000000000A0 /* PerriModelTests.swift */,
 				DD00000000000000000000A0 /* SessionHealthTests.swift */,
-				EE00000000000000000000B1 /* SidenavGroupingTests.swift */,
+				FF00000000000000000000B1 /* SidenavGroupingTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -296,7 +296,7 @@
 				AA0000020000000000000124 /* CreateFocusSheet.swift in Sources */,
 				BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */,
 				CC00000000000000000000A5 /* DiffColoring.swift in Sources */,
-				EE00000000000000000000A2 /* SidenavGrouping.swift in Sources */,
+				FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -315,8 +315,8 @@
 				DD00000000000000000000A2 /* NostromodClient.swift in TestSources */,
 				DD00000000000000000000A3 /* ChatModels.swift in TestSources */,
 				DD00000000000000000000A4 /* ChatSession.swift in TestSources */,
-				EE00000000000000000000A3 /* SidenavGrouping.swift in TestSources */,
-				EE00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */,
+				FF00000000000000000000A3 /* SidenavGrouping.swift in TestSources */,
+				FF00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
