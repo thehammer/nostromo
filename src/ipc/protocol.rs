@@ -235,6 +235,9 @@ pub enum ClientMsg {
     SessionSend {
         tag: String,
         text: String,
+        /// Absolute paths to image files; daemon reads + base64-encodes them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
     },
 
     /// Lifecycle control (stop / restart / new_session).
@@ -446,6 +449,12 @@ mod tests {
         round_trip_client(ClientMsg::SessionSend {
             tag: "fred".into(),
             text: "hello".into(),
+            images: vec![],
+        });
+        round_trip_client(ClientMsg::SessionSend {
+            tag: "fred".into(),
+            text: "look at this".into(),
+            images: vec!["/tmp/a.png".into()],
         });
         round_trip_client(ClientMsg::SessionControl {
             tag: "fred".into(),
@@ -528,6 +537,7 @@ mod tests {
         let v = serde_json::to_value(ClientMsg::SessionSend {
             tag: "t".into(),
             text: "x".into(),
+            images: vec![],
         })
         .unwrap();
         assert_eq!(v.get("type").unwrap(), "session_send");

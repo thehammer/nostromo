@@ -206,7 +206,8 @@ private struct SessionSendMsg: Encodable {
     let type_ = "session_send"
     let tag: String
     let text: String
-    enum CodingKeys: String, CodingKey { case type_ = "type", tag, text }
+    let images: [String]
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, text, images }
 }
 
 private struct SessionControlMsg: Encodable {
@@ -360,7 +361,9 @@ class NostromodClient {
     func sessionDetach(tag: String) { send(SessionDetachMsg(tag: tag)) }
 
     /// Enqueue a user message; the daemon writes it to the child's stdin.
-    func sessionSend(tag: String, text: String) { send(SessionSendMsg(tag: tag, text: text)) }
+    func sessionSend(tag: String, text: String, imagePaths: [String] = []) {
+        send(SessionSendMsg(tag: tag, text: text, images: imagePaths))
+    }
 
     /// Lifecycle control: "stop" | "restart" | "new_session".
     func sessionControl(tag: String, action: String) {
