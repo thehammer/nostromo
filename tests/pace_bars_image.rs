@@ -67,28 +67,29 @@ fn top_left_pixel_is_background() {
 }
 
 #[test]
-fn leftmost_fill_pixel_is_green() {
+fn leftmost_fill_pixel_is_dark_blue_anchor() {
     let snap = make_snapshot();
     let img = render_pace_bars_to_image(&snap, 400, 48);
     let rgba = img.to_rgba8();
 
-    // The 5h bar occupies the top half. Rail starts at x = LABEL_PX + GAP_PX = 40.
-    // Vertically: mid of top half ≈ row 12 (half_h=24, V_PAD=3 → bar rows 3..21).
+    // The 5h bar is the top third. Rail starts at x = LABEL_PX + GAP_PX = 40.
+    // third_h=16, V_PAD=3 → bar rows 3..12; row 7 is the midpoint.
     let label_and_gap = 40u32;
-    let bar_row = 12u32; // somewhere in the middle of the top-half bar
+    let bar_row = 7u32;
 
     let p = rgba.get_pixel(label_and_gap, bar_row);
-    // Leftmost pixel of the gradient = green anchor (#00C853 → R~0, G~200, B~83)
-    // Allow ±10 per channel for OKLab rounding and font overlap.
+    // The gradient uses pace_color(t * pace). At t=0 (leftmost pixel) this is
+    // pace_color(0.0) = #0A1460 (dark blue: R≈10, G≈20, B≈96).
+    // Allow ±15 per channel for OKLab rounding.
     assert!(
-        p[0] < 50,
-        "leftmost fill R should be low (green start): {}",
+        p[0] < 30,
+        "leftmost fill R should be low (dark-blue anchor): {}",
         p[0]
     );
     assert!(
-        p[1] > 150,
-        "leftmost fill G should be high (green start): {}",
-        p[1]
+        p[2] > 60,
+        "leftmost fill B should be high (dark-blue anchor): {}",
+        p[2]
     );
 }
 
