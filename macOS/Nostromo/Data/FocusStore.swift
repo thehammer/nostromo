@@ -30,6 +30,15 @@ final class FocusStore {
         }
     }
 
+    /// Apply an auto-generated session summary to the focus whose `sessionTag`
+    /// matches `tag`.  Idempotent: no-ops when the summary is already equal.
+    func updateSummary(tag: String, summary: String) {
+        guard let idx = focuses.firstIndex(where: { $0.sessionTag == tag }) else { return }
+        guard focuses[idx].sessionSummary != summary else { return }
+        focuses[idx].sessionSummary = summary
+        save()
+    }
+
     func remove(_ focus: Focus) {
         guard !focus.isBuiltIn else { return }
         focuses.removeAll { $0.id == focus.id }

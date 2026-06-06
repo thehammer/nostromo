@@ -49,7 +49,7 @@ use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
 use super::protocol::{ServerMsg, SessionInfo};
-use super::stream_json::{load_scrollback, SessionState, SessionTranscript, TurnDelta};
+use super::stream_json::{load_scrollback, SessionState, SessionTranscript, Turn, TurnDelta};
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
 /// operators with a non-standard install).
@@ -192,6 +192,10 @@ struct ManagedSession {
     /// `kill_all_on_shutdown` (left None — daemon teardown). Cleared (reset to
     /// None) whenever a new `ManagedSession` is spawned by `restart()`.
     pub(crate) stop_reason: Option<StopReason>,
+    /// Guards the one-shot `SessionSummaryUpdate` emission per session lifetime.
+    /// Set to `true` once the summary has been derived and broadcast to all
+    /// connected clients. Resets on restart (new `ManagedSession`).
+    summary_sent: Arc<AtomicBool>,
 }
 
 impl ManagedSession {
@@ -429,6 +433,7 @@ impl SessionManager {
             restart_at: None,
             last_exit_code: None,
             stop_reason: None,
+            summary_sent: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -911,6 +916,36 @@ impl SessionManager {
         }
     }
 
+    /// Broadcast a message to every currently connected client.
+    fn send_to_all_clients(&self, msg: ServerMsg) {
+        let senders = self.client_senders.lock().unwrap();
+        for tx in senders.values() {
+            let _ = tx.send(msg.clone());
+        }
+    }
+
+    /// Scan all sessions for pending summary emissions.  Called from the
+    /// supervisor tick immediately after `reap_and_recover`.  For each session
+    /// whose `summary_sent` flag is still false, derives a summary from
+    /// `turns[0].user_input` and broadcasts it to all clients.  The flag is
+    /// set to `true` before the broadcast so a second tick is a no-op even if
+    /// the send fails.
+    pub fn emit_pending_summaries(&self) {
+        for (tag, session) in &self.sessions {
+            if session.summary_sent.load(Ordering::SeqCst) {
+                continue;
+            }
+            let turns = session.shared.transcript.lock().unwrap().snapshot();
+            if let Some(summary) = derive_summary(&turns) {
+                session.summary_sent.store(true, Ordering::SeqCst);
+                self.send_to_all_clients(ServerMsg::SessionSummaryUpdate {
+                    tag: tag.clone(),
+                    summary,
+                });
+            }
+        }
+    }
+
     #[cfg(test)]
     fn session_state(&self, tag: &str) -> Option<SessionState> {
         self.sessions.get(tag).map(|s| s.state())
@@ -1200,6 +1235,39 @@ fn augment_path(cmd: &mut Command) {
     cmd.env("PATH", path);
 }
 
+// ── summary derivation ────────────────────────────────────────────────────────
+
+/// Derive a short display summary from the first user turn.
+///
+/// - Collapses newlines and runs of whitespace to a single space.
+/// - Returns `None` for empty / whitespace-only input.
+/// - Truncates to 40 chars (by `char` count) with a `…` suffix if longer.
+fn derive_summary(turns: &[Turn]) -> Option<String> {
+    let raw = turns.first().map(|t| t.user_input.as_str())?;
+
+    // Collapse all whitespace (including newlines) to single spaces, then trim.
+    let collapsed: String = raw
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if collapsed.is_empty() {
+        return None;
+    }
+
+    // Truncate by Unicode scalar count (chars()), not bytes.
+    const MAX_CHARS: usize = 40;
+    if collapsed.chars().count() > MAX_CHARS {
+        let truncated: String = collapsed.chars().take(MAX_CHARS).collect();
+        Some(format!("{truncated}\u{2026}")) // U+2026 HORIZONTAL ELLIPSIS
+    } else {
+        Some(collapsed)
+    }
+}
+
 // ── session-id store ────────────────────────────────────────────────────────
 
 /// Daemon-owned `tag -> session_id` store path.
@@ -1267,6 +1335,71 @@ mod tests {
         let unique = format!("nostromo-test-{}.json", Uuid::new_v4());
         p.push(unique);
         p
+    }
+
+    // ── derive_summary ────────────────────────────────────────────────────────
+
+    fn make_turns(user_input: &str) -> Vec<Turn> {
+        vec![Turn {
+            id: "t0".into(),
+            user_input: user_input.into(),
+            timestamp: None,
+            blocks: vec![],
+            is_complete: false,
+        }]
+    }
+
+    #[test]
+    fn derive_summary_short_passthrough() {
+        let turns = make_turns("Build the auth flow");
+        assert_eq!(derive_summary(&turns), Some("Build the auth flow".into()));
+    }
+
+    #[test]
+    fn derive_summary_exactly_40_chars_not_truncated() {
+        // 40 chars — should pass through unchanged
+        let input = "a".repeat(40);
+        let turns = make_turns(&input);
+        assert_eq!(derive_summary(&turns), Some(input));
+    }
+
+    #[test]
+    fn derive_summary_41_chars_gets_ellipsis() {
+        let input = "a".repeat(41);
+        let turns = make_turns(&input);
+        let result = derive_summary(&turns).unwrap();
+        assert!(result.ends_with('\u{2026}'), "should end with ellipsis: {result:?}");
+        // The truncated part is 40 chars + 1 ellipsis codepoint
+        assert_eq!(result.chars().count(), 41);
+    }
+
+    #[test]
+    fn derive_summary_collapses_newlines() {
+        let turns = make_turns("Fix the bug\nin the login\r\nmodule");
+        assert_eq!(derive_summary(&turns), Some("Fix the bug in the login module".into()));
+    }
+
+    #[test]
+    fn derive_summary_collapses_extra_spaces() {
+        let turns = make_turns("  lots   of   spaces  ");
+        assert_eq!(derive_summary(&turns), Some("lots of spaces".into()));
+    }
+
+    #[test]
+    fn derive_summary_empty_returns_none() {
+        let turns = make_turns("");
+        assert_eq!(derive_summary(&turns), None);
+    }
+
+    #[test]
+    fn derive_summary_whitespace_only_returns_none() {
+        let turns = make_turns("   \n\t\r\n   ");
+        assert_eq!(derive_summary(&turns), None);
+    }
+
+    #[test]
+    fn derive_summary_no_turns_returns_none() {
+        assert_eq!(derive_summary(&[]), None);
     }
 
     // ── arg construction ──────────────────────────────────────────────────────
