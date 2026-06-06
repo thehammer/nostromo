@@ -74,6 +74,8 @@ enum Theme {
     static let navRepoHeaderHeight: CGFloat = 28
     /// Height of a clickable focus item row.
     static let navItemHeight:       CGFloat = 40
+    /// Height of a clickable focus item row that carries a secondary subtitle label.
+    static let navItemSubtitleHeight: CGFloat = 52
     /// Extra leading inset for agent rows nested under a repo-group header.
     static let navChildIndent:      CGFloat = 12
     /// Font for org section labels (uppercase, small, muted).

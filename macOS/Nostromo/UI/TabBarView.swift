@@ -180,7 +180,8 @@ class TabBarView: NSView {
             switch row {
             case .orgHeader:  height = Theme.navOrgHeaderHeight
             case .repoHeader: height = Theme.navRepoHeaderHeight
-            case .focus:      height = Theme.navItemHeight
+            case .focus(_, _, let secondary, _):
+                height = secondary != nil ? Theme.navItemSubtitleHeight : Theme.navItemHeight
             }
 
             NSLayoutConstraint.activate([

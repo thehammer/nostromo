@@ -405,6 +405,14 @@ pub enum ServerMsg {
         sessions: Vec<SessionInfo>,
     },
 
+    /// Auto-generated one-line summary derived from the first user message.
+    /// Sent once per session lifetime (guarded by `summary_sent` on the daemon).
+    /// The Swift client stores this as `Focus.sessionSummary` for sidenav disambiguation.
+    SessionSummaryUpdate {
+        tag: String,
+        summary: String,
+    },
+
     /// TUI-internal pseudo-event — **never produced by the daemon**.
     ///
     /// Injected locally by the [`DaemonClient`] supervisor immediately after a
@@ -575,6 +583,14 @@ mod tests {
         round_trip_server(ServerMsg::SessionDown {
             tag: "fred".into(),
             reason: StopReason::CrashLoopGuard,
+        });
+    }
+
+    #[test]
+    fn session_summary_update_round_trips() {
+        round_trip_server(ServerMsg::SessionSummaryUpdate {
+            tag: "fred".into(),
+            summary: "Build the auth flow".into(),
         });
     }
 

@@ -469,6 +469,9 @@ class AppStore: ObservableObject {
                 applySessionHealth(.permanentlyDown(reason), for: tag)
             }
 
+        case .sessionSummaryUpdate(let tag, let summary):
+            FocusStore.shared.updateSummary(tag: tag, summary: summary)
+
         case .sessionSpawned, .sessionTurns, .sessionTurnDelta,
              .sessionPermissionRequest, .sessionExited:
             break

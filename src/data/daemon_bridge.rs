@@ -76,7 +76,9 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::SessionPermissionRequest { .. }
         | ServerMsg::SessionExited { .. }
         | ServerMsg::SessionDown { .. }
-        | ServerMsg::SessionListResp { .. } => {}
+        | ServerMsg::SessionListResp { .. }
+        // Summary updates are consumed by the Swift thin-client.
+        | ServerMsg::SessionSummaryUpdate { .. } => {}
         // DaemonReconnected is handled by individual DaemonPtyClient subscribers.
         ServerMsg::DaemonReconnected => {}
         // Control messages — no action needed.

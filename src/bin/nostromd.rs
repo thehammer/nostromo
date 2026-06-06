@@ -72,7 +72,9 @@ async fn main() -> Result<()> {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                session_mgr.lock().unwrap().reap_and_recover();
+                let mgr = &mut *session_mgr.lock().unwrap();
+                mgr.reap_and_recover();
+                mgr.emit_pending_summaries();
             }
         });
     }

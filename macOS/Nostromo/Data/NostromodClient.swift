@@ -45,6 +45,9 @@ enum ServerMsg {
     /// The session has been permanently stopped and will not auto-restart.
     /// `reason: .user` → benign user stop (clear indicator); `reason: .crashLoopGuard` → alarm.
     case sessionDown(tag: String, reason: DaemonStopReason)
+    /// Auto-generated one-line summary derived from the first user message.
+    /// Sent once per session lifetime by the daemon.
+    case sessionSummaryUpdate(tag: String, summary: String)
     case unknown
 }
 
@@ -513,6 +516,11 @@ class NostromodClient {
                 return .sessionDown(tag: m.tag, reason: m.reason)
             }
 
+        case "session_summary_update":
+            if let m = try? decoder.decode(SessionSummaryUpdateResp.self, from: raw) {
+                return .sessionSummaryUpdate(tag: m.tag, summary: m.summary)
+            }
+
         default:
             break
         }
@@ -529,4 +537,5 @@ private struct SessionTurnDeltaResp: Decodable { let tag: String; let delta: Dae
 private struct SessionStateResp:   Decodable { let tag: String; let state: DaemonSessionState }
 private struct SessionPermResp:    Decodable { let tag: String; let request_id: String; let tool: String }
 private struct SessionExitedResp:  Decodable { let tag: String; let exit_code: Int? }
-private struct SessionDownResp:    Decodable { let tag: String; let reason: DaemonStopReason }
+private struct SessionDownResp:          Decodable { let tag: String; let reason: DaemonStopReason }
+private struct SessionSummaryUpdateResp: Decodable { let tag: String; let summary: String }
