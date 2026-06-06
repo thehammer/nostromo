@@ -204,12 +204,13 @@ private class PerriPRList: NSView {
 
     var onSelect: ((PRQueueItem?) -> Void)?
 
-    private let scrollView   = NSScrollView()
-    private let stackView    = NSStackView()
-    private let headerLabel  = NSTextField(labelWithString: "")
-    private let refreshBtn   = NSButton()
-    private let spinner      = NSProgressIndicator()
-    private var cancellables = Set<AnyCancellable>()
+    private let scrollView       = NSScrollView()
+    private let stackView        = NSStackView()
+    private let headerLabel      = NSTextField(labelWithString: "")
+    private let refreshBtn       = NSButton()
+    private let startReviewingBtn = NSButton()
+    private let spinner          = NSProgressIndicator()
+    private var cancellables     = Set<AnyCancellable>()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -239,6 +240,22 @@ private class PerriPRList: NSView {
         refreshBtn.translatesAutoresizingMaskIntoConstraints = false
         toolbar.addSubview(refreshBtn)
 
+        // "Start Reviewing" pill button — clears Perri's session context
+        startReviewingBtn.bezelStyle = .inline
+        startReviewingBtn.isBordered = false
+        startReviewingBtn.wantsLayer = true
+        startReviewingBtn.layer?.backgroundColor = Theme.cornflower.withAlphaComponent(0.20).cgColor
+        startReviewingBtn.layer?.cornerRadius    = 5
+        let reviewAttrs: [NSAttributedString.Key: Any] = [
+            .font:            NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: Theme.fg,
+        ]
+        startReviewingBtn.attributedTitle = NSAttributedString(string: "Start Reviewing", attributes: reviewAttrs)
+        startReviewingBtn.target = self
+        startReviewingBtn.action = #selector(startReviewing)
+        startReviewingBtn.translatesAutoresizingMaskIntoConstraints = false
+        toolbar.addSubview(startReviewingBtn)
+
         spinner.style                  = .spinning
         spinner.controlSize            = .small
         spinner.isDisplayedWhenStopped = false
@@ -252,6 +269,11 @@ private class PerriPRList: NSView {
             toolbar.heightAnchor.constraint(equalToConstant: 24),
             headerLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
             headerLabel.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 10),
+            // "Start Reviewing" button — between header label and refresh button
+            startReviewingBtn.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            startReviewingBtn.heightAnchor.constraint(equalToConstant: 22),
+            startReviewingBtn.leadingAnchor.constraint(greaterThanOrEqualTo: headerLabel.trailingAnchor, constant: 8),
+            startReviewingBtn.trailingAnchor.constraint(lessThanOrEqualTo: refreshBtn.leadingAnchor, constant: -8),
             // Spinner sits where the button is; button hides while spinning
             spinner.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
             spinner.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -8),
@@ -309,6 +331,14 @@ private class PerriPRList: NSView {
 
     @objc private func didRefresh() {
         AppStore.shared.refreshPerriQueue()
+    }
+
+    @objc private func startReviewing() {
+        // Obtain the Perri session (idempotent — returns existing if already created).
+        // Clear context so Perri's system prompt auto-starts the review workflow
+        // on the fresh session. No prompt needed for the empty-prompt case.
+        let session = AppStore.shared.session(for: "perri", displayName: "Perri")
+        session.newSession()
     }
 
     func setError(_ error: String?) {

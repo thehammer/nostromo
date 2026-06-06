@@ -153,15 +153,19 @@ class MainLayout: NSView {
         switch focus.id {
         case "mother": v = MotherView()
         case "perri":  v = PerriView()
-        case "fred":   v = AgentView(tag: "fred",  label: "Fred")
-        case "teri":   v = AgentView(tag: "teri",  label: "Teri")
+        case "fred":   v = AgentView(tag: "fred",  label: "Fred",  quickActions: [QuickAction.clearContext])
+        case "teri":   v = AgentView(tag: "teri",  label: "Teri",  quickActions: [QuickAction.clearContext])
         default:
             // Dynamic focuses: full-screen REPL, no split pane.
             // sessionTag keys the session; agentTag is the --agent name.
+            // Show Clear Context by default; respect any custom actions the focus defines in JSON.
             v = ReplView(tag: focus.sessionTag,
                          agentName: focus.agentTag,
                          displayName: focus.displayName,
-                         workingDirectory: focus.projectPath)
+                         workingDirectory: focus.projectPath,
+                         quickActions: focus.quickActions.isEmpty
+                             ? [QuickAction.clearContext]
+                             : focus.quickActions)
         }
         viewCache[focus.id] = v
         return v
@@ -209,7 +213,8 @@ private class AgentView: NSView, NSSplitViewDelegate {
     private var didSetInitialPosition = false
     private var isReadyToSave        = false
 
-    init(tag: String, label: String, agentName: String? = nil, workingDirectory: String? = nil) {
+    init(tag: String, label: String, agentName: String? = nil, workingDirectory: String? = nil,
+         quickActions: [QuickAction] = []) {
         self.agentTag  = tag
         self.agentName = agentName ?? tag
         super.init(frame: .zero)
@@ -231,7 +236,8 @@ private class AgentView: NSView, NSSplitViewDelegate {
             hintLabel.centerYAnchor.constraint(equalTo: hud.centerYAnchor),
         ])
 
-        let repl = ReplView(tag: agentTag, agentName: agentName, displayName: label, workingDirectory: workingDirectory)
+        let repl = ReplView(tag: agentTag, agentName: agentName, displayName: label,
+                            workingDirectory: workingDirectory, quickActions: quickActions)
 
         split.isVertical   = false     // horizontal divider (top / bottom)
         split.dividerStyle = .thin

@@ -25,6 +25,7 @@
 		AA0000020000000000000120 /* MotherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000020 /* MotherView.swift */; };
 		AA0000020000000000000122 /* PerriView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000022 /* PerriView.swift */; };
 		AA0000020000000000000123 /* ReplView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000023 /* ReplView.swift */; };
+		EE00000000000000000000A1 /* QuickActionStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000A0 /* QuickActionStripView.swift */; };
 		AA0000020000000000000130 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000030 /* ChatModels.swift */; };
 		AA0000020000000000000131 /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000031 /* ChatSession.swift */; };
 		AA0000020000000000000132 /* FocusStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000032 /* FocusStore.swift */; };
@@ -65,6 +66,7 @@
 		AA0000020000000000000020 /* MotherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000022 /* PerriView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000023 /* ReplView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplView.swift; sourceTree = "<group>"; };
+		EE00000000000000000000A0 /* QuickActionStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionStripView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000030 /* ChatModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModels.swift; sourceTree = "<group>"; };
 		AA0000020000000000000031 /* ChatSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSession.swift; sourceTree = "<group>"; };
 		AA0000020000000000000032 /* FocusStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusStore.swift; sourceTree = "<group>"; };
@@ -165,6 +167,7 @@
 			children = (
 				AA0000020000000000000020 /* MotherView.swift */,
 				AA0000020000000000000022 /* PerriView.swift */,
+				EE00000000000000000000A0 /* QuickActionStripView.swift */,
 				AA0000020000000000000023 /* ReplView.swift */,
 			);
 			path = Views;
@@ -278,6 +281,7 @@
 				AA0000020000000000000111 /* SessionHealthStatusView.swift in Sources */,
 			AA0000020000000000000120 /* MotherView.swift in Sources */,
 				AA0000020000000000000122 /* PerriView.swift in Sources */,
+				EE00000000000000000000A1 /* QuickActionStripView.swift in Sources */,
 				AA0000020000000000000123 /* ReplView.swift in Sources */,
 				AA0000020000000000000130 /* ChatModels.swift in Sources */,
 				AA0000020000000000000131 /* ChatSession.swift in Sources */,
