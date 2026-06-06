@@ -97,9 +97,10 @@ class MainLayout: NSView {
         contentContainer.layer?.backgroundColor = Theme.bg.cgColor
 
         // Wire TabBarView callbacks
-        tabBar.onSwitch = { [weak self] focus in self?.switchFocus(focus) }
-        tabBar.onAdd    = { [weak self] in self?.presentCreateFocusSheet() }
-        tabBar.onRemove = { [weak self] focus in self?.removeFocus(focus) }
+        tabBar.onSwitch      = { [weak self] focus in self?.switchFocus(focus) }
+        tabBar.onAdd         = { [weak self] in self?.presentCreateFocusSheet() }
+        tabBar.onRemove      = { [weak self] focus in self?.removeFocus(focus) }
+        tabBar.onForceStart  = { [weak self] focus in self?.forceStart(focus) }
 
         // Subscribe to FocusStore so the tab bar rebuilds when focuses change
         FocusStore.shared.$focuses
@@ -132,6 +133,15 @@ class MainLayout: NSView {
         UserDefaults.standard.synchronize()
         AppStore.shared.setActiveFocusAgentTag(focus.agentTag)
         showContent(for: focus)
+    }
+
+    private func forceStart(_ focus: Focus) {
+        AppStore.shared.session(
+            for: focus.sessionTag,
+            agentName: focus.agentTag,
+            displayName: focus.displayName,
+            workingDirectory: focus.projectPath
+        ).restart()
     }
 
     private func removeFocus(_ focus: Focus) {
@@ -190,9 +200,15 @@ class MainLayout: NSView {
     private func presentCreateFocusSheet() {
         guard let window else { return }
         let sheet = CreateFocusSheet { [weak self] focus in
-            FocusStore.shared.add(focus)
-            self?.switchFocus(focus)
-            self?.presentedSheet = nil
+            guard let self else { return }
+            if let existing = FocusStore.shared.existing(
+                projectPath: focus.projectPath, agentTag: focus.agentTag) {
+                self.switchFocus(existing)
+            } else {
+                FocusStore.shared.add(focus)
+                self.switchFocus(focus)
+            }
+            self.presentedSheet = nil
         }
         presentedSheet = sheet  // retain for the sheet's lifetime
         window.beginSheet(sheet.window!) { [weak self] _ in

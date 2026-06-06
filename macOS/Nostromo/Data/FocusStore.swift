@@ -23,6 +23,13 @@ final class FocusStore {
         save()
     }
 
+    /// Returns an existing dynamic focus matching this project + agent, if any.
+    func existing(projectPath: String?, agentTag: String) -> Focus? {
+        focuses.first {
+            !$0.isBuiltIn && $0.projectPath == projectPath && $0.agentTag == agentTag
+        }
+    }
+
     func remove(_ focus: Focus) {
         guard !focus.isBuiltIn else { return }
         focuses.removeAll { $0.id == focus.id }

@@ -30,6 +30,9 @@ class TabBarView: NSView {
     /// Called when the user selects "Remove Focus" from a dynamic item's context menu.
     var onRemove: ((Focus) -> Void)?
 
+    /// Called when the user selects "Force Start" from a dynamic item's context menu.
+    var onForceStart: ((Focus) -> Void)?
+
     // Layout sub-views managed across reloads
     private var addButton: NSView?
     private var documentView: FlippedView!
@@ -143,6 +146,16 @@ class TabBarView: NSView {
 
                 if !focus.isBuiltIn {
                     let menu = NSMenu()
+
+                    let forceStartItem = NSMenuItem(
+                        title: "Force Start",
+                        action: #selector(forceStartTapped(_:)),
+                        keyEquivalent: ""
+                    )
+                    forceStartItem.target = self
+                    forceStartItem.representedObject = focus
+                    menu.addItem(forceStartItem)
+
                     let removeItem = NSMenuItem(
                         title: "Remove Focus",
                         action: #selector(removeFocusTapped(_:)),
@@ -151,6 +164,7 @@ class TabBarView: NSView {
                     removeItem.target = self
                     removeItem.representedObject = focus
                     menu.addItem(removeItem)
+
                     item.menu = menu
                 }
 
@@ -190,6 +204,11 @@ class TabBarView: NSView {
 
         updateStates()
         updateSweaters()
+    }
+
+    @objc private func forceStartTapped(_ sender: NSMenuItem) {
+        guard let focus = sender.representedObject as? Focus else { return }
+        onForceStart?(focus)
     }
 
     @objc private func removeFocusTapped(_ sender: NSMenuItem) {
