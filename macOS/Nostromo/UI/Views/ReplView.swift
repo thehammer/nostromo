@@ -749,6 +749,28 @@ private class TextBlockView: NSView {
     init(text: String) {
         super.init(frame: .zero)
 
+        // Route to markdown cards if text has markdown content and no pipe table.
+        // (Pipe tables use the existing MarkdownTableView path.)
+        if !Self.hasPipeTable(text) && Self.hasMarkdown(text) {
+            let segments = Self.markdownSegments(from: text)
+            var prevAnchor: NSLayoutYAxisAnchor = topAnchor
+            for (i, segment) in segments.enumerated() {
+                let card = MarkdownCardView(markdown: segment)
+                card.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(card)
+                NSLayoutConstraint.activate([
+                    card.topAnchor.constraint(equalTo: prevAnchor, constant: i == 0 ? 0 : 8),
+                    card.leadingAnchor.constraint(equalTo: leadingAnchor),
+                    card.trailingAnchor.constraint(equalTo: trailingAnchor),
+                ])
+                prevAnchor = card.bottomAnchor
+            }
+            if let last = subviews.last {
+                last.bottomAnchor.constraint(equalTo: bottomAnchor).isActive = true
+            }
+            return
+        }
+
         let segments = Self.parseSegments(text)
         var prevAnchor: NSLayoutYAxisAnchor? = nil
 
@@ -785,6 +807,46 @@ private class TextBlockView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    // MARK: Markdown detection & segmentation
+
+    /// Returns true when the text contains enough markdown markers to warrant card rendering.
+    private static func hasMarkdown(_ s: String) -> Bool {
+        let lines = s.components(separatedBy: "\n")
+        let lineMarker = lines.contains { line in
+            line.hasPrefix("# ") || line.hasPrefix("## ") || line.hasPrefix("### ")
+                || line.hasPrefix("- ") || line.hasPrefix("* ")
+                || line.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil
+        }
+        return lineMarker || s.contains("`") || s.contains("**") || s.contains("\n---")
+    }
+
+    /// Splits text on bare `---` separator lines into one or more markdown segments.
+    private static func markdownSegments(from text: String) -> [String] {
+        var segments: [String] = []
+        var current: [String]  = []
+        for line in text.components(separatedBy: "\n") {
+            if line.trimmingCharacters(in: .whitespaces) == "---" {
+                let seg = current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !seg.isEmpty { segments.append(seg) }
+                current = []
+            } else {
+                current.append(line)
+            }
+        }
+        let tail = current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { segments.append(tail) }
+        return segments
+    }
+
+    /// Returns true when the text contains a markdown pipe table (takes the existing path).
+    private static func hasPipeTable(_ s: String) -> Bool {
+        let lines = s.components(separatedBy: "\n")
+        guard let headerIdx = lines.firstIndex(where: { $0.hasPrefix("|") }) else { return false }
+        let nextIdx = lines.index(after: headerIdx)
+        guard nextIdx < lines.endIndex else { return false }
+        return lines[nextIdx].contains("|") && lines[nextIdx].contains("-")
+    }
 
     // MARK: Segment model & parser
 
