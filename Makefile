@@ -60,8 +60,7 @@ uninstall-daemon:
 
 # ── macOS GUI ──────────────────────────────────────────────────────────────────
 
-APP_DERIVED = $(HOME)/Library/Developer/Xcode/DerivedData/Nostromo-ciqaoqxunjzisvdagpitruomymcr
-APP_BUNDLE  = $(APP_DERIVED)/Build/Products/Debug/Nostromo.app
+APP_BUNDLE  = macOS/build/Build/Products/Debug/Nostromo.app
 
 .PHONY: mac mac-run mac-kill mac-icon mac-release mac-install
 
@@ -71,9 +70,11 @@ APP_BUNDLE  = $(APP_DERIVED)/Build/Products/Debug/Nostromo.app
 APP_RELEASE = macOS/build/Build/Products/Release/Nostromo.app
 INSTALLED   = /Applications/Nostromo.app
 
-## Build the macOS GUI app
+## Build the macOS GUI app (uses explicit derivedDataPath so worktree builds
+## don't scatter extra .app copies into ~/Library/Developer/Xcode/DerivedData)
 mac:
-	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo -configuration Debug build 2>&1 | grep -E "error:|warning:|BUILD"
+	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo -configuration Debug \
+	  -derivedDataPath build build 2>&1 | grep -E "error:|warning:|BUILD"
 
 ## Kill any running Nostromo instance (handles debugserver wedge)
 mac-kill:
