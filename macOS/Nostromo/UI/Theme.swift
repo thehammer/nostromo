@@ -58,10 +58,30 @@ enum Theme {
     // MARK: - Metrics
 
     static let tabBarHeight:    CGFloat = 26   // legacy; kept for reference
-    static let sidebarWidth:    CGFloat = 80
+    // Widened from 80 → 160 to accommodate the Org → Repo → Agent hierarchy.
+    // The extra width is required: repo names like "Admin Portal" and left-aligned
+    // indented labels are not legible at 80px.
+    static let sidebarWidth:    CGFloat = 160
     static let statusBarHeight: CGFloat = 22
     /// Tall enough for 2–3 pace bars (top ~30px) + agent attribution text row (~16px).
     static let paceBarsHeight:  CGFloat = 46
+
+    // MARK: Sidebar hierarchy layout
+
+    /// Height of an org-section header row (e.g. "CAREFEED").
+    static let navOrgHeaderHeight:  CGFloat = 28
+    /// Height of a repo-group header row (non-clickable; sits above indented agent rows).
+    static let navRepoHeaderHeight: CGFloat = 28
+    /// Height of a clickable focus item row.
+    static let navItemHeight:       CGFloat = 40
+    /// Extra leading inset for agent rows nested under a repo-group header.
+    static let navChildIndent:      CGFloat = 12
+    /// Font for org section labels (uppercase, small, muted).
+    static let navOrgFont  = NSFont.systemFont(ofSize: 10, weight: .semibold)
+    /// Font for repo-group header labels.
+    static let navRepoFont = NSFont.systemFont(ofSize: 11, weight: .regular)
+    /// Font for optional secondary disambiguation line on agent rows.
+    static let navSubFont  = NSFont.systemFont(ofSize: 10, weight: .regular)
 
     // MARK: - Helpers
 

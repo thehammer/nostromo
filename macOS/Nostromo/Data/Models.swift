@@ -23,31 +23,47 @@ struct Focus: Codable, Hashable, Identifiable {
     var projectPath: String? // nil for built-ins; absolute path e.g. "/Users/hammer/Code/admin-portal"
     var isBuiltIn: Bool
     var quickActions: [QuickAction] = []
+    /// Org section for sidebar grouping: "Carefeed", "Personal", or nil (legacy; resolved via effectiveOrg).
+    var org: String? = nil
+    /// Phase 2: auto-generated session summary for disambiguation. Nil until Phase 2 ships.
+    var sessionSummary: String? = nil
+
+    /// Repo display name derived from the last path component of `projectPath`,
+    /// converting kebab-case to Title Case (e.g. "admin-portal" → "Admin Portal").
+    var repoName: String? {
+        guard let path = projectPath else { return nil }
+        return URL(fileURLWithPath: path).lastPathComponent
+            .split(separator: "-").map { $0.capitalized }.joined(separator: " ")
+    }
 
     var displayName: String {
-        guard let path = projectPath else {
-            return agentTag.capitalized
-        }
-        let project = URL(fileURLWithPath: path).lastPathComponent
-            .split(separator: "-").map { $0.capitalized }.joined(separator: " ")
-        return "\(agentTag.capitalized) in \(project)"
+        guard let repo = repoName else { return agentTag.capitalized }
+        return "\(agentTag.capitalized) in \(repo)"
     }
 
     var sessionTag: String {
         isBuiltIn ? agentTag : "\(agentTag)-\(id.prefix(8))"
     }
 
+    /// Resolved org bucket for sidebar grouping. Legacy focuses (saved before the `org`
+    /// field existed) have `org == nil`: project sessions fall under "Carefeed", pathless
+    /// ones under "Personal".
+    var effectiveOrg: String {
+        if let org, !org.isEmpty { return org }
+        return projectPath == nil ? "Personal" : "Carefeed"
+    }
+
     static let builtIns: [Focus] = [
-        Focus(id: "fred",   agentTag: "fred",   projectPath: nil, isBuiltIn: true),
-        Focus(id: "mother", agentTag: "mother", projectPath: nil, isBuiltIn: true),
-        Focus(id: "perri",  agentTag: "perri",  projectPath: nil, isBuiltIn: true,
+        Focus(id: "fred",   agentTag: "fred",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
+        Focus(id: "mother", agentTag: "mother", projectPath: nil, isBuiltIn: true, org: "Carefeed"),
+        Focus(id: "perri",  agentTag: "perri",  projectPath: nil, isBuiltIn: true, org: "Carefeed",
               quickActions: [QuickAction(
                   id: "perri-start-reviewing",
                   label: "Start Reviewing",
                   prompt: "",        // empty — just clear; Perri auto-starts review on fresh session
                   clearFirst: true
               )]),
-        Focus(id: "teri",   agentTag: "teri",   projectPath: nil, isBuiltIn: true),
+        Focus(id: "teri",   agentTag: "teri",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
     ]
 }
 
