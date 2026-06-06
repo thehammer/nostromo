@@ -1,5 +1,20 @@
 import Foundation
 
+// MARK: - QuickAction
+
+/// A pre-set action that can be triggered from a pill button in a REPL-backed focus.
+struct QuickAction: Codable, Hashable {
+    let id: String        // stable identifier e.g. "perri-start-reviewing"
+    let label: String     // button text e.g. "Start Reviewing"
+    let prompt: String    // message to send; empty string means "clear only"
+    let clearFirst: Bool  // if true, call session.newSession() before sending
+
+    /// Generic "wipe the conversation" action shown on every REPL-backed focus.
+    static let clearContext = QuickAction(
+        id: "clear-context", label: "Clear Context", prompt: "", clearFirst: true
+    )
+}
+
 // MARK: - Focus
 
 struct Focus: Codable, Hashable, Identifiable {
@@ -7,6 +22,7 @@ struct Focus: Codable, Hashable, Identifiable {
     var agentTag: String     // claude agent name e.g. "claudia", "cody"
     var projectPath: String? // nil for built-ins; absolute path e.g. "/Users/hammer/Code/admin-portal"
     var isBuiltIn: Bool
+    var quickActions: [QuickAction] = []
 
     var displayName: String {
         guard let path = projectPath else {
@@ -24,7 +40,13 @@ struct Focus: Codable, Hashable, Identifiable {
     static let builtIns: [Focus] = [
         Focus(id: "fred",   agentTag: "fred",   projectPath: nil, isBuiltIn: true),
         Focus(id: "mother", agentTag: "mother", projectPath: nil, isBuiltIn: true),
-        Focus(id: "perri",  agentTag: "perri",  projectPath: nil, isBuiltIn: true),
+        Focus(id: "perri",  agentTag: "perri",  projectPath: nil, isBuiltIn: true,
+              quickActions: [QuickAction(
+                  id: "perri-start-reviewing",
+                  label: "Start Reviewing",
+                  prompt: "",        // empty — just clear; Perri auto-starts review on fresh session
+                  clearFirst: true
+              )]),
         Focus(id: "teri",   agentTag: "teri",   projectPath: nil, isBuiltIn: true),
     ]
 }
