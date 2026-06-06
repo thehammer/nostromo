@@ -56,13 +56,13 @@ struct Focus: Codable, Hashable, Identifiable {
     static let builtIns: [Focus] = [
         Focus(id: "fred",   agentTag: "fred",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
         Focus(id: "mother", agentTag: "mother", projectPath: nil, isBuiltIn: true, org: "Carefeed"),
-        Focus(id: "perri",  agentTag: "perri",  projectPath: nil, isBuiltIn: true, org: "Carefeed",
+        Focus(id: "perri",  agentTag: "perri",  projectPath: nil, isBuiltIn: true,
               quickActions: [QuickAction(
                   id: "perri-start-reviewing",
                   label: "Start Reviewing",
                   prompt: "",        // empty — just clear; Perri auto-starts review on fresh session
                   clearFirst: true
-              )]),
+              )], org: "Carefeed"),
         Focus(id: "teri",   agentTag: "teri",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
     ]
 }
