@@ -381,7 +381,7 @@ impl SessionManager {
             tokio::task::spawn_blocking(move || {
                 use std::io::BufRead as _;
                 let reader = std::io::BufReader::new(stderr_pipe);
-                for line in reader.lines().flatten() {
+                for line in reader.lines().map_while(Result::ok) {
                     let line = line.trim().to_owned();
                     if line.is_empty() {
                         continue;
