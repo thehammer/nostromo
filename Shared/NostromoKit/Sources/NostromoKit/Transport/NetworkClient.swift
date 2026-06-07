@@ -135,7 +135,7 @@ public final class NetworkClient: ObservableObject {
     // MARK: - Handshake
 
     private func sendHello() {
-        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 3))
+        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
         // Phase 0: subscribe to all topics (empty list = "everything").
         send(ClientSubscribe(topics: []))
     }

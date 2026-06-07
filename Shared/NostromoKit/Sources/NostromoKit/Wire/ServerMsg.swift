@@ -36,6 +36,11 @@ public enum ServerMsg {
     /// The session's child process exited.
     case sessionExited(tag: String, exitCode: Int?)
 
+    /// Response to `focus_list`.
+    case focusListResp([FocusMeta])
+    /// Broadcast registry change.
+    case focusRegistryUpdated([FocusMeta])
+
     case unknown
 }
 
@@ -107,6 +112,20 @@ public struct DaemonTurn: Decodable {
         case timestamp
         case blocks
         case isComplete = "is_complete"
+    }
+}
+
+extension DaemonTurn {
+    /// Return a copy with `block` appended to `blocks`.
+    func appending(_ block: DaemonTurnBlock) -> DaemonTurn {
+        DaemonTurn(id: id, userInput: userInput, timestamp: timestamp,
+                   blocks: blocks + [block], isComplete: isComplete)
+    }
+
+    /// Return a copy with `isComplete` set to `true`.
+    func completed() -> DaemonTurn {
+        DaemonTurn(id: id, userInput: userInput, timestamp: timestamp,
+                   blocks: blocks, isComplete: true)
     }
 }
 
@@ -269,6 +288,7 @@ extension ServerMsg {
     private struct SessionTurnDeltaWrapper:  Decodable { let tag: String; let delta: DaemonTurnDelta }
     private struct SessionPermWrapper:       Decodable { let tag: String; let request_id: String; let tool: String }
     private struct SessionExitedWrapper:     Decodable { let tag: String; let exit_code: Int? }
+    private struct FocusListWrapper:         Decodable { let focuses: [FocusMeta] }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -336,6 +356,16 @@ extension ServerMsg {
         case "session_exited":
             if let m = try? dec.decode(SessionExitedWrapper.self, from: data) {
                 return .sessionExited(tag: m.tag, exitCode: m.exit_code)
+            }
+
+        case "focus_list_resp":
+            if let m = try? dec.decode(FocusListWrapper.self, from: data) {
+                return .focusListResp(m.focuses)
+            }
+
+        case "focus_registry_updated":
+            if let m = try? dec.decode(FocusListWrapper.self, from: data) {
+                return .focusRegistryUpdated(m.focuses)
             }
 
         default:

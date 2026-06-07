@@ -23,7 +23,7 @@ pub const SOCKET_PATH_ENV: &str = "NOSTROMOD_SOCKET";
 /// Current protocol version — bump when messages change in a breaking way.
 /// Phase 5b introduced PTY ownership in the daemon (v2). v3 adds the
 /// daemon-hosted persistent stream-json session protocol (`Session*` messages).
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Minimum client version accepted by the daemon.
 ///
@@ -61,6 +61,7 @@ pub enum Topic {
     Activity,
     MotherJobs,
     MotherStatusline,
+    Focuses,
 }
 
 /// Metadata about a daemon-owned PTY.
@@ -120,6 +121,31 @@ pub struct SessionInfo {
     /// intentional so older peers decode it as `null` without breaking.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub stop_reason: Option<StopReason>,
+}
+
+/// Daemon-serveable projection of a Mac-side `Focus`. No absolute filesystem
+/// paths leak to mobile — only a derived display name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusMeta {
+    /// Session tag — the stable key that ties a focus to its daemon session.
+    pub tag: String,
+    /// Resolved display name (e.g. "Cody in Admin Portal" or "Fred").
+    pub display_name: String,
+    /// Claude agent name (e.g. "cody", "fred").
+    pub agent_name: String,
+    /// Repo/project display name (last path component, Title Cased). None for
+    /// built-ins / pathless focuses.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub project_name: Option<String>,
+    /// Org section for grouping ("Carefeed", "Personal", …). None → client
+    /// resolves a default.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub org: Option<String>,
+    /// True for built-in focuses (fred/mother/perri/teri).
+    pub is_built_in: bool,
+    /// Auto-generated one-line session summary, when known.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_summary: Option<String>,
 }
 
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────
@@ -256,6 +282,14 @@ pub enum ClientMsg {
 
     /// Request a snapshot of all daemon-hosted sessions.
     SessionList,
+
+    /// The Mac app publishes its full focus registry to the daemon. Replaces the
+    /// daemon's in-memory registry wholesale.
+    FocusRegistryPush {
+        focuses: Vec<FocusMeta>,
+    },
+    /// Request a snapshot of the current focus registry.
+    FocusList,
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -413,6 +447,15 @@ pub enum ServerMsg {
         summary: String,
     },
 
+    /// Response to `FocusList`.
+    FocusListResp {
+        focuses: Vec<FocusMeta>,
+    },
+    /// Broadcast to all clients whenever the registry changes (push received).
+    FocusRegistryUpdated {
+        focuses: Vec<FocusMeta>,
+    },
+
     /// TUI-internal pseudo-event — **never produced by the daemon**.
     ///
     /// Injected locally by the [`DaemonClient`] supervisor immediately after a
@@ -552,8 +595,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_v3() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+    fn protocol_version_is_v4() {
+        assert_eq!(PROTOCOL_VERSION, 4);
         // The MIN_CLIENT_VERSION <= PROTOCOL_VERSION invariant is enforced at
         // compile time via a `const _` assertion near the constant definitions.
     }
@@ -591,6 +634,62 @@ mod tests {
         round_trip_server(ServerMsg::SessionSummaryUpdate {
             tag: "fred".into(),
             summary: "Build the auth flow".into(),
+        });
+    }
+
+    #[test]
+    fn focus_meta_round_trips() {
+        // All optionals Some
+        let full = FocusMeta {
+            tag:             "cody-abc12345".into(),
+            display_name:    "Cody in Admin Portal".into(),
+            agent_name:      "cody".into(),
+            project_name:    Some("Admin Portal".into()),
+            org:             Some("Carefeed".into()),
+            is_built_in:     false,
+            session_summary: Some("Build the auth flow".into()),
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        let back: FocusMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(full, back);
+
+        // All optionals None
+        let minimal = FocusMeta {
+            tag:             "fred".into(),
+            display_name:    "Fred".into(),
+            agent_name:      "fred".into(),
+            project_name:    None,
+            org:             None,
+            is_built_in:     true,
+            session_summary: None,
+        };
+        let json = serde_json::to_string(&minimal).unwrap();
+        let back: FocusMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(minimal, back);
+    }
+
+    #[test]
+    fn focus_registry_messages_round_trip() {
+        let meta = FocusMeta {
+            tag:             "fred".into(),
+            display_name:    "Fred".into(),
+            agent_name:      "fred".into(),
+            project_name:    None,
+            org:             Some("Carefeed".into()),
+            is_built_in:     true,
+            session_summary: None,
+        };
+
+        round_trip_client(ClientMsg::FocusRegistryPush {
+            focuses: vec![meta.clone()],
+        });
+        round_trip_client(ClientMsg::FocusList);
+
+        round_trip_server(ServerMsg::FocusListResp {
+            focuses: vec![meta.clone()],
+        });
+        round_trip_server(ServerMsg::FocusRegistryUpdated {
+            focuses: vec![meta],
         });
     }
 

@@ -11,6 +11,7 @@
 		AA000001000000000000000B /* NostromoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000000A /* NostromoApp.swift */; };
 		AA000001000000000000000D /* FocusListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000000C /* FocusListView.swift */; };
 		AA000001000000000000000F /* ConnectionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000000E /* ConnectionSettingsView.swift */; };
+		AA0000010000000000000010 /* TranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000011 /* TranscriptView.swift */; };
 		AA00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000100000000000000AA /* NostromoKit */; };
 /* End PBXBuildFile section */
 
@@ -19,6 +20,7 @@
 		AA000001000000000000000A /* NostromoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoApp.swift; sourceTree = "<group>"; };
 		AA000001000000000000000C /* FocusListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusListView.swift; sourceTree = "<group>"; };
 		AA000001000000000000000E /* ConnectionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSettingsView.swift; sourceTree = "<group>"; };
+		AA0000010000000000000011 /* TranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptView.swift; sourceTree = "<group>"; };
 		AA00000100000000000000A0 /* Nostromo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nostromo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -45,6 +47,7 @@
 		AA000001000000000000002B /* Nostromo */ = {
 			isa = PBXGroup;
 			children = (
+				5318BC592FD5A28A00957D5C /* Assets.xcassets */,
 				AA000001000000000000000A /* NostromoApp.swift */,
 				AA000001000000000000002C /* Views */,
 			);
@@ -56,6 +59,7 @@
 			children = (
 				AA000001000000000000000C /* FocusListView.swift */,
 				AA000001000000000000000E /* ConnectionSettingsView.swift */,
+				AA0000010000000000000011 /* TranscriptView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -63,7 +67,6 @@
 		AA000001000000000000002D = {
 			isa = PBXGroup;
 			children = (
-				5318BC592FD5A28A00957D5C /* Assets.xcassets */,
 				AA000001000000000000002B /* Nostromo */,
 				AA000001000000000000002A /* Products */,
 			);
@@ -147,6 +150,7 @@
 				AA000001000000000000000B /* NostromoApp.swift in Sources */,
 				AA000001000000000000000D /* FocusListView.swift in Sources */,
 				AA000001000000000000000F /* ConnectionSettingsView.swift in Sources */,
+				AA0000010000000000000010 /* TranscriptView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

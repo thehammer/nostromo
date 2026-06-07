@@ -1,8 +1,7 @@
 // Nostromo iOS — FocusListView.swift
 //
-// Shows all daemon-hosted sessions as a list with live state badges.
-// The state badge updates within ~1 s whenever the daemon pushes a
-// `session_state` message (no polling).
+// Shows all daemon-served focuses grouped by org, with live state badges
+// joined to session state by tag.  Tapping a focus navigates to TranscriptView.
 
 import SwiftUI
 import NostromoKit
@@ -14,25 +13,57 @@ struct FocusListView: View {
         Group {
             if !store.connected {
                 disconnectedView
-            } else if store.sessionList.isEmpty {
+            } else if store.focusRows.isEmpty {
                 emptyView
             } else {
-                sessionList
+                focusList
             }
         }
         .animation(.easeInOut(duration: 0.25), value: store.connected)
-        .animation(.easeInOut(duration: 0.25), value: store.sessionList.count)
+        .animation(.easeInOut(duration: 0.25), value: store.focusRows.count)
     }
 
     // MARK: - Sub-views
 
-    private var sessionList: some View {
-        List(store.sessionList, id: \.tag) { session in
-            SessionRow(session: session)
+    private var focusList: some View {
+        List {
+            ForEach(store.focusRows) { row in
+                switch row {
+                case .orgHeader(let title):
+                    Text(title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 4, trailing: 16))
+
+                case .repoHeader(let title):
+                    Text(title)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 2, trailing: 16))
+
+                case .focus(let meta, let label, let secondary, let indented):
+                    let session = store.sessions[meta.tag]
+                    NavigationLink {
+                        TranscriptView(tag: meta.tag, displayName: label, client: store.client)
+                    } label: {
+                        FocusRow(
+                            label: label,
+                            secondary: secondary,
+                            state: session?.state,
+                            alive: session?.alive
+                        )
+                        .listRowInsets(EdgeInsets(
+                            top: 6, leading: indented ? 32 : 16, bottom: 6, trailing: 16
+                        ))
+                    }
+                }
+            }
         }
         .listStyle(.insetGrouped)
         .refreshable {
-            // Pull-to-refresh requests a fresh session list from the daemon.
+            store.refreshFocuses()
             store.refreshSessions()
         }
     }
@@ -57,7 +88,7 @@ struct FocusListView: View {
             Image(systemName: "tray")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text("No Sessions")
+            Text("No Focuses")
                 .font(.title2.weight(.semibold))
             Text("Start a session on your Mac to see it here.")
                 .font(.subheadline)
@@ -68,30 +99,32 @@ struct FocusListView: View {
     }
 }
 
-// MARK: - SessionRow
+// MARK: - FocusRow
 
-private struct SessionRow: View {
-    let session: SessionInfo
+private struct FocusRow: View {
+    let label:     String
+    let secondary: String?
+    let state:     SessionState?
+    let alive:     Bool?
 
     var body: some View {
         HStack(spacing: 12) {
-            // State badge
             stateBadge
 
-            // Session info
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.viewName.isEmpty ? session.tag : session.viewName)
+                Text(label)
                     .font(.headline)
-                Text(session.tag)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if let secondary {
+                    Text(secondary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
 
-            // Alive indicator
-            if !session.alive {
+            if alive == false {
                 Image(systemName: "exclamationmark.circle.fill")
                     .foregroundStyle(.orange)
                     .imageScale(.small)
@@ -99,8 +132,6 @@ private struct SessionRow: View {
         }
         .padding(.vertical, 4)
     }
-
-    // MARK: - Badge
 
     @ViewBuilder
     private var stateBadge: some View {
@@ -115,22 +146,24 @@ private struct SessionRow: View {
     }
 
     private var badgeColor: Color {
-        guard session.alive else { return .gray }
-        switch session.state {
+        guard alive != false else { return .gray }
+        switch state {
         case .idle:                return .green
         case .midTurn:             return .blue
         case .awaitingPermission:  return .orange
         case .crashed:             return .red
+        case nil:                  return .gray
         }
     }
 
     private var badgeIcon: String {
-        guard session.alive else { return "stop.circle" }
-        switch session.state {
+        guard alive != false else { return "stop.circle" }
+        switch state {
         case .idle:                return "checkmark.circle"
         case .midTurn:             return "bolt.circle"
         case .awaitingPermission:  return "questionmark.circle"
         case .crashed:             return "xmark.circle"
+        case nil:                  return "circle.dashed"
         }
     }
 }
@@ -138,9 +171,11 @@ private struct SessionRow: View {
 // MARK: - Preview
 
 #Preview {
-    FocusListView()
-        .environmentObject({
-            let client = NetworkClient(host: "127.0.0.1", port: 47100)
-            return DaemonStore(client: client)
-        }())
+    NavigationStack {
+        FocusListView()
+            .environmentObject({
+                let client = NetworkClient(host: "127.0.0.1", port: 47100)
+                return DaemonStore(client: client)
+            }())
+    }
 }

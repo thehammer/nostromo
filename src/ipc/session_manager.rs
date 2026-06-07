@@ -48,7 +48,7 @@ use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 
-use super::protocol::{ServerMsg, SessionInfo};
+use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
 use super::stream_json::{load_scrollback, SessionState, SessionTranscript, Turn, TurnDelta};
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
@@ -231,6 +231,8 @@ pub struct SessionManager {
     client_senders: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ServerMsg>>>>,
     /// Path to the daemon-owned `tag -> session_id` store.
     store_path: PathBuf,
+    /// Mac-pushed focus registry; served to all clients and broadcast on change.
+    focus_registry: Vec<FocusMeta>,
 }
 
 impl SessionManager {
@@ -243,6 +245,7 @@ impl SessionManager {
             sessions: HashMap::new(),
             client_senders: Arc::new(Mutex::new(HashMap::new())),
             store_path,
+            focus_registry: Vec::new(),
         }
     }
 
@@ -879,6 +882,18 @@ impl SessionManager {
 
     pub fn list(&self) -> Vec<SessionInfo> {
         self.sessions.values().map(|s| s.info()).collect()
+    }
+
+    /// Replace the focus registry with the Mac-pushed snapshot. Returns the new
+    /// registry so the caller can broadcast it.
+    pub fn set_focus_registry(&mut self, focuses: Vec<FocusMeta>) -> Vec<FocusMeta> {
+        self.focus_registry = focuses;
+        self.focus_registry.clone()
+    }
+
+    /// Current focus registry snapshot.
+    pub fn focus_registry(&self) -> Vec<FocusMeta> {
+        self.focus_registry.clone()
     }
 
     // ── shutdown ────────────────────────────────────────────────────────────

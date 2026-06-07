@@ -52,6 +52,21 @@ final class FocusStore {
         }
     }
 
+    /// Project the live focus list into the daemon wire shape (Phase 1: registry push).
+    func wireProjection() -> [NostromodClient.FocusMetaWire] {
+        focuses.map { f in
+            NostromodClient.FocusMetaWire(
+                tag:             f.sessionTag,
+                display_name:    f.displayName,
+                agent_name:      f.agentTag,
+                project_name:    f.repoName,
+                org:             f.effectiveOrg,
+                is_built_in:     f.isBuiltIn,
+                session_summary: f.sessionSummary
+            )
+        }
+    }
+
     private static func load(from url: URL) -> [Focus] {
         guard let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode([Focus].self, from: data)

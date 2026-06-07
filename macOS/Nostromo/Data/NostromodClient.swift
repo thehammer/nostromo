@@ -341,9 +341,9 @@ class NostromodClient {
     // MARK: - Handshake
 
     private func sendHello() {
-        // protocol v3 adds the persistent Session* family. The daemon holds
-        // MIN_CLIENT_VERSION at 2, so this is safe either way, but we speak v3.
-        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 3))
+        // protocol v4 adds the focus registry push/pull family. The daemon holds
+        // MIN_CLIENT_VERSION at 2, so the shipped GUI keeps working against older daemons.
+        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
         send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline"]))
     }
 
@@ -371,6 +371,29 @@ class NostromodClient {
     /// Lifecycle control: "stop" | "restart" | "new_session".
     func sessionControl(tag: String, action: String) {
         send(SessionControlMsg(tag: tag, action: action))
+    }
+
+    // MARK: - Focus registry commands (Phase 1)
+
+    struct FocusMetaWire: Encodable {
+        let tag: String
+        let display_name: String
+        let agent_name: String
+        let project_name: String?
+        let org: String?
+        let is_built_in: Bool
+        let session_summary: String?
+    }
+
+    private struct FocusRegistryPushMsg: Encodable {
+        let type_ = "focus_registry_push"
+        let focuses: [FocusMetaWire]
+        enum CodingKeys: String, CodingKey { case type_ = "type", focuses }
+    }
+
+    /// Publish the full focus registry to the daemon, replacing its in-memory registry.
+    func focusRegistryPush(_ focuses: [FocusMetaWire]) {
+        send(FocusRegistryPushMsg(focuses: focuses))
     }
 
     private func send(_ msg: some Encodable) {
