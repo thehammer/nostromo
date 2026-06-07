@@ -20,9 +20,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use super::{
     codec::{read_frame, write_frame},
@@ -84,6 +86,25 @@ impl Server {
     pub fn broadcast(&self, msg: ServerMsg) {
         let _ = self.tx.send(msg);
     }
+
+    /// Attach a TCP listener that shares the same broadcast channel and PTY/
+    /// session managers as the Unix socket listener.
+    ///
+    /// Both transports run the identical `handle_client` handshake loop, so iOS
+    /// (and any other TCP peer) behaves exactly like the macOS TUI client.
+    pub fn bind_tcp(
+        &self,
+        listener: TcpListener,
+        pty_mgr: Arc<Mutex<PtyManager>>,
+        session_mgr: Arc<Mutex<SessionManager>>,
+    ) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr).await {
+                warn!("TCP IPC accept loop exited: {e:#}");
+            }
+        });
+    }
 }
 
 impl Drop for Server {
@@ -92,7 +113,7 @@ impl Drop for Server {
     }
 }
 
-// ── accept loop ───────────────────────────────────────────────────────────────
+// ── accept loops ──────────────────────────────────────────────────────────────
 
 async fn accept_loop(
     listener: UnixListener,
@@ -119,14 +140,49 @@ async fn accept_loop(
     }
 }
 
-// ── per-client task ───────────────────────────────────────────────────────────
-
-async fn handle_client(
-    stream: UnixStream,
-    mut broadcast_rx: broadcast::Receiver<ServerMsg>,
+async fn accept_loop_tcp(
+    listener: TcpListener,
+    tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
 ) -> Result<()> {
+    loop {
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                info!(%addr, "TCP IPC client connected");
+                let rx = tx.subscribe();
+                let pty_mgr = Arc::clone(&pty_mgr);
+                let session_mgr = Arc::clone(&session_mgr);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_client(stream, rx, pty_mgr, session_mgr).await {
+                        debug!(%addr, "TCP client disconnected: {e:#}");
+                    }
+                });
+            }
+            Err(e) => {
+                warn!("TCP accept error: {e}");
+            }
+        }
+    }
+}
+
+// ── per-client task ───────────────────────────────────────────────────────────
+
+/// Handle a single connected client over any async transport (Unix socket, TCP, …).
+///
+/// The caller provides a stream that implements both [`AsyncRead`] and
+/// [`AsyncWrite`].  `tokio::io::split` provides transport-agnostic halves
+/// whose `ReadHalf`/`WriteHalf` are always `Unpin`, so the handshake and
+/// the `select!` loop below need no stream-specific code.
+async fn handle_client<S>(
+    stream: S,
+    mut broadcast_rx: broadcast::Receiver<ServerMsg>,
+    pty_mgr: Arc<Mutex<PtyManager>>,
+    session_mgr: Arc<Mutex<SessionManager>>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite,
+{
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     // ── Handshake ─────────────────────────────────────────────────────────────
@@ -134,7 +190,11 @@ async fn handle_client(
     let hello_bytes = read_frame(&mut reader).await?;
     let hello: ClientMsg = serde_json::from_slice(&hello_bytes)?;
 
-    let client_id = match hello {
+    // `claimed_id` is what the client sent; used only for log context.
+    // `conn_key` is a server-minted UUID used as the registry routing key so
+    // that a malicious client cannot hijack another connection's targeted
+    // channel by sending a pre-known client_id.
+    let (claimed_id, conn_key) = match hello {
         ClientMsg::Hello {
             ref client_id,
             protocol_version,
@@ -150,7 +210,7 @@ async fn handle_client(
                     "client version {protocol_version} too old (need {MIN_CLIENT_VERSION}+)"
                 );
             }
-            client_id.clone()
+            (client_id.clone(), Uuid::new_v4().to_string())
         }
         other => {
             let err = ServerMsg::Error {
@@ -166,7 +226,7 @@ async fn handle_client(
         daemon_pid: std::process::id(),
     };
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
-    debug!(client_id, "client welcomed");
+    debug!(claimed_id, conn_key, "client welcomed");
 
     // ── Subscribe ─────────────────────────────────────────────────────────────
 
@@ -184,16 +244,19 @@ async fn handle_client(
         }
     };
 
-    info!(client_id, ?topics, "client subscribed");
+    info!(claimed_id, conn_key, ?topics, "client subscribed");
 
     // ── Register per-client targeted channel ──────────────────────────────────
+    // Use `conn_key` (server-minted UUID) as the registry key — not the
+    // client-supplied `claimed_id` — so no remote peer can impersonate an
+    // existing connection by guessing or replaying another client's id.
 
     let (targeted_tx, mut targeted_rx) = mpsc::unbounded_channel::<ServerMsg>();
     {
         let mgr = pty_mgr.lock().unwrap();
         let registry = mgr.client_sender_registry();
         let mut senders = registry.lock().unwrap();
-        senders.insert(client_id.clone(), targeted_tx.clone());
+        senders.insert(conn_key.clone(), targeted_tx.clone());
     }
     {
         // The session manager keeps its own client-sender registry for session
@@ -201,7 +264,7 @@ async fn handle_client(
         let mgr = session_mgr.lock().unwrap();
         let registry = mgr.client_sender_registry();
         let mut senders = registry.lock().unwrap();
-        senders.insert(client_id.clone(), targeted_tx.clone());
+        senders.insert(conn_key.clone(), targeted_tx.clone());
     }
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
@@ -224,7 +287,7 @@ async fn handle_client(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(client_id, "client lagged {n} broadcast messages");
+                        warn!(conn_key, "client lagged {n} broadcast messages");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         break Ok(());
@@ -250,11 +313,11 @@ async fn handle_client(
                         let msg: ClientMsg = match serde_json::from_slice(&bytes) {
                             Ok(m) => m,
                             Err(e) => {
-                                warn!(client_id, "bad ClientMsg: {e}");
+                                warn!(claimed_id, conn_key, "bad ClientMsg: {e}");
                                 continue;
                             }
                         };
-                        handle_client_msg(msg, &client_id, &pty_mgr, &session_mgr, &targeted_tx);
+                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -268,16 +331,17 @@ async fn handle_client(
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     debug!(
-        client_id,
+        claimed_id,
+        conn_key,
         "client handler exiting; detaching PTYs + sessions"
     );
     {
         let mut mgr = pty_mgr.lock().unwrap();
-        mgr.on_client_disconnect(&client_id);
+        mgr.on_client_disconnect(&conn_key);
     }
     {
         let mut mgr = session_mgr.lock().unwrap();
-        mgr.on_client_disconnect(&client_id);
+        mgr.on_client_disconnect(&conn_key);
     }
 
     result
@@ -285,9 +349,11 @@ async fn handle_client(
 
 // ── PTY command dispatch ──────────────────────────────────────────────────────
 
+/// `conn_key` is the server-minted UUID for this connection (not the
+/// client-supplied `client_id` from the Hello frame).
 fn handle_client_msg(
     msg: ClientMsg,
-    client_id: &str,
+    conn_key: &str,
     pty_mgr: &Arc<Mutex<PtyManager>>,
     session_mgr: &Arc<Mutex<SessionManager>>,
     targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
@@ -323,7 +389,7 @@ fn handle_client_msg(
                     });
                 }
                 Err(e) => {
-                    warn!(client_id, cmd, "PtySpawn failed: {e:#}");
+                    warn!(conn_key, cmd, "PtySpawn failed: {e:#}");
                     let _ = targeted_tx.send(ServerMsg::Error {
                         message: format!("PtySpawn failed: {e}"),
                     });
@@ -334,7 +400,7 @@ fn handle_client_msg(
         ClientMsg::PtyAttach { pty_id } => {
             let result = {
                 let mut mgr = pty_mgr.lock().unwrap();
-                mgr.attach(&pty_id, client_id)
+                mgr.attach(&pty_id, conn_key)
             };
             if let Err(e) = result {
                 let _ = targeted_tx.send(ServerMsg::Error {
@@ -345,20 +411,20 @@ fn handle_client_msg(
 
         ClientMsg::PtyDetach { pty_id } => {
             let mut mgr = pty_mgr.lock().unwrap();
-            mgr.detach(&pty_id, client_id);
+            mgr.detach(&pty_id, conn_key);
         }
 
         ClientMsg::PtyInput { pty_id, bytes } => {
             let mut mgr = pty_mgr.lock().unwrap();
             if let Err(e) = mgr.send_input(&pty_id, &bytes) {
-                warn!(client_id, "PtyInput error: {e}");
+                warn!(conn_key, "PtyInput error: {e}");
             }
         }
 
         ClientMsg::PtyResize { pty_id, cols, rows } => {
             let mut mgr = pty_mgr.lock().unwrap();
             if let Err(e) = mgr.resize_pty(&pty_id, cols, rows) {
-                warn!(client_id, "PtyResize error: {e}");
+                warn!(conn_key, "PtyResize error: {e}");
             }
         }
 
@@ -398,7 +464,7 @@ fn handle_client_msg(
                     let _ = targeted_tx.send(ServerMsg::SessionSpawned { tag, session_id });
                 }
                 Err(e) => {
-                    warn!(client_id, %tag, "SessionSpawn failed: {e:#}");
+                    warn!(conn_key, %tag, "SessionSpawn failed: {e:#}");
                     let _ = targeted_tx.send(ServerMsg::Error {
                         message: format!("SessionSpawn failed: {e}"),
                     });
@@ -409,7 +475,7 @@ fn handle_client_msg(
         ClientMsg::SessionAttach { tag } => {
             let result = {
                 let mut mgr = session_mgr.lock().unwrap();
-                mgr.attach(&tag, client_id)
+                mgr.attach(&tag, conn_key)
             };
             if let Err(e) = result {
                 let _ = targeted_tx.send(ServerMsg::Error {
@@ -420,13 +486,13 @@ fn handle_client_msg(
 
         ClientMsg::SessionDetach { tag } => {
             let mut mgr = session_mgr.lock().unwrap();
-            mgr.detach(&tag, client_id);
+            mgr.detach(&tag, conn_key);
         }
 
         ClientMsg::SessionSend { tag, text, images } => {
             let mut mgr = session_mgr.lock().unwrap();
             if let Err(e) = mgr.send_user_message(&tag, &text, &images) {
-                warn!(client_id, %tag, "SessionSend error: {e}");
+                warn!(conn_key, %tag, "SessionSend error: {e}");
                 let _ = targeted_tx.send(ServerMsg::Error {
                     message: format!("SessionSend failed: {e}"),
                 });
@@ -439,7 +505,7 @@ fn handle_client_msg(
                 SessionAction::Stop => mgr.stop(&tag),
                 SessionAction::Restart => {
                     if let Err(e) = mgr.restart(&tag) {
-                        warn!(client_id, %tag, "SessionControl restart error: {e}");
+                        warn!(conn_key, %tag, "SessionControl restart error: {e}");
                     }
                 }
                 SessionAction::NewSession => mgr.new_session(&tag),
@@ -452,7 +518,7 @@ fn handle_client_msg(
             // natively on the phone via remote control. Accepted as a no-op so
             // future binaries / the Swift client can wire it without a protocol
             // change.
-            debug!(client_id, %tag, "SessionAnswerPermission received (no-op in v1)");
+            debug!(conn_key, %tag, "SessionAnswerPermission received (no-op in v1)");
         }
 
         ClientMsg::SessionList => {

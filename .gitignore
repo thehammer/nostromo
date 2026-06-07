@@ -12,3 +12,8 @@ DerivedData/
 *.xccheckout
 *.moved-aside
 macOS/icon/build/
+
+# Swift Package Manager build artifacts
+Shared/NostromoKit/.build/
+iOS/Nostromo.xcodeproj/project.xcworkspace/
+iOS/Nostromo.xcodeproj/xcuserdata/
