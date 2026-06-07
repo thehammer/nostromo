@@ -1,8 +1,9 @@
 // Nostromo iOS — TranscriptView.swift
 //
-// Read-only transcript view for a single focus session.
+// Phase 2: interactive transcript view for a single focus session.
 // Attaches on appear, streams live deltas, detaches on disappear.
-// No input bar (Phase 3).
+// Bottom input bar sends user messages via session_send.
+// askQuestion blocks render as tappable option buttons (same mechanism).
 
 import SwiftUI
 import NostromoKit
@@ -13,6 +14,7 @@ struct TranscriptView: View {
     let client:      NetworkClient
 
     @StateObject private var store: TranscriptStore
+    @State private var draft = ""
 
     init(tag: String, displayName: String, client: NetworkClient) {
         self.tag = tag
@@ -26,7 +28,7 @@ struct TranscriptView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(store.turns, id: \.id) { turn in
-                        TurnCard(turn: turn)
+                        TurnCard(turn: turn, onAnswer: { store.send($0) })
                     }
                 }
                 .padding()
@@ -37,6 +39,12 @@ struct TranscriptView: View {
                 }
             }
         }
+        .safeAreaInset(edge: .bottom) {
+            InputBar(draft: $draft) {
+                store.send(draft)
+                draft = ""
+            }
+        }
         .navigationTitle(displayName)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { store.attach(tag: tag) }
@@ -44,10 +52,42 @@ struct TranscriptView: View {
     }
 }
 
+// MARK: - InputBar
+
+private struct InputBar: View {
+    @Binding var draft: String
+    let onSend: () -> Void
+
+    private var isEmpty: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField("Message", text: $draft, axis: .vertical)
+                .lineLimit(1...5)
+                .textFieldStyle(.roundedBorder)
+                .submitLabel(.send)
+                .onSubmit {
+                    if !isEmpty { onSend() }
+                }
+
+            Button(action: onSend) {
+                Image(systemName: "paperplane.fill")
+            }
+            .disabled(isEmpty)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+}
+
 // MARK: - TurnCard
 
 private struct TurnCard: View {
-    let turn: DaemonTurn
+    let turn:     DaemonTurn
+    let onAnswer: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -65,7 +105,7 @@ private struct TurnCard: View {
 
             // Assistant blocks
             ForEach(Array(turn.blocks.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block)
+                BlockView(block: block, onAnswer: onAnswer)
             }
         }
     }
@@ -74,7 +114,8 @@ private struct TurnCard: View {
 // MARK: - BlockView
 
 private struct BlockView: View {
-    let block: DaemonTurnBlock
+    let block:    DaemonTurnBlock
+    let onAnswer: (String) -> Void
 
     var body: some View {
         switch block {
@@ -125,11 +166,13 @@ private struct BlockView: View {
                 .foregroundStyle(.red)
                 .lineLimit(2)
 
-        case .askQuestion(let question, _, _, _):
-            Label(question, systemImage: "questionmark.circle")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .lineLimit(2)
+        case .askQuestion(let question, let header, let options, _):
+            AskQuestionPrompt(
+                question: question,
+                header:   header,
+                options:  options,
+                onAnswer: onAnswer
+            )
         }
     }
 }
