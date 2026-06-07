@@ -3,10 +3,11 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 56;
+	objectVersion = 60;
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5318BC5A2FD5A28A00957D5C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5318BC592FD5A28A00957D5C /* Assets.xcassets */; };
 		AA000001000000000000000B /* NostromoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000000A /* NostromoApp.swift */; };
 		AA000001000000000000000D /* FocusListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000000C /* FocusListView.swift */; };
 		AA000001000000000000000F /* ConnectionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000000E /* ConnectionSettingsView.swift */; };
@@ -14,6 +15,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		5318BC592FD5A28A00957D5C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA000001000000000000000A /* NostromoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoApp.swift; sourceTree = "<group>"; };
 		AA000001000000000000000C /* FocusListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusListView.swift; sourceTree = "<group>"; };
 		AA000001000000000000000E /* ConnectionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSettingsView.swift; sourceTree = "<group>"; };
@@ -58,9 +60,10 @@
 			path = Views;
 			sourceTree = "<group>";
 		};
-		AA000001000000000000002D /* root */ = {
+		AA000001000000000000002D = {
 			isa = PBXGroup;
 			children = (
+				5318BC592FD5A28A00957D5C /* Assets.xcassets */,
 				AA000001000000000000002B /* Nostromo */,
 				AA000001000000000000002A /* Products */,
 			);
@@ -97,7 +100,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1600;
-				LastUpgradeCheck = 1600;
+				LastUpgradeCheck = 2640;
 				TargetAttributes = {
 					AA000001000000000000003A = {
 						CreatedOnToolsVersion = 16.0;
@@ -112,7 +115,7 @@
 				en,
 				Base,
 			);
-			mainGroup = AA000001000000000000002D /* root */;
+			mainGroup = AA000001000000000000002D;
 			packageReferences = (
 				AA00000100000000000000A9 /* XCLocalSwiftPackageReference "../Shared/NostromoKit" */,
 			);
@@ -130,6 +133,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5318BC5A2FD5A28A00957D5C /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -173,6 +177,7 @@
 				CLANG_WARN_INT_CONVERSION = YES;
 				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
 				CLANG_WARN_OBJC_IMPLICIT_RETAIN_CYCLE = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
 				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
 				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
 				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
@@ -184,6 +189,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 656WFH973S;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -206,6 +212,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -235,6 +242,7 @@
 				CLANG_WARN_INT_CONVERSION = YES;
 				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
 				CLANG_WARN_OBJC_IMPLICIT_RETAIN_CYCLE = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
 				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
 				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
 				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
@@ -246,6 +254,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 656WFH973S;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -260,6 +269,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -288,7 +298,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.hammer.nostromo.ios";
+				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -321,7 +331,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.hammer.nostromo.ios";
+				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -358,7 +368,7 @@
 /* Begin XCLocalSwiftPackageReference section */
 		AA00000100000000000000A9 /* XCLocalSwiftPackageReference "../Shared/NostromoKit" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "../Shared/NostromoKit";
+			relativePath = ../Shared/NostromoKit;
 		};
 /* End XCLocalSwiftPackageReference section */
 
@@ -369,7 +379,6 @@
 			productName = NostromoKit;
 		};
 /* End XCSwiftPackageProductDependency section */
-
 	};
 	rootObject = AA000001000000000000004A /* Project object */;
 }
