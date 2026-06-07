@@ -226,11 +226,11 @@ class ReplView: NSView {
 
     private func scrollToBottom() {
         guard let doc = scrollView.documentView else { return }
-        // No layoutSubtreeIfNeeded() — layout has settled by the time this deferred
-        // dispatch runs. Forcing it re-solved every NSTextField constraint across the
-        // whole transcript on every streaming token (O(n^2)), pinning CPU at 100%.
-        let bottom = NSPoint(x: 0, y: max(0, doc.frame.height - scrollView.contentView.bounds.height))
-        scrollView.contentView.scroll(to: bottom)
+        // Scroll to an arbitrarily large Y — AppKit clamps to the actual maximum.
+        // Avoids accessing doc.frame entirely: accessing .frame on a dirty NSView
+        // triggers a synchronous layout pass (the same O(n^2) NSTextField constraint
+        // solve we were trying to avoid), even without an explicit layoutSubtreeIfNeeded().
+        scrollView.contentView.scroll(NSPoint(x: 0, y: CGFloat.greatestFiniteMagnitude))
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
