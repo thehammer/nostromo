@@ -62,7 +62,10 @@ uninstall-daemon:
 
 APP_BUNDLE  = macOS/build/Build/Products/Debug/Nostromo.app
 
-.PHONY: mac mac-run mac-kill mac-icon mac-release mac-install
+IOS_DEVICE_ID ?= 195907F5-56CB-5334-B012-6F71CFA5EB21
+IOS_APP_RELEASE = iOS/build/Build/Products/Release-iphoneos/Nostromo.app
+
+.PHONY: mac mac-run mac-kill mac-icon mac-release mac-install ios-build ios-install
 
 # Release build uses an explicit derived-data path so the product location is
 # predictable (no DerivedData hash dependency). Ad-hoc signed so the arm64
@@ -106,9 +109,28 @@ mac-release:
 	  2>&1 | grep -E "error:|warning:|BUILD" || true
 	@test -d "$(APP_RELEASE)" && echo "built → $(APP_RELEASE)" || { echo "release build failed"; exit 1; }
 
-## Install the Release build into /Applications (run at milestones). This is a
-## real, standalone app — it survives Xcode cmd-R debug runs (which live in
-## DerivedData), and you replace it here when you cut a milestone.
+## Build the iOS app for a paired device (release, device code signing).
+## Override the target device with: make ios-install IOS_DEVICE_ID=<uuid>
+ios-build:
+	cd iOS && xcodebuild \
+	  -project Nostromo.xcodeproj \
+	  -scheme Nostromo \
+	  -configuration Release \
+	  -destination "id=$(IOS_DEVICE_ID)" \
+	  -derivedDataPath build \
+	  build 2>&1 | grep -E "error:|warning:|BUILD|SUCCEEDED|FAILED"
+	@test -d "$(IOS_APP_RELEASE)" || { echo "iOS build failed — .app not found"; exit 1; }
+	@echo "built → $(IOS_APP_RELEASE)"
+
+## Build and install the iOS app directly to the paired iPhone over the air.
+## Requires the device to be paired (xcrun devicectl list devices).
+ios-install: ios-build
+	xcrun devicectl device install app \
+	  --device "$(IOS_DEVICE_ID)" \
+	  "$(IOS_APP_RELEASE)"
+	@echo "installed → iPhone ($(IOS_DEVICE_ID))"
+
+## Install the Release build into /Applications (run at milestones).
 mac-install: mac-release
 	@rm -rf "$(INSTALLED)"
 	@cp -R "$(APP_RELEASE)" "$(INSTALLED)"
