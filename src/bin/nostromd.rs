@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::broadcast;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_appender::rolling;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -59,10 +59,33 @@ async fn main() -> Result<()> {
     // ── Session manager (persistent stream-json sessions) ──────────────────────
     let session_mgr: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
 
-    // ── IPC server ────────────────────────────────────────────────────────────
+    // ── IPC server (Unix socket) ──────────────────────────────────────────────
     let socket_path = nostromo::ipc::default_socket_path();
     let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr))
         .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
+
+    // ── IPC server (TCP — iOS / LAN clients) ──────────────────────────────────
+    let tcp_addr = config.tcp_listen_addr();
+    let tcp_listener = tokio::net::TcpListener::bind(tcp_addr)
+        .await
+        .with_context(|| format!("binding TCP IPC listener at {tcp_addr}"))?;
+    let bound_tcp_addr = tcp_listener.local_addr()?;
+    info!(addr = %bound_tcp_addr, "IPC TCP listener bound");
+
+    // Phase 0 carries no authentication.  Warn loudly when the daemon is
+    // reachable from off-host so operators understand the risk and can choose
+    // to restrict access (firewall / VPN) while auth is not yet implemented.
+    if !bound_tcp_addr.ip().is_loopback() {
+        warn!(
+            addr = %bound_tcp_addr,
+            "TCP IPC listener is reachable from the network (non-loopback). \
+             Phase 0 has NO authentication — any LAN host can issue PtySpawn \
+             and session commands. Restrict with a firewall or set \
+             NOSTROMD_TCP_ADDR=127.0.0.1:47100 to disable LAN access."
+        );
+    }
+
+    server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr));
 
     // ── Session crash-recovery supervisor ──────────────────────────────────────
     {

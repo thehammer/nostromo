@@ -3,16 +3,37 @@
 //! Reads `~/.config/nostromo/config.toml` (or a path override).  All fields
 //! are optional — sane defaults are used when absent.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Environment variable that overrides the TCP listen address.
+pub const TCP_ADDR_ENV: &str = "NOSTROMD_TCP_ADDR";
+
+/// Default TCP listen address when no override is present.
+///
+/// **Loopback-only by default.**  Phase 0 carries no authentication; binding
+/// to `0.0.0.0` would expose PTY-spawn and session-control to any host on the
+/// LAN.  To accept connections from iOS / other LAN clients set
+/// `tcp_addr = "0.0.0.0:47100"` in `config.toml` or export
+/// `NOSTROMD_TCP_ADDR=0.0.0.0:47100`.  The daemon will log a prominent
+/// warning whenever the resolved address is non-loopback.
+pub const DEFAULT_TCP_ADDR: &str = "127.0.0.1:47100";
+
 /// Top-level config struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// TCP address to bind the iOS/LAN listener on (default: `0.0.0.0:47100`).
+    ///
+    /// Overridden by the `NOSTROMD_TCP_ADDR` environment variable.  Set to
+    /// `null` in `config.toml` to use the default.  Plaintext only (Phase 0);
+    /// TLS is added in Phase 5.
+    pub tcp_addr: Option<SocketAddr>,
+
     /// Path to the fred state directory (default: `$HOME/.claude/state/fred`).
     pub fred_state: Option<PathBuf>,
     /// Path to the perri state directory (default: `$HOME/.claude/state/perri`).
@@ -50,6 +71,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            tcp_addr: None,
             fred_state: None,
             perri_state: None,
             claude_bin: None,
@@ -115,6 +137,20 @@ impl Config {
                 .join("nostromo")
                 .join("graph-token.json")
         })
+    }
+
+    /// Resolved TCP listen address.
+    ///
+    /// Resolution order: `NOSTROMD_TCP_ADDR` env var → `config.toml tcp_addr`
+    /// → `DEFAULT_TCP_ADDR` (`0.0.0.0:47100`).
+    pub fn tcp_listen_addr(&self) -> SocketAddr {
+        if let Ok(v) = std::env::var(TCP_ADDR_ENV) {
+            if let Ok(addr) = v.parse() {
+                return addr;
+            }
+        }
+        self.tcp_addr
+            .unwrap_or_else(|| DEFAULT_TCP_ADDR.parse().expect("valid default TCP addr"))
     }
 
     pub fn mailbox_poll_interval(&self) -> Duration {
