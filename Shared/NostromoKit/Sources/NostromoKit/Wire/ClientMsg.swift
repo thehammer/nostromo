@@ -49,6 +49,14 @@ struct ClientSessionList: Encodable {
     enum CodingKeys: String, CodingKey { case type_ = "type" }
 }
 
+// MARK: - FocusList
+
+/// Request the daemon's focus registry snapshot.
+struct ClientFocusList: Encodable {
+    let type_ = "focus_list"
+    enum CodingKeys: String, CodingKey { case type_ = "type" }
+}
+
 // MARK: - SessionSpawn
 
 struct ClientSessionSpawn: Encodable {

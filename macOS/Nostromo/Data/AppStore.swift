@@ -150,10 +150,27 @@ class AppStore: ObservableObject {
         client.start()
         broker.start()
 
+        // Phase 1: keep the daemon's focus registry mirrored from the Mac.
+        client.connected
+            .receive(on: DispatchQueue.main)
+            .filter { $0 }                       // push on each successful (re)connect
+            .sink { [weak self] _ in self?.pushFocusRegistry() }
+            .store(in: &cancellables)
+
+        FocusStore.shared.$focuses
+            .receive(on: DispatchQueue.main)
+            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.pushFocusRegistry() }
+            .store(in: &cancellables)
+
         // Perri queue: the Rust daemon (nostromd) is the authoritative writer of
         // .queue.cache.json via the native queue source.  Swift reads it via
         // FSEvents (FileWatchers.perriQueue above) — no periodic bash shell-out needed.
         // The refresh button writes queue.dirty to ask the daemon for an immediate cycle.
+    }
+
+    private func pushFocusRegistry() {
+        client.focusRegistryPush(FocusStore.shared.wireProjection())
     }
 
     // MARK: - Broker event fold

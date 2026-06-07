@@ -127,8 +127,9 @@ async fn accept_loop(
                 let rx = tx.subscribe();
                 let pty_mgr = Arc::clone(&pty_mgr);
                 let session_mgr = Arc::clone(&session_mgr);
+                let broadcast_tx = tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, pty_mgr, session_mgr).await {
+                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr).await {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -153,8 +154,9 @@ async fn accept_loop_tcp(
                 let rx = tx.subscribe();
                 let pty_mgr = Arc::clone(&pty_mgr);
                 let session_mgr = Arc::clone(&session_mgr);
+                let broadcast_tx = tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, pty_mgr, session_mgr).await {
+                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr).await {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -177,6 +179,7 @@ async fn accept_loop_tcp(
 async fn handle_client<S>(
     stream: S,
     mut broadcast_rx: broadcast::Receiver<ServerMsg>,
+    broadcast_tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
 ) -> Result<()>
@@ -317,7 +320,7 @@ where
                                 continue;
                             }
                         };
-                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx);
+                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -357,6 +360,7 @@ fn handle_client_msg(
     pty_mgr: &Arc<Mutex<PtyManager>>,
     session_mgr: &Arc<Mutex<SessionManager>>,
     targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
+    broadcast_tx: &broadcast::Sender<ServerMsg>,
 ) {
     match msg {
         ClientMsg::Ping => {
@@ -527,6 +531,23 @@ fn handle_client_msg(
             let _ = targeted_tx.send(ServerMsg::SessionListResp { sessions });
         }
 
+        ClientMsg::FocusRegistryPush { focuses } => {
+            let updated = {
+                let mut mgr = session_mgr.lock().unwrap();
+                mgr.set_focus_registry(focuses)
+            };
+            // Fan out to every connected, Focuses-subscribed client (incl. this one).
+            let _ = broadcast_tx.send(ServerMsg::FocusRegistryUpdated { focuses: updated });
+        }
+
+        ClientMsg::FocusList => {
+            let focuses = {
+                let mgr = session_mgr.lock().unwrap();
+                mgr.focus_registry()
+            };
+            let _ = targeted_tx.send(ServerMsg::FocusListResp { focuses });
+        }
+
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
     }
@@ -543,6 +564,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherJobs { .. } => topics.contains(&Topic::MotherJobs),
         ServerMsg::MotherStatusline(_) => topics.contains(&Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => topics.contains(&Topic::MotherJobs),
+        ServerMsg::FocusRegistryUpdated { .. } => topics.contains(&Topic::Focuses),
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,

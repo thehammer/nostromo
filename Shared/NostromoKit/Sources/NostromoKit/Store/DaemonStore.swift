@@ -29,6 +29,12 @@ public final class DaemonStore: ObservableObject {
         sessions.values.sorted { $0.tag < $1.tag }
     }
 
+    /// Daemon-served focus registry, keyed by tag.
+    @Published public private(set) var focuses: [String: FocusMeta] = [:]
+
+    /// Focuses grouped + ordered for list rendering.
+    public var focusRows: [FocusRow] { buildFocusRows(Array(focuses.values)) }
+
     /// Whether the daemon connection is currently alive.
     @Published public private(set) var connected: Bool = false
 
@@ -63,6 +69,11 @@ public final class DaemonStore: ObservableObject {
         client.send(ClientSessionList())
     }
 
+    /// Request a fresh `FocusListResp` from the daemon.
+    public func refreshFocuses() {
+        client.send(ClientFocusList())
+    }
+
     // MARK: - Bindings
 
     private func bind() {
@@ -74,10 +85,13 @@ public final class DaemonStore: ObservableObject {
                 if isConnected {
                     // Request the current session list immediately after connecting.
                     self?.client.send(ClientSessionList())
+                    // Request the focus registry immediately after connecting.
+                    self?.client.send(ClientFocusList())
                 } else {
                     // Clear stale state on disconnect so the list doesn't show
                     // ghost entries if the daemon is restarted.
                     self?.sessions = [:]
+                    self?.focuses = [:]
                 }
             }
             .store(in: &cancellables)
@@ -158,6 +172,9 @@ public final class DaemonStore: ObservableObject {
             }
             // Re-request the list to pick up any new sessions.
             client.send(ClientSessionList())
+
+        case .focusListResp(let list), .focusRegistryUpdated(let list):
+            focuses = Dictionary(uniqueKeysWithValues: list.map { ($0.tag, $0) })
 
         default:
             break
