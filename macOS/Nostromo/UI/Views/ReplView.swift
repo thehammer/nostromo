@@ -19,6 +19,7 @@ class ReplView: NSView {
     private var quickActionStrip: QuickActionStripView?
 
     private var turnViews:   [UUID: ChatTurnView] = [:]
+    private var scrollPending = false
     private var cancellables = Set<AnyCancellable>()
 
     init(tag: String, agentName: String? = nil, displayName: String? = nil,
@@ -211,16 +212,23 @@ class ReplView: NSView {
                 v.widthAnchor.constraint(equalTo: stackView.widthAnchor).isActive = true
             }
         }
-        // Scroll to bottom after layout settles
-        DispatchQueue.main.async { [weak self] in self?.scrollToBottom() }
+        // Scroll to bottom after layout settles — coalesced so rapid streaming
+        // tokens don't queue a separate dispatch per token (O(n) dispatches × O(n)
+        // layout = O(n^2) CPU). Only one scroll dispatch is outstanding at any time.
+        if !scrollPending {
+            scrollPending = true
+            DispatchQueue.main.async { [weak self] in
+                self?.scrollPending = false
+                self?.scrollToBottom()
+            }
+        }
     }
 
     private func scrollToBottom() {
         guard let doc = scrollView.documentView else { return }
-        // Force pending layout so a just-appended turn (e.g. the optimistic echo)
-        // has its real height before we compute the offset — otherwise we scroll
-        // short and the newest message hides behind the input bar.
-        doc.layoutSubtreeIfNeeded()
+        // No layoutSubtreeIfNeeded() — layout has settled by the time this deferred
+        // dispatch runs. Forcing it re-solved every NSTextField constraint across the
+        // whole transcript on every streaming token (O(n^2)), pinning CPU at 100%.
         let bottom = NSPoint(x: 0, y: max(0, doc.frame.height - scrollView.contentView.bounds.height))
         scrollView.contentView.scroll(to: bottom)
         scrollView.reflectScrolledClipView(scrollView.contentView)
