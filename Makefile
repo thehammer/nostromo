@@ -62,10 +62,11 @@ uninstall-daemon:
 
 APP_BUNDLE  = macOS/build/Build/Products/Debug/Nostromo.app
 
-IOS_DEVICE_ID ?= 195907F5-56CB-5334-B012-6F71CFA5EB21
-IOS_APP_RELEASE = iOS/build/Build/Products/Release-iphoneos/Nostromo.app
+IOS_DEVICE_ID   ?= 195907F5-56CB-5334-B012-6F71CFA5EB21  # Hammer's iPhone Pro
+IPAD_DEVICE_ID  ?= BA38C738-E848-5694-B1C4-7D5DB4C631EE  # Hammer's iPad Pro
+IOS_APP_RELEASE  = iOS/build/Build/Products/Release-iphoneos/Nostromo.app
 
-.PHONY: mac mac-run mac-kill mac-icon mac-release mac-install ios-build ios-install
+.PHONY: mac mac-run mac-kill mac-icon mac-release mac-install ios-build ios-install ios-install-ipad ios-install-all
 
 # Release build uses an explicit derived-data path so the product location is
 # predictable (no DerivedData hash dependency). Ad-hoc signed so the arm64
@@ -122,13 +123,30 @@ ios-build:
 	@test -d "$(IOS_APP_RELEASE)" || { echo "iOS build failed — .app not found"; exit 1; }
 	@echo "built → $(IOS_APP_RELEASE)"
 
-## Build and install the iOS app directly to the paired iPhone over the air.
-## Requires the device to be paired (xcrun devicectl list devices).
+## Build and install to the paired iPhone.
 ios-install: ios-build
 	xcrun devicectl device install app \
 	  --device "$(IOS_DEVICE_ID)" \
 	  "$(IOS_APP_RELEASE)"
 	@echo "installed → iPhone ($(IOS_DEVICE_ID))"
+
+## Install the already-built app to the paired iPad (no rebuild).
+ios-install-ipad: ios-build
+	xcrun devicectl device install app \
+	  --device "$(IPAD_DEVICE_ID)" \
+	  "$(IOS_APP_RELEASE)"
+	@echo "installed → iPad ($(IPAD_DEVICE_ID))"
+
+## Build once, install to both iPhone and iPad.
+ios-install-all: ios-build
+	xcrun devicectl device install app \
+	  --device "$(IOS_DEVICE_ID)" \
+	  "$(IOS_APP_RELEASE)"
+	@echo "installed → iPhone ($(IOS_DEVICE_ID))"
+	xcrun devicectl device install app \
+	  --device "$(IPAD_DEVICE_ID)" \
+	  "$(IOS_APP_RELEASE)"
+	@echo "installed → iPad ($(IPAD_DEVICE_ID))"
 
 ## Install the Release build into /Applications (run at milestones).
 mac-install: mac-release
