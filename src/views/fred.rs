@@ -25,7 +25,7 @@ use tokio::sync::watch;
 use crate::{
     config::Config,
     data::{
-        fred_calendar::CalendarEvent, fred_mailbox::MailboxSnapshot, rate_limits::PostureSnapshot,
+        fred_calendar::CalendarEvent, fred_mailbox::MailboxSnapshot,
     },
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
@@ -37,7 +37,7 @@ use crate::{
         widgets::{relative_time::format_relative_now, truncate::truncate},
     },
     views::{
-        fred_calendar_image::render_calendar_to_image, pace_bars_image::render_pace_bars_to_image,
+        fred_calendar_image::render_calendar_to_image,
         EventOutcome, View, ViewCtx,
     },
 };
@@ -106,15 +106,6 @@ pub struct FredView {
     picker: Picker,
     /// Active `ThreadProtocol` state for the calendar image.
     calendar_image_state: Option<ThreadProtocol>,
-    /// `StatefulProtocol` for the pace-bars widget (rebuilt on change).
-    pace_bars_image_state: Option<StatefulProtocol>,
-    /// `loaded_at` of the snapshot used for the last pace-bars render,
-    /// for cache-busting: when this changes we re-encode the image.
-    pace_bars_last_loaded_at: Option<std::time::Instant>,
-    /// Cell-area size `(cols, rows)` from the last pace-bars render.
-    pace_bars_last_size: Option<(u16, u16)>,
-    /// Latest posture snapshot forwarded from `AppEvent::PostureSnapshot`.
-    posture_snapshot: Option<PostureSnapshot>,
     /// Sender side of the background resize-encode worker channel.
     resize_tx: mpsc::Sender<ResizeRequest>,
     /// Receiver for completed `ResizeResponse` values from the worker.
@@ -234,10 +225,6 @@ impl FredView {
             repl_scroll: 0,
             picker,
             calendar_image_state: None,
-            pace_bars_image_state: None,
-            pace_bars_last_loaded_at: None,
-            pace_bars_last_size: None,
-            posture_snapshot: None,
             resize_tx,
             resize_result_rx,
             calendar_last_rendered: None,
@@ -507,37 +494,6 @@ impl FredView {
         }
     }
 
-    /// Render the pace-bars pixel widget into the 4-row strip.
-    #[allow(dead_code)]
-    fn render_pace_bars(&mut self, f: &mut Frame, area: Rect) {
-        let snap = match self.posture_snapshot.as_ref() {
-            Some(s) => s,
-            None => return, // nothing to render yet
-        };
-
-        let font_size = self.picker.font_size();
-        let cell_size = (area.width, area.height);
-        let loaded_at = snap.loaded_at;
-
-        // Rebuild the protocol when the snapshot changed or the area resized.
-        let needs_regen = self.pace_bars_image_state.is_none()
-            || self.pace_bars_last_size != Some(cell_size)
-            || self.pace_bars_last_loaded_at != Some(loaded_at);
-
-        if needs_regen {
-            let w_px = (area.width as u32) * (font_size.width as u32);
-            let h_px = (area.height as u32) * (font_size.height as u32);
-            let dyn_img = render_pace_bars_to_image(snap, w_px, h_px);
-            self.pace_bars_image_state = Some(self.picker.new_resize_protocol(dyn_img));
-            self.pace_bars_last_loaded_at = Some(loaded_at);
-            self.pace_bars_last_size = Some(cell_size);
-        }
-
-        if let Some(state) = &mut self.pace_bars_image_state {
-            f.render_stateful_widget(StatefulImage::new(), area, state);
-        }
-    }
-
     fn render_repl(&mut self, f: &mut Frame, area: Rect) {
         let border_color = if self.pty_capturing {
             theme::BORDER_ACTIVE
@@ -688,14 +644,6 @@ impl View for FredView {
                     self.repl_scroll = 0;
                 }
             }
-        }
-
-        // Cache the latest posture snapshot for the pace-bars widget.
-        if let AppEvent::PostureSnapshot(snap) = ev {
-            self.posture_snapshot = Some(snap.clone());
-            // Invalidate cached state so the bars re-encode on next render.
-            self.pace_bars_last_loaded_at = None;
-            return EventOutcome::Consumed;
         }
 
         // Forward keys to the PTY only when it is active and capturing input.
