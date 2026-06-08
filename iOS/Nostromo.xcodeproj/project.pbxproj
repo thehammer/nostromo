@@ -13,6 +13,8 @@
 		AA000001000000000000000F /* ConnectionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000000E /* ConnectionSettingsView.swift */; };
 		AA0000010000000000000010 /* TranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000011 /* TranscriptView.swift */; };
 		AA0000010000000000000012 /* AskQuestionPrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000013 /* AskQuestionPrompt.swift */; };
+		AA0000010000000000000014 /* MotherQueueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000015 /* MotherQueueView.swift */; };
+		AA0000010000000000000016 /* MotherJobDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000017 /* MotherJobDetailView.swift */; };
 		AA00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000100000000000000AA /* NostromoKit */; };
 /* End PBXBuildFile section */
 
@@ -23,6 +25,8 @@
 		AA000001000000000000000E /* ConnectionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSettingsView.swift; sourceTree = "<group>"; };
 		AA0000010000000000000011 /* TranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptView.swift; sourceTree = "<group>"; };
 		AA0000010000000000000013 /* AskQuestionPrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskQuestionPrompt.swift; sourceTree = "<group>"; };
+		AA0000010000000000000015 /* MotherQueueView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherQueueView.swift; sourceTree = "<group>"; };
+		AA0000010000000000000017 /* MotherJobDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobDetailView.swift; sourceTree = "<group>"; };
 		AA00000100000000000000A0 /* Nostromo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nostromo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -63,6 +67,8 @@
 				AA000001000000000000000E /* ConnectionSettingsView.swift */,
 				AA0000010000000000000011 /* TranscriptView.swift */,
 				AA0000010000000000000013 /* AskQuestionPrompt.swift */,
+				AA0000010000000000000015 /* MotherQueueView.swift */,
+				AA0000010000000000000017 /* MotherJobDetailView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -155,6 +161,8 @@
 				AA000001000000000000000F /* ConnectionSettingsView.swift in Sources */,
 				AA0000010000000000000010 /* TranscriptView.swift in Sources */,
 				AA0000010000000000000012 /* AskQuestionPrompt.swift in Sources */,
+				AA0000010000000000000014 /* MotherQueueView.swift in Sources */,
+				AA0000010000000000000016 /* MotherJobDetailView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

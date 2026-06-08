@@ -41,9 +41,31 @@ struct NostromoApp: App {
     }
 }
 
-/// Root content view — shows FocusListView once connected, a progress
-/// indicator while connecting, and the settings sheet when disconnected.
+/// Root content view — TabView with Sessions and Queue tabs.
 struct ContentView: View {
+    @EnvironmentObject var store: DaemonStore
+
+    var body: some View {
+        TabView {
+            SessionsTab()
+                .tabItem { Label("Sessions", systemImage: "list.bullet.rectangle") }
+
+            QueueTab()
+                .tabItem { Label("Queue", systemImage: "tray.full") }
+                .badge(activeJobCount)
+        }
+    }
+
+    private var activeJobCount: Int {
+        store.motherJobs.filter {
+            ["running", "queued", "ready", "awaiting"].contains($0.state)
+        }.count
+    }
+}
+
+// MARK: - SessionsTab
+
+private struct SessionsTab: View {
     @EnvironmentObject var store: DaemonStore
     @State private var showSettings = false
 
@@ -63,6 +85,17 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSettings) {
             ConnectionSettingsView(store: store)
+        }
+    }
+}
+
+// MARK: - QueueTab
+
+private struct QueueTab: View {
+    var body: some View {
+        NavigationStack {
+            MotherQueueView()
+                .navigationTitle("Queue")
         }
     }
 }

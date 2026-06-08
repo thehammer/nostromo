@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use super::{
     codec::{read_frame, write_frame},
-    protocol::{ClientMsg, ServerMsg, SessionAction, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
+    protocol::{ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
     pty_manager::PtyManager,
     session_manager::SessionManager,
 };
@@ -546,6 +546,27 @@ fn handle_client_msg(
                 mgr.focus_registry()
             };
             let _ = targeted_tx.send(ServerMsg::FocusListResp { focuses });
+        }
+
+        ClientMsg::MotherAction { job_id, action } => {
+            let btx = broadcast_tx.clone();
+            let conn = conn_key.to_string();
+            tokio::spawn(async move {
+                let res = match action {
+                    MotherActionKind::Cancel     => crate::mother::cancel(&job_id).await,
+                    MotherActionKind::Retry      => crate::mother::retry(&job_id).await,
+                    MotherActionKind::ForceStart => crate::mother::force_start(&job_id).await,
+                };
+                if let Err(e) = res {
+                    tracing::warn!(conn, %job_id, ?action, "MotherAction failed: {e:#}");
+                }
+                match crate::mother::list_jobs().await {
+                    Ok(jobs) => {
+                        let _ = btx.send(ServerMsg::MotherJobs { jobs });
+                    }
+                    Err(e) => tracing::warn!("MotherAction re-poll failed: {e:#}"),
+                }
+            });
         }
 
         // These are already handled during handshake; ignore duplicates.
