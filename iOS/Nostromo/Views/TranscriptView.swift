@@ -4,6 +4,11 @@
 // Attaches on appear, streams live deltas, detaches on disappear.
 // Bottom input bar sends user messages via session_send.
 // askQuestion blocks render as tappable option buttons (same mechanism).
+//
+// Phase 3: toolbar menu provides Stop, Restart, and New Session controls.
+// Stop is enabled only when the session is mid-turn or awaiting permission.
+// New Session re-spawns in $HOME (iOS never receives project paths via
+// FocusMeta — cwd-awareness is intentionally out of scope on mobile).
 
 import SwiftUI
 import NostromoKit
@@ -11,14 +16,22 @@ import NostromoKit
 struct TranscriptView: View {
     let tag:         String
     let displayName: String
+    let agentName:   String
+    let viewName:    String
     let client:      NetworkClient
 
     @StateObject private var store: TranscriptStore
     @State private var draft = ""
 
-    init(tag: String, displayName: String, client: NetworkClient) {
+    @State private var showStopConfirm        = false
+    @State private var showRestartConfirm     = false
+    @State private var showNewSessionConfirm  = false
+
+    init(tag: String, displayName: String, agentName: String, viewName: String, client: NetworkClient) {
         self.tag = tag
         self.displayName = displayName
+        self.agentName = agentName
+        self.viewName = viewName
         self.client = client
         _store = StateObject(wrappedValue: TranscriptStore(client: client))
     }
@@ -47,7 +60,47 @@ struct TranscriptView: View {
         }
         .navigationTitle(displayName)
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { store.attach(tag: tag) }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button { showRestartConfirm = true } label: {
+                        Label("Restart", systemImage: "arrow.clockwise")
+                    }
+
+                    Button(role: .destructive) { showStopConfirm = true } label: {
+                        Label("Stop", systemImage: "stop.circle")
+                    }
+                    .disabled(store.state != .midTurn && store.state != .awaitingPermission)
+
+                    Button(role: .destructive) { showNewSessionConfirm = true } label: {
+                        Label("New Session", systemImage: "plus.bubble")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
+        .confirmationDialog(
+            "Stop session?",
+            isPresented: $showStopConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Stop", role: .destructive) { store.stop() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The running turn will be interrupted.")
+        }
+        .confirmationDialog(
+            "New Session?",
+            isPresented: $showNewSessionConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("New Session", role: .destructive) { store.newSession() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Starts a fresh session in your home directory (not the project folder). The current transcript will be cleared.")
+        }
+        .onAppear { store.attach(tag: tag, agentName: agentName, viewName: viewName) }
         .onDisappear { store.detach() }
     }
 }

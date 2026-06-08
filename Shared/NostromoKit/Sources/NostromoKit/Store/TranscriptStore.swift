@@ -21,6 +21,8 @@ public final class TranscriptStore: ObservableObject {
 
     private let client: NetworkClient
     private var tag: String?
+    private var agentName: String = ""
+    private var viewName: String = ""
     private var cancellable: AnyCancellable?
 
     // MARK: - Init
@@ -31,8 +33,11 @@ public final class TranscriptStore: ObservableObject {
 
     // MARK: - Attach / detach
 
-    public func attach(tag: String) {
+    /// Attach to a session tag, storing agentName and viewName for re-spawn after new_session.
+    public func attach(tag: String, agentName: String, viewName: String) {
         self.tag = tag
+        self.agentName = agentName
+        self.viewName = viewName
         turns = []
         cancellable = client.messages
             .receive(on: RunLoop.main)
@@ -59,6 +64,31 @@ public final class TranscriptStore: ObservableObject {
                                 userInput: trimmed, timestamp: nil,
                                 blocks: [], isComplete: false))
         client.send(ClientSessionSend(tag: tag, text: trimmed, images: []))
+    }
+
+    // MARK: - Session lifecycle controls
+
+    public func stop() {
+        guard let tag else { return }
+        client.send(ClientSessionControl(tag: tag, action: "stop"))
+    }
+
+    public func restart() {
+        guard let tag else { return }
+        client.send(ClientSessionControl(tag: tag, action: "restart"))
+        // No re-spawn: daemon restarts child and re-attaches clients automatically
+    }
+
+    public func newSession() {
+        guard let tag else { return }
+        turns = []  // optimistic clear
+        client.send(ClientSessionControl(tag: tag, action: "new_session"))
+        // MUST re-spawn: new_session deregisters the tag (session_manager.rs:679-684).
+        // cwd: nil → daemon defaults to $HOME (iOS never receives filesystem paths
+        // via FocusMeta — cwd-awareness is intentionally out of scope on mobile).
+        client.send(ClientSessionSpawn(tag: tag, agentName: agentName, viewName: viewName,
+                                       cwd: nil, sessionId: nil, remoteControl: false))
+        client.send(ClientSessionAttach(tag: tag))
     }
 
     // MARK: - Message handling
