@@ -3,6 +3,8 @@
 // @MainActor ObservableObject that owns a single attached focus's transcript.
 // Sends SessionAttach on attach(tag:), ingests sessionTurns (snapshot) and
 // sessionTurnDelta (live deltas), and sends SessionDetach on teardown.
+// Phase 2: send(_ text:) emits ClientSessionSend; published state tracks
+// SessionState updates from the daemon.
 
 import Foundation
 import Combine
@@ -13,6 +15,7 @@ public final class TranscriptStore: ObservableObject {
     // MARK: - Public state
 
     @Published public private(set) var turns: [DaemonTurn] = []
+    @Published public private(set) var state: SessionState = .idle
 
     // MARK: - Dependencies
 
@@ -46,8 +49,24 @@ public final class TranscriptStore: ObservableObject {
 
     // MARK: - Message handling
 
+    // MARK: - Send
+
+    public func send(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let tag else { return }
+        // Optimistic echo — real turn de-duped on arrival via id mismatch
+        turns.append(DaemonTurn(id: "local-\(UUID().uuidString)",
+                                userInput: trimmed, timestamp: nil,
+                                blocks: [], isComplete: false))
+        client.send(ClientSessionSend(tag: tag, text: trimmed, images: []))
+    }
+
+    // MARK: - Message handling
+
     private func handle(_ msg: ServerMsg) {
         switch msg {
+        case .sessionState(let t, let s) where t == tag:
+            state = s
         case .sessionTurns(let t, let snapshot) where t == tag:
             turns = snapshot                         // replace full snapshot
         case .sessionTurnDelta(let t, let delta) where t == tag:
