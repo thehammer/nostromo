@@ -47,6 +47,7 @@
 		FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
 		FF00000000000000000000A3 /* SidenavGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
 		FF00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000B1 /* SidenavGroupingTests.swift */; };
+		CC00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -92,6 +93,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CC00000100000000000000AB /* NostromoKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -210,6 +212,9 @@
 			dependencies = (
 			);
 			name = Nostromo;
+			packageProductDependencies = (
+				CC00000100000000000000AA /* NostromoKit */,
+			);
 			productName = Nostromo;
 			productReference = AA0000000000000000000006 /* Nostromo.app */;
 			productType = "com.apple.product-type.application";
@@ -252,6 +257,9 @@
 			productRefGroup = AA0000000000000000000022 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
+			packageReferences = (
+				CC00000100000000000000A9 /* XCLocalSwiftPackageReference "../Shared/NostromoKit" */,
+			);
 			targets = (
 				AA0000000000000000000040 /* Nostromo */,
 				BB00000000000000000000D1 /* NostromoTests */,
@@ -511,6 +519,21 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		CC00000100000000000000A9 /* XCLocalSwiftPackageReference "../Shared/NostromoKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Shared/NostromoKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		CC00000100000000000000AA /* NostromoKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC00000100000000000000A9 /* XCLocalSwiftPackageReference "../Shared/NostromoKit" */;
+			productName = NostromoKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 	};
 	rootObject = AA0000000000000000000050 /* Project object */;
