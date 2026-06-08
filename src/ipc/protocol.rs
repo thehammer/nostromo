@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent_bus::ActivityEvent,
+    data::{perri_pr::PrSnapshot, perri_queue::PrQueueItem},
     ipc::{
         session_manager::StopReason,
         stream_json::{SessionState, Turn, TurnDelta},
@@ -62,6 +63,8 @@ pub enum Topic {
     MotherJobs,
     MotherStatusline,
     Focuses,
+    /// Perri PR review queue + current-PR snapshot broadcasts.
+    Perri,
 }
 
 /// Metadata about a daemon-owned PTY.
@@ -316,6 +319,22 @@ pub enum ClientMsg {
         job_id: String,
         answer: String,
     },
+
+    /// Request a Perri action. The daemon shells out to `perri <action> …`
+    /// and the native Perri source re-broadcasts a fresh `PerriState` via the
+    /// watch channel.
+    ///
+    /// Recognised actions:
+    ///   - `"load_pr"` — requires `pr_number` + `repo`
+    ///   - `"clear"`   — clears the current PR; `pr_number`/`repo` are ignored
+    PerriAction {
+        /// Action to perform (`"load_pr"` or `"clear"`).
+        action: String,
+        /// PR number for `load_pr`; `None` for `clear`.
+        pr_number: Option<u64>,
+        /// `owner/name` repo slug for `load_pr`; `None` for `clear`.
+        repo: Option<String>,
+    },
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -339,6 +358,14 @@ pub enum ServerMsg {
     /// `cycles`/`phases`), so boxing keeps `ServerMsg`'s size down
     /// (clippy::large_enum_variant).
     MotherAwaitDetected(Box<MotherJob>),
+
+    /// Broadcast snapshot of Perri's PR review state. Re-sent whenever the
+    /// native queue or current-PR watch channel changes.
+    PerriState {
+        queue: Vec<PrQueueItem>,
+        current: Option<Box<PrSnapshot>>,
+    },
+
     Pong,
     Error {
         message: String,
@@ -796,5 +823,119 @@ mod tests {
                 stop_reason: None,
             }],
         });
+    }
+
+    // ── PerriAction / PerriState ─────────────────────────────────────────────
+
+    #[test]
+    fn perri_action_round_trip() {
+        // load_pr with all fields
+        round_trip_client(ClientMsg::PerriAction {
+            action: "load_pr".into(),
+            pr_number: Some(42),
+            repo: Some("acme/web".into()),
+        });
+        // clear — pr_number and repo are None
+        round_trip_client(ClientMsg::PerriAction {
+            action: "clear".into(),
+            pr_number: None,
+            repo: None,
+        });
+    }
+
+    #[test]
+    fn perri_action_type_tag_is_perri_action() {
+        let v = serde_json::to_value(ClientMsg::PerriAction {
+            action: "load_pr".into(),
+            pr_number: Some(1),
+            repo: Some("org/repo".into()),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "perri_action");
+        assert_eq!(v["pr_number"], 1u64);
+        assert_eq!(v["repo"], "org/repo");
+
+        let v2 = serde_json::to_value(ClientMsg::PerriAction {
+            action: "clear".into(),
+            pr_number: None,
+            repo: None,
+        })
+        .unwrap();
+        assert_eq!(v2["type"], "perri_action");
+        assert!(v2["pr_number"].is_null());
+        assert!(v2["repo"].is_null());
+    }
+
+    #[test]
+    fn perri_state_round_trip_empty() {
+        round_trip_server(ServerMsg::PerriState {
+            queue: vec![],
+            current: None,
+        });
+    }
+
+    #[test]
+    fn perri_state_round_trip_populated() {
+        use crate::data::{
+            perri_pr::{CiCheck, PrSnapshot},
+            perri_queue::{CiState, PrQueueItem},
+        };
+
+        let item = PrQueueItem {
+            repo: "acme/web".into(),
+            number: 42,
+            title: "feat: auth".into(),
+            author: "alice".into(),
+            bucket: "requested".into(),
+            new_activity: false,
+            url: "https://github.com/acme/web/pull/42".into(),
+            ci_state: CiState::Success,
+            head_sha: "abc123".into(),
+        };
+        let snap = PrSnapshot {
+            pr_number: Some(42),
+            repo: "acme/web".into(),
+            title: "feat: auth".into(),
+            author: "alice".into(),
+            url: "https://github.com/acme/web/pull/42".into(),
+            diff: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new".into(),
+            stale: false,
+            error: None,
+            ci_checks: vec![CiCheck {
+                name: "test".into(),
+                state: CiState::Success,
+                detail: None,
+            }],
+            additions: 10,
+            deletions: 5,
+            changed_files: 2,
+            head_sha: "abc123".into(),
+            diff_too_large: false,
+        };
+
+        round_trip_server(ServerMsg::PerriState {
+            queue: vec![item],
+            current: Some(Box::new(snap)),
+        });
+    }
+
+    #[test]
+    fn perri_state_type_tag_is_perri_state() {
+        let v = serde_json::to_value(ServerMsg::PerriState {
+            queue: vec![],
+            current: None,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "perri_state");
+    }
+
+    #[test]
+    fn topic_perri_serializes_to_perri() {
+        assert_eq!(
+            serde_json::to_string(&Topic::Perri).unwrap(),
+            "\"perri\""
+        );
+        let decoded: Topic = serde_json::from_str("\"perri\"").unwrap();
+        assert_eq!(decoded, Topic::Perri);
     }
 }

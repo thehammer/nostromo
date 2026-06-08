@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod layout;
 pub mod mcp;
 pub mod mother;
+pub mod perri_cli;
 pub mod pty;
 pub mod sessions;
 pub mod transcript;

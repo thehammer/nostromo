@@ -155,3 +155,31 @@ public struct ClientMotherResume: Encodable {
         case answer
     }
 }
+
+// MARK: - PerriAction
+
+/// Request a Perri action from the daemon.
+/// Mirrors `ClientMsg::PerriAction` in `src/ipc/protocol.rs`.
+///
+/// Supported actions:
+///   - `"load_pr"` — load a specific PR; requires `prNumber` + `repo`.
+///   - `"clear"`   — clear the current PR; `prNumber`/`repo` are ignored.
+public struct ClientPerriAction: Encodable {
+    let type_:         String = "perri_action"
+    public let action: String
+    public let prNumber: Int?
+    public let repo:     String?
+
+    public init(action: String, prNumber: Int?, repo: String?) {
+        self.action   = action
+        self.prNumber = prNumber
+        self.repo     = repo
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_    = "type"
+        case action
+        case prNumber = "pr_number"
+        case repo
+    }
+}

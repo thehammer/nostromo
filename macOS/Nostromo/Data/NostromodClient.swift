@@ -48,6 +48,8 @@ enum ServerMsg {
     /// Auto-generated one-line summary derived from the first user message.
     /// Sent once per session lifetime by the daemon.
     case sessionSummaryUpdate(tag: String, summary: String)
+    /// Broadcast snapshot of Perri's PR review queue + current-PR detail.
+    case perriState(queue: [PRQueueItem], current: PRDetail?)
     case unknown
 }
 
@@ -344,7 +346,7 @@ class NostromodClient {
         // protocol v4 adds the focus registry push/pull family. The daemon holds
         // MIN_CLIENT_VERSION at 2, so the shipped GUI keeps working against older daemons.
         send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
-        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline"]))
+        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "perri"]))
     }
 
     // MARK: - Session commands (protocol v3)
@@ -544,6 +546,11 @@ class NostromodClient {
                 return .sessionSummaryUpdate(tag: m.tag, summary: m.summary)
             }
 
+        case "perri_state":
+            if let m = try? decoder.decode(PerriStateResp.self, from: raw) {
+                return .perriState(queue: m.queue.map(\.asPRQueueItem), current: m.current)
+            }
+
         default:
             break
         }
@@ -562,3 +569,60 @@ private struct SessionPermResp:    Decodable { let tag: String; let request_id: 
 private struct SessionExitedResp:  Decodable { let tag: String; let exit_code: Int? }
 private struct SessionDownResp:          Decodable { let tag: String; let reason: DaemonStopReason }
 private struct SessionSummaryUpdateResp: Decodable { let tag: String; let summary: String }
+
+// MARK: - Perri state wire wrapper
+
+/// Thin `Decodable` wrapper for `perri_state` frames.
+/// Decodes the daemon wire shape and converts the queue items to the macOS
+/// `PRQueueItem` model (which is not `Decodable` itself).
+private struct PerriStateResp: Decodable {
+    let queue:   [PRQueueItemWire]
+    let current: PRDetail?
+
+    /// Wire form of a queue item (decodes directly from daemon JSON).
+    struct PRQueueItemWire: Decodable {
+        let repo:        String
+        let number:      Int
+        let title:       String
+        let author:      String
+        let bucket:      String
+        let newActivity: Bool
+        let url:         String
+        let ciState:     String?
+        let headSha:     String?
+
+        enum CodingKeys: String, CodingKey {
+            case repo, number, title, author, bucket, url
+            case newActivity = "new_activity"
+            case ciState     = "ci_state"
+            case headSha     = "head_sha"
+        }
+
+        init(from d: Decoder) throws {
+            let c       = try d.container(keyedBy: CodingKeys.self)
+            repo        = try c.decode(String.self, forKey: .repo)
+            number      = try c.decode(Int.self,    forKey: .number)
+            title       = try c.decode(String.self, forKey: .title)
+            author      = try c.decode(String.self, forKey: .author)
+            bucket      = (try? c.decode(String.self, forKey: .bucket)) ?? "needs_review"
+            newActivity = (try? c.decode(Bool.self,   forKey: .newActivity)) ?? false
+            url         = try c.decode(String.self, forKey: .url)
+            ciState     = try? c.decodeIfPresent(String.self, forKey: .ciState)
+            headSha     = try? c.decodeIfPresent(String.self, forKey: .headSha)
+        }
+
+        var asPRQueueItem: PRQueueItem {
+            PRQueueItem(
+                repo:        repo,
+                number:      number,
+                title:       title,
+                author:      author,
+                bucket:      bucket,
+                newActivity: newActivity,
+                url:         url,
+                ciState:     CiState.from(ciStateString: ciState),
+                headSha:     headSha ?? ""
+            )
+        }
+    }
+}
