@@ -29,6 +29,9 @@ public final class DaemonStore: ObservableObject {
         sessions.values.sorted { $0.tag < $1.tag }
     }
 
+    /// All known Mother jobs. Updated by `mother_jobs` broadcasts.
+    @Published public private(set) var motherJobs: [MotherJob] = []
+
     /// Daemon-served focus registry, keyed by tag.
     @Published public private(set) var focuses: [String: FocusMeta] = [:]
 
@@ -74,6 +77,15 @@ public final class DaemonStore: ObservableObject {
         client.send(ClientFocusList())
     }
 
+    /// Send a Mother job action to the daemon.
+    ///
+    /// The daemon shells out to `mother <action> <job_id>` and re-broadcasts
+    /// a fresh `mother_jobs` snapshot.  Valid action strings: `"cancel"`,
+    /// `"retry"`, `"force_start"`.
+    public func motherAction(jobId: String, action: String) {
+        client.send(ClientMotherAction(jobId: jobId, action: action))
+    }
+
     // MARK: - Bindings
 
     private func bind() {
@@ -90,8 +102,9 @@ public final class DaemonStore: ObservableObject {
                 } else {
                     // Clear stale state on disconnect so the list doesn't show
                     // ghost entries if the daemon is restarted.
-                    self?.sessions = [:]
-                    self?.focuses = [:]
+                    self?.sessions    = [:]
+                    self?.focuses     = [:]
+                    self?.motherJobs  = []
                 }
             }
             .store(in: &cancellables)
@@ -175,6 +188,9 @@ public final class DaemonStore: ObservableObject {
 
         case .focusListResp(let list), .focusRegistryUpdated(let list):
             focuses = Dictionary(uniqueKeysWithValues: list.map { ($0.tag, $0) })
+
+        case .motherJobs(let jobs):
+            motherJobs = jobs
 
         default:
             break

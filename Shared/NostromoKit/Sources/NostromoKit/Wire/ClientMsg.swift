@@ -113,3 +113,24 @@ struct ClientSessionSend: Encodable {
     let images: [String]
     enum CodingKeys: String, CodingKey { case type_ = "type", tag, text, images }
 }
+
+// MARK: - MotherAction
+
+/// Request a Mother job action (cancel / retry / force_start).
+/// Mirrors `ClientMsg::MotherAction` in `src/ipc/protocol.rs`.
+public struct ClientMotherAction: Encodable {
+    let type_:  String = "mother_action"
+    public let jobId:  String
+    public let action: String
+
+    public init(jobId: String, action: String) {
+        self.jobId  = jobId
+        self.action = action
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_  = "type"
+        case jobId  = "job_id"
+        case action
+    }
+}

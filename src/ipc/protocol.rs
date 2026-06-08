@@ -93,6 +93,15 @@ pub enum SessionAction {
     NewSession,
 }
 
+/// Action to perform on a Mother job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotherActionKind {
+    Cancel,
+    Retry,
+    ForceStart,
+}
+
 /// Operator decision on a permission request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -290,6 +299,14 @@ pub enum ClientMsg {
     },
     /// Request a snapshot of the current focus registry.
     FocusList,
+
+    /// Request a Mother job action (cancel / retry / force-start).
+    /// The daemon shells out to `mother <action> <job_id>` and re-broadcasts
+    /// a fresh `ServerMsg::MotherJobs` on completion.
+    MotherAction {
+        job_id: String,
+        action: MotherActionKind,
+    },
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -666,6 +683,38 @@ mod tests {
         let json = serde_json::to_string(&minimal).unwrap();
         let back: FocusMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(minimal, back);
+    }
+
+    #[test]
+    fn mother_action_round_trip() {
+        round_trip_client(ClientMsg::MotherAction {
+            job_id: "job-123".into(),
+            action: MotherActionKind::Cancel,
+        });
+        round_trip_client(ClientMsg::MotherAction {
+            job_id: "job-456".into(),
+            action: MotherActionKind::Retry,
+        });
+        round_trip_client(ClientMsg::MotherAction {
+            job_id: "job-789".into(),
+            action: MotherActionKind::ForceStart,
+        });
+    }
+
+    #[test]
+    fn mother_action_kind_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&MotherActionKind::Cancel).unwrap(),
+            "\"cancel\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MotherActionKind::Retry).unwrap(),
+            "\"retry\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MotherActionKind::ForceStart).unwrap(),
+            "\"force_start\""
+        );
     }
 
     #[test]

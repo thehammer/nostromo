@@ -41,6 +41,9 @@ public enum ServerMsg {
     /// Broadcast registry change.
     case focusRegistryUpdated([FocusMeta])
 
+    /// Broadcast snapshot of all Mother jobs.
+    case motherJobs([MotherJob])
+
     case unknown
 }
 
@@ -289,6 +292,7 @@ extension ServerMsg {
     private struct SessionPermWrapper:       Decodable { let tag: String; let request_id: String; let tool: String }
     private struct SessionExitedWrapper:     Decodable { let tag: String; let exit_code: Int? }
     private struct FocusListWrapper:         Decodable { let focuses: [FocusMeta] }
+    private struct MotherJobsWrapper:        Decodable { let jobs: [MotherJob] }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -366,6 +370,11 @@ extension ServerMsg {
         case "focus_registry_updated":
             if let m = try? dec.decode(FocusListWrapper.self, from: data) {
                 return .focusRegistryUpdated(m.focuses)
+            }
+
+        case "mother_jobs":
+            if let m = try? dec.decode(MotherJobsWrapper.self, from: data) {
+                return .motherJobs(m.jobs)
             }
 
         default:
