@@ -569,6 +569,22 @@ fn handle_client_msg(
             });
         }
 
+        ClientMsg::MotherResume { job_id, answer } => {
+            let btx = broadcast_tx.clone();
+            let conn = conn_key.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = crate::mother::resume(&job_id, &answer).await {
+                    tracing::warn!(conn, %job_id, "MotherResume failed: {e:#}");
+                }
+                match crate::mother::list_jobs().await {
+                    Ok(jobs) => {
+                        let _ = btx.send(ServerMsg::MotherJobs { jobs });
+                    }
+                    Err(e) => tracing::warn!("MotherResume re-poll failed: {e:#}"),
+                }
+            });
+        }
+
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
     }

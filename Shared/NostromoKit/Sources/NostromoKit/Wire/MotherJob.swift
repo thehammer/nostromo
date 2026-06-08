@@ -20,9 +20,12 @@ public struct MotherJob: Codable, Identifiable, Equatable {
     public let createdAt:  String?
     public let startedAt:  String?
     public let finishedAt: String?
+    /// The question text set when a Mother worker calls `mother await`.
+    /// Non-nil only when `state == "awaiting"`.
+    public let question:   String?
 
     enum CodingKeys: String, CodingKey {
-        case id, state, title, repo, branch
+        case id, state, title, repo, branch, question
         case prUrl      = "pr_url"
         case createdAt  = "created_at"
         case startedAt  = "started_at"
@@ -38,7 +41,8 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         prUrl: String? = nil,
         createdAt: String? = nil,
         startedAt: String? = nil,
-        finishedAt: String? = nil
+        finishedAt: String? = nil,
+        question: String? = nil
     ) {
         self.id         = id
         self.state      = state
@@ -49,5 +53,6 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         self.createdAt  = createdAt
         self.startedAt  = startedAt
         self.finishedAt = finishedAt
+        self.question   = question
     }
 }
