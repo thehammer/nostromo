@@ -59,8 +59,37 @@ struct MotherQueueView: View {
         NavigationLink {
             MotherJobDetailView(job: job)
         } label: {
-            MotherJobRow(job: job)
+            NostromoKit.MotherJobRow(
+                model: rowModel(for: job),
+                onArchive: { store.motherAction(jobId: job.id, action: "archive") },
+                onCancel:  { store.motherAction(jobId: job.id, action: "cancel")  }
+            )
         }
+    }
+
+    private func rowModel(for job: MotherJob) -> MotherJobRowModel {
+        MotherJobRowModel(
+            id: job.id,
+            state: job.state,
+            title: job.title.isEmpty ? job.id : job.title,
+            repo: job.repo,
+            branch: job.branch,
+            relativeTimestamp: relativeTimestamp(for: job)
+        )
+    }
+
+    /// Approximate relative timestamp from ISO-8601 string fields.
+    private func relativeTimestamp(for job: MotherJob) -> String? {
+        let ts = job.finishedAt ?? job.startedAt ?? job.createdAt
+        guard let ts else { return nil }
+        let fmtFrac  = ISO8601DateFormatter()
+        fmtFrac.formatOptions  = [.withInternetDateTime, .withFractionalSeconds]
+        let fmtBasic = ISO8601DateFormatter()
+        fmtBasic.formatOptions = [.withInternetDateTime]
+        guard let date = fmtFrac.date(from: ts) ?? fmtBasic.date(from: ts) else { return nil }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private var disconnectedView: some View {
@@ -104,86 +133,6 @@ struct MotherQueueView: View {
                 let r = rhs.createdAt ?? ""
                 return l == r ? lhs.id > rhs.id : l > r
             }
-    }
-}
-
-// MARK: - MotherJobRow
-
-private struct MotherJobRow: View {
-    let job: MotherJob
-
-    var body: some View {
-        HStack(spacing: 12) {
-            stateCircle
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(job.title.isEmpty ? job.id : job.title)
-                    .font(.headline)
-                    .lineLimit(2)
-
-                if let repoBranch = repoBranchLabel {
-                    Text(repoBranch)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer()
-
-            if let ts = relativeTimestamp {
-                Text(ts)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-    private var stateCircle: some View {
-        Circle()
-            .fill(stateColor)
-            .frame(width: 10, height: 10)
-            .padding(.top, 2)
-    }
-
-    private var stateColor: Color {
-        switch job.state {
-        case "running":           return .blue
-        case "awaiting":          return .orange
-        case "queued", "ready":   return .gray
-        case "succeeded":         return .green
-        case "failed":            return .red
-        case "cancelled":         return .gray
-        default:                  return .gray
-        }
-    }
-
-    private var repoBranchLabel: String? {
-        switch (job.repo, job.branch) {
-        case (let r?, let b?): return "\(r) • \(b)"
-        case (let r?, nil):    return r
-        case (nil, let b?):    return b
-        case (nil, nil):       return nil
-        }
-    }
-
-    /// Approximate relative timestamp from ISO-8601 string.
-    private var relativeTimestamp: String? {
-        let ts = job.finishedAt ?? job.startedAt ?? job.createdAt
-        guard let ts else { return nil }
-        // Parse the ISO-8601 date and format relatively.
-        let fmtFrac  = ISO8601DateFormatter()
-        fmtFrac.formatOptions  = [.withInternetDateTime, .withFractionalSeconds]
-        let fmtBasic = ISO8601DateFormatter()
-        fmtBasic.formatOptions = [.withInternetDateTime]
-        guard let date = fmtFrac.date(from: ts) ?? fmtBasic.date(from: ts) else {
-            return nil
-        }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 

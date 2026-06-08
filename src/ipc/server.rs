@@ -556,6 +556,7 @@ fn handle_client_msg(
                     MotherActionKind::Cancel     => crate::mother::cancel(&job_id).await,
                     MotherActionKind::Retry      => crate::mother::retry(&job_id).await,
                     MotherActionKind::ForceStart => crate::mother::force_start(&job_id).await,
+                    MotherActionKind::Archive    => crate::mother::archive(&job_id).await,
                 };
                 if let Err(e) = res {
                     tracing::warn!(conn, %job_id, ?action, "MotherAction failed: {e:#}");

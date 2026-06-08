@@ -1,5 +1,7 @@
 import AppKit
 import Combine
+import NostromoKit
+import SwiftUI
 import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "mother-view")
@@ -222,256 +224,138 @@ private class MotherCountsStrip: NSView {
     }
 }
 
-// MARK: - FlippedClipView
-// Standard AppKit fix: y=0 at top so list items flow downward from the top of the scroll view.
-private class FlippedClipView: NSClipView {
-    override var isFlipped: Bool { true }
+// MARK: - MotherJobListViewModel
+
+private class MotherJobListViewModel: ObservableObject {
+    @Published var jobs: [MotherJob] = []
+    var onSelect: ((MotherJob?) -> Void)?
+
+    func rowModel(for job: MotherJob) -> MotherJobRowModel {
+        MotherJobRowModel(
+            id: job.id,
+            state: job.state,
+            title: job.title.isEmpty ? job.id : job.title,
+            repo: job.repo.isEmpty ? nil : job.repo,
+            branch: nil,                     // macOS MotherJob has no branch field
+            question: job.question,
+            relativeTimestamp: formattedTimestamp(for: job)
+        )
+    }
+
+    private func formattedTimestamp(for job: MotherJob) -> String? {
+        // Running jobs: show elapsed time since start.
+        if job.state == "running", let started = job.startedAt {
+            let secs = Int(Date().timeIntervalSince(started))
+            if secs < 60   { return "\(secs)s" }
+            if secs < 3600 { return "\(secs / 60)m" }
+            return "\(secs / 3600)h\((secs % 3600) / 60)m"
+        }
+        // Others: relative time from most-recent timestamp.
+        if let date = job.finishedAt ?? job.startedAt ?? job.createdAt {
+            let secs = Int(Date().timeIntervalSince(date))
+            if secs < 60   { return "\(secs)s ago" }
+            if secs < 3600 { return "\(secs / 60)m ago" }
+            return "\(secs / 3600)h ago"
+        }
+        return nil
+    }
+}
+
+// MARK: - MotherJobListSwiftUI
+
+private struct JobGroup: Identifiable {
+    let state: String
+    var jobs: [MotherJob]
+    var id: String { state }
+}
+
+private struct MotherJobListSwiftUI: View {
+    @ObservedObject var vm: MotherJobListViewModel
+    @State private var selectedId: String?
+
+    var body: some View {
+        List(selection: $selectedId) {
+            ForEach(groupedJobs) { group in
+                Section(group.state.uppercased()) {
+                    ForEach(group.jobs, id: \.id) { job in
+                        NostromoKit.MotherJobRow(
+                            model: vm.rowModel(for: job),
+                            onArchive: { AppStore.shared.archiveJob(job.id) },
+                            onCancel:  { AppStore.shared.cancelJob(job.id)  }
+                        )
+                        .tag(job.id)
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(Color(nsColor: Theme.bg))
+        .overlay {
+            if vm.jobs.isEmpty {
+                Text("No jobs")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onChange(of: selectedId) { _, newId in
+            vm.onSelect?(vm.jobs.first { $0.id == newId })
+        }
+    }
+
+    /// Jobs grouped by state, sorted: awaiting → running → queued/ready → failed → succeeded/cancelled.
+    private var groupedJobs: [JobGroup] {
+        let stateRank: [String: Int] = [
+            "awaiting": 0, "running": 1, "queued": 2, "ready": 2,
+            "failed": 3, "succeeded": 4, "cancelled": 4,
+        ]
+        let sorted = vm.jobs.sorted {
+            let a = stateRank[$0.state] ?? 5
+            let b = stateRank[$1.state] ?? 5
+            if a != b { return a < b }
+            return ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast)
+        }
+        var groups: [JobGroup] = []
+        for job in sorted {
+            if groups.last?.state == job.state {
+                groups[groups.count - 1].jobs.append(job)
+            } else {
+                groups.append(JobGroup(state: job.state, jobs: [job]))
+            }
+        }
+        return groups
+    }
 }
 
 // MARK: - MotherJobList
 
 private class MotherJobList: NSView {
 
-    var onSelect: ((MotherJob?) -> Void)?
+    var onSelect: ((MotherJob?) -> Void)? {
+        didSet { viewModel.onSelect = onSelect }
+    }
 
-    private let scrollView = NSScrollView()
-    private let stackView  = NSStackView()
-    private var rows: [MotherJobRow] = []
-    private var selectedId: String?
+    private let viewModel = MotherJobListViewModel()
+    private var hostingView: NSHostingView<MotherJobListSwiftUI>!
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-
-        wantsLayer = true
-        layer?.backgroundColor = Theme.bg.cgColor
-
-        // Flipped clip view so content anchors to the top
-        let clipView = FlippedClipView()
-        clipView.drawsBackground = false
-        scrollView.contentView = clipView
-
-        scrollView.hasVerticalScroller  = true
-        scrollView.autohidesScrollers   = true
-        scrollView.drawsBackground      = false
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(scrollView)
+        let swiftUIView = MotherJobListSwiftUI(vm: viewModel)
+        hostingView = NSHostingView(rootView: swiftUIView)
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hostingView)
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
-
-        stackView.orientation = .vertical
-        stackView.spacing     = 0
-        stackView.alignment   = .width
-        stackView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = stackView
-        NSLayoutConstraint.activate([
-            stackView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            stackView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            stackView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            hostingView.topAnchor.constraint(equalTo: topAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func update(_ jobs: [MotherJob]) {
-        let order: [String: Int] = [
-            "awaiting": 0, "running": 1, "queued": 2, "failed": 3, "succeeded": 4,
-        ]
-        let sorted = jobs.sorted {
-            let a = order[$0.state] ?? 5, b = order[$1.state] ?? 5
-            if a != b { return a < b }
-            return ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast)
-        }
-
-        stackView.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        rows = []
-
-        if sorted.isEmpty {
-            let empty = NSTextField(labelWithString: "No jobs")
-            empty.textColor = Theme.fgMuted
-            empty.font      = .systemFont(ofSize: 12)
-            empty.translatesAutoresizingMaskIntoConstraints = false
-            let wrapper = NSView()
-            wrapper.translatesAutoresizingMaskIntoConstraints = false
-            wrapper.addSubview(empty)
-            NSLayoutConstraint.activate([
-                empty.centerXAnchor.constraint(equalTo: wrapper.centerXAnchor),
-                empty.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: 24),
-                wrapper.heightAnchor.constraint(equalToConstant: 60),
-            ])
-            stackView.addArrangedSubview(wrapper)
-            return
-        }
-
-        var lastGroup = ""
-        for job in sorted {
-            if job.state != lastGroup {
-                lastGroup = job.state
-                stackView.addArrangedSubview(groupHeader(job.state))
-            }
-            let row = MotherJobRow(job: job)
-            row.isSelected = job.id == selectedId
-            row.onClick    = { [weak self] j in self?.select(j) }
-            stackView.addArrangedSubview(row)
-            rows.append(row)
-        }
-    }
-
-    private func select(_ job: MotherJob) {
-        selectedId = job.id
-        rows.forEach { $0.isSelected = $0.job.id == job.id }
-        onSelect?(job)
-    }
-
-    private func groupHeader(_ state: String) -> NSView {
-        let label = NSTextField(labelWithString: state.uppercased())
-        label.font      = .systemFont(ofSize: 9, weight: .semibold)
-        label.textColor = Theme.fgMuted
-        label.translatesAutoresizingMaskIntoConstraints = false
-
-        let v = NSView()
-        v.wantsLayer = true
-        v.layer?.backgroundColor = NSColor(white: 0.09, alpha: 1).cgColor
-        v.translatesAutoresizingMaskIntoConstraints = false
-        v.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 10),
-            label.centerYAnchor.constraint(equalTo: v.centerYAnchor),
-            v.heightAnchor.constraint(equalToConstant: 20),
-        ])
-        return v
-    }
-}
-
-// MARK: - MotherJobRow
-
-private class MotherJobRow: NSView {
-
-    let job: MotherJob
-    var onClick: ((MotherJob) -> Void)?
-
-    var isSelected: Bool = false {
-        didSet {
-            wantsLayer = true
-            layer?.backgroundColor = isSelected
-                ? Theme.cornflower.withAlphaComponent(0.15).cgColor
-                : NSColor.clear.cgColor
-        }
-    }
-
-    init(job: MotherJob) {
-        self.job = job
-        super.init(frame: .zero)
-        wantsLayer = true
-
-        let dot   = NSTextField(labelWithString: "●")
-        dot.font      = .systemFont(ofSize: 9)
-        dot.textColor = stateColor(job.state)
-
-        let title = NSTextField(labelWithString: job.title.isEmpty ? job.id : job.title)
-        title.font          = .systemFont(ofSize: 12)
-        title.textColor     = Theme.fg
-        title.lineBreakMode = .byTruncatingTail
-
-        let elapsed = NSTextField(labelWithString: elapsedString(job))
-        elapsed.font      = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        elapsed.textColor = Theme.fgMuted
-        elapsed.setContentHuggingPriority(.required, for: .horizontal)
-
-        let row = NSStackView(views: [dot, title, elapsed])
-        row.orientation = .horizontal
-        row.spacing     = 6
-        row.alignment   = .centerY
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
-
-        NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 5),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 28),
-        ])
-
-        addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(didClick)))
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func didClick() { onClick?(job) }
-
-    override func rightMouseDown(with event: NSEvent) {
-        let menu = NSMenu()
-        // Always available
-        if let planPath = job.planPath, !planPath.isEmpty {
-            menu.addItem(NSMenuItem(title: "View Plan", action: #selector(contextViewPlan), keyEquivalent: ""))
-        }
-        menu.addItem(NSMenuItem(title: "View Log", action: #selector(contextViewLog), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        // State-specific
-        switch job.state {
-        case "awaiting":
-            menu.addItem(NSMenuItem(title: "Answer…", action: #selector(contextAnswer), keyEquivalent: ""))
-            menu.addItem(NSMenuItem(title: "Cancel", action: #selector(contextCancel), keyEquivalent: ""))
-        case "running", "queued", "ready":
-            menu.addItem(NSMenuItem(title: "Force-start", action: #selector(contextForceStart), keyEquivalent: ""))
-            menu.addItem(NSMenuItem(title: "Cancel", action: #selector(contextCancel), keyEquivalent: ""))
-        case "failed", "cancelled":
-            menu.addItem(NSMenuItem(title: "Retry", action: #selector(contextRetry), keyEquivalent: ""))
-            menu.addItem(NSMenuItem(title: "Archive", action: #selector(contextArchive), keyEquivalent: ""))
-        case "succeeded":
-            menu.addItem(NSMenuItem(title: "Archive", action: #selector(contextArchive), keyEquivalent: ""))
-        default: break
-        }
-        // Set targets
-        for item in menu.items { item.target = self }
-        NSMenu.popUpContextMenu(menu, with: event, for: self)
-    }
-
-    @objc private func contextViewPlan() {
-        onClick?(job)
-        if let path = job.planPath { AppStore.shared.openPlan(path: path) }
-    }
-
-    @objc private func contextViewLog() { onClick?(job) }
-
-    @objc private func contextAnswer() { onClick?(job) }
-
-    @objc private func contextForceStart() {
-        onClick?(job)
-        let alert = NSAlert()
-        alert.messageText = "Force-start this job?"
-        alert.informativeText = "Runs now, ignoring quota cap and conservative posture."
-        alert.addButton(withTitle: "Force-start")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        if alert.runModal() == .alertFirstButtonReturn {
-            AppStore.shared.forceStartJob(job.id)
-        }
-    }
-
-    @objc private func contextCancel()  { onClick?(job); AppStore.shared.cancelJob(job.id) }
-    @objc private func contextRetry()   { onClick?(job); AppStore.shared.retryJob(job.id) }
-    @objc private func contextArchive() { onClick?(job); AppStore.shared.archiveJob(job.id) }
-
-    private func stateColor(_ state: String) -> NSColor {
-        switch state {
-        case "running":  return Theme.sage
-        case "awaiting": return Theme.amber
-        case "failed":   return Theme.redSweater
-        default:         return Theme.fgMuted
-        }
-    }
-
-    private func elapsedString(_ job: MotherJob) -> String {
-        guard job.state == "running", let started = job.startedAt else { return "" }
-        let secs = Int(Date().timeIntervalSince(started))
-        if secs < 60   { return "\(secs)s" }
-        if secs < 3600 { return "\(secs / 60)m" }
-        return "\(secs / 3600)h\((secs % 3600) / 60)m"
+        viewModel.jobs = jobs
     }
 }
 

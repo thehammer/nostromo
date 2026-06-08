@@ -100,6 +100,7 @@ pub enum MotherActionKind {
     Cancel,
     Retry,
     ForceStart,
+    Archive,
 }
 
 /// Operator decision on a permission request.
@@ -734,6 +735,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&MotherActionKind::ForceStart).unwrap(),
             "\"force_start\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MotherActionKind::Archive).unwrap(),
+            "\"archive\""
         );
     }
 
