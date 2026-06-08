@@ -259,17 +259,35 @@ pub async fn archive(id: &str) -> Result<()> {
 
 /// Cancel a running or queued job by id.
 pub async fn cancel(id: &str) -> Result<()> {
-    run_mother(&["cancel", id]).await
+    validate_job_id(id)?;
+    run_mother(&["cancel", "--", id]).await
 }
 
 /// Retry a failed or cancelled job by id.
 pub async fn retry(id: &str) -> Result<()> {
-    run_mother(&["retry", id]).await
+    validate_job_id(id)?;
+    run_mother(&["retry", "--", id]).await
 }
 
 /// Force-start a queued job by id, skipping the quota-cap confirmation.
 pub async fn force_start(id: &str) -> Result<()> {
-    run_mother(&["force-start", id, "--yes"]).await
+    validate_job_id(id)?;
+    run_mother(&["force-start", "--yes", "--", id]).await
+}
+
+/// Reject job ids that look like CLI flags or contain unexpected characters.
+///
+/// Mother job ids are UUID-like hex strings (e.g. `ab12cd34`).  Accepting
+/// arbitrary strings here would let a malicious client smuggle flags like
+/// `--debug` or `-x` into the `mother` argv.
+fn validate_job_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.starts_with('-')
+        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!("invalid job id: {id:?}");
+    }
+    Ok(())
 }
 
 /// Shell out to the `mother` binary with the given arguments.
