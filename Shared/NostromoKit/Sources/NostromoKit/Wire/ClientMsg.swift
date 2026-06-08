@@ -93,10 +93,16 @@ struct ClientSessionDetach: Encodable {
     enum CodingKeys: String, CodingKey { case type_ = "type", tag }
 }
 
-struct ClientSessionControl: Encodable {
+public struct ClientSessionControl: Encodable {
     let type_:  String = "session_control"
-    let tag:    String
-    let action: String
+    public let tag:    String
+    public let action: String
+
+    public init(tag: String, action: String) {
+        self.tag = tag
+        self.action = action
+    }
+
     enum CodingKeys: String, CodingKey { case type_ = "type", tag, action }
 }
 

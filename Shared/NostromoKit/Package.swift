@@ -19,5 +19,10 @@ let package = Package(
             dependencies: [],
             path: "Sources/NostromoKit"
         ),
+        .testTarget(
+            name: "NostromoKitTests",
+            dependencies: ["NostromoKit"],
+            path: "Tests/NostromoKitTests"
+        ),
     ]
 )

@@ -46,7 +46,13 @@ struct FocusListView: View {
                 case .focus(let meta, let label, let secondary, let indented):
                     let session = store.sessions[meta.tag]
                     NavigationLink {
-                        TranscriptView(tag: meta.tag, displayName: label, client: store.client)
+                        TranscriptView(
+                            tag: meta.tag,
+                            displayName: label,
+                            agentName: meta.agentName,
+                            viewName: meta.displayName,
+                            client: store.client
+                        )
                     } label: {
                         FocusRow(
                             label: label,
