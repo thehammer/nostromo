@@ -307,6 +307,14 @@ pub enum ClientMsg {
         job_id: String,
         action: MotherActionKind,
     },
+
+    /// Resume an awaiting Mother job by supplying the operator's answer.
+    /// The daemon shells out to `mother resume <job_id> <answer>` and
+    /// re-broadcasts a fresh `ServerMsg::MotherJobs` on completion.
+    MotherResume {
+        job_id: String,
+        answer: String,
+    },
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -698,6 +706,18 @@ mod tests {
         round_trip_client(ClientMsg::MotherAction {
             job_id: "job-789".into(),
             action: MotherActionKind::ForceStart,
+        });
+    }
+
+    #[test]
+    fn mother_resume_round_trip() {
+        round_trip_client(ClientMsg::MotherResume {
+            job_id: "job-abc".into(),
+            answer: "yes, proceed with the migration".into(),
+        });
+        round_trip_client(ClientMsg::MotherResume {
+            job_id: "job-def".into(),
+            answer: "no".into(),
         });
     }
 

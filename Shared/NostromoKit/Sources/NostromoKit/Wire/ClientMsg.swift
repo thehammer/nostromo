@@ -134,3 +134,24 @@ public struct ClientMotherAction: Encodable {
         case action
     }
 }
+
+// MARK: - MotherResume
+
+/// Resume an awaiting Mother job by supplying the operator's answer.
+/// Mirrors `ClientMsg::MotherResume` in `src/ipc/protocol.rs`.
+public struct ClientMotherResume: Encodable {
+    let type_:         String = "mother_resume"
+    public let jobId:  String
+    public let answer: String
+
+    public init(jobId: String, answer: String) {
+        self.jobId  = jobId
+        self.answer = answer
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_  = "type"
+        case jobId  = "job_id"
+        case answer
+    }
+}

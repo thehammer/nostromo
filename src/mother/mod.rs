@@ -275,6 +275,19 @@ pub async fn force_start(id: &str) -> Result<()> {
     run_mother(&["force-start", "--yes", "--", id]).await
 }
 
+/// Resume an awaiting job by id, supplying the operator's answer.
+/// Shells out to `mother resume -- <id> <answer>`.
+///
+/// The `--` end-of-options separator ensures neither `id` nor `answer`
+/// can be misinterpreted as CLI flags by the `mother` binary, regardless
+/// of their content.  `id` is additionally validated by `validate_job_id`
+/// to reject leading-dash strings; `answer` is passed literally after `--`
+/// so arbitrary text is safe without further sanitization.
+pub async fn resume(id: &str, answer: &str) -> Result<()> {
+    validate_job_id(id)?;
+    run_mother(&["resume", "--", id, answer]).await
+}
+
 /// Reject job ids that look like CLI flags or contain unexpected characters.
 ///
 /// Mother job ids are UUID-like hex strings (e.g. `ab12cd34`).  Accepting

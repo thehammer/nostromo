@@ -86,6 +86,14 @@ public final class DaemonStore: ObservableObject {
         client.send(ClientMotherAction(jobId: jobId, action: action))
     }
 
+    /// Resume an awaiting Mother job by supplying the operator's answer.
+    ///
+    /// The daemon shells out to `mother resume <job_id> <answer>` and
+    /// re-broadcasts a fresh `mother_jobs` snapshot.
+    public func motherResume(jobId: String, answer: String) {
+        client.send(ClientMotherResume(jobId: jobId, answer: answer))
+    }
+
     // MARK: - Bindings
 
     private func bind() {

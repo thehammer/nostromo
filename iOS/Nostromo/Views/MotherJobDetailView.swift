@@ -3,6 +3,9 @@
 // Phase 4: Detail view for a single Mother job.
 // Shows metadata, timestamps, PR link, and action controls
 // (cancel / retry / force-start) appropriate to the job's current state.
+//
+// Phase 5: Adds an answer UI for awaiting jobs — shows the question text and
+// a submit control so the operator can resume the job from the phone.
 
 import SwiftUI
 import NostromoKit
@@ -14,6 +17,7 @@ struct MotherJobDetailView: View {
     @State private var showCancelConfirm     = false
     @State private var showRetryConfirm      = false
     @State private var showForceStartConfirm = false
+    @State private var answerText            = ""
 
     var body: some View {
         Form {
@@ -54,6 +58,21 @@ struct MotherJobDetailView: View {
             if let prUrl = job.prUrl, let url = URL(string: prUrl) {
                 Section("Pull Request") {
                     Link("Open PR", destination: url)
+                }
+            }
+
+            // MARK: Await Question (awaiting state only)
+            if job.state == "awaiting" {
+                Section("Question") {
+                    Text(job.question ?? "This job is waiting for your input.")
+                        .foregroundStyle(.primary)
+                    TextField("Your answer…", text: $answerText, axis: .vertical)
+                        .lineLimit(3...)
+                    Button("Submit Answer") {
+                        store.motherResume(jobId: job.id, answer: answerText)
+                        answerText = ""
+                    }
+                    .disabled(answerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
 
@@ -171,7 +190,7 @@ struct MotherJobDetailView: View {
 
 // MARK: - Preview
 
-#Preview {
+#Preview("Running job") {
     NavigationStack {
         MotherJobDetailView(job: MotherJob(
             id: "preview-job",
@@ -183,6 +202,27 @@ struct MotherJobDetailView: View {
             createdAt: "2026-06-07T10:00:00Z",
             startedAt: "2026-06-07T10:01:00Z",
             finishedAt: nil
+        ))
+        .environmentObject({
+            let client = NetworkClient(host: "127.0.0.1", port: 47100)
+            return DaemonStore(client: client)
+        }())
+    }
+}
+
+#Preview("Awaiting answer") {
+    NavigationStack {
+        MotherJobDetailView(job: MotherJob(
+            id: "await-job",
+            state: "awaiting",
+            title: "Migrate user schema",
+            repo: "core",
+            branch: "feature/user-schema",
+            prUrl: nil,
+            createdAt: "2026-06-07T10:00:00Z",
+            startedAt: "2026-06-07T10:01:00Z",
+            finishedAt: nil,
+            question: "The migration adds a NOT NULL column to a 50M-row table. Should I use a backfill default or a nullable-then-backfill approach?"
         ))
         .environmentObject({
             let client = NetworkClient(host: "127.0.0.1", port: 47100)
