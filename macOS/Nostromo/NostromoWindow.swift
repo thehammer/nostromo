@@ -19,13 +19,12 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         }
     }
 
-    func windowWillExitFullScreen(_ notification: Notification) {
-        // Re-enter full screen immediately. This window lives in its Space —
-        // swiping away is fine (system gesture), but exiting to windowed mode isn't.
-        DispatchQueue.main.async { [weak self] in
-            self?.toggleFullScreen(nil)
-        }
-    }
+    // Note: we deliberately do NOT force re-entry on windowWillExitFullScreen.
+    // Calling toggleFullScreen here during the initial multi-screen startup
+    // sequence triggers a toggle loop (macOS fires this during entry transitions
+    // when multiple windows enter full-screen simultaneously), causing all windows
+    // to close and the app to quit cleanly. The window lives in its own Space;
+    // swiping away via Mission Control is fine — it stays in the Space.
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         // Traffic lights are hidden, but just in case: route close to quit.
