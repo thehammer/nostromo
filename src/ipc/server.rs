@@ -614,6 +614,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherJobs { .. } => topics.contains(&Topic::MotherJobs),
         ServerMsg::MotherStatusline(_) => topics.contains(&Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => topics.contains(&Topic::MotherJobs),
+        ServerMsg::MotherPeek { .. } => topics.contains(&Topic::MotherPeek),
         ServerMsg::TeriState { .. } => topics.contains(&Topic::Teri),
         ServerMsg::FocusRegistryUpdated { .. } => topics.contains(&Topic::Focuses),
         ServerMsg::PerriState { .. } => topics.contains(&Topic::Perri),

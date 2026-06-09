@@ -63,6 +63,7 @@ pub enum Topic {
     MotherJobs,
     MotherStatusline,
     Focuses,
+    MotherPeek,
     /// Perri PR review queue + current-PR snapshot broadcasts.
     Perri,
     Fred,
@@ -521,6 +522,19 @@ pub enum ServerMsg {
         focuses: Vec<FocusMeta>,
     },
 
+    /// Live peek snapshot for one active job. Polled every ~3 s while the
+    /// job is running or awaiting; a final snapshot is sent on terminal
+    /// transition (succeeded/failed/cancelled) with an empty todo list so
+    /// clients can clear the display.
+    MotherPeek {
+        job_id: String,
+        todos: Vec<crate::mother::PeekTodo>,
+        /// Last 3 tool calls (tool name + brief).
+        tool_trail: Vec<crate::mother::PeekToolCall>,
+        /// Most recent assistant text snippet (first 200 chars).
+        last_text: String,
+    },
+
     /// TUI-internal pseudo-event — **never produced by the daemon**.
     ///
     /// Injected locally by the [`DaemonClient`] supervisor immediately after a
@@ -806,6 +820,43 @@ mod tests {
             serde_json::to_string(&MotherActionKind::Archive).unwrap(),
             "\"archive\""
         );
+    }
+
+    #[test]
+    fn mother_peek_round_trip_with_todos() {
+        use crate::mother::{PeekTodo, PeekToolCall};
+        round_trip_server(ServerMsg::MotherPeek {
+            job_id: "job-abc123".into(),
+            todos: vec![
+                PeekTodo { status: "completed".into(), content: "Add Rust protocol variant".into() },
+                PeekTodo { status: "in_progress".into(), content: "Add NostromoKit wire types".into() },
+                PeekTodo { status: "pending".into(), content: "Add iOS tab".into() },
+            ],
+            tool_trail: vec![
+                PeekToolCall { tool: "Read".into(), brief: "src/ipc/protocol.rs".into() },
+                PeekToolCall { tool: "Edit".into(), brief: "add MotherPeek variant".into() },
+            ],
+            last_text: "Implementing the MotherPeek broadcast".into(),
+        });
+        // Assert the type tag serialises correctly.
+        let json = serde_json::to_value(ServerMsg::MotherPeek {
+            job_id: "j".into(),
+            todos: vec![],
+            tool_trail: vec![],
+            last_text: "".into(),
+        })
+        .unwrap();
+        assert_eq!(json.get("type").unwrap(), "mother_peek");
+    }
+
+    #[test]
+    fn mother_peek_round_trip_empty_terminal_clear() {
+        round_trip_server(ServerMsg::MotherPeek {
+            job_id: "job-xyz".into(),
+            todos: vec![],
+            tool_trail: vec![],
+            last_text: String::new(),
+        });
     }
 
     #[test]

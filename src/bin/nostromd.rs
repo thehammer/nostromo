@@ -160,7 +160,12 @@ async fn main() -> Result<()> {
 
     // ── Mother pollers ────────────────────────────────────────────────────────
     let btx_mother = broadcast_tx.clone();
-    tokio::spawn(run_mother_pollers(btx_mother));
+    let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
+    tokio::spawn(run_mother_pollers(btx_mother, jobs_tx));
+
+    // ── Mother peek poller ────────────────────────────────────────────────────
+    let btx_peek = broadcast_tx.clone();
+    tokio::spawn(run_peek_poller(btx_peek, jobs_rx));
 
     // ── Fred broadcaster ──────────────────────────────────────────────────────
     let btx_fred = broadcast_tx.clone();
@@ -194,9 +199,12 @@ async fn main() -> Result<()> {
 
 // ── mother pollers ────────────────────────────────────────────────────────────
 
-async fn run_mother_pollers(tx: broadcast::Sender<ServerMsg>) {
+async fn run_mother_pollers(
+    tx: broadcast::Sender<ServerMsg>,
+    jobs_tx: tokio::sync::watch::Sender<Vec<nostromo::mother::MotherJob>>,
+) {
     let tx2 = tx.clone();
-    tokio::join!(run_statusline_watcher(tx), run_job_poller(tx2),);
+    tokio::join!(run_statusline_watcher(tx), run_job_poller(tx2, jobs_tx),);
 }
 
 async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
@@ -246,7 +254,10 @@ async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
     }
 }
 
-async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
+async fn run_job_poller(
+    tx: broadcast::Sender<ServerMsg>,
+    jobs_tx: tokio::sync::watch::Sender<Vec<nostromo::mother::MotherJob>>,
+) {
     let mut seen_awaiting: HashSet<String> = HashSet::new();
     let mut last_states: HashMap<String, String> = HashMap::new();
 
@@ -280,6 +291,9 @@ async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
                     last_states.insert(job.id.clone(), job.state.clone());
                 }
 
+                // Publish live job list to the peek poller.
+                let _ = jobs_tx.send(jobs.clone());
+
                 match tx.send(ServerMsg::MotherJobs { jobs }) {
                     Ok(n) => tracing::debug!(receivers = n, "MotherJobs broadcast sent"),
                     Err(_) => {
@@ -291,6 +305,65 @@ async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
             }
             Err(e) => {
                 tracing::warn!("mother list_jobs error: {e:#}");
+            }
+        }
+    }
+}
+
+// ── peek poller ───────────────────────────────────────────────────────────────
+
+/// Polls `mother peek` every 3 seconds for each active (running / awaiting) job
+/// and broadcasts `ServerMsg::MotherPeek` snapshots.
+///
+/// When a job transitions out of active state a final `MotherPeek` with empty
+/// todos / tool_trail / last_text is broadcast so clients can clear the display.
+async fn run_peek_poller(
+    tx: broadcast::Sender<ServerMsg>,
+    jobs_rx: tokio::sync::watch::Receiver<Vec<nostromo::mother::MotherJob>>,
+) {
+    let mut active: HashSet<String> = HashSet::new();
+
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+
+        // Snapshot the current job list.
+        let jobs = jobs_rx.borrow().clone();
+
+        let currently_active: HashSet<String> = jobs
+            .iter()
+            .filter(|j| j.state == "running" || j.state == "awaiting")
+            .map(|j| j.id.clone())
+            .collect();
+
+        // Send a terminal-clear for jobs that just left the active set.
+        for id in active.difference(&currently_active) {
+            let _ = tx.send(ServerMsg::MotherPeek {
+                job_id:     id.clone(),
+                todos:      vec![],
+                tool_trail: vec![],
+                last_text:  String::new(),
+            });
+        }
+
+        active = currently_active;
+
+        // Peek each active job and broadcast its snapshot.
+        for id in &active {
+            match mother::peek(id).await {
+                Ok(snap) => {
+                    let _ = tx.send(ServerMsg::MotherPeek {
+                        job_id:     id.clone(),
+                        todos:      snap.todos,
+                        tool_trail: snap.tool_trail,
+                        last_text:  snap.last_text.chars().take(200).collect(),
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!(job_id = %id, "peek error: {e:#}");
+                }
             }
         }
     }

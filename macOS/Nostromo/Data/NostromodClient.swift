@@ -26,6 +26,34 @@ private struct ClientSubscribe: Encodable {
     }
 }
 
+// MARK: - Mother peek wire types
+
+struct MotherPeekItem: Decodable {
+    let status: String
+    let content: String
+}
+
+struct MotherPeekTool: Decodable {
+    let tool: String
+    let brief: String
+}
+
+struct MotherPeekPayload {
+    let jobId:     String
+    let todos:     [MotherPeekItem]
+    let toolTrail: [MotherPeekTool]
+    let lastText:  String
+
+    var isEmpty: Bool { todos.isEmpty }
+}
+
+private struct MotherPeekResp: Decodable {
+    let job_id:     String
+    let todos:      [MotherPeekItem]
+    let tool_trail: [MotherPeekTool]
+    let last_text:  String
+}
+
 // MARK: - ServerMsg (inbound)
 
 enum ServerMsg {
@@ -33,6 +61,7 @@ enum ServerMsg {
     case activity(ActivityEvent)
     case motherJobs([MotherJob])
     case motherStatusline(MotherStatus)
+    case motherPeek(MotherPeekPayload)
     case pong
     case error(String)
     // ── persistent session responses (protocol v3) ──────────────────────────
@@ -350,7 +379,7 @@ class NostromodClient {
         // protocol v4 adds the focus registry push/pull family. The daemon holds
         // MIN_CLIENT_VERSION at 2, so the shipped GUI keeps working against older daemons.
         send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
-        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "perri", "fred", "teri"]))
+        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri"]))
     }
 
     // MARK: - Session commands (protocol v3)
@@ -508,6 +537,17 @@ class NostromodClient {
             return .error(json["message"] as? String ?? "unknown error")
 
         // ── persistent session responses (protocol v3) ──────────────────────
+        case "mother_peek":
+            if let m = try? decoder.decode(MotherPeekResp.self, from: raw) {
+                let payload = MotherPeekPayload(
+                    jobId:     m.job_id,
+                    todos:     m.todos,
+                    toolTrail: m.tool_trail,
+                    lastText:  m.last_text
+                )
+                return .motherPeek(payload)
+            }
+
         case "session_spawned":
             if let m = try? decoder.decode(SessionSpawnedResp.self, from: raw) {
                 return .sessionSpawned(tag: m.tag, sessionId: m.session_id)

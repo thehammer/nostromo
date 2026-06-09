@@ -32,6 +32,10 @@ public final class DaemonStore: ObservableObject {
     /// All known Mother jobs. Updated by `mother_jobs` broadcasts.
     @Published public private(set) var motherJobs: [MotherJob] = []
 
+    /// Live peek snapshots keyed by job id.  Updated by `mother_peek` broadcasts.
+    /// An entry is cleared when its todos array arrives empty (terminal transition).
+    @Published public private(set) var motherPeeks: [String: MotherPeekSnapshot] = [:]
+
     /// Perri PR review queue. Updated by `perri_state` broadcasts.
     @Published public private(set) var perriQueue: [PrQueueItem] = []
 
@@ -128,6 +132,7 @@ public final class DaemonStore: ObservableObject {
                     self?.sessions       = [:]
                     self?.focuses        = [:]
                     self?.motherJobs     = []
+                    self?.motherPeeks    = [:]
                     self?.perriQueue     = []
                     self?.perriCurrentPr = nil
                     self?.fredMailbox    = nil
@@ -219,6 +224,13 @@ public final class DaemonStore: ObservableObject {
 
         case .motherJobs(let jobs):
             motherJobs = jobs
+
+        case .motherPeek(let snap):
+            if snap.todos.isEmpty {
+                motherPeeks.removeValue(forKey: snap.jobId)
+            } else {
+                motherPeeks[snap.jobId] = snap
+            }
 
         case .perriState(let queue, let current):
             perriQueue     = queue

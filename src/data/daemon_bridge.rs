@@ -82,6 +82,8 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         // Focus registry messages are consumed by the Swift/iOS thin-client.
         | ServerMsg::FocusListResp { .. }
         | ServerMsg::FocusRegistryUpdated { .. }
+        // Peek snapshots are consumed by Swift clients (iOS + macOS).
+        | ServerMsg::MotherPeek { .. }
         // Perri state is consumed by the Swift/iOS thin-client via IPC broadcast.
         | ServerMsg::PerriState { .. }
         // Fred state is consumed by the Swift/iOS thin-client via the fred topic.

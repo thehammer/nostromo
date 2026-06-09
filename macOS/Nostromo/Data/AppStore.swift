@@ -19,6 +19,8 @@ class AppStore: ObservableObject {
     // Mother
     @Published private(set) var motherStatus:       MotherStatus = MotherStatus()
     @Published private(set) var motherJobs:         [MotherJob]  = []
+    /// Live peek snapshots keyed by job id. Cleared on disconnect and on terminal transition.
+    @Published private(set) var motherPeeks:        [String: MotherPeekPayload] = [:]
     /// True while the broker socket is connected (hello received + subscribe sent).
     @Published private(set) var brokerConnected:    Bool         = false
     /// Set on action failure; UI observes and clears after display.
@@ -207,8 +209,16 @@ class AppStore: ObservableObject {
                 // Archived jobs leave the queue entirely.
                 jobMap.removeValue(forKey: jobId)
             } else {
-                jobMap[jobId] = foldJobState(jobMap[jobId]!, eventKind: eventKind,
-                                             question: question, pausedReason: pausedReason, toState: toState)
+                let updated = foldJobState(jobMap[jobId]!, eventKind: eventKind,
+                                           question: question, pausedReason: pausedReason, toState: toState)
+                jobMap[jobId] = updated
+                // Clear peek snapshot on terminal transition — the daemon sends an
+                // empty clear too, but removing here avoids any flash between the
+                // state change and the next peek poll.
+                let terminalStates: Set<String> = ["succeeded", "failed", "cancelled"]
+                if terminalStates.contains(updated.state) {
+                    motherPeeks.removeValue(forKey: jobId)
+                }
             }
             publishJobsAndStatus()
 
@@ -218,6 +228,7 @@ class AppStore: ObservableObject {
         case .reconnected:
             // Clear stale state; next snapshot will repopulate
             jobMap.removeAll()
+            motherPeeks.removeAll()
             publishJobsAndStatus()
         }
     }
@@ -468,6 +479,13 @@ class AppStore: ObservableObject {
             // Ignored — jobs now come from the broker
             log.debug("mother_jobs IPC message ignored (broker is source of truth)")
             _ = jobs
+
+        case .motherPeek(let payload):
+            if payload.isEmpty {
+                motherPeeks.removeValue(forKey: payload.jobId)
+            } else {
+                motherPeeks[payload.jobId] = payload
+            }
 
         case .motherStatusline:
             // Ignored — status now derived from broker job map

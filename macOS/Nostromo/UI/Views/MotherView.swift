@@ -450,6 +450,9 @@ private class MotherJobDetail: NSView {
     private let stateLabel      = NSTextField(labelWithString: "")
     private let phaseRibbonView = PhaseRibbonView()
     private var ribbonHeight:   NSLayoutConstraint!
+    /// Live todo list for running/awaiting jobs — hidden when no peek data.
+    private let todoStack       = NSStackView()
+    private var todoHeight:     NSLayoutConstraint!
     private let metaStack       = NSStackView()
     private let actionsContainer = NSView()  // rebuilt per job state
     private let logSectionLabel = NSTextField(labelWithString: "LOG TAIL")
@@ -515,7 +518,11 @@ private class MotherJobDetail: NSView {
         logScrollView.layer?.cornerRadius    = 4
         logScrollView.documentView = logTextView
 
-        for v in [titleLabel, stateLabel, phaseRibbonView, metaStack, actionsContainer,
+        todoStack.orientation = .vertical
+        todoStack.spacing     = 4
+        todoStack.alignment   = .leading
+
+        for v in [titleLabel, stateLabel, phaseRibbonView, todoStack, metaStack, actionsContainer,
                   logSectionLabel, logScrollView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
@@ -525,6 +532,10 @@ private class MotherJobDetail: NSView {
         ribbonHeight = phaseRibbonView.heightAnchor.constraint(equalToConstant: 0)
         ribbonHeight.isActive = true
 
+        // Todo stack height: 0 when empty, constrained by content otherwise
+        todoHeight = todoStack.heightAnchor.constraint(equalToConstant: 0)
+        todoHeight.isActive = true
+
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 20),
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
@@ -533,12 +544,17 @@ private class MotherJobDetail: NSView {
             stateLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
             stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
-            // Phase ribbon — sits between state label and meta; height is 0 when hidden
+            // Phase ribbon — sits between state label and todo list; height is 0 when hidden
             phaseRibbonView.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 8),
             phaseRibbonView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             phaseRibbonView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
-            metaStack.topAnchor.constraint(equalTo: phaseRibbonView.bottomAnchor, constant: 8),
+            // Todo stack — below ribbon, above meta rows
+            todoStack.topAnchor.constraint(equalTo: phaseRibbonView.bottomAnchor, constant: 8),
+            todoStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            todoStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+
+            metaStack.topAnchor.constraint(equalTo: todoStack.bottomAnchor, constant: 8),
             metaStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             metaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
@@ -583,6 +599,15 @@ private class MotherJobDetail: NSView {
             .receive(on: DispatchQueue.main)
             .compactMap { $0 }
             .sink { [weak self] msg in self?.showActionError(msg) }
+            .store(in: &cancellables)
+
+        // Observe live peek snapshots to update the todo list
+        AppStore.shared.$motherPeeks
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] peeks in
+                guard let self, let jobId = self.currentJobId else { return }
+                self.updateTodoList(peeks[jobId])
+            }
             .store(in: &cancellables)
     }
 
@@ -651,7 +676,7 @@ private class MotherJobDetail: NSView {
 
         guard let job else { showEmpty(); return }
 
-        [titleLabel, stateLabel, metaStack, actionsContainer,
+        [titleLabel, stateLabel, todoStack, metaStack, actionsContainer,
          logSectionLabel, logScrollView].forEach { $0.isHidden = false }
         emptyLabel.isHidden = true
 
@@ -660,6 +685,7 @@ private class MotherJobDetail: NSView {
         stateLabel.textColor   = stateColor(job.state)
 
         updateRibbon(job)
+        updateTodoList(AppStore.shared.motherPeeks[job.id])
         rebuildMeta(job)
         rebuildActions(job)
         loadLog(job)
@@ -675,7 +701,7 @@ private class MotherJobDetail: NSView {
     // MARK: Private
 
     private func showEmpty() {
-        [titleLabel, stateLabel, phaseRibbonView, metaStack, actionsContainer,
+        [titleLabel, stateLabel, phaseRibbonView, todoStack, metaStack, actionsContainer,
          logSectionLabel, logScrollView].forEach { $0.isHidden = true }
         emptyLabel.isHidden = false
     }
@@ -689,6 +715,74 @@ private class MotherJobDetail: NSView {
         } else {
             phaseRibbonView.isHidden = true
             ribbonHeight.constant    = 0
+        }
+    }
+
+    /// Rebuild the todo list rows from the latest peek payload.
+    /// Passing nil (or a payload with no todos) collapses the stack to zero height.
+    private func updateTodoList(_ payload: MotherPeekPayload?) {
+        todoStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        guard let todos = payload?.todos, !todos.isEmpty,
+              let state = currentJob?.state,
+              state == "running" || state == "awaiting"
+        else {
+            // Collapse: re-activate the zero-height constraint.
+            todoHeight.isActive = true
+            return
+        }
+
+        for todo in todos {
+            todoStack.addArrangedSubview(todoRow(todo))
+        }
+
+        // Let Auto Layout size the stack by its content.
+        todoHeight.isActive = false
+    }
+
+    private func todoRow(_ todo: MotherPeekItem) -> NSView {
+        let icon = NSTextField(labelWithString: todoIcon(todo.status))
+        icon.font      = .systemFont(ofSize: 11)
+        icon.textColor = todoIconColor(todo.status)
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let lbl = NSTextField(labelWithString: todo.content)
+        lbl.font          = .systemFont(ofSize: 11)
+        lbl.lineBreakMode = .byWordWrapping
+        lbl.maximumNumberOfLines = 3
+        if todo.status == "completed" {
+            lbl.textColor = Theme.fgMuted
+            // Strikethrough via attributed string
+            let attrs: [NSAttributedString.Key: Any] = [
+                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                .foregroundColor: Theme.fgMuted,
+                .font: NSFont.systemFont(ofSize: 11),
+            ]
+            lbl.attributedStringValue = NSAttributedString(string: todo.content, attributes: attrs)
+        } else {
+            lbl.textColor = Theme.fg
+        }
+
+        let row = NSStackView(views: [icon, lbl])
+        row.orientation = .horizontal
+        row.spacing     = 5
+        row.alignment   = .firstBaseline
+        return row
+    }
+
+    private func todoIcon(_ status: String) -> String {
+        switch status {
+        case "completed":   return "✓"
+        case "in_progress": return "⟳"
+        default:            return "○"
+        }
+    }
+
+    private func todoIconColor(_ status: String) -> NSColor {
+        switch status {
+        case "completed":   return Theme.sage
+        case "in_progress": return Theme.amber
+        default:            return Theme.fgMuted
         }
     }
 

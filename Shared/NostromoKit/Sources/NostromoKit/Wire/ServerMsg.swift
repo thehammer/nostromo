@@ -44,6 +44,11 @@ public enum ServerMsg {
     /// Broadcast snapshot of all Mother jobs.
     case motherJobs([MotherJob])
 
+    /// Live peek snapshot for one active Mother job.
+    /// Sent every ~3 s while a job is running or awaiting.
+    /// An empty `todos` array signals that the job left the active set (terminal clear).
+    case motherPeek(MotherPeekSnapshot)
+
     /// Broadcast snapshot of Perri's PR review queue + current-PR detail.
     case perriState(queue: [PrQueueItem], current: PrSnapshot?)
 
@@ -387,6 +392,11 @@ extension ServerMsg {
         case "mother_jobs":
             if let m = try? dec.decode(MotherJobsWrapper.self, from: data) {
                 return .motherJobs(m.jobs)
+            }
+
+        case "mother_peek":
+            if let snap = try? dec.decode(MotherPeekSnapshot.self, from: data) {
+                return .motherPeek(snap)
             }
 
         case "perri_state":
