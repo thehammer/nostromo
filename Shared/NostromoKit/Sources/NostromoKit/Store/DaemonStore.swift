@@ -38,6 +38,12 @@ public final class DaemonStore: ObservableObject {
     /// Perri current-PR detail snapshot. Updated by `perri_state` broadcasts.
     @Published public private(set) var perriCurrentPr: PrSnapshot? = nil
 
+    /// Fred mailbox snapshot. Updated by `fred_state` broadcasts; nil until first broadcast.
+    @Published public private(set) var fredMailbox: MailboxSnapshot? = nil
+
+    /// Fred calendar snapshot. Updated by `fred_state` broadcasts; nil until first broadcast.
+    @Published public private(set) var fredCalendar: CalendarSnapshot? = nil
+
     /// Daemon-served focus registry, keyed by tag.
     @Published public private(set) var focuses: [String: FocusMeta] = [:]
 
@@ -121,6 +127,8 @@ public final class DaemonStore: ObservableObject {
                     self?.motherJobs     = []
                     self?.perriQueue     = []
                     self?.perriCurrentPr = nil
+                    self?.fredMailbox    = nil
+                    self?.fredCalendar   = nil
                 }
             }
             .store(in: &cancellables)
@@ -211,6 +219,10 @@ public final class DaemonStore: ObservableObject {
         case .perriState(let queue, let current):
             perriQueue     = queue
             perriCurrentPr = current
+
+        case .fredState(let mailbox, let calendar):
+            fredMailbox  = mailbox
+            fredCalendar = calendar
 
         default:
             break

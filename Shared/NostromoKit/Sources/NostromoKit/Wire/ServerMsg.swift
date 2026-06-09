@@ -47,6 +47,9 @@ public enum ServerMsg {
     /// Broadcast snapshot of Perri's PR review queue + current-PR detail.
     case perriState(queue: [PrQueueItem], current: PrSnapshot?)
 
+    /// Broadcast snapshot of Fred's mailbox + calendar state.
+    case fredState(mailbox: MailboxSnapshot, calendar: CalendarSnapshot)
+
     case unknown
 }
 
@@ -297,6 +300,7 @@ extension ServerMsg {
     private struct FocusListWrapper:         Decodable { let focuses: [FocusMeta] }
     private struct MotherJobsWrapper:        Decodable { let jobs: [MotherJob] }
     private struct PerriStateWrapper:        Decodable { let queue: [PrQueueItem]; let current: PrSnapshot? }
+    private struct FredStateWrapper:         Decodable { let mailbox: MailboxSnapshot; let calendar: CalendarSnapshot }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -384,6 +388,11 @@ extension ServerMsg {
         case "perri_state":
             if let m = try? dec.decode(PerriStateWrapper.self, from: data) {
                 return .perriState(queue: m.queue, current: m.current)
+            }
+
+        case "fred_state":
+            if let m = try? dec.decode(FredStateWrapper.self, from: data) {
+                return .fredState(mailbox: m.mailbox, calendar: m.calendar)
             }
 
         default:

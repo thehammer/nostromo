@@ -8,6 +8,8 @@
 //!   `MotherStatusline`, and `MotherAwaitDetected` events.
 //! - Watches the Perri native sources and broadcasts `PerriState` events
 //!   whenever the PR queue or current-PR snapshot changes.
+//! - Spawns `FredMailboxNativeSource` + `FredCalendarNativeSource` and broadcasts
+//!   `FredState` on startup and whenever either watch channel changes.
 //! - Owns PTY processes on behalf of TUI clients so they survive TUI restarts.
 //! - Removes the socket file on clean exit (SIGTERM / SIGINT).
 
@@ -26,6 +28,10 @@ use nostromo::{
     agent_bus::{tail_activity_jsonl, ActivityEvent},
     config::Config,
     data::{
+        fred_calendar::CalendarSnapshot,
+        fred_calendar_native::FredCalendarNativeSource,
+        fred_mailbox::MailboxSnapshot,
+        fred_mailbox_native::FredMailboxNativeSource,
         perri_pr::PrSnapshot,
         perri_pr_native::PerriPrNativeSource,
         perri_queue::PrQueueSnapshot,
@@ -142,9 +148,17 @@ async fn main() -> Result<()> {
         perri_pr_rx,
     ));
 
+    // ── Fred background sources ───────────────────────────────────────────────
+    let fred_mailbox_rx  = FredMailboxNativeSource::spawn(config.clone());
+    let fred_calendar_rx = FredCalendarNativeSource::spawn(config.clone());
+
     // ── Mother pollers ────────────────────────────────────────────────────────
     let btx_mother = broadcast_tx.clone();
     tokio::spawn(run_mother_pollers(btx_mother));
+
+    // ── Fred broadcaster ──────────────────────────────────────────────────────
+    let btx_fred = broadcast_tx.clone();
+    tokio::spawn(run_fred_broadcaster(btx_fred, fred_mailbox_rx, fred_calendar_rx));
 
     // ── SIGTERM / SIGINT ──────────────────────────────────────────────────────
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -328,6 +342,39 @@ async fn run_perri_broadcaster(
     }
 
     tracing::debug!("perri broadcaster exiting — watch channels closed");
+}
+
+// ── Fred broadcaster ─────────────────────────────────────────────────────────
+
+/// Broadcast `FredState` on startup and whenever either Fred source changes.
+async fn run_fred_broadcaster(
+    tx: broadcast::Sender<ServerMsg>,
+    mut mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
+    mut calendar_rx: tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
+) {
+    // Send an initial frame so a client that connects after the first fetch
+    // still gets state. Clone the watch contents while borrowed, drop the
+    // borrow before send.
+    let _ = tx.send(build_fred_state(&mailbox_rx, &calendar_rx));
+    loop {
+        tokio::select! {
+            r = mailbox_rx.changed() => { if r.is_err() { break; } }
+            r = calendar_rx.changed() => { if r.is_err() { break; } }
+        }
+        // No-receiver send error is non-fatal (Nostromo may be closed).
+        let _ = tx.send(build_fred_state(&mailbox_rx, &calendar_rx));
+    }
+}
+
+/// Build a `FredState` from the current watch contents, substituting
+/// `default()` snapshots when a source has not produced data yet.
+fn build_fred_state(
+    mailbox_rx: &tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
+    calendar_rx: &tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
+) -> ServerMsg {
+    let mailbox  = mailbox_rx.borrow().clone().unwrap_or_default();
+    let calendar = calendar_rx.borrow().clone().unwrap_or_default();
+    ServerMsg::FredState { mailbox, calendar }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

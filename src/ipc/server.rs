@@ -616,6 +616,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherAwaitDetected(_) => topics.contains(&Topic::MotherJobs),
         ServerMsg::FocusRegistryUpdated { .. } => topics.contains(&Topic::Focuses),
         ServerMsg::PerriState { .. } => topics.contains(&Topic::Perri),
+        ServerMsg::FredState { .. } => topics.contains(&Topic::Fred),
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,

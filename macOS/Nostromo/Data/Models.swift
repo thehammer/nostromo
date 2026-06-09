@@ -620,3 +620,124 @@ struct PostureSnapshot {
                           resetsAt: resets, level: s["status"] as? String ?? "normal")
     }
 }
+
+// MARK: - Fred wire types (macOS-local; mirrors NostromoKit but not linked here)
+
+/// Mirrors `DeviceFlowPrompt` in `src/data/graph_client.rs`.
+struct DeviceFlowPrompt: Decodable {
+    let verificationUri: String
+    let userCode:        String
+    let expiresAt:       Date
+
+    enum CodingKeys: String, CodingKey {
+        case verificationUri = "verification_uri"
+        case userCode        = "user_code"
+        case expiresAt       = "expires_at"
+    }
+}
+
+/// Mirrors `MailboxItem` in `src/data/fred_mailbox.rs`.
+struct MailboxItem: Decodable, Identifiable {
+    let from:       String
+    let subject:    String
+    let receivedAt: Date?
+    let vip:        Bool
+    let isInvite:   Bool
+    let isRead:     Bool
+
+    var id: String { "\(from)|\(subject)|\(receivedAt?.timeIntervalSince1970 ?? 0)" }
+
+    enum CodingKeys: String, CodingKey {
+        case from
+        case subject
+        case receivedAt = "received_at"
+        case vip
+        case isInvite   = "is_invite"
+        case isRead     = "is_read"
+    }
+}
+
+/// Mirrors `MailboxSnapshot` in `src/data/fred_mailbox.rs`.
+struct MailboxSnapshot: Decodable {
+    let generatedAt:  Date?
+    let unreadCount:  Int
+    let items:        [MailboxItem]
+    let stale:        Bool
+    let error:        String?
+    let authPrompt:   DeviceFlowPrompt?
+
+    enum CodingKeys: String, CodingKey {
+        case generatedAt = "generated_at"
+        case unreadCount = "unread_count"
+        case items
+        case stale
+        case error
+        case authPrompt  = "auth_prompt"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c       = try decoder.container(keyedBy: CodingKeys.self)
+        generatedAt = try c.decodeIfPresent(Date.self,              forKey: .generatedAt)
+        unreadCount = try c.decodeIfPresent(Int.self,               forKey: .unreadCount) ?? 0
+        items       = try c.decodeIfPresent([MailboxItem].self,     forKey: .items)       ?? []
+        stale       = try c.decodeIfPresent(Bool.self,              forKey: .stale)       ?? false
+        error       = try c.decodeIfPresent(String.self,            forKey: .error)
+        authPrompt  = try c.decodeIfPresent(DeviceFlowPrompt.self,  forKey: .authPrompt)
+    }
+}
+
+/// Mirrors `CalendarEvent` in `src/data/fred_calendar.rs`.
+struct CalendarEvent: Decodable, Identifiable {
+    let start:  Date?
+    let end:    Date?
+    let title:  String
+    let status: String
+    let isNow:  Bool
+
+    var id: String { "\(title)|\(start?.timeIntervalSince1970 ?? 0)" }
+
+    enum CodingKeys: String, CodingKey {
+        case start
+        case end
+        case title
+        case status
+        case isNow = "is_now"
+    }
+}
+
+/// Mirrors `NextEvent` in `src/data/fred_calendar.rs`.
+struct NextEvent: Decodable {
+    let title:     String
+    let inMinutes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case title
+        case inMinutes = "in_minutes"
+    }
+}
+
+/// Mirrors `CalendarSnapshot` in `src/data/fred_calendar.rs`.
+struct CalendarSnapshot: Decodable {
+    let events:  [CalendarEvent]
+    let next:    NextEvent?
+    let sweater: String
+    let stale:   Bool
+    let error:   String?
+
+    enum CodingKeys: String, CodingKey {
+        case events
+        case next
+        case sweater
+        case stale
+        case error
+    }
+
+    init(from decoder: Decoder) throws {
+        let c   = try decoder.container(keyedBy: CodingKeys.self)
+        events  = try c.decodeIfPresent([CalendarEvent].self, forKey: .events) ?? []
+        next    = try c.decodeIfPresent(NextEvent.self,       forKey: .next)
+        sweater = try c.decodeIfPresent(String.self,          forKey: .sweater) ?? ""
+        stale   = try c.decodeIfPresent(Bool.self,            forKey: .stale)   ?? false
+        error   = try c.decodeIfPresent(String.self,          forKey: .error)
+    }
+}

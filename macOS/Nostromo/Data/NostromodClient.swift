@@ -50,6 +50,8 @@ enum ServerMsg {
     case sessionSummaryUpdate(tag: String, summary: String)
     /// Broadcast snapshot of Perri's PR review queue + current-PR detail.
     case perriState(queue: [PRQueueItem], current: PRDetail?)
+    /// Broadcast snapshot of Fred's mailbox + calendar state.
+    case fredState(mailbox: MailboxSnapshot, calendar: CalendarSnapshot)
     case unknown
 }
 
@@ -346,7 +348,7 @@ class NostromodClient {
         // protocol v4 adds the focus registry push/pull family. The daemon holds
         // MIN_CLIENT_VERSION at 2, so the shipped GUI keeps working against older daemons.
         send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
-        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "perri"]))
+        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "perri", "fred"]))
     }
 
     // MARK: - Session commands (protocol v3)
@@ -551,6 +553,11 @@ class NostromodClient {
                 return .perriState(queue: m.queue.map(\.asPRQueueItem), current: m.current)
             }
 
+        case "fred_state":
+            if let m = try? decoder.decode(FredStateResp.self, from: raw) {
+                return .fredState(mailbox: m.mailbox, calendar: m.calendar)
+            }
+
         default:
             break
         }
@@ -626,3 +633,5 @@ private struct PerriStateResp: Decodable {
         }
     }
 }
+
+private struct FredStateResp: Decodable { let mailbox: MailboxSnapshot; let calendar: CalendarSnapshot }

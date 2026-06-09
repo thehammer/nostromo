@@ -41,22 +41,33 @@ struct NostromoApp: App {
     }
 }
 
-/// Root content view — TabView with Sessions and Queue tabs.
+/// Root content view — TabView with Sessions, Queue, and Fred tabs.
 struct ContentView: View {
     @EnvironmentObject var store: DaemonStore
 
+    enum Tab: Hashable { case sessions, queue, perri, fred }
+    @State private var selection: Tab = .sessions
+
     var body: some View {
-        TabView {
+        TabView(selection: $selection) {
             SessionsTab()
+                .tag(Tab.sessions)
                 .tabItem { Label("Sessions", systemImage: "list.bullet.rectangle") }
 
             QueueTab()
+                .tag(Tab.queue)
                 .tabItem { Label("Queue", systemImage: "tray.full") }
                 .badge(activeJobCount)
 
             PerriTab()
+                .tag(Tab.perri)
                 .tabItem { Label("Perri", systemImage: "checkmark.seal") }
                 .badge(store.perriQueue.count)
+
+            FredTab(onStartAgent: { selection = .sessions })
+                .tag(Tab.fred)
+                .tabItem { Label("Fred", systemImage: "envelope") }
+                .badge(unreadCount)
         }
     }
 
@@ -64,6 +75,10 @@ struct ContentView: View {
         store.motherJobs.filter {
             ["running", "queued", "ready", "awaiting"].contains($0.state)
         }.count
+    }
+
+    private var unreadCount: Int {
+        store.fredMailbox?.unreadCount ?? 0
     }
 }
 
@@ -111,6 +126,19 @@ private struct PerriTab: View {
         NavigationStack {
             PerriView()
                 .navigationTitle("Perri")
+        }
+    }
+}
+
+// MARK: - FredTab
+
+private struct FredTab: View {
+    var onStartAgent: () -> Void = {}
+
+    var body: some View {
+        NavigationStack {
+            FredView(onStartAgent: onStartAgent)
+                .navigationTitle("Fred")
         }
     }
 }

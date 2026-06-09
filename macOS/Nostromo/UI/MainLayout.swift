@@ -163,7 +163,7 @@ class MainLayout: NSView {
         switch focus.id {
         case "mother": v = MotherView()
         case "perri":  v = PerriView()
-        case "fred":   v = AgentView(tag: "fred",  label: "Fred",  quickActions: [QuickAction.clearContext])
+        case "fred":   v = FredView()
         case "teri":   v = AgentView(tag: "teri",  label: "Teri",  quickActions: [QuickAction.clearContext])
         default:
             // Dynamic focuses: full-screen REPL, no split pane.
