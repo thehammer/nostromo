@@ -185,6 +185,7 @@ public final class NetworkClient: ObservableObject {
                 guard !Task.isCancelled else { return }
                 if let found = discovery.daemons.first {
                     log.info("Rediscovery found daemon: \(found.hostName, privacy: .public)")
+                    discovery.stop()
                     // Update stored host to the .local name for future reconnects.
                     self.host = found.hostName
                     // host's didSet calls reconnect() which calls openConnection().
