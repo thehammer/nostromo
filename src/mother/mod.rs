@@ -345,13 +345,13 @@ pub async fn add_plan(plan_path: &Path) -> Result<()> {
 
 // ── peek types ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 pub struct PeekTodo {
     pub status: String,
     pub content: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 pub struct PeekToolCall {
     pub tool: String,
     pub brief: String,

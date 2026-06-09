@@ -61,6 +61,15 @@ struct MotherJobDetailView: View {
                 }
             }
 
+            // MARK: Live progress (running + awaiting only)
+            if (job.state == "running" || job.state == "awaiting"),
+               let peek = store.motherPeeks[job.id],
+               !peek.todos.isEmpty {
+                Section("Progress") {
+                    NostromoKit.MotherTodoList(todos: peek.todos)
+                }
+            }
+
             // MARK: Await Question (awaiting state only)
             if job.state == "awaiting" {
                 Section("Question") {
