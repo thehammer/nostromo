@@ -1,4 +1,7 @@
 import AppKit
+import os
+
+private let appLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "AppDelegate")
 
 class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -6,6 +9,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowsByScreenNumber: [Int: NostromoWindow] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        appLog.info("applicationDidFinishLaunching — pid=\(ProcessInfo.processInfo.processIdentifier, privacy: .public) screens=\(NSScreen.screens.count, privacy: .public)")
+
         // Enforce single instance: if another Nostromo process is already running,
         // signal it to come forward and exit self.
         let others = NSRunningApplication.runningApplications(
@@ -13,6 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ).filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
 
         if !others.isEmpty {
+            appLog.warning("Another Nostromo already running (pid=\(others.first?.processIdentifier ?? -1, privacy: .public)) — activating it and quitting self")
             others.first?.activate()
             NSApp.terminate(nil)
             return
@@ -20,6 +26,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupMenu()
         AppStore.shared.start()
+        appLog.info("Opening windows for \(NSScreen.screens.count, privacy: .public) screen(s)")
         for (index, screen) in NSScreen.screens.enumerated() {
             openWindow(for: screen, index: index)
         }
@@ -40,15 +47,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        appLog.warning("applicationWillTerminate — saving state")
         FocusStore.shared.save()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        appLog.info("applicationShouldHandleReopen — hasVisibleWindows=\(flag, privacy: .public) windowCount=\(self.windows.count, privacy: .public)")
         windows.forEach { $0.makeKeyAndOrderFront(nil) }
         return false
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        appLog.warning("applicationShouldTerminateAfterLastWindowClosed — returning true, windowCount=\(self.windows.count, privacy: .public)")
         return true
     }
 
@@ -154,5 +164,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let win = notification.object as? NostromoWindow else { return }
         windows.removeAll { $0 === win }
         windowsByScreenNumber = windowsByScreenNumber.filter { $0.value !== win }
+        appLog.warning("windowWillClose — remaining windows=\(self.windows.count, privacy: .public)")
     }
 }
