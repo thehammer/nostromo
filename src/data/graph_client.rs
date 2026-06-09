@@ -82,6 +82,10 @@ pub struct GraphClient {
     cache_path: PathBuf,
     client_id: String,
     tenant: String,
+    /// True while a device-flow poll task is in flight. Prevents spawning
+    /// multiple concurrent poll tasks (each with its own device code) when
+    /// `ensure_authed` is called repeatedly while sign-in is pending.
+    device_flow_active: Arc<Mutex<bool>>,
 }
 
 impl GraphClient {
@@ -100,6 +104,7 @@ impl GraphClient {
             cache_path,
             client_id,
             tenant,
+            device_flow_active: Arc::new(Mutex::new(false)),
         })
     }
 
@@ -141,6 +146,12 @@ impl GraphClient {
             return Ok(None);
         }
 
+        {
+            let active = self.device_flow_active.lock().await;
+            if *active {
+                return Ok(None);
+            }
+        }
         let prompt = self.start_device_flow().await?;
         Ok(Some(prompt))
     }
@@ -353,6 +364,8 @@ impl GraphClient {
             expires_at,
         };
 
+        *self.device_flow_active.lock().await = true;
+
         // Spawn background poll task.
         let client = self.clone();
         let device_code = dc.device_code.clone();
@@ -425,6 +438,7 @@ impl GraphClient {
                 break;
             }
         }
+        *self.device_flow_active.lock().await = false;
     }
 }
 
