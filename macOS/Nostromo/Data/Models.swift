@@ -395,6 +395,47 @@ struct PRDetail: Decodable {
     }
 }
 
+// MARK: - Teri todos (macOS-local decode types; separate from NostromoKit wire types)
+
+/// macOS-local mirror of `TeriTodo` in `src/data/teri_todos.rs`.
+/// Decoded from the `teri_state` daemon message.  Separate from NostromoKit's
+/// wire type so macOS does not depend on NostromoKit for decoding.
+struct TeriTodo: Decodable, Identifiable {
+    let id:       Int
+    let title:    String
+    let status:   String          // "open" | "in_progress" | "blocked"
+    let priority: Int             // 1...5
+    let dueDate:  String?         // ISO date string (yyyy-MM-dd)
+    let jiraKey:  String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, status, priority
+        case dueDate  = "due_date"
+        case jiraKey  = "jira_key"
+    }
+}
+
+/// macOS-local mirror of `TeriTodosSnapshot` in `src/data/teri_todos.rs`.
+struct TeriTodosSnapshot: Decodable {
+    let generatedAt: String?
+    let items:       [TeriTodo]
+    let stale:       Bool
+    let error:       String?
+
+    enum CodingKeys: String, CodingKey {
+        case generatedAt = "generated_at"
+        case items, stale, error
+    }
+
+    init(from d: Decoder) throws {
+        let c    = try d.container(keyedBy: CodingKeys.self)
+        generatedAt = try? c.decodeIfPresent(String.self,  forKey: .generatedAt)
+        items       = (try? c.decode([TeriTodo].self,      forKey: .items))  ?? []
+        stale       = (try? c.decode(Bool.self,            forKey: .stale))  ?? false
+        error       = try? c.decodeIfPresent(String.self,  forKey: .error)
+    }
+}
+
 // MARK: - Activity
 
 struct ActivityEvent: Decodable {

@@ -1,5 +1,7 @@
 import AppKit
 import Combine
+import NostromoKit
+import SwiftUI
 
 /// Root content view — vertical nav sidebar (left), content area (right of sidebar),
 /// pace bars (just above status bar), status bar (bottom of content area).
@@ -164,7 +166,7 @@ class MainLayout: NSView {
         case "mother": v = MotherView()
         case "perri":  v = PerriView()
         case "fred":   v = FredView()
-        case "teri":   v = AgentView(tag: "teri",  label: "Teri",  quickActions: [QuickAction.clearContext])
+        case "teri":   v = TeriView()
         default:
             // Dynamic focuses: full-screen REPL, no split pane.
             // sessionTag keys the session; agentTag is the --agent name.
@@ -303,5 +305,177 @@ private class AgentView: NSView, NSSplitViewDelegate {
               let h = split.subviews.first?.frame.height, h > 10 else { return }
         UserDefaults.standard.set(h, forKey: udKey)
         UserDefaults.standard.synchronize()
+    }
+}
+
+// MARK: - TeriView
+
+/// Teri agent view — todos panel (left, ~40%) + Teri REPL (right, ~60%), draggable vertical split.
+///
+/// The todos panel is an NSHostingView wrapping a small SwiftUI list that observes
+/// AppStore.shared.teriTodos.  The REPL panel reuses the existing ReplView/PTY plumbing.
+private class TeriView: NSView, NSSplitViewDelegate {
+
+    private let split = DarkSplitView()
+    private var didSetInitialPosition = false
+    private var isReadyToSave        = false
+    private static let udKey = "nostromo.teri.todosWidth"
+
+    override init(frame: NSRect) { super.init(frame: frame); setup() }
+    required init?(coder: NSCoder) { super.init(coder: coder); setup() }
+
+    private func setup() {
+        wantsLayer = true
+        layer?.backgroundColor = Theme.bg.cgColor
+
+        split.isVertical   = true       // vertical divider (left | right)
+        split.dividerStyle = .thin
+        split.delegate     = self
+        split.translatesAutoresizingMaskIntoConstraints = false
+
+        // ── Left: todos panel ────────────────────────────────────────────────
+        let todosPanel = NSHostingView(rootView: TeriTodosPanel())
+        todosPanel.translatesAutoresizingMaskIntoConstraints = false
+
+        // ── Right: REPL ──────────────────────────────────────────────────────
+        let repl = ReplView(tag: "teri", agentName: "teri", displayName: "Teri",
+                            quickActions: [QuickAction.clearContext])
+
+        split.addSubview(todosPanel)
+        split.addSubview(repl)
+        addSubview(split)
+
+        NSLayoutConstraint.activate([
+            split.topAnchor.constraint(equalTo: topAnchor),
+            split.leadingAnchor.constraint(equalTo: leadingAnchor),
+            split.trailingAnchor.constraint(equalTo: trailingAnchor),
+            split.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard !didSetInitialPosition, window != nil else { return }
+        didSetInitialPosition = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.bounds.width > 0 else { return }
+            let saved = UserDefaults.standard.double(forKey: Self.udKey)
+            let pos   = saved > 10 ? saved : self.bounds.width * 0.4
+            self.split.setPosition(pos, ofDividerAt: 0)
+            self.isReadyToSave = true
+        }
+    }
+
+    // MARK: NSSplitViewDelegate
+
+    func splitView(_ sv: NSSplitView, constrainMinCoordinate pos: CGFloat, ofSubviewAt idx: Int) -> CGFloat {
+        idx == 0 ? max(pos, 200) : pos
+    }
+    func splitView(_ sv: NSSplitView, constrainMaxCoordinate pos: CGFloat, ofSubviewAt idx: Int) -> CGFloat {
+        idx == 0 ? min(pos, sv.bounds.width - 300) : pos
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard isReadyToSave,
+              let w = split.subviews.first?.frame.width, w > 10 else { return }
+        UserDefaults.standard.set(w, forKey: Self.udKey)
+        UserDefaults.standard.synchronize()
+    }
+}
+
+// MARK: - TeriTodosPanel (SwiftUI list inside NSHostingView)
+
+/// SwiftUI todos list rendered inside the left pane of the macOS TeriView.
+private struct TeriTodosPanel: View {
+    @ObservedObject private var store = AppStore.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Panel header
+            HStack {
+                Text("Todos")
+                    .font(.headline)
+                Spacer()
+                if store.teriTodos?.stale == true {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                        .font(.caption)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
+
+            if let err = store.teriTodos?.error {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            }
+
+            if items.isEmpty {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "tray")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                    Text("No Todos")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            } else {
+                List {
+                    ForEach(items) { todo in
+                        NostromoKit.TeriTodoRow(model: rowModel(for: todo))
+                    }
+                }
+                .listStyle(.sidebar)
+            }
+        }
+        .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    /// Active todos sorted by priority ASC, then nulls-last on due_date, then due_date ASC.
+    private var items: [TeriTodo] {
+        guard let snap = store.teriTodos else { return [] }
+        return snap.items.sorted { lhs, rhs in
+            if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
+            switch (lhs.dueDate, rhs.dueDate) {
+            case (nil, nil):       return false
+            case (nil, _):         return false
+            case (_, nil):         return true
+            case (let l?, let r?): return l < r
+            }
+        }
+    }
+
+    private func rowModel(for todo: TeriTodo) -> TeriTodoRowModel {
+        TeriTodoRowModel(
+            id:          todo.id,
+            title:       todo.title,
+            priority:    todo.priority,
+            jiraKey:     todo.jiraKey,
+            relativeDue: relativeDue(for: todo.dueDate),
+            rawDueDate:  todo.dueDate
+        )
+    }
+
+    private func relativeDue(for dateStr: String?) -> String? {
+        guard let dateStr else { return nil }
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        fmt.timeZone   = .gmt
+        guard let date = fmt.date(from: dateStr) else { return nil }
+        let rel = RelativeDateTimeFormatter()
+        rel.unitsStyle = .abbreviated
+        return rel.localizedString(for: date, relativeTo: Date())
     }
 }

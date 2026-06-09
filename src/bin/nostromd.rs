@@ -36,6 +36,7 @@ use nostromo::{
         perri_pr_native::PerriPrNativeSource,
         perri_queue::PrQueueSnapshot,
         perri_queue_native::PerriQueueNativeSource,
+        teri_todos::TeriTodosNativeSource,
     },
     ipc::{protocol::ServerMsg, PtyManager, Server, SessionManager},
     mother::{self, statusline_cache_path, MotherStatus},
@@ -151,6 +152,11 @@ async fn main() -> Result<()> {
     // ── Fred background sources ───────────────────────────────────────────────
     let fred_mailbox_rx  = FredMailboxNativeSource::spawn(config.clone());
     let fred_calendar_rx = FredCalendarNativeSource::spawn(config.clone());
+
+    // ── Teri todos source + broadcaster ───────────────────────────────────────
+    let teri_todos_rx = TeriTodosNativeSource::spawn();
+    let btx_teri = broadcast_tx.clone();
+    tokio::spawn(run_teri_broadcaster(teri_todos_rx, btx_teri));
 
     // ── Mother pollers ────────────────────────────────────────────────────────
     let btx_mother = broadcast_tx.clone();
@@ -375,6 +381,26 @@ fn build_fred_state(
     let mailbox  = mailbox_rx.borrow().clone().unwrap_or_default();
     let calendar = calendar_rx.borrow().clone().unwrap_or_default();
     ServerMsg::FredState { mailbox, calendar }
+}
+
+// ── teri broadcaster ──────────────────────────────────────────────────────────
+
+/// Watch the `TeriTodosNativeSource` channel and broadcast a `TeriState` frame
+/// whenever the snapshot changes.  The first emission covers the initial poll.
+async fn run_teri_broadcaster(
+    mut rx: tokio::sync::watch::Receiver<Option<nostromo::data::teri_todos::TeriTodosSnapshot>>,
+    tx: broadcast::Sender<ServerMsg>,
+) {
+    loop {
+        // Emit the current value first (covers the initial snapshot), then wait
+        // for the next change before emitting again.
+        if let Some(snap) = rx.borrow_and_update().clone() {
+            let _ = tx.send(ServerMsg::TeriState { todos: snap });
+        }
+        if rx.changed().await.is_err() {
+            break; // sender dropped — daemon shutting down
+        }
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

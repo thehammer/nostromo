@@ -41,11 +41,11 @@ struct NostromoApp: App {
     }
 }
 
-/// Root content view — TabView with Sessions, Queue, and Fred tabs.
+/// Root content view — TabView with Sessions, Queue, Perri, Fred, and Teri tabs.
 struct ContentView: View {
     @EnvironmentObject var store: DaemonStore
 
-    enum Tab: Hashable { case sessions, queue, perri, fred }
+    enum Tab: Hashable { case sessions, queue, perri, fred, teri }
     @State private var selection: Tab = .sessions
 
     var body: some View {
@@ -68,6 +68,11 @@ struct ContentView: View {
                 .tag(Tab.fred)
                 .tabItem { Label("Fred", systemImage: "envelope") }
                 .badge(unreadCount)
+
+            TeriTab()
+                .tag(Tab.teri)
+                .tabItem { Label("Teri", systemImage: "checklist") }
+                .badge(openTodoCount)
         }
     }
 
@@ -79,6 +84,11 @@ struct ContentView: View {
 
     private var unreadCount: Int {
         store.fredMailbox?.unreadCount ?? 0
+    }
+
+    /// Count of active todos for the tab badge.
+    private var openTodoCount: Int {
+        store.teriTodos?.items.count ?? 0
     }
 }
 
@@ -139,6 +149,17 @@ private struct FredTab: View {
         NavigationStack {
             FredView(onStartAgent: onStartAgent)
                 .navigationTitle("Fred")
+        }
+    }
+}
+
+// MARK: - TeriTab
+
+private struct TeriTab: View {
+    var body: some View {
+        NavigationStack {
+            TeriView()
+                .navigationTitle("Teri")
         }
     }
 }

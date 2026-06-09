@@ -12,7 +12,7 @@ use rusqlite::{Connection, OpenFlags};
 use tokio::sync::watch;
 use tracing::warn;
 
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TeriTodosSnapshot {
     pub generated_at: Option<DateTime<Utc>>,
     pub items: Vec<TeriTodo>,
@@ -20,7 +20,7 @@ pub struct TeriTodosSnapshot {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TeriTodo {
     pub id: i64,
     pub title: String,
