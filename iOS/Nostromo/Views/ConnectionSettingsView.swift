@@ -69,7 +69,7 @@ struct ConnectionSettingsView: View {
                 } header: {
                     Text("Daemon Connection")
                 } footer: {
-                    Text("Enter the LAN IP address of the Mac running nostromd. The default port is 47100.")
+                    Text("Discovery normally finds nostromd automatically. Enter a host manually only if your network blocks Bonjour. Use the Mac's `.local` name (e.g. `hostname.local`) or its LAN IP. Default port is 47100.")
                 }
 
                 if let errorMsg {

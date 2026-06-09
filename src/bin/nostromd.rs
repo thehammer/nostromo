@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
+use nostromo::mdns;
 use tracing_appender::rolling;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -100,6 +101,21 @@ async fn main() -> Result<()> {
     }
 
     server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr));
+
+    // ── mDNS / Bonjour advertising ────────────────────────────────────────────
+    // Advertise nostromd on the LAN so iOS clients can discover it without a
+    // hardcoded IP.  Failure is non-fatal: some sandboxed or enterprise
+    // environments block multicast.  The guard MUST outlive the select! below.
+    let _mdns_guard = match mdns::advertise(bound_tcp_addr.port()) {
+        Ok(guard) => {
+            info!(port = bound_tcp_addr.port(), "mDNS advertising started (_nostromo._tcp.local.)");
+            Some(guard)
+        }
+        Err(e) => {
+            warn!("mDNS advertising unavailable (non-fatal): {e:#}");
+            None
+        }
+    };
 
     // ── Session crash-recovery supervisor ──────────────────────────────────────
     {

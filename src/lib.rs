@@ -3,6 +3,7 @@
 use clap::ValueEnum;
 
 pub mod agent_bus;
+pub mod mdns;
 pub mod app;
 pub mod config;
 pub mod data;
