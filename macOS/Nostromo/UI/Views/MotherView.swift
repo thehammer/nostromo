@@ -278,19 +278,34 @@ private struct MotherJobListSwiftUI: View {
             ForEach(groupedJobs) { group in
                 Section(group.state.uppercased()) {
                     ForEach(group.jobs, id: \.id) { job in
+                        // On macOS, swipe actions in NSHostingView don't fire reliably —
+                        // pass empty callbacks so no swipe buttons appear; actions are
+                        // surfaced via .contextMenu instead.
                         NostromoKit.MotherJobRow(
                             model: vm.rowModel(for: job),
-                            onArchive:    { AppStore.shared.archiveJob(job.id)     },
-                            onCancel:     { AppStore.shared.cancelJob(job.id)      },
-                            onRetry:      { AppStore.shared.retryJob(job.id)       },
-                            onForceStart: { AppStore.shared.forceStartJob(job.id)  }
+                            onArchive:    {},
+                            onCancel:     {},
+                            onRetry:      {},
+                            onForceStart: {}
                         )
                         .tag(job.id)
+                        .contextMenu {
+                            let m = vm.rowModel(for: job)
+                            if m.isDone {
+                                Button("Archive") { AppStore.shared.archiveJob(job.id) }
+                            } else {
+                                Button("Cancel Job")     { AppStore.shared.cancelJob(job.id) }
+                                Button("Force Start")    { AppStore.shared.forceStartJob(job.id) }
+                            }
+                            if job.state == "failed" || job.state == "cancelled" {
+                                Button("Retry") { AppStore.shared.retryJob(job.id) }
+                            }
+                        }
                     }
                 }
             }
         }
-        .listStyle(.sidebar)
+        .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Color(nsColor: Theme.bg))
         .overlay {
@@ -344,6 +359,7 @@ private class MotherJobList: NSView {
         super.init(frame: frame)
         let swiftUIView = MotherJobListSwiftUI(vm: viewModel)
         hostingView = NSHostingView(rootView: swiftUIView)
+        hostingView.appearance = NSAppearance(named: .darkAqua)
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(hostingView)
         NSLayoutConstraint.activate([
@@ -464,6 +480,7 @@ private class MotherJobDetail: NSView {
     private func setup() {
         wantsLayer = true
         layer?.backgroundColor = Theme.bg.cgColor
+        appearance = NSAppearance(named: .darkAqua)
 
         titleLabel.font               = .systemFont(ofSize: 16, weight: .medium)
         titleLabel.textColor          = Theme.fg

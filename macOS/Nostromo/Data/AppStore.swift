@@ -199,12 +199,17 @@ class AppStore: ObservableObject {
             publishJobsAndStatus()
 
         case .stateChange(let jobId, let eventKind, let question, let pausedReason, let toState):
-            guard let existing = jobMap[jobId] else {
+            guard jobMap[jobId] != nil else {
                 log.debug("broker stateChange for unknown job \(jobId.prefix(8), privacy: .public) — ignoring")
                 return
             }
-            jobMap[jobId] = foldJobState(existing, eventKind: eventKind,
-                                         question: question, pausedReason: pausedReason, toState: toState)
+            if eventKind == "archived" {
+                // Archived jobs leave the queue entirely.
+                jobMap.removeValue(forKey: jobId)
+            } else {
+                jobMap[jobId] = foldJobState(jobMap[jobId]!, eventKind: eventKind,
+                                             question: question, pausedReason: pausedReason, toState: toState)
+            }
             publishJobsAndStatus()
 
         case .ping:
