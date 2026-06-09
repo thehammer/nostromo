@@ -66,6 +66,7 @@ pub enum Topic {
     /// Perri PR review queue + current-PR snapshot broadcasts.
     Perri,
     Fred,
+    Teri,
 }
 
 /// Metadata about a daemon-owned PTY.
@@ -353,6 +354,10 @@ pub enum ServerMsg {
         jobs: Vec<MotherJob>,
     },
     MotherStatusline(MotherStatus),
+    /// Broadcast snapshot of Teri's active todos.
+    TeriState {
+        todos: crate::data::teri_todos::TeriTodosSnapshot,
+    },
     /// A job transitioned into `awaiting` — daemon fires this once per
     /// transition (same logic as the in-process `mother_poll`).
     /// Boxed: `MotherJob` is the largest payload in this enum (esp. with
@@ -695,6 +700,33 @@ mod tests {
             tag: "fred".into(),
             summary: "Build the auth flow".into(),
         });
+    }
+
+    #[test]
+    fn teri_state_round_trips() {
+        use crate::data::teri_todos::{TeriTodo, TeriTodosSnapshot};
+        let snap = TeriTodosSnapshot {
+            generated_at: None,
+            items: vec![TeriTodo {
+                id: 1,
+                title: "Write the Teri broadcast".into(),
+                status: "open".into(),
+                priority: 1,
+                due_date: Some("2026-07-01".into()),
+                jira_key: Some("CORE-123".into()),
+            }],
+            stale: false,
+            error: None,
+        };
+        round_trip_server(ServerMsg::TeriState { todos: snap });
+    }
+
+    #[test]
+    fn topic_teri_serializes_to_teri() {
+        assert_eq!(
+            serde_json::to_string(&Topic::Teri).unwrap(),
+            "\"teri\""
+        );
     }
 
     #[test]

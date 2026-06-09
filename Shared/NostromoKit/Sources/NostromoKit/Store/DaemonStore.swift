@@ -44,6 +44,9 @@ public final class DaemonStore: ObservableObject {
     /// Fred calendar snapshot. Updated by `fred_state` broadcasts; nil until first broadcast.
     @Published public private(set) var fredCalendar: CalendarSnapshot? = nil
 
+    /// Latest Teri todos snapshot. Updated by `teri_state` broadcasts.
+    @Published public private(set) var teriTodos: TeriTodosSnapshot? = nil
+
     /// Daemon-served focus registry, keyed by tag.
     @Published public private(set) var focuses: [String: FocusMeta] = [:]
 
@@ -129,6 +132,7 @@ public final class DaemonStore: ObservableObject {
                     self?.perriCurrentPr = nil
                     self?.fredMailbox    = nil
                     self?.fredCalendar   = nil
+                    self?.teriTodos      = nil
                 }
             }
             .store(in: &cancellables)
@@ -223,6 +227,9 @@ public final class DaemonStore: ObservableObject {
         case .fredState(let mailbox, let calendar):
             fredMailbox  = mailbox
             fredCalendar = calendar
+
+        case .teriState(let snap):
+            teriTodos = snap
 
         default:
             break

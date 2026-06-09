@@ -85,7 +85,9 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         // Perri state is consumed by the Swift/iOS thin-client via IPC broadcast.
         | ServerMsg::PerriState { .. }
         // Fred state is consumed by the Swift/iOS thin-client via the fred topic.
-        | ServerMsg::FredState { .. } => {}
+        | ServerMsg::FredState { .. }
+        // Teri todos are consumed by the Swift thin-clients.
+        | ServerMsg::TeriState { .. } => {}
         // DaemonReconnected is handled by individual DaemonPtyClient subscribers.
         ServerMsg::DaemonReconnected => {}
         // Control messages — no action needed.

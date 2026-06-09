@@ -50,6 +50,9 @@ public enum ServerMsg {
     /// Broadcast snapshot of Fred's mailbox + calendar state.
     case fredState(mailbox: MailboxSnapshot, calendar: CalendarSnapshot)
 
+    /// Broadcast snapshot of Teri's active todos.
+    case teriState(TeriTodosSnapshot)
+
     case unknown
 }
 
@@ -301,6 +304,7 @@ extension ServerMsg {
     private struct MotherJobsWrapper:        Decodable { let jobs: [MotherJob] }
     private struct PerriStateWrapper:        Decodable { let queue: [PrQueueItem]; let current: PrSnapshot? }
     private struct FredStateWrapper:         Decodable { let mailbox: MailboxSnapshot; let calendar: CalendarSnapshot }
+    private struct TeriStateWrapper:         Decodable { let todos: TeriTodosSnapshot }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -393,6 +397,11 @@ extension ServerMsg {
         case "fred_state":
             if let m = try? dec.decode(FredStateWrapper.self, from: data) {
                 return .fredState(mailbox: m.mailbox, calendar: m.calendar)
+            }
+
+        case "teri_state":
+            if let m = try? dec.decode(TeriStateWrapper.self, from: data) {
+                return .teriState(m.todos)
             }
 
         default:

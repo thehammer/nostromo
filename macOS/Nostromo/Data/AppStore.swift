@@ -31,6 +31,9 @@ class AppStore: ObservableObject {
     // Activity
     @Published private(set) var recentActivity: [ActivityEvent] = []
 
+    // Teri todos
+    @Published private(set) var teriTodos:            TeriTodosSnapshot? = nil
+
     // Perri PR queue
     @Published private(set) var perriQueue:          [PRQueueItem]  = []
     @Published private(set) var perriQueueStale:     Bool           = false
@@ -506,6 +509,9 @@ class AppStore: ObservableObject {
         case .fredState(let mailbox, let calendar):
             fredMailbox  = mailbox
             fredCalendar = calendar
+
+        case .teriState(let snap):
+            teriTodos = snap
 
         case .sessionSpawned, .sessionTurns, .sessionTurnDelta,
              .sessionPermissionRequest, .sessionExited:
