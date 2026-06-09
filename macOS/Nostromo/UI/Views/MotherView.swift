@@ -290,7 +290,7 @@ private struct MotherJobListSwiftUI: View {
                 }
             }
         }
-        .listStyle(.sidebar)
+        .listStyle(.inset)
         .scrollContentBackground(.hidden)
         .background(Color(nsColor: Theme.bg))
         .overlay {
@@ -344,6 +344,7 @@ private class MotherJobList: NSView {
         super.init(frame: frame)
         let swiftUIView = MotherJobListSwiftUI(vm: viewModel)
         hostingView = NSHostingView(rootView: swiftUIView)
+        hostingView.sizingOptions = [.minSize, .intrinsicContentSize]  // allow horizontal scroll events to reach SwiftUI
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(hostingView)
         NSLayoutConstraint.activate([
