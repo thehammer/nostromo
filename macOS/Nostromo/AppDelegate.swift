@@ -3,13 +3,40 @@ import AppKit
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     private(set) var windows: [NostromoWindow] = []
+    private var windowsByScreenNumber: [Int: NostromoWindow] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Enforce single instance: if another Nostromo process is already running,
+        // signal it to come forward and exit self.
+        let others = NSRunningApplication.runningApplications(
+            withBundleIdentifier: Bundle.main.bundleIdentifier ?? ""
+        ).filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+
+        if !others.isEmpty {
+            others.first?.activate()
+            NSApp.terminate(nil)
+            return
+        }
+
         setupMenu()
         AppStore.shared.start()
         for (index, screen) in NSScreen.screens.enumerated() {
             openWindow(for: screen, index: index)
         }
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screensDidChange(_:)),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowWillClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: nil
+        )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -89,5 +116,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         windows.append(win)
+
+        if let screenNumber = screen.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+        ] as? Int {
+            windowsByScreenNumber[screenNumber] = win
+        }
+    }
+
+    // MARK: - Screen change handling
+
+    @objc private func screensDidChange(_ notification: Notification) {
+        let currentScreenNumbers = Set(NSScreen.screens.compactMap {
+            $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? Int
+        })
+
+        // Close windows whose screen has disappeared.
+        for (number, win) in windowsByScreenNumber where !currentScreenNumbers.contains(number) {
+            win.close()
+            windowsByScreenNumber.removeValue(forKey: number)
+            windows.removeAll { $0 === win }
+        }
+
+        // Open windows for newly connected screens.
+        for screen in NSScreen.screens {
+            guard let number = screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")
+            ] as? Int,
+            windowsByScreenNumber[number] == nil else { continue }
+
+            let index = windows.count
+            openWindow(for: screen, index: index)
+        }
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        guard let win = notification.object as? NostromoWindow else { return }
+        windows.removeAll { $0 === win }
+        windowsByScreenNumber = windowsByScreenNumber.filter { $0.value !== win }
     }
 }
