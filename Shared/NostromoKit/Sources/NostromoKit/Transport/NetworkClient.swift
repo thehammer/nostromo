@@ -50,6 +50,10 @@ public final class NetworkClient: ObservableObject {
     private let encoder = JSONEncoder()
 
     private var reconnectTask: Task<Void, Never>?
+    private var pingTask:      Task<Void, Never>?
+
+    /// Interval between keepalive pings. NWConnection idles out at ~6s without traffic.
+    private let pingInterval: TimeInterval = 3.0
 
     // MARK: - Init
 
@@ -66,6 +70,8 @@ public final class NetworkClient: ObservableObject {
     }
 
     public func stop() {
+        pingTask?.cancel()
+        pingTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
         connection?.cancel()
@@ -104,6 +110,7 @@ public final class NetworkClient: ObservableObject {
             sendHello()
             connected = true
             startReading()
+            startPinging()
 
         case .failed(let err):
             log.warning("Connection failed: \(err.localizedDescription, privacy: .public)")
@@ -230,9 +237,27 @@ public final class NetworkClient: ObservableObject {
     private func handleDisconnect() {
         guard connected else { return }
         log.info("Disconnected — scheduling reconnect")
+        pingTask?.cancel()
+        pingTask = nil
         connected = false
         connection?.cancel()
         connection = nil
         scheduleReconnect()
+    }
+
+    // MARK: - Keepalive
+
+    /// Sends a ping every `pingInterval` seconds to prevent NWConnection idle timeout (~6s).
+    private func startPinging() {
+        pingTask?.cancel()
+        pingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(self.pingInterval * 1_000_000_000))
+                guard !Task.isCancelled, self.connected else { break }
+                log.debug("→ ping")
+                self.send(ClientPing())
+            }
+        }
     }
 }
