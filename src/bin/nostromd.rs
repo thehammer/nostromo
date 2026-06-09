@@ -6,6 +6,8 @@
 //! - Tails `~/.claude/activity.jsonl` and fans out `Activity` events.
 //! - Polls `mother list --format json` every 2 s and broadcasts `MotherJobs`,
 //!   `MotherStatusline`, and `MotherAwaitDetected` events.
+//! - Watches the Perri native sources and broadcasts `PerriState` events
+//!   whenever the PR queue or current-PR snapshot changes.
 //! - Owns PTY processes on behalf of TUI clients so they survive TUI restarts.
 //! - Removes the socket file on clean exit (SIGTERM / SIGINT).
 
@@ -23,7 +25,12 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use nostromo::{
     agent_bus::{tail_activity_jsonl, ActivityEvent},
     config::Config,
-    data::{perri_pr_native::PerriPrNativeSource, perri_queue_native::PerriQueueNativeSource},
+    data::{
+        perri_pr::PrSnapshot,
+        perri_pr_native::PerriPrNativeSource,
+        perri_queue::PrQueueSnapshot,
+        perri_queue_native::PerriQueueNativeSource,
+    },
     ipc::{protocol::ServerMsg, PtyManager, Server, SessionManager},
     mother::{self, statusline_cache_path, MotherStatus},
 };
@@ -123,8 +130,17 @@ async fn main() -> Result<()> {
     // ── Perri background sources ──────────────────────────────────────────────
     // These watch dirty-file sentinels and write cache files consumed by the
     // GUI (AppStore.swift).  They run independently of any TUI connection.
-    let (_perri_queue_rx, _perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
-    let (_perri_pr_rx, _perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
+    let (perri_queue_rx, _perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
+    let (perri_pr_rx, _perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
+
+    // ── Perri broadcaster ─────────────────────────────────────────────────────
+    // Watches the native Perri sources and broadcasts PerriState whenever either
+    // the queue or the current-PR snapshot changes.
+    tokio::spawn(run_perri_broadcaster(
+        broadcast_tx.clone(),
+        perri_queue_rx,
+        perri_pr_rx,
+    ));
 
     // ── Mother pollers ────────────────────────────────────────────────────────
     let btx_mother = broadcast_tx.clone();
@@ -258,6 +274,60 @@ async fn run_job_poller(tx: broadcast::Sender<ServerMsg>) {
             }
         }
     }
+}
+
+// ── perri broadcaster ─────────────────────────────────────────────────────────
+
+/// Build a `ServerMsg::PerriState` from the current watch-channel snapshots.
+///
+/// Extracted as a free function so it can be unit-tested without a running daemon.
+fn build_perri_state(
+    queue_snap: Option<&PrQueueSnapshot>,
+    pr_snap: Option<&PrSnapshot>,
+) -> ServerMsg {
+    ServerMsg::PerriState {
+        queue: queue_snap
+            .map(|s| s.items.clone())
+            .unwrap_or_default(),
+        current: pr_snap.cloned().map(Box::new),
+    }
+}
+
+/// Watch the Perri native sources and broadcast `PerriState` on every change.
+///
+/// Sends one initial broadcast immediately (so clients that connect after the
+/// first fetch still see current state), then loops on `tokio::select!` over
+/// both channels.
+async fn run_perri_broadcaster(
+    tx: broadcast::Sender<ServerMsg>,
+    mut queue_rx: tokio::sync::watch::Receiver<Option<PrQueueSnapshot>>,
+    mut pr_rx: tokio::sync::watch::Receiver<Option<PrSnapshot>>,
+) {
+    // Initial broadcast — borrow briefly, clone data, drop borrow before send.
+    {
+        let queue = queue_rx.borrow().clone();
+        let pr    = pr_rx.borrow().clone();
+        let _ = tx.send(build_perri_state(queue.as_ref(), pr.as_ref()));
+    }
+
+    loop {
+        tokio::select! {
+            result = queue_rx.changed() => {
+                if result.is_err() { break; } // sender dropped — clean exit
+                let queue = queue_rx.borrow_and_update().clone();
+                let pr    = pr_rx.borrow().clone();
+                let _ = tx.send(build_perri_state(queue.as_ref(), pr.as_ref()));
+            }
+            result = pr_rx.changed() => {
+                if result.is_err() { break; }
+                let queue = queue_rx.borrow().clone();
+                let pr    = pr_rx.borrow_and_update().clone();
+                let _ = tx.send(build_perri_state(queue.as_ref(), pr.as_ref()));
+            }
+        }
+    }
+
+    tracing::debug!("perri broadcaster exiting — watch channels closed");
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

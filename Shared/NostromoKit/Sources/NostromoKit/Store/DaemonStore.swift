@@ -32,6 +32,12 @@ public final class DaemonStore: ObservableObject {
     /// All known Mother jobs. Updated by `mother_jobs` broadcasts.
     @Published public private(set) var motherJobs: [MotherJob] = []
 
+    /// Perri PR review queue. Updated by `perri_state` broadcasts.
+    @Published public private(set) var perriQueue: [PrQueueItem] = []
+
+    /// Perri current-PR detail snapshot. Updated by `perri_state` broadcasts.
+    @Published public private(set) var perriCurrentPr: PrSnapshot? = nil
+
     /// Daemon-served focus registry, keyed by tag.
     @Published public private(set) var focuses: [String: FocusMeta] = [:]
 
@@ -110,9 +116,11 @@ public final class DaemonStore: ObservableObject {
                 } else {
                     // Clear stale state on disconnect so the list doesn't show
                     // ghost entries if the daemon is restarted.
-                    self?.sessions    = [:]
-                    self?.focuses     = [:]
-                    self?.motherJobs  = []
+                    self?.sessions       = [:]
+                    self?.focuses        = [:]
+                    self?.motherJobs     = []
+                    self?.perriQueue     = []
+                    self?.perriCurrentPr = nil
                 }
             }
             .store(in: &cancellables)
@@ -200,9 +208,31 @@ public final class DaemonStore: ObservableObject {
         case .motherJobs(let jobs):
             motherJobs = jobs
 
+        case .perriState(let queue, let current):
+            perriQueue     = queue
+            perriCurrentPr = current
+
         default:
             break
         }
+    }
+
+    // MARK: - Perri actions
+
+    /// Load a specific PR into the Perri current-PR view.
+    ///
+    /// The daemon shells out to `perri load_pr -- <number> <repo>` and the
+    /// native source re-broadcasts a fresh `perri_state` snapshot.
+    public func perriLoadPr(number: Int, repo: String) {
+        client.send(ClientPerriAction(action: "load_pr", prNumber: number, repo: repo))
+    }
+
+    /// Clear the current PR from the Perri view.
+    ///
+    /// The daemon shells out to `perri clear_current_pr` and the native source
+    /// re-broadcasts a fresh `perri_state` snapshot.
+    public func perriClear() {
+        client.send(ClientPerriAction(action: "clear", prNumber: nil, repo: nil))
     }
 }
 

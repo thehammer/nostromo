@@ -489,6 +489,16 @@ class AppStore: ObservableObject {
         case .sessionSummaryUpdate(let tag, let summary):
             FocusStore.shared.updateSummary(tag: tag, summary: summary)
 
+        case .perriState(let queue, let current):
+            // Daemon push is an additive, lower-latency source feeding the same
+            // publishers the file-watchers already drive.  The file-watcher path
+            // is preserved (not removed) in this wedge.
+            perriQueue      = queue
+            perriQueueStale = false
+            perriQueueError = nil
+            // `current` is already decoded as PRDetail? from the wire shape.
+            if let current { perriDetail = current }
+
         case .sessionSpawned, .sessionTurns, .sessionTurnDelta,
              .sessionPermissionRequest, .sessionExited:
             break

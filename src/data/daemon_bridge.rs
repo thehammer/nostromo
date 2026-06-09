@@ -81,7 +81,9 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::SessionSummaryUpdate { .. }
         // Focus registry messages are consumed by the Swift/iOS thin-client.
         | ServerMsg::FocusListResp { .. }
-        | ServerMsg::FocusRegistryUpdated { .. } => {}
+        | ServerMsg::FocusRegistryUpdated { .. }
+        // Perri state is consumed by the Swift/iOS thin-client via IPC broadcast.
+        | ServerMsg::PerriState { .. } => {}
         // DaemonReconnected is handled by individual DaemonPtyClient subscribers.
         ServerMsg::DaemonReconnected => {}
         // Control messages — no action needed.

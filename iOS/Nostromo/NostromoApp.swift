@@ -53,6 +53,10 @@ struct ContentView: View {
             QueueTab()
                 .tabItem { Label("Queue", systemImage: "tray.full") }
                 .badge(activeJobCount)
+
+            PerriTab()
+                .tabItem { Label("Perri", systemImage: "checkmark.seal") }
+                .badge(store.perriQueue.count)
         }
     }
 
@@ -96,6 +100,17 @@ private struct QueueTab: View {
         NavigationStack {
             MotherQueueView()
                 .navigationTitle("Queue")
+        }
+    }
+}
+
+// MARK: - PerriTab
+
+private struct PerriTab: View {
+    var body: some View {
+        NavigationStack {
+            PerriView()
+                .navigationTitle("Perri")
         }
     }
 }

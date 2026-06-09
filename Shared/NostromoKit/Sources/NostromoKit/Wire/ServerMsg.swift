@@ -44,6 +44,9 @@ public enum ServerMsg {
     /// Broadcast snapshot of all Mother jobs.
     case motherJobs([MotherJob])
 
+    /// Broadcast snapshot of Perri's PR review queue + current-PR detail.
+    case perriState(queue: [PrQueueItem], current: PrSnapshot?)
+
     case unknown
 }
 
@@ -293,6 +296,7 @@ extension ServerMsg {
     private struct SessionExitedWrapper:     Decodable { let tag: String; let exit_code: Int? }
     private struct FocusListWrapper:         Decodable { let focuses: [FocusMeta] }
     private struct MotherJobsWrapper:        Decodable { let jobs: [MotherJob] }
+    private struct PerriStateWrapper:        Decodable { let queue: [PrQueueItem]; let current: PrSnapshot? }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -375,6 +379,11 @@ extension ServerMsg {
         case "mother_jobs":
             if let m = try? dec.decode(MotherJobsWrapper.self, from: data) {
                 return .motherJobs(m.jobs)
+            }
+
+        case "perri_state":
+            if let m = try? dec.decode(PerriStateWrapper.self, from: data) {
+                return .perriState(queue: m.queue, current: m.current)
             }
 
         default:

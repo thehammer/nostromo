@@ -586,6 +586,18 @@ fn handle_client_msg(
             });
         }
 
+        ClientMsg::PerriAction { action, pr_number, repo } => {
+            let conn = conn_key.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = crate::perri_cli::run_perri_action(&action, pr_number, repo.as_deref()).await {
+                    tracing::warn!(conn, %action, "PerriAction failed: {e:#}");
+                }
+                // The native Perri sources watch dirty-file sentinels; the
+                // `perri` CLI writes those sentinels, so the broadcaster will
+                // fire naturally without any explicit re-poll here.
+            });
+        }
+
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
     }
@@ -603,6 +615,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherStatusline(_) => topics.contains(&Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => topics.contains(&Topic::MotherJobs),
         ServerMsg::FocusRegistryUpdated { .. } => topics.contains(&Topic::Focuses),
+        ServerMsg::PerriState { .. } => topics.contains(&Topic::Perri),
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,
