@@ -62,8 +62,8 @@ uninstall-daemon:
 
 APP_BUNDLE  = macOS/build/Build/Products/Debug/Nostromo.app
 
-IOS_DEVICE_ID   ?= 195907F5-56CB-5334-B012-6F71CFA5EB21  # Hammer's iPhone Pro
-IPAD_DEVICE_ID  ?= BA38C738-E848-5694-B1C4-7D5DB4C631EE  # Hammer's iPad Pro
+IOS_DEVICE_ID   ?= 195907F5-56CB-5334-B012-6F71CFA5EB21# Hammer's iPhone Pro
+IPAD_DEVICE_ID  ?= BA38C738-E848-5694-B1C4-7D5DB4C631EE# Hammer's iPad Pro
 IOS_APP_RELEASE  = iOS/build/Build/Products/Release-iphoneos/Nostromo.app
 
 .PHONY: mac mac-run mac-kill mac-icon mac-release mac-install ios-build ios-install ios-install-ipad ios-install-all
