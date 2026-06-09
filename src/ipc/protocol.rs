@@ -65,6 +65,7 @@ pub enum Topic {
     Focuses,
     /// Perri PR review queue + current-PR snapshot broadcasts.
     Perri,
+    Fred,
 }
 
 /// Metadata about a daemon-owned PTY.
@@ -366,6 +367,12 @@ pub enum ServerMsg {
         current: Option<Box<PrSnapshot>>,
     },
 
+    /// Broadcast snapshot of Fred's mailbox + calendar state. Re-sent whenever
+    /// either native source's watch channel changes.
+    FredState {
+        mailbox: crate::data::fred_mailbox::MailboxSnapshot,
+        calendar: crate::data::fred_calendar::CalendarSnapshot,
+    },
     Pong,
     Error {
         message: String,
@@ -937,5 +944,70 @@ mod tests {
         );
         let decoded: Topic = serde_json::from_str("\"perri\"").unwrap();
         assert_eq!(decoded, Topic::Perri);
+    }
+
+    // ── FredState round-trip + type-tag ──────────────────────────────────────
+
+    #[test]
+    fn fred_state_round_trips() {
+        use crate::data::{
+            fred_calendar::{CalendarEvent, CalendarSnapshot, NextEvent},
+            fred_mailbox::{DeviceFlowPrompt, MailboxItem, MailboxSnapshot},
+        };
+
+        // (a) Empty snapshots
+        round_trip_server(ServerMsg::FredState {
+            mailbox:  MailboxSnapshot::default(),
+            calendar: CalendarSnapshot::default(),
+        });
+
+        // (b) Populated: one VIP unread MailboxItem + one is_now CalendarEvent +
+        //     NextEvent + auth_prompt.
+        let mailbox = MailboxSnapshot {
+            generated_at: None,
+            unread_count: 1,
+            items: vec![MailboxItem {
+                from:        "Alice <alice@example.com>".into(),
+                subject:     "Important: Meeting Tomorrow".into(),
+                received_at: Some(chrono::Utc::now()),
+                vip:         true,
+                is_invite:   false,
+                is_read:     false,
+            }],
+            stale:       false,
+            error:       None,
+            auth_prompt: Some(DeviceFlowPrompt {
+                verification_uri: "https://microsoft.com/devicelogin".into(),
+                user_code:        "ABCD-1234".into(),
+                expires_at:       chrono::Utc::now(),
+            }),
+        };
+        let calendar = CalendarSnapshot {
+            events: vec![CalendarEvent {
+                start:  Some(chrono::Utc::now()),
+                end:    Some(chrono::Utc::now()),
+                title:  "Daily standup".into(),
+                status: "accepted".into(),
+                is_now: true,
+            }],
+            next: Some(NextEvent {
+                title:      "Lunch".into(),
+                in_minutes: 45,
+            }),
+            sweater: "amber".into(),
+            stale:   false,
+            error:   None,
+        };
+        round_trip_server(ServerMsg::FredState { mailbox, calendar });
+    }
+
+    #[test]
+    fn fred_state_type_tag_is_fred_state() {
+        let v = serde_json::to_value(ServerMsg::FredState {
+            mailbox:  crate::data::fred_mailbox::MailboxSnapshot::default(),
+            calendar: crate::data::fred_calendar::CalendarSnapshot::default(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "fred_state");
     }
 }

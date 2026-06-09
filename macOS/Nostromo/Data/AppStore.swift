@@ -41,6 +41,10 @@ class AppStore: ObservableObject {
     @Published private(set) var perriDetail:         PRDetail?      = nil
     @Published private(set) var perriDetailLoading:  Bool           = false
 
+    // Fred mailbox + calendar — updated from fred_state IPC broadcasts.
+    @Published private(set) var fredMailbox:  MailboxSnapshot?  = nil
+    @Published private(set) var fredCalendar: CalendarSnapshot? = nil
+
     // Active focus agent tag — set by MainLayout on every focus switch.
     @Published private(set) var activeFocusAgentTag: String?      = nil
 
@@ -498,6 +502,10 @@ class AppStore: ObservableObject {
             perriQueueError = nil
             // `current` is already decoded as PRDetail? from the wire shape.
             if let current { perriDetail = current }
+
+        case .fredState(let mailbox, let calendar):
+            fredMailbox  = mailbox
+            fredCalendar = calendar
 
         case .sessionSpawned, .sessionTurns, .sessionTurnDelta,
              .sessionPermissionRequest, .sessionExited:
