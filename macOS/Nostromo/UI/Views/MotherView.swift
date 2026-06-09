@@ -280,8 +280,10 @@ private struct MotherJobListSwiftUI: View {
                     ForEach(group.jobs, id: \.id) { job in
                         NostromoKit.MotherJobRow(
                             model: vm.rowModel(for: job),
-                            onArchive: { AppStore.shared.archiveJob(job.id) },
-                            onCancel:  { AppStore.shared.cancelJob(job.id)  }
+                            onArchive:    { AppStore.shared.archiveJob(job.id)     },
+                            onCancel:     { AppStore.shared.cancelJob(job.id)      },
+                            onRetry:      { AppStore.shared.retryJob(job.id)       },
+                            onForceStart: { AppStore.shared.forceStartJob(job.id)  }
                         )
                         .tag(job.id)
                     }

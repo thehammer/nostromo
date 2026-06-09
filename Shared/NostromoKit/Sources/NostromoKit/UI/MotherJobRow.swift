@@ -8,20 +8,27 @@
 
 import SwiftUI
 
-/// A single Mother job row with built-in swipe-to-archive / swipe-to-cancel.
+/// A single Mother job row with built-in swipe-to-archive / swipe-to-cancel
+/// and a state-aware right-click / long-press context menu.
 public struct MotherJobRow: View {
     public let model: MotherJobRowModel
     public let onArchive: () -> Void
     public let onCancel: () -> Void
+    public let onRetry: () -> Void
+    public let onForceStart: () -> Void
 
     public init(
         model: MotherJobRowModel,
-        onArchive: @escaping () -> Void = {},
-        onCancel:  @escaping () -> Void = {}
+        onArchive:    @escaping () -> Void = {},
+        onCancel:     @escaping () -> Void = {},
+        onRetry:      @escaping () -> Void = {},
+        onForceStart: @escaping () -> Void = {}
     ) {
-        self.model     = model
-        self.onArchive = onArchive
-        self.onCancel  = onCancel
+        self.model        = model
+        self.onArchive    = onArchive
+        self.onCancel     = onCancel
+        self.onRetry      = onRetry
+        self.onForceStart = onForceStart
     }
 
     public var body: some View {
@@ -37,6 +44,55 @@ public struct MotherJobRow: View {
                     }
                 }
             }
+            .contextMenu { contextMenuItems }
+    }
+
+    // MARK: - Context menu
+
+    @ViewBuilder
+    private var contextMenuItems: some View {
+        switch model.state {
+        case "running":
+            Button(action: onCancel) {
+                Label("Cancel", systemImage: "xmark.circle")
+            }
+
+        case "awaiting":
+            if let question = model.question {
+                Button(action: {}) {
+                    Label("Answer: \(question)", systemImage: "questionmark.bubble")
+                }
+                .disabled(true)
+                Divider()
+            }
+            Button(action: onCancel) {
+                Label("Cancel", systemImage: "xmark.circle")
+            }
+
+        case "queued", "ready":
+            Button(action: onForceStart) {
+                Label("Force Start", systemImage: "play.circle")
+            }
+            Button(action: onCancel) {
+                Label("Cancel", systemImage: "xmark.circle")
+            }
+
+        case "failed", "cancelled":
+            Button(action: onRetry) {
+                Label("Retry", systemImage: "arrow.clockwise")
+            }
+            Button(role: .destructive, action: onArchive) {
+                Label("Archive", systemImage: "archivebox")
+            }
+
+        case "succeeded":
+            Button(role: .destructive, action: onArchive) {
+                Label("Archive", systemImage: "archivebox")
+            }
+
+        default:
+            EmptyView()
+        }
     }
 
     // MARK: - Row layout

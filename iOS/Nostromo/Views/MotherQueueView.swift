@@ -61,8 +61,10 @@ struct MotherQueueView: View {
         } label: {
             NostromoKit.MotherJobRow(
                 model: rowModel(for: job),
-                onArchive: { store.motherAction(jobId: job.id, action: "archive") },
-                onCancel:  { store.motherAction(jobId: job.id, action: "cancel")  }
+                onArchive:    { store.motherAction(jobId: job.id, action: "archive") },
+                onCancel:     { store.motherAction(jobId: job.id, action: "cancel")  },
+                onRetry:      {},
+                onForceStart: {}
             )
         }
     }
