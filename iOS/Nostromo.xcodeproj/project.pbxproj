@@ -16,6 +16,9 @@
 		AA0000010000000000000014 /* MotherQueueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000015 /* MotherQueueView.swift */; };
 		AA0000010000000000000016 /* MotherJobDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000017 /* MotherJobDetailView.swift */; };
 		AA0000010000000000000018 /* TeriView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000019 /* TeriView.swift */; };
+		AA0000010000000000000020 /* PerriView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000021 /* PerriView.swift */; };
+		AA0000010000000000000022 /* FredView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000023 /* FredView.swift */; };
+		AA0000010000000000000024 /* DaemonDiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000025 /* DaemonDiscoveryView.swift */; };
 		AA00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000100000000000000AA /* NostromoKit */; };
 /* End PBXBuildFile section */
 
@@ -29,6 +32,10 @@
 		AA0000010000000000000015 /* MotherQueueView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherQueueView.swift; sourceTree = "<group>"; };
 		AA0000010000000000000017 /* MotherJobDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobDetailView.swift; sourceTree = "<group>"; };
 		AA0000010000000000000019 /* TeriView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriView.swift; sourceTree = "<group>"; };
+		AA0000010000000000000021 /* PerriView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriView.swift; sourceTree = "<group>"; };
+		AA0000010000000000000023 /* FredView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredView.swift; sourceTree = "<group>"; };
+		AA0000010000000000000025 /* DaemonDiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiscoveryView.swift; sourceTree = "<group>"; };
+		AA0000010000000000000026 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA00000100000000000000A0 /* Nostromo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nostromo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -58,6 +65,7 @@
 				5318BC592FD5A28A00957D5C /* Assets.xcassets */,
 				AA000001000000000000000A /* NostromoApp.swift */,
 				AA000001000000000000002C /* Views */,
+				AA0000010000000000000026 /* Info.plist */,
 			);
 			path = Nostromo;
 			sourceTree = "<group>";
@@ -72,6 +80,9 @@
 				AA0000010000000000000015 /* MotherQueueView.swift */,
 				AA0000010000000000000017 /* MotherJobDetailView.swift */,
 				AA0000010000000000000019 /* TeriView.swift */,
+				AA0000010000000000000021 /* PerriView.swift */,
+				AA0000010000000000000023 /* FredView.swift */,
+				AA0000010000000000000025 /* DaemonDiscoveryView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -167,6 +178,9 @@
 				AA0000010000000000000014 /* MotherQueueView.swift in Sources */,
 				AA0000010000000000000016 /* MotherJobDetailView.swift in Sources */,
 				AA0000010000000000000018 /* TeriView.swift in Sources */,
+				AA0000010000000000000020 /* PerriView.swift in Sources */,
+				AA0000010000000000000022 /* FredView.swift in Sources */,
+				AA0000010000000000000024 /* DaemonDiscoveryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -306,6 +320,7 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Nostromo/Info.plist;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Nostromo connects to the nostromd daemon on your local network to display the live focus list.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -339,6 +354,7 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Nostromo/Info.plist;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Nostromo connects to the nostromd daemon on your local network to display the live focus list.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

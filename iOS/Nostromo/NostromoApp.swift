@@ -25,7 +25,10 @@ struct NostromoApp: App {
             ContentView()
                 .environmentObject(store)
                 .onAppear {
-                    // Show settings if no host has been configured yet.
+                    // On first launch, open discovery so the user doesn't need
+                    // to type an IP.  DaemonDiscoveryView calls store.start()
+                    // on successful connect; we call it here for subsequent
+                    // launches where the host is already saved.
                     if ConnectionSettings.isDefault {
                         showSettings = true
                     } else {
@@ -33,9 +36,12 @@ struct NostromoApp: App {
                     }
                 }
                 .sheet(isPresented: $showSettings, onDismiss: {
-                    store.start()
+                    // Only start if DaemonDiscoveryView didn't already start it.
+                    if !store.client.connected {
+                        store.start()
+                    }
                 }) {
-                    ConnectionSettingsView(store: store)
+                    DaemonDiscoveryView(store: store)
                 }
         }
     }
@@ -113,7 +119,7 @@ private struct SessionsTab: View {
                 }
         }
         .sheet(isPresented: $showSettings) {
-            ConnectionSettingsView(store: store)
+            DaemonDiscoveryView(store: store)
         }
     }
 }
