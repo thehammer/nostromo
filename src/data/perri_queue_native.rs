@@ -36,6 +36,7 @@ use crate::{
         github_client::GithubClient,
         perri_pr_native::prefetch_into_cache,
         perri_queue::{CiState, PrQueueItem, PrQueueSnapshot},
+        perri_suppress::{SuppressStore, unix_now_secs},
     },
 };
 
@@ -163,16 +164,29 @@ impl PerriQueueNativeSource {
         let (tx, rx) = watch::channel(None);
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
         let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+        let (approvals_tx, mut approvals_rx) = mpsc::unbounded_channel::<()>();
 
-        let dirty_path = config.perri_state_dir().join("queue.dirty");
+        let state_dir = config.perri_state_dir();
+        let dirty_path = state_dir.join("queue.dirty");
         dirty_file::spawn_watcher(dirty_path, dirty_tx);
+
+        // Watch approvals.jsonl without deleting it — the daemon renames and
+        // processes it atomically inside consume_approvals_file().
+        let approvals_path = state_dir.join("approvals.jsonl");
+        dirty_file::spawn_exists_watcher(approvals_path, approvals_tx);
+
+        // Load the suppression store from disk so previously-recorded approvals
+        // survive a daemon restart.
+        let ttl = std::time::Duration::from_secs(config.pr_approval_suppress_secs);
+        let state_path = state_dir.join("approvals-state.json");
+        let suppress = Arc::new(Mutex::new(SuppressStore::load(state_path, ttl)));
 
         let interval_secs = config.pr_queue_poll_secs;
 
         tokio::spawn(async move {
             let source = PerriQueueNativeSource { config };
             source
-                .run(tx, &mut dirty_rx, &mut refresh_rx, interval_secs)
+                .run(tx, &mut dirty_rx, &mut refresh_rx, &mut approvals_rx, suppress, interval_secs)
                 .await;
         });
 
@@ -184,6 +198,8 @@ impl PerriQueueNativeSource {
         tx: watch::Sender<Option<PrQueueSnapshot>>,
         dirty_rx: &mut mpsc::UnboundedReceiver<()>,
         refresh_rx: &mut mpsc::UnboundedReceiver<()>,
+        approvals_rx: &mut mpsc::UnboundedReceiver<()>,
+        suppress: Arc<Mutex<SuppressStore>>,
         interval_secs: u64,
     ) {
         let client = match self.build_client() {
@@ -225,7 +241,24 @@ impl PerriQueueNativeSource {
         let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
+        // Path to the approvals JSONL signal file.
+        let approvals_path = self.config.perri_state_dir().join("approvals.jsonl");
+
         loop {
+            // Consume any approvals that arrived since the last cycle (or since
+            // startup).  Belt-and-suspenders: the approvals_rx branch in the
+            // select! below also triggers an immediate re-fetch when the file
+            // appears, but we consume here unconditionally so a write that races
+            // past the watcher is never missed.
+            {
+                let mut store = suppress.lock().unwrap();
+                let count = store.consume_approvals_file(&approvals_path, unix_now_secs());
+                if count > 0 {
+                    store.save();
+                    debug!("perri suppress: consumed {count} new approval(s) before fetch");
+                }
+            }
+
             let me_login = match &me {
                 Some(m) => m.clone(),
                 None => match get_authenticated_user(&client).await {
@@ -257,6 +290,7 @@ impl PerriQueueNativeSource {
                     &ci_state_cache,
                     &endpoint_etags,
                     &endpoint_body_cache,
+                    &suppress,
                 )
                 .await
             {
@@ -324,6 +358,9 @@ impl PerriQueueNativeSource {
                 Some(_) = refresh_rx.recv() => {
                     debug!("perri queue direct-push refresh signal (MCP)");
                 }
+                Some(_) = approvals_rx.recv() => {
+                    debug!("perri queue approvals-file signal — re-fetching with new suppression");
+                }
             }
         }
     }
@@ -341,6 +378,7 @@ impl PerriQueueNativeSource {
         ci_state_cache: &Arc<Mutex<HashMap<String, (CiState, bool)>>>,
         endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
         endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
+        suppress: &Arc<Mutex<SuppressStore>>,
     ) -> Result<PrQueueSnapshot> {
         // ── Run the three search queries ──────────────────────────────────────
         let q_requested =
@@ -593,7 +631,26 @@ impl PerriQueueNativeSource {
             }
         }
 
-        let items: Vec<PrQueueItem> = b12_items.into_iter().chain(b3_items).collect();
+        let mut items: Vec<PrQueueItem> = b12_items.into_iter().chain(b3_items).collect();
+
+        // ── Apply approval suppression ────────────────────────────────────────
+        // Prune expired entries then filter out any PR whose current head_sha
+        // exactly matches a live suppression entry.  PRs with an empty head_sha
+        // (unresolved) are never suppressed — an empty string cannot match a
+        // real recorded sha (is_suppressed() guards this explicitly).
+        {
+            let now = unix_now_secs();
+            let mut store = suppress.lock().unwrap();
+            store.prune(now);
+            let before = items.len();
+            items.retain(|item| {
+                !store.is_suppressed(&item.repo, item.number, &item.head_sha, now)
+            });
+            let suppressed = before - items.len();
+            if suppressed > 0 {
+                debug!("perri suppress: hid {suppressed} just-approved PR(s) from snapshot");
+            }
+        }
 
         Ok(PrQueueSnapshot {
             generated_at: Some(Utc::now()),
@@ -664,7 +721,7 @@ fn review_from_cache(
 async fn get_authenticated_user(client: &GithubClient) -> Result<String> {
     let resp = client
         .http
-        .get("https://api.github.com/user")
+        .get(format!("{}/user", api_base()))
         .headers(base_headers(client))
         .send()
         .await
@@ -683,7 +740,8 @@ async fn search_issues(
     item_cache: &mut HashMap<String, Vec<SearchIssueItem>>,
 ) -> Result<Vec<SearchIssueItem>> {
     let url = format!(
-        "https://api.github.com/search/issues?q={}&per_page=100",
+        "{}/search/issues?q={}&per_page=100",
+        api_base(),
         urlencoding::encode(query)
     );
 
@@ -1057,8 +1115,9 @@ mod tests {
 
     /// Regression guard for the refresh-channel hot loop.
     ///
-    /// The run loop waits on a `tokio::select!` over three branches:
-    /// `sleep(interval)`, `dirty_rx.recv()`, and `refresh_rx.recv()`.
+    /// The run loop waits on a `tokio::select!` over four branches:
+    /// `sleep(interval)`, `dirty_rx.recv()`, `refresh_rx.recv()`, and
+    /// `approvals_rx.recv()`.
     /// When the corresponding sender is dropped, `recv()` returns
     /// `Poll::Ready(None)` on every poll forever.  If the select branch
     /// uses `_ = recv() => ...`, it fires on every iteration, producing
@@ -1071,7 +1130,8 @@ mod tests {
     /// the channel is closed, letting the sleep branch win normally.
     ///
     /// This test exercises the exact select! shape used in `run()` to
-    /// catch any future regression that swaps the pattern back.
+    /// catch any future regression that swaps the pattern back — including
+    /// the newly-added `approvals_rx` branch.
     #[tokio::test]
     async fn select_does_not_hot_fire_when_refresh_sender_dropped() {
         use std::time::Duration;
@@ -1079,13 +1139,14 @@ mod tests {
 
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
         let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+        let (approvals_tx, mut approvals_rx) = mpsc::unbounded_channel::<()>();
 
-        // Simulate the bug condition: app.rs:281 drops the queue refresh tx
-        // because MCP doesn't currently push to the queue source.  With the
-        // `_ = recv()` form the closed channel's None return would win
+        // Simulate the bug condition: all senders except dirty_tx are dropped.
+        // With the `_ = recv()` form the closed channel's None return would win
         // every iteration; with `Some(_) = recv()` the branch is disabled
         // and the sleep wins.
         drop(refresh_tx);
+        drop(approvals_tx);
 
         // Short interval so the test stays fast — the assertion is that
         // the select waits the full interval, not that any particular
@@ -1101,12 +1162,15 @@ mod tests {
             Some(_) = refresh_rx.recv() => {
                 panic!("refresh branch fired when sender was dropped (the regression)");
             }
+            Some(_) = approvals_rx.recv() => {
+                panic!("approvals branch fired when sender was dropped (the regression)");
+            }
         }
         let elapsed = start.elapsed();
         assert!(
             elapsed >= Duration::from_millis(100),
-            "select! returned early ({elapsed:?} < ~100ms) — the refresh \
-             branch is firing on a closed channel"
+            "select! returned early ({elapsed:?} < ~100ms) — a closed \
+             channel branch is firing on every poll"
         );
 
         // Keep dirty_tx alive past the select so it's not the closed
@@ -1218,5 +1282,237 @@ mod tests {
     #[test]
     fn is_filtered_passes_normal_prs() {
         assert!(!is_filtered(&make_item("alice", false, None), "hammer"));
+    }
+
+    // ── Suppression integration tests ─────────────────────────────────────────
+    //
+    // These tests verify the end-to-end suppression filter inside `fetch()`.
+    // They are inline (rather than in `tests/`) because `fetch()` is a private
+    // method and this gives direct access without exposing it in the public API.
+    //
+    // Pattern: mock GitHub search + PR detail + check-runs, call `fetch()` with
+    // a pre-populated `SuppressStore`, and assert presence/absence in the snapshot.
+
+    /// Build a minimal `PerriQueueNativeSource` pointed at a temp hosts.yml.
+    fn make_source() -> (PerriQueueNativeSource, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_path = dir.path().join("hosts.yml");
+        std::fs::write(
+            &hosts_path,
+            "github.com:\n  oauth_token: test-token\n  user: tester\n  git_protocol: https\n",
+        )
+        .unwrap();
+        std::env::remove_var("GITHUB_TOKEN");
+        let cfg = crate::config::Config {
+            github_token_path: Some(hosts_path),
+            // Point perri_state at the tempdir so suppress-state files land there.
+            perri_state: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        (PerriQueueNativeSource { config: cfg }, dir)
+    }
+
+    /// Call `fetch()` with the given suppress store, returning the snapshot.
+    async fn run_fetch(
+        source: &PerriQueueNativeSource,
+        suppress: Arc<Mutex<SuppressStore>>,
+    ) -> PrQueueSnapshot {
+        let client = source.build_client().unwrap();
+        let mut etags = HashMap::new();
+        let mut item_cache = HashMap::new();
+        let mut last_seen = HashMap::new();
+        let mut review_cache = HashMap::new();
+        let head_sha_cache = Arc::new(Mutex::new(HashMap::new()));
+        let ci_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint_etags = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint_body = Arc::new(Mutex::new(HashMap::new()));
+        source
+            .fetch(
+                &client,
+                "tester",
+                &mut etags,
+                &mut item_cache,
+                &mut last_seen,
+                &mut review_cache,
+                &head_sha_cache,
+                &ci_state_cache,
+                &endpoint_etags,
+                &endpoint_body,
+                &suppress,
+            )
+            .await
+            .expect("fetch() should succeed")
+    }
+
+    /// Register the three GitHub mock endpoints needed to return PR #42 in
+    /// `review:required` with head SHA `head_sha` and passing CI.
+    async fn mount_pr_mocks(server: &wiremock::MockServer, head_sha: &str) {
+        use serde_json::json;
+        use wiremock::matchers::{method, path, path_regex, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+
+        // /user — authenticated user
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": "tester"
+            })))
+            .mount(server)
+            .await;
+
+        // review-requested — empty (PR is only in needs_review)
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr review-requested:@me org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(server)
+            .await;
+
+        // review:required — returns PR #42
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr review:required org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [{
+                    "number": 42,
+                    "title": "Add feature X",
+                    "html_url": "https://github.com/Carefeed/admin-portal/pull/42",
+                    "repository_url": "https://api.github.com/repos/Carefeed/admin-portal",
+                    "user": { "login": "alice" },
+                    "draft": false,
+                    "updated_at": "2026-06-07T12:00:00Z"
+                }]
+            })))
+            .mount(server)
+            .await;
+
+        // reviewed-by — empty (no bucket-3 PRs)
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr reviewed-by:@me org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(server)
+            .await;
+
+        // PR detail — head SHA
+        let head_sha = head_sha.to_owned();
+        Mock::given(method("GET"))
+            .and(path("/repos/Carefeed/admin-portal/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "head": { "sha": head_sha }
+            })))
+            .mount(server)
+            .await;
+
+        // Check-runs — passing CI
+        Mock::given(method("GET"))
+            .and(path_regex(r".*/commits/.*/check-runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "check_runs": [{
+                    "name": "build",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "id": 1,
+                    "app": { "slug": "github-actions" },
+                    "output": {}
+                }]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// A suppressed PR (matching sha) is absent from the snapshot.
+    #[tokio::test]
+    async fn fetch_excludes_suppressed_pr() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let head_sha = "abc123";
+        mount_pr_mocks(&server, head_sha).await;
+
+        let (source, _dir) = make_source();
+        let ttl = std::time::Duration::from_secs(900);
+        let state_path = source.config.perri_state_dir().join("approvals-state.json");
+        let mut store = SuppressStore::new(state_path, ttl);
+        store.record("Carefeed/admin-portal", 42, head_sha, unix_now_secs());
+        let suppress = Arc::new(Mutex::new(store));
+
+        let snap = run_fetch(&source, suppress).await;
+        assert!(
+            snap.items.is_empty(),
+            "suppressed PR should not appear in snapshot, got: {:?}",
+            snap.items.iter().map(|i| i.number).collect::<Vec<_>>()
+        );
+    }
+
+    /// When the head SHA differs from the recorded entry, the PR reappears.
+    #[tokio::test]
+    async fn fetch_includes_pr_when_sha_differs() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        // GitHub returns sha-new but we recorded sha-old → not suppressed.
+        mount_pr_mocks(&server, "sha-new").await;
+
+        let (source, _dir) = make_source();
+        let ttl = std::time::Duration::from_secs(900);
+        let state_path = source.config.perri_state_dir().join("approvals-state.json");
+        let mut store = SuppressStore::new(state_path, ttl);
+        store.record("Carefeed/admin-portal", 42, "sha-old", unix_now_secs());
+        let suppress = Arc::new(Mutex::new(store));
+
+        let snap = run_fetch(&source, suppress).await;
+        assert_eq!(
+            snap.items.len(), 1,
+            "PR with different sha should appear in snapshot"
+        );
+        assert_eq!(snap.items[0].number, 42);
+    }
+
+    /// A PR not in the suppression store always appears normally.
+    #[tokio::test]
+    async fn fetch_includes_unsuppressed_pr() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        mount_pr_mocks(&server, "sha-abc").await;
+
+        let (source, _dir) = make_source();
+        let ttl = std::time::Duration::from_secs(900);
+        let state_path = source.config.perri_state_dir().join("approvals-state.json");
+        let store = SuppressStore::new(state_path, ttl);
+        let suppress = Arc::new(Mutex::new(store));
+
+        let snap = run_fetch(&source, suppress).await;
+        assert_eq!(snap.items.len(), 1, "unsuppressed PR should appear in snapshot");
+        assert_eq!(snap.items[0].number, 42);
+        assert_eq!(snap.items[0].head_sha, "sha-abc");
+    }
+
+    /// Empty head_sha on a queue item is never suppressed, even if an entry
+    /// exists in the store — guards against accidentally hiding PRs whose SHA
+    /// couldn't be resolved.
+    #[test]
+    fn suppression_never_fires_on_empty_head_sha() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SuppressStore::new(
+            dir.path().join("state.json"),
+            std::time::Duration::from_secs(900),
+        );
+        let now = unix_now_secs();
+        // Record an entry with an empty sha (shouldn't happen in practice but
+        // must be safe).
+        store.record("acme/repo", 99, "", now);
+        // Checking with empty sha should never be suppressed.
+        assert!(
+            !store.is_suppressed("acme/repo", 99, "", now + 1),
+            "empty head_sha must never be suppressed"
+        );
     }
 }

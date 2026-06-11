@@ -23,3 +23,22 @@ pub fn spawn_watcher(path: PathBuf, tx: mpsc::UnboundedSender<()>) {
         }
     });
 }
+
+/// Spawn a task that watches `path` for appearance **without deleting it**.
+///
+/// Fires (rising edge) each time the file transitions from absent → present.
+/// Used to watch append-only signal files such as `approvals.jsonl`, where the
+/// consumer is responsible for processing and removing the file atomically.
+pub fn spawn_exists_watcher(path: PathBuf, tx: mpsc::UnboundedSender<()>) {
+    tokio::spawn(async move {
+        let mut last_existed = path.exists();
+        loop {
+            tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
+            let exists_now = path.exists();
+            if exists_now && !last_existed && tx.send(()).is_err() {
+                break;
+            }
+            last_existed = exists_now;
+        }
+    });
+}
