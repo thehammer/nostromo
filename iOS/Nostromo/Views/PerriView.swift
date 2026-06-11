@@ -48,6 +48,7 @@ struct PerriView: View {
             ("Requested",   "requested"),
             ("Needs Review","needs_review"),
             ("Changes Req", "changes_req"),
+            ("Dependabot",  "dependabot"),
         ]
 
         return ForEach(buckets, id: \.key) { bucket in

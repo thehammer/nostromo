@@ -135,11 +135,24 @@ struct AppInfo {
 #[derive(Deserialize)]
 struct PrDetail {
     head: PrHead,
+    /// `"open"`, `"closed"`, or `"merged"`.  `None` when the field is absent
+    /// (older daemon-test mocks that predate this field).
+    state: Option<String>,
+    /// ISO-8601 timestamp set when the PR was merged; `None` for open PRs.
+    merged_at: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct PrHead {
     sha: String,
+}
+
+/// Result of fetching a PR's HEAD SHA from the GitHub API.
+enum GetPrHeadResult {
+    /// PR is open; the `String` is the HEAD commit SHA.
+    Open(String),
+    /// PR is closed or merged — drop it from the queue regardless of search results.
+    Terminal,
 }
 
 // ── Source ────────────────────────────────────────────────────────────────────
@@ -416,17 +429,21 @@ impl PerriQueueNativeSource {
                     .filter(|i| !requested_urls.contains(i.html_url.as_str()))
                     .map(|i| (i.clone(), "needs_review")),
             )
-            .filter(|(i, _)| {
-                let filtered = is_filtered(i, me);
-                if filtered {
+            .filter_map(|(i, original_bucket)| {
+                if is_filtered(&i, me) {
                     debug!(
                         url = %i.html_url,
                         author = i.user.as_ref().map(|u| u.login.as_str()).unwrap_or("(none)"),
                         draft = i.draft.unwrap_or(false),
                         "is_filtered: dropping"
                     );
+                    return None;
                 }
-                !filtered
+                // Bot-authored PRs land in the "dependabot" bucket instead of the
+                // human-review bucket they were discovered in.
+                let author = i.user.as_ref().map(|u| u.login.as_str()).unwrap_or("");
+                let effective_bucket = if is_bot(author) { "dependabot" } else { original_bucket };
+                Some((i, effective_bucket))
             })
             .collect();
 
@@ -456,20 +473,23 @@ impl PerriQueueNativeSource {
                     if failed {
                         return None;
                     }
+                    let author = item
+                        .user
+                        .as_ref()
+                        .map(|u| u.login.clone())
+                        .unwrap_or_default();
+                    let item_is_bot = is_bot(&author);
                     Some(PrQueueItem {
                         repo,
                         number: item.number,
                         title: item.title.clone(),
-                        author: item
-                            .user
-                            .as_ref()
-                            .map(|u| u.login.clone())
-                            .unwrap_or_default(),
+                        author,
                         bucket: bucket.to_owned(),
                         new_activity: false,
                         url: item.html_url.clone(),
                         ci_state,
                         head_sha,
+                        is_bot: item_is_bot,
                     })
                 }
             })
@@ -591,20 +611,23 @@ impl PerriQueueNativeSource {
                         return (key, None, new_cache_entry);
                     }
 
+                    let b3_author = item
+                        .user
+                        .as_ref()
+                        .map(|u| u.login.clone())
+                        .unwrap_or_default();
+                    let b3_is_bot = is_bot(&b3_author);
                     let pr_item = PrQueueItem {
                         repo,
                         number: item.number,
                         title: item.title.clone(),
-                        author: item
-                            .user
-                            .as_ref()
-                            .map(|u| u.login.clone())
-                            .unwrap_or_default(),
-                        bucket: "changes_req".to_owned(),
-                        new_activity: true,
+                        author: b3_author,
+                        bucket: if b3_is_bot { "dependabot".to_owned() } else { "changes_req".to_owned() },
+                        new_activity: !b3_is_bot,
                         url: item.html_url.clone(),
                         ci_state,
                         head_sha,
+                        is_bot: b3_is_bot,
                     };
                     (key, Some(pr_item), new_cache_entry)
                 }
@@ -670,18 +693,27 @@ impl PerriQueueNativeSource {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Returns `true` if the GitHub login belongs to a known bot that should be
+/// routed into the `"dependabot"` bucket rather than the human-review buckets.
+///
+/// This is the **single source of truth** for bot identity — the `review-prs`
+/// skill delegates to the daemon queue's `is_bot` field and does not maintain
+/// its own dependabot-discovery query.
+pub(crate) fn is_bot(author: &str) -> bool {
+    matches!(author, "dependabot" | "dependabot[bot]" | "carefeed-ci")
+}
+
 /// Returns `true` if the item should be excluded from all buckets:
-/// draft PRs, self-authored PRs, and known bot accounts.
+/// draft PRs and self-authored PRs.
+///
+/// **Note:** bot-authored PRs are no longer excluded here — they flow through
+/// to the `"dependabot"` bucket.  Use `is_bot()` to identify them.
 fn is_filtered(item: &SearchIssueItem, me: &str) -> bool {
     if item.draft.unwrap_or(false) {
         return true;
     }
     let author = item.user.as_ref().map(|u| u.login.as_str()).unwrap_or("");
-    if author == me {
-        return true;
-    }
-    // Drop well-known bots.
-    matches!(author, "dependabot" | "dependabot[bot]" | "carefeed-ci")
+    author == me
 }
 
 /// Extract `{owner}/{repo}` from `https://api.github.com/repos/{owner}/{repo}`.
@@ -825,7 +857,12 @@ pub async fn ci_state_cached(
 ) -> (CiState, bool, String) {
     let sha = match get_pr_head_sha(client, repo, number, endpoint_etags, endpoint_body_cache).await
     {
-        Some(s) => s,
+        Some(GetPrHeadResult::Open(s)) => s,
+        // Terminal (closed/merged): treat as a hard drop — same as Actions failure.
+        Some(GetPrHeadResult::Terminal) => {
+            debug!(%repo, number, "pr is closed/merged — dropping from queue");
+            return (CiState::Unknown, true, String::new());
+        }
         None => return (CiState::Unknown, false, String::new()),
     };
 
@@ -960,11 +997,19 @@ async fn get_pr_head_sha(
     number: u64,
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> Option<String> {
+) -> Option<GetPrHeadResult> {
     let url = format!("{}/repos/{repo}/pulls/{number}", api_base());
     let body = etag_get(client, &url, etags, body_cache).await?;
     let pr: PrDetail = serde_json::from_str(&body).ok()?;
-    Some(pr.head.sha)
+    // Drop the item if the PR is already closed or merged — independent of
+    // the GitHub search index, which can lag by a cycle after a merge.
+    let is_terminal = pr.state.as_deref() == Some("closed")
+        || pr.merged_at.as_deref().is_some_and(|s| !s.is_empty());
+    if is_terminal {
+        Some(GetPrHeadResult::Terminal)
+    } else {
+        Some(GetPrHeadResult::Open(pr.head.sha))
+    }
 }
 
 /// Conditional GET helper.
@@ -1044,13 +1089,17 @@ pub(crate) fn write_json_atomic(path: &Path, json: &str) -> std::io::Result<()> 
 }
 
 /// Select the top-3 PRs in bucket-priority order:
-/// `requested` → `needs_review` → `changes_req`; preserve within-bucket order.
+/// `requested` → `needs_review` → `changes_req` → `dependabot`; preserve within-bucket order.
+///
+/// Dependabot PRs sit last — they rarely require reading the diff, so prefetching
+/// them over a human-review PR wastes the limited prefetch budget.
 fn top_three_items(items: &[PrQueueItem]) -> Vec<&PrQueueItem> {
     let bucket_order = |b: &str| match b {
         "requested" => 0usize,
         "needs_review" => 1,
         "changes_req" => 2,
-        _ => 3,
+        "dependabot" => 3,
+        _ => 4,
     };
     let mut sorted: Vec<&PrQueueItem> = items.iter().collect();
     sorted.sort_by_key(|i| bucket_order(&i.bucket));
@@ -1259,6 +1308,22 @@ mod tests {
         assert!(after.saturating_sub(review_epoch) > 30);
     }
 
+    // ── is_bot ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_bot_recognises_all_bot_logins() {
+        for login in &["dependabot", "dependabot[bot]", "carefeed-ci"] {
+            assert!(is_bot(login), "expected '{login}' to be recognised as a bot");
+        }
+    }
+
+    #[test]
+    fn is_bot_returns_false_for_humans() {
+        for login in &["alice", "hammer", "app/dependabot", "dependabot-bot"] {
+            assert!(!is_bot(login), "expected '{login}' not to be a bot");
+        }
+    }
+
     // ── is_filtered ───────────────────────────────────────────────────────────
 
     #[test]
@@ -1272,11 +1337,13 @@ mod tests {
     }
 
     #[test]
-    fn is_filtered_excludes_known_bots() {
+    fn is_filtered_does_not_exclude_bots() {
+        // Bots are no longer dropped by is_filtered — they flow through to the
+        // "dependabot" bucket.  is_bot() is the single source of truth.
         for bot in &["dependabot", "dependabot[bot]", "carefeed-ci"] {
             assert!(
-                is_filtered(&make_item(bot, false, None), "hammer"),
-                "expected bot '{bot}' to be filtered"
+                !is_filtered(&make_item(bot, false, None), "hammer"),
+                "bot '{bot}' should pass is_filtered (routed to dependabot bucket instead)"
             );
         }
     }
@@ -1515,6 +1582,260 @@ mod tests {
         assert!(
             !store.is_suppressed("acme/repo", 99, "", now + 1),
             "empty head_sha must never be suppressed"
+        );
+    }
+
+    // ── Dependabot grouping integration tests ─────────────────────────────────
+
+    /// Mount mocks for a dependabot-authored PR in the needs_review bucket.
+    async fn mount_dependabot_pr_mocks(server: &wiremock::MockServer, head_sha: &str) {
+        use serde_json::json;
+        use wiremock::matchers::{method, path, path_regex, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "tester"})))
+            .mount(server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr review-requested:@me org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(server)
+            .await;
+
+        let head_sha_owned = head_sha.to_owned();
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr review:required org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [{
+                    "number": 100,
+                    "title": "chore: bump serde from 1.0.195 to 1.0.196",
+                    "html_url": "https://github.com/Carefeed/admin-portal/pull/100",
+                    "repository_url": "https://api.github.com/repos/Carefeed/admin-portal",
+                    "user": { "login": "dependabot[bot]" },
+                    "draft": false,
+                    "updated_at": "2026-06-07T12:00:00Z"
+                }]
+            })))
+            .mount(server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr reviewed-by:@me org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/Carefeed/admin-portal/pulls/100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "head": { "sha": head_sha_owned },
+                "state": "open",
+                "merged_at": null
+            })))
+            .mount(server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r".*/commits/.*/check-runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "check_runs": [{
+                    "name": "build", "status": "completed", "conclusion": "success",
+                    "id": 1, "app": { "slug": "github-actions" }, "output": {}
+                }]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// A dependabot-authored PR appears in the snapshot with bucket == "dependabot"
+    /// and is_bot == true instead of being silently dropped.
+    #[tokio::test]
+    async fn fetch_routes_dependabot_pr_to_dependabot_bucket() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        mount_dependabot_pr_mocks(&server, "bot-sha-1").await;
+
+        let (source, _dir) = make_source();
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            source.config.perri_state_dir().join("approvals-state.json"),
+            std::time::Duration::from_secs(900),
+        )));
+
+        let snap = run_fetch(&source, suppress).await;
+
+        assert_eq!(snap.items.len(), 1, "dependabot PR should appear in snapshot");
+        let item = &snap.items[0];
+        assert_eq!(item.number, 100);
+        assert_eq!(item.bucket, "dependabot", "dependabot PR must land in 'dependabot' bucket");
+        assert!(item.is_bot, "is_bot must be true for a dependabot PR");
+        assert_eq!(item.head_sha, "bot-sha-1");
+    }
+
+    // ── Merged/closed PR exclusion integration tests ──────────────────────────
+
+    /// Mount mocks for a PR that the search index still returns as open but
+    /// whose PR detail shows it has been merged.
+    async fn mount_merged_pr_mocks(server: &wiremock::MockServer) {
+        use serde_json::json;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "tester"})))
+            .mount(server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr review-requested:@me org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(server)
+            .await;
+
+        // Search index still returns PR #55 as open (lag)
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr review:required org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [{
+                    "number": 55,
+                    "title": "fix: something",
+                    "html_url": "https://github.com/Carefeed/admin-portal/pull/55",
+                    "repository_url": "https://api.github.com/repos/Carefeed/admin-portal",
+                    "user": { "login": "alice" },
+                    "draft": false,
+                    "updated_at": "2026-06-07T12:00:00Z"
+                }]
+            })))
+            .mount(server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr reviewed-by:@me org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(server)
+            .await;
+
+        // PR detail shows merged_at is set → terminal
+        Mock::given(method("GET"))
+            .and(path("/repos/Carefeed/admin-portal/pulls/55"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "head": { "sha": "merged-sha" },
+                "state": "closed",
+                "merged_at": "2026-06-07T11:58:00Z"
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// A PR that has been merged is dropped from the snapshot even if the
+    /// search index still returns it as open.
+    #[tokio::test]
+    async fn fetch_drops_merged_pr_despite_search_index_lag() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        mount_merged_pr_mocks(&server).await;
+
+        let (source, _dir) = make_source();
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            source.config.perri_state_dir().join("approvals-state.json"),
+            std::time::Duration::from_secs(900),
+        )));
+
+        let snap = run_fetch(&source, suppress).await;
+        assert!(
+            snap.items.is_empty(),
+            "merged PR must not appear in snapshot even if search index lags; \
+             got: {:?}",
+            snap.items.iter().map(|i| i.number).collect::<Vec<_>>()
+        );
+    }
+
+    /// A PR whose detail shows state == "closed" but merged_at is null (closed
+    /// without merge) is also dropped.
+    #[tokio::test]
+    async fn fetch_drops_closed_unmerged_pr() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "tester"})))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr review-requested:@me org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr review:required org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [{
+                    "number": 66,
+                    "title": "wip: abandoned",
+                    "html_url": "https://github.com/Carefeed/admin-portal/pull/66",
+                    "repository_url": "https://api.github.com/repos/Carefeed/admin-portal",
+                    "user": { "login": "bob" },
+                    "draft": false,
+                    "updated_at": "2026-06-07T12:00:00Z"
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open is:pr reviewed-by:@me org:Carefeed archived:false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(&server)
+            .await;
+
+        // Closed (not merged) — state == "closed", merged_at == null
+        Mock::given(method("GET"))
+            .and(path("/repos/Carefeed/admin-portal/pulls/66"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "head": { "sha": "closed-sha" },
+                "state": "closed",
+                "merged_at": null
+            })))
+            .mount(&server)
+            .await;
+
+        let (source, _dir) = make_source();
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            source.config.perri_state_dir().join("approvals-state.json"),
+            std::time::Duration::from_secs(900),
+        )));
+
+        let snap = run_fetch(&source, suppress).await;
+        assert!(
+            snap.items.is_empty(),
+            "closed (unmerged) PR must not appear in snapshot; \
+             got: {:?}",
+            snap.items.iter().map(|i| i.number).collect::<Vec<_>>()
         );
     }
 }
