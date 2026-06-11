@@ -27,6 +27,18 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         winLog.info("windowDidEnterFullScreen — \(self.title, privacy: .public)")
     }
 
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        // One window in the simultaneous multi-window startup sequence occasionally
+        // fails to complete the full-screen transition. Retry after a short delay to
+        // let the other windows' Space animations settle first.
+        winLog.warning("windowDidFailToEnterFullScreen — \(self.title, privacy: .public) — retrying in 0.5s")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak window] in
+            guard let window, !window.styleMask.contains(.fullScreen) else { return }
+            winLog.warning("windowDidFailToEnterFullScreen — retrying toggleFullScreen for \(window.title, privacy: .public)")
+            window.toggleFullScreen(nil)
+        }
+    }
+
     func windowShouldExitFullScreen(_ sender: NSWindow) -> Bool {
         // Block ALL exit-full-screen attempts. macOS fires these on sleep/wake
         // via _NSExitFullScreenTransitionController, which holds an internal

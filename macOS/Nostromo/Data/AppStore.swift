@@ -310,12 +310,21 @@ class AppStore: ObservableObject {
             motherActionError = "mother binary not found"
             return
         }
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             let proc = Process()
             proc.executableURL = bin
             proc.arguments = ["archive", id]
             try? proc.run()
             proc.waitUntilExit()
+            // Optimistically remove from UI — the broker may push an "archived"
+            // event too, but jobMap.removeValue is idempotent so the double-remove
+            // is harmless. Without this the list only updates if/when the broker
+            // event arrives, which can be delayed or absent.
+            guard proc.terminationStatus == 0 else { return }
+            DispatchQueue.main.async {
+                self?.jobMap.removeValue(forKey: id)
+                self?.publishJobsAndStatus()
+            }
         }
     }
 
@@ -324,12 +333,19 @@ class AppStore: ObservableObject {
             motherActionError = "mother binary not found"
             return
         }
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             let proc = Process()
             proc.executableURL = bin
             proc.arguments = ["archive", "--older-than", "0"]
             try? proc.run()
             proc.waitUntilExit()
+            // Optimistically remove all terminal-state jobs from the UI.
+            guard proc.terminationStatus == 0 else { return }
+            DispatchQueue.main.async {
+                let terminal: Set<String> = ["succeeded", "failed", "cancelled"]
+                self?.jobMap = self?.jobMap.filter { !terminal.contains($0.value.state) } ?? [:]
+                self?.publishJobsAndStatus()
+            }
         }
     }
 
