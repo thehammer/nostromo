@@ -1240,9 +1240,11 @@ private class PlanChecklistView: NSView {
     // MARK: Private
 
     private func collapse() {
-        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        heightConstraint.isActive = true
-        onItemsChanged?(false)
+        DispatchQueue.main.async { [weak self] in
+            self?.stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            self?.heightConstraint.isActive = true
+            self?.onItemsChanged?(false)
+        }
     }
 
     private func apply(_ items: [(done: Bool, text: String)]) {
