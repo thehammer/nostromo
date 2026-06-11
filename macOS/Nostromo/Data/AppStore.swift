@@ -159,6 +159,14 @@ class AppStore: ObservableObject {
         client.start()
         broker.start()
 
+        // Fallback poll: `mother list --format json` every 30 s reconciles any
+        // external changes (e.g. tmux archive) that the broker didn't broadcast.
+        // The broker is authoritative for live events; this only catches stragglers.
+        Timer.publish(every: 30, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in self?.pollMotherList() }
+            .store(in: &cancellables)
+
         // Phase 1: keep the daemon's focus registry mirrored from the Mac.
         client.connected
             .receive(on: DispatchQueue.main)
@@ -296,6 +304,34 @@ class AppStore: ObservableObject {
     func retryJob(_ id: String) {
         broker.retry(job: id) { [weak self] result in
             self?.handleActionResult(result, verb: "retry")
+        }
+    }
+
+    private func pollMotherList() {
+        guard let bin = AppStore.findBinary("mother") else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let proc = Process()
+            proc.executableURL = bin
+            proc.arguments = ["list", "--format", "json"]
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { return }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            // Parse just the job ids and states to detect jobs that have been
+            // externally archived (removed from mother's list) so we can remove
+            // them from our jobMap without a broker event.
+            guard let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+            let liveIds = Set(raw.compactMap { $0["id"] as? String })
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let stale = self.jobMap.keys.filter { !liveIds.contains($0) }
+                if !stale.isEmpty {
+                    stale.forEach { self.jobMap.removeValue(forKey: $0) }
+                    self.publishJobsAndStatus()
+                }
+            }
         }
     }
 

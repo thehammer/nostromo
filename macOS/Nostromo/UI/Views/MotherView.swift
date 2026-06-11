@@ -278,15 +278,12 @@ private struct MotherJobListSwiftUI: View {
             ForEach(groupedJobs) { group in
                 Section(group.state.uppercased()) {
                     ForEach(group.jobs, id: \.id) { job in
-                        // On macOS, swipe actions in NSHostingView don't fire reliably —
-                        // pass empty callbacks so no swipe buttons appear; actions are
-                        // surfaced via .contextMenu instead.
                         NostromoKit.MotherJobRow(
                             model: vm.rowModel(for: job),
-                            onArchive:    {},
-                            onCancel:     {},
-                            onRetry:      {},
-                            onForceStart: {}
+                            onArchive:    { AppStore.shared.archiveJob(job.id) },
+                            onCancel:     { AppStore.shared.cancelJob(job.id) },
+                            onRetry:      { AppStore.shared.retryJob(job.id) },
+                            onForceStart: { AppStore.shared.forceStartJob(job.id) }
                         )
                         .tag(job.id)
                         .contextMenu {
