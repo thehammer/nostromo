@@ -71,12 +71,15 @@ class PaceBarsView: NSView {
                         ?? .healthy
 
         if activeHealth == .healthy {
-            // Remove health overlay — restore normal bars drawing.
+            // Remove health overlay (if present) and restore normal bars drawing.
             if let hv = healthView {
                 hv.removeFromSuperview()
                 healthView = nil
-                needsDisplay = true
             }
+            // Always mark dirty — posture data may have arrived after the first
+            // draw (startup race) or changed since. Without this, bars stay blank
+            // if posture was nil during the initial layout pass.
+            needsDisplay = true
         } else {
             // Show or update health status view.
             if healthView == nil {
