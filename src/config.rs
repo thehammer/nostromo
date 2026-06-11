@@ -48,6 +48,12 @@ pub struct Config {
     pub pr_queue_poll_secs: u64,
     /// PR diff poll interval in seconds (default: 30).
     pub pr_diff_poll_secs: u64,
+    /// How long (in seconds) to suppress a just-approved PR from the queue.
+    ///
+    /// Covers the GitHub search-index lag window (typically seconds to low minutes).
+    /// After this many seconds the suppression entry expires and the PR reappears
+    /// even if the search index never caught up.  Default: 900 (15 min).
+    pub pr_approval_suppress_secs: u64,
 
     // ── Phase 4: Microsoft Graph (native mailbox/calendar) ──────────────────
     /// Azure AD application (client) ID for Microsoft Graph OAuth2 device flow.
@@ -79,6 +85,7 @@ impl Default for Config {
             calendar_poll_secs: 120,
             pr_queue_poll_secs: 60,
             pr_diff_poll_secs: 30,
+            pr_approval_suppress_secs: 900,
             graph_client_id: None,
             graph_tenant: None,
             graph_token_cache: None,
