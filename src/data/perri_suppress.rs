@@ -148,7 +148,9 @@ impl SuppressStore {
     }
 
     /// Remove entries older than the TTL.  Called once per fetch cycle.
-    pub fn prune(&mut self, now_secs: u64) {
+    /// Prune expired entries. Returns `true` if any entries were removed
+    /// (caller should call `save()` to persist the pruned state to disk).
+    pub fn prune(&mut self, now_secs: u64) -> bool {
         let ttl_secs = self.ttl.as_secs();
         let before = self.entries.len();
         self.entries
@@ -157,6 +159,7 @@ impl SuppressStore {
         if pruned > 0 {
             debug!("perri suppress: pruned {pruned} expired entries");
         }
+        pruned > 0
     }
 
     /// Persist the current map to disk atomically.

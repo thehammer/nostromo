@@ -641,7 +641,9 @@ impl PerriQueueNativeSource {
         {
             let now = unix_now_secs();
             let mut store = suppress.lock().unwrap();
-            store.prune(now);
+            if store.prune(now) {
+                store.save();
+            }
             let before = items.len();
             items.retain(|item| {
                 !store.is_suppressed(&item.repo, item.number, &item.head_sha, now)
