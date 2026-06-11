@@ -38,7 +38,7 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
     public let title: String
     /// PR author login.
     public let author: String
-    /// Review bucket: `"requested"`, `"needs_review"`, or `"changes_req"`.
+    /// Review bucket: `"requested"`, `"needs_review"`, `"changes_req"`, or `"dependabot"`.
     public let bucket: String
     /// `true` when the PR has new activity since we last reviewed it.
     public let newActivity: Bool
@@ -48,6 +48,9 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
     public let ciState: CiState
     /// HEAD commit SHA — used to validate detail cache freshness.
     public let headSha: String
+    /// `true` when this PR was authored by a known bot (dependabot, carefeed-ci).
+    /// The daemon is the single source of truth — do not infer from `author`.
+    public let isBot: Bool
 
     // MARK: Identifiable
 
@@ -61,6 +64,7 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         case newActivity = "new_activity"
         case ciState     = "ci_state"
         case headSha     = "head_sha"
+        case isBot       = "is_bot"
     }
 
     // MARK: Init
@@ -74,7 +78,8 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         newActivity: Bool,
         url: String,
         ciState: CiState,
-        headSha: String
+        headSha: String,
+        isBot: Bool = false
     ) {
         self.repo        = repo
         self.number      = number
@@ -85,6 +90,7 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         self.url         = url
         self.ciState     = ciState
         self.headSha     = headSha
+        self.isBot       = isBot
     }
 
     // MARK: Decode with defaults
@@ -100,5 +106,6 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         url         = try c.decode(String.self, forKey: .url)
         ciState     = (try? c.decode(CiState.self, forKey: .ciState)) ?? .unknown
         headSha     = (try? c.decode(String.self, forKey: .headSha)) ?? ""
+        isBot       = (try? c.decode(Bool.self,   forKey: .isBot))   ?? false
     }
 }

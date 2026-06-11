@@ -25,6 +25,7 @@
 //! - `requested`    — review explicitly requested from me
 //! - `needs_review` — open PR that needs at least one approval
 //! - `changes_req`  — I requested changes and the author has since responded
+//! - `dependabot`   — dependabot / carefeed-ci authored PRs needing review
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -106,7 +107,7 @@ pub struct PrQueueItem {
     pub number: u64,
     pub title: String,
     pub author: String,
-    /// One of: `"requested"`, `"needs_review"`, `"changes_req"`.
+    /// One of: `"requested"`, `"needs_review"`, `"changes_req"`, `"dependabot"`.
     #[serde(default = "default_bucket")]
     pub bucket: String,
     /// For `changes_req` items: whether the author has pushed new commits or
@@ -122,6 +123,11 @@ pub struct PrQueueItem {
     /// the queue source could not resolve the head SHA.
     #[serde(default)]
     pub head_sha: String,
+    /// `true` when this PR was authored by a known bot (dependabot, carefeed-ci).
+    /// The daemon (`is_bot` in `perri_queue_native.rs`) is the single source of
+    /// truth; clients must not infer bot status from the `author` string.
+    #[serde(default)]
+    pub is_bot: bool,
 }
 
 fn default_bucket() -> String {
@@ -226,6 +232,7 @@ mod tests {
             url: "https://github.com/acme/web/pull/42".to_owned(),
             ci_state: CiState::Success,
             head_sha: "abc123def456".to_owned(),
+            is_bot: false,
         };
 
         let json = serde_json::to_string(&item).expect("serialize");
@@ -249,6 +256,36 @@ mod tests {
         let item: PrQueueItem = serde_json::from_str(json).expect("deserialize");
         assert_eq!(item.head_sha, "");
         assert_eq!(item.ci_state, CiState::Unknown);
+        assert!(!item.is_bot, "is_bot should default to false when absent");
+    }
+
+    #[test]
+    fn pr_queue_item_is_bot_roundtrips() {
+        let item = PrQueueItem {
+            repo: "acme/web".to_owned(),
+            number: 7,
+            title: "chore: bump deps".to_owned(),
+            author: "dependabot[bot]".to_owned(),
+            bucket: "dependabot".to_owned(),
+            new_activity: false,
+            url: "https://github.com/acme/web/pull/7".to_owned(),
+            ci_state: CiState::Success,
+            head_sha: "deadbeef".to_owned(),
+            is_bot: true,
+        };
+        let json = serde_json::to_string(&item).expect("serialize");
+        let decoded: PrQueueItem = serde_json::from_str(&json).expect("deserialize");
+        assert!(decoded.is_bot);
+        assert_eq!(decoded.bucket, "dependabot");
+
+        // Also verify that a payload explicitly carrying is_bot:false decodes correctly.
+        let explicit_false = r#"{
+            "repo": "acme/web", "number": 1, "title": "t", "author": "alice",
+            "bucket": "requested", "new_activity": false,
+            "url": "https://github.com/acme/web/pull/1", "is_bot": false
+        }"#;
+        let item2: PrQueueItem = serde_json::from_str(explicit_false).expect("deserialize");
+        assert!(!item2.is_bot);
     }
 
     #[test]

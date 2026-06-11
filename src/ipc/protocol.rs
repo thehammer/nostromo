@@ -981,6 +981,7 @@ mod tests {
             url: "https://github.com/acme/web/pull/42".into(),
             ci_state: CiState::Success,
             head_sha: "abc123".into(),
+            is_bot: false,
         };
         let snap = PrSnapshot {
             pr_number: Some(42),

@@ -335,10 +335,10 @@ private class PerriPRList: NSView {
 
     @objc private func startReviewing() {
         // Obtain the Perri session (idempotent — returns existing if already created).
-        // Clear context so Perri's system prompt auto-starts the review workflow
-        // on the fresh session. No prompt needed for the empty-prompt case.
+        // Clear context and send the opening prompt so Perri's startup logic fires.
         let session = AppStore.shared.session(for: "perri", displayName: "Perri")
         session.newSession()
+        session.send("start reviewing")
     }
 
     func setError(_ error: String?) {
@@ -358,10 +358,11 @@ private class PerriPRList: NSView {
         }
 
         // Split into buckets
-        let bucketOrder   = ["requested", "needs_review", "changes_req"]
-        let bucketLabels  = ["requested": "REVIEW REQUESTED",
+        let bucketOrder   = ["requested", "needs_review", "changes_req", "dependabot"]
+        let bucketLabels  = ["requested":   "REVIEW REQUESTED",
                              "needs_review": "NEEDS REVIEW",
-                             "changes_req": "CHANGES REQUESTED"]
+                             "changes_req":  "CHANGES REQUESTED",
+                             "dependabot":   "DEPENDABOT"]
 
         for bucket in bucketOrder {
             let group = items.filter { $0.bucket == bucket }
@@ -533,6 +534,7 @@ private class PerriPRRow: NSView {
         switch bucket {
         case "changes_req":  return Theme.redSweater
         case "needs_review": return Theme.sage
+        case "dependabot":   return Theme.amber
         default:             return Theme.cornflower
         }
     }
@@ -995,6 +997,7 @@ private class PerriPRDetail: NSView {
         case "requested":    return "REVIEW REQUESTED"
         case "needs_review": return "NEEDS REVIEW"
         case "changes_req":  return "CHANGES REQUESTED"
+        case "dependabot":   return "DEPENDABOT"
         default:             return bucket.uppercased()
         }
     }
@@ -1003,6 +1006,7 @@ private class PerriPRDetail: NSView {
         switch bucket {
         case "changes_req":  return Theme.redSweater
         case "needs_review": return Theme.sage
+        case "dependabot":   return Theme.amber
         default:             return Theme.cornflower
         }
     }

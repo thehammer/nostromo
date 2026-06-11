@@ -27,6 +27,7 @@ fn fake_queue() -> PrQueueSnapshot {
                 url: "https://github.com/acme/web-app/pull/42".into(),
                 ci_state: Default::default(),
                 head_sha: String::new(),
+                is_bot: false,
             },
             PrQueueItem {
                 repo: "acme/api".into(),
@@ -38,6 +39,7 @@ fn fake_queue() -> PrQueueSnapshot {
                 url: "https://github.com/acme/api/pull/17".into(),
                 ci_state: Default::default(),
                 head_sha: String::new(),
+                is_bot: false,
             },
         ],
         stale: false,

@@ -178,6 +178,83 @@ final class PerriWireTests: XCTestCase {
         }
     }
 
+    // MARK: - is_bot field + dependabot bucket
+
+    func testIsBotDecodesFromPayload() throws {
+        let json = """
+        {
+            "repo": "Carefeed/admin-portal",
+            "number": 100,
+            "title": "chore: bump serde",
+            "author": "dependabot[bot]",
+            "bucket": "dependabot",
+            "new_activity": false,
+            "url": "https://github.com/Carefeed/admin-portal/pull/100",
+            "ci_state": "success",
+            "head_sha": "bot-sha",
+            "is_bot": true
+        }
+        """.data(using: .utf8)!
+
+        let item = try JSONDecoder().decode(PrQueueItem.self, from: json)
+        XCTAssertTrue(item.isBot,              "is_bot:true should decode to isBot == true")
+        XCTAssertEqual(item.bucket, "dependabot")
+        XCTAssertEqual(item.author, "dependabot[bot]")
+    }
+
+    func testIsBotDefaultsFalseWhenAbsent() throws {
+        let json = """
+        {
+            "repo": "acme/web",
+            "number": 1,
+            "title": "t",
+            "author": "alice",
+            "bucket": "requested",
+            "new_activity": false,
+            "url": "https://example.com"
+        }
+        """.data(using: .utf8)!
+
+        let item = try JSONDecoder().decode(PrQueueItem.self, from: json)
+        XCTAssertFalse(item.isBot, "is_bot should default to false when absent from payload")
+    }
+
+    func testPerriStateDependabotBucketRoundtrips() throws {
+        // A perri_state message with a dependabot bucket item should decode cleanly.
+        let json = """
+        {
+            "type": "perri_state",
+            "queue": [
+                {
+                    "repo": "Carefeed/admin-portal",
+                    "number": 99,
+                    "title": "chore: bump tokio",
+                    "author": "dependabot[bot]",
+                    "bucket": "dependabot",
+                    "new_activity": false,
+                    "url": "https://github.com/Carefeed/admin-portal/pull/99",
+                    "ci_state": "success",
+                    "head_sha": "dep-sha",
+                    "is_bot": true
+                }
+            ],
+            "current": null
+        }
+        """.data(using: .utf8)!
+
+        let msg = ServerMsg.decode(from: json)
+        guard case .perriState(let queue, let current) = msg else {
+            XCTFail("Expected .perriState, got \(msg)")
+            return
+        }
+        XCTAssertNil(current)
+        XCTAssertEqual(queue.count, 1)
+        let item = queue[0]
+        XCTAssertEqual(item.bucket, "dependabot")
+        XCTAssertTrue(item.isBot)
+        XCTAssertEqual(item.headSha, "dep-sha")
+    }
+
     // MARK: - PrSnapshot defaults for missing Rust `#[serde(default)]` fields
 
     func testPrSnapshotDefaultsMissingCountFields() throws {

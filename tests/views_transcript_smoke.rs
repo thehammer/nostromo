@@ -106,6 +106,7 @@ async fn perri_view_ctrl_t_toggles_transcript() {
             url: "https://github.com/a/b/pull/1".into(),
             ci_state: Default::default(),
             head_sha: String::new(),
+            is_bot: false,
         }],
         stale: false,
         error: None,
