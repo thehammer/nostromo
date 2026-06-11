@@ -1051,21 +1051,111 @@ private class MotherJobDetail: NSView {
         let path = "\(home)/.mother/logs/\(job.id).log"
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-            let tail    = content.components(separatedBy: "\n").suffix(60).joined(separator: "\n")
+            let tail    = content.components(separatedBy: "\n").suffix(200).joined(separator: "\n")
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.currentJobId == job.id else { return }
-                self.setLog(tail)
+                self.setLogAttributed(tail)
             }
         }
     }
 
-    private func setLog(_ text: String) {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: Theme.monoFont, .foregroundColor: Theme.fgMuted,
-        ]
-        logTextView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: attrs))
-        let end = NSRange(location: logTextView.textStorage?.length ?? 0, length: 0)
-        logTextView.scrollRangeToVisible(end)
+    private func setLogAttributed(_ text: String) {
+        let result = NSMutableAttributedString()
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            guard
+                let data = trimmed.data(using: .utf8),
+                let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let type = obj["type"] as? String
+            else { continue }
+
+            switch type {
+            case "system":
+                continue
+
+            case "assistant":
+                guard let msg     = obj["message"] as? [String: Any],
+                      let content = msg["content"] as? [[String: Any]] else { continue }
+                for block in content {
+                    guard let blockType = block["type"] as? String else { continue }
+                    switch blockType {
+                    case "text":
+                        guard let txt = block["text"] as? String else { continue }
+                        appendRun(txt + "\n\n", font: Theme.monoFont, color: Theme.fg, to: result)
+                    case "tool_use":
+                        let name    = (block["name"] as? String) ?? "Tool"
+                        let input   = (block["input"] as? [String: Any]) ?? [:]
+                        let summary = toolSummary(input)
+                        let header  = summary.isEmpty ? "▶ \(name)\n" : "▶ \(name)  \(summary)\n"
+                        appendRun(header, font: NSFont.systemFont(ofSize: 11), color: Theme.amber, to: result)
+                    default:
+                        continue
+                    }
+                }
+
+            case "user":
+                guard let content = obj["content"] as? [[String: Any]] else { continue }
+                for block in content {
+                    guard (block["type"] as? String) == "tool_result" else { continue }
+                    let isError = (block["is_error"] as? Bool) ?? false
+
+                    // Prefer stdout from tool_use_result envelope
+                    var body    = ""
+                    var hasErr  = false
+                    if let tur    = obj["tool_use_result"] as? [String: Any] {
+                        let stdout = (tur["stdout"] as? String) ?? ""
+                        let stderr = (tur["stderr"] as? String) ?? ""
+                        hasErr = !stderr.isEmpty
+                        body   = stdout.isEmpty ? stderr : stdout
+                    }
+                    if body.isEmpty {
+                        body = (block["content"] as? String) ?? ""
+                    }
+
+                    let truncated: String
+                    if body.count > 500 {
+                        truncated = String(body.prefix(500)) + "\n  … (truncated)"
+                    } else {
+                        truncated = body
+                    }
+                    let indented = truncated.components(separatedBy: "\n")
+                        .map { "  \($0)" }
+                        .joined(separator: "\n")
+                    let color = (isError || hasErr) ? Theme.redSweater : Theme.fgMuted
+                    appendRun(indented + "\n\n", font: Theme.monoFont, color: color, to: result)
+                }
+
+            default:
+                continue
+            }
+        }
+        logTextView.textStorage?.setAttributedString(result)
+        logTextView.scrollRangeToVisible(NSRange(location: result.length, length: 0))
+    }
+
+    private func appendRun(_ s: String, font: NSFont, color: NSColor, to target: NSMutableAttributedString) {
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        target.append(NSAttributedString(string: s, attributes: attrs))
+    }
+
+    private func toolSummary(_ input: [String: Any]) -> String {
+        if let desc = input["description"] as? String, !desc.isEmpty {
+            return desc
+        }
+        let candidates = ["command", "file_path"]
+        for key in candidates {
+            if let val = input[key] as? String, !val.isEmpty {
+                return val.count > 80 ? String(val.prefix(80)) + "…" : val
+            }
+        }
+        // Fallback: first string value
+        for (_, val) in input {
+            if let s = val as? String, !s.isEmpty {
+                return s.count > 80 ? String(s.prefix(80)) + "…" : s
+            }
+        }
+        return ""
     }
 
     private func stateColor(_ state: String) -> NSColor {
