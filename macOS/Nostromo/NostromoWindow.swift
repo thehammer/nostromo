@@ -27,12 +27,34 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         winLog.info("windowDidEnterFullScreen — \(self.title, privacy: .public)")
     }
 
+    func windowShouldExitFullScreen(_ sender: NSWindow) -> Bool {
+        // Block ALL exit-full-screen attempts. macOS fires these on sleep/wake
+        // via _NSExitFullScreenTransitionController, which holds an internal
+        // reference to the window and calls `isVisible` on it during the
+        // transition. If anything has invalidated that pointer by the time the
+        // async callback fires, AppKit crashes with EXC_BAD_ACCESS (SIGSEGV)
+        // deep inside _doFailedToExitFullScreen — before any delegate hook is
+        // reached. Returning false here prevents the transition controller from
+        // ever being created, which is the only safe fix on macOS 26.
+        // (Crash reports: 2026-06-10-160411, 2026-06-11-080220.)
+        winLog.warning("windowShouldExitFullScreen — returning false to prevent transition controller crash (\(self.title, privacy: .public))")
+        return false
+    }
+
     func windowWillExitFullScreen(_ notification: Notification) {
+        // Fires only if windowShouldExitFullScreen returns true (e.g. user
+        // explicitly exits via Mission Control despite the block above, or
+        // in a future macOS that ignores the delegate return value).
         winLog.warning("windowWillExitFullScreen — \(self.title, privacy: .public) (not re-entering; see comment)")
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         winLog.warning("windowDidExitFullScreen — \(self.title, privacy: .public) isFullScreen=\(self.styleMask.contains(.fullScreen), privacy: .public)")
+    }
+
+    func windowDidFailToExitFullScreen(_ window: NSWindow) {
+        // Fallback for any path that bypasses windowShouldExitFullScreen.
+        winLog.warning("windowDidFailToExitFullScreen — \(self.title, privacy: .public) (suppressed)")
     }
 
     // Note: we deliberately do NOT force re-entry on windowWillExitFullScreen.

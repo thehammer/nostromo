@@ -96,6 +96,7 @@ public struct PerriPRRow: View {
         case "requested":    return "requested"
         case "needs_review": return "needs review"
         case "changes_req":  return "changes req"
+        case "dependabot":   return "dependabot"
         default:             return model.bucket
         }
     }
@@ -105,6 +106,7 @@ public struct PerriPRRow: View {
         case "requested":    return .blue
         case "needs_review": return .orange
         case "changes_req":  return .red
+        case "dependabot":   return .yellow
         default:             return .gray
         }
     }
