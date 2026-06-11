@@ -191,10 +191,11 @@ private class MotherCountsStrip: NSView {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         let items: [(String, String, Int, NSColor)] = [
-            ("▶", "Running",  s.running,  Theme.sage),
-            ("⏸", "Queued",   s.queued,   Theme.fgMuted),
-            ("?", "Awaiting", s.awaiting, Theme.amber),
-            ("!", "Failed",   s.failed,   Theme.redSweater),
+            ("▶", "Running",   s.running,   Theme.sage),
+            ("⏸", "Queued",    s.queued,    Theme.fgMuted),
+            ("?", "Awaiting",  s.awaiting,  Theme.amber),
+            ("✓", "Succeeded", s.succeeded, Theme.sage),
+            ("!", "Failed",    s.failed,    Theme.redSweater),
         ]
         for (symbol, label, count, color) in items {
             stack.addArrangedSubview(chip(symbol: symbol, label: label, count: count, color: color))
@@ -359,11 +360,31 @@ private class MotherJobList: NSView {
         hostingView.appearance = NSAppearance(named: .darkAqua)
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(hostingView)
+
+        // Archive All — borderless button pinned to the bottom of the list pane
+        let btn = NSButton()
+        btn.title        = ""
+        btn.isBordered   = false
+        btn.bezelStyle   = .rounded
+        btn.font         = .systemFont(ofSize: 10)
+        btn.attributedTitle = NSAttributedString(
+            string: "Archive All",
+            attributes: [.foregroundColor: Theme.fgMuted, .font: NSFont.systemFont(ofSize: 10)]
+        )
+        btn.target = self
+        btn.action = #selector(didTapArchiveAll)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(btn)
+
         NSLayoutConstraint.activate([
             hostingView.topAnchor.constraint(equalTo: topAnchor),
             hostingView.leadingAnchor.constraint(equalTo: leadingAnchor),
             hostingView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: btn.topAnchor, constant: -8),
+
+            btn.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            btn.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
+            btn.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
         ])
     }
 
@@ -371,6 +392,17 @@ private class MotherJobList: NSView {
 
     func update(_ jobs: [MotherJob]) {
         viewModel.jobs = jobs
+    }
+
+    @objc private func didTapArchiveAll() {
+        let alert = NSAlert()
+        alert.messageText    = "Archive all terminal-state jobs?"
+        alert.informativeText = "This archives every succeeded, failed, and cancelled job immediately."
+        alert.addButton(withTitle: "Archive All")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            AppStore.shared.archiveAllJobs()
+        }
     }
 }
 
@@ -465,9 +497,10 @@ private class MotherJobDetail: NSView {
     private let retryButton      = NSButton(title: "Retry",       target: nil, action: nil)
     private let forceStartButton = NSButton(title: "Force-start", target: nil, action: nil)
     private let archiveButton    = NSButton(title: "Archive",     target: nil, action: nil)
-    private let archiveAllButton = NSButton(title: "Archive All", target: nil, action: nil)
     private let viewPlanButton   = NSButton(title: "View Plan",   target: nil, action: nil)
     private let actionErrorLabel = NSTextField(labelWithString: "")
+    private let planSectionLabel  = NSTextField(labelWithString: "PLAN")
+    private let planChecklistView = PlanChecklistView()
 
     private var logTimer:         Timer?
     private var actionErrorTimer: Timer?
@@ -519,8 +552,11 @@ private class MotherJobDetail: NSView {
         todoStack.spacing     = 4
         todoStack.alignment   = .leading
 
-        for v in [titleLabel, stateLabel, phaseRibbonView, todoStack, metaStack, actionsContainer,
-                  logSectionLabel, logScrollView] as [NSView] {
+        planSectionLabel.font      = .systemFont(ofSize: 9, weight: .semibold)
+        planSectionLabel.textColor = Theme.fgMuted
+
+        for v in [titleLabel, stateLabel, phaseRibbonView, actionsContainer, todoStack, metaStack,
+                  planSectionLabel, planChecklistView, logSectionLabel, logScrollView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -533,6 +569,11 @@ private class MotherJobDetail: NSView {
         todoHeight = todoStack.heightAnchor.constraint(equalToConstant: 0)
         todoHeight.isActive = true
 
+        // Wire plan checklist visibility: show/hide section label in tandem
+        planChecklistView.onItemsChanged = { [weak self] hasItems in
+            self?.planSectionLabel.isHidden = !hasItems
+        }
+
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 20),
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
@@ -541,13 +582,18 @@ private class MotherJobDetail: NSView {
             stateLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
             stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
-            // Phase ribbon — sits between state label and todo list; height is 0 when hidden
+            // Phase ribbon — sits between state label and actions; height is 0 when hidden
             phaseRibbonView.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 8),
             phaseRibbonView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             phaseRibbonView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
-            // Todo stack — below ribbon, above meta rows
-            todoStack.topAnchor.constraint(equalTo: phaseRibbonView.bottomAnchor, constant: 8),
+            // Actions container — directly below phase ribbon (or state label when ribbon is hidden)
+            actionsContainer.topAnchor.constraint(equalTo: phaseRibbonView.bottomAnchor, constant: 8),
+            actionsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            actionsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+
+            // Todo stack — below actions, above meta rows
+            todoStack.topAnchor.constraint(equalTo: actionsContainer.bottomAnchor, constant: 8),
             todoStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             todoStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
@@ -555,13 +601,15 @@ private class MotherJobDetail: NSView {
             metaStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             metaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
-            // actionsContainer sits between metaStack and logSectionLabel.
-            // Its height is determined by its content (zero when no actions).
-            actionsContainer.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 12),
-            actionsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            actionsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            // Plan checklist section — between meta and log
+            planSectionLabel.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 12),
+            planSectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
-            logSectionLabel.topAnchor.constraint(equalTo: actionsContainer.bottomAnchor, constant: 12),
+            planChecklistView.topAnchor.constraint(equalTo: planSectionLabel.bottomAnchor, constant: 6),
+            planChecklistView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            planChecklistView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+
+            logSectionLabel.topAnchor.constraint(equalTo: planChecklistView.bottomAnchor, constant: 12),
             logSectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
             logScrollView.topAnchor.constraint(equalTo: logSectionLabel.bottomAnchor, constant: 6),
@@ -635,7 +683,7 @@ private class MotherJobDetail: NSView {
 
         // Buttons
         for btn in [answerButton, cancelButton, retryButton,
-                    forceStartButton, archiveButton, archiveAllButton, viewPlanButton] {
+                    forceStartButton, archiveButton, viewPlanButton] {
             btn.bezelStyle  = .rounded
             btn.isBordered  = true
             btn.font        = .systemFont(ofSize: 11)
@@ -650,10 +698,16 @@ private class MotherJobDetail: NSView {
         forceStartButton.action = #selector(didForceStart)
         archiveButton.target    = self
         archiveButton.action    = #selector(didArchive)
-        archiveAllButton.target = self
-        archiveAllButton.action = #selector(didArchiveAll)
         viewPlanButton.target   = self
         viewPlanButton.action   = #selector(didViewPlan)
+
+        // Semantic color coding via contentTintColor
+        cancelButton.contentTintColor     = Theme.redSweater
+        retryButton.contentTintColor      = Theme.sage
+        forceStartButton.contentTintColor = Theme.amber
+        archiveButton.contentTintColor    = Theme.fgMuted
+        viewPlanButton.contentTintColor   = Theme.fgMuted
+        answerButton.contentTintColor     = Theme.sage
 
         // Error label (shown inline below buttons, auto-clears)
         actionErrorLabel.font      = .systemFont(ofSize: 10)
@@ -674,7 +728,7 @@ private class MotherJobDetail: NSView {
         guard let job else { showEmpty(); return }
 
         [titleLabel, stateLabel, todoStack, metaStack, actionsContainer,
-         logSectionLabel, logScrollView].forEach { $0.isHidden = false }
+         planSectionLabel, planChecklistView, logSectionLabel, logScrollView].forEach { $0.isHidden = false }
         emptyLabel.isHidden = true
 
         titleLabel.stringValue = job.title.isEmpty ? job.id : job.title
@@ -685,6 +739,7 @@ private class MotherJobDetail: NSView {
         updateTodoList(AppStore.shared.motherPeeks[job.id])
         rebuildMeta(job)
         rebuildActions(job)
+        planChecklistView.load(planPath: job.planPath)
         loadLog(job)
 
         if job.state == "running" || job.state == "awaiting" {
@@ -699,8 +754,9 @@ private class MotherJobDetail: NSView {
 
     private func showEmpty() {
         [titleLabel, stateLabel, phaseRibbonView, todoStack, metaStack, actionsContainer,
-         logSectionLabel, logScrollView].forEach { $0.isHidden = true }
+         planSectionLabel, planChecklistView, logSectionLabel, logScrollView].forEach { $0.isHidden = true }
         emptyLabel.isHidden = false
+        planChecklistView.load(planPath: nil)
     }
 
     private func updateRibbon(_ job: MotherJob) {
@@ -836,20 +892,16 @@ private class MotherJobDetail: NSView {
             widgets.append(viewPlanButton)
         }
 
-        // Archive All — always present
-        widgets.append(archiveAllButton)
-
         widgets.append(actionErrorLabel)
 
         // Disable action buttons when broker is offline
         for btn in [answerButton, cancelButton, retryButton,
-                    forceStartButton, archiveButton, archiveAllButton, viewPlanButton] {
+                    forceStartButton, archiveButton, viewPlanButton] {
             btn.isEnabled = connected
         }
         // Archive and View Plan don't require broker — always enabled
-        archiveButton.isEnabled    = true
-        archiveAllButton.isEnabled = true
-        viewPlanButton.isEnabled   = true
+        archiveButton.isEnabled  = true
+        viewPlanButton.isEnabled = true
 
         guard !widgets.filter({ $0 !== actionErrorLabel || !$0.isHidden }).isEmpty else { return }
 
@@ -897,9 +949,8 @@ private class MotherJobDetail: NSView {
             btn.isEnabled = connected
         }
         // Archive and View Plan don't use the broker — always enabled
-        archiveButton.isEnabled    = true
-        archiveAllButton.isEnabled = true
-        viewPlanButton.isEnabled   = true
+        archiveButton.isEnabled  = true
+        viewPlanButton.isEnabled = true
     }
 
     private func showActionError(_ message: String) {
@@ -949,17 +1000,6 @@ private class MotherJobDetail: NSView {
     @objc private func didArchive() {
         guard let job = currentJob else { return }
         AppStore.shared.archiveJob(job.id)
-    }
-
-    @objc private func didArchiveAll() {
-        let alert = NSAlert()
-        alert.messageText = "Archive all terminal-state jobs?"
-        alert.informativeText = "This archives every succeeded, failed, and cancelled job immediately."
-        alert.addButton(withTitle: "Archive All")
-        alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
-            AppStore.shared.archiveAllJobs()
-        }
     }
 
     @objc private func didViewPlan() {
@@ -1049,5 +1089,118 @@ private class MotherJobDetail: NSView {
         if secs < 60   { return "\(secs)s" }
         if secs < 3600 { return "\(secs / 60)m \(secs % 60)s" }
         return "\(secs / 3600)h \((secs % 3600) / 60)m"
+    }
+}
+
+// MARK: - PlanChecklistView
+
+/// Read-only checklist parsed from a plan markdown file.
+///
+/// Scans the file for `- [ ]` / `- [x]` items and renders them as icon+text rows.
+/// Collapses to zero height (via `heightConstraint`) when there are no items.
+private class PlanChecklistView: NSView {
+
+    /// Called on the main queue when items load or clear.  Parameter is `true` if items are present.
+    var onItemsChanged: ((Bool) -> Void)?
+
+    private let stack = NSStackView()
+    private var heightConstraint: NSLayoutConstraint!
+
+    private static let itemRegex: NSRegularExpression = {
+        // Matches: optional leading spaces, "- [", space or x/X, "]", space, item text
+        try! NSRegularExpression(pattern: #"^\s*- \[([ xX])\]\s+(.+)$"#)
+    }()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+
+        stack.orientation = .vertical
+        stack.spacing     = 4
+        stack.alignment   = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        // Start collapsed
+        heightConstraint = heightAnchor.constraint(equalToConstant: 0)
+        heightConstraint.isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func load(planPath: String?) {
+        guard let path = planPath, !path.isEmpty else {
+            collapse()
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            let items   = Self.parse(content)
+            DispatchQueue.main.async { [weak self] in
+                self?.apply(items)
+            }
+        }
+    }
+
+    // MARK: Private
+
+    private func collapse() {
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        heightConstraint.isActive = true
+        onItemsChanged?(false)
+    }
+
+    private func apply(_ items: [(done: Bool, text: String)]) {
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        guard !items.isEmpty else {
+            heightConstraint.isActive = true
+            onItemsChanged?(false)
+            return
+        }
+        for item in items {
+            stack.addArrangedSubview(checklistRow(item))
+        }
+        heightConstraint.isActive = false
+        onItemsChanged?(true)
+    }
+
+    private func checklistRow(_ item: (done: Bool, text: String)) -> NSView {
+        let icon = NSTextField(labelWithString: item.done ? "✓" : "○")
+        icon.font      = .systemFont(ofSize: 11)
+        icon.textColor = item.done ? Theme.sage : Theme.fgMuted
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let lbl = NSTextField(labelWithString: item.text)
+        lbl.font                 = .systemFont(ofSize: 11)
+        lbl.lineBreakMode        = .byWordWrapping
+        lbl.maximumNumberOfLines = 3
+        lbl.textColor            = item.done ? Theme.fgMuted : Theme.fg
+
+        let row = NSStackView(views: [icon, lbl])
+        row.orientation = .horizontal
+        row.spacing     = 5
+        row.alignment   = .firstBaseline
+        return row
+    }
+
+    private static func parse(_ content: String) -> [(done: Bool, text: String)] {
+        var result: [(done: Bool, text: String)] = []
+        let lines = content.components(separatedBy: "\n")
+        for line in lines {
+            let nsLine = line as NSString
+            let range  = NSRange(location: 0, length: nsLine.length)
+            guard let match = itemRegex.firstMatch(in: line, range: range),
+                  match.numberOfRanges == 3 else { continue }
+            let marker = nsLine.substring(with: match.range(at: 1))
+            let text   = nsLine.substring(with: match.range(at: 2))
+            let done   = marker == "x" || marker == "X"
+            result.append((done: done, text: text))
+        }
+        return result
     }
 }

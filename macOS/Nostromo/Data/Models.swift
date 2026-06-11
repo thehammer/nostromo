@@ -60,7 +60,7 @@ struct Focus: Codable, Hashable, Identifiable {
               quickActions: [QuickAction(
                   id: "perri-start-reviewing",
                   label: "Start Reviewing",
-                  prompt: "",        // empty — just clear; Perri auto-starts review on fresh session
+                  prompt: "start reviewing",
                   clearFirst: true
               )], org: "Carefeed"),
         Focus(id: "teri",   agentTag: "teri",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
@@ -157,10 +157,11 @@ struct PhaseRibbonModel {
 // MARK: - Mother
 
 struct MotherStatus {
-    var running:  Int = 0
-    var queued:   Int = 0
-    var failed:   Int = 0
-    var awaiting: Int = 0
+    var running:   Int = 0
+    var queued:    Int = 0
+    var failed:    Int = 0
+    var awaiting:  Int = 0
+    var succeeded: Int = 0
 
     var isEmpty: Bool { running == 0 && queued == 0 && failed == 0 && awaiting == 0 }
 
@@ -176,10 +177,11 @@ struct MotherStatus {
         var s = MotherStatus()
         for job in jobs {
             switch job.state {
-            case "running":  s.running  += 1
-            case "queued":   s.queued   += 1
-            case "awaiting": s.awaiting += 1
-            case "failed":   s.failed   += 1
+            case "running":   s.running   += 1
+            case "queued":    s.queued    += 1
+            case "awaiting":  s.awaiting  += 1
+            case "failed":    s.failed    += 1
+            case "succeeded": s.succeeded += 1
             default: break
             }
         }
