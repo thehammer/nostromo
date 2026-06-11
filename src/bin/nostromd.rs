@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
 
     // ── IPC server (Unix socket) ──────────────────────────────────────────────
     let socket_path = nostromo::ipc::default_socket_path();
-    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr))
+    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), config.perri_state_dir())
         .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
 
     // ── IPC server (TCP — iOS / LAN clients) ──────────────────────────────────
@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr));
+    server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), config.perri_state_dir());
 
     // ── mDNS / Bonjour advertising ────────────────────────────────────────────
     // Advertise nostromd on the LAN so iOS clients can discover it without a

@@ -12,6 +12,11 @@ import NostromoKit
 struct PerriView: View {
     @EnvironmentObject var store: DaemonStore
 
+    /// Staged pending approval — set on first swipe tap; cleared on cancel or
+    /// after the confirmation's "Approve" button fires the actual request.
+    /// Nothing is sent to GitHub until the user confirms.
+    @State private var pendingApproval: PrQueueItem?
+
     var body: some View {
         Group {
             if !store.connected {
@@ -24,6 +29,27 @@ struct PerriView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: store.connected)
         .animation(.easeInOut(duration: 0.25), value: store.perriQueue.count)
+        // Confirmation gate — nothing reaches GitHub until the user taps "Approve" here.
+        .confirmationDialog(
+            pendingApproval.map { "Approve PR #\($0.number) in \($0.repo)?" } ?? "",
+            isPresented: Binding(
+                get:  { pendingApproval != nil },
+                set:  { if !$0 { pendingApproval = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let item = pendingApproval {
+                Button("Approve", role: .destructive) {
+                    store.perriApprove(number: item.number, repo: item.repo)
+                    pendingApproval = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingApproval = nil
+            }
+        } message: {
+            Text("The approval will be posted to GitHub. The PR will leave the queue once the index catches up.")
+        }
     }
 
     // MARK: - Main content
@@ -61,6 +87,16 @@ struct PerriView: View {
                             onLoad:  { store.perriLoadPr(number: item.number, repo: item.repo) },
                             onClear: { store.perriClear() }
                         )
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button {
+                                // First tap only stages the approval — confirmation
+                                // dialog fires before anything is sent to GitHub.
+                                pendingApproval = item
+                            } label: {
+                                Label("Approve", systemImage: "checkmark.seal.fill")
+                            }
+                            .tint(.green)
+                        }
                     }
                 }
             }

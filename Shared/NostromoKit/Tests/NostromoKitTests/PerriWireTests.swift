@@ -49,6 +49,16 @@ final class PerriWireTests: XCTestCase {
         XCTAssertEqual(dict.keys.count, 4, "Expected type, action, pr_number, repo")
     }
 
+    func testPerriActionApproveEncoding() throws {
+        let msg = ClientPerriAction(action: "approve", prNumber: 7, repo: "acme/web")
+        let dict = try encode(msg)
+        XCTAssertEqual(dict["type"]      as? String, "perri_action")
+        XCTAssertEqual(dict["action"]    as? String, "approve")
+        XCTAssertEqual(dict["pr_number"] as? Int,    7)
+        XCTAssertEqual(dict["repo"]      as? String, "acme/web")
+        XCTAssertEqual(dict.keys.count,  4, "Expected exactly type, action, pr_number, repo")
+    }
+
     // MARK: - ServerMsg.perriState decoding — populated queue + current
 
     func testPerriStateDecodesPopulatedQueue() throws {

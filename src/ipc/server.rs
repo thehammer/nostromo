@@ -44,10 +44,15 @@ impl Server {
     ///
     /// `pty_mgr` and `session_mgr` are shared with every client handler for PTY
     /// and persistent-session command routing respectively.
+    ///
+    /// `perri_state_dir` is forwarded to the `PerriAction` handler so the
+    /// `"approve"` arm can write the Phase 1 approval signal (approvals.jsonl +
+    /// queue.dirty) for instant queue suppression.
     pub fn bind(
         socket_path: &Path,
         pty_mgr: Arc<Mutex<PtyManager>>,
         session_mgr: Arc<Mutex<SessionManager>>,
+        perri_state_dir: PathBuf,
     ) -> Result<Self> {
         // Remove stale socket file so bind doesn't fail.
         let _ = std::fs::remove_file(socket_path);
@@ -69,7 +74,7 @@ impl Server {
         let path = socket_path.to_path_buf();
 
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr).await {
+            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr, perri_state_dir).await {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -92,15 +97,18 @@ impl Server {
     ///
     /// Both transports run the identical `handle_client` handshake loop, so iOS
     /// (and any other TCP peer) behaves exactly like the macOS TUI client.
+    ///
+    /// `perri_state_dir` is forwarded identically to [`Server::bind`].
     pub fn bind_tcp(
         &self,
         listener: TcpListener,
         pty_mgr: Arc<Mutex<PtyManager>>,
         session_mgr: Arc<Mutex<SessionManager>>,
+        perri_state_dir: PathBuf,
     ) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr).await {
+            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr, perri_state_dir).await {
                 warn!("TCP IPC accept loop exited: {e:#}");
             }
         });
@@ -120,6 +128,7 @@ async fn accept_loop(
     tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
+    perri_state_dir: PathBuf,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -128,8 +137,9 @@ async fn accept_loop(
                 let pty_mgr = Arc::clone(&pty_mgr);
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
+                let psd = perri_state_dir.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr).await {
+                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd).await {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -146,6 +156,7 @@ async fn accept_loop_tcp(
     tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
+    perri_state_dir: PathBuf,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -155,8 +166,9 @@ async fn accept_loop_tcp(
                 let pty_mgr = Arc::clone(&pty_mgr);
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
+                let psd = perri_state_dir.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr).await {
+                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd).await {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -182,6 +194,7 @@ async fn handle_client<S>(
     broadcast_tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
+    perri_state_dir: PathBuf,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite,
@@ -320,7 +333,7 @@ where
                                 continue;
                             }
                         };
-                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx);
+                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -361,6 +374,7 @@ fn handle_client_msg(
     session_mgr: &Arc<Mutex<SessionManager>>,
     targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
     broadcast_tx: &broadcast::Sender<ServerMsg>,
+    perri_state_dir: &Path,
 ) {
     match msg {
         ClientMsg::Ping => {
@@ -588,13 +602,15 @@ fn handle_client_msg(
 
         ClientMsg::PerriAction { action, pr_number, repo } => {
             let conn = conn_key.to_string();
+            let psd = perri_state_dir.to_path_buf();
             tokio::spawn(async move {
-                if let Err(e) = crate::perri_cli::run_perri_action(&action, pr_number, repo.as_deref()).await {
+                if let Err(e) = crate::perri_cli::run_perri_action(&action, pr_number, repo.as_deref(), &psd).await {
                     tracing::warn!(conn, %action, "PerriAction failed: {e:#}");
                 }
-                // The native Perri sources watch dirty-file sentinels; the
-                // `perri` CLI writes those sentinels, so the broadcaster will
-                // fire naturally without any explicit re-poll here.
+                // The native Perri sources watch dirty-file sentinels; for
+                // "load_pr"/"clear" the `perri` CLI writes those sentinels.
+                // For "approve" the handler writes approvals.jsonl + queue.dirty
+                // directly so the broadcaster fires without a separate re-poll.
             });
         }
 
