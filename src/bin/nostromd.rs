@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("creating daemon log dir {}", log_dir.display()))?;
 
+    prune_old_logs(&log_dir, 3);
     let file_appender = rolling::daily(&log_dir, "nostromd.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
@@ -493,6 +494,27 @@ async fn run_teri_broadcaster(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Delete log files in `dir` whose modification time is older than `keep_days` days.
+/// Silent on any I/O error — log pruning is best-effort.
+fn prune_old_logs(dir: &std::path::Path, keep_days: u64) {
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(keep_days * 86_400))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    if let Ok(modified) = meta.modified() {
+                        if modified < cutoff {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 fn daemon_log_dir() -> PathBuf {
     dirs_next::home_dir()
