@@ -39,7 +39,7 @@ struct PerriView: View {
             titleVisibility: .visible
         ) {
             if let item = pendingApproval {
-                Button("Approve", role: .destructive) {
+                Button("Approve") {
                     store.perriApprove(number: item.number, repo: item.repo)
                     pendingApproval = nil
                 }

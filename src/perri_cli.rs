@@ -127,6 +127,15 @@ pub async fn run_perri_action(
                 bail!("gh pr view returned an empty head sha for PR #{number} in {repo}");
             }
 
+            // Guard against unexpected gh output (error messages, malformed data)
+            // leaking verbatim into approvals.jsonl.  A valid SHA is hex-only and
+            // at least 7 chars; anything else is treated as a gh failure.
+            if head_sha.len() < 7 || !head_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                bail!(
+                    "gh pr view returned an unexpected head sha for PR #{number}: {head_sha:?}"
+                );
+            }
+
             // 2. Post the approval — no comment body (iOS approve is comment-free).
             let approve_status = tokio::process::Command::new(&gh)
                 .args([
