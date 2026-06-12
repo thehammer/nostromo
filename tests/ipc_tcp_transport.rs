@@ -27,7 +27,7 @@ async fn spawn_server() -> (Server, u16, TempDir) {
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let session_mgr = Arc::new(Mutex::new(SessionManager::new()));
 
-    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr))
+    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), tmp.path().join("perri-state"))
         .expect("bind unix socket");
 
     // Bind on an ephemeral port so tests don't collide.
@@ -39,7 +39,7 @@ async fn spawn_server() -> (Server, u16, TempDir) {
         .expect("local addr")
         .port();
 
-    server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr));
+    server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), tmp.path().join("perri-state"));
 
     (server, port, tmp)
 }

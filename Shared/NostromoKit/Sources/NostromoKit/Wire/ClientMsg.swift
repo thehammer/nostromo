@@ -164,6 +164,11 @@ public struct ClientMotherResume: Encodable {
 /// Supported actions:
 ///   - `"load_pr"` — load a specific PR; requires `prNumber` + `repo`.
 ///   - `"clear"`   — clear the current PR; `prNumber`/`repo` are ignored.
+///   - `"approve"` — approve a PR; requires `prNumber` + `repo`. The daemon
+///     resolves the HEAD sha, posts `gh pr review --approve`, and writes the
+///     Phase 1 approval signal for instant queue suppression. Always gate
+///     behind a `confirmationDialog` — the first tap should only stage the
+///     pending approval; confirmation triggers this send.
 public struct ClientPerriAction: Encodable {
     let type_:         String = "perri_action"
     public let action: String

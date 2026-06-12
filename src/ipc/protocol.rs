@@ -323,19 +323,23 @@ pub enum ClientMsg {
         answer: String,
     },
 
-    /// Request a Perri action. The daemon shells out to `perri <action> …`
-    /// and the native Perri source re-broadcasts a fresh `PerriState` via the
-    /// watch channel.
+    /// Request a Perri action. The daemon shells out to `perri <action> …` or
+    /// `gh …` and the native Perri source re-broadcasts a fresh `PerriState`
+    /// via the watch channel.
     ///
     /// Recognised actions:
     ///   - `"load_pr"` — requires `pr_number` + `repo`
     ///   - `"clear"`   — clears the current PR; `pr_number`/`repo` are ignored
+    ///   - `"approve"` — requires `pr_number` + `repo`; resolves the HEAD sha,
+    ///     posts `gh pr review --approve`, then writes the Phase 1 approval
+    ///     signal (approvals.jsonl + queue.dirty) for instant queue suppression.
+    ///     No comment body — iOS approve is comment-free.
     PerriAction {
-        /// Action to perform (`"load_pr"` or `"clear"`).
+        /// Action to perform (`"load_pr"`, `"clear"`, or `"approve"`).
         action: String,
-        /// PR number for `load_pr`; `None` for `clear`.
+        /// PR number for `load_pr` and `approve`; `None` for `clear`.
         pr_number: Option<u64>,
-        /// `owner/name` repo slug for `load_pr`; `None` for `clear`.
+        /// `owner/name` repo slug for `load_pr` and `approve`; `None` for `clear`.
         repo: Option<String>,
     },
 }
@@ -931,6 +935,26 @@ mod tests {
             pr_number: None,
             repo: None,
         });
+        // approve — pr_number and repo required
+        round_trip_client(ClientMsg::PerriAction {
+            action: "approve".into(),
+            pr_number: Some(7),
+            repo: Some("acme/web".into()),
+        });
+    }
+
+    #[test]
+    fn perri_action_approve_wire_shape() {
+        let v = serde_json::to_value(ClientMsg::PerriAction {
+            action: "approve".into(),
+            pr_number: Some(7),
+            repo: Some("acme/web".into()),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "perri_action");
+        assert_eq!(v["action"], "approve");
+        assert_eq!(v["pr_number"], 7u64);
+        assert_eq!(v["repo"], "acme/web");
     }
 
     #[test]

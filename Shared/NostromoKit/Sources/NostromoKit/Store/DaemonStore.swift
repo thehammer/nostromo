@@ -265,5 +265,18 @@ public final class DaemonStore: ObservableObject {
     public func perriClear() {
         client.send(ClientPerriAction(action: "clear", prNumber: nil, repo: nil))
     }
+
+    /// Approve a PR from the iOS queue row.
+    ///
+    /// The daemon resolves the HEAD sha, posts `gh pr review --approve`, then
+    /// writes the Phase 1 approval signal (approvals.jsonl + queue.dirty) so
+    /// the PR is suppressed on the next broadcast — identical instant-removal
+    /// behaviour to the desk `submit-review` flow.
+    ///
+    /// **Always gate this call behind a `confirmationDialog`** — the user must
+    /// explicitly confirm before anything is posted to GitHub.
+    public func perriApprove(number: Int, repo: String) {
+        client.send(ClientPerriAction(action: "approve", prNumber: number, repo: repo))
+    }
 }
 
