@@ -199,11 +199,11 @@ class PaceBarsView: NSView {
             let fillRect = NSRect(x: railX, y: railY, width: fillW, height: barH)
             let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: barCorner, yRadius: barCorner)
 
-            // All bars start vivid green; tip color reflects current pace.
-            // Critical bars show the full journey: green → amber → red.
-            let (colors, stops) = Theme.paceGradientStops(window.pace)
-            if let gradient = NSGradient(colors: colors, atLocations: stops,
-                                         colorSpace: .genericRGB) {
+            // Aqua → red spectrum; position of red on the bar is determined by pace.
+            if let gradient = Theme.paceBarGradient(pace: window.pace,
+                                                    elapsedFrac: window.elapsedPct / 100.0,
+                                                    paceSmoothed: window.paceSmoothed,
+                                                    usedPct: window.usedPct) {
                 gradient.draw(in: fillPath, angle: 0)
             }
         }

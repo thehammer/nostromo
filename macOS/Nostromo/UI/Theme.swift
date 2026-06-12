@@ -87,25 +87,65 @@ enum Theme {
 
     // MARK: - Helpers
 
-    /// Map a pace value to a vivid tip color: ≥1.5 → red, ≥1.1 → amber, else green.
-    static func paceColor(_ pace: Float) -> NSColor {
-        if pace >= 1.5 { return redSweater }
-        if pace >= 1.1 { return amber }
-        return sage
+    /// Smooth spectrum color sweeping HSB hue from 180° (aqua) → 0° (alarm red).
+    /// t=0 → aqua, t=0.25 → green, t=0.5 → yellow, t=0.75 → orange, t=1 → red.
+    static func spectrumColor(t: Float) -> NSColor {
+        let hue        = CGFloat(0.5 * (1.0 - Double(t)))
+        let saturation = CGFloat(1.0)
+        let brightness = CGFloat(0.88)
+        return NSColor(hue: hue, saturation: saturation, brightness: brightness, alpha: 1.0)
     }
 
-    /// Gradient stops for a pace bar. All bars start vivid green; critical bars
-    /// show the full journey green → amber → red.
-    static func paceGradientStops(_ pace: Float) -> ([NSColor], [CGFloat]) {
-        if pace >= 1.5 {
-            return ([sage, amber, redSweater], [0, 0.5, 1.0])
-        } else if pace >= 1.1 {
-            return ([sage, amber], [0, 1.0])
-        } else {
-            // Subtle: slightly deeper green start so there's still a visible gradient
-            let dimGreen = NSColor(red: 0.04, green: 0.30, blue: 0.13, alpha: 1)
-            return ([dimGreen, sage], [0, 1.0])
+    /// Pace text color: maps pace linearly across the spectrum (0.5× → aqua, 1.5× → red).
+    static func paceColor(_ pace: Float) -> NSColor {
+        let t = max(0, min(1, (pace - 0.5) / 1.0))
+        return spectrumColor(t: t)
+    }
+
+    /// Gradient for a pace bar, sampling the aqua→red HSB spectrum.
+    ///
+    /// Every bar starts at aqua. The point where budget hits 100% is treated as
+    /// red; if that point falls beyond the current fill, the bar shows only the
+    /// cooler portion of the spectrum. If pace is high enough that exhaustion
+    /// falls inside the fill, the gradient reaches red at that point and holds
+    /// solid red for the remainder.
+    ///
+    /// - pace: used_pct / elapsed_pct
+    /// - elapsedFrac: fraction of window elapsed (0–1), which determines fill width
+    static func paceBarGradient(pace: Float, elapsedFrac: Float,
+                                paceSmoothed: Float? = nil, usedPct: Float = 0) -> NSGradient? {
+        guard elapsedFrac > 0, pace > 0 else {
+            return NSGradient(colors: [spectrumColor(t: 0), spectrumColor(t: 0)])
         }
+        // When the OAuth API has capped used_pct at 100, `pace` is derived from 100/elapsed
+        // and gives usedFrac ≈ 1.0 — the red boundary collapses to one invisible pixel.
+        // Use pace_smoothed instead: it's a rolling average that reflects true burn rate
+        // independently of the cap, so it correctly places the exhaustion boundary.
+        // When usedPct is capped at 100, fall back to paceSmoothed for a realistic
+        // exhaustion boundary; otherwise pace × elapsed collapses to ≈ 1.0 exactly.
+        let effectivePace: Float
+        if usedPct >= 100, let ps = paceSmoothed, ps > pace {
+            effectivePace = ps
+        } else {
+            effectivePace = pace
+        }
+        let usedFrac = CGFloat(effectivePace) * CGFloat(elapsedFrac)
+
+        // Sample at 16 equidistant steps — enough to make the hue sweep visually
+        // smooth when NSGradient interpolates linearly in RGB space.
+        // min(1.0, u * usedFrac) naturally clamps at red and holds it flat when
+        // usedFrac > 1.0 (budget already exceeded at some point in the fill).
+        let steps = 16
+        var colors:    [NSColor]  = []
+        var locations: [CGFloat]  = []
+        for i in 0...steps {
+            let u = CGFloat(i) / CGFloat(steps)
+            let t = Float(min(1.0, u * usedFrac))
+            colors.append(spectrumColor(t: t))
+            locations.append(u)
+        }
+        var locs = locations
+        return NSGradient(colors: colors, atLocations: &locs, colorSpace: .genericRGB)
     }
 
     /// Percent-to-color for rate-limit bars: ≥80% → red, ≥50% → amber, else sage.

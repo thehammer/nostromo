@@ -576,11 +576,16 @@ struct PostureThresholdEvent {
 // MARK: - Window pace (from budget-posture.json)
 
 struct WindowPace {
-    let usedPct:   Float
-    let elapsedPct: Float
-    let pace:      Float
-    let resetsAt:  TimeInterval
-    let level:     String
+    let usedPct:       Float
+    let elapsedPct:    Float
+    let pace:          Float
+    /// Smoothed pace from bishop's rolling average — more stable than instant pace,
+    /// and crucially not capped when used_pct hits 100 (unlike `pace` which is
+    /// derived from capped used_pct). Use this to locate the exhaustion boundary
+    /// on the bar when usedPct >= 100.
+    let paceSmoothed:  Float?
+    let resetsAt:      TimeInterval
+    let level:         String
 }
 
 struct PostureSnapshot {
@@ -635,7 +640,9 @@ struct PostureSnapshot {
         // bishop omits pace when the window is too new; compute from used/elapsed.
         let pace: Float = (d["pace"] as? NSNumber).map({ Float($0.doubleValue) })
                           ?? (elapsed > 0 ? used / elapsed : 0)
+        let paceSmoothed = (d["pace_smoothed"] as? NSNumber).map { Float($0.doubleValue) }
         return WindowPace(usedPct: used, elapsedPct: elapsed, pace: pace,
+                          paceSmoothed: paceSmoothed,
                           resetsAt: resets, level: d["level"] as? String ?? "normal")
     }
 
@@ -660,6 +667,7 @@ struct PostureSnapshot {
         else { return nil }
         let pace: Float = elapsed > 0 ? used / elapsed : 0
         return WindowPace(usedPct: used, elapsedPct: elapsed, pace: pace,
+                          paceSmoothed: nil,
                           resetsAt: resets, level: s["status"] as? String ?? "normal")
     }
 }
