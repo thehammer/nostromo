@@ -90,7 +90,7 @@ enum Theme {
     /// Smooth spectrum color sweeping HSB hue from 180° (aqua) → 0° (alarm red).
     /// t=0 → aqua, t=0.25 → green, t=0.5 → yellow, t=0.75 → orange, t=1 → red.
     static func spectrumColor(t: Float) -> NSColor {
-        let hue        = CGFloat(0.5 * (1.0 - Double(t)))
+        let hue        = CGFloat(0.65 * (1.0 - Double(t)))
         let saturation = CGFloat(1.0)
         let brightness = CGFloat(0.88)
         return NSColor(hue: hue, saturation: saturation, brightness: brightness, alpha: 1.0)
