@@ -44,6 +44,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWindow.willCloseNotification,
             object: nil
         )
+
+        // Quiesce all window animations before sleep so AppKit's internal
+        // scene/transition cleanup (NSScrubberChangeTransition et al.) doesn't
+        // race with in-flight CALayer animations and produce a use-after-free.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemWillSleep(_:)),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+    }
+
+    @objc private func systemWillSleep(_ note: Notification) {
+        appLog.info("systemWillSleep — removing window animations")
+        for win in windows {
+            win.animationBehavior = .none
+            win.contentView?.layer?.removeAllAnimations()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
