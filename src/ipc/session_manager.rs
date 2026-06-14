@@ -48,6 +48,7 @@ use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 
+use super::pane_registry::PaneRegistry;
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
 use super::stream_json::{load_scrollback, SessionState, SessionTranscript, Turn, TurnDelta};
 
@@ -233,6 +234,15 @@ pub struct SessionManager {
     store_path: PathBuf,
     /// Mac-pushed focus registry; served to all clients and broadcast on change.
     focus_registry: Vec<FocusMeta>,
+    /// Per-focus pane-tree registry. Set by the daemon via
+    /// [`SessionManager::configure_mcp_bridge`]; `None` in tests / non-daemon use.
+    /// A fresh (non-resume) spawn initialises the focus's tree to a single REPL
+    /// leaf so the agent's first turn assembles from a known baseline.
+    pane_registry: Option<Arc<Mutex<PaneRegistry>>>,
+    /// Daemon MCP socket path injected as `NOSTROMO_MCP_SOCKET` into sessions.
+    mcp_socket: Option<PathBuf>,
+    /// `--mcp-config` file path registering the `nostromo-mcp-bridge` stdio server.
+    mcp_config: Option<PathBuf>,
 }
 
 impl SessionManager {
@@ -246,7 +256,31 @@ impl SessionManager {
             client_senders: Arc::new(Mutex::new(HashMap::new())),
             store_path,
             focus_registry: Vec::new(),
+            pane_registry: None,
+            mcp_socket: None,
+            mcp_config: None,
         }
+    }
+
+    /// Wire the daemon-hosted MCP bridge: the shared pane registry plus the
+    /// socket + config paths injected into every freshly spawned session so the
+    /// child `claude` can reach the layout/introspection tool surface.
+    pub fn configure_mcp_bridge(
+        &mut self,
+        pane_registry: Arc<Mutex<PaneRegistry>>,
+        mcp_socket: PathBuf,
+        mcp_config: PathBuf,
+    ) {
+        self.pane_registry = Some(pane_registry);
+        self.mcp_socket = Some(mcp_socket);
+        self.mcp_config = Some(mcp_config);
+    }
+
+    /// Access the shared pane registry (if wired up). Used by the IPC server
+    /// to replay layout state to newly connected clients without threading
+    /// the Arc through every accept-loop call site.
+    pub fn pane_registry(&self) -> Option<Arc<Mutex<PaneRegistry>>> {
+        self.pane_registry.clone()
     }
 
     pub fn client_sender_registry(
@@ -306,6 +340,16 @@ impl SessionManager {
 
         self.sessions.insert(tag.clone(), managed);
 
+        // A fresh (non-resume) spawn starts from a known baseline: a single REPL
+        // pane the agent grows on its first turn. A resume keeps the persisted
+        // tree (loaded from the pane store) so a reconnecting client sees the
+        // already-assembled workspace.
+        if !resume {
+            if let Some(reg) = &self.pane_registry {
+                reg.lock().unwrap().init_focus(&tag);
+            }
+        }
+
         // Persist the (possibly freshly generated) id for the tag.
         save_id(&self.store_path, &tag, Some(&effective_id));
         info!(tag, session_id = %effective_id, resume, "session spawned");
@@ -340,6 +384,20 @@ impl SessionManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()); // piped for crash diagnostics (was null)
+
+        // MCP bridge wiring for real (non-stubbed) `claude` sessions. The child
+        // registers the `nostromo-mcp-bridge` stdio server (--mcp-config) and
+        // inherits the identity env the bridge forwards in its Hello frame, so
+        // the agent can call the layout/introspection tools against the daemon.
+        // The focus tag is the identity key (NOSTROMO_PTY_ID) and the view id.
+        if respawn_fixed.is_none() {
+            if let (Some(socket), Some(config)) = (&self.mcp_socket, &self.mcp_config) {
+                cmd.env("NOSTROMO_MCP_SOCKET", socket);
+                cmd.env("NOSTROMO_PTY_ID", &tag);
+                cmd.env("NOSTROMO_VIEW_ID", &tag);
+                cmd.arg("--mcp-config").arg(config);
+            }
+        }
                                      // Child working directory. When the focus carries no project dir, default
                                      // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
                                      // is `/` (filesystem root). Running an agent at `/` has no git context, so
@@ -893,6 +951,24 @@ impl SessionManager {
 
     /// Current focus registry snapshot.
     pub fn focus_registry(&self) -> Vec<FocusMeta> {
+        self.focus_registry.clone()
+    }
+
+    /// Whether `tag` currently has a live (non-exited) session child.
+    pub fn has_live_session(&self, tag: &str) -> bool {
+        self.sessions.get(tag).map(|s| s.alive()).unwrap_or(false)
+    }
+
+    /// Insert or replace a single focus in the registry (by `tag`), returning the
+    /// updated registry so the caller can broadcast it. Used by the
+    /// `create_focus` MCP tool, which adds an agent-spawned focus to the
+    /// daemon-owned registry.
+    pub fn add_or_update_focus(&mut self, meta: FocusMeta) -> Vec<FocusMeta> {
+        if let Some(existing) = self.focus_registry.iter_mut().find(|f| f.tag == meta.tag) {
+            *existing = meta;
+        } else {
+            self.focus_registry.push(meta);
+        }
         self.focus_registry.clone()
     }
 

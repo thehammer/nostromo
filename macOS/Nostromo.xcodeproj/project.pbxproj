@@ -28,6 +28,8 @@
 		AA0000020000000000000125 /* FredView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000025 /* FredView.swift */; };
 		EE00000000000000000000A1 /* QuickActionStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000A0 /* QuickActionStripView.swift */; };
 		EE00000000000000000000C1 /* MarkdownCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000C0 /* MarkdownCardView.swift */; };
+		EE00000000000000000000D1 /* DynamicFocusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000D0 /* DynamicFocusView.swift */; };
+		EE00000000000000000000E1 /* PaneContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000E0 /* PaneContentView.swift */; };
 		AA0000020000000000000130 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000030 /* ChatModels.swift */; };
 		AA0000020000000000000131 /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000031 /* ChatSession.swift */; };
 		AA0000020000000000000132 /* FocusStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000032 /* FocusStore.swift */; };
@@ -75,6 +77,8 @@
 		AA0000020000000000000025 /* FredView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredView.swift; sourceTree = "<group>"; };
 		EE00000000000000000000A0 /* QuickActionStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionStripView.swift; sourceTree = "<group>"; };
 		EE00000000000000000000C0 /* MarkdownCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownCardView.swift; sourceTree = "<group>"; };
+		EE00000000000000000000D0 /* DynamicFocusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicFocusView.swift; sourceTree = "<group>"; };
+		EE00000000000000000000E0 /* PaneContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000030 /* ChatModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModels.swift; sourceTree = "<group>"; };
 		AA0000020000000000000031 /* ChatSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSession.swift; sourceTree = "<group>"; };
 		AA0000020000000000000032 /* FocusStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusStore.swift; sourceTree = "<group>"; };
@@ -183,6 +187,8 @@
 				EE00000000000000000000A0 /* QuickActionStripView.swift */,
 				AA0000020000000000000023 /* ReplView.swift */,
 				EE00000000000000000000C0 /* MarkdownCardView.swift */,
+				EE00000000000000000000D0 /* DynamicFocusView.swift */,
+				EE00000000000000000000E0 /* PaneContentView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -306,6 +312,8 @@
 				EE00000000000000000000A1 /* QuickActionStripView.swift in Sources */,
 				AA0000020000000000000123 /* ReplView.swift in Sources */,
 				EE00000000000000000000C1 /* MarkdownCardView.swift in Sources */,
+				EE00000000000000000000D1 /* DynamicFocusView.swift in Sources */,
+				EE00000000000000000000E1 /* PaneContentView.swift in Sources */,
 				AA0000020000000000000130 /* ChatModels.swift in Sources */,
 				AA0000020000000000000131 /* ChatSession.swift in Sources */,
 				AA0000020000000000000132 /* FocusStore.swift in Sources */,

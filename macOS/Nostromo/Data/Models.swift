@@ -792,3 +792,130 @@ struct CalendarSnapshot: Decodable {
         error   = try c.decodeIfPresent(String.self,          forKey: .error)
     }
 }
+
+// MARK: - Agent-authored pane layout (Phase 1: agent-driven-pane-layout)
+//
+// These types mirror the Rust `PaneTree` / `PaneContentWire` / `FocusLayoutModel`
+// defined in `src/ipc/protocol.rs` and `src/ipc/pane_registry.rs`.
+// Wire encoding uses `#[serde(tag = "kind", rename_all = "snake_case")]`, so:
+//   leaf:  { "kind": "leaf",  "pane_id": "repl" }
+//   split: { "kind": "split", "direction": "horizontal", "children": [...], "ratios": [0.5, 0.5] }
+
+/// Direction a split lays its children out in.
+enum SplitDirection: String, Decodable, Equatable {
+    case horizontal
+    case vertical
+}
+
+/// A node in an agent-authored pane layout tree.
+///
+/// The Rust `#[serde(tag = "kind")]` encoding means each node has a `kind` discriminator.
+indirect enum PaneTree: Equatable {
+    case leaf(paneId: String)
+    case split(direction: SplitDirection, children: [PaneTree], ratios: [Double])
+
+    /// A fresh focus: a single REPL leaf.
+    static let replLeaf = PaneTree.leaf(paneId: "repl")
+
+    /// All pane ids in left-to-right, depth-first order.
+    var paneIds: [String] {
+        switch self {
+        case .leaf(let id): return [id]
+        case .split(_, let children, _): return children.flatMap(\.paneIds)
+        }
+    }
+}
+
+extension PaneTree: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case paneId    = "pane_id"
+        case direction
+        case children
+        case ratios
+    }
+
+    init(from decoder: Decoder) throws {
+        let c    = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(String.self, forKey: .kind)
+        switch kind {
+        case "leaf":
+            let id = try c.decode(String.self, forKey: .paneId)
+            self = .leaf(paneId: id)
+        case "split":
+            let dir      = try c.decode(SplitDirection.self, forKey: .direction)
+            let children = try c.decode([PaneTree].self,     forKey: .children)
+            let ratios   = try c.decode([Double].self,       forKey: .ratios)
+            self = .split(direction: dir, children: children, ratios: ratios)
+        default:
+            // Future-proof: unknown kind falls back to a repl leaf.
+            self = .replLeaf
+        }
+    }
+}
+
+/// Content payload pushed to a single pane, decoupled from layout geometry.
+enum PaneContentWire {
+    case text(String)
+    case jsonSnapshot(Any)
+}
+
+extension PaneContentWire: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case text
+        case value
+    }
+
+    init(from decoder: Decoder) throws {
+        let c    = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(String.self, forKey: .kind)
+        switch kind {
+        case "text":
+            let t = try c.decode(String.self, forKey: .text)
+            self = .text(t)
+        default:
+            // json_snapshot: decode raw value for generic rendering.
+            if let raw = try? c.decode(AnyDecodable.self, forKey: .value) {
+                self = .jsonSnapshot(raw.value)
+            } else {
+                self = .text("")
+            }
+        }
+    }
+}
+
+/// Live layout state for a single focus (stored in AppStore, keyed by tag).
+struct FocusLayoutModel {
+    /// The pane tree for this focus.
+    var tree: PaneTree
+    /// The agent's hint for which pane to foreground (used by iOS degradation).
+    var focusedPane: String?
+    /// Per-pane text/json content, keyed by pane_id.
+    var paneContent: [String: PaneContentWire] = [:]
+
+    static let initial = FocusLayoutModel(tree: .replLeaf, focusedPane: nil)
+}
+
+/// Minimal Decodable wrapper for an arbitrary JSON value.
+private struct AnyDecodable: Decodable {
+    let value: Any
+
+    init(from decoder: Decoder) throws {
+        if let c = try? decoder.singleValueContainer() {
+            if let b = try? c.decode(Bool.self)   { value = b; return }
+            if let i = try? c.decode(Int.self)    { value = i; return }
+            if let d = try? c.decode(Double.self) { value = d; return }
+            if let s = try? c.decode(String.self) { value = s; return }
+        }
+        if var c = try? decoder.unkeyedContainer() {
+            var arr: [Any] = []
+            while !c.isAtEnd {
+                let el = try c.decode(AnyDecodable.self)
+                arr.append(el.value)
+            }
+            value = arr; return
+        }
+        value = ""
+    }
+}

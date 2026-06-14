@@ -58,6 +58,15 @@ public enum ServerMsg {
     /// Broadcast snapshot of Teri's active todos.
     case teriState(TeriTodosSnapshot)
 
+    /// Structural layout update for a focus (create_pane / reset_panes / set_pane_layout).
+    case focusLayout(tag: String, tree: PaneTree, focusedPane: String?)
+
+    /// Content update for a single pane (set_pane_content — does not touch geometry).
+    case paneContent(tag: String, paneId: String, content: PaneContentWire)
+
+    /// A new daemon-hosted focus was spawned via `create_focus`.
+    case focusCreated(meta: FocusCreatedMeta)
+
     case unknown
 }
 
@@ -310,6 +319,8 @@ extension ServerMsg {
     private struct PerriStateWrapper:        Decodable { let queue: [PrQueueItem]; let current: PrSnapshot? }
     private struct FredStateWrapper:         Decodable { let mailbox: MailboxSnapshot; let calendar: CalendarSnapshot }
     private struct TeriStateWrapper:         Decodable { let todos: TeriTodosSnapshot }
+    private struct FocusLayoutWrapper:       Decodable { let tag: String; let tree: PaneTree; let focused_pane: String? }
+    private struct PaneContentWrapper:       Decodable { let tag: String; let pane_id: String; let content: PaneContentWire }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -412,6 +423,21 @@ extension ServerMsg {
         case "teri_state":
             if let m = try? dec.decode(TeriStateWrapper.self, from: data) {
                 return .teriState(m.todos)
+            }
+
+        case "focus_layout":
+            if let m = try? dec.decode(FocusLayoutWrapper.self, from: data) {
+                return .focusLayout(tag: m.tag, tree: m.tree, focusedPane: m.focused_pane)
+            }
+
+        case "pane_content":
+            if let m = try? dec.decode(PaneContentWrapper.self, from: data) {
+                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content)
+            }
+
+        case "focus_created":
+            if let m = try? dec.decode(FocusCreatedMeta.self, from: data) {
+                return .focusCreated(meta: m)
             }
 
         default:

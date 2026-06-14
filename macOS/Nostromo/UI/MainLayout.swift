@@ -161,24 +161,15 @@ class MainLayout: NSView {
 
     private func makeView(for focus: Focus) -> NSView {
         if let cached = viewCache[focus.id] { return cached }
-        let v: NSView
-        switch focus.id {
-        case "mother": v = MotherView()
-        case "perri":  v = PerriView()
-        case "fred":   v = FredView()
-        case "teri":   v = TeriView()
-        default:
-            // Dynamic focuses: full-screen REPL, no split pane.
-            // sessionTag keys the session; agentTag is the --agent name.
-            // Show Clear Context by default; respect any custom actions the focus defines in JSON.
-            v = ReplView(tag: focus.sessionTag,
-                         agentName: focus.agentTag,
-                         displayName: focus.displayName,
-                         workingDirectory: focus.projectPath,
-                         quickActions: focus.quickActions.isEmpty
-                             ? [QuickAction.clearContext]
-                             : focus.quickActions)
-        }
+        // Every focus is now a DynamicFocusView: the daemon's pane tree drives
+        // the layout, starting as a single REPL pane and growing as the agent
+        // calls create_pane on its first turn.
+        //
+        // NOTE: MotherView / PerriView / FredView are NOT deleted yet — they
+        // remain in the project for parity verification (W3 exit gate). Once
+        // agent prompts (W5) assemble the equivalent layouts and visual parity
+        // is confirmed, those files will be removed in a follow-up PR.
+        let v = DynamicFocusView(focus: focus)
         viewCache[focus.id] = v
         return v
     }

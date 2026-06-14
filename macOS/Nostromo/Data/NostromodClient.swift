@@ -54,6 +54,43 @@ private struct MotherPeekResp: Decodable {
     let last_text:  String
 }
 
+// MARK: - FocusCreatedMeta (agent-authored pane layout, Phase 1)
+
+/// Inbound wire form of a daemon-announced focus_created message
+/// (mirrors `FocusMeta` in `src/ipc/protocol.rs`).
+/// Distinct from the outbound `NostromodClient.FocusMetaWire` (Encodable, nested in NostromodClient).
+struct FocusCreatedMeta: Decodable {
+    let tag:            String
+    let displayName:    String
+    let agentName:      String
+    let projectName:    String?
+    let org:            String?
+    let isBuiltIn:      Bool
+    let sessionSummary: String?
+
+    enum CodingKeys: String, CodingKey {
+        case tag
+        case displayName    = "display_name"
+        case agentName      = "agent_name"
+        case projectName    = "project_name"
+        case org
+        case isBuiltIn      = "is_built_in"
+        case sessionSummary = "session_summary"
+    }
+
+    /// Convert to a `Focus` model for insertion into `FocusStore`.
+    func toFocus() -> Focus {
+        Focus(
+            id:          tag,
+            agentTag:    agentName,
+            projectPath: nil,   // daemon-spawned focuses carry no absolute path
+            isBuiltIn:   isBuiltIn,
+            org:         org,
+            sessionSummary: sessionSummary
+        )
+    }
+}
+
 // MARK: - ServerMsg (inbound)
 
 enum ServerMsg {
@@ -83,6 +120,16 @@ enum ServerMsg {
     case fredState(mailbox: MailboxSnapshot, calendar: CalendarSnapshot)
     /// Broadcast snapshot of Teri's active todos.
     case teriState(TeriTodosSnapshot)
+    // ── agent-authored pane layout (Phase 1) ───────────────────────────────
+    /// Structural layout broadcast — the full pane tree for a focus, sent
+    /// whenever the tree changes and replayed on `session_attach` so a
+    /// reconnecting client renders the already-assembled workspace.
+    case focusLayout(tag: String, tree: PaneTree, focusedPane: String?)
+    /// Content push for a single pane; never carries split geometry so an
+    /// operator's drag-resize survives content refreshes.
+    case paneContent(tag: String, paneId: String, content: PaneContentWire)
+    /// An agent-spawned focus was created; every client should add the new tab.
+    case focusCreated(meta: FocusCreatedMeta)
     case unknown
 }
 
@@ -379,7 +426,8 @@ class NostromodClient {
         // protocol v4 adds the focus registry push/pull family. The daemon holds
         // MIN_CLIENT_VERSION at 2, so the shipped GUI keeps working against older daemons.
         send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
-        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri"]))
+        // "layout" subscribes to FocusLayout / PaneContent / FocusCreated broadcasts.
+        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout"]))
     }
 
     // MARK: - Session commands (protocol v3)
@@ -605,12 +653,46 @@ class NostromodClient {
                 return .teriState(m.todos)
             }
 
+        // ── agent-authored pane layout (Phase 1) ─────────────────────────────
+        case "focus_layout":
+            if let m = try? decoder.decode(FocusLayoutResp.self, from: raw) {
+                return .focusLayout(tag: m.tag, tree: m.tree, focusedPane: m.focused_pane)
+            }
+
+        case "pane_content":
+            if let m = try? decoder.decode(PaneContentResp.self, from: raw) {
+                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content)
+            }
+
+        case "focus_created":
+            if let m = try? decoder.decode(FocusCreatedResp.self, from: raw) {
+                return .focusCreated(meta: m.meta)
+            }
+
         default:
             break
         }
 
         return .unknown
     }
+}
+
+// MARK: - Agent-authored pane layout response wrappers (Phase 1)
+
+private struct FocusLayoutResp: Decodable {
+    let tag:          String
+    let tree:         PaneTree
+    let focused_pane: String?
+}
+
+private struct PaneContentResp: Decodable {
+    let tag:     String
+    let pane_id: String
+    let content: PaneContentWire
+}
+
+private struct FocusCreatedResp: Decodable {
+    let meta: FocusCreatedMeta
 }
 
 // MARK: - Inbound session response wrappers (decoded from the raw frame)
