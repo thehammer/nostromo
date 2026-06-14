@@ -283,6 +283,37 @@ where
         senders.insert(conn_key.clone(), targeted_tx.clone());
     }
 
+    // ── Layout replay — push existing pane trees to newly subscribed client ──
+    // A freshly connected or reconnected client would otherwise see empty panes
+    // until the agent next sends a structural mutation. Replay one FocusLayout
+    // per registered focus so the client starts with a complete picture.
+    // `focused_pane` is omitted (None) — the registry does not persist it;
+    // the agent's next `set_pane_focus` call will re-establish it.
+    if topics.contains(&Topic::Layout) {
+        let snapshots: Vec<ServerMsg> = {
+            let mgr = session_mgr.lock().unwrap();
+            if let Some(reg) = mgr.pane_registry() {
+                reg.lock().unwrap()
+                    .all_layouts()
+                    .into_iter()
+                    .map(|(tag, tree, focused)| ServerMsg::FocusLayout {
+                        tag,
+                        tree,
+                        focused_pane: focused,
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        };
+        for msg in snapshots {
+            let bytes = serde_json::to_vec(&msg).unwrap_or_default();
+            if !bytes.is_empty() {
+                let _ = write_frame(&mut writer, &bytes).await;
+            }
+        }
+    }
+
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
 
     let result: Result<()> = loop {

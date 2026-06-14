@@ -101,11 +101,8 @@ pub async fn create_focus(state: &McpSharedState, args: &Value, _pty_id: Option<
         return json!({ "error": "spawn_failed", "detail": e.to_string() });
     }
 
-    // Initialise the pane tree to a single REPL leaf.
-    {
-        let mut reg = daemon.pane_registry.lock().unwrap();
-        reg.init_focus(&tag);
-    }
+    // Note: `spawn_session` already calls `reg.init_focus(&tag)` via the
+    // SessionManager's pane registry reference — no explicit init needed here.
 
     // Seed the first turn with the initial context (best-effort).
     if let Some(ctx) = initial_context {

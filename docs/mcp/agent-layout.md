@@ -93,8 +93,8 @@ structure untouched. Broadcasts a structural `FocusLayout`.
 ### `nostromo.set_pane_content({ view_id, pane_id, content })`
 
 Pushes content to a pane without touching geometry. Broadcasts `PaneContent`.
-Content shape: `{ "type": "text", "text": "…" }` or
-`{ "type": "json_snapshot", "value": … }`.
+Content shape: `{ "kind": "text", "text": "…" }` or
+`{ "kind": "json_snapshot", "value": … }`.
 
 ### `nostromo.create_focus({ agent, title, working_directory?, initial_context? })`
 

@@ -80,11 +80,13 @@ public enum PaneContentWire {
 }
 
 extension PaneContentWire: Decodable {
-    private enum K: String, CodingKey { case type, text, value }
+    // The Rust daemon serializes with #[serde(tag = "kind")], so the
+    // discriminator key on the wire is "kind", not "type".
+    private enum K: String, CodingKey { case kind, text, value }
 
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: K.self)
-        switch try c.decode(String.self, forKey: .type) {
+        switch try c.decode(String.self, forKey: .kind) {
         case "text":
             self = .text(try c.decode(String.self, forKey: .text))
         case "json_snapshot":
@@ -92,8 +94,8 @@ extension PaneContentWire: Decodable {
             self = .jsonSnapshot(raw.value)
         case let other:
             throw DecodingError.dataCorruptedError(
-                forKey: .type, in: c,
-                debugDescription: "unknown PaneContentWire type: \(other)"
+                forKey: .kind, in: c,
+                debugDescription: "unknown PaneContentWire kind: \(other)"
             )
         }
     }

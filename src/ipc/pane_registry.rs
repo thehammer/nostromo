@@ -150,6 +150,17 @@ impl PaneRegistry {
         self.trees.get(tag)
     }
 
+    /// Snapshot of every registered focus's tree, used to replay layout state
+    /// to a newly connected or reconnecting client. `focused_pane` is `None`
+    /// because the registry does not persist focus state — the agent's next
+    /// `set_pane_focus` call will update it.
+    pub fn all_layouts(&self) -> Vec<(String, PaneTree, Option<String>)> {
+        self.trees
+            .iter()
+            .map(|(tag, tree)| (tag.clone(), tree.clone(), None))
+            .collect()
+    }
+
     /// Whether `tag` has a registered tree.
     pub fn contains(&self, tag: &str) -> bool {
         self.trees.contains_key(tag)

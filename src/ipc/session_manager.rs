@@ -276,6 +276,13 @@ impl SessionManager {
         self.mcp_config = Some(mcp_config);
     }
 
+    /// Access the shared pane registry (if wired up). Used by the IPC server
+    /// to replay layout state to newly connected clients without threading
+    /// the Arc through every accept-loop call site.
+    pub fn pane_registry(&self) -> Option<Arc<Mutex<PaneRegistry>>> {
+        self.pane_registry.clone()
+    }
+
     pub fn client_sender_registry(
         &self,
     ) -> Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ServerMsg>>>> {

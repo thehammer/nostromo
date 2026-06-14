@@ -180,17 +180,16 @@ final class DynamicFocusView: NSView {
         guard totalSize > 0 else { return }
 
         // Distribute sizes proportionally, leaving divider thickness accounted for.
+        // NSSplitView has (subviews.count - 1) dividers, indexed 0..<(count-1).
+        // Divider i sits between subviews[i] and subviews[i+1].
+        // The last subview has no trailing divider — skip setPosition for it.
         let dividerTotal = split.dividerThickness * Double(subviews.count - 1)
         let usable = totalSize - dividerTotal
         var offset: CGFloat = 0
-        for (i, sv) in subviews.enumerated() {
+        for (i, _) in subviews.enumerated() {
             let size = usable * ratios[i]
-            if split.isVertical {
-                split.setPosition(offset + size, ofDividerAt: i > 0 ? i - 1 : 0)
-                sv.frame.size.width = size
-            } else {
-                split.setPosition(offset + size, ofDividerAt: i > 0 ? i - 1 : 0)
-                sv.frame.size.height = size
+            if i < subviews.count - 1 {
+                split.setPosition(offset + size, ofDividerAt: i)
             }
             offset += size + split.dividerThickness
         }
