@@ -82,4 +82,28 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         NSApplication.shared.terminate(nil)
         return false
     }
+
+    // Swallow Escape / cancelOperation so it can't bubble up and trigger
+    // toggleFullScreen. AppKit sends cancelOperation when nothing in the
+    // responder chain handles the Escape key; without this override the
+    // window itself becomes the handler and can exit full-screen.
+    override func cancelOperation(_ sender: Any?) {
+        winLog.debug("cancelOperation swallowed (Escape key)")
+    }
+
+    // Block toggleFullScreen when already in full-screen. The delegate
+    // `windowShouldExitFullScreen` only intercepts the delegate code path;
+    // on macOS 26 the Window Server can trigger `_performExitFullScreen`
+    // via XPC (sleep/wake) before the delegate is consulted, producing a
+    // use-after-free SIGSEGV in `_doFailedToExitFullScreen`. Overriding
+    // the method itself is the only interception point guaranteed to fire
+    // before any transition controller is created.
+    override func toggleFullScreen(_ sender: Any?) {
+        if styleMask.contains(.fullScreen) {
+            winLog.warning("toggleFullScreen exit blocked (\(self.title, privacy: .public))")
+            return
+        }
+        winLog.info("toggleFullScreen entry allowed (\(self.title, privacy: .public))")
+        super.toggleFullScreen(sender)
+    }
 }

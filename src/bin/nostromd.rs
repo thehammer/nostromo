@@ -142,6 +142,15 @@ async fn main() -> Result<()> {
     let broadcast_tx = server.tx.clone();
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
+    // ── Perri background sources (spawned early so MCP state gets live receivers) ─
+    let (perri_queue_rx, _perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
+    let (perri_pr_rx, _perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
+    let perri_queue_rx_for_mcp = perri_queue_rx.clone();
+
+    // ── Mother jobs channel (spawned early so MCP state gets live receiver) ─────
+    let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
+    let jobs_rx_for_mcp = jobs_rx.clone();
+
     // Hosts the layout/introspection/focus tool surface inside nostromd so that
     // daemon-hosted agent sessions can assemble their own pane workspaces. Pane
     // mutations are applied to `pane_registry` and broadcast as `FocusLayout` /
@@ -163,7 +172,11 @@ async fn main() -> Result<()> {
                 session_mgr: Arc::clone(&session_mgr),
                 broadcast_tx: broadcast_tx.clone(),
             };
-            let state = McpSharedState::for_daemon(backend);
+            let state = McpSharedState::for_daemon_with_sources(
+                backend,
+                perri_queue_rx_for_mcp,
+                jobs_rx_for_mcp,
+            );
             match McpServer::bind(mcp_socket.clone(), state).await {
                 Ok(srv) => {
                     info!(socket = %mcp_socket.display(), "daemon MCP server listening");
@@ -197,15 +210,8 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ── Perri background sources ──────────────────────────────────────────────
-    // These watch dirty-file sentinels and write cache files consumed by the
-    // GUI (AppStore.swift).  They run independently of any TUI connection.
-    let (perri_queue_rx, _perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
-    let (perri_pr_rx, _perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
-
     // ── Perri broadcaster ─────────────────────────────────────────────────────
-    // Watches the native Perri sources and broadcasts PerriState whenever either
-    // the queue or the current-PR snapshot changes.
+    // (Sources were spawned earlier so the MCP state could get live receivers.)
     tokio::spawn(run_perri_broadcaster(
         broadcast_tx.clone(),
         perri_queue_rx,
@@ -222,8 +228,8 @@ async fn main() -> Result<()> {
     tokio::spawn(run_teri_broadcaster(teri_todos_rx, btx_teri));
 
     // ── Mother pollers ────────────────────────────────────────────────────────
+    // (jobs_tx/jobs_rx were created earlier so the MCP state could get a live receiver.)
     let btx_mother = broadcast_tx.clone();
-    let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
     tokio::spawn(run_mother_pollers(btx_mother, jobs_tx));
 
     // ── Mother peek poller ────────────────────────────────────────────────────

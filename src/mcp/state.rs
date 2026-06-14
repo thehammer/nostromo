@@ -203,18 +203,32 @@ impl McpSharedState {
         )
     }
 
-    /// Construct an `McpSharedState` for an MCP server hosted inside `nostromd`.
+    /// Construct an `McpSharedState` for an MCP server hosted inside `nostromd`,
+    /// wiring in the daemon's live data sources so MCP tools like
+    /// `perri.list_pr_queue` and `mother.list_jobs` return real data.
     ///
-    /// TUI-only watch channels are initialised empty (the daemon doesn't serve
-    /// the TUI's introspection reads through this path). The `event_tx` is wired
-    /// to a channel whose receiver is dropped immediately, so any accidental call
-    /// to a legacy TUI-only mutator returns `event_loop_closed` *fast* instead of
-    /// blocking for the 5 s command timeout. Pane/focus tools branch on
-    /// `self.daemon` and never touch `event_tx`.
+    /// The `event_tx` is connected to a dropped receiver so any accidental call
+    /// to a legacy TUI-only mutator fails fast rather than blocking.
     pub fn for_daemon(daemon: DaemonMcpBackend) -> Self {
         let (event_tx, _dropped_rx) = mpsc::unbounded_channel();
         let mut state = Self::for_test(event_tx);
         state.daemon = Some(daemon);
+        state
+    }
+
+    /// Variant of [`for_daemon`] that accepts the real watch receivers from the
+    /// daemon's background sources, so `perri.list_pr_queue`, `mother.list_jobs`,
+    /// etc. return live data instead of the empty stubs from `for_test`.
+    pub fn for_daemon_with_sources(
+        daemon: DaemonMcpBackend,
+        perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
+        mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
+    ) -> Self {
+        let (event_tx, _dropped_rx) = mpsc::unbounded_channel();
+        let mut state = Self::for_test(event_tx);
+        state.daemon = Some(daemon);
+        state.perri_queue_rx = perri_queue_rx;
+        state.mother_jobs_rx = mother_jobs_rx;
         state
     }
 }

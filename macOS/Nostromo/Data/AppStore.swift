@@ -147,10 +147,27 @@ class AppStore: ObservableObject {
             .sink { [weak self] in self?.checkPrCacheForPendingSelection() }
             .store(in: &cancellables)
 
-        // Broker connection state → brokerConnected
+        // Broker connection state → brokerConnected + daemon recovery.
+        // When the broker goes offline, attempt `mother daemon start` after a
+        // short delay as a backstop — the launchd plist keeps the runner alive
+        // for most cases, but a clean-exit race or a crashed broker can leave
+        // the daemon stopped without launchd noticing.
         broker.connected
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.brokerConnected = $0 }
+            .sink { [weak self] connected in
+                self?.brokerConnected = connected
+                if !connected {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                        guard let self, !self.brokerConnected else { return }
+                        log.warning("broker offline — attempting 'mother daemon start'")
+                        let proc = Process()
+                        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                        proc.arguments = ["mother", "daemon", "start"]
+                        proc.environment = ProcessInfo.processInfo.environment
+                        try? proc.run()
+                    }
+                }
+            }
             .store(in: &cancellables)
 
         // Broker events → job map + derived status

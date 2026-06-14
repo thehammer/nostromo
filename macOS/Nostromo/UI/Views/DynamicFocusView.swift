@@ -229,6 +229,7 @@ final class PaneContentNSView: NSView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         wantsLayer = true
+        // Temporarily dark green so we can confirm the view IS in the hierarchy
         layer?.backgroundColor = NSColor.black.cgColor
         // Start with an empty state.
         let hosting = NSHostingView(rootView: PaneContentView(content: nil))
@@ -246,6 +247,20 @@ final class PaneContentNSView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func update(content: PaneContentWire) {
-        hostingView?.rootView = PaneContentView(content: content)
+        // Replace rather than mutate rootView — setting rootView on an existing
+        // NSHostingView inside a split view doesn't reliably trigger a SwiftUI
+        // layout pass. Creating a fresh NSHostingView guarantees the content renders.
+        hostingView?.removeFromSuperview()
+        let hosting = NSHostingView(rootView: PaneContentView(content: content))
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        hosting.appearance = NSAppearance(named: .darkAqua)
+        addSubview(hosting)
+        NSLayoutConstraint.activate([
+            hosting.topAnchor.constraint(equalTo: topAnchor),
+            hosting.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hosting.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        hostingView = hosting
     }
 }
