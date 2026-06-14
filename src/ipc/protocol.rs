@@ -68,6 +68,9 @@ pub enum Topic {
     Perri,
     Fred,
     Teri,
+    /// Agent-authored pane layout + content broadcasts (`FocusLayout`,
+    /// `PaneContent`, `FocusCreated`).
+    Layout,
 }
 
 /// Metadata about a daemon-owned PTY.
@@ -162,6 +165,90 @@ pub struct FocusMeta {
     /// Auto-generated one-line session summary, when known.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub session_summary: Option<String>,
+}
+
+// ── agent-authored pane layout (Phase 1: agent-driven-pane-layout) ───────────
+
+/// Direction a split node lays its children out in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitDirection {
+    /// Children laid out left → right (a vertical divider between columns).
+    Horizontal,
+    /// Children laid out top → bottom (a horizontal divider between rows).
+    Vertical,
+}
+
+/// A node in a focus's agent-authored pane layout tree.
+///
+/// The tree is the canonical description of how a focus's workspace is split.
+/// Leaves are panes addressable by `pane_id`; interior `Split` nodes carry a
+/// direction, ordered children, and per-child ratios (parallel to `children`,
+/// conventionally summing to ~1.0).
+///
+/// Invariants enforced by the daemon's pane registry (not by this type):
+/// - exactly one leaf has `pane_id == "repl"` (B2 — the REPL is a pane, not a
+///   privileged host),
+/// - pane ids are unique within a focus,
+/// - every `Split` has `children.len() == ratios.len()` and `children.len() >= 2`.
+///
+/// `#[serde(tag = "kind")]` gives a self-describing wire shape the Swift/iOS
+/// clients decode directly:
+/// `{"kind":"leaf","pane_id":"repl"}` /
+/// `{"kind":"split","direction":"horizontal","children":[…],"ratios":[0.5,0.5]}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneTree {
+    /// A leaf pane.
+    Leaf { pane_id: String },
+    /// An interior split with ordered children and parallel ratios.
+    Split {
+        direction: SplitDirection,
+        children: Vec<PaneTree>,
+        ratios: Vec<f32>,
+    },
+}
+
+impl PaneTree {
+    /// A fresh focus: a single REPL leaf.
+    pub fn repl_leaf() -> Self {
+        PaneTree::Leaf {
+            pane_id: "repl".to_string(),
+        }
+    }
+
+    /// Collect every pane id in left-to-right, depth-first tree order.
+    pub fn pane_ids(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_pane_ids(&mut out);
+        out
+    }
+
+    fn collect_pane_ids(&self, out: &mut Vec<String>) {
+        match self {
+            PaneTree::Leaf { pane_id } => out.push(pane_id.clone()),
+            PaneTree::Split { children, .. } => {
+                for c in children {
+                    c.collect_pane_ids(out);
+                }
+            }
+        }
+    }
+}
+
+/// Content payload pushed to a single pane, decoupled from layout geometry.
+///
+/// `PaneContent` is a separate wire message from `FocusLayout` precisely so a
+/// content refresh never carries split ratios — that is the mechanism by which
+/// an operator's manual drag-resize survives content updates (only a structural
+/// message re-declares geometry).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneContentWire {
+    /// Plain/markdown/mono text.
+    Text { text: String },
+    /// A structured JSON snapshot the client renders generically.
+    JsonSnapshot { value: serde_json::Value },
 }
 
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────
@@ -539,6 +626,34 @@ pub enum ServerMsg {
         last_text: String,
     },
 
+    // ── agent-authored pane layout (Phase 1) ─────────────────────────────────
+    /// Broadcast of a focus's current pane tree. Sent whenever an agent mutates
+    /// the layout (create_pane / reset_panes / set_pane_layout) and replayed to a
+    /// client on `SessionAttach` so a reconnecting client renders the
+    /// already-assembled workspace with no re-assembly. This is the *structural*
+    /// message — it carries geometry; content pushes do not.
+    FocusLayout {
+        tag: String,
+        tree: PaneTree,
+        /// The pane the agent wants foregrounded (the iOS degradation hint).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        focused_pane: Option<String>,
+    },
+
+    /// Content push for a single pane, decoupled from layout geometry so a
+    /// refresh never moves a split (preserving operator drag-resizes).
+    PaneContent {
+        tag: String,
+        pane_id: String,
+        content: PaneContentWire,
+    },
+
+    /// The daemon announces an agent-spawned focus (via `create_focus`) so every
+    /// connected client can add the new tab.
+    FocusCreated {
+        meta: FocusMeta,
+    },
+
     /// TUI-internal pseudo-event — **never produced by the daemon**.
     ///
     /// Injected locally by the [`DaemonClient`] supervisor immediately after a
@@ -886,6 +1001,87 @@ mod tests {
         round_trip_server(ServerMsg::FocusRegistryUpdated {
             focuses: vec![meta],
         });
+    }
+
+    #[test]
+    fn layout_messages_round_trip() {
+        let tree = PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Leaf {
+                    pane_id: "repl".into(),
+                },
+                PaneTree::Split {
+                    direction: SplitDirection::Vertical,
+                    children: vec![
+                        PaneTree::Leaf {
+                            pane_id: "jobs".into(),
+                        },
+                        PaneTree::Leaf {
+                            pane_id: "log".into(),
+                        },
+                    ],
+                    ratios: vec![0.6, 0.4],
+                },
+            ],
+            ratios: vec![0.3, 0.7],
+        };
+
+        round_trip_server(ServerMsg::FocusLayout {
+            tag: "mother".into(),
+            tree: tree.clone(),
+            focused_pane: Some("log".into()),
+        });
+        round_trip_server(ServerMsg::PaneContent {
+            tag: "mother".into(),
+            pane_id: "log".into(),
+            content: PaneContentWire::Text {
+                text: "hello".into(),
+            },
+        });
+        round_trip_server(ServerMsg::PaneContent {
+            tag: "mother".into(),
+            pane_id: "jobs".into(),
+            content: PaneContentWire::JsonSnapshot {
+                value: serde_json::json!({ "jobs": [1, 2, 3] }),
+            },
+        });
+        round_trip_server(ServerMsg::FocusCreated {
+            meta: FocusMeta {
+                tag: "cody-core-1234".into(),
+                display_name: "CORE-1234".into(),
+                agent_name: "cody".into(),
+                project_name: None,
+                org: None,
+                is_built_in: false,
+                session_summary: None,
+            },
+        });
+    }
+
+    #[test]
+    fn pane_tree_collects_ids_in_tree_order() {
+        let tree = PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Leaf {
+                    pane_id: "repl".into(),
+                },
+                PaneTree::Leaf {
+                    pane_id: "jobs".into(),
+                },
+            ],
+            ratios: vec![0.5, 0.5],
+        };
+        assert_eq!(tree.pane_ids(), vec!["repl", "jobs"]);
+        assert_eq!(PaneTree::repl_leaf().pane_ids(), vec!["repl"]);
+    }
+
+    #[test]
+    fn layout_topic_round_trips() {
+        assert_eq!(serde_json::to_string(&Topic::Layout).unwrap(), "\"layout\"");
+        let decoded: Topic = serde_json::from_str("\"layout\"").unwrap();
+        assert_eq!(decoded, Topic::Layout);
     }
 
     #[test]

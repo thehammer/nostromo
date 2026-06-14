@@ -19,6 +19,7 @@
 		AA0000010000000000000020 /* PerriView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000021 /* PerriView.swift */; };
 		AA0000010000000000000022 /* FredView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000023 /* FredView.swift */; };
 		AA0000010000000000000024 /* DaemonDiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000025 /* DaemonDiscoveryView.swift */; };
+		AA0000010000000000000027 /* DynamicFocusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000028 /* DynamicFocusView.swift */; };
 		AA00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000100000000000000AA /* NostromoKit */; };
 /* End PBXBuildFile section */
 
@@ -36,6 +37,7 @@
 		AA0000010000000000000023 /* FredView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredView.swift; sourceTree = "<group>"; };
 		AA0000010000000000000025 /* DaemonDiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiscoveryView.swift; sourceTree = "<group>"; };
 		AA0000010000000000000026 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA0000010000000000000028 /* DynamicFocusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicFocusView.swift; sourceTree = "<group>"; };
 		AA00000100000000000000A0 /* Nostromo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nostromo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -83,6 +85,7 @@
 				AA0000010000000000000021 /* PerriView.swift */,
 				AA0000010000000000000023 /* FredView.swift */,
 				AA0000010000000000000025 /* DaemonDiscoveryView.swift */,
+				AA0000010000000000000028 /* DynamicFocusView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -181,6 +184,7 @@
 				AA0000010000000000000020 /* PerriView.swift in Sources */,
 				AA0000010000000000000022 /* FredView.swift in Sources */,
 				AA0000010000000000000024 /* DaemonDiscoveryView.swift in Sources */,
+				AA0000010000000000000027 /* DynamicFocusView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

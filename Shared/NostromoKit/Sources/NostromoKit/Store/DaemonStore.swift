@@ -54,6 +54,10 @@ public final class DaemonStore: ObservableObject {
     /// Daemon-served focus registry, keyed by tag.
     @Published public private(set) var focuses: [String: FocusMeta] = [:]
 
+    /// Per-focus layout models, keyed by session tag.
+    /// Updated by `focus_layout` (structural) and `pane_content` (content-only) broadcasts.
+    @Published public private(set) var focusLayouts: [String: FocusLayoutModel] = [:]
+
     /// Focuses grouped + ordered for list rendering.
     public var focusRows: [FocusRow] { buildFocusRows(Array(focuses.values)) }
 
@@ -131,6 +135,7 @@ public final class DaemonStore: ObservableObject {
                     // ghost entries if the daemon is restarted.
                     self?.sessions       = [:]
                     self?.focuses        = [:]
+                    self?.focusLayouts   = [:]
                     self?.motherJobs     = []
                     self?.motherPeeks    = [:]
                     self?.perriQueue     = []
@@ -242,6 +247,25 @@ public final class DaemonStore: ObservableObject {
 
         case .teriState(let snap):
             teriTodos = snap
+
+        case .focusLayout(let tag, let tree, let focusedPane):
+            var model = focusLayouts[tag] ?? FocusLayoutModel.initial
+            model.tree        = tree
+            model.focusedPane = focusedPane
+            focusLayouts[tag] = model
+
+        case .paneContent(let tag, let paneId, let content):
+            var model = focusLayouts[tag] ?? FocusLayoutModel.initial
+            model.paneContent[paneId] = content
+            focusLayouts[tag] = model
+
+        case .focusCreated(let meta):
+            // Register the new focus in the focus registry.
+            focuses[meta.tag] = meta.toFocusMeta()
+            // Seed the layout model so the tab appears immediately.
+            if focusLayouts[meta.tag] == nil {
+                focusLayouts[meta.tag] = FocusLayoutModel.initial
+            }
 
         default:
             break

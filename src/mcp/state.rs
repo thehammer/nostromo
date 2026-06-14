@@ -4,10 +4,10 @@
 //! across task boundaries.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, RwLock};
 
 use crate::{
     data::{
@@ -19,6 +19,7 @@ use crate::{
         teri_todos::TeriTodosSnapshot,
     },
     event::AppEvent,
+    ipc::{pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
     mother::{MotherJob, MotherStatus},
 };
 
@@ -49,6 +50,28 @@ pub struct ViewMeta {
     pub pane_ids: Vec<&'static str>,
 }
 
+// ── daemon backend ─────────────────────────────────────────────────────────────
+
+/// Backend for an MCP server hosted **inside `nostromd`** (rather than the TUI).
+///
+/// The TUI routes pane mutations through `event_tx` → `AppEvent::McpCommand` →
+/// its own event loop. That path cannot reach the macOS app, which is a separate
+/// process talking to the daemon over IPC. So when the MCP server runs in the
+/// daemon, pane tools instead mutate the daemon-owned [`PaneRegistry`] directly
+/// (under its mutex) and fan the result out to every connected client as a
+/// `ServerMsg` broadcast. `create_focus` additionally spawns a daemon session.
+///
+/// Cheap to clone — every field is `Arc`/`Sender`-backed.
+#[derive(Clone)]
+pub struct DaemonMcpBackend {
+    /// Per-focus pane-tree registry (the single source of truth for structure).
+    pub pane_registry: Arc<Mutex<PaneRegistry>>,
+    /// Daemon session manager — `create_focus` spawns sessions through it.
+    pub session_mgr: Arc<Mutex<SessionManager>>,
+    /// IPC broadcast channel — pane mutations fan out to all clients here.
+    pub broadcast_tx: broadcast::Sender<ServerMsg>,
+}
+
 // ── shared state ───────────────────────────────────────────────────────────────
 
 /// Cheap-clone shared state passed to all MCP tool handlers.
@@ -58,6 +81,11 @@ pub struct ViewMeta {
 pub struct McpSharedState {
     /// For future mutating tools: post an `AppEvent::McpCommand(...)`.
     pub event_tx: mpsc::UnboundedSender<AppEvent>,
+
+    /// Set when this MCP server is hosted by `nostromd` rather than the TUI.
+    /// Pane/focus tools branch on this: `Some` → mutate the daemon registry and
+    /// broadcast; `None` → the legacy TUI `event_tx` path.
+    pub daemon: Option<DaemonMcpBackend>,
 
     /// Metadata about every registered view.  Populated once at startup.
     pub views_meta: Arc<RwLock<Vec<ViewMeta>>>,
@@ -117,6 +145,7 @@ impl McpSharedState {
     ) -> Self {
         Self {
             event_tx,
+            daemon: None,
             views_meta: Arc::new(RwLock::new(Vec::new())),
             ptys: Arc::new(RwLock::new(HashMap::new())),
             perri_queue_rx,
@@ -172,5 +201,20 @@ impl McpSharedState {
             rate_limits_rx,
             budget_posture_rx,
         )
+    }
+
+    /// Construct an `McpSharedState` for an MCP server hosted inside `nostromd`.
+    ///
+    /// TUI-only watch channels are initialised empty (the daemon doesn't serve
+    /// the TUI's introspection reads through this path). The `event_tx` is wired
+    /// to a channel whose receiver is dropped immediately, so any accidental call
+    /// to a legacy TUI-only mutator returns `event_loop_closed` *fast* instead of
+    /// blocking for the 5 s command timeout. Pane/focus tools branch on
+    /// `self.daemon` and never touch `event_tx`.
+    pub fn for_daemon(daemon: DaemonMcpBackend) -> Self {
+        let (event_tx, _dropped_rx) = mpsc::unbounded_channel();
+        let mut state = Self::for_test(event_tx);
+        state.daemon = Some(daemon);
+        state
     }
 }

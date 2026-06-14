@@ -53,6 +53,10 @@ class AppStore: ObservableObject {
     // Active focus agent tag — set by MainLayout on every focus switch.
     @Published private(set) var activeFocusAgentTag: String?      = nil
 
+    // Agent-authored pane layout (Phase 1).
+    // Keyed by focus tag; updated from FocusLayout / PaneContent broadcasts.
+    @Published private(set) var focusLayouts: [String: FocusLayoutModel] = [:]
+
     // Session health — keyed by focus agent tag.
     // Updated from the IPC stream for every tag the client sees events for,
     // so the sidebar badge can render for any opened focus without the active
@@ -591,6 +595,31 @@ class AppStore: ObservableObject {
         case .sessionSpawned, .sessionTurns, .sessionTurnDelta,
              .sessionPermissionRequest, .sessionExited:
             break
+
+        // ── agent-authored pane layout (Phase 1) ─────────────────────────────
+        case .focusLayout(let tag, let tree, let focusedPane):
+            // Structural update — rebuild the tree for this focus. Content is
+            // preserved (content pushes are decoupled from layout geometry).
+            var model = focusLayouts[tag] ?? FocusLayoutModel.initial
+            model.tree        = tree
+            model.focusedPane = focusedPane
+            focusLayouts[tag] = model
+
+        case .paneContent(let tag, let paneId, let content):
+            // Content update — update the leaf without touching tree geometry so
+            // operator drag-resizes survive.
+            var model = focusLayouts[tag] ?? FocusLayoutModel.initial
+            model.paneContent[paneId] = content
+            focusLayouts[tag] = model
+
+        case .focusCreated(let meta):
+            // An agent-spawned focus was created — add it to FocusStore so the
+            // tab appears, and seed an empty layout so DynamicFocusView has state.
+            let focus = meta.toFocus()
+            FocusStore.shared.add(focus)
+            if focusLayouts[meta.tag] == nil {
+                focusLayouts[meta.tag] = FocusLayoutModel.initial
+            }
 
         case .pong, .unknown:
             break

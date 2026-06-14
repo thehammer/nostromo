@@ -635,6 +635,10 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::FocusRegistryUpdated { .. } => topics.contains(&Topic::Focuses),
         ServerMsg::PerriState { .. } => topics.contains(&Topic::Perri),
         ServerMsg::FredState { .. } => topics.contains(&Topic::Fred),
+        // Agent-authored pane layout broadcasts (Phase 1).
+        ServerMsg::FocusLayout { .. }
+        | ServerMsg::PaneContent { .. }
+        | ServerMsg::FocusCreated { .. } => topics.contains(&Topic::Layout),
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,

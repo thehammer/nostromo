@@ -14,6 +14,7 @@
 
 pub mod client;
 pub mod codec;
+pub mod pane_registry;
 pub mod protocol;
 pub mod pty_manager;
 pub mod scrollback;

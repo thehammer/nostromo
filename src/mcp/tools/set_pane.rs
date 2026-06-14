@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 use tracing::warn;
 
 use crate::event::AppEvent;
+use crate::ipc::protocol::{PaneContentWire, ServerMsg};
 use crate::mcp::{
     command::{McpCommand, PaneContent},
     state::McpSharedState,
@@ -35,6 +36,22 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
         Ok(c) => c,
         Err(e) => return json!({ "error": "invalid_args", "detail": e }),
     };
+
+    // ── daemon-hosted path ──────────────────────────────────────────────────
+    // Content is decoupled from layout geometry: broadcast a `PaneContent`
+    // message that carries no ratios, so an operator's drag-resize survives.
+    if let Some(daemon) = &state.daemon {
+        let wire = match content {
+            PaneContent::Text(t) => PaneContentWire::Text { text: t },
+            PaneContent::JsonSnapshot(v) => PaneContentWire::JsonSnapshot { value: v },
+        };
+        let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
+            tag: view_id,
+            pane_id,
+            content: wire,
+        });
+        return json!({ "ok": true });
+    }
 
     let (tx, rx) = oneshot::channel();
     let cmd = McpCommand::SetPaneContent {
@@ -101,6 +118,28 @@ pub async fn set_pane_layout(state: &McpSharedState, args: &Value) -> Value {
         Some(r) => r.clone(),
         None => return json!({ "error": "invalid_args", "detail": "missing ratios" }),
     };
+
+    // ── daemon-hosted path ──────────────────────────────────────────────────
+    // Re-declare the focus's layout. The `ratios` payload may be a flat
+    // `{ pane_id: ratio }` map (legacy sugar) or a full pane tree (B3); the
+    // registry normalises both. Broadcasts a structural `FocusLayout`.
+    if let Some(daemon) = &state.daemon {
+        let result = {
+            let mut reg = daemon.pane_registry.lock().unwrap();
+            reg.set_layout(&view_id, &ratios)
+        };
+        return match result {
+            Ok(tree) => {
+                let _ = daemon.broadcast_tx.send(ServerMsg::FocusLayout {
+                    tag: view_id,
+                    tree,
+                    focused_pane: None,
+                });
+                json!({ "ok": true })
+            }
+            Err(e) => json!({ "error": e.code() }),
+        };
+    }
 
     let (tx, rx) = oneshot::channel();
     let cmd = McpCommand::SetPaneLayout {

@@ -89,7 +89,11 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         // Fred state is consumed by the Swift/iOS thin-client via the fred topic.
         | ServerMsg::FredState { .. }
         // Teri todos are consumed by the Swift thin-clients.
-        | ServerMsg::TeriState { .. } => {}
+        | ServerMsg::TeriState { .. }
+        // Agent-authored pane layout messages are consumed by the Swift thin-client.
+        | ServerMsg::FocusLayout { .. }
+        | ServerMsg::PaneContent { .. }
+        | ServerMsg::FocusCreated { .. } => {}
         // DaemonReconnected is handled by individual DaemonPtyClient subscribers.
         ServerMsg::DaemonReconnected => {}
         // Control messages — no action needed.

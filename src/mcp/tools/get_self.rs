@@ -25,6 +25,40 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
         return json!({ "error": "unidentified_caller", "reason": "no pty_id in Hello frame" });
     };
 
+    // ── daemon-hosted path ──────────────────────────────────────────────────
+    // In the daemon, the Hello `pty_id` *is* the focus tag. Identity comes from
+    // the session/focus registry and live pane membership from the pane registry
+    // (always at least `["repl"]`).
+    if let Some(daemon) = &state.daemon {
+        let tag = pty_id;
+        let pane_ids = {
+            let reg = daemon.pane_registry.lock().unwrap();
+            let ids = reg.pane_ids(tag);
+            if ids.is_empty() {
+                vec!["repl".to_string()]
+            } else {
+                ids
+            }
+        };
+        let (view_title, agent_name) = {
+            let mgr = daemon.session_mgr.lock().unwrap();
+            mgr.focus_registry()
+                .into_iter()
+                .find(|f| f.tag == tag)
+                .map(|f| (f.display_name, Some(f.agent_name)))
+                .unwrap_or_else(|| (tag.to_string(), None))
+        };
+        return json!({
+            "view_id": tag,
+            "view_title": view_title,
+            "agent_name": agent_name,
+            "pty_id": tag,
+            "session_id": tag,
+            "pane_ids": pane_ids,
+            "nostromo_version": env!("CARGO_PKG_VERSION"),
+        });
+    }
+
     let ptys = state.ptys.read().await;
     let Some(identity) = ptys.get(pty_id) else {
         return json!({

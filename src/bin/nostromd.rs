@@ -39,7 +39,8 @@ use nostromo::{
         perri_queue_native::PerriQueueNativeSource,
         teri_todos::TeriTodosNativeSource,
     },
-    ipc::{protocol::ServerMsg, PtyManager, Server, SessionManager},
+    ipc::{pane_registry::PaneRegistry, protocol::ServerMsg, PtyManager, Server, SessionManager},
+    mcp::{daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState},
     mother::{self, statusline_cache_path, MotherStatus},
 };
 
@@ -74,6 +75,11 @@ async fn main() -> Result<()> {
 
     // ── Session manager (persistent stream-json sessions) ──────────────────────
     let session_mgr: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
+
+    // ── Pane registry (agent-authored layout) ──────────────────────────────────
+    // Single source of truth for every focus's pane tree. Persisted to disk so
+    // an assembled layout survives a daemon restart.
+    let pane_registry: Arc<Mutex<PaneRegistry>> = Arc::new(Mutex::new(PaneRegistry::new()));
 
     // ── IPC server (Unix socket) ──────────────────────────────────────────────
     let socket_path = nostromo::ipc::default_socket_path();
@@ -134,6 +140,46 @@ async fn main() -> Result<()> {
     }
 
     let broadcast_tx = server.tx.clone();
+
+    // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
+    // Hosts the layout/introspection/focus tool surface inside nostromd so that
+    // daemon-hosted agent sessions can assemble their own pane workspaces. Pane
+    // mutations are applied to `pane_registry` and broadcast as `FocusLayout` /
+    // `PaneContent` / `FocusCreated` to all clients. Bind failure is non-fatal —
+    // the daemon keeps running without the layout surface.
+    let mcp_socket = daemon_socket_path();
+    let _mcp_server: Option<McpServer> = match write_bridge_mcp_config() {
+        Some(mcp_config) => {
+            {
+                let mut mgr = session_mgr.lock().unwrap();
+                mgr.configure_mcp_bridge(
+                    Arc::clone(&pane_registry),
+                    mcp_socket.clone(),
+                    mcp_config,
+                );
+            }
+            let backend = DaemonMcpBackend {
+                pane_registry: Arc::clone(&pane_registry),
+                session_mgr: Arc::clone(&session_mgr),
+                broadcast_tx: broadcast_tx.clone(),
+            };
+            let state = McpSharedState::for_daemon(backend);
+            match McpServer::bind(mcp_socket.clone(), state).await {
+                Ok(srv) => {
+                    info!(socket = %mcp_socket.display(), "daemon MCP server listening");
+                    Some(srv)
+                }
+                Err(e) => {
+                    warn!("daemon MCP server unavailable (non-fatal): {e:#}");
+                    None
+                }
+            }
+        }
+        None => {
+            warn!("could not write MCP bridge config; daemon MCP server disabled");
+            None
+        }
+    };
 
     // ── Activity tailer ───────────────────────────────────────────────────────
     let activity_path = dirs_next::home_dir()

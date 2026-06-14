@@ -6,6 +6,8 @@
 //! Phase 4: `nostromo.notify`, `nostromo.register_status_segment`,
 //!           `nostromo.clear_status_segment`.
 
+pub mod create_focus;
+pub mod create_pane;
 pub mod fred;
 pub mod get_self;
 pub mod get_view_state;
@@ -203,6 +205,46 @@ pub fn tool_descriptors() -> Vec<Value> {
                     "ratios": { "type": "object", "description": "View-specific ratio keys and values (0.1–0.9)" }
                 },
                 "required": ["view_id", "ratios"]
+            }
+        }),
+        // ── agent-driven pane layout (Phase 1) ─────────────────────────────
+        json!({
+            "name": "nostromo.create_pane",
+            "description": "Add a named pane to the calling focus by splitting an existing pane in a stated direction. The new pane becomes addressable by its agent-chosen pane_id in subsequent content/layout/focus calls. Errors: unknown_view, unknown_pane, duplicate_pane, invalid_position.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id":     { "type": "string", "description": "Focus/view id (e.g. 'mother'); omit to target the caller's own focus" },
+                    "pane_id":     { "type": "string", "description": "Agent-chosen id for the new pane (e.g. 'jobs', 'diff')" },
+                    "position":    { "type": "string", "enum": ["split_left", "split_right", "split_above", "split_below"], "description": "Direction to split relative_to" },
+                    "relative_to": { "type": "string", "description": "Existing pane id to split (e.g. 'repl')" }
+                },
+                "required": ["pane_id", "position", "relative_to"]
+            }
+        }),
+        json!({
+            "name": "nostromo.reset_panes",
+            "description": "Tear the calling focus back down to a single REPL pane. Used by a restarting agent before rebuilding its workspace from scratch. Error: unknown_view.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string", "description": "Focus/view id; omit to target the caller's own focus" }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "nostromo.create_focus",
+            "description": "Programmatically create a new persistent focus running a named agent persona in a working directory, with seeded first-turn context. Returns the new focus_id. Errors: invalid_working_directory, spawn_failed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent":             { "type": "string", "description": "Agent persona name (e.g. 'cody', 'fred')" },
+                    "working_directory": { "type": "string", "description": "Absolute path for the session's cwd; omit for a pathless focus" },
+                    "title":             { "type": "string", "description": "Tab title (e.g. 'CORE-1234')" },
+                    "initial_context":   { "type": "string", "description": "Markdown/text folded into the new session's first turn so it does not start blank" }
+                },
+                "required": ["agent", "title"]
             }
         }),
         json!({
@@ -445,6 +487,20 @@ pub async fn dispatch(
         "nostromo.switch_active_view" => {
             let args = arguments.cloned().unwrap_or_default();
             switch_view::switch_active_view(state, &args).await
+        }
+
+        // ── agent-driven pane layout (Phase 1) ────────────────────────────
+        "nostromo.create_pane" => {
+            let args = arguments.cloned().unwrap_or_default();
+            create_pane::create_pane(state, &args, pty_id).await
+        }
+        "nostromo.reset_panes" => {
+            let args = arguments.cloned().unwrap_or_default();
+            create_pane::reset_panes(state, &args, pty_id).await
+        }
+        "nostromo.create_focus" => {
+            let args = arguments.cloned().unwrap_or_default();
+            create_focus::create_focus(state, &args, pty_id).await
         }
 
         // ── Phase 3: Perri mutations ───────────────────────────────────────
