@@ -57,10 +57,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func systemWillSleep(_ note: Notification) {
-        appLog.info("systemWillSleep — removing window animations")
+        // Set animationBehavior = .none so no new animations start during sleep.
+        // Do NOT call removeAllAnimations() — forcibly removing in-flight animations
+        // leaves NSAnimationManager's KVO observers dangling, which causes a
+        // SIGABRT in the display link callback on wake.
+        appLog.info("systemWillSleep — disabling window animation behavior")
         for win in windows {
             win.animationBehavior = .none
-            win.contentView?.layer?.removeAllAnimations()
         }
     }
 
