@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+use crate::ipc::protocol::PrListItem;
+
 // ── notification level ────────────────────────────────────────────────────────
 
 /// Severity level for a `nostromo.notify` call.
@@ -46,6 +48,8 @@ pub enum PaneContent {
     Text(String),
     /// Structured JSON snapshot (e.g. a diff pane override).
     JsonSnapshot(serde_json::Value),
+    /// Typed list of PR queue items rendered by `PerriPRRow`.
+    PrList(Vec<PrListItem>),
 }
 
 // ── minimal Mother job lite ───────────────────────────────────────────────────
