@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use tracing::warn;
 
 use crate::event::AppEvent;
-use crate::ipc::protocol::{PaneContentWire, ServerMsg};
+use crate::ipc::protocol::{PaneContentWire, PrListItem, ServerMsg};
 use crate::mcp::{
     command::{McpCommand, PaneContent},
     state::McpSharedState,
@@ -44,6 +44,7 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
         let wire = match content {
             PaneContent::Text(t) => PaneContentWire::Text { text: t },
             PaneContent::JsonSnapshot(v) => PaneContentWire::JsonSnapshot { value: v },
+            PaneContent::PrList(items) => PaneContentWire::PrList { items },
         };
         let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
             tag: view_id,
@@ -193,6 +194,22 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
                 .cloned()
                 .unwrap_or(Value::Null);
             Ok(PaneContent::JsonSnapshot(snap))
+        }
+        "pr_list" => {
+            let items_raw = v
+                .get("items")
+                .and_then(|i| i.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let mut items = Vec::with_capacity(items_raw.len());
+            for (idx, raw) in items_raw.iter().enumerate() {
+                let item: PrListItem = serde_json::from_value(raw.clone()).map_err(|e| {
+                    format!("unsupported_payload: items[{idx}] missing required field: {e}")
+                })?;
+                items.push(item);
+            }
+            Ok(PaneContent::PrList(items))
         }
         other => Err(format!("unknown content type: {other}")),
     }

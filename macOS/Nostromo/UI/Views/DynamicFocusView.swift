@@ -122,6 +122,13 @@ final class DynamicFocusView: NSView {
             return repl
         } else {
             let wrapper = PaneContentNSView()
+            // Wire pr_list row actions through AppStore so the existing
+            // PerriState load path fires (D2: reuse existing PerriAction path).
+            wrapper.onLoadPR    = { repo, number in AppStore.shared.loadPR(repo: repo, number: number) }
+            // macOS approve: no native approve path exists in Phase 1 (the
+            // legacy macOS PerriView had no swipe-approve). The context menu item
+            // is wired to a no-op; full macOS approve is Phase 2 work.
+            wrapper.onApprovePR = { _, _ in }
             leafViews[paneId] = wrapper
             return wrapper
         }
@@ -226,10 +233,14 @@ final class PaneContentNSView: NSView {
     private var hostingView: NSHostingView<PaneContentView>?
     private var currentContent: PaneContentWire?
 
+    /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is loaded.
+    var onLoadPR:    (String, Int) -> Void = { _, _ in }
+    /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is approved.
+    var onApprovePR: (String, Int) -> Void = { _, _ in }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         wantsLayer = true
-        // Temporarily dark green so we can confirm the view IS in the hierarchy
         layer?.backgroundColor = NSColor.black.cgColor
         // Start with an empty state.
         let hosting = NSHostingView(rootView: PaneContentView(content: nil))
@@ -251,7 +262,10 @@ final class PaneContentNSView: NSView {
         // NSHostingView inside a split view doesn't reliably trigger a SwiftUI
         // layout pass. Creating a fresh NSHostingView guarantees the content renders.
         hostingView?.removeFromSuperview()
-        let hosting = NSHostingView(rootView: PaneContentView(content: content))
+        var view = PaneContentView(content: content)
+        view.onLoadPR    = onLoadPR
+        view.onApprovePR = onApprovePR
+        let hosting = NSHostingView(rootView: view)
         hosting.translatesAutoresizingMaskIntoConstraints = false
         hosting.appearance = NSAppearance(named: .darkAqua)
         addSubview(hosting)

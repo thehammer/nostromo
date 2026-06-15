@@ -476,6 +476,27 @@ class AppStore: ObservableObject {
         }
     }
 
+    // MARK: - Thin helpers for typed-content action dispatch
+
+    /// Load a PR by identity only — used by `pr_list` pane rows where we have
+    /// `repo` + `number` but no full `PRQueueItem`. Writes the same sentinels as
+    /// `selectPR(_:)` so the daemon fetches and broadcasts the diff/CI detail.
+    func loadPR(repo: String, number: Int) {
+        // Build a minimal PRQueueItem shell so we can reuse selectPR's cache key logic.
+        let shell = PRQueueItem(
+            repo:        repo,
+            number:      number,
+            title:       "",
+            author:      "",
+            bucket:      "needs_review",
+            newActivity: false,
+            url:         "",
+            ciState:     .unknown,
+            headSha:     ""
+        )
+        selectPR(shell)
+    }
+
     /// Called when FileWatchers receives an updated PRDetail from current-pr-detail.json.
     private func handleDetailUpdate(_ detail: PRDetail?) {
         guard let detail else { return }

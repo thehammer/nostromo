@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent_bus::ActivityEvent,
-    data::{perri_pr::PrSnapshot, perri_queue::PrQueueItem},
+    data::{perri_pr::PrSnapshot, perri_queue::{CiState, PrQueueItem}},
     ipc::{
         session_manager::StopReason,
         stream_json::{SessionState, Turn, TurnDelta},
@@ -236,6 +236,35 @@ impl PaneTree {
     }
 }
 
+/// One item in a `pr_list` pane payload.
+///
+/// Carries the fields `PerriPRRowModel` needs plus the `repo`/`number`
+/// identity the action path (`load_pr`, `approve`) keys on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrListItem {
+    /// Repository in `owner/name` form.
+    pub repo: String,
+    /// PR number.
+    pub number: u64,
+    /// PR title.
+    pub title: String,
+    /// PR author login.
+    pub author: String,
+    /// Review bucket: `"requested"`, `"needs_review"`, `"changes_req"`, `"dependabot"`.
+    pub bucket: String,
+    /// Rolled-up CI state.
+    pub ci_state: CiState,
+    /// `true` when the PR has new activity since last review.
+    #[serde(default)]
+    pub new_activity: bool,
+    /// HTML URL for the PR.
+    #[serde(default)]
+    pub url: String,
+    /// HEAD commit SHA.
+    #[serde(default)]
+    pub head_sha: String,
+}
+
 /// Content payload pushed to a single pane, decoupled from layout geometry.
 ///
 /// `PaneContent` is a separate wire message from `FocusLayout` precisely so a
@@ -249,6 +278,8 @@ pub enum PaneContentWire {
     Text { text: String },
     /// A structured JSON snapshot the client renders generically.
     JsonSnapshot { value: serde_json::Value },
+    /// A typed list of PR queue items, rendered by `PerriPRRow`.
+    PrList { items: Vec<PrListItem> },
 }
 
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────
@@ -1313,5 +1344,38 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["type"], "fred_state");
+    }
+
+    // ── PaneContentWire::PrList ──────────────────────────────────────────────
+
+    #[test]
+    fn pane_content_pr_list_round_trip() {
+        use crate::data::perri_queue::CiState;
+        round_trip_server(ServerMsg::PaneContent {
+            tag: "perri".into(),
+            pane_id: "queue".into(),
+            content: PaneContentWire::PrList {
+                items: vec![PrListItem {
+                    repo:         "acme/web".into(),
+                    number:       42,
+                    title:        "feat: auth".into(),
+                    author:       "alice".into(),
+                    bucket:       "requested".into(),
+                    ci_state:     CiState::Success,
+                    new_activity: false,
+                    url:          "https://github.com/acme/web/pull/42".into(),
+                    head_sha:     "abc123".into(),
+                }],
+            },
+        });
+    }
+
+    #[test]
+    fn pane_content_pr_list_wire_kind() {
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&PaneContentWire::PrList { items: vec![] }).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["kind"], "pr_list");
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import NostromoKit
 
 // MARK: - QuickAction
 
@@ -858,6 +859,12 @@ extension PaneTree: Decodable {
 enum PaneContentWire {
     case text(String)
     case jsonSnapshot(Any)
+    /// Typed list of PR queue items; rendered by `PerriPRRow`.
+    case prList([PrListItemModel])
+    /// A future content kind not yet recognised by this client version.
+    /// Carries the raw JSON payload so the renderer can show a legible dump
+    /// without crashing or blanking (D4 forward-compat guard).
+    case unknown(Any)
 }
 
 extension PaneContentWire: Decodable {
@@ -865,6 +872,7 @@ extension PaneContentWire: Decodable {
         case kind
         case text
         case value
+        case items
     }
 
     init(from decoder: Decoder) throws {
@@ -874,13 +882,17 @@ extension PaneContentWire: Decodable {
         case "text":
             let t = try c.decode(String.self, forKey: .text)
             self = .text(t)
+        case "json_snapshot":
+            // Decode raw value for generic rendering; fall back gracefully.
+            let raw = (try? c.decode(AnyDecodable.self, forKey: .value))?.value ?? [:]
+            self = .jsonSnapshot(raw)
+        case "pr_list":
+            let items = (try? c.decode([PrListItemModel].self, forKey: .items)) ?? []
+            self = .prList(items)
         default:
-            // json_snapshot: decode raw value for generic rendering.
-            if let raw = try? c.decode(AnyDecodable.self, forKey: .value) {
-                self = .jsonSnapshot(raw.value)
-            } else {
-                self = .text("")
-            }
+            // D4 forward-compat: unknown kinds carry raw JSON without throwing.
+            let raw = (try? AnyDecodable(from: decoder))?.value ?? [:]
+            self = .unknown(raw)
         }
     }
 }

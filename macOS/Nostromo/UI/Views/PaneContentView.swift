@@ -1,4 +1,5 @@
 import SwiftUI
+import NostromoKit
 
 /// SwiftUI renderer for `PaneContentWire` pushed by `set_pane_content`.
 ///
@@ -7,10 +8,25 @@ import SwiftUI
 /// panes (Mother job list, Perri PR queue, Fred inbox, Teri todos) to reach
 /// visual parity without duplicating the hand-written NSView implementations.
 ///
+/// `pr_list` renders bucket-grouped `PerriPRRow` components at parity with
+/// the legacy `PerriPRList`. Action callbacks are injected by the caller so the
+/// view remains dependency-free (no direct store coupling).
+///
 /// When `content` is nil the pane shows a subtle "waiting for content…" placeholder,
 /// which is the normal initial state before an agent's first `set_pane_content` call.
 struct PaneContentView: View {
     let content: PaneContentWire?
+    /// Called when the user loads a PR from a `pr_list` row. `(repo, number)`
+    var onLoadPR:   (String, Int) -> Void = { _, _ in }
+    /// Called when the user approves a PR from a `pr_list` row. `(repo, number)`
+    var onApprovePR: (String, Int) -> Void = { _, _ in }
+
+    private let bucketOrder: [(label: String, key: String)] = [
+        ("REVIEW REQUESTED", "requested"),
+        ("NEEDS REVIEW",     "needs_review"),
+        ("CHANGES REQUESTED","changes_req"),
+        ("DEPENDABOT",       "dependabot"),
+    ]
 
     var body: some View {
         ZStack {
@@ -22,8 +38,80 @@ struct PaneContentView: View {
                 textView(text)
             case .jsonSnapshot(let value):
                 jsonView(value)
+            case .prList(let items):
+                prListView(items)
+            case .unknown(let raw):
+                jsonView(raw)
             }
         }
+    }
+
+    // MARK: - pr_list renderer
+
+    @ViewBuilder
+    private func prListView(_ items: [PrListItemModel]) -> some View {
+        if items.isEmpty {
+            VStack {
+                Spacer()
+                Text("No PRs in queue")
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(Color(nsColor: .tertiaryLabelColor))
+                Spacer()
+            }
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(bucketOrder, id: \.key) { bucket in
+                        let group = items.filter { $0.bucket == bucket.key }
+                        if !group.isEmpty {
+                            sectionHeader(bucket.label, count: group.count)
+                            ForEach(group) { item in
+                                NostromoKit.PerriPRRow(
+                                    model:  item.toRowModel(),
+                                    onLoad: { onLoadPR(item.repo, item.number) },
+                                    onClear: {}
+                                )
+                                .contextMenu {
+                                    Button("Approve") { onApprovePR(item.repo, item.number) }
+                                }
+                                .padding(.horizontal, 8)
+                            }
+                        }
+                    }
+                    // Overflow bucket — items with an unrecognised bucket string
+                    let knownBuckets = Set(bucketOrder.map(\.key))
+                    let overflow = items.filter { !knownBuckets.contains($0.bucket) }
+                    if !overflow.isEmpty {
+                        sectionHeader("OTHER", count: overflow.count)
+                        ForEach(overflow) { item in
+                            NostromoKit.PerriPRRow(
+                                model:  item.toRowModel(),
+                                onLoad: { onLoadPR(item.repo, item.number) },
+                                onClear: {}
+                            )
+                            .contextMenu {
+                                Button("Approve") { onApprovePR(item.repo, item.number) }
+                            }
+                            .padding(.horizontal, 8)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sectionHeader(_ label: String, count: Int) -> some View {
+        HStack {
+            Text("\(label)  \(count)")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(Color(nsColor: .tertiaryLabelColor))
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 3)
+        .background(Color(nsColor: NSColor(white: 0.09, alpha: 1)))
     }
 
     // MARK: - Sub-renderers

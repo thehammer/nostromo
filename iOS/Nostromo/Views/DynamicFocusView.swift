@@ -41,6 +41,7 @@ struct DynamicFocusView: View {
 
                 ForEach(paneIds.filter { $0 != "repl" }, id: \.self) { paneId in
                     PaneTab(paneId: paneId, content: layout.paneContent[paneId])
+                        .environmentObject(store)
                         .navigationTitle(paneId.capitalized)
                         .navigationBarTitleDisplayMode(.inline)
                         .tag(paneId)
@@ -74,25 +75,130 @@ struct DynamicFocusView: View {
 // MARK: - PaneTab
 
 /// A single non-repl pane rendered from `PaneContentWire` content.
+/// Receives `DaemonStore` via `@EnvironmentObject` for `pr_list` action dispatch.
 private struct PaneTab: View {
     let paneId:  String
     let content: PaneContentWire?
 
+    @EnvironmentObject var store: DaemonStore
+
+    /// Staged pending approval — set on first swipe tap; cleared on cancel or after
+    /// the confirmation dialog fires. Mirrors the pattern in `PerriView`.
+    @State private var pendingApproval: (repo: String, number: Int)?
+
+    private let bucketOrder: [(label: String, key: String)] = [
+        ("Requested",    "requested"),
+        ("Needs Review", "needs_review"),
+        ("Changes Req",  "changes_req"),
+        ("Dependabot",   "dependabot"),
+    ]
+
     var body: some View {
-        ScrollView {
+        Group {
             switch content {
             case nil:
-                waitingView
+                ScrollView { waitingView }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .text(let text):
-                textView(text)
+                ScrollView { textView(text) }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .jsonSnapshot(let value):
-                jsonView(value)
+                ScrollView { jsonView(value) }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .prList(let items):
+                prListView(items)
+            case .unknown(let raw):
+                ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Confirmation gate — nothing reaches GitHub until the user taps "Approve" here.
+        // This mirrors the existing PerriView swipe-to-approve + pendingApproval pattern.
+        .confirmationDialog(
+            pendingApproval.map { "Approve PR #\($0.number) in \($0.repo)?" } ?? "",
+            isPresented: Binding(
+                get:  { pendingApproval != nil },
+                set:  { if !$0 { pendingApproval = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let item = pendingApproval {
+                Button("Approve") {
+                    store.perriApprove(number: item.number, repo: item.repo)
+                    pendingApproval = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingApproval = nil }
+        } message: {
+            Text("The approval will be posted to GitHub. The PR will leave the queue once the index catches up.")
+        }
     }
 
-    // MARK: - Renderers
+    // MARK: - pr_list renderer
+
+    @ViewBuilder
+    private func prListView(_ items: [PrListItemModel]) -> some View {
+        if items.isEmpty {
+            ScrollView {
+                VStack {
+                    Spacer(minLength: 60)
+                    Text("No PRs in queue")
+                        .font(.system(size: 13, weight: .regular, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            }
+        } else {
+            List {
+                ForEach(bucketOrder, id: \.key) { bucket in
+                    let group = items.filter { $0.bucket == bucket.key }
+                    if !group.isEmpty {
+                        Section(bucket.label) {
+                            ForEach(group) { item in
+                                NostromoKit.PerriPRRow(
+                                    model:  item.toRowModel(),
+                                    onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
+                                    onClear: {}
+                                )
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button {
+                                        // First tap only stages the approval — confirmation
+                                        // dialog fires before anything is sent to GitHub.
+                                        pendingApproval = (repo: item.repo, number: item.number)
+                                    } label: {
+                                        Label("Approve", systemImage: "checkmark.seal.fill")
+                                    }
+                                    .tint(.green)
+                                }
+                            }
+                        }
+                    }
+                }
+                // Overflow — items with unrecognised bucket strings
+                let knownBuckets = Set(bucketOrder.map(\.key))
+                let overflow = items.filter { !knownBuckets.contains($0.bucket) }
+                if !overflow.isEmpty {
+                    Section("Other") {
+                        ForEach(overflow) { item in
+                            NostromoKit.PerriPRRow(
+                                model:  item.toRowModel(),
+                                onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
+                                onClear: {}
+                            )
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button {
+                                    pendingApproval = (repo: item.repo, number: item.number)
+                                } label: {
+                                    Label("Approve", systemImage: "checkmark.seal.fill")
+                                }
+                                .tint(.green)
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+        }
+    }
+
+    // MARK: - Text / JSON renderers
 
     private var waitingView: some View {
         VStack {

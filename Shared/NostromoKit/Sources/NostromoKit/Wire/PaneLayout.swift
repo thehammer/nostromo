@@ -70,19 +70,101 @@ extension PaneTree: Decodable {
     }
 }
 
+// MARK: - PrListItemModel
+
+/// One item in a `pr_list` pane payload.
+/// Mirrors `PrListItem` from `src/ipc/protocol.rs`.
+public struct PrListItemModel: Decodable, Identifiable {
+    /// Stable identity: `"owner/name#number"` — matching `PrQueueItem.id`.
+    public var id: String { "\(repo)#\(number)" }
+    public let repo:        String
+    public let number:      Int
+    public let title:       String
+    public let author:      String
+    public let bucket:      String
+    public let ciState:     CiState
+    public let newActivity: Bool
+    public let url:         String
+    public let headSha:     String
+
+    enum CodingKeys: String, CodingKey {
+        case repo, number, title, author, bucket, url
+        case ciState     = "ci_state"
+        case newActivity = "new_activity"
+        case headSha     = "head_sha"
+    }
+
+    /// Memberwise init — used directly in tests and by callers building models in memory.
+    public init(
+        repo:        String,
+        number:      Int,
+        title:       String,
+        author:      String,
+        bucket:      String,
+        ciState:     CiState,
+        newActivity: Bool,
+        url:         String,
+        headSha:     String
+    ) {
+        self.repo        = repo
+        self.number      = number
+        self.title       = title
+        self.author      = author
+        self.bucket      = bucket
+        self.ciState     = ciState
+        self.newActivity = newActivity
+        self.url         = url
+        self.headSha     = headSha
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c    = try decoder.container(keyedBy: CodingKeys.self)
+        repo        = try  c.decode(String.self, forKey: .repo)
+        number      = try  c.decode(Int.self,    forKey: .number)
+        title       = try  c.decode(String.self, forKey: .title)
+        author      = try  c.decode(String.self, forKey: .author)
+        bucket      = try  c.decode(String.self, forKey: .bucket)
+        ciState     = (try? c.decode(CiState.self, forKey: .ciState))     ?? .unknown
+        newActivity = (try? c.decode(Bool.self,    forKey: .newActivity))  ?? false
+        url         = (try? c.decode(String.self,  forKey: .url))          ?? ""
+        headSha     = (try? c.decode(String.self,  forKey: .headSha))      ?? ""
+    }
+
+    /// Map to the shared `PerriPRRowModel` used by `PerriPRRow`.
+    /// `id` is `"\(repo)#\(number)"` — matching `PrQueueItem.id`.
+    public func toRowModel() -> PerriPRRowModel {
+        PerriPRRowModel(
+            id:          "\(repo)#\(number)",
+            number:      number,
+            title:       title,
+            repo:        repo,
+            author:      author,
+            bucket:      bucket,
+            ciState:     ciState,
+            newActivity: newActivity
+        )
+    }
+}
+
 // MARK: - PaneContentWire
 
 /// Content pushed to a pane via `set_pane_content`. Not Equatable because
-/// the `jsonSnapshot` case carries `Any`.
+/// the `jsonSnapshot` and `unknown` cases carry `Any`.
 public enum PaneContentWire {
     case text(String)
     case jsonSnapshot(Any)
+    /// Typed list of PR queue items, rendered by `PerriPRRow`.
+    case prList([PrListItemModel])
+    /// A future content kind not yet known to this client version.
+    /// The raw JSON payload is carried as `Any` so the renderer can show a legible
+    /// dump rather than crashing or blanking (D4 forward-compat guard).
+    case unknown(Any)
 }
 
 extension PaneContentWire: Decodable {
     // The Rust daemon serializes with #[serde(tag = "kind")], so the
     // discriminator key on the wire is "kind", not "type".
-    private enum K: String, CodingKey { case kind, text, value }
+    private enum K: String, CodingKey { case kind, text, value, items }
 
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: K.self)
@@ -92,11 +174,14 @@ extension PaneContentWire: Decodable {
         case "json_snapshot":
             let raw = try c.decode(AnyDecodable.self, forKey: .value)
             self = .jsonSnapshot(raw.value)
-        case let other:
-            throw DecodingError.dataCorruptedError(
-                forKey: .kind, in: c,
-                debugDescription: "unknown PaneContentWire kind: \(other)"
-            )
+        case "pr_list":
+            let items = try c.decode([PrListItemModel].self, forKey: .items)
+            self = .prList(items)
+        default:
+            // D4 forward-compat: unknown kinds fall back to a raw-Any carry rather
+            // than throwing. Renderers show the JSON dump so data is never silently lost.
+            let raw = try AnyDecodable(from: d)
+            self = .unknown(raw.value)
         }
     }
 }
