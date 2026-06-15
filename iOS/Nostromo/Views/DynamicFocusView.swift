@@ -104,6 +104,30 @@ private struct PaneTab: View {
                 ScrollView { jsonView(value) }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .prList(let items):
                 prListView(items)
+            case .loading:
+                ScrollView {
+                    VStack(spacing: 8) {
+                        Spacer(minLength: 60)
+                        ProgressView()
+                        Text("Refreshing…")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                    }.frame(maxWidth: .infinity)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .error(let msg):
+                ScrollView {
+                    VStack(spacing: 8) {
+                        Spacer(minLength: 60)
+                        Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                        Text(msg)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 16)
+                        Spacer()
+                    }.frame(maxWidth: .infinity)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .unknown(let raw):
                 ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }

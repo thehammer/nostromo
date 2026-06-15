@@ -280,6 +280,11 @@ pub enum PaneContentWire {
     JsonSnapshot { value: serde_json::Value },
     /// A typed list of PR queue items, rendered by `PerriPRRow`.
     PrList { items: Vec<PrListItem> },
+    /// Transient loading state — agent signals "I'm refreshing this pane"
+    /// before a slow fetch. The client shows a subtle spinner/indicator.
+    Loading,
+    /// The agent encountered an error fetching this pane's data.
+    Error { message: String },
 }
 
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────

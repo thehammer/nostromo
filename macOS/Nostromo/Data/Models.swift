@@ -58,12 +58,20 @@ struct Focus: Codable, Hashable, Identifiable {
         Focus(id: "fred",   agentTag: "fred",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
         Focus(id: "mother", agentTag: "mother", projectPath: nil, isBuiltIn: true, org: "Carefeed"),
         Focus(id: "perri",  agentTag: "perri",  projectPath: nil, isBuiltIn: true,
-              quickActions: [QuickAction(
-                  id: "perri-start-reviewing",
-                  label: "Start Reviewing",
-                  prompt: "start reviewing",
-                  clearFirst: true
-              )], org: "Carefeed"),
+              quickActions: [
+                  QuickAction(
+                      id: "perri-start-reviewing",
+                      label: "Start Reviewing",
+                      prompt: "start reviewing",
+                      clearFirst: true
+                  ),
+                  QuickAction(
+                      id: "perri-reset-layout",
+                      label: "Reset Layout",
+                      prompt: "please reset your pane layout and rebuild it from scratch using your standard layout (queue top-left, diff top-right, repl bottom)",
+                      clearFirst: false
+                  ),
+              ], org: "Carefeed"),
         Focus(id: "teri",   agentTag: "teri",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
     ]
 }
@@ -306,7 +314,7 @@ struct MotherJobSlim: Decodable {
 
 /// Rolled-up CI state for a PR row or individual check.
 /// Raw values match the Rust `CiState` serde encoding (`lowercase`).
-enum CiState: String, Decodable {
+enum CiState: String, Codable {
     case unknown, pending, success, failure
 
     /// Tolerant decode: any unknown or missing string maps to `.unknown`.
@@ -317,7 +325,7 @@ enum CiState: String, Decodable {
 }
 
 /// One item from the perri queue cache.
-struct PRQueueItem: Identifiable {
+struct PRQueueItem: Identifiable, Encodable {
     var id: String { "\(repo)#\(number)" }
     let repo:        String
     let number:      Int
@@ -331,6 +339,13 @@ struct PRQueueItem: Identifiable {
     let ciState:     CiState
     /// HEAD commit SHA — used by the GUI to validate its detail cache.
     let headSha:     String
+
+    enum CodingKeys: String, CodingKey {
+        case repo, number, title, author, bucket, url
+        case newActivity = "new_activity"
+        case ciState     = "ci_state"
+        case headSha     = "head_sha"
+    }
 }
 
 /// A single CI check-run result decoded from the PR detail JSON.
@@ -861,18 +876,17 @@ enum PaneContentWire {
     case jsonSnapshot(Any)
     /// Typed list of PR queue items; rendered by `PerriPRRow`.
     case prList([PrListItemModel])
+    /// Transient loading state — agent signals it is refreshing this pane.
+    case loading
+    /// Agent encountered an error fetching this pane's data.
+    case error(String)
     /// A future content kind not yet recognised by this client version.
-    /// Carries the raw JSON payload so the renderer can show a legible dump
-    /// without crashing or blanking (D4 forward-compat guard).
     case unknown(Any)
 }
 
 extension PaneContentWire: Decodable {
     private enum CodingKeys: String, CodingKey {
-        case kind
-        case text
-        case value
-        case items
+        case kind, text, value, items, message
     }
 
     init(from decoder: Decoder) throws {
@@ -883,14 +897,17 @@ extension PaneContentWire: Decodable {
             let t = try c.decode(String.self, forKey: .text)
             self = .text(t)
         case "json_snapshot":
-            // Decode raw value for generic rendering; fall back gracefully.
             let raw = (try? c.decode(AnyDecodable.self, forKey: .value))?.value ?? [:]
             self = .jsonSnapshot(raw)
         case "pr_list":
             let items = (try? c.decode([PrListItemModel].self, forKey: .items)) ?? []
             self = .prList(items)
+        case "loading":
+            self = .loading
+        case "error":
+            let msg = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? "An error occurred"
+            self = .error(msg)
         default:
-            // D4 forward-compat: unknown kinds carry raw JSON without throwing.
             let raw = (try? AnyDecodable(from: decoder))?.value ?? [:]
             self = .unknown(raw)
         }

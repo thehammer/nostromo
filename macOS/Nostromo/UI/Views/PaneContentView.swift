@@ -40,6 +40,10 @@ struct PaneContentView: View {
                 jsonView(value)
             case .prList(let items):
                 prListView(items)
+            case .loading:
+                loadingView
+            case .error(let message):
+                errorView(message)
             case .unknown(let raw):
                 jsonView(raw)
             }
@@ -115,6 +119,38 @@ struct PaneContentView: View {
     }
 
     // MARK: - Sub-renderers
+
+    // MARK: - Loading / error
+
+    @ViewBuilder
+    private var loadingView: some View {
+        VStack(spacing: 6) {
+            Spacer()
+            ProgressView()
+                .scaleEffect(0.7)
+                .tint(Color(nsColor: .secondaryLabelColor))
+            Text("Refreshing…")
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundColor(Color(nsColor: .tertiaryLabelColor))
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: 6) {
+            Spacer()
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 16))
+                .foregroundColor(.orange)
+            Text(message)
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+            Spacer()
+        }
+    }
 
     @ViewBuilder
     private var placeholder: some View {

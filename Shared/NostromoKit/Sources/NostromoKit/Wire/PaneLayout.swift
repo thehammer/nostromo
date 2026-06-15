@@ -155,16 +155,18 @@ public enum PaneContentWire {
     case jsonSnapshot(Any)
     /// Typed list of PR queue items, rendered by `PerriPRRow`.
     case prList([PrListItemModel])
+    /// Transient loading indicator — agent signals it is refreshing this pane.
+    case loading
+    /// Agent encountered an error fetching this pane's data.
+    case error(String)
     /// A future content kind not yet known to this client version.
-    /// The raw JSON payload is carried as `Any` so the renderer can show a legible
-    /// dump rather than crashing or blanking (D4 forward-compat guard).
     case unknown(Any)
 }
 
 extension PaneContentWire: Decodable {
     // The Rust daemon serializes with #[serde(tag = "kind")], so the
     // discriminator key on the wire is "kind", not "type".
-    private enum K: String, CodingKey { case kind, text, value, items }
+    private enum K: String, CodingKey { case kind, text, value, items, message }
 
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: K.self)
@@ -177,9 +179,12 @@ extension PaneContentWire: Decodable {
         case "pr_list":
             let items = try c.decode([PrListItemModel].self, forKey: .items)
             self = .prList(items)
+        case "loading":
+            self = .loading
+        case "error":
+            let msg = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? "An error occurred"
+            self = .error(msg)
         default:
-            // D4 forward-compat: unknown kinds fall back to a raw-Any carry rather
-            // than throwing. Renderers show the JSON dump so data is never silently lost.
             let raw = try AnyDecodable(from: d)
             self = .unknown(raw.value)
         }

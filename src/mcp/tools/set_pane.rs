@@ -42,9 +42,11 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
     // message that carries no ratios, so an operator's drag-resize survives.
     if let Some(daemon) = &state.daemon {
         let wire = match content {
-            PaneContent::Text(t) => PaneContentWire::Text { text: t },
-            PaneContent::JsonSnapshot(v) => PaneContentWire::JsonSnapshot { value: v },
-            PaneContent::PrList(items) => PaneContentWire::PrList { items },
+            PaneContent::Text(t)          => PaneContentWire::Text { text: t },
+            PaneContent::JsonSnapshot(v)  => PaneContentWire::JsonSnapshot { value: v },
+            PaneContent::PrList(items)    => PaneContentWire::PrList { items },
+            PaneContent::Loading          => PaneContentWire::Loading,
+            PaneContent::Error(msg)       => PaneContentWire::Error { message: msg },
         };
         let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
             tag: view_id,
@@ -176,7 +178,12 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
         return Ok(PaneContent::Text(s.to_string()));
     }
 
-    let type_str = v.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+    // Accept both "type" (MCP input convention) and "kind" (wire convention) so
+    // agents can use either discriminator key without knowing the internal split.
+    let type_str = v.get("type")
+        .or_else(|| v.get("kind"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("text");
     match type_str {
         "text" => {
             let text = v
@@ -210,6 +217,15 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
                 items.push(item);
             }
             Ok(PaneContent::PrList(items))
+        }
+        "loading" => Ok(PaneContent::Loading),
+        "error" => {
+            let msg = v.get("message")
+                .or_else(|| v.get("text"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("An error occurred")
+                .to_string();
+            Ok(PaneContent::Error(msg))
         }
         other => Err(format!("unknown content type: {other}")),
     }

@@ -50,6 +50,10 @@ pub enum PaneContent {
     JsonSnapshot(serde_json::Value),
     /// Typed list of PR queue items rendered by `PerriPRRow`.
     PrList(Vec<PrListItem>),
+    /// Transient loading state — agent signals it is refreshing this pane.
+    Loading,
+    /// Agent encountered an error fetching this pane's content.
+    Error(String),
 }
 
 // ── minimal Mother job lite ───────────────────────────────────────────────────

@@ -890,7 +890,8 @@ impl View for PerriView {
                     self.diff_override = Some(s.clone());
                     Ok(())
                 }
-                PaneContent::JsonSnapshot(_) | PaneContent::PrList(_) => {
+                PaneContent::JsonSnapshot(_) | PaneContent::PrList(_)
+                | PaneContent::Loading | PaneContent::Error(_) => {
                     Err("unsupported_payload".into())
                 }
             },
