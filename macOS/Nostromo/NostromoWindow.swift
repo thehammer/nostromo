@@ -27,6 +27,12 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     /// multiple windows are entering full-screen simultaneously.
     private var isReenteringFullScreen = false
 
+    /// Set to true while a display configuration change is in progress so
+    /// deferred re-entry callbacks know to abort rather than firing into a
+    /// menu-bar manager that is mid-cleanup (macOS 26 crash path via
+    /// NSMenuBarWindowManager._reactToDisplayChanges).
+    private var displayChangePending = false
+
     // MARK: - NSWindowDelegate
 
     func windowWillEnterFullScreen(_ notification: Notification) {
@@ -65,12 +71,39 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
             return
         }
         isReenteringFullScreen = true
+        displayChangePending   = false   // clear any stale flag from a prior wake
+
+        // Observe display changes so we can abort if the menu bar manager starts
+        // reacting to a configuration change (NSMenuBarWindowManager path, macOS 26).
+        let observer = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.displayChangePending = true
+            winLog.warning("windowDidExitFullScreen — display change detected, will abort re-entry if pending")
+        }
+
         // Re-enter after the run-loop drains any remaining transition cleanup.
-        // Do NOT call toggleFullScreen synchronously here — the previous exit's
-        // animation context may still be active, which would cause a toggle loop.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        // Delay extended to 0.6 s (was 0.3 s) to give the menu bar manager more
+        // time to settle before we call toggleFullScreen again.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            NotificationCenter.default.removeObserver(observer)
             guard let self, !self.styleMask.contains(.fullScreen) else {
                 self?.isReenteringFullScreen = false
+                return
+            }
+            guard !self.displayChangePending else {
+                winLog.warning("windowDidExitFullScreen — aborting re-entry: display change in progress (\(self.title, privacy: .public))")
+                self.isReenteringFullScreen = false
+                // Schedule a follow-up re-entry once the display change settles.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    guard let self, !self.styleMask.contains(.fullScreen),
+                          !self.isReenteringFullScreen else { return }
+                    winLog.warning("windowDidExitFullScreen — follow-up re-entry after display settle (\(self.title, privacy: .public))")
+                    self.displayChangePending = false
+                    self.toggleFullScreen(nil)
+                }
                 return
             }
             winLog.warning("windowDidExitFullScreen — calling toggleFullScreen to re-enter (\(self.title, privacy: .public))")
