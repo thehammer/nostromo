@@ -145,10 +145,22 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if isOrphanedByScreenRemoval {
+            // Screen disconnected — allow this window to close without terminating.
+            // AppDelegate.screensDidChange handles cleanup; we just let it go.
+            winLog.info("windowShouldClose — orphaned by screen removal, allowing close (\(self.title, privacy: .public))")
+            return true
+        }
+        // Traffic lights are hidden, but just in case: route close to quit.
         winLog.warning("windowShouldClose — routing to app terminate")
         NSApplication.shared.terminate(nil)
         return false
     }
+
+    /// Set by AppDelegate.screensDidChange before calling close() on a window
+    /// whose screen has disappeared. Prevents the close from terminating the app —
+    /// disconnecting a monitor should remove that window, not quit Nostromo.
+    var isOrphanedByScreenRemoval = false
 
     // Swallow Escape so it can't trigger a full-screen exit via cancelOperation.
     override func cancelOperation(_ sender: Any?) {

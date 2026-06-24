@@ -163,10 +163,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         })
 
         // Close windows whose screen has disappeared.
+        // Mark as orphaned first so windowShouldClose allows the close without
+        // terminating the app. Disable animations and exit full-screen state
+        // before closing to avoid the _NSExitFullScreenTransitionController
+        // crash path that fires when a full-screen window is closed mid-animation.
         for (number, win) in windowsByScreenNumber where !currentScreenNumbers.contains(number) {
-            win.close()
+            appLog.info("screensDidChange — screen \(number, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .public)'")
+            win.isOrphanedByScreenRemoval = true
+            win.animationBehavior = .none
+            if win.styleMask.contains(.fullScreen) {
+                // Exit full-screen synchronously before close so AppKit doesn't
+                // schedule an exit-transition cleanup block that outlives the window.
+                var mask = win.styleMask
+                mask.remove(.fullScreen)
+                win.styleMask = mask
+            }
             windowsByScreenNumber.removeValue(forKey: number)
             windows.removeAll { $0 === win }
+            win.close()
         }
 
         // Open windows for newly connected screens.
