@@ -85,6 +85,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 
 # GitHub API (Phase 4)
 octocrab = "0.41"
+
+# github-relay WebSocket subscriber
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 serde_yaml = "0.9"
 url = "2"
 unicode-width = "0.1"

@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
-    let (perri_queue_rx, _perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
+    let (perri_queue_rx, perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
     let (perri_pr_rx, _perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
 
@@ -209,6 +209,12 @@ async fn main() -> Result<()> {
             tracing::warn!("activity tailer exited: {e:#}");
         }
     });
+
+    // ── github-relay subscriber ───────────────────────────────────────────────
+    // Connects to the relay WebSocket and triggers an immediate queue refresh
+    // on every relevant GitHub event, reducing PR-queue lag from the poll
+    // interval (~60s) to ~3s. No-ops if relay_url/relay_token are not set.
+    nostromo::data::relay_client::spawn(config.clone(), perri_queue_refresh_tx);
 
     // ── Perri broadcaster ─────────────────────────────────────────────────────
     // (Sources were spawned earlier so the MCP state could get live receivers.)

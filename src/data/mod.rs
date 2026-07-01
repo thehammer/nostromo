@@ -20,6 +20,7 @@ pub mod perri_pr_native;
 pub mod perri_queue;
 pub mod perri_queue_native;
 pub mod perri_suppress;
+pub mod relay_client;
 pub mod posture_events_watcher;
 pub mod rate_limits;
 pub mod rate_limits_watcher;

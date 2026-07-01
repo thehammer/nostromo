@@ -69,6 +69,17 @@ pub struct Config {
     /// `GITHUB_TOKEN` is not set.  Default: `$HOME/.config/gh/hosts.yml`.
     pub github_token_path: Option<PathBuf>,
 
+    // ── github-relay subscriber ─────────────────────────────────────────────
+    /// WebSocket URL of the github-relay service.
+    /// Example: `"wss://github-relay.carefeed.com/subscribe"`
+    /// When set (along with `relay_token`), nostromd connects as a subscriber
+    /// and triggers an immediate queue refresh on every relevant GitHub event,
+    /// reducing the visible PR-queue lag from the poll interval to ~3 seconds.
+    pub relay_url: Option<String>,
+    /// Bearer token for the github-relay WebSocket endpoint.
+    /// Obtain via `https://github-relay.carefeed.com/auth/token` (VPN required).
+    pub relay_token: Option<String>,
+
     /// VIP sender addresses (lowercase); emails from these addresses are
     /// highlighted in the mailbox panel.
     pub vip_senders: Vec<String>,
@@ -90,6 +101,8 @@ impl Default for Config {
             graph_tenant: None,
             graph_token_cache: None,
             github_token_path: None,
+            relay_url: None,
+            relay_token: None,
             vip_senders: Vec::new(),
         }
     }
