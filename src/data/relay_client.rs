@@ -166,7 +166,7 @@ async fn connect_and_subscribe(
 
     // Declare subscription — org-wide, default event subset.
     let sub = serde_json::json!({ "type": "subscribe", "org": "Carefeed" });
-    ws.send(Message::Text(sub.to_string().into()))
+    ws.send(Message::Text(sub.to_string()))
         .await
         .map_err(|e| RelayError::Other(e.into()))?;
 
