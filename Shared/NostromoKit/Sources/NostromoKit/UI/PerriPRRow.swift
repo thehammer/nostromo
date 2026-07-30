@@ -26,11 +26,17 @@ public struct PerriPRRow: View {
     }
 
     public var body: some View {
-        rowContent
-            .contextMenu {
-                Button("Load PR", action: onLoad)
-                Button("Clear",   action: onClear)
-            }
+        // Button captures mouse-down reliably inside NSHostingView on macOS
+        // (onTapGesture can be swallowed by the split view hierarchy).
+        Button(action: onLoad) {
+            rowContent
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Load PR", action: onLoad)
+            Button("Clear",   action: onClear)
+        }
     }
 
     // MARK: - Row layout

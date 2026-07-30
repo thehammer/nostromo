@@ -39,11 +39,17 @@ class ChatSession: ObservableObject {
     let displayName: String    // `-n` / `--remote-control` name (phone-facing label)
     let workingDirectory: String?
 
-    @Published private(set) var turns:        [ChatTurn]     = []
-    @Published private(set) var isRunning:    Bool           = false
-    @Published private(set) var pendingCount: Int            = 0     // daemon queues; reserved
+    @Published private(set) var turns:          [ChatTurn]    = []
+    @Published private(set) var isRunning:      Bool          = false
+    @Published private(set) var pendingCount:   Int           = 0     // daemon queues; reserved
     /// Derived from daemon health events. Drives the sidebar badge and pace-bars status strip.
-    @Published private(set) var health:       SessionHealth  = .healthy
+    @Published private(set) var health:         SessionHealth = .healthy
+    /// Fraction of the context window used (0–1), derived from the most recent
+    /// turn's token-usage report. Nil until the first turn completes.
+    /// Assumes a 200 k-token context window (claude-sonnet default).
+    @Published private(set) var contextFraction: Double?      = nil
+
+    private static let contextLimit: Double = 200_000
 
     /// When true, the health indicator is suppressed for the current `health` value.
     /// Cleared automatically on the next health *change* so the indicator re-appears.
@@ -106,6 +112,7 @@ class ChatSession: ObservableObject {
     /// session id on the next message).
     func newSession() {
         turns = []
+        contextFraction = nil
         // The daemon's `new_session` stops the child, drops the session from its
         // registry, and clears the stored id ("next spawn is fresh"). If we don't
         // re-spawn, the tag becomes unknown and every subsequent send fails with
@@ -213,13 +220,16 @@ class ChatSession: ObservableObject {
                 turns[i].blocks.append(Self.mapBlock(block))
             }
 
-        case .turnCompleted(let turnId, let summary):
+        case .turnCompleted(let turnId, let summary, let contextTokens):
             if let i = turns.firstIndex(where: { $0.daemonId == turnId }) {
                 turns[i].blocks.append(.resultSummary(ResultSummaryData(
                     durationMs: summary.durationMs,
                     costUSD:    summary.costUsd,
                     isError:    summary.isError)))
                 turns[i].isComplete = true
+            }
+            if let ct = contextTokens, ct > 0 {
+                contextFraction = min(1.0, Double(ct) / Self.contextLimit)
             }
 
         case .turnErrored(let turnId, let message):
@@ -262,7 +272,7 @@ class ChatSession: ObservableObject {
             return .askQuestion(AskQuestionData(
                 question: q,
                 header:   h,
-                options:  opts.map { AskQuestionData.Option(label: $0.label, description: $0.description) },
+                options:  opts.map { AskQuestionData.Option(label: $0.label, description: $0.description, recommended: $0.recommended) },
                 multiSelect: multi))
         }
     }

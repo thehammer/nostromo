@@ -66,6 +66,11 @@ pub enum TurnBlock {
 pub struct AskOption {
     pub label: String,
     pub description: String,
+    /// True when this is Perri's (or the agent's) recommended choice. Only
+    /// ever set from the `CONFIRM:` compact JSON's `"r"` key today — the GUI
+    /// renders it as a "(recommended)" suffix on the option label.
+    #[serde(default)]
+    pub recommended: bool,
 }
 
 /// One complete user→assistant exchange.
@@ -110,6 +115,9 @@ pub enum TurnDelta {
     TurnCompleted {
         turn_id: String,
         summary: ResultSummary,
+        /// Total context-window tokens at turn completion (input + cache_read + cache_creation).
+        /// None when the stream didn't include usage data for this turn.
+        context_tokens: Option<u64>,
     },
     /// The in-flight turn was aborted (e.g. the child crashed).
     TurnErrored { turn_id: String, message: String },
@@ -131,7 +139,12 @@ pub enum ParsedLine {
     },
     /// Blocks to append to the current in-flight turn — assistant content
     /// blocks, or `tool_result` blocks carried on a `user` event.
-    Blocks(Vec<TurnBlock>),
+    /// `context_tokens` is the total context-window usage extracted from the
+    /// assistant message's `usage` field (input + cache_read + cache_creation).
+    Blocks {
+        blocks: Vec<TurnBlock>,
+        context_tokens: Option<u64>,
+    },
     /// Turn boundary.
     Result(ResultSummary),
 }
@@ -149,16 +162,39 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
             .map(|s| ParsedLine::SessionId(s.to_string())),
 
         "assistant" => {
-            let content = obj.get("message")?.get("content")?.as_array()?;
+            let msg = obj.get("message")?;
+            let content = msg.get("content")?.as_array()?;
             let blocks: Vec<TurnBlock> = content
                 .iter()
                 .filter_map(parse_content_block)
                 .flat_map(expand_confirm)
                 .collect();
-            if blocks.is_empty() {
+            // Extract total context-window usage: input + cache_read + cache_creation.
+            // These three sum to the number of tokens currently occupying the context window.
+            let context_tokens = msg.get("usage").and_then(|u| {
+                let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                let cached = u
+                    .get("cache_read_input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let creating = u
+                    .get("cache_creation_input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let total = input + cached + creating;
+                if total > 0 {
+                    Some(total)
+                } else {
+                    None
+                }
+            });
+            if blocks.is_empty() && context_tokens.is_none() {
                 None
             } else {
-                Some(ParsedLine::Blocks(blocks))
+                Some(ParsedLine::Blocks {
+                    blocks,
+                    context_tokens,
+                })
             }
         }
 
@@ -225,7 +261,10 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
         return if blocks.is_empty() {
             None
         } else {
-            Some(ParsedLine::Blocks(blocks))
+            Some(ParsedLine::Blocks {
+                blocks,
+                context_tokens: None,
+            })
         };
     }
 
@@ -363,6 +402,7 @@ fn parse_ask_question(input: &Value) -> Option<TurnBlock> {
                             .and_then(|x| x.as_str())
                             .unwrap_or("")
                             .to_string(),
+                        recommended: false,
                     })
                 })
                 .collect()
@@ -427,7 +467,8 @@ fn expand_confirm(block: TurnBlock) -> Vec<TurnBlock> {
 }
 
 /// Parse the compact JSON the submit-review skill emits on a `CONFIRM:` line.
-/// Keys: `q` (question), `h` (header), `opts` (array of `{l, d}`).
+/// Keys: `q` (question), `h` (header), `opts` (array of `{l, d, r}` — `r` is
+/// an optional bool marking Perri's recommended option).
 fn parse_confirm_json(json: &Value) -> Option<TurnBlock> {
     let question = json
         .get("q")
@@ -456,6 +497,7 @@ fn parse_confirm_json(json: &Value) -> Option<TurnBlock> {
                             .and_then(|x| x.as_str())
                             .unwrap_or("")
                             .to_string(),
+                        recommended: opt.get("r").and_then(|x| x.as_bool()).unwrap_or(false),
                     })
                 })
                 .collect()
@@ -520,6 +562,8 @@ pub struct SessionTranscript {
     session_id: Option<String>,
     turns: Vec<Turn>,
     next_seq: u64,
+    /// Most recent context-window token count from an assistant message's usage field.
+    last_context_tokens: Option<u64>,
 }
 
 impl SessionTranscript {
@@ -580,7 +624,13 @@ impl SessionTranscript {
                 vec![TurnDelta::TurnStarted { turn }]
             }
 
-            ParsedLine::Blocks(blocks) => {
+            ParsedLine::Blocks {
+                blocks,
+                context_tokens,
+            } => {
+                if let Some(ct) = context_tokens {
+                    self.last_context_tokens = Some(ct);
+                }
                 let mut deltas = Vec::with_capacity(blocks.len());
                 if let Some(turn) = self.turns.last_mut() {
                     let turn_id = turn.id.clone();
@@ -604,7 +654,12 @@ impl SessionTranscript {
                         is_error: summary.is_error,
                     });
                     turn.is_complete = true;
-                    vec![TurnDelta::TurnCompleted { turn_id, summary }]
+                    let context_tokens = self.last_context_tokens;
+                    vec![TurnDelta::TurnCompleted {
+                        turn_id,
+                        summary,
+                        context_tokens,
+                    }]
                 } else {
                     vec![]
                 }
@@ -724,7 +779,7 @@ mod tests {
     fn parses_assistant_text_block() {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#;
         match parse_line(line) {
-            Some(ParsedLine::Blocks(blocks)) => {
+            Some(ParsedLine::Blocks { blocks, .. }) => {
                 assert_eq!(
                     blocks,
                     vec![TurnBlock::Text {
@@ -740,7 +795,7 @@ mod tests {
     fn drops_thinking_blocks_for_render_parity() {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"answer"}]}}"#;
         match parse_line(line) {
-            Some(ParsedLine::Blocks(blocks)) => {
+            Some(ParsedLine::Blocks { blocks, .. }) => {
                 assert_eq!(
                     blocks,
                     vec![TurnBlock::Text {
@@ -756,7 +811,7 @@ mod tests {
     fn parses_tool_use_into_tool_call_with_summary() {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"echo hi"}}]}}"#;
         match parse_line(line) {
-            Some(ParsedLine::Blocks(blocks)) => match &blocks[0] {
+            Some(ParsedLine::Blocks { blocks, .. }) => match &blocks[0] {
                 TurnBlock::ToolCall {
                     tool_name,
                     input_summary,
@@ -775,7 +830,7 @@ mod tests {
     fn read_tool_summary_is_basename_only() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/a/b/c/deep.rs"}}]}}"#;
         match parse_line(line) {
-            Some(ParsedLine::Blocks(b)) => match &b[0] {
+            Some(ParsedLine::Blocks { blocks: b, .. }) => match &b[0] {
                 TurnBlock::ToolCall { input_summary, .. } => assert_eq!(input_summary, "deep.rs"),
                 other => panic!("{other:?}"),
             },
@@ -819,7 +874,7 @@ mod tests {
     fn parses_user_tool_result_array_as_blocks() {
         let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok","is_error":false,"tool_use_id":"t1"}]}}"#;
         match parse_line(line) {
-            Some(ParsedLine::Blocks(b)) => assert_eq!(
+            Some(ParsedLine::Blocks { blocks: b, .. }) => assert_eq!(
                 b,
                 vec![TurnBlock::ToolResult {
                     content: "ok".into(),
@@ -859,7 +914,7 @@ mod tests {
     fn ask_user_question_becomes_card() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"question":"Pick one","header":"H","multiSelect":false,"options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}}]}}"#;
         match parse_line(line) {
-            Some(ParsedLine::Blocks(b)) => match &b[0] {
+            Some(ParsedLine::Blocks { blocks: b, .. }) => match &b[0] {
                 TurnBlock::AskQuestion {
                     question,
                     options,
@@ -880,7 +935,7 @@ mod tests {
     fn confirm_line_splits_text_into_card() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"before\nCONFIRM:{\"q\":\"OK?\",\"h\":\"Review\",\"opts\":[{\"l\":\"Yes\",\"d\":\"do it\"}]}\nafter"}]}}"#;
         match parse_line(line) {
-            Some(ParsedLine::Blocks(b)) => {
+            Some(ParsedLine::Blocks { blocks: b, .. }) => {
                 assert_eq!(b.len(), 3);
                 assert_eq!(
                     b[0],
@@ -901,12 +956,28 @@ mod tests {
     }
 
     #[test]
+    fn confirm_option_recommended_flag_is_parsed() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"CONFIRM:{\"q\":\"Submit?\",\"h\":\"PR\",\"opts\":[{\"l\":\"Approve\",\"d\":\"Post approval\",\"r\":true},{\"l\":\"Skip\",\"d\":\"Do nothing\"}]}"}]}}"#;
+        match parse_line(line) {
+            Some(ParsedLine::Blocks { blocks: b, .. }) => match &b[0] {
+                TurnBlock::AskQuestion { options, .. } => {
+                    assert_eq!(options.len(), 2);
+                    assert!(options[0].recommended);
+                    assert!(!options[1].recommended);
+                }
+                other => panic!("expected AskQuestion, got {other:?}"),
+            },
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn confirm_line_wrapped_in_backticks_still_splits() {
         // Agents sometimes emit the directive as markdown code: `CONFIRM:{…}`.
         // It must still render as a card, not raw text.
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"before\n`CONFIRM:{\"q\":\"OK?\",\"h\":\"Review\",\"opts\":[{\"l\":\"Yes\",\"d\":\"do it\"}]}`\nafter"}]}}"#;
         match parse_line(line) {
-            Some(ParsedLine::Blocks(b)) => {
+            Some(ParsedLine::Blocks { blocks: b, .. }) => {
                 assert_eq!(b.len(), 3);
                 assert_eq!(
                     b[0],
@@ -1119,6 +1190,7 @@ mod tests {
                 options: vec![AskOption {
                     label: "A".into(),
                     description: "d".into(),
+                    recommended: true,
                 }],
                 multi_select: true,
             },
@@ -1160,6 +1232,7 @@ mod tests {
                     cost_usd: 0.0,
                     is_error: false,
                 },
+                context_tokens: None,
             },
             TurnDelta::TurnErrored {
                 turn_id: "t0".into(),

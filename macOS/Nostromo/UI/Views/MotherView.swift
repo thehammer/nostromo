@@ -400,8 +400,14 @@ private class MotherJobList: NSView {
         alert.informativeText = "This archives every succeeded, failed, and cancelled job immediately."
         alert.addButton(withTitle: "Archive All")
         alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
-            AppStore.shared.archiveAllJobs()
+        // Sheet, not alert.runModal() — a free-floating modal has no window
+        // association and can strand on another Space with the main thread
+        // blocked waiting on it (looks exactly like a hang).
+        guard let window else { return }
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn {
+                AppStore.shared.archiveAllJobs()
+            }
         }
     }
 }
@@ -992,8 +998,14 @@ private class MotherJobDetail: NSView {
         alert.addButton(withTitle: "Force-start")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
-        if alert.runModal() == .alertFirstButtonReturn {
-            AppStore.shared.forceStartJob(job.id)
+        // Sheet, not alert.runModal() — a free-floating modal has no window
+        // association and can strand on another Space with the main thread
+        // blocked waiting on it (looks exactly like a hang).
+        guard let window else { return }
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn {
+                AppStore.shared.forceStartJob(job.id)
+            }
         }
     }
 
