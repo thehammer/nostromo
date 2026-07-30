@@ -252,6 +252,68 @@ does **not** mutate the registry — the focus's existing layout is left intact.
 
 ---
 
+## `nostromo.refresh_pane_content` — content-only refresh from a registered source
+
+`apply_layout` solves *initial assembly*, but an agent that has already
+assembled its workspace still refreshes a single pane's content many times
+per session (Perri re-pushing her PR queue after each review, for example).
+`apply_layout` re-declares geometry on every call — correct for "assemble or
+reset a layout," wrong for a routine content refresh, since it would forcibly
+reset an operator's manually-dragged split ratios. `refresh_pane_content` is
+the companion tool for that case: it reuses `apply_layout`'s exact fetcher
+registry (the same `source` names, the same content shapes, the same error
+vocabulary — there is no second, parallel source list) but emits **only** a
+`PaneContent` broadcast. No `FocusLayout`, no `PaneRegistry` mutation, ever.
+
+```json
+{ "pane_id": "queue", "source": "perri.list_pr_queue" }
+```
+
+```json
+{ "pane_id": "diff", "source": "perri.get_current_pr", "placeholder": "No PR loaded. Select one from the queue or ask me to pull one." }
+```
+
+- `pane_id` (required) — the pane to refresh.
+- `source` (required) — a name from the same closed fetcher registry
+  `apply_layout` uses. Missing and unrecognised are the same failure:
+  `unknown_source`.
+- `placeholder` (optional) — shown as `text` when the source yields
+  empty/null data (e.g. no PR currently loaded), matching `apply_layout`'s
+  per-pane `placeholder` behavior for the same source.
+- `view_id` (optional) — defaults to the caller's own focus.
+
+**When to reach for this vs. `set_pane_content`:** use `refresh_pane_content`
+to pull a *registered* source into your pane — the daemon fetches and shapes
+the data itself, so you never hand-build the `items`/`kind` pairing (this is
+exactly the mistake that motivated this tool: a `pr_list` payload nested
+inside a `json_snapshot` envelope, which rendered as inert garbage instead of
+the native PR list). Use `set_pane_content` for content you author yourself —
+freeform text, an explicit error, an explicit loading state, or any data that
+isn't behind a registered source.
+
+**Loading, then content, in one call.** The tool broadcasts a transient
+`Loading` state immediately, then the fetched content (or an `Error` if the
+fetch failed, so the pane never sticks on `Loading`) — both as ordinary
+`PaneContent` broadcasts. The JSON response returns only after both have been
+sent, so `{ "ok": true }` means the content is actually on screen, not merely
+"a fetch was kicked off."
+
+### Error codes
+
+| Code | Meaning |
+|------|---------|
+| `unknown_source` | `source` is missing or isn't in the closed fetcher registry (broadcasts nothing) |
+| `fetch_failed` | The fetcher ran but failed to produce content (an `Error` content is broadcast; where a `placeholder` applies, e.g. no PR loaded, this is `{ok:true}` instead) |
+| `invalid_args` | Missing `pane_id` |
+| `unidentified_caller` | No `view_id` and no caller `pty_id` to target |
+| `not_supported` | Called against a non-daemon-hosted MCP server |
+
+A call that fails validation (`invalid_args`, `unidentified_caller`,
+`unknown_source`, `not_supported`) broadcasts nothing at all — not even
+`Loading`.
+
+---
+
 ## Phase 4 roadmap
 
 - Fred `mailbox` and `calendar` panes will accept `JsonSnapshot` overrides.

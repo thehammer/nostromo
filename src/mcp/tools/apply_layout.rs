@@ -80,8 +80,9 @@ pub(crate) fn source_content_kind(source: &str) -> Option<&'static str> {
 
 /// Resolve the focus tag a layout tool targets: an explicit `view_id`, else the
 /// caller's own focus (`pty_id` from the Hello frame). Mirrors
-/// `create_pane.rs::target_tag`.
-fn target_tag<'a>(args: &'a Value, pty_id: Option<&'a str>) -> Option<&'a str> {
+/// `create_pane.rs::target_tag`. `pub(crate)` — also used by
+/// `refresh_pane::refresh_pane_content`.
+pub(crate) fn target_tag<'a>(args: &'a Value, pty_id: Option<&'a str>) -> Option<&'a str> {
     args.get("view_id").and_then(|v| v.as_str()).or(pty_id)
 }
 
@@ -103,7 +104,11 @@ fn schema_from_inline(args: &Value) -> Result<LayoutSchema, ApplyLayoutError> {
 ///
 /// `perri.get_current_pr` renders a plain-text snapshot summary — no agent
 /// "highlights" — the agent may overwrite it afterward via `set_pane_content`.
-fn fetch(
+///
+/// `pub(crate)` — this is the single dispatch point both `apply_layout` and
+/// `refresh_pane::refresh_pane_content` call, which is what guarantees the two
+/// tools can never disagree about what a source produces.
+pub(crate) fn fetch(
     source: &str,
     state: &McpSharedState,
     placeholder: Option<&str>,
