@@ -31,9 +31,15 @@
 //!   `mother.peek`, `mother.get_status`
 //! - Teri: `teri.list_todos`
 //!
-//! Phases 3–4 will add pane mutations and cross-view dispatch.
+//! Phases 3–4 add pane mutations and cross-view dispatch.
+//!
+//! **`nostromo.apply_layout`** resolves a declarative pane-layout schema (see
+//! [`layout_schema`]) — named or inline — builds the pane tree, fetches each
+//! pane's content server-side, and broadcasts the whole thing in one round
+//! trip: a single `FocusLayout` plus one `PaneContent` per pane.
 
 pub mod command;
+pub mod layout_schema;
 pub mod server;
 pub mod socket;
 pub mod state;

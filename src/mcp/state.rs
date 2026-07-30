@@ -217,17 +217,20 @@ impl McpSharedState {
     }
 
     /// Variant of [`for_daemon`] that accepts the real watch receivers from the
-    /// daemon's background sources, so `perri.list_pr_queue`, `mother.list_jobs`,
-    /// etc. return live data instead of the empty stubs from `for_test`.
+    /// daemon's background sources, so `perri.list_pr_queue`, `perri.get_current_pr`,
+    /// `mother.list_jobs`, etc. return live data instead of the empty stubs from
+    /// `for_test`.
     pub fn for_daemon_with_sources(
         daemon: DaemonMcpBackend,
         perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
+        perri_pr_rx: watch::Receiver<Option<PrSnapshot>>,
         mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
     ) -> Self {
         let (event_tx, _dropped_rx) = mpsc::unbounded_channel();
         let mut state = Self::for_test(event_tx);
         state.daemon = Some(daemon);
         state.perri_queue_rx = perri_queue_rx;
+        state.perri_pr_rx = perri_pr_rx;
         state.mother_jobs_rx = mother_jobs_rx;
         state
     }

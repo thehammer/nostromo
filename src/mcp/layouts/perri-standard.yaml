@@ -1,0 +1,20 @@
+name: perri-standard
+description: Perri's default PR-review dashboard
+tree:
+  direction: vertical
+  ratios: [0.6, 0.4]
+  children:
+    - direction: horizontal
+      ratios: [0.5, 0.5]
+      children:
+        - pane: queue
+        - pane: diff
+    - pane: repl
+panes:
+  queue:
+    source: perri.list_pr_queue
+    content_kind: pr_list
+  diff:
+    source: perri.get_current_pr
+    content_kind: text
+    placeholder: "No PR loaded. Select one from the queue or ask me to pull one."

@@ -6,6 +6,7 @@
 //! Phase 4: `nostromo.notify`, `nostromo.register_status_segment`,
 //!           `nostromo.clear_status_segment`.
 
+pub mod apply_layout;
 pub mod create_focus;
 pub mod create_pane;
 pub mod fred;
@@ -229,6 +230,26 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "view_id": { "type": "string", "description": "Focus/view id; omit to target the caller's own focus" }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "nostromo.apply_layout",
+            "description": "Resolve a declarative pane-layout schema — named (with on-disk override precedence at ~/.nostromo/layouts/<name>.yaml, else a compiled-in default) or inline (tree + panes) — build the pane tree, fetch each pane's bound data source server-side (no LLM involvement), and broadcast the result in one round trip: one FocusLayout plus one PaneContent per non-repl pane. Provide either `name` or `tree`+`panes`, not both. Errors: unknown_layout, unknown_source, invalid_content_kind, invalid_schema, invalid_args, unidentified_caller, not_supported, plus PaneRegistry codes (unknown_view, invalid_layout).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Named layout to resolve (e.g. 'perri-standard'). Mutually exclusive with `tree`." },
+                    "tree": {
+                        "type": "object",
+                        "description": "Inline DSL tree: { direction, ratios, children } for a split, or { pane: <id> } for a leaf. Mutually exclusive with `name`."
+                    },
+                    "panes": {
+                        "type": "object",
+                        "description": "Inline per-pane bindings: { <pane_id>: { source?, content_kind, placeholder? } }. Used with `tree`."
+                    },
+                    "view_id": { "type": "string", "description": "Focus/view id to apply the layout to; omit to target the caller's own focus" }
                 },
                 "required": []
             }
@@ -501,6 +522,10 @@ pub async fn dispatch(
         "nostromo.create_focus" => {
             let args = arguments.cloned().unwrap_or_default();
             create_focus::create_focus(state, &args, pty_id).await
+        }
+        "nostromo.apply_layout" => {
+            let args = arguments.cloned().unwrap_or_default();
+            apply_layout::apply_layout(state, &args, pty_id).await
         }
 
         // ── Phase 3: Perri mutations ───────────────────────────────────────

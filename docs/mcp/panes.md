@@ -128,6 +128,130 @@ All ratio values are clamped to `[0.1, 0.9]`.
 
 ---
 
+## `nostromo.apply_layout` — declarative layout DSL
+
+The imperative sequence for assembling a known, fixed pane layout — `reset_panes` →
+`create_pane` (×N) → `set_pane_layout` → per-pane `set_pane_content` / a read
+tool — costs a full LLM turn and puts every fetched-data result in the calling
+agent's context, even when the shape and the data source are already known and
+involve no judgment. `nostromo.apply_layout` collapses that into one call: it
+resolves a layout schema, builds the pane tree through the same `PaneRegistry`
+invariants (exactly one `repl` leaf, unique ids, well-formed splits), fetches
+each pane's bound data source **server-side, with no LLM involvement**, and
+broadcasts one `FocusLayout` plus one `PaneContent` per non-repl pane.
+
+It is purely additive — `create_pane`, `set_pane_layout`, `set_pane_focus`,
+`set_pane_content`, and `reset_panes` are unchanged and still work for
+freeform / agent-judgment layout work.
+
+### Named mode
+
+```json
+{ "name": "perri-standard" }
+```
+
+Resolution precedence: an on-disk override at `~/.nostromo/layouts/<name>.yaml`
+if present (read fresh on every call — edit it and the next `apply_layout` call
+picks it up, no daemon restart needed), else a compiled-in default. An unknown
+name with no override and no compiled-in default is `unknown_layout`.
+
+### Inline mode
+
+```json
+{
+  "tree": { "direction": "horizontal", "ratios": [0.5, 0.5],
+            "children": [ { "pane": "notes" }, { "pane": "repl" } ] },
+  "panes": { "notes": { "content_kind": "text" } }
+}
+```
+
+Provide either `name` or `tree`(+`panes`), not both. Inline mode serves any
+one-shot layout — including per-focus or dynamic shapes — without needing a
+named schema on disk.
+
+### The DSL
+
+A layout schema is YAML (or, for inline mode, the equivalent JSON shape):
+
+```yaml
+name: perri-standard
+description: Perri's default PR-review dashboard
+tree:
+  direction: vertical
+  ratios: [0.6, 0.4]
+  children:
+    - direction: horizontal
+      ratios: [0.5, 0.5]
+      children:
+        - pane: queue
+        - pane: diff
+    - pane: repl
+panes:
+  queue:
+    source: perri.list_pr_queue
+    content_kind: pr_list
+  diff:
+    source: perri.get_current_pr
+    content_kind: text
+    placeholder: "No PR loaded. Select one from the queue or ask me to pull one."
+```
+
+- `tree` — interior nodes carry `direction` (`horizontal` | `vertical`),
+  `ratios`, and `children`; leaves are `{ pane: <id> }`. Converts directly to
+  the existing `PaneTree` wire type; the *existing* `PaneRegistry` validation
+  path (not reimplemented here) enforces exactly one `repl` leaf, unique pane
+  ids, and well-formed splits.
+- `panes` — a map of non-repl pane id → binding. `repl` must not appear here.
+  - `source` (optional) — a name from the closed fetcher registry below. Omit
+    it when the agent will populate the pane itself via `set_pane_content`
+    after the layout is applied.
+  - `content_kind` (required) — one of `text`, `json_snapshot`, `pr_list`,
+    `loading`, `error` (the `PaneContentWire` variant surface). When the pane
+    also has a `source`, `content_kind` must match what that source actually
+    produces (see the fetcher registry table below) — a mismatch is rejected
+    at validation time (`invalid_content_kind`) rather than silently ignored.
+  - `placeholder` (optional) — shown as `text` when the source yields
+    empty/null data (e.g. no PR currently loaded).
+
+### Fetcher registry (v1)
+
+A closed, compile-time dispatch table — adding a source is a deliberate code
+change, not arbitrary code execution:
+
+| `source` | reads | produces |
+|---|---|---|
+| `perri.list_pr_queue` | `perri_queue_rx` | `PrList` — the live PR queue |
+| `perri.get_current_pr` | `perri_pr_rx` | `Text` — a plain-text summary (title, `owner/repo#number`, author, `+adds/-dels`, changed files), or the pane's `placeholder` when no PR is loaded |
+
+`perri.get_current_pr`'s fetcher is intentionally a plain snapshot summary —
+rendering agent "highlights" requires the LLM and cannot happen server-side.
+The agent may overwrite the pane afterward with richer text via the existing
+`set_pane_content`.
+
+A pane's fetcher failing does not abort the whole layout: it broadcasts
+`PaneContentWire::Error` for that pane and the call still returns `{ "ok":
+true, "warnings": [...] }`, listing the failed panes.
+
+### Error codes
+
+| Code | Meaning |
+|------|---------|
+| `unknown_layout` | Named layout has no on-disk override and no compiled-in default |
+| `unknown_source` | A pane's `source` isn't in the closed fetcher registry |
+| `invalid_content_kind` | A pane's `content_kind` isn't a recognised `PaneContentWire` variant |
+| `invalid_schema` | The schema document is malformed, or `repl` is bound as a pane |
+| `fetch_failed` | A fetcher ran but failed to produce content (reported via `warnings`, not a hard error) |
+| `invalid_args` | Neither `name` nor `tree` was provided, or both were |
+| `unidentified_caller` | No `view_id` and no caller `pty_id` to target |
+| `not_supported` | Called against a non-daemon-hosted MCP server |
+| `unknown_view` / `invalid_layout` | Reused `PaneRegistry` codes — see above |
+
+A schema failing validation (`unknown_source`, `invalid_content_kind`,
+`invalid_schema`) or a tree failing `PaneRegistry` invariants (`invalid_layout`)
+does **not** mutate the registry — the focus's existing layout is left intact.
+
+---
+
 ## Phase 4 roadmap
 
 - Fred `mailbox` and `calendar` panes will accept `JsonSnapshot` overrides.
