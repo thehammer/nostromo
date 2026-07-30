@@ -19,6 +19,7 @@ pub mod nostromo_meta;
 pub mod notify;
 pub mod perri;
 pub mod perri_mutators;
+pub mod refresh_pane;
 pub mod set_pane;
 pub mod status_segment;
 pub mod switch_view;
@@ -252,6 +253,20 @@ pub fn tool_descriptors() -> Vec<Value> {
                     "view_id": { "type": "string", "description": "Focus/view id to apply the layout to; omit to target the caller's own focus" }
                 },
                 "required": []
+            }
+        }),
+        json!({
+            "name": "nostromo.refresh_pane_content",
+            "description": "Refresh one pane's content from a registered server-side data source — the daemon fetches and shapes the data itself, so you never hand-build the payload. Use this to pull a known source (e.g. perri.list_pr_queue) into your own pane; use set_pane_content instead to push content you authored yourself (freeform text, an error, an explicit loading state). Content only: emits one PaneContent broadcast, never re-declares geometry, so an operator's dragged split ratios survive. Shows a transient Loading state then the fetched content in one call. Errors: unknown_source, fetch_failed, unidentified_caller, invalid_args, not_supported.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pane_id":     { "type": "string", "description": "Pane to refresh" },
+                    "source":      { "type": "string", "description": "Registered fetcher name from the same closed registry apply_layout uses (e.g. 'perri.list_pr_queue', 'perri.get_current_pr')" },
+                    "placeholder": { "type": "string", "description": "Shown as text when the source yields empty/null data (e.g. no PR currently loaded)" },
+                    "view_id":     { "type": "string", "description": "Focus/view id owning the pane; omit to target the caller's own focus" }
+                },
+                "required": ["pane_id", "source"]
             }
         }),
         json!({
@@ -526,6 +541,10 @@ pub async fn dispatch(
         "nostromo.apply_layout" => {
             let args = arguments.cloned().unwrap_or_default();
             apply_layout::apply_layout(state, &args, pty_id).await
+        }
+        "nostromo.refresh_pane_content" => {
+            let args = arguments.cloned().unwrap_or_default();
+            refresh_pane::refresh_pane_content(state, &args, pty_id).await
         }
 
         // ── Phase 3: Perri mutations ───────────────────────────────────────

@@ -37,6 +37,11 @@
 //! [`layout_schema`]) — named or inline — builds the pane tree, fetches each
 //! pane's content server-side, and broadcasts the whole thing in one round
 //! trip: a single `FocusLayout` plus one `PaneContent` per pane.
+//!
+//! **`nostromo.refresh_pane_content`** is the content-only sibling: refreshes
+//! one pane from the same fetcher registry `apply_layout` uses, with no
+//! geometry change — no `FocusLayout`, no `PaneRegistry` mutation, just the
+//! `PaneContent` broadcast(s) for that pane.
 
 pub mod command;
 pub mod layout_schema;

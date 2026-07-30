@@ -291,6 +291,31 @@ Source: `src/mcp/tools/set_pane.rs`
 
 ---
 
+### `nostromo.refresh_pane_content`
+
+Refresh one pane's content from a registered server-side data source — the
+same closed fetcher registry `nostromo.apply_layout` uses (see
+`docs/mcp/panes.md`). Content only: never re-declares geometry, so an
+operator's dragged split ratios survive. Use this instead of
+`set_pane_content` whenever the data comes from a known source, so the caller
+never hand-constructs the content shape.
+
+**Input**:
+```json
+{
+  "view_id": "perri",
+  "pane_id": "queue",
+  "source": "perri.list_pr_queue",
+  "placeholder": "No PR loaded."
+}
+```
+
+**Output**: `{ "ok": true }` or `{ "error": "unknown_source | fetch_failed | invalid_args | unidentified_caller | not_supported" }`
+
+Source: `src/mcp/tools/refresh_pane.rs`
+
+---
+
 ### `nostromo.set_pane_focus`
 
 Focus a specific pane within a view (also switches the active view tab).
