@@ -206,7 +206,10 @@ panes:
     it when the agent will populate the pane itself via `set_pane_content`
     after the layout is applied.
   - `content_kind` (required) — one of `text`, `json_snapshot`, `pr_list`,
-    `loading`, `error` (the `PaneContentWire` variant surface).
+    `loading`, `error` (the `PaneContentWire` variant surface). When the pane
+    also has a `source`, `content_kind` must match what that source actually
+    produces (see the fetcher registry table below) — a mismatch is rejected
+    at validation time (`invalid_content_kind`) rather than silently ignored.
   - `placeholder` (optional) — shown as `text` when the source yields
     empty/null data (e.g. no PR currently loaded).
 
@@ -238,7 +241,7 @@ true, "warnings": [...] }`, listing the failed panes.
 | `invalid_content_kind` | A pane's `content_kind` isn't a recognised `PaneContentWire` variant |
 | `invalid_schema` | The schema document is malformed, or `repl` is bound as a pane |
 | `fetch_failed` | A fetcher ran but failed to produce content (reported via `warnings`, not a hard error) |
-| `invalid_args` | Neither `name` nor `tree` was provided |
+| `invalid_args` | Neither `name` nor `tree` was provided, or both were |
 | `unidentified_caller` | No `view_id` and no caller `pty_id` to target |
 | `not_supported` | Called against a non-daemon-hosted MCP server |
 | `unknown_view` / `invalid_layout` | Reused `PaneRegistry` codes — see above |

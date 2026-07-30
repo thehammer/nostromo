@@ -63,6 +63,21 @@ pub(crate) fn source_is_known(source: &str) -> bool {
     KNOWN_SOURCES.contains(&source)
 }
 
+/// The `PaneContentWire` surface-name a known `source` actually produces, per
+/// [`fetch`]. `layout_schema::validate` cross-checks a pane's declared
+/// `content_kind` against this so a schema can't declare e.g.
+/// `content_kind: text` for `source: perri.list_pr_queue` and have it pass
+/// validation while `fetch` silently ignores the declaration and emits
+/// `PrList` anyway — this is the single source of truth `fetch` itself
+/// dispatches on, kept next to it so the two can't drift apart.
+pub(crate) fn source_content_kind(source: &str) -> Option<&'static str> {
+    match source {
+        "perri.list_pr_queue" => Some("pr_list"),
+        "perri.get_current_pr" => Some("text"),
+        _ => None,
+    }
+}
+
 /// Resolve the focus tag a layout tool targets: an explicit `view_id`, else the
 /// caller's own focus (`pty_id` from the Hello frame). Mirrors
 /// `create_pane.rs::target_tag`.
@@ -152,6 +167,12 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
     };
 
     // ── resolve the schema (named, with override precedence, or inline) ────
+    // `name` and `tree` are documented as mutually exclusive (docs/mcp/panes.md,
+    // the tool_descriptors() entry) — enforce that rather than silently
+    // preferring `name` and discarding a caller-supplied `tree`/`panes`.
+    if args.get("name").is_some() && args.get("tree").is_some() {
+        return json!({ "error": "invalid_args", "detail": "provide `name` or `tree`, not both" });
+    }
     let schema = if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
         match layout_schema::load(name) {
             Ok(s) => s,
@@ -442,6 +463,26 @@ mod tests {
         let (state, _bcast) = make_state();
         let result = apply_layout(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["error"], "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn both_name_and_tree_returns_invalid_args_and_does_not_mutate_registry() {
+        // `name` and `tree` are documented as mutually exclusive — passing both
+        // must be a loud caller error, not a silent "name wins, tree ignored".
+        let (state, _bcast) = make_state();
+        let args = json!({
+            "name": "perri-standard",
+            "tree": { "direction": "horizontal", "ratios": [0.5, 0.5],
+                      "children": [ { "pane": "notes" }, { "pane": "repl" } ] },
+        });
+
+        let result = apply_layout(&state, &args, Some("perri")).await;
+        assert_eq!(result["error"], "invalid_args");
+
+        if let Some(daemon) = &state.daemon {
+            let reg = daemon.pane_registry.lock().unwrap();
+            assert!(!reg.contains("perri"));
+        }
     }
 
     #[tokio::test]

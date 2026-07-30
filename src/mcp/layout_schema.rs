@@ -26,7 +26,7 @@ use serde::Deserialize;
 
 use crate::ipc::pane_registry::REPL_PANE_ID;
 use crate::ipc::protocol::{PaneTree, SplitDirection};
-use crate::mcp::tools::apply_layout::{source_is_known, ApplyLayoutError};
+use crate::mcp::tools::apply_layout::{source_content_kind, source_is_known, ApplyLayoutError};
 
 /// The `content_kind` names a `PaneSpec` may declare — one per
 /// `PaneContentWire` variant.
@@ -112,8 +112,16 @@ pub fn parse(yaml: &str) -> Result<LayoutSchema, ApplyLayoutError> {
 
 /// Validate the parts of a schema the `PaneRegistry` doesn't know about:
 /// the `repl` leaf must not appear in `panes`, every `content_kind` must be a
-/// recognised `PaneContentWire` variant, and every `source` must resolve
-/// against the closed fetcher registry.
+/// recognised `PaneContentWire` variant, every `source` must resolve against
+/// the closed fetcher registry, and — for a pane that has a `source` — the
+/// declared `content_kind` must match what that source actually produces.
+///
+/// That last check exists because `apply_layout::fetch` hardcodes the
+/// `PaneContentWire` variant per `source` name; without it, a schema could
+/// declare e.g. `content_kind: text` for `source: perri.list_pr_queue` and
+/// pass validation while `fetch` silently ignored the declaration and pushed
+/// `PrList` anyway. Failing loud here (`InvalidContentKind`) instead keeps the
+/// two in sync rather than letting them drift apart silently.
 pub fn validate(schema: &LayoutSchema) -> Result<(), ApplyLayoutError> {
     if schema.panes.contains_key(REPL_PANE_ID) {
         return Err(ApplyLayoutError::InvalidSchema);
@@ -125,6 +133,11 @@ pub fn validate(schema: &LayoutSchema) -> Result<(), ApplyLayoutError> {
         if let Some(source) = &spec.source {
             if !source_is_known(source) {
                 return Err(ApplyLayoutError::UnknownSource);
+            }
+            if let Some(expected) = source_content_kind(source) {
+                if expected != spec.content_kind {
+                    return Err(ApplyLayoutError::InvalidContentKind);
+                }
             }
         }
     }
@@ -249,6 +262,29 @@ tree:
 panes:
   sidebar:
     content_kind: not_a_real_kind
+"#;
+        let err = parse(yaml).unwrap_err();
+        assert_eq!(err, ApplyLayoutError::InvalidContentKind);
+    }
+
+    #[test]
+    fn content_kind_mismatched_with_known_source_is_rejected() {
+        // `perri.list_pr_queue` always produces `PrList` (see
+        // `apply_layout::source_content_kind`) — declaring `content_kind: text`
+        // for it must fail validation rather than silently passing while
+        // `fetch` ignores the declared kind.
+        let yaml = r#"
+name: bad
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: sidebar
+    - pane: repl
+panes:
+  sidebar:
+    source: perri.list_pr_queue
+    content_kind: text
 "#;
         let err = parse(yaml).unwrap_err();
         assert_eq!(err, ApplyLayoutError::InvalidContentKind);
