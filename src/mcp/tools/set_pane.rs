@@ -18,6 +18,15 @@ use crate::mcp::{
 
 const COMMAND_TIMEOUT_SECS: u64 = 5;
 
+/// The full set of `PaneContentWire` discriminator names. Used by
+/// `parse_pane_content`'s `"json_snapshot"` arm to catch a classic mistake:
+/// nesting an already-typed content payload (e.g. `{ kind: "pr_list", items:
+/// [...] }`) inside `json_snapshot`'s `value` instead of using `content.type`
+/// directly. The GUI has no native renderer for a `json_snapshot`-wrapped
+/// `pr_list`/`text`/etc. — it silently falls through to the generic key/value
+/// JSON viewer, which reads as broken rather than erroring.
+const KNOWN_CONTENT_KINDS: &[&str] = &["text", "json_snapshot", "pr_list", "loading", "error"];
+
 // ── handlers ─────────────────────────────────────────────────────────────────
 
 /// Handle `nostromo.set_pane_content`.
@@ -200,6 +209,23 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
                 .or_else(|| v.get("snapshot"))
                 .cloned()
                 .unwrap_or(Value::Null);
+
+            // Guard against wrapping an already-typed content payload inside
+            // json_snapshot instead of using content.type/content.kind
+            // directly — see KNOWN_CONTENT_KINDS doc comment.
+            if let Some(nested_kind) = snap.get("kind").and_then(|k| k.as_str()) {
+                if KNOWN_CONTENT_KINDS.contains(&nested_kind) {
+                    return Err(format!(
+                        "json_snapshot.value has its own \"kind\": \"{nested_kind}\" field \
+                         matching a real content type — this looks like a mis-nested content \
+                         payload. Use `content.type: \"{nested_kind}\"` (with its own fields, \
+                         e.g. `items` for pr_list) directly instead of wrapping it in \
+                         json_snapshot, or the GUI will render it as inert JSON instead of the \
+                         native view."
+                    ));
+                }
+            }
+
             Ok(PaneContent::JsonSnapshot(snap))
         }
         "pr_list" => {
@@ -228,5 +254,89 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
             Ok(PaneContent::Error(msg))
         }
         other => Err(format!("unknown content type: {other}")),
+    }
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_snapshot_wrapping_pr_list_is_rejected() {
+        let content = json!({
+            "type": "json_snapshot",
+            "value": {
+                "kind": "pr_list",
+                "items": [
+                    { "repo": "acme/web", "number": 1, "title": "t", "author": "a",
+                      "bucket": "requested", "ci_state": "success", "url": "https://x" }
+                ]
+            }
+        });
+        let err = parse_pane_content(Some(&content)).unwrap_err();
+        assert!(
+            err.contains("pr_list"),
+            "error should name the mis-nested kind: {err}"
+        );
+        assert!(
+            err.contains("content.type"),
+            "error should point the caller at the fix: {err}"
+        );
+    }
+
+    #[test]
+    fn json_snapshot_wrapping_text_is_rejected() {
+        let content = json!({
+            "type": "json_snapshot",
+            "value": { "kind": "text", "text": "hi" }
+        });
+        let err = parse_pane_content(Some(&content)).unwrap_err();
+        assert!(err.contains("text"));
+    }
+
+    #[test]
+    fn json_snapshot_with_ordinary_data_is_accepted() {
+        // A real json_snapshot use case: arbitrary structured data with no
+        // "kind" field at all, or one that isn't a recognised content type.
+        let content = json!({
+            "type": "json_snapshot",
+            "value": { "queue_depth": 12, "last_run": "2026-07-30" }
+        });
+        let parsed = parse_pane_content(Some(&content)).unwrap();
+        assert!(matches!(parsed, PaneContent::JsonSnapshot(_)));
+    }
+
+    #[test]
+    fn json_snapshot_with_unrelated_kind_field_is_accepted() {
+        // "kind" that doesn't match any real PaneContentWire variant is just
+        // ordinary data, not a mis-nesting mistake — don't false-positive.
+        let content = json!({
+            "type": "json_snapshot",
+            "value": { "kind": "widget", "count": 3 }
+        });
+        let parsed = parse_pane_content(Some(&content)).unwrap();
+        assert!(matches!(parsed, PaneContent::JsonSnapshot(_)));
+    }
+
+    #[test]
+    fn json_snapshot_of_bare_scalar_is_accepted() {
+        let content = json!({ "type": "json_snapshot", "value": "just a string" });
+        let parsed = parse_pane_content(Some(&content)).unwrap();
+        assert!(matches!(parsed, PaneContent::JsonSnapshot(_)));
+    }
+
+    #[test]
+    fn pr_list_content_type_still_works_directly() {
+        let content = json!({
+            "type": "pr_list",
+            "items": [
+                { "repo": "acme/web", "number": 1, "title": "t", "author": "a",
+                  "bucket": "requested", "ci_state": "success", "url": "https://x" }
+            ]
+        });
+        let parsed = parse_pane_content(Some(&content)).unwrap();
+        assert!(matches!(parsed, PaneContent::PrList(items) if items.len() == 1));
     }
 }
