@@ -146,6 +146,7 @@ async fn main() -> Result<()> {
     let (perri_queue_rx, perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
     let (perri_pr_rx, _perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
+    let perri_pr_rx_for_mcp = perri_pr_rx.clone();
 
     // ── Mother jobs channel (spawned early so MCP state gets live receiver) ─────
     let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
@@ -175,6 +176,7 @@ async fn main() -> Result<()> {
             let state = McpSharedState::for_daemon_with_sources(
                 backend,
                 perri_queue_rx_for_mcp,
+                perri_pr_rx_for_mcp,
                 jobs_rx_for_mcp,
             );
             match McpServer::bind(mcp_socket.clone(), state).await {

@@ -68,7 +68,7 @@ struct Focus: Codable, Hashable, Identifiable {
                   QuickAction(
                       id: "perri-reset-layout",
                       label: "Reset Layout",
-                      prompt: "please reset your pane layout and rebuild it from scratch using your standard layout (queue top-left, diff top-right, repl bottom)",
+                      prompt: "apply your standard layout",
                       clearFirst: false
                   ),
               ], org: "Carefeed"),
