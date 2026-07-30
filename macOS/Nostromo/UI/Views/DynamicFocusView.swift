@@ -71,12 +71,27 @@ final class DynamicFocusView: NSView {
     }
 
     private func renderLayout(_ model: FocusLayoutModel) {
+        // Snapshot existing leaf views before tearing anything down. A leaf
+        // whose pane_id persists across this structural change — "repl" in
+        // particular, whose content has nothing to do with tree shape — gets
+        // re-parented into the new split hierarchy below instead of being
+        // destroyed and recreated. Recreating ReplView on every structural
+        // rebuild (every apply_layout/create_pane/reset_panes call) was
+        // silently resetting scroll position and the pinned-to-bottom state
+        // on a fresh instance each time, undoing the user's manual scroll.
+        let previousLeafViews = leafViews
+
         // Remove existing content.
         subviews.forEach { $0.removeFromSuperview() }
         leafViews = [:]
         renderedTreePaneIds = model.tree.paneIds
+        // Clear any previously saved operator-drag ratios so the agent's
+        // layout intent takes effect on each structural rebuild. The operator
+        // can drag to adjust after the agent assembles; those new ratios will
+        // be persisted until the next structural change.
+        clearSavedRatios(for: focus.sessionTag)
 
-        let rootView = buildView(for: model.tree, tag: focus.sessionTag, path: "root")
+        let rootView = buildView(for: model.tree, tag: focus.sessionTag, path: "root", reusing: previousLeafViews)
         rootView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(rootView)
         NSLayoutConstraint.activate([
@@ -92,22 +107,34 @@ final class DynamicFocusView: NSView {
 
     // MARK: - Tree rendering
 
-    private func buildView(for tree: PaneTree, tag: String, path: String) -> NSView {
+    private func buildView(for tree: PaneTree, tag: String, path: String, reusing previous: [String: NSView]) -> NSView {
         switch tree {
         case .leaf(let paneId):
-            return makeLeafView(paneId: paneId)
+            return makeLeafView(paneId: paneId, reusing: previous[paneId])
         case .split(let direction, let children, let ratios):
             return makeSplitView(
                 direction: direction,
                 children: children,
                 ratios: ratios,
                 tag: tag,
-                path: path
+                path: path,
+                reusing: previous
             )
         }
     }
 
-    private func makeLeafView(paneId: String) -> NSView {
+    private func makeLeafView(paneId: String, reusing existing: NSView?) -> NSView {
+        if let existing {
+            // Same pane_id as before this structural change — reuse the
+            // instance verbatim (already detached from its old superview by
+            // the caller) rather than tearing down and recreating it. For
+            // ReplView this is what preserves scroll position and the
+            // pinned-to-bottom flag across a layout rebuild; for
+            // PaneContentNSView it just avoids a pointless flicker, since
+            // updateContent() below re-pushes current content regardless.
+            leafViews[paneId] = existing
+            return existing
+        }
         if paneId == "repl" {
             let repl = ReplView(
                 tag:              focus.sessionTag,
@@ -129,6 +156,14 @@ final class DynamicFocusView: NSView {
             // legacy macOS PerriView had no swipe-approve). The context menu item
             // is wired to a no-op; full macOS approve is Phase 2 work.
             wrapper.onApprovePR = { _, _ in }
+            // Generic refresh affordance: nudge the owning focus's session.
+            // The agent (Perri, Mother, Fred, Teri, ...) decides what
+            // "refresh" means for its own pane content and re-pushes via
+            // set_pane_content — no wire protocol changes needed.
+            wrapper.onRefresh = { [weak self] in
+                guard let self else { return }
+                AppStore.shared.session(for: self.focus.sessionTag).send("refresh")
+            }
             leafViews[paneId] = wrapper
             return wrapper
         }
@@ -139,7 +174,8 @@ final class DynamicFocusView: NSView {
         children: [PaneTree],
         ratios: [Double],
         tag: String,
-        path: String
+        path: String,
+        reusing previous: [String: NSView]
     ) -> NSSplitView {
         let split = NSSplitView()
         split.isVertical = (direction == .horizontal)
@@ -147,7 +183,7 @@ final class DynamicFocusView: NSView {
 
         for (i, child) in children.enumerated() {
             let childPath = "\(path).\(i)"
-            let childView = buildView(for: child, tag: tag, path: childPath)
+            let childView = buildView(for: child, tag: tag, path: childPath, reusing: previous)
             split.addArrangedSubview(childView)
         }
 
@@ -217,6 +253,15 @@ final class DynamicFocusView: NSView {
 
     // MARK: - Content update
 
+    /// Remove all UserDefaults ratio keys for this focus so the next
+    /// `applyRatios` call uses the agent's ratios rather than stale drag values.
+    private func clearSavedRatios(for tag: String) {
+        let prefix = "nostromo.dynlayout.\(tag)."
+        UserDefaults.standard.dictionaryRepresentation().keys
+            .filter { $0.hasPrefix(prefix) }
+            .forEach { UserDefaults.standard.removeObject(forKey: $0) }
+    }
+
     private func updateContent(_ paneContent: [String: PaneContentWire]) {
         for (paneId, content) in paneContent {
             guard let leafView = leafViews[paneId] as? PaneContentNSView else { continue }
@@ -237,6 +282,13 @@ final class PaneContentNSView: NSView {
     var onLoadPR:    (String, Int) -> Void = { _, _ in }
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is approved.
     var onApprovePR: (String, Int) -> Void = { _, _ in }
+    /// Injected by `DynamicFocusView.makeLeafView` — called when the operator
+    /// clicks the pane's refresh button.
+    var onRefresh: () -> Void = {}
+
+    /// Persistent AppKit chrome — lives above the SwiftUI content, which is
+    /// torn down and rebuilt on every `update(content:)` call.
+    private let refreshButton = NSButton()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -253,9 +305,27 @@ final class PaneContentNSView: NSView {
             hosting.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         hostingView = hosting
+
+        refreshButton.isBordered       = false
+        refreshButton.title            = "↺"
+        refreshButton.font             = .systemFont(ofSize: 12)
+        refreshButton.contentTintColor = .tertiaryLabelColor
+        refreshButton.toolTip          = "Ask the agent to refresh this pane"
+        refreshButton.target           = self
+        refreshButton.action           = #selector(didTapRefresh)
+        refreshButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(refreshButton)
+        NSLayoutConstraint.activate([
+            refreshButton.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            refreshButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            refreshButton.widthAnchor.constraint(equalToConstant: 18),
+            refreshButton.heightAnchor.constraint(equalToConstant: 18),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func didTapRefresh() { onRefresh() }
 
     func update(content: PaneContentWire) {
         // Replace rather than mutate rootView — setting rootView on an existing
@@ -268,7 +338,9 @@ final class PaneContentNSView: NSView {
         let hosting = NSHostingView(rootView: view)
         hosting.translatesAutoresizingMaskIntoConstraints = false
         hosting.appearance = NSAppearance(named: .darkAqua)
-        addSubview(hosting)
+        // Insert below the refresh button so the button stays clickable and
+        // visible above whatever content the agent just pushed.
+        addSubview(hosting, positioned: .below, relativeTo: refreshButton)
         NSLayoutConstraint.activate([
             hosting.topAnchor.constraint(equalTo: topAnchor),
             hosting.leadingAnchor.constraint(equalTo: leadingAnchor),

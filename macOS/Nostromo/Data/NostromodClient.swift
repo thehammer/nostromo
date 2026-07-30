@@ -158,6 +158,21 @@ enum DaemonStopReason: String, Decodable {
 struct DaemonAskOption: Decodable {
     let label: String
     let description: String
+    /// True when this is Perri's (or the agent's) recommended choice — the
+    /// daemon only ever sets this from the `submit-review` skill's `CONFIRM:`
+    /// JSON. Absent on older daemon builds, so decode defaults to `false`.
+    let recommended: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case label, description, recommended
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label       = try c.decode(String.self, forKey: .label)
+        description = try c.decode(String.self, forKey: .description)
+        recommended = try c.decodeIfPresent(Bool.self, forKey: .recommended) ?? false
+    }
 }
 
 /// Mirrors `stream_json::TurnBlock` — tagged by `kind`.
@@ -231,11 +246,12 @@ struct DaemonTurn: Decodable {
 enum DaemonTurnDelta: Decodable {
     case turnStarted(DaemonTurn)
     case blockAppended(turnId: String, block: DaemonTurnBlock)
-    case turnCompleted(turnId: String, summary: DaemonResultSummary)
+    case turnCompleted(turnId: String, summary: DaemonResultSummary, contextTokens: Int?)
     case turnErrored(turnId: String, message: String)
 
     private enum K: String, CodingKey {
         case delta, turn, turnId = "turn_id", block, summary, message
+        case contextTokens = "context_tokens"
     }
 
     init(from d: Decoder) throws {
@@ -247,8 +263,11 @@ enum DaemonTurnDelta: Decodable {
             self = .blockAppended(turnId: try c.decode(String.self, forKey: .turnId),
                                   block: try c.decode(DaemonTurnBlock.self, forKey: .block))
         case "turn_completed":
-            self = .turnCompleted(turnId: try c.decode(String.self, forKey: .turnId),
-                                  summary: try c.decode(DaemonResultSummary.self, forKey: .summary))
+            self = .turnCompleted(
+                turnId:        try c.decode(String.self, forKey: .turnId),
+                summary:       try c.decode(DaemonResultSummary.self, forKey: .summary),
+                contextTokens: try? c.decodeIfPresent(Int.self, forKey: .contextTokens)
+            )
         case "turn_errored":
             self = .turnErrored(turnId: try c.decode(String.self, forKey: .turnId),
                                 message: try c.decode(String.self, forKey: .message))

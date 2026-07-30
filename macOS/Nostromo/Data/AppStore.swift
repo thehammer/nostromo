@@ -132,6 +132,9 @@ class AppStore: ObservableObject {
                 self.perriQueue      = items
                 self.perriQueueStale = false
                 self.perriQueueError = nil
+                // Keep the queue pane current whenever the cache updates —
+                // this makes content survive app restarts without agent involvement.
+                self.pushQueueToQueuePane(items)
             }
             .store(in: &cancellables)
 
@@ -511,6 +514,7 @@ class AppStore: ObservableObject {
 
         perriDetail        = detail
         perriDetailLoading = false
+        pushDetailToDiffPane(detail)
     }
 
     /// Called when the pr-cache/ directory changes — re-check if pending selection is warm.
@@ -534,8 +538,108 @@ class AppStore: ObservableObject {
                 else { return }
                 self.perriDetail        = detail
                 self.perriDetailLoading = false
+                self.pushDetailToDiffPane(detail)
             }
         }
+    }
+
+    /// Push the current queue into the Perri queue pane as a pr_list.
+    /// Called whenever the queue cache updates, including on startup — making
+    /// the queue pane durable across app restarts without agent involvement.
+    ///
+    /// Builds a minimal JSON array using the snake_case keys that PrListItemModel
+    /// expects, avoiding a direct NostromoKit import (which causes CiState ambiguity).
+    func pushQueueToQueuePane(_ items: [PRQueueItem]) {
+        // JSON encode PRQueueItem (snake_case keys match PrListItemModel CodingKeys)
+        // then decode as the NostromoKit type via the shared PaneContentWire path.
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        // Decode into PaneContentWire.prList via a wrapper that the wire decoder understands.
+        let wrapper = """
+        {"kind":"pr_list","items":\(String(data: data, encoding: .utf8) ?? "[]")}
+        """
+        guard let wrapperData = wrapper.data(using: .utf8),
+              let content = try? JSONDecoder().decode(PaneContentWire.self, from: wrapperData)
+        else { return }
+        var model = focusLayouts["perri"] ?? FocusLayoutModel.initial
+        model.paneContent["queue"] = content
+        focusLayouts["perri"] = model
+    }
+
+    /// Push a formatted PRDetail summary into the Perri diff pane.
+    private func pushDetailToDiffPane(_ detail: PRDetail) {
+        let number = detail.prNumber.map { $0 } ?? 0
+        let divider = String(repeating: "─", count: 60)
+
+        // ── Header ────────────────────────────────────────────────────────────
+        var lines: [String] = [
+            detail.title,
+            "\(detail.repo) #\(number) · \(detail.author)",
+            divider,
+        ]
+
+        // ── Links ─────────────────────────────────────────────────────────────
+        lines.append("🔗 GitHub  \(detail.url)")
+        // Extract Jira ticket key from title (e.g. "CORE-1234", "PAYM-567")
+        let jiraPattern = #"[A-Z]{2,6}-\d+"#
+        if let range = detail.title.range(of: jiraPattern, options: .regularExpression),
+           !detail.title[range].isEmpty {
+            let key = String(detail.title[range])
+            lines.append("📋 Jira    https://carefeed.atlassian.net/browse/\(key)")
+        }
+        lines.append("")
+
+        // ── Stats ─────────────────────────────────────────────────────────────
+        let fileWord = detail.changedFiles == 1 ? "file" : "files"
+        lines.append("📊 +\(detail.additions)  -\(detail.deletions)  in \(detail.changedFiles) \(fileWord)")
+        lines.append("")
+
+        // ── CI checks ─────────────────────────────────────────────────────────
+        if !detail.ciChecks.isEmpty {
+            let passing = detail.ciChecks.filter { $0.state == .success }
+            let failing = detail.ciChecks.filter { $0.state == .failure }
+            let pending = detail.ciChecks.filter { $0.state == .pending }
+            let unknown = detail.ciChecks.filter { $0.state == .unknown }
+
+            var ciSummary = "CI  "
+            if !passing.isEmpty { ciSummary += "✓ \(passing.count) passing  " }
+            if !pending.isEmpty { ciSummary += "○ \(pending.count) pending  " }
+            if !failing.isEmpty { ciSummary += "✗ \(failing.count) failing  " }
+            if !unknown.isEmpty { ciSummary += "? \(unknown.count) unknown" }
+            lines.append(ciSummary.trimmingCharacters(in: .whitespaces))
+
+            // Surface failing checks with detail
+            for check in failing {
+                lines.append("  ✗ \(check.name)")
+                if let d = check.detail, !d.isEmpty {
+                    lines.append("    \(d.prefix(200))")
+                }
+            }
+            // Surface pending checks
+            for check in pending {
+                lines.append("  ○ \(check.name)")
+            }
+            lines.append("")
+        }
+
+        // ── Diff ──────────────────────────────────────────────────────────────
+        lines.append(divider)
+        if detail.diffTooLarge {
+            lines.append("⚠  Diff too large — open in GitHub to view.")
+        } else if detail.diff.isEmpty {
+            lines.append("No diff available.")
+        } else {
+            // Cap at ~150 lines — enough for most PRs, avoids flooding the pane
+            let diffLines = detail.diff.components(separatedBy: "\n")
+            let cap = 150
+            lines += diffLines.prefix(cap)
+            if diffLines.count > cap {
+                lines.append("… \(diffLines.count - cap) more lines — open GitHub for the full diff.")
+            }
+        }
+
+        var model = focusLayouts["perri"] ?? FocusLayoutModel.initial
+        model.paneContent["diff"] = .text(lines.joined(separator: "\n"))
+        focusLayouts["perri"] = model
     }
 
     private func prDetailCacheKey(_ item: PRQueueItem) -> String {

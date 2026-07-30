@@ -17,10 +17,18 @@ class ReplView: NSView {
     private var inputBarHeightConstraint: NSLayoutConstraint!
     private let quickActions: [QuickAction]
     private var quickActionStrip: QuickActionStripView?
+    private let contextMeter = ContextMeterView()
 
     private var turnViews:   [UUID: ChatTurnView] = [:]
     private var scrollPending = false
     private var cancellables = Set<AnyCancellable>()
+
+    /// True while the transcript should auto-scroll to the newest content.
+    /// Cleared when the user scrolls up to read history, so a background
+    /// stream of blocks (tool calls, Perri's own chatter, etc.) doesn't yank
+    /// the view back to the bottom out from under them. Set again once they
+    /// scroll back down, or when they send a message themselves.
+    private var isPinnedToBottom = true
 
     init(tag: String, agentName: String? = nil, displayName: String? = nil,
          workingDirectory: String? = nil, quickActions: [QuickAction] = []) {
@@ -33,6 +41,10 @@ class ReplView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self, name: NSScrollView.didLiveScrollNotification, object: scrollView)
+    }
 
     // MARK: Setup
 
@@ -101,6 +113,15 @@ class ReplView: NSView {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
 
+        // Live-scroll notifications only fire for user-driven trackpad/wheel
+        // scrolling, not our own programmatic scrollToBottom() calls — exactly
+        // the signal needed to tell "user is reading history" apart from
+        // "we just auto-scrolled". Re-checked on every live-scroll tick so it
+        // tracks drags back down to the bottom too.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(liveScrollDidChange),
+            name: NSScrollView.didLiveScrollNotification, object: scrollView)
+
         // Stack — turns stacked vertically, full width
         stackView.orientation = .vertical
         stackView.spacing     = 0
@@ -123,7 +144,11 @@ class ReplView: NSView {
 
         // Input bar — fixed at bottom
         inputBar.translatesAutoresizingMaskIntoConstraints = false
-        inputBar.onSend = { [weak self] text, images in self?.session.send(text, images: images) }
+        inputBar.onSend = { [weak self] text, images in
+            guard let self else { return }
+            self.isPinnedToBottom = true
+            self.session.send(text, images: images)
+        }
         addSubview(inputBar)
 
         inputBarHeightConstraint = inputBar.heightAnchor.constraint(equalToConstant: ReplInputBar.minHeight)
@@ -138,14 +163,23 @@ class ReplView: NSView {
             quickActionStrip = strip
         }
 
-        // Scroll view's bottom connects to the strip (if present) or directly to the input bar.
-        let scrollBottomTarget = quickActionStrip?.topAnchor ?? inputBar.topAnchor
+        // Context meter — 2px stripe on the border above the input bar.
+        contextMeter.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(contextMeter)
+
+        // Scroll view's bottom connects to the strip (if present) or the meter.
+        let scrollBottomTarget = quickActionStrip?.topAnchor ?? contextMeter.topAnchor
 
         var constraints: [NSLayoutConstraint] = [
             inputBar.bottomAnchor.constraint(equalTo: bottomAnchor),
             inputBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             inputBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             inputBarHeightConstraint,
+
+            contextMeter.bottomAnchor.constraint(equalTo: inputBar.topAnchor),
+            contextMeter.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contextMeter.trailingAnchor.constraint(equalTo: trailingAnchor),
+            contextMeter.heightAnchor.constraint(equalToConstant: 2),
 
             scrollView.topAnchor.constraint(equalTo: toolbarBottomBorder.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -157,7 +191,7 @@ class ReplView: NSView {
             constraints += [
                 strip.leadingAnchor.constraint(equalTo: leadingAnchor),
                 strip.trailingAnchor.constraint(equalTo: trailingAnchor),
-                strip.bottomAnchor.constraint(equalTo: inputBar.topAnchor),
+                strip.bottomAnchor.constraint(equalTo: contextMeter.topAnchor),
                 strip.heightAnchor.constraint(equalToConstant: 40),
             ]
         }
@@ -193,6 +227,11 @@ class ReplView: NSView {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] count in self?.inputBar.setPendingCount(count) }
             .store(in: &cancellables)
+
+        session.$contextFraction
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] fraction in self?.contextMeter.fraction = fraction }
+            .store(in: &cancellables)
     }
 
     // MARK: Turn management
@@ -204,7 +243,11 @@ class ReplView: NSView {
             } else {
                 let v = ChatTurnView(turn: turn)
                 v.translatesAutoresizingMaskIntoConstraints = false
-                v.onSend = { [weak self] text in self?.session.send(text) }
+                v.onSend = { [weak self] text in
+                    guard let self else { return }
+                    self.isPinnedToBottom = true
+                    self.session.send(text)
+                }
                 turnViews[turn.id] = v
                 stackView.addArrangedSubview(v)
                 // Explicit width — NSStackView alignment=.width doesn't reliably
@@ -215,11 +258,14 @@ class ReplView: NSView {
         // Scroll to bottom after layout settles — coalesced so rapid streaming
         // tokens don't queue a separate dispatch per token (O(n) dispatches × O(n)
         // layout = O(n^2) CPU). Only one scroll dispatch is outstanding at any time.
+        // Gated on isPinnedToBottom so a user who's scrolled up to read history
+        // doesn't get yanked back down by every background block delta.
         if !scrollPending {
             scrollPending = true
             DispatchQueue.main.async { [weak self] in
                 self?.scrollPending = false
-                self?.scrollToBottom()
+                guard let self, self.isPinnedToBottom else { return }
+                self.scrollToBottom()
             }
         }
     }
@@ -232,6 +278,22 @@ class ReplView: NSView {
         // solve we were trying to avoid), even without an explicit layoutSubtreeIfNeeded().
         scrollView.contentView.scroll(NSPoint(x: 0, y: CGFloat.greatestFiniteMagnitude))
         scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    /// Re-pin to the bottom — call whenever the user takes an action that
+    /// should bring the newest content into view (sending a message, an
+    /// answer, a quick action).
+    private func pinToBottomAndScroll() {
+        isPinnedToBottom = true
+        scrollToBottom()
+    }
+
+    @objc private func liveScrollDidChange() {
+        guard let doc = scrollView.documentView else { return }
+        let visibleMaxY = scrollView.contentView.bounds.maxY
+        // Within a small threshold of the true bottom counts as "pinned" —
+        // demanding an exact match would fight sub-pixel rounding.
+        isPinnedToBottom = doc.frame.height - visibleMaxY < 40
     }
 
     override func viewDidMoveToWindow() {
@@ -250,11 +312,20 @@ class ReplView: NSView {
         alert.alertStyle      = .warning
         alert.addButton(withTitle: "New Session")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        // Clear turn views
-        turnViews.values.forEach { $0.removeFromSuperview() }
-        turnViews = [:]
-        session.newSession()
+        // Present as a sheet on our own window rather than alert.runModal().
+        // A free-floating modal alert has no window association, so it can end
+        // up stranded on another Space/display with no visible way to dismiss
+        // it — which blocks the whole app's main thread indefinitely (it looks
+        // exactly like a hang). A sheet is always anchored to this window and
+        // resolves asynchronously, so it can't wander off or block the app.
+        guard let window else { return }
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            // Clear turn views
+            self.turnViews.values.forEach { $0.removeFromSuperview() }
+            self.turnViews = [:]
+            self.session.newSession()
+        }
     }
 
     private func runQuickAction(_ action: QuickAction) {
@@ -268,6 +339,7 @@ class ReplView: NSView {
         }
         let prompt = action.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !prompt.isEmpty {
+            isPinnedToBottom = true
             session.send(prompt)
         }
     }
@@ -1385,9 +1457,14 @@ private class AskQuestionView: NSView {
         private var chosen = false
         private let checkmark: NSImageView
         private let label: NSTextField
+        /// Whether this option carries the "(recommended)" suffix — tracked so
+        /// `markChosen()` can rebuild the attributed string instead of clobbering
+        /// its mixed fonts with a uniform `.font` assignment.
+        private let recommended: Bool
 
         init(option: AskQuestionData.Option, tag: Int) {
             optionLabel = option.label
+            recommended = option.recommended
 
             // Checkmark — hidden by default; space is always reserved so revealing
             // it causes no layout shift (label leading is anchored to checkmark.trailing).
@@ -1400,14 +1477,32 @@ private class AskQuestionView: NSView {
             check.translatesAutoresizingMaskIntoConstraints = false
             checkmark = check
 
-            let lbl = NSTextField(labelWithString: option.label)
-            lbl.font      = .systemFont(ofSize: 12, weight: .medium)
-            lbl.textColor = Theme.fg
+            let labelFont = NSFont.systemFont(ofSize: 12, weight: .medium)
+            let lbl: NSTextField
+            if option.recommended {
+                // Append a muted "(recommended)" suffix so Perri's pick stands out
+                // without implying the other options are wrong.
+                let attributed = NSMutableAttributedString(
+                    string: option.label,
+                    attributes: [.font: labelFont, .foregroundColor: Theme.fg])
+                attributed.append(NSAttributedString(
+                    string: " (recommended)",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                        .foregroundColor: Theme.fgMuted,
+                    ]))
+                lbl = NSTextField(labelWithAttributedString: attributed)
+            } else {
+                lbl = NSTextField(labelWithString: option.label)
+                lbl.font      = labelFont
+                lbl.textColor = Theme.fg
+            }
             lbl.translatesAutoresizingMaskIntoConstraints = false
             label = lbl
 
             super.init(frame: .zero)
             self.tag      = tag
+            title         = ""   // NSButton defaults to "Button" — we render our own label/description subviews
             isBordered    = false
             wantsLayer    = true
 
@@ -1455,7 +1550,24 @@ private class AskQuestionView: NSView {
             chosen = true
             checkmark.isHidden = false
             checkmark.animator().alphaValue = 1
-            label.font = .systemFont(ofSize: 12, weight: .semibold)
+            let chosenFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
+            if recommended {
+                // Setting `.font` directly on an attributed NSTextField flattens
+                // all runs to one style, which would swallow the muted
+                // "(recommended)" suffix — rebuild the attributed string instead.
+                let attributed = NSMutableAttributedString(
+                    string: optionLabel,
+                    attributes: [.font: chosenFont, .foregroundColor: Theme.fg])
+                attributed.append(NSAttributedString(
+                    string: " (recommended)",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                        .foregroundColor: Theme.fgMuted,
+                    ]))
+                label.attributedStringValue = attributed
+            } else {
+                label.font = chosenFont
+            }
             layer?.backgroundColor = Theme.sage.withAlphaComponent(0.12).cgColor
         }
 
@@ -1539,4 +1651,30 @@ private class ErrorBlockView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+}
+
+// MARK: - ContextMeterView
+
+/// A 2 px horizontal bar that fills left-to-right proportional to the session's
+/// context-window usage. Invisible when `fraction` is nil (no data yet).
+class ContextMeterView: NSView {
+
+    /// 0–1 fill fraction, or nil to hide. Set from the main queue.
+    var fraction: Double? = nil {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.clear.setFill()
+        bounds.fill()
+
+        guard let f = fraction, f > 0 else { return }
+
+        let fillW = bounds.width * CGFloat(min(1.0, f))
+        let fillRect = NSRect(x: 0, y: 0, width: fillW, height: bounds.height)
+
+        // Subtle: fgMuted at 60% opacity — visible but not competing with content.
+        Theme.fgMuted.withAlphaComponent(0.6).setFill()
+        fillRect.fill()
+    }
 }

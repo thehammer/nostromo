@@ -49,6 +49,15 @@ struct AskQuestionData {
     struct Option {
         let label:       String
         let description: String
+        /// True when this is Perri's (or the agent's) recommended choice.
+        /// Rendered as a "(recommended)" suffix on the option label.
+        let recommended: Bool
+
+        init(label: String, description: String, recommended: Bool = false) {
+            self.label       = label
+            self.description = description
+            self.recommended = recommended
+        }
     }
     let question:    String
     let header:      String
@@ -237,14 +246,18 @@ extension TurnBlock {
     }
 
     /// Parse the compact JSON object emitted by the submit-review skill's CONFIRM: line.
-    /// Keys: "q" (question), "h" (header), "opts" (array of {"l": label, "d": description}).
+    /// Keys: "q" (question), "h" (header), "opts" (array of {"l": label, "d": description,
+    /// "r": recommended — optional bool marking Perri's recommended option}).
     private static func parseConfirmJSON(_ json: [String: Any]) -> AskQuestionData? {
         let question = json["q"] as? String ?? ""
         let header   = json["h"] as? String ?? ""
         let rawOpts  = json["opts"] as? [[String: Any]] ?? []
         let options: [AskQuestionData.Option] = rawOpts.compactMap { opt in
             guard let label = opt["l"] as? String, !label.isEmpty else { return nil }
-            return AskQuestionData.Option(label: label, description: opt["d"] as? String ?? "")
+            return AskQuestionData.Option(
+                label:       label,
+                description: opt["d"] as? String ?? "",
+                recommended: opt["r"] as? Bool ?? false)
         }
         guard !question.isEmpty || !options.isEmpty else { return nil }
         return AskQuestionData(question: question, header: header,
