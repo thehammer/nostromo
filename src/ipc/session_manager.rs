@@ -566,7 +566,19 @@ impl SessionManager {
                 .get_mut(tag)
                 .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
             session.attached_clients.insert(client_id.to_string());
-            let turns = session.shared.transcript.lock().unwrap().snapshot();
+            let mut turns = session.shared.transcript.lock().unwrap().snapshot();
+            // Cap what a freshly-attaching client receives to the last
+            // SCROLLBACK_TURNS turns — mirrors the cap already applied when
+            // loading scrollback at spawn time (`load_scrollback`). Without
+            // this, a session that's been alive and busy for a long time
+            // (without crashing/respawning — the only other place the cap
+            // gets re-applied) sends its entire accumulated in-memory
+            // history to any client that attaches later. A GUI client
+            // rendering that as one flat turn list can peg Auto Layout
+            // trying to lay out thousands of historical turns at once.
+            if turns.len() > SCROLLBACK_TURNS {
+                turns = turns.split_off(turns.len() - SCROLLBACK_TURNS);
+            }
             let state = session.state();
             let rx = session.shared.event_tx.subscribe();
             (turns, state, rx)
@@ -1717,6 +1729,53 @@ mod tests {
             matches!(m2, ServerMsg::SessionState { .. }),
             "second msg {m2:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn attach_truncates_snapshot_to_scrollback_cap() {
+        // A session that's accumulated more live turns than SCROLLBACK_TURNS
+        // (simulating a long-lived, busy session that never crashed/respawned,
+        // so load_scrollback's own cap never re-applied) must still only ever
+        // send the last SCROLLBACK_TURNS turns to a freshly attaching client.
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        let mut script = String::new();
+        for i in 0..(SCROLLBACK_TURNS + 10) {
+            script.push_str(&format!(
+                r#"printf '%s\n' '{{"type":"user","message":{{"role":"user","content":"q{i}"}},"isReplay":true}}' '{{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}}';"#
+            ));
+        }
+        script.push_str(" sleep 1");
+        spawn_stub(&mut mgr, "teri", &script);
+
+        let (tx, mut crx) = mpsc::unbounded_channel::<ServerMsg>();
+        mgr.client_senders.lock().unwrap().insert("c1".into(), tx);
+
+        // Give the reader time to process every synthetic turn.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        mgr.attach("teri", "c1").unwrap();
+
+        let m1 = tokio::time::timeout(Duration::from_secs(2), crx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match m1 {
+            ServerMsg::SessionTurns { turns, .. } => {
+                assert_eq!(
+                    turns.len(),
+                    SCROLLBACK_TURNS,
+                    "attach must cap the snapshot even though the live transcript has more"
+                );
+                // Must keep the MOST RECENT turns, not the oldest.
+                let last = turns.last().unwrap();
+                assert!(
+                    last.user_input
+                        .contains(&(SCROLLBACK_TURNS + 9).to_string()),
+                    "expected the newest turn to survive truncation, got {:?}",
+                    last.user_input
+                );
+            }
+            other => panic!("expected SessionTurns, got {other:?}"),
+        }
     }
 
     // ── backoff and crash-loop guard tests ───────────────────────────────────
