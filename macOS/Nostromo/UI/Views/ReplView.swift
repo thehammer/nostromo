@@ -1174,11 +1174,17 @@ private class ToolResultView: NSView {
     private let disclosure  = NSButton()
     private let contentWrap = NSView()
     private let lineCount:  Int
+    private let content:    String
+    private let isError:    Bool
+    /// Guards against building the expensive full-content label more than once.
+    private var labelBuilt  = false
 
     init(data: ToolResultData) {
         let nonEmpty = data.content.components(separatedBy: "\n")
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         lineCount  = max(nonEmpty.count, 1)
+        content    = data.content
+        isError    = data.isError
         isExpanded = data.isError   // errors always open
 
         super.init(frame: .zero)
@@ -1186,7 +1192,7 @@ private class ToolResultView: NSView {
         layer?.backgroundColor = NSColor(white: 0.07, alpha: 1).cgColor
         layer?.cornerRadius    = 6
         layer?.borderWidth     = 1
-        layer?.borderColor     = data.isError
+        layer?.borderColor     = isError
             ? Theme.redSweater.withAlphaComponent(0.5).cgColor
             : Theme.borderInactive.withAlphaComponent(0.6).cgColor
 
@@ -1196,24 +1202,15 @@ private class ToolResultView: NSView {
         disclosure.action     = #selector(toggleExpand)
         disclosure.translatesAutoresizingMaskIntoConstraints = false
 
-        // Content label inside a wrapper so NSStackView can collapse it
-        let label = NSTextField(labelWithString: data.content)
-        label.font                 = Theme.monoFont
-        label.textColor            = data.isError ? Theme.redSweater : Theme.fgMuted
-        label.lineBreakMode        = .byCharWrapping
-        label.maximumNumberOfLines = 0
-        // Biggest balloon driver: long single-line tool output (JSON, git status) had
-        // an intrinsic width of ~8600pt. Yield horizontally so it wraps to the pane.
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        contentWrap.addSubview(label)
+        // Content label is built lazily (see buildLabelIfNeeded) — most tool
+        // results are non-error and stay collapsed forever, and merely
+        // constructing NSTextField(labelWithString:) with a large blob
+        // triggers a full CoreText glyph-shaping pass via its internal
+        // sizeToFit(), even when the view is immediately hidden. Replaying a
+        // long-lived session's full turn history was paying that cost for
+        // every historical tool result up front, pegging the main thread for
+        // tens of seconds on launch/reconnect for no visible benefit.
         contentWrap.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            label.topAnchor.constraint(equalTo: contentWrap.topAnchor),
-            label.leadingAnchor.constraint(equalTo: contentWrap.leadingAnchor),
-            label.trailingAnchor.constraint(equalTo: contentWrap.trailingAnchor),
-            label.bottomAnchor.constraint(equalTo: contentWrap.bottomAnchor),
-        ])
 
         // NSStackView collapses hidden arranged subviews automatically
         let vStack = NSStackView(views: [disclosure, contentWrap])
@@ -1249,6 +1246,29 @@ private class ToolResultView: NSView {
         }
     }
 
+    /// Builds the full-content label on first actual need (see the doc
+    /// comment on `contentWrap` in `init`). Safe to call repeatedly.
+    private func buildLabelIfNeeded() {
+        guard !labelBuilt else { return }
+        labelBuilt = true
+        let label = NSTextField(labelWithString: content)
+        label.font                 = Theme.monoFont
+        label.textColor            = isError ? Theme.redSweater : Theme.fgMuted
+        label.lineBreakMode        = .byCharWrapping
+        label.maximumNumberOfLines = 0
+        // Biggest balloon driver: long single-line tool output (JSON, git status) had
+        // an intrinsic width of ~8600pt. Yield horizontally so it wraps to the pane.
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        contentWrap.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: contentWrap.topAnchor),
+            label.leadingAnchor.constraint(equalTo: contentWrap.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: contentWrap.trailingAnchor),
+            label.bottomAnchor.constraint(equalTo: contentWrap.bottomAnchor),
+        ])
+    }
+
     private func applyState() {
         let arrow = isExpanded ? "▼" : "▶"
         let count = "\(lineCount) line\(lineCount == 1 ? "" : "s")"
@@ -1257,6 +1277,7 @@ private class ToolResultView: NSView {
             .foregroundColor: Theme.fgMuted,
         ]
         disclosure.attributedTitle = NSAttributedString(string: "\(arrow)  \(count)", attributes: attrs)
+        if isExpanded { buildLabelIfNeeded() }
         contentWrap.isHidden = !isExpanded
     }
 }
