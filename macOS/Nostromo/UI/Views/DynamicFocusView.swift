@@ -306,10 +306,24 @@ final class PaneContentNSView: NSView {
         ])
         hostingView = hosting
 
+        // Force dark appearance explicitly rather than relying on inheritance —
+        // `hosting` below gets the same forced .darkAqua, and a mismatch here
+        // (e.g. this button rendering under a light-appearance ancestor while
+        // hosting forces dark) can leave the glyph an invisible color against
+        // this view's manually-black layer.
+        refreshButton.appearance      = NSAppearance(named: .darkAqua)
         refreshButton.isBordered       = false
-        refreshButton.title            = "↺"
-        refreshButton.font             = .systemFont(ofSize: 12)
-        refreshButton.contentTintColor = .tertiaryLabelColor
+        refreshButton.wantsLayer       = true
+        // A faint background pill so the button has a visible presence even
+        // if contentTintColor doesn't tint a plain-string title the way a
+        // template image would — the corner should never be totally blank.
+        refreshButton.layer?.backgroundColor = NSColor(white: 1, alpha: 0.12).cgColor
+        refreshButton.layer?.cornerRadius     = 4
+        let refreshAttrs: [NSAttributedString.Key: Any] = [
+            .font:            NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.65),
+        ]
+        refreshButton.attributedTitle  = NSAttributedString(string: "↺", attributes: refreshAttrs)
         refreshButton.toolTip          = "Ask the agent to refresh this pane"
         refreshButton.target           = self
         refreshButton.action           = #selector(didTapRefresh)
@@ -318,8 +332,8 @@ final class PaneContentNSView: NSView {
         NSLayoutConstraint.activate([
             refreshButton.topAnchor.constraint(equalTo: topAnchor, constant: 4),
             refreshButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            refreshButton.widthAnchor.constraint(equalToConstant: 18),
-            refreshButton.heightAnchor.constraint(equalToConstant: 18),
+            refreshButton.widthAnchor.constraint(equalToConstant: 20),
+            refreshButton.heightAnchor.constraint(equalToConstant: 20),
         ])
     }
 
@@ -338,9 +352,7 @@ final class PaneContentNSView: NSView {
         let hosting = NSHostingView(rootView: view)
         hosting.translatesAutoresizingMaskIntoConstraints = false
         hosting.appearance = NSAppearance(named: .darkAqua)
-        // Insert below the refresh button so the button stays clickable and
-        // visible above whatever content the agent just pushed.
-        addSubview(hosting, positioned: .below, relativeTo: refreshButton)
+        addSubview(hosting)
         NSLayoutConstraint.activate([
             hosting.topAnchor.constraint(equalTo: topAnchor),
             hosting.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -348,5 +360,11 @@ final class PaneContentNSView: NSView {
             hosting.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         hostingView = hosting
+        // Explicitly reassert the button's z-order every time, rather than
+        // trusting a single one-time `positioned:relativeTo:` insertion —
+        // NSHostingView's own layer promotion timing has been unreliable
+        // here, and this is cheap enough to just redo unconditionally.
+        refreshButton.removeFromSuperview()
+        addSubview(refreshButton)
     }
 }
