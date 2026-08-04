@@ -229,10 +229,11 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
 
     let content = obj.get("message")?.get("content")?;
 
-    // Plain-string content → a human prompt (new turn).
+    // Plain-string content → a human prompt (new turn), unless it's a
+    // harness-injected notification (see is_harness_notification below).
     if let Some(s) = content.as_str() {
         let s = s.to_string();
-        if s.trim().is_empty() {
+        if s.trim().is_empty() || is_harness_notification(&s) {
             return None;
         }
         return Some(ParsedLine::UserPrompt {
@@ -283,7 +284,7 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
         .trim()
         .to_string();
 
-    if text.is_empty() {
+    if text.is_empty() || is_harness_notification(&text) {
         return None;
     }
     Some(ParsedLine::UserPrompt {
@@ -297,6 +298,19 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
             .and_then(|x| x.as_str())
             .map(str::to_string),
     })
+}
+
+/// Wrapper tags Claude Code's own harness injects as plain "user" events for
+/// out-of-band signals — a completed background task (`<task-notification>`),
+/// ambient context (`<system-reminder>`) — arriving on the wire in the exact
+/// same shape as real human input. These are not something a human typed;
+/// rendering one as a chat bubble reads as garbled human input (see the
+/// isSidechain drop above for the same problem with sub-agent prompts).
+/// Checked as a prefix after trimming leading whitespace/newlines, since the
+/// harness sometimes leads with blank lines before the tag.
+fn is_harness_notification(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("<task-notification>") || trimmed.starts_with("<system-reminder>")
 }
 
 fn parse_content_block(b: &Value) -> Option<TurnBlock> {
@@ -856,6 +870,35 @@ mod tests {
         // A sub-agent's prompt is emitted on the parent's stdout as a `user`
         // event with isSidechain:true — it must NOT open a turn.
         let line = r#"{"type":"user","message":{"role":"user","content":"You are a sub-agent. Do X."},"isSidechain":true}"#;
+        assert_eq!(parse_line(line), None);
+    }
+
+    #[test]
+    fn task_notification_user_event_is_dropped() {
+        // A completed background task delivers a <task-notification> block as
+        // a plain "user" event, same wire shape as real human input — must
+        // not open a spurious turn/chat bubble.
+        let line = r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>abc123</task-id>\n<status>completed</status>\n</task-notification>"}}"#;
+        assert_eq!(parse_line(line), None);
+    }
+
+    #[test]
+    fn system_reminder_user_event_is_dropped() {
+        let line = r#"{"type":"user","message":{"role":"user","content":"<system-reminder>Ambient context.</system-reminder>"}}"#;
+        assert_eq!(parse_line(line), None);
+    }
+
+    #[test]
+    fn task_notification_in_text_array_is_dropped() {
+        // Same drop must apply when the notification arrives as a
+        // text-array content shape rather than a plain string.
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<task-notification><status>completed</status></task-notification>"}]}}"#;
+        assert_eq!(parse_line(line), None);
+    }
+
+    #[test]
+    fn leading_whitespace_before_notification_tag_still_drops() {
+        let line = r#"{"type":"user","message":{"role":"user","content":"\n\n<task-notification>...</task-notification>"}}"#;
         assert_eq!(parse_line(line), None);
     }
 
