@@ -158,6 +158,18 @@ This unloads the agent, removes the plist, and deletes the binary.
 |---------------|------------------------------------------------|
 | `--no-daemon` | Skip daemon connection and run in-process mode |
 
+## Health check
+
+```bash
+bin/nostromo-doctor
+```
+
+A one-shot, no-build health check across the daemon, GUI, IPC channel, and
+known agent sessions — one OK/WARN/FAIL/INCONCLUSIVE line per check, a
+next-step for anything not OK, and a non-zero exit iff something FAILed.
+See [`docs/nostromo-doctor.md`](docs/nostromo-doctor.md) for what it checks
+and how to add a check.
+
 ## Phases
 
 - **Phase 1**: Fred + Perri parity via bash `--json` mode
