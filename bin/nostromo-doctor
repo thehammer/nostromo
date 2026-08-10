@@ -1,0 +1,1199 @@
+#!/usr/bin/python3
+"""nostromo-doctor — one-shot health check for the Nostromo system.
+
+Runs a fixed set of checks against the `nostromd` daemon, the macOS GUI, the
+IPC channel between them, and the known persistent agent sessions, then
+prints a plain-language OK/WARN/FAIL/INCONCLUSIVE verdict for each and exits
+non-zero iff at least one check FAILed.
+
+Design constraints (see .claude/prds/nostromo-doctor.md in the primary repo
+checkout for the full rationale):
+
+  - No build/install step to run this tool or to add a check. It is a single
+    stdlib-only script; adding a check means editing this file.
+  - Every external tool is invoked via subprocess with `shell=False` and an
+    absolute, pre-resolved path, with an explicit minimal environment. This
+    means shell builtins/aliases/functions in the invoking shell (e.g. a
+    `log` builtin shadowing the real `log` binary) cannot affect results,
+    because subprocess.run() never goes through a shell at all.
+  - A check that cannot run returns INCONCLUSIVE (a non-OK status with a
+    concrete reason), never a silent OK.
+  - No auto-remediation: checks report and recommend, they never kill,
+    install, restart, or edit anything.
+
+Usage: bin/nostromo-doctor   (no arguments; run from anywhere)
+
+This file is unit-tested (see tests/doctor/) for its pure parse/classify/
+format functions. The live-system checks (socket handshake, ps/git/launchctl
+execution, filesystem globbing) are verified manually — see the manual
+verification checklist in the PR description / docs/nostromo-doctor.md.
+"""
+
+import datetime
+import glob
+import json
+import os
+import re
+import socket
+import struct
+import subprocess
+import sys
+import time
+from collections import namedtuple
+
+# ── status model ─────────────────────────────────────────────────────────────
+
+STATUS_OK = "OK"
+STATUS_WARN = "WARN"
+STATUS_FAIL = "FAIL"
+STATUS_INCONCLUSIVE = "INCONCLUSIVE"
+
+# Precedence for "worst status" purposes: FAIL beats WARN beats INCONCLUSIVE
+# beats OK. WARN and INCONCLUSIVE are both "non-OK, didn't fail" but WARN is
+# a confirmed problem while INCONCLUSIVE is "couldn't tell" — WARN outranks
+# INCONCLUSIVE when both are present.
+_STATUS_PRECEDENCE = (STATUS_FAIL, STATUS_WARN, STATUS_INCONCLUSIVE, STATUS_OK)
+
+CheckResult = namedtuple("CheckResult", ["name", "status", "detail", "next_step"])
+
+
+def validate_check_result(result):
+    """Enforce the runner invariant: OK carries no next_step, non-OK must.
+
+    This is what stops any check from emitting a bare "failed" — every WARN,
+    FAIL, or INCONCLUSIVE must name a concrete next step.
+    """
+    if result.status == STATUS_OK:
+        if result.next_step is not None:
+            raise ValueError(
+                "OK result must not carry a next_step: {!r}".format(result)
+            )
+    else:
+        if not result.next_step:
+            raise ValueError(
+                "non-OK result must carry a non-empty next_step: {!r}".format(result)
+            )
+
+
+def compute_exit_code(results):
+    """Non-zero iff at least one result is FAIL. WARN/INCONCLUSIVE alone -> 0."""
+    return 1 if any(r.status == STATUS_FAIL for r in results) else 0
+
+
+def _worst_of_statuses(statuses):
+    """The worst of an iterable of statuses, per _STATUS_PRECEDENCE. Empty -> OK."""
+    present = set(statuses)
+    for status in _STATUS_PRECEDENCE:
+        if status in present:
+            return status
+    return STATUS_OK
+
+
+def worst_status(results):
+    """The worst status present, per _STATUS_PRECEDENCE. Empty -> OK."""
+    return _worst_of_statuses(r.status for r in results)
+
+
+def _worse_of(a, b):
+    return _worst_of_statuses((a, b))
+
+
+def format_check_line(result):
+    line = "{}  {} — {}".format(result.status, result.name, result.detail)
+    if result.next_step:
+        line += "\n      → next step: {}".format(result.next_step)
+    return line
+
+
+def format_report(results):
+    lines = [format_check_line(r) for r in results]
+    worst = worst_status(results)
+    fails = sum(1 for r in results if r.status == STATUS_FAIL)
+    warns = sum(1 for r in results if r.status == STATUS_WARN)
+    inconclusive = sum(1 for r in results if r.status == STATUS_INCONCLUSIVE)
+    summary = "Summary: {} — {} failure(s), {} warning(s), {} inconclusive".format(
+        worst, fails, warns, inconclusive
+    )
+    return "\n".join(lines + ["", summary])
+
+
+# ── hardened external-tool invocation ───────────────────────────────────────
+
+# Absolute paths only — never resolved through the invoking shell's PATH, and
+# subprocess.run() below always passes shell=False, so shell builtins,
+# aliases, and functions cannot shadow anything here.
+_TOOL_CANDIDATES = {
+    "ps": ["/bin/ps"],
+    "uptime": ["/usr/bin/uptime"],
+    "sysctl": ["/usr/sbin/sysctl"],
+    "launchctl": ["/bin/launchctl"],
+    "git": ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"],
+}
+
+
+def resolve_tool(candidates):
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def resolve_tools():
+    return {name: resolve_tool(candidates) for name, candidates in _TOOL_CANDIDATES.items()}
+
+
+def run_command(path, args, timeout=5):
+    """Run an absolute-path external tool with a minimal explicit environment.
+
+    Never goes through a shell (shell=False, argv list) — immune to shell
+    builtin/alias/function shadowing by construction.
+    """
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": os.environ.get("HOME", "")}
+    result = subprocess.run(
+        [path] + list(args),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+        shell=False,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+# Exceptions that mean "the external tool invocation itself failed" (missing
+# binary, timed out, etc.) as opposed to "it ran and gave us bad output" —
+# the latter is handled by each caller's own parsing logic.
+_SUBPROCESS_ERRORS = (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError)
+
+
+def ps_snapshot(ps_path, fields):
+    """Run `ps -axo <fields>` and parse stdout into row dicts.
+
+    Centralizes the ps-arg-string / parse-field-list pairing so the two
+    (the comma-joined args and the field-name list) can't drift apart.
+    """
+    rc, out, _err = run_command(ps_path, ["-axo", ",".join(fields)])
+    return rc, parse_ps_rows(out, fields)
+
+
+# ── pure helpers: load average / core ratio ─────────────────────────────────
+
+_LOAD_AVERAGE_RE = re.compile(r"load averages?:\s*([0-9]+(?:\.[0-9]+)?)")
+
+
+def parse_load_average(uptime_text):
+    """Parse the 1-minute load average out of `uptime` output.
+
+    Handles both macOS ("load averages: X Y Z") and Linux ("load average:
+    X, Y, Z") phrasing.
+    """
+    match = _LOAD_AVERAGE_RE.search(uptime_text)
+    if not match:
+        raise ValueError("no load average found in: {!r}".format(uptime_text))
+    return float(match.group(1))
+
+
+def classify_load(load1, cores):
+    ratio = load1 / cores
+    if ratio > 2.0:
+        return STATUS_FAIL
+    if ratio > 1.0:
+        return STATUS_WARN
+    return STATUS_OK
+
+
+# ── pure helpers: ps table / process tree ───────────────────────────────────
+
+def parse_ps_rows(ps_output, field_names):
+    """Parse `ps -axo <field_names>` output (header first) into row dicts.
+
+    The last field name captures the remainder of the line verbatim (spaces
+    included) so `command` never gets truncated.
+    """
+    lines = ps_output.splitlines()
+    if not lines:
+        return []
+    rows = []
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        parts = line.split(None, len(field_names) - 1)
+        if len(parts) < len(field_names):
+            continue
+        rows.append(dict(zip(field_names, parts)))
+    return rows
+
+
+def build_descendant_pids(rows, root_pid):
+    """Transitive closure of descendants of root_pid (root itself excluded)."""
+    children_map = {}
+    for row in rows:
+        try:
+            pid = int(row["pid"])
+            ppid = int(row["ppid"])
+        except (KeyError, ValueError):
+            continue
+        children_map.setdefault(ppid, []).append(pid)
+
+    descendants = set()
+    visited = set()
+    queue = list(children_map.get(root_pid, []))
+    while queue:
+        pid = queue.pop()
+        if pid in visited:
+            continue
+        visited.add(pid)
+        descendants.add(pid)
+        queue.extend(children_map.get(pid, []))
+    return descendants
+
+
+def normalize_command_basename(command):
+    command = command.strip()
+    if not command:
+        return ""
+    first_token = command.split(None, 1)[0]
+    return os.path.basename(first_token)
+
+
+def tally_command_pileup(rows):
+    counts = {}
+    for row in rows:
+        name = normalize_command_basename(row.get("command", ""))
+        if not name:
+            continue
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def classify_pileup_counts(counts, warn_threshold=8, fail_threshold=25):
+    result = []
+    for name, count in counts.items():
+        if count >= fail_threshold:
+            result.append((name, count, STATUS_FAIL))
+        elif count >= warn_threshold:
+            result.append((name, count, STATUS_WARN))
+    return result
+
+
+def find_zombie_rows(rows):
+    zombies = []
+    for row in rows:
+        stat = row.get("stat", "")
+        command = row.get("command", "")
+        if "Z" in stat or "<defunct>" in command:
+            zombies.append(row)
+    return zombies
+
+
+def parse_etime(etime):
+    """Parse ps BSD etime ("MM:SS", "HH:MM:SS", "DD-HH:MM:SS") into seconds."""
+    if not etime:
+        raise ValueError("empty etime")
+    days = 0
+    rest = etime
+    if "-" in etime:
+        day_part, rest = etime.split("-", 1)
+        try:
+            days = int(day_part)
+        except ValueError:
+            raise ValueError("invalid etime: {!r}".format(etime))
+    raw_parts = rest.split(":")
+    try:
+        parts = [int(p) for p in raw_parts]
+    except ValueError:
+        raise ValueError("invalid etime: {!r}".format(etime))
+    if len(parts) == 2:
+        hours = 0
+        minutes, seconds = parts
+    elif len(parts) == 3:
+        hours, minutes, seconds = parts
+    else:
+        raise ValueError("invalid etime: {!r}".format(etime))
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+# ── pure helpers: installed-vs-source staleness ─────────────────────────────
+
+def classify_staleness(artifact_mtime, commit_time, tolerance=2.0):
+    """Classify an installed artifact against its latest relevant commit.
+
+    Returns one of: "artifact_absent", "no_commit_info", "current", "stale".
+    A dirty working tree is deliberately NOT a factor here — only committed
+    history is compared, so the operator's in-progress work never trips a
+    false staleness alarm.
+    """
+    if artifact_mtime is None:
+        return "artifact_absent"
+    if commit_time is None:
+        return "no_commit_info"
+    if artifact_mtime >= commit_time - tolerance:
+        return "current"
+    return "stale"
+
+
+def staleness_to_status(reason):
+    return {
+        "current": STATUS_OK,
+        "stale": STATUS_WARN,
+        "artifact_absent": STATUS_INCONCLUSIVE,
+        "no_commit_info": STATUS_INCONCLUSIVE,
+    }[reason]
+
+
+# ── pure helpers: daemon error log filter ───────────────────────────────────
+
+def _parse_iso8601(ts_str):
+    if ts_str.endswith("Z"):
+        ts_str = ts_str[:-1] + "+00:00"
+    # datetime.fromisoformat() in Python 3.9 only accepts a 3- or 6-digit
+    # fractional-second component; tracing-appender emits 6 digits, but
+    # normalize defensively in case that ever changes.
+    match = re.match(r"^(.*?)(\.\d+)?([+-]\d{2}:\d{2})$", ts_str)
+    if match and match.group(2):
+        frac_digits = match.group(2)[1:]
+        frac_digits = (frac_digits + "000000")[:6]
+        ts_str = match.group(1) + "." + frac_digits + match.group(3)
+    dt = datetime.datetime.fromisoformat(ts_str)
+    return dt.timestamp()
+
+
+def filter_recent_error_lines(lines, now_ts, window_seconds):
+    """Keep only ERROR-level, recent (within window_seconds of now_ts) entries.
+
+    Each line is one raw tracing-appender JSON log line. Malformed lines,
+    lines missing "level"/"timestamp", and unparseable timestamps are
+    skipped silently — never raised — so one corrupt line can't crash the
+    check.
+    """
+    kept = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("level") != "ERROR":
+            continue
+        ts_str = entry.get("timestamp")
+        if not ts_str:
+            continue
+        try:
+            ts = _parse_iso8601(ts_str)
+        except (ValueError, TypeError):
+            continue
+        if now_ts - ts <= window_seconds:
+            kept.append(entry)
+    return kept
+
+
+def _tail_lines(path, max_lines=2000, chunk_size=65536):
+    """Read up to the last max_lines lines of a file without loading it whole."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            remaining = f.tell()
+            data = b""
+            while remaining > 0 and data.count(b"\n") <= max_lines:
+                read_size = min(chunk_size, remaining)
+                remaining -= read_size
+                f.seek(remaining)
+                data = f.read(read_size) + data
+            text = data.decode("utf-8", errors="replace")
+            return text.splitlines()[-max_lines:]
+    except OSError:
+        return []
+
+
+# ── pure helpers: per-session stuck-signal classifier ───────────────────────
+
+def classify_session_signal(
+    alive,
+    state,
+    transcript_age_seconds,
+    cpu_percent,
+    stale_turn_threshold=300,
+    cpu_pin_threshold=90.0,
+):
+    """The cry-wolf-critical classifier: idle-but-alive must stay silent.
+
+    Escalates to WARN only on a positive stuck signal (crashed, an in-flight
+    turn that hasn't advanced, or CPU-pinned with no transcript progress).
+    A long-idle, Idle/AwaitingPermission agent with a quiet transcript is
+    OK — silently so. Rules are checked in order; the first match wins.
+    """
+    if state == "Crashed":
+        return (STATUS_WARN, "crashed")
+    if (
+        state == "MidTurn"
+        and transcript_age_seconds is not None
+        and transcript_age_seconds > stale_turn_threshold
+    ):
+        return (STATUS_WARN, "in-flight turn stalled")
+    if (
+        alive
+        and cpu_percent is not None
+        and cpu_percent >= cpu_pin_threshold
+        and transcript_age_seconds is not None
+        and transcript_age_seconds > stale_turn_threshold
+    ):
+        return (STATUS_WARN, "alive but pinned")
+    if not alive:
+        return (STATUS_INCONCLUSIVE, "child not running")
+    return (STATUS_OK, None)
+
+
+def _format_duration(seconds):
+    if seconds is None:
+        return "unknown"
+    seconds = int(seconds)
+    if seconds < 60:
+        return "{}s".format(seconds)
+    minutes = seconds // 60
+    if minutes < 60:
+        return "{}m".format(minutes)
+    hours = minutes // 60
+    minutes = minutes % 60
+    return "{}h{}m".format(hours, minutes)
+
+
+# ── IPC: length-prefixed JSON frames over the daemon's Unix socket ─────────
+
+def ipc_connect(socket_path, timeout=2.0):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect(socket_path)
+    return sock
+
+
+def ipc_write_frame(sock, obj):
+    body = json.dumps(obj).encode("utf-8")
+    header = struct.pack(">I", len(body))
+    sock.sendall(header + body)
+
+
+def _recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("socket closed while reading frame")
+        buf += chunk
+    return buf
+
+
+def ipc_read_frame(sock, timeout=2.0):
+    sock.settimeout(timeout)
+    header = _recv_exact(sock, 4)
+    (length,) = struct.unpack(">I", header)
+    body = _recv_exact(sock, length)
+    return json.loads(body.decode("utf-8"))
+
+
+# ── context setup ────────────────────────────────────────────────────────────
+
+def _repo_root():
+    # bin/nostromo-doctor lives at <repo>/bin/nostromo-doctor.
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def build_context():
+    home = os.path.expanduser("~")
+    return {
+        "tools": resolve_tools(),
+        "uid": os.getuid(),
+        "home": home,
+        "socket_path": os.environ.get("NOSTROMOD_SOCKET")
+        or os.path.join(home, ".nostromo", "nostromd.sock"),
+        "repo_root": _repo_root(),
+        "daemon_pid": None,
+        "gui_pid": None,
+        "ipc_sessions": None,
+    }
+
+
+# ── check 1: daemon liveness ────────────────────────────────────────────────
+
+def _daemon_ps_row(rows):
+    for row in rows:
+        if normalize_command_basename(row.get("command", "")) == "nostromd":
+            return row
+    return None
+
+
+def _launchctl_daemon_state(launchctl, label):
+    """Determine (parsed, running, pid) for nostromd from `launchctl print`.
+
+    parsed=False means the output couldn't be interpreted with confidence;
+    the caller should fall back to a ps-based check rather than trust
+    running/pid.
+    """
+    try:
+        rc, out, _err = run_command(launchctl, ["print", label])
+    except _SUBPROCESS_ERRORS:
+        return False, False, None
+
+    if rc != 0:
+        # not registered with launchd at all.
+        return True, False, None
+
+    m = re.search(r"^\s*pid\s*=\s*(\d+)", out, re.MULTILINE)
+    if m:
+        return True, True, int(m.group(1))
+    if "state = running" in out:
+        # registered and running but the pid line didn't parse — fall back
+        # to a ps match rather than guess.
+        return False, False, None
+    return True, False, None
+
+
+def _ps_daemon_state(ps_path):
+    """ps-based fallback liveness check for nostromd. Returns (running, pid)."""
+    _rc, rows = ps_snapshot(ps_path, ["pid", "etime", "command"])
+    row = _daemon_ps_row(rows)
+    if row:
+        return True, int(row["pid"])
+    return False, None
+
+
+def _daemon_uptime_str(ps_path, pid):
+    if not ps_path:
+        return "unknown"
+    rc, out, _err = run_command(ps_path, ["-o", "etime=", "-p", str(pid)])
+    if rc == 0 and out.strip():
+        return out.strip()
+    return "unknown"
+
+
+def check_daemon_liveness(ctx):
+    name = "daemon liveness"
+    launchctl = ctx["tools"].get("launchctl")
+    if not launchctl:
+        return CheckResult(
+            name,
+            STATUS_INCONCLUSIVE,
+            "launchctl not found at /bin/launchctl — cannot confirm daemon liveness",
+            "verify this is macOS and /bin/launchctl exists",
+        )
+
+    label = "gui/{}/com.hammer.nostromd".format(ctx["uid"])
+    parsed, running, pid = _launchctl_daemon_state(launchctl, label)
+
+    if not parsed:
+        ps_path = ctx["tools"].get("ps")
+        if not ps_path:
+            return CheckResult(
+                name,
+                STATUS_INCONCLUSIVE,
+                "ps unavailable and launchctl output unparseable — cannot determine daemon liveness",
+                "run `launchctl print gui/$(id -u)/com.hammer.nostromd` manually",
+            )
+        running, pid = _ps_daemon_state(ps_path)
+
+    if not running or pid is None:
+        return CheckResult(
+            name,
+            STATUS_FAIL,
+            "nostromd is not running",
+            "daemon not running — check `launchctl print gui/$(id -u)/com.hammer.nostromd` "
+            "and re-run `make install-daemon` if unloaded",
+        )
+
+    ctx["daemon_pid"] = pid
+    uptime_str = _daemon_uptime_str(ctx["tools"].get("ps"), pid)
+    return CheckResult(name, STATUS_OK, "running (pid {}, up {})".format(pid, uptime_str), None)
+
+
+# ── check 2: GUI liveness & CPU ──────────────────────────────────────────────
+
+def check_gui_liveness(ctx):
+    name = "GUI liveness & CPU"
+    ps_path = ctx["tools"].get("ps")
+    if not ps_path:
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE, "ps unavailable — cannot check GUI liveness",
+            "install/repair coreutils; `ps` is required",
+        )
+    _rc, rows = ps_snapshot(ps_path, ["pid", "%cpu", "command"])
+    match = None
+    for row in rows:
+        if "Nostromo.app/Contents/MacOS/Nostromo" in row["command"]:
+            match = row
+            break
+
+    if not match:
+        return CheckResult(name, STATUS_OK, "not running (a closed GUI is a normal state)", None)
+
+    pid = int(match["pid"])
+    try:
+        cpu = float(match["%cpu"])
+    except ValueError:
+        cpu = 0.0
+    ctx["gui_pid"] = pid
+    detail = "running (pid {}, {:.1f}% cpu sampled at check time)".format(pid, cpu)
+
+    if cpu >= 150:
+        return CheckResult(
+            name, STATUS_FAIL, detail,
+            "GUI pid {} pinned at {:.0f}% cpu — `sample {}` and check its child processes "
+            "(see stuck-processes check)".format(pid, cpu, pid),
+        )
+    if cpu >= 90:
+        return CheckResult(
+            name, STATUS_WARN, detail,
+            "GUI pid {} elevated cpu ({:.0f}%) — `sample {}` and check its child processes "
+            "(see stuck-processes check)".format(pid, cpu, pid),
+        )
+    return CheckResult(name, STATUS_OK, detail, None)
+
+
+# ── check 3: IPC channel liveness (real handshake) ──────────────────────────
+
+def _fetch_session_list(sock, budget_seconds=3.0):
+    """Best-effort `session_list` request; None if it can't complete in time."""
+    try:
+        ipc_write_frame(sock, {"type": "session_list"})
+        deadline = time.time() + budget_seconds
+        while time.time() < deadline:
+            remaining = max(0.1, deadline - time.time())
+            frame = ipc_read_frame(sock, timeout=remaining)
+            if frame.get("type") == "session_list_resp":
+                return frame.get("sessions", [])
+    except (OSError, socket.timeout, ValueError, ConnectionError):
+        pass
+    return None
+
+
+def check_ipc_channel(ctx):
+    name = "IPC channel"
+    socket_path = ctx["socket_path"]
+
+    if not os.path.exists(socket_path):
+        return CheckResult(
+            name, STATUS_FAIL, "no socket file at {}".format(socket_path),
+            "no daemon socket — daemon likely down (see daemon-liveness check)",
+        )
+
+    try:
+        sock = ipc_connect(socket_path, timeout=2.0)
+    except (OSError, socket.timeout) as e:
+        return CheckResult(
+            name, STATUS_FAIL, "socket present but connect failed: {}".format(e),
+            "socket present but not responding — daemon may be wedged; consider "
+            "`launchctl kickstart -k gui/$(id -u)/com.hammer.nostromd`",
+        )
+
+    try:
+        hello = {
+            "type": "hello",
+            "client_id": "nostromo-doctor-{}".format(os.getpid()),
+            "protocol_version": 4,
+        }
+        ipc_write_frame(sock, hello)
+        welcome = ipc_read_frame(sock, timeout=2.0)
+        if welcome.get("type") != "welcome":
+            return CheckResult(
+                name, STATUS_FAIL,
+                "socket present but not responding correctly (got {!r} instead of welcome)".format(
+                    welcome.get("type")
+                ),
+                "socket present but not responding — daemon may be wedged; consider "
+                "`launchctl kickstart -k gui/$(id -u)/com.hammer.nostromd`",
+            )
+        daemon_pid = welcome.get("daemon_pid")
+        ctx["ipc_sessions"] = _fetch_session_list(sock)
+        return CheckResult(name, STATUS_OK, "handshake ok, daemon pid {}".format(daemon_pid), None)
+    except (OSError, socket.timeout, ValueError, ConnectionError) as e:
+        return CheckResult(
+            name, STATUS_FAIL, "socket present but not responding: {}".format(e),
+            "socket present but not responding — daemon may be wedged; consider "
+            "`launchctl kickstart -k gui/$(id -u)/com.hammer.nostromd`",
+        )
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+# ── check 4: stuck / piled-up child processes ───────────────────────────────
+
+_TRANSIENT_HELPER_COMMANDS = {"sh", "bash", "zsh"}
+_LONG_LIVED_SECONDS = 30 * 60
+
+
+def _find_stuck_helpers(rows):
+    """Transient shell helpers (sh/bash/zsh) that have run long and are still burning CPU."""
+    problems = []
+    for row in rows:
+        cmd_name = normalize_command_basename(row.get("command", ""))
+        if cmd_name not in _TRANSIENT_HELPER_COMMANDS:
+            continue
+        try:
+            age = parse_etime(row.get("etime", ""))
+            cpu = float(row.get("%cpu", "0"))
+        except ValueError:
+            continue
+        if age > _LONG_LIVED_SECONDS and cpu > 1.0:
+            problems.append(
+                (STATUS_WARN, "`{}` (pid {}) has run {} and is still using {:.1f}% cpu".format(
+                    cmd_name, row.get("pid"), _format_duration(age), cpu
+                ))
+            )
+    return problems
+
+
+def check_stuck_processes(ctx):
+    name = "stuck / piled-up child processes"
+    ps_path = ctx["tools"].get("ps")
+    if not ps_path:
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE, "ps unavailable — cannot check for stuck processes",
+            "install/repair coreutils; `ps` is required",
+        )
+
+    roots = [pid for pid in (ctx.get("daemon_pid"), ctx.get("gui_pid")) if pid]
+    if not roots:
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE,
+            "neither daemon nor GUI pid is known — cannot walk descendants",
+            "re-run after confirming the daemon-liveness / GUI-liveness checks",
+        )
+
+    _rc, rows = ps_snapshot(ps_path, ["pid", "ppid", "etime", "%cpu", "stat", "command"])
+
+    descendant_pids = set()
+    for root in roots:
+        descendant_pids |= build_descendant_pids(rows, root)
+    descendant_rows = [r for r in rows if int(r["pid"]) in descendant_pids]
+
+    problems = []
+
+    for cmd, count, status in classify_pileup_counts(tally_command_pileup(descendant_rows)):
+        problems.append((status, "{} instances of `{}` piled up under daemon/GUI".format(count, cmd)))
+
+    for zombie in find_zombie_rows(descendant_rows):
+        problems.append(
+            (STATUS_WARN, "zombie/defunct process pid {} ({})".format(
+                zombie.get("pid", "?"), zombie.get("command", "?")
+            ))
+        )
+
+    problems.extend(_find_stuck_helpers(descendant_rows))
+
+    if not problems:
+        return CheckResult(
+            name, STATUS_OK,
+            "no pile-ups, zombies, or stuck helper processes under daemon/GUI "
+            "({} descendants checked)".format(len(descendant_rows)),
+            None,
+        )
+
+    worst = STATUS_FAIL if any(status == STATUS_FAIL for status, _ in problems) else STATUS_WARN
+    detail = "; ".join(msg for _, msg in problems)
+    next_step = "inspect the pids named above and, if appropriate, `kill` them by hand " \
+        "(this tool never kills anything for you)"
+    return CheckResult(name, worst, detail, next_step)
+
+
+# ── check 5: load average vs. core count ────────────────────────────────────
+
+def check_load_average(ctx):
+    name = "load average"
+    uptime_path = ctx["tools"].get("uptime")
+    sysctl_path = ctx["tools"].get("sysctl")
+    if not uptime_path or not sysctl_path:
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE, "uptime/sysctl unavailable — cannot check load",
+            "install/repair coreutils; `uptime` and `sysctl` are required",
+        )
+
+    _rc, uptime_out, _err = run_command(uptime_path, [])
+    try:
+        load1 = parse_load_average(uptime_out)
+    except ValueError:
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE,
+            "could not parse `uptime` output: {!r}".format(uptime_out.strip()),
+            "run `uptime` manually and inspect its output format",
+        )
+
+    _rc2, cores_out, _err2 = run_command(sysctl_path, ["-n", "hw.logicalcpu"])
+    try:
+        cores = int(cores_out.strip())
+    except ValueError:
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE, "could not parse core count from sysctl",
+            "run `sysctl -n hw.logicalcpu` manually",
+        )
+
+    status = classify_load(load1, cores)
+    detail = "load1 {:.2f} across {} cores (ratio {:.2f})".format(load1, cores, load1 / cores)
+    if status == STATUS_OK:
+        return CheckResult(name, STATUS_OK, detail, None)
+
+    ps_path = ctx["tools"].get("ps")
+    offenders = "top offenders unavailable (ps missing)"
+    if ps_path:
+        rc3, ps_out, _err3 = run_command(ps_path, ["-Ao", "pid,%cpu,comm", "-r"])
+        if rc3 == 0:
+            top_lines = [l.strip() for l in ps_out.splitlines()[1:] if l.strip()][:5]
+            offenders = "; ".join(top_lines)
+    detail = "{} — top offenders: {}".format(detail, offenders)
+    next_step = "load is high — inspect/kill the top offenders: {}".format(offenders)
+    return CheckResult(name, status, detail, next_step)
+
+
+# ── check 6: installed-vs-source staleness ──────────────────────────────────
+
+def _artifact_mtime(path):
+    try:
+        return os.stat(os.path.realpath(path)).st_mtime
+    except OSError:
+        return None
+
+
+def _latest_commit_time(ctx, paths):
+    git = ctx["tools"].get("git")
+    repo_root = ctx["repo_root"]
+    if not git or not repo_root:
+        return None
+    args = ["-C", repo_root, "log", "-1", "--format=%ct", "--"] + list(paths)
+    try:
+        rc, out, _err = run_command(git, args, timeout=5)
+    except _SUBPROCESS_ERRORS:
+        return None
+    if rc != 0 or not out.strip():
+        return None
+    try:
+        return float(out.strip())
+    except ValueError:
+        return None
+
+
+def _working_tree_dirty(ctx):
+    git = ctx["tools"].get("git")
+    if not git or not ctx["repo_root"]:
+        return False
+    try:
+        rc, out, _err = run_command(git, ["-C", ctx["repo_root"], "status", "--porcelain"], timeout=5)
+    except _SUBPROCESS_ERRORS:
+        return False
+    return rc == 0 and bool(out.strip())
+
+
+def _describe_staleness(reason, mtime, commit_time, path):
+    if reason == "artifact_absent":
+        return "{} not found (may be running from a dev/cargo-run build)".format(path)
+    if reason == "no_commit_info":
+        return "{} present but no git history found for its source paths".format(path)
+    mtime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+    commit_str = datetime.datetime.fromtimestamp(commit_time).strftime("%Y-%m-%d %H:%M")
+    if reason == "current":
+        return "current (installed {}, latest commit {})".format(mtime_str, commit_str)
+    return "STALE (installed {}, latest commit {})".format(mtime_str, commit_str)
+
+
+def _staleness_check(ctx, artifact_path, source_paths):
+    """(mtime, commit_time, reason, status) for one artifact vs. its source paths."""
+    mtime = _artifact_mtime(artifact_path)
+    commit_time = _latest_commit_time(ctx, source_paths)
+    reason = classify_staleness(mtime, commit_time)
+    return mtime, commit_time, reason, staleness_to_status(reason)
+
+
+def check_staleness(ctx):
+    name = "installed-vs-source staleness"
+    daemon_path = os.path.join(ctx["home"], ".local", "bin", "nostromd")
+    gui_path = "/Applications/Nostromo.app/Contents/MacOS/Nostromo"
+
+    daemon_mtime, daemon_commit, daemon_reason, daemon_status = _staleness_check(
+        ctx, daemon_path, ["src", "Cargo.toml", "Cargo.lock"]
+    )
+    gui_mtime, gui_commit, gui_reason, gui_status = _staleness_check(
+        ctx, gui_path, ["macOS", "Shared"]
+    )
+
+    detail = "daemon: {}; GUI: {}".format(
+        _describe_staleness(daemon_reason, daemon_mtime, daemon_commit, daemon_path),
+        _describe_staleness(gui_reason, gui_mtime, gui_commit, gui_path),
+    )
+    if _working_tree_dirty(ctx):
+        detail += " (note: working tree has uncommitted changes — not used for staleness)"
+
+    overall = _worse_of(daemon_status, gui_status)
+    if overall == STATUS_OK:
+        return CheckResult(name, STATUS_OK, detail, None)
+
+    next_steps = []
+    if daemon_status == STATUS_WARN:
+        next_steps.append("installed nostromd predates its latest source commit — run `make install`")
+    if gui_status == STATUS_WARN:
+        next_steps.append("installed Nostromo.app predates its latest source commit — run `make mac-install`")
+    if daemon_status == STATUS_INCONCLUSIVE:
+        next_steps.append("daemon staleness inconclusive ({})".format(daemon_reason))
+    if gui_status == STATUS_INCONCLUSIVE:
+        next_steps.append("GUI staleness inconclusive ({})".format(gui_reason))
+
+    return CheckResult(name, overall, detail, "; ".join(next_steps))
+
+
+# ── check 7: recent daemon errors ───────────────────────────────────────────
+
+_ERROR_WINDOW_SECONDS = 15 * 60
+
+
+def check_daemon_errors(ctx):
+    name = "recent daemon errors"
+    log_dir = os.path.join(ctx["home"], ".cache", "nostromd", "log")
+    if not os.path.isdir(log_dir):
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE, "log directory {} not found".format(log_dir),
+            "cannot confirm daemon health from logs — check that nostromd is installed "
+            "and has run at least once",
+        )
+
+    candidates = glob.glob(os.path.join(log_dir, "nostromd.log.*"))
+    if not candidates:
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE, "no nostromd.log.* files found in {}".format(log_dir),
+            "cannot confirm daemon health from logs — check {}".format(log_dir),
+        )
+
+    latest = max(candidates, key=os.path.getmtime)
+    lines = _tail_lines(latest, max_lines=2000)
+    recent_errors = filter_recent_error_lines(lines, time.time(), _ERROR_WINDOW_SECONDS)
+
+    if not recent_errors:
+        return CheckResult(
+            name, STATUS_OK,
+            "no ERROR-level entries in the last 15m ({})".format(os.path.basename(latest)),
+            None,
+        )
+
+    sample = recent_errors[0]
+    sample_msg = sample.get("fields", {}).get("message", "?")
+    sample_target = sample.get("target", "?")
+    detail = "{} recent ERROR(s) in {} — sample: [{}] {}".format(
+        len(recent_errors), os.path.basename(latest), sample_target, sample_msg
+    )
+    next_step = "recent daemon errors — inspect `{}`".format(latest)
+    return CheckResult(name, STATUS_WARN, detail, next_step)
+
+
+# ── check 8: per-known-session progress ─────────────────────────────────────
+
+_SESSION_HEADER_RE = re.compile(r"^\[sessions\.([^\]]+)\]\s*$")
+
+
+def _parse_session_tags(path):
+    if not os.path.isfile(path):
+        return []
+    tags = []
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                m = _SESSION_HEADER_RE.match(line.strip())
+                if m:
+                    tags.append(m.group(1))
+    except OSError:
+        return []
+    return tags
+
+
+def _find_transcript_mtime(session_id):
+    if not session_id:
+        return None
+    pattern = os.path.join(
+        os.path.expanduser("~"), ".claude", "projects", "**", "{}.jsonl".format(session_id)
+    )
+    matches = glob.glob(pattern, recursive=True)
+    if not matches:
+        return None
+    return max(os.path.getmtime(m) for m in matches)
+
+
+def _match_session_ps_row(ps_rows, tag):
+    agent_flag = "--agent {}".format(tag)
+    return next((r for r in ps_rows if agent_flag in r["command"]), None)
+
+
+def _session_identity(info, fallback_session_ids, tag, matching_row):
+    """(alive, state, session_id) for one known session tag.
+
+    Prefers live IPC session info; falls back to a ps match plus the
+    daemon's last-known session-id mapping when IPC didn't report this tag.
+    """
+    if info:
+        return bool(info.get("alive")), info.get("state"), info.get("session_id")
+    return matching_row is not None, None, fallback_session_ids.get(tag)
+
+
+def _session_cpu_percent(matching_row):
+    if matching_row is None:
+        return None
+    try:
+        return float(matching_row["%cpu"])
+    except ValueError:
+        return None
+
+
+def _classify_known_session(alive, state, transcript_age, cpu_percent):
+    """classify_session_signal(), plus the "no IPC state at all" fallback."""
+    if state is not None:
+        return classify_session_signal(alive, state, transcript_age, cpu_percent)
+    if not alive:
+        return STATUS_INCONCLUSIVE, "child not running"
+    return STATUS_OK, None
+
+
+def _describe_known_session(tag, alive, state, transcript_age):
+    state_desc = " ({})".format(state) if state else ""
+    activity_desc = (
+        "last active {} ago".format(_format_duration(transcript_age))
+        if transcript_age is not None
+        else "last-activity unknown"
+    )
+    return "{}: {}{}, {}".format(tag, "alive" if alive else "not alive", state_desc, activity_desc)
+
+
+def _known_session_next_step(tag, status, reason):
+    if status == STATUS_INCONCLUSIVE:
+        return "{}: {} — verify with `launchctl`/`ps` whether it should be running".format(tag, reason)
+    return "{}: {} — check its pane / `sample <pid>`".format(tag, reason)
+
+
+def check_session_progress(ctx):
+    name = "per-known-session progress"
+    sessions_toml = os.path.join(ctx["home"], ".nostromo", "sessions.toml")
+    tags = _parse_session_tags(sessions_toml)
+    if not tags:
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE, "no known sessions found in {}".format(sessions_toml),
+            "check that {} exists and has [sessions.<tag>] entries".format(sessions_toml),
+        )
+
+    ipc_sessions = ctx.get("ipc_sessions")
+    by_tag = {s.get("tag"): s for s in ipc_sessions} if ipc_sessions else {}
+
+    daemon_sessions_path = os.path.join(ctx["home"], ".nostromo", "daemon-sessions.json")
+    fallback_session_ids = {}
+    if os.path.isfile(daemon_sessions_path):
+        try:
+            with open(daemon_sessions_path) as f:
+                fallback_session_ids = json.load(f)
+        except (OSError, ValueError):
+            fallback_session_ids = {}
+
+    ps_path = ctx["tools"].get("ps")
+    ps_rows = []
+    if ps_path:
+        _rc, ps_rows = ps_snapshot(ps_path, ["pid", "%cpu", "command"])
+
+    now_ts = time.time()
+    facts = []
+    worst = STATUS_OK
+    next_steps = []
+
+    for tag in tags:
+        info = by_tag.get(tag)
+        matching_row = _match_session_ps_row(ps_rows, tag)
+        alive, state, session_id = _session_identity(info, fallback_session_ids, tag, matching_row)
+
+        transcript_mtime = _find_transcript_mtime(session_id)
+        transcript_age = (now_ts - transcript_mtime) if transcript_mtime is not None else None
+        cpu_percent = _session_cpu_percent(matching_row)
+
+        status, reason = _classify_known_session(alive, state, transcript_age, cpu_percent)
+        facts.append(_describe_known_session(tag, alive, state, transcript_age))
+
+        if status != STATUS_OK:
+            worst = _worse_of(worst, status)
+            next_steps.append(_known_session_next_step(tag, status, reason))
+
+    detail = "; ".join(facts)
+    next_step = "; ".join(next_steps) if next_steps else None
+    return CheckResult(name, worst, detail, next_step)
+
+
+# ── check 9: known-session view/pane registry sanity ────────────────────────
+
+def check_pane_registry(ctx):
+    name = "session pane registry"
+    panes_path = os.path.join(ctx["home"], ".nostromo", "daemon-panes.json")
+    if not os.path.isfile(panes_path):
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE, "{} not found".format(panes_path),
+            "cannot inspect pane registry — check that the daemon has run and persisted daemon-panes.json",
+        )
+
+    try:
+        with open(panes_path) as f:
+            panes = json.load(f)
+    except (OSError, ValueError) as e:
+        return CheckResult(
+            name, STATUS_INCONCLUSIVE, "could not parse {}: {}".format(panes_path, e),
+            "inspect {} by hand — it may be corrupt".format(panes_path),
+        )
+
+    sessions_toml = os.path.join(ctx["home"], ".nostromo", "sessions.toml")
+    tags = _parse_session_tags(sessions_toml)
+
+    facts = []
+    for tag in tags:
+        entry = panes.get(tag)
+        if entry is None:
+            facts.append("{}: no registry entry".format(tag))
+            continue
+        collapsed = entry.get("kind") == "leaf" and entry.get("pane_id") == "repl"
+        if collapsed:
+            facts.append("{}: collapsed default".format(tag))
+        else:
+            facts.append("{}: applied layout ({})".format(tag, entry.get("kind")))
+
+    detail = "; ".join(facts) if facts else "no known sessions to check"
+    return CheckResult(name, STATUS_OK, detail, None)
+
+
+# ── runner ───────────────────────────────────────────────────────────────────
+
+CHECKS = [
+    check_daemon_liveness,
+    check_gui_liveness,
+    check_ipc_channel,
+    check_stuck_processes,
+    check_load_average,
+    check_staleness,
+    check_daemon_errors,
+    check_session_progress,
+    check_pane_registry,
+]
+
+
+def run_checks(ctx, checks=CHECKS):
+    results = []
+    for check_fn in checks:
+        try:
+            result = check_fn(ctx)
+        except Exception as e:  # noqa: BLE001 — a crashing check must not crash the tool
+            result = CheckResult(
+                name=getattr(check_fn, "__name__", "unknown check"),
+                status=STATUS_INCONCLUSIVE,
+                detail="check crashed unexpectedly: {}: {}".format(type(e).__name__, e),
+                next_step="re-run nostromo-doctor; if this persists, it's a bug in the doctor itself",
+            )
+        validate_check_result(result)
+        results.append(result)
+    return results
+
+
+def main():
+    ctx = build_context()
+    results = run_checks(ctx)
+    print(format_report(results))
+    return compute_exit_code(results)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
