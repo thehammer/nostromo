@@ -703,47 +703,47 @@ class ClassifySessionSignalTests(unittest.TestCase):
         cases = [
             (
                 "long idle is not a warn",
-                dict(alive=True, state="Idle", transcript_age_seconds=99999, cpu_percent=0.5),
+                dict(alive=True, state="idle", transcript_age_seconds=99999, cpu_percent=0.5),
                 (doctor.STATUS_OK, None),
             ),
             (
                 "awaiting permission is not a warn",
-                dict(alive=True, state="AwaitingPermission", transcript_age_seconds=99999, cpu_percent=0.1),
+                dict(alive=True, state="awaiting_permission", transcript_age_seconds=99999, cpu_percent=0.1),
                 (doctor.STATUS_OK, None),
             ),
             (
                 "mid-turn recently active is ok",
-                dict(alive=True, state="MidTurn", transcript_age_seconds=10, cpu_percent=50.0),
+                dict(alive=True, state="mid_turn", transcript_age_seconds=10, cpu_percent=50.0),
                 (doctor.STATUS_OK, None),
             ),
             (
                 "mid-turn stalled past threshold is warn",
-                dict(alive=True, state="MidTurn", transcript_age_seconds=600, cpu_percent=50.0),
+                dict(alive=True, state="mid_turn", transcript_age_seconds=600, cpu_percent=50.0),
                 (doctor.STATUS_WARN, "in-flight turn stalled"),
             ),
             (
                 "crashed state is warn regardless of other fields",
-                dict(alive=True, state="Crashed", transcript_age_seconds=10, cpu_percent=0.0),
+                dict(alive=True, state="crashed", transcript_age_seconds=10, cpu_percent=0.0),
                 (doctor.STATUS_WARN, "crashed"),
             ),
             (
                 "alive, idle, pinned cpu, and stale transcript is warn",
-                dict(alive=True, state="Idle", transcript_age_seconds=600, cpu_percent=95.0),
+                dict(alive=True, state="idle", transcript_age_seconds=600, cpu_percent=95.0),
                 (doctor.STATUS_WARN, "alive but pinned"),
             ),
             (
                 "pinned cpu but transcript just advanced is not yet stuck",
-                dict(alive=True, state="Idle", transcript_age_seconds=10, cpu_percent=95.0),
+                dict(alive=True, state="idle", transcript_age_seconds=10, cpu_percent=95.0),
                 (doctor.STATUS_OK, None),
             ),
             (
                 "child not running is inconclusive",
-                dict(alive=False, state="Idle", transcript_age_seconds=None, cpu_percent=None),
+                dict(alive=False, state="idle", transcript_age_seconds=None, cpu_percent=None),
                 (doctor.STATUS_INCONCLUSIVE, "child not running"),
             ),
             (
                 "alive with unknown age and cpu has nothing positive to flag",
-                dict(alive=True, state="Idle", transcript_age_seconds=None, cpu_percent=None),
+                dict(alive=True, state="idle", transcript_age_seconds=None, cpu_percent=None),
                 (doctor.STATUS_OK, None),
             ),
         ]
@@ -753,11 +753,11 @@ class ClassifySessionSignalTests(unittest.TestCase):
                 self.assertEqual(result, expected)
 
     def test_crashed_takes_precedence_over_mid_turn_staleness(self):
-        # Rule order: Crashed (rule 1) must win even if state/age would
+        # Rule order: crashed (rule 1) must win even if state/age would
         # otherwise match a later rule's shape (defensive against a state
-        # value of "Crashed" being combined with the MidTurn-like fields).
+        # value of "crashed" being combined with the mid_turn-like fields).
         result = doctor.classify_session_signal(
-            alive=True, state="Crashed", transcript_age_seconds=99999, cpu_percent=99.0
+            alive=True, state="crashed", transcript_age_seconds=99999, cpu_percent=99.0
         )
         self.assertEqual(result, (doctor.STATUS_WARN, "crashed"))
 
@@ -765,28 +765,28 @@ class ClassifySessionSignalTests(unittest.TestCase):
         # Rule 2 requires transcript_age_seconds to be known; unknown age
         # must not be treated as "definitely stale".
         result = doctor.classify_session_signal(
-            alive=True, state="MidTurn", transcript_age_seconds=None, cpu_percent=50.0
+            alive=True, state="mid_turn", transcript_age_seconds=None, cpu_percent=50.0
         )
         self.assertEqual(result, (doctor.STATUS_OK, None))
 
     def test_pinned_cpu_rule_requires_known_cpu_and_age(self):
         # alive + high cpu but age unknown must not trigger "alive but pinned".
         result = doctor.classify_session_signal(
-            alive=True, state="Idle", transcript_age_seconds=None, cpu_percent=95.0
+            alive=True, state="idle", transcript_age_seconds=None, cpu_percent=95.0
         )
         self.assertEqual(result, (doctor.STATUS_OK, None))
 
     def test_dead_child_is_inconclusive_even_with_crashed_state(self):
         # not-alive (rule 4) only fires when earlier rules don't match;
-        # "Crashed" state matches rule 1 first regardless of alive.
+        # "crashed" state matches rule 1 first regardless of alive.
         result = doctor.classify_session_signal(
-            alive=False, state="Crashed", transcript_age_seconds=None, cpu_percent=None
+            alive=False, state="crashed", transcript_age_seconds=None, cpu_percent=None
         )
         self.assertEqual(result, (doctor.STATUS_WARN, "crashed"))
 
     def test_not_alive_with_idle_state_and_no_data_is_inconclusive(self):
         result = doctor.classify_session_signal(
-            alive=False, state="Idle", transcript_age_seconds=None, cpu_percent=None
+            alive=False, state="idle", transcript_age_seconds=None, cpu_percent=None
         )
         self.assertEqual(result, (doctor.STATUS_INCONCLUSIVE, "child not running"))
 
@@ -795,7 +795,7 @@ class ClassifySessionSignalTests(unittest.TestCase):
         # wouldn't trip under defaults.
         result = doctor.classify_session_signal(
             alive=True,
-            state="MidTurn",
+            state="mid_turn",
             transcript_age_seconds=50,
             cpu_percent=50.0,
             stale_turn_threshold=30,
@@ -804,10 +804,38 @@ class ClassifySessionSignalTests(unittest.TestCase):
 
     def test_returns_a_two_tuple(self):
         result = doctor.classify_session_signal(
-            alive=True, state="Idle", transcript_age_seconds=5, cpu_percent=1.0
+            alive=True, state="idle", transcript_age_seconds=5, cpu_percent=1.0
         )
         self.assertIsInstance(result, tuple)
         self.assertEqual(len(result), 2)
+
+    def test_state_values_match_daemon_wire_format(self):
+        # Anchor against the real values, not just internal self-consistency.
+        # SessionState (src/ipc/stream_json.rs) is
+        # `#[serde(rename_all = "snake_case")]` over { Idle, MidTurn,
+        # AwaitingPermission, Crashed } — the wire value is always the
+        # snake_case form, never the Rust variant's PascalCase spelling. A
+        # prior version of this test used the PascalCase strings directly,
+        # which let classify_session_signal() silently never match real
+        # session_list_resp data (every comparison false -> always OK) while
+        # staying green, because the fixtures shared the same wrong casing as
+        # the bug. If the daemon ever renames a variant, update this literal
+        # list *and* re-verify against a live `session_list` response body —
+        # don't just make the test pass again.
+        daemon_wire_states = {"idle", "mid_turn", "awaiting_permission", "crashed"}
+        warn_states = {"crashed", "mid_turn"}
+        for state in sorted(daemon_wire_states):
+            with self.subTest(state=state):
+                status, _reason = doctor.classify_session_signal(
+                    alive=True,
+                    state=state,
+                    transcript_age_seconds=99999,
+                    cpu_percent=0.0,
+                )
+                if state in warn_states:
+                    self.assertEqual(status, doctor.STATUS_WARN)
+                else:
+                    self.assertEqual(status, doctor.STATUS_OK)
 
 
 if __name__ == "__main__":

@@ -420,13 +420,18 @@ def classify_session_signal(
 
     Escalates to WARN only on a positive stuck signal (crashed, an in-flight
     turn that hasn't advanced, or CPU-pinned with no transcript progress).
-    A long-idle, Idle/AwaitingPermission agent with a quiet transcript is
+    A long-idle, idle/awaiting_permission agent with a quiet transcript is
     OK — silently so. Rules are checked in order; the first match wins.
+
+    `state` is the daemon's wire value verbatim — SessionState is
+    `#[serde(rename_all = "snake_case")]` in src/ipc/stream_json.rs, so this
+    expects "idle" / "mid_turn" / "awaiting_permission" / "crashed", never
+    PascalCase.
     """
-    if state == "Crashed":
+    if state == "crashed":
         return (STATUS_WARN, "crashed")
     if (
-        state == "MidTurn"
+        state == "mid_turn"
         and transcript_age_seconds is not None
         and transcript_age_seconds > stale_turn_threshold
     ):
