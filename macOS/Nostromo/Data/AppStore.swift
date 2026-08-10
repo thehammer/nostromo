@@ -331,22 +331,29 @@ class AppStore: ObservableObject {
         }
     }
 
+    /// True while a `pollMotherList()` subprocess is in flight. Read/written only
+    /// on the main thread (the timer fires on `.main`, and the background poll's
+    /// completion always hops back to `.main` before touching this), so no lock
+    /// is needed. Guards against unbounded subprocess pileup: without it, a
+    /// single stuck poll (e.g. a pipe deadlock) would leave every subsequent
+    /// 30s tick free to spawn yet another subprocess on top of it.
+    private var motherPollInFlight = false
+
     private func pollMotherList() {
+        guard !motherPollInFlight else { return }
         guard let bin = AppStore.findBinary("mother") else { return }
+        motherPollInFlight = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let proc = Process()
-            proc.executableURL = bin
-            proc.arguments = ["list", "--format", "json"]
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            try? proc.run()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else { return }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            defer {
+                DispatchQueue.main.async { self?.motherPollInFlight = false }
+            }
+            guard let result = ProcessRunner.runCapturingStdout(bin, arguments: ["list", "--format", "json"]),
+                  result.status == 0
+            else { return }
             // Parse just the job ids and states to detect jobs that have been
             // externally archived (removed from mother's list) so we can remove
             // them from our jobMap without a broker event.
-            guard let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+            guard let raw = try? JSONSerialization.jsonObject(with: result.data) as? [[String: Any]] else { return }
             let liveIds = Set(raw.compactMap { $0["id"] as? String })
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -655,13 +662,10 @@ class AppStore: ObservableObject {
         if let hit = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
             return URL(fileURLWithPath: hit)
         }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        proc.arguments     = [name]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        try? proc.run(); proc.waitUntilExit()
-        let p = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        guard let result = ProcessRunner.runCapturingStdout(URL(fileURLWithPath: "/usr/bin/which"), arguments: [name]) else {
+            return nil
+        }
+        let p = String(data: result.data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return p.isEmpty ? nil : URL(fileURLWithPath: p)
     }
