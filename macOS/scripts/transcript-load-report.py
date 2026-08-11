@@ -138,10 +138,17 @@ def main():
 
     # A transcript that empties itself is the most alarming thing this pane can
     # do. Reported explicitly so a drop in retained turns is never a mystery.
-    clears = max((p.get("transcriptClears", 0) for r in rows for p in r["panes"]),
-                 default=0)
-    add("transcript never cleared during the run", clears == 0,
-        f"{clears} clears", "0")
+    instrumented = any("transcriptClears" in p for r in rows for p in r["panes"])
+    if instrumented:
+        clears = max((p.get("transcriptClears", 0) for r in rows for p in r["panes"]),
+                     default=0)
+        add("transcript never cleared during the run", clears == 0,
+            f"{clears} clears", "0")
+    else:
+        # Absent is not zero. A run recorded before the counter existed must not
+        # be allowed to report a clean bill of health it never earned.
+        add("transcript never cleared during the run", False,
+            "not instrumented in this run", "0")
 
     # Retained turns must only ever grow (below the retention cap).
     worst_drop = 0
