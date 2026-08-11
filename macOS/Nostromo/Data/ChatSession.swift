@@ -10,12 +10,11 @@ private let log = Logger(subsystem: "com.hammer.nostromo", category: "chat")
 
 /// A precise description of what just changed in `ChatSession.turns`.
 ///
-/// `@Published turns` remains the addressable model — virtualization needs
-/// random access by index — but it is no longer what drives rendering. It fires
-/// on every block append, and `ReplView` used to respond by walking the *entire*
-/// turn array, so the cost of painting one streamed token rose linearly with
-/// session length. Subscribers use this instead and do O(changed) work,
-/// consulting `turns` only by index.
+/// `turns` remains the addressable model — virtualization needs random access by
+/// index — but it is not what drives rendering. `ReplView` used to respond to
+/// every published change by walking the *entire* turn array, so the cost of
+/// painting one streamed token rose linearly with session length. Subscribers
+/// use this instead and do O(changed) work, consulting `turns` only by index.
 enum TurnChange {
     /// One turn was appended at `index`.
     case appended(index: Int)
@@ -167,6 +166,12 @@ class ChatSession: ObservableObject {
     /// Clear the local display and start a fresh daemon session (new claude
     /// session id on the next message).
     func newSession() {
+        // Counted and reported. A transcript that empties itself is the single
+        // most alarming thing this pane can do, and working out *why* after the
+        // fact — from a diagnostics stream that only recorded the turn count
+        // going 57 -> 2 — is not something to do twice.
+        transcriptClears += 1
+        log.info("ChatSession[\(self.tag, privacy: .public)] newSession — transcript cleared (clears=\(self.transcriptClears))")
         turns = []
         payloadStore.clear()
         currentSessionId = nil
@@ -287,6 +292,7 @@ class ChatSession: ObservableObject {
                                                 sessionIdChanged: sessionIdChanged)
 
         if outcome.didReplaceAll {
+            transcriptClears += 1
             payloadStore.clear()
         } else {
             // Turns the splice dropped (a replaced tail) release their payloads.
@@ -440,6 +446,12 @@ class ChatSession: ObservableObject {
 
     /// Turns still holding an uncompressed payload, for diagnostics.
     var hotPayloadTurnCount: Int { turns.count - payloadStore.stats.coldTurns }
+
+    /// How many times this transcript has been emptied — by New Session, by a
+    /// quick action with `clearFirst`, or by an attach snapshot that shared no
+    /// common ground with a *different* session id. Reported by
+    /// `TranscriptDiagnostics` so a drop in retained turns is never a mystery.
+    private(set) var transcriptClears = 0
 
     // MARK: - Mapping (daemon model → GUI model)
 

@@ -27,6 +27,7 @@ enum TranscriptDiagnostics {
         var hotPayloadTurnCount: Int { get }
         var compressedPayloadBytes: Int { get }
         var estimatedDocumentHeight: Double { get }
+        var transcriptClearCount: Int { get }
     }
 
     // MARK: - Registry
@@ -79,6 +80,7 @@ enum TranscriptDiagnostics {
         let hotPayloadTurns: Int
         let compressedPayloadBytes: Int
         let estimatedDocHeight: Double
+        let transcriptClears: Int
     }
 
     struct Report: Encodable {
@@ -100,7 +102,8 @@ enum TranscriptDiagnostics {
                               materializedViews: pane.materializedViewCount,
                               hotPayloadTurns: pane.hotPayloadTurnCount,
                               compressedPayloadBytes: pane.compressedPayloadBytes,
-                              estimatedDocHeight: pane.estimatedDocumentHeight)
+                              estimatedDocHeight: pane.estimatedDocumentHeight,
+                              transcriptClears: pane.transcriptClearCount)
         }
         return Report(timestamp: ISO8601DateFormatter().string(from: Date()),
                       physFootprintBytes: footprint,

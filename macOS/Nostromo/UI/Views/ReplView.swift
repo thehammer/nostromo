@@ -614,6 +614,7 @@ extension ReplView: TranscriptDiagnostics.Reporting {
     var hotPayloadTurnCount: Int        { session.hotPayloadTurnCount }
     var compressedPayloadBytes: Int     { session.payloadStore.stats.compressedBytes }
     var estimatedDocumentHeight: Double { Double(virtualizer.documentHeight) }
+    var transcriptClearCount: Int       { session.transcriptClears }
 }
 
 // MARK: - ReplClipView

@@ -136,6 +136,24 @@ def main():
     add("hot payload window bounded", hot <= 210, f"{hot} turns hot",
         "<= 200 + in-flight")
 
+    # A transcript that empties itself is the most alarming thing this pane can
+    # do. Reported explicitly so a drop in retained turns is never a mystery.
+    clears = max((p.get("transcriptClears", 0) for r in rows for p in r["panes"]),
+                 default=0)
+    add("transcript never cleared during the run", clears == 0,
+        f"{clears} clears", "0")
+
+    # Retained turns must only ever grow (below the retention cap).
+    worst_drop = 0
+    prev = {}
+    for r in rows:
+        for pane in r["panes"]:
+            was = prev.get(pane["tag"], 0)
+            worst_drop = max(worst_drop, was - pane["retainedTurns"])
+            prev[pane["tag"]] = pane["retainedTurns"]
+    add("retained turns monotonic", worst_drop == 0,
+        f"largest drop: {worst_drop} turns", "0 (below the retention cap)")
+
     # Per-delta cost does not grow with session length.
     curve = throughput_curve(rows)
     if len(curve) >= 2:
