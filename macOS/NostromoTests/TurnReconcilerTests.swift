@@ -745,4 +745,74 @@ final class TurnReconcilerTests: XCTestCase {
                            file: file, line: line)
         }
     }
+
+    // MARK: - The shrink invariant
+    //
+    // A load run showed a pane's retained turn count going 57 -> 2 and then
+    // refilling. `ChatSession` has exactly three writers that can shorten
+    // `turns`: `newSession()` (every call site is a click), `enforceRetentionCap`
+    // (needs more than 10,000 turns), and `turns = outcome.turns` here. These
+    // tests pin the third one shut, so the next time it happens the reconciler
+    // is not a suspect.
+
+    func testReconcileNeverReturnsFewerTurnsThanItWasGiven() {
+        // Every shape the reconciler can take, over a range of sizes and
+        // overlaps. The only sanctioned way to lose history is a changed session
+        // id, which is covered separately below.
+        for retainedCount in [0, 1, 2, 5, 30, 60] {
+            for snapshotStart in [0, 1, 5, 29, 30, 45, 100] {
+                for snapshotCount in [0, 1, 2, 30] {
+                    let retained = makeRetained(Array(0 ..< retainedCount))
+                    let snapshot = makeSnapshot(
+                        Array(snapshotStart ..< (snapshotStart + snapshotCount)), epoch: 1)
+                    let outcome = TurnReconciler.reconcile(retained: retained,
+                                                           snapshot: snapshot,
+                                                           sessionIdChanged: false)
+                    XCTAssertGreaterThanOrEqual(
+                        outcome.turns.count, retained.count,
+                        """
+                        reconcile shed history with an unchanged session id: \
+                        retained=\(retainedCount) snapshot=\(snapshotStart)..<\
+                        \(snapshotStart + snapshotCount) -> \(outcome.turns.count)
+                        """)
+                    XCTAssertFalse(outcome.didReplaceAll,
+                                   "an unchanged session id must never replace wholesale")
+                }
+            }
+        }
+    }
+
+    func testEveryRetainedIdentitySurvivesWhenTheSessionIdIsUnchanged() {
+        // Stronger than a count check: no turn may be silently dropped from the
+        // middle either.
+        for snapshotStart in [0, 10, 25, 30, 80] {
+            let retained = makeRetained(Array(0 ..< 30))
+            let snapshot = makeSnapshot(Array(snapshotStart ..< (snapshotStart + 30)), epoch: 1)
+            let outcome = TurnReconciler.reconcile(retained: retained,
+                                                   snapshot: snapshot,
+                                                   sessionIdChanged: false)
+            let survivors = Set(outcome.turns.map { $0.identityKey })
+            for turn in retained {
+                XCTAssertTrue(survivors.contains(turn.identityKey),
+                              "lost \(turn.identityKey) at snapshotStart=\(snapshotStart)")
+            }
+        }
+    }
+
+    func testOnlyAChangedSessionIdCanShortenTheTranscript() {
+        let retained = makeRetained(Array(0 ..< 30))
+        let snapshot = makeSnapshot([900, 901], epoch: 1)
+
+        let kept = TurnReconciler.reconcile(retained: retained, snapshot: snapshot,
+                                            sessionIdChanged: false)
+        XCTAssertGreaterThan(kept.turns.count, retained.count,
+                             "same record: keep history and state the gap")
+        XCTAssertTrue(kept.insertedGapMarker)
+
+        let replaced = TurnReconciler.reconcile(retained: retained, snapshot: snapshot,
+                                                sessionIdChanged: true)
+        XCTAssertEqual(replaced.turns.count, snapshot.count,
+                       "a different conversation is the one case history may go")
+        XCTAssertTrue(replaced.didReplaceAll)
+    }
 }
