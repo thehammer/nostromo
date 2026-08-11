@@ -51,6 +51,11 @@ class ReplView: NSView {
     /// True for the duration of a pass, so the frame and scroll changes it makes
     /// cannot schedule another one. See `schedulePass`.
     private var isMaterializing = false
+    /// Set when a *content* change asked for a pass. Cleared as a pass begins,
+    /// so a change that lands while one is running still gets rendered — the
+    /// `isMaterializing` guard suppresses self-inflicted requests, and dropping
+    /// a real update alongside them would be a very quiet rendering bug.
+    private var contentDirty = false
     /// Pane width the geometry was last computed for.
     private var laidOutWidth: CGFloat = 0
     private var cancellables = Set<AnyCancellable>()
@@ -307,6 +312,10 @@ class ReplView: NSView {
                 pendingRemeasure.insert(turn.id)
             }
         }
+        // Distinguished from a scroll- or frame-driven request: a content change
+        // must never be dropped, whereas a bounds notification the pass caused
+        // itself must be.
+        contentDirty = true
         schedulePass()
     }
 
@@ -334,7 +343,11 @@ class ReplView: NSView {
         let turns = session.turns
         guard contentWidth > 1, !isMaterializing else { return }
         isMaterializing = true
-        defer { isMaterializing = false }
+        contentDirty = false
+        defer {
+            isMaterializing = false
+            if contentDirty { schedulePass() }
+        }
 
         guard !turns.isEmpty else {
             releaseAllTurnViews()
