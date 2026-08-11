@@ -107,9 +107,21 @@ final class TurnHeightEstimatorTests: XCTestCase {
         }
     }
 
-    func testAUserMessageGetsTallerAsItGrows() {
+    func testAUserMessageNeverGetsShorterAsItGrows() {
         var previous: CGFloat = 0
-        for n in [1, 40, 200, 900, 5_000] {
+        for n in stride(from: 1, through: 4_000, by: 13) {
+            let height = estimate(turn(user: text(n)))
+            XCTAssertGreaterThanOrEqual(height, previous,
+                                        "a \(n)-character message got shorter")
+            previous = height
+        }
+    }
+
+    func testAUserMessageGetsTallerAsItWrapsOntoMoreLines() {
+        // Line height is quantised — 1 and 40 characters are both one line — so
+        // the sample lengths have to actually cross wrap boundaries.
+        var previous: CGFloat = 0
+        for n in [1, 200, 900, 5_000, 30_000] {
             let height = estimate(turn(user: text(n)))
             XCTAssertGreaterThan(height, previous, "a \(n)-character message must be taller")
             previous = height

@@ -80,8 +80,37 @@ final class TranscriptLoadHarness {
         self.durationSeconds = Self.parseDuration(env["NOSTROMO_LOAD_DURATION"])
     }
 
+    /// Wait until the window has laid out and its transcript panes have
+    /// registered, then drive *those* tags.
+    ///
+    /// Guessing tags is how the first harness run measured nothing: the traffic
+    /// reached a `ChatSession` with no `ReplView` attached, so `ChatSession` was
+    /// exercised and the view layer — the expensive half, and the half this work
+    /// exists to bound — never was.
     private func start() {
-        tags = (0 ..< focusCount).map { $0 == 0 ? "claudia" : "harness\($0)" }
+        var attempts = 0
+        func attempt() {
+            var live = TranscriptDiagnostics.registeredTags
+            if !live.isEmpty || attempts > 60 {
+                // Drive the *visible* pane first. A hidden pane has a zero-height
+                // viewport, so it materializes almost nothing — the run would
+                // measure the data path and skip the view path entirely.
+                if let active = AppStore.shared.activeFocusAgentTag,
+                   let i = live.firstIndex(of: active) {
+                    live.swapAt(0, i)
+                }
+                begin(tags: live.isEmpty ? ["claudia"] : Array(live.prefix(focusCount)))
+                return
+            }
+            attempts += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { attempt() }
+        }
+        attempt()
+    }
+
+    private func begin(tags discovered: [String]) {
+        tags = discovered
+        log.info("load harness: driving panes \(discovered.joined(separator: ","), privacy: .public)")
         for tag in tags {
             records[tag]    = []
             nextSeq[tag]    = 0
@@ -92,7 +121,7 @@ final class TranscriptLoadHarness {
             focuses=\(self.focusCount) scroll=\(self.scrollAfterLoad)
             """)
 
-        // Come up "connected" so ChatSession attaches, then deliver an empty
+        // Re-announce "connected" so ChatSession attaches, then deliver an empty
         // snapshot — the same order the daemon uses.
         client.connected.send(true)
         for tag in tags {

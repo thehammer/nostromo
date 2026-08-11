@@ -87,7 +87,9 @@ final class TurnListVirtualizer {
     /// This is the splice path: turns before `index` kept their identity, their
     /// measured heights, and their views.
     func splice(turns: [ChatTurn], from index: Int) {
-        let floor = max(0, min(index, count))
+        // Clamp to both the old and the new length. Clamping only to the old
+        // one lets `turns[floor...]` index past the end of a shorter list.
+        let floor = max(0, min(index, count, turns.count))
         keys.removeSubrange(floor...)
         heights.removeSubrange(floor...)
         isExact.removeSubrange(floor...)
@@ -103,15 +105,34 @@ final class TurnListVirtualizer {
     }
 
     /// One turn appended at the end.
+    ///
+    /// Extends the Fenwick tree in place rather than rebuilding it. A rebuild is
+    /// O(n) and this runs once per arriving turn, so rebuilding here would make
+    /// a session's total append cost quadratic in its own length — the exact
+    /// shape being removed elsewhere.
     func append(_ turn: ChatTurn) {
         let key = turn.contentKey
         keys.append(key)
-        let height = measured["\(key)|\(width)"] ?? TurnHeightEstimator.estimate(turn, width: width)
+        let cached = measured["\(key)|\(width)"]
+        let height = cached ?? TurnHeightEstimator.estimate(turn, width: width)
         heights.append(height)
-        isExact.append(measured["\(key)|\(width)"] != nil)
+        isExact.append(cached != nil)
         indexByKey[key] = count
         count += 1
-        rebuildTree()
+
+        // A Fenwick node at 1-based position i covers the half-open range ending
+        // at i of length lsb(i), and its children sit at i-1, i-2, i-4, … down to
+        // i - lsb/2. Summing those gives the new node in O(log n) worst case and
+        // O(1) amortised.
+        tree.append(height)
+        let i = count
+        var step = 1
+        let lsb = i & (-i)
+        while step < lsb {
+            tree[i] += tree[i - step]
+            treeOperations += 1
+            step <<= 1
+        }
     }
 
     /// A turn's content changed in place (blocks appended while streaming).
@@ -120,17 +141,35 @@ final class TurnListVirtualizer {
     func refresh(_ turn: ChatTurn, at index: Int) -> CGFloat {
         guard index >= 0, index < count else { return 0 }
         let key = turn.contentKey
+        // Retire the superseded key. A streaming turn changes key on every block
+        // append, and each abandoned entry holds a ~300-byte string
+        // (`identityKey` embeds 256 characters of user input) until the next
+        // full reindex — tens of megabytes over a long session, inside the
+        // change whose whole point is bounding memory.
+        let oldKey = keys[index]
+        if oldKey != key, indexByKey[oldKey] == index { indexByKey.removeValue(forKey: oldKey) }
         keys[index] = key
         indexByKey[key] = index
-        let height = measured["\(key)|\(width)"]
-            ?? TurnHeightEstimator.estimate(turn, width: width)
-        isExact[index] = measured["\(key)|\(width)"] != nil
+
+        // A measured height is only reusable for a *completed* turn. `contentKey`
+        // is invariant while a text block grows in place, so a turn measured
+        // while materialized and then scrolled away would keep being handed its
+        // stale height and the document would stop growing.
+        let cached = turn.isComplete ? measured["\(key)|\(width)"] : nil
+        let height = cached ?? TurnHeightEstimator.estimate(turn, width: width)
+        isExact[index] = cached != nil
         return setHeight(height, at: index)
     }
 
     /// Width changed: every estimate is stale, and every measured height was
     /// measured at the old width.
     func invalidateWidth(_ newWidth: CGFloat, turns: [ChatTurn]) {
+        // Diverging silently here would leave heights and keys for turns the
+        // caller no longer has, with `count` still claiming they exist.
+        guard turns.count == count else {
+            reset(turns: turns, width: newWidth)
+            return
+        }
         width = max(newWidth, 1)
         for i in 0 ..< min(count, turns.count) {
             let key = turns[i].contentKey
@@ -274,6 +313,10 @@ final class TurnListVirtualizer {
     }
 
     private func rebuildTree() {
+        // Counted, so `treeOperations` can tell an O(log n) incremental update
+        // apart from an O(n) rebuild. Uncounted, a rebuild reads as zero work
+        // and the complexity assertions pass for the wrong reason.
+        treeOperations += count
         tree = Array(repeating: 0, count: count + 1)
         for i in 0 ..< count { tree[i + 1] = heights[i] }
         var i = 1

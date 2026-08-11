@@ -61,7 +61,20 @@ class ChatSession: ObservableObject {
     let displayName: String    // `-n` / `--remote-control` name (phone-facing label)
     let workingDirectory: String?
 
-    @Published private(set) var turns:          [ChatTurn]    = []
+    /// The addressable transcript. Deliberately NOT `@Published`.
+    ///
+    /// `@Published` has no `_modify` accessor, so every in-place mutation goes
+    /// get → mutate copy → set. That leaves the array buffer non-uniquely
+    /// referenced, and each of the ~15 block appends per turn pays a full O(n)
+    /// element copy — 5,000 struct copies with their retains and releases, per
+    /// streamed block. Measured on the load harness: throughput collapsed to
+    /// roughly one turn per second by turn 130, which is the same O(n²) shape
+    /// this change exists to remove, just moved down a layer.
+    ///
+    /// Nothing observes `$turns` any more — `ReplView` renders from `changes`
+    /// (see `TurnChange`) and reads `turns` by index. Re-adding `@Published`
+    /// here, or any whole-array subscriber, reintroduces that cost.
+    private(set) var turns: [ChatTurn] = []
     @Published private(set) var isRunning:      Bool          = false
     @Published private(set) var pendingCount:   Int           = 0     // daemon queues; reserved
     /// Derived from daemon health events. Drives the sidebar badge and pace-bars status strip.

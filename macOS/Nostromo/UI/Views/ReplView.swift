@@ -48,6 +48,9 @@ class ReplView: NSView {
     /// inside a layout or scroll callback recurses; this is the same coalescing
     /// guard the old scroll path used, widened to cover the whole pass.
     private var passPending = false
+    /// True for the duration of a pass, so the frame and scroll changes it makes
+    /// cannot schedule another one. See `schedulePass`.
+    private var isMaterializing = false
     /// Pane width the geometry was last computed for.
     private var laidOutWidth: CGFloat = 0
     private var cancellables = Set<AnyCancellable>()
@@ -309,8 +312,15 @@ class ReplView: NSView {
 
     /// Queue a materialization pass. Never runs one synchronously: materializing
     /// from inside `layout()` or a scroll callback re-enters layout.
+    ///
+    /// The `isMaterializing` guard closes a feedback loop that is easy to miss
+    /// and total when you hit it: the pass sets the document view's frame and
+    /// scrolls the clip view, both of which post `boundsDidChangeNotification`
+    /// synchronously, whose handler schedules another pass. Measured on the load
+    /// harness, that saturated the run loop and throughput collapsed to about
+    /// one turn every five seconds.
     private func schedulePass() {
-        guard !passPending else { return }
+        guard !passPending, !isMaterializing else { return }
         passPending = true
         DispatchQueue.main.async { [weak self] in
             self?.passPending = false
@@ -322,7 +332,9 @@ class ReplView: NSView {
     /// must happen in this order.
     private func materialize() {
         let turns = session.turns
-        guard contentWidth > 1 else { return }
+        guard contentWidth > 1, !isMaterializing else { return }
+        isMaterializing = true
+        defer { isMaterializing = false }
 
         guard !turns.isEmpty else {
             releaseAllTurnViews()

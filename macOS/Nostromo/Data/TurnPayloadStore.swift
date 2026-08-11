@@ -34,10 +34,20 @@ import Foundation
 ///
 /// ## Budget
 ///
-/// Skeleton ≈ 1.5–4.5 KB/turn (bounded prefixes plus collapsed-UI metadata),
-/// compressed payload ≈ 7.7 KB/turn measured. At 5,000 turns that is roughly
-/// 60 MB, a slope near 12 MB per 1,000 turns — inside the 20 MB criterion with
-/// room for real traffic being less compressible than the synthetic corpus.
+/// Measured by `TurnPayloadStoreTests` over a 5,000-turn corpus, which is the
+/// authority for these numbers — an earlier estimate here was optimistic by
+/// roughly 4x on the skeleton side and it was the test that caught it:
+///
+///     raw, uncompressed : 39.1 MB / 1,000 turns
+///     skeletons         :  3.7 MB / 1,000 turns
+///     compressed payload: 12.6 MB / 1,000 turns
+///     retained total    : 16.1 MB / 1,000 turns   (criterion: <= 20)
+///
+/// That corpus compresses at 3.1x, against 4.6x on a more repetitive one — so
+/// treat 16.1 as a conservative upper bound rather than a typical figure. The
+/// margin is real but not large; `prefixLength` and `maxRetainedTurns` are the
+/// two dials, and the test will say so immediately if either moves the wrong
+/// way.
 final class TurnPayloadStore {
 
     /// Turns within this distance of the newest are never compressed, so the
@@ -45,15 +55,24 @@ final class TurnPayloadStore {
     /// instant.
     static let hotWindow = 200
 
-    /// Hard cap on retained skeletons (≈30 MB). Past this, history genuinely
-    /// becomes unreachable and the transcript says so — see
+    /// Hard cap on retained skeletons. Past this, history genuinely becomes
+    /// unreachable and the transcript says so — see
     /// `ChatTurn.Marker.historyUnavailable`.
-    static let maxRetainedTurns = 20_000
+    ///
+    /// At the measured ~3.7 KB per skeleton this is a ~35 MB ceiling. It was
+    /// 20,000 while the skeleton cost was assumed to be 1.5 KB; measurement put
+    /// that at 6.2 KB, making the real ceiling ~119 MB — four times the intended
+    /// budget, and quietly.
+    static let maxRetainedTurns = 10_000
 
     /// How much of each text payload the skeleton keeps. Enough to hold a
     /// turn's place with real words while its full content is decompressed, and
     /// to serve as the honest fallback if it cannot be.
-    static let prefixLength = 512
+    ///
+    /// This is the dominant term in skeleton size: a turn carries 3–8 text
+    /// blocks, so the prefix is paid several times over per turn. At 512 the
+    /// skeletons alone were 6.2 KB/turn and ate most of the slope budget.
+    static let prefixLength = 240
 
     /// The result of asking for a cold turn's full content.
     enum Hydration {
@@ -73,6 +92,11 @@ final class TurnPayloadStore {
     /// Turns whose payload was compressed and then dropped — asked for again,
     /// they must report unavailability rather than emptiness.
     private var dropped: Set<UUID> = []
+    /// Turns currently being compressed on `queue`. Without this, two `compact`
+    /// calls for the same turn before the first returns both compress it and
+    /// both fire their completion — the `blobs[id] == nil` guard is evaluated
+    /// synchronously but the blob is written asynchronously.
+    private var inFlight: Set<UUID> = []
     private let queue = DispatchQueue(label: "com.hammer.nostromo.payload", qos: .utility)
 
     // MARK: - Stats (for TranscriptDiagnostics)
@@ -98,15 +122,18 @@ final class TurnPayloadStore {
     func compact(_ turn: ChatTurn, completion: @escaping (ChatTurn) -> Void) {
         guard turn.isComplete, turn.marker == nil,
               blobs[turn.id] == nil, !pinned.contains(turn.id), !dropped.contains(turn.id),
+              !inFlight.contains(turn.id),
               let payload = Self.encodePayload(turn)
         else { return }
 
         let id = turn.id
+        inFlight.insert(id)
         queue.async { [weak self] in
-            guard let blob = try? (payload as NSData).compressed(using: .lzfse) as Data
-            else { return }
+            let blob = try? (payload as NSData).compressed(using: .lzfse) as Data
             DispatchQueue.main.async {
-                guard let self, !self.dropped.contains(id) else { return }
+                guard let self else { return }
+                self.inFlight.remove(id)
+                guard let blob, !self.dropped.contains(id) else { return }
                 self.blobs[id] = blob
                 completion(Self.skeleton(of: turn))
             }
@@ -122,6 +149,7 @@ final class TurnPayloadStore {
         let candidates = turns.filter {
             $0.isComplete && $0.marker == nil && blobs[$0.id] == nil
                 && !pinned.contains($0.id) && !dropped.contains($0.id)
+                && !inFlight.contains($0.id)
         }
         guard !candidates.isEmpty else { return }
         let payloads: [(UUID, Data)] = candidates.compactMap { turn in
@@ -165,9 +193,15 @@ final class TurnPayloadStore {
 
     /// Release a turn's payload permanently. Subsequent `hydrate` calls report
     /// `.unavailable` rather than silently returning a skeleton.
+    /// Marks the turn dropped whether or not it had been compacted yet. A turn
+    /// dropped while still hot has no blob to remove, and recording nothing
+    /// would let a later `hydrate` answer `.full` for content that is gone —
+    /// the silently-empty expansion this is supposed to make impossible.
     func drop(_ id: UUID) {
-        if blobs.removeValue(forKey: id) != nil { dropped.insert(id) }
+        blobs.removeValue(forKey: id)
+        dropped.insert(id)
         pinned.remove(id)
+        inFlight.remove(id)
     }
 
     func clear() {

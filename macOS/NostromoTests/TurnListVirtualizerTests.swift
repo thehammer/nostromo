@@ -161,19 +161,28 @@ final class TurnListVirtualizerTests: XCTestCase {
         assertInBounds(window, count: turns.count)
     }
 
-    func testWhenTheWindowIsCappedItKeepsTheNewestTurns() {
+    func testWhenTheWindowIsCappedItDropsTheOldestTurnsAndKeepsTheNewest() {
         let turns = (0 ..< 2_000).map { shortTurn($0) }
         let v = makeVirtualizer(turns)
         let box = viewport(top: 5_000, height: 1_600)
+        let overscan = box.height * TurnListVirtualizer.overscanScreens
 
-        let capped   = v.visibleWindow(viewport: box)
-        let bottomAt = v.index(atY: box.maxY)
+        // The window the geometry alone would ask for, before the cap bites.
+        let geometricFirst = v.index(atY: box.minY - overscan)
+        let geometricLast  = v.index(atY: box.maxY + overscan)
+        XCTAssertGreaterThan(geometricLast - geometricFirst + 1,
+                             TurnListVirtualizer.maxMaterialized,
+                             "fixture must actually exercise the cap")
+
+        let capped = v.visibleWindow(viewport: box)
 
         XCTAssertEqual(capped.count, TurnListVirtualizer.maxMaterialized)
-        XCTAssertGreaterThan(capped.upperBound, bottomAt,
-                             "the turn under the bottom edge of the viewport must survive the cap")
-        XCTAssertTrue(capped.contains(bottomAt),
-                      "a reader following a stream is looking at the newest end")
+        XCTAssertEqual(capped.upperBound, geometricLast + 1,
+                       "a reader following a stream is looking at the newest end; "
+                       + "the cap must give way at the top, not the bottom")
+        XCTAssertGreaterThan(capped.lowerBound, geometricFirst,
+                             "...so the oldest turns are what the cap drops")
+        XCTAssertTrue(capped.contains(v.index(atY: box.maxY)))
     }
 
     // MARK: - 2. Anchor stability under height corrections above the anchor
@@ -322,6 +331,23 @@ final class TurnListVirtualizerTests: XCTestCase {
         return worst
     }
 
+    /// Worst per-append cost when a session is already `n` turns long.
+    ///
+    /// A note on what this can and cannot see: `treeOperations` is incremented
+    /// only on the incremental tree paths, so an `append` that rebuilt the whole
+    /// tree would report *zero* operations rather than n. The lower bound in
+    /// `assertLogarithmic` is what catches that — a spread of appends that
+    /// touches no tree node at all has not extended the tree in place.
+    private func maxAppendOps(_ n: Int) -> Int {
+        let v = makeVirtualizer(uniformTurns(n))
+        var worst = 0
+        for i in 0 ..< 200 {
+            let turn = uniformTurn(n + i)
+            worst = max(worst, treeOps(v) { v.append(turn) })
+        }
+        return worst
+    }
+
     private func maxIndexAtYOps(_ n: Int) -> Int {
         let v = makeVirtualizer(uniformTurns(n))
         let document = v.documentHeight
@@ -341,39 +367,58 @@ final class TurnListVirtualizerTests: XCTestCase {
         return out
     }
 
-    func testOffsetQueryCostGrowsLogarithmicallyNotLinearlyInListLength() {
-        let small = maxOffsetOps(100)
-        let large = maxOffsetOps(5_000)
+    /// Asserts the growth *shape* of `measure` over a range of list lengths.
+    ///
+    /// Two bounds, both absolute — no ratio between two measurements, because a
+    /// ratio between two small integers is a flaky way to say "sublinear":
+    ///
+    ///  - each measurement stays within a constant factor of log2(n);
+    ///  - going from 100 to 5,000 turns *adds* a handful of operations. That is
+    ///    the signature of a logarithm. A linear cost would multiply by fifty.
+    private func assertLogarithmic(_ label: String,
+                                   sizes: [Int] = [100, 500, 2_500, 5_000],
+                                   _ measure: (Int) -> Int,
+                                   file: StaticString = #filePath, line: UInt = #line) {
+        let ops = sizes.map(measure)
+        print("[complexity] \(label): "
+              + zip(sizes, ops).map { "n=\($0)→\($1) ops" }.joined(separator: "  "))
 
-        XCTAssertGreaterThan(small, 0, "the counter must actually be observing work")
-        XCTAssertLessThanOrEqual(large, 2 * ceilLog2(5_000),
-                                 "offset(of:) must stay within a constant factor of log2(n)")
-        // Linear would make this ratio ~50. Five is an order of magnitude of
-        // headroom and still nowhere near linear.
-        XCTAssertLessThanOrEqual(large, small * 5,
-                                 "a 50x longer list must not cost proportionally more per query")
+        for (n, count) in zip(sizes, ops) {
+            XCTAssertGreaterThan(count, 0,
+                                 "\(label): the node counter saw no work at all at n=\(n)",
+                                 file: file, line: line)
+            XCTAssertLessThanOrEqual(count, 2 * ceilLog2(n),
+                                     "\(label): \(count) operations at n=\(n) is beyond a constant factor of log2(n)",
+                                     file: file, line: line)
+        }
+
+        guard let first = ops.first, let last = ops.last else { return }
+        XCTAssertLessThanOrEqual(last - first, 12,
+                                 "\(label): a 50x longer list added \(last - first) operations; a logarithm adds one per doubling",
+                                 file: file, line: line)
     }
 
-    func testHeightCorrectionCostGrowsLogarithmicallyNotLinearlyInListLength() {
-        let small = maxRecordMeasuredOps(100)
-        let large = maxRecordMeasuredOps(5_000)
-
-        XCTAssertGreaterThan(small, 0)
-        XCTAssertLessThanOrEqual(large, 2 * ceilLog2(5_000),
-                                 "recordMeasured must stay within a constant factor of log2(n)")
-        XCTAssertLessThanOrEqual(large, small * 5,
-                                 "a materialization pass corrects up to 60 heights per scroll tick")
+    func testOffsetQueryCostIsLogarithmicInListLength() {
+        assertLogarithmic("offset(of:)") { maxOffsetOps($0) }
     }
 
-    func testHitTestCostGrowsLogarithmicallyNotLinearlyInListLength() {
-        let small = maxIndexAtYOps(100)
-        let large = maxIndexAtYOps(5_000)
+    func testHeightCorrectionCostIsLogarithmicInListLength() {
+        // A materialization pass performs up to `maxMaterialized` of these per
+        // scroll tick, on the main thread.
+        assertLogarithmic("recordMeasured") { maxRecordMeasuredOps($0) }
+    }
 
-        XCTAssertGreaterThan(small, 0)
-        XCTAssertLessThanOrEqual(large, 2 * ceilLog2(5_000),
-                                 "index(atY:) is asked on every scroll event and must be a descent")
-        XCTAssertLessThanOrEqual(large, small * 5,
-                                 "hit-testing must not degrade into a scan")
+    func testAppendCostIsLogarithmicInSessionLength() {
+        // Once per arriving turn, for the whole life of a session. If this were
+        // linear the total cost of a session would be quadratic in its own
+        // length — the same shape the transcript is being rescued from.
+        assertLogarithmic("append") { maxAppendOps($0) }
+    }
+
+    func testHitTestCostIsLogarithmicInListLength() {
+        // Asked on every scroll event, so this one must be a descent and not a
+        // scan however long the transcript gets.
+        assertLogarithmic("index(atY:)") { maxIndexAtYOps($0) }
     }
 
     func testAFullMaterializationPassOverAHugeListStaysWellUnderLinearCost() {

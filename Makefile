@@ -66,7 +66,7 @@ IOS_DEVICE_ID   ?= 195907F5-56CB-5334-B012-6F71CFA5EB21# Hammer's iPhone Pro
 IPAD_DEVICE_ID  ?= BA38C738-E848-5694-B1C4-7D5DB4C631EE# Hammer's iPad Pro
 IOS_APP_RELEASE  = iOS/build/Build/Products/Release-iphoneos/Nostromo.app
 
-.PHONY: mac mac-run mac-kill mac-icon mac-release mac-install ios-build ios-install ios-install-ipad ios-install-all
+.PHONY: mac mac-test mac-load-test mac-run mac-kill mac-icon mac-release mac-install ios-build ios-install ios-install-ipad ios-install-all
 
 # Release build uses an explicit derived-data path so the product location is
 # predictable (no DerivedData hash dependency). Ad-hoc signed so the arm64
@@ -79,6 +79,21 @@ INSTALLED   = /Applications/Nostromo.app
 mac:
 	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo -configuration Debug \
 	  -derivedDataPath build build 2>&1 | grep -E "error:|warning:|BUILD"
+
+## Run the macOS logic test suite (standalone bundle, no test host)
+mac-test:
+	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
+	  -destination 'platform=macOS' -derivedDataPath build test \
+	  2>&1 | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST"
+
+## Measure the bounded-transcript acceptance criteria against a Release build.
+## Takes several minutes; drives synthetic traffic through the real code path.
+##   make mac-load-test                 # 5000 turns, 1 focus
+##   make mac-load-test TURNS=40000 FOCUSES=8
+TURNS   ?= 5000
+FOCUSES ?= 1
+mac-load-test:
+	macOS/scripts/transcript-load-test.sh $(TURNS) $(FOCUSES)
 
 ## Kill any running Nostromo instance (handles debugserver wedge)
 mac-kill:

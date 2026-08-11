@@ -36,6 +36,21 @@ enum TranscriptDiagnostics {
     static func register(_ pane: Reporting) { panes.add(pane) }
     static func unregister(_ pane: Reporting) { panes.remove(pane) }
 
+    /// Tags of every live transcript pane, distinct and ordered.
+    ///
+    /// The load harness drives these rather than a hard-coded list: traffic sent
+    /// to a tag with no pane attached would exercise `ChatSession` but never
+    /// materialize a view, which is precisely the half of the system under test.
+    static var registeredTags: [String] {
+        var seen = Set<String>()
+        var tags: [String] = []
+        for object in panes.allObjects {
+            guard let pane = object as? Reporting else { continue }
+            if seen.insert(pane.diagnosticsTag).inserted { tags.append(pane.diagnosticsTag) }
+        }
+        return tags.sorted()
+    }
+
     // MARK: - Resident memory
 
     /// The process's `phys_footprint`, in bytes.
