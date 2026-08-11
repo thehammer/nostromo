@@ -300,6 +300,14 @@ class ChatSession: ObservableObject {
             for turn in turns where !survivors.contains(turn.id) {
                 payloadStore.drop(turn.id)
             }
+            // Overlapping turns keep their id but take the snapshot's content, so
+            // any blob still held under that id describes the *previous* view of
+            // the turn. Decoding it into the new block shape either fails (and
+            // reports unavailable) or, worse, lines up and renders stale content
+            // as current with nothing saying so. Forget them; they are hot again.
+            for turn in outcome.turns[min(outcome.replacedFrom, outcome.turns.count)...] {
+                payloadStore.forget(turn.id)
+            }
         }
 
         turns = outcome.turns
@@ -413,13 +421,21 @@ class ChatSession: ObservableObject {
     /// at the top of the transcript. This is the one place history genuinely
     /// becomes unreachable, so it is never silent.
     private func enforceRetentionCap() {
-        guard turns.count > TurnPayloadStore.maxRetainedTurns else { return }
-        let overflow = turns.count - TurnPayloadStore.maxRetainedTurns
-        for turn in turns.prefix(overflow) { payloadStore.drop(turn.id) }
-        turns.removeFirst(overflow)
-        if turns.first?.marker != .historyUnavailable {
-            turns.insert(.marker(.historyUnavailable), at: 0)
-        }
+        // The marker must not be counted toward the cap, and must not be the
+        // thing removed. Counting it meant that once the cap was reached, each
+        // new turn removed the marker (it sits at index 0), re-inserted it, and
+        // left the list still one over — so the marker churned on every turn
+        // for ever and no real history was ever actually dropped.
+        let hasMarker  = turns.first?.marker == .historyUnavailable
+        let start      = hasMarker ? 1 : 0
+        let realCount  = turns.count - start
+        guard realCount > TurnPayloadStore.maxRetainedTurns else { return }
+
+        let overflow = realCount - TurnPayloadStore.maxRetainedTurns
+        for turn in turns[start ..< (start + overflow)] { payloadStore.drop(turn.id) }
+        turns.removeSubrange(start ..< (start + overflow))
+        if !hasMarker { turns.insert(.marker(.historyUnavailable), at: 0) }
+        log.info("ChatSession[\(self.tag, privacy: .public)] retention cap: dropped \(overflow) turns")
         changes.send(.spliced(replacedFrom: 0))
     }
 

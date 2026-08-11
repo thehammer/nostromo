@@ -72,6 +72,9 @@ final class TurnPayloadStore {
     /// This is the dominant term in skeleton size: a turn carries 3–8 text
     /// blocks, so the prefix is paid several times over per turn. At 512 the
     /// skeletons alone were 6.2 KB/turn and ate most of the slope budget.
+    ///
+    /// Must be **≥ `ChatTurn.identityPrefix`** — see that constant for what
+    /// happens otherwise.
     static let prefixLength = 240
 
     /// The result of asking for a cold turn's full content.
@@ -204,10 +207,26 @@ final class TurnPayloadStore {
         inFlight.remove(id)
     }
 
+    /// Discard any stored payload for `id` **without** marking it unavailable.
+    ///
+    /// Distinct from `drop`: the caller is telling us the turn's content has been
+    /// replaced with a fresh, complete copy, so there is nothing lost and nothing
+    /// to warn about. `drop` means "this content is gone"; this means "this blob
+    /// is stale".
+    func forget(_ id: UUID) {
+        blobs.removeValue(forKey: id)
+        pinned.remove(id)
+        inFlight.remove(id)
+        dropped.remove(id)
+    }
+
     func clear() {
         blobs.removeAll()
         pinned.removeAll()
         dropped.removeAll()
+        // A compaction still in flight would otherwise land after the clear and
+        // write an orphan blob for a turn that no longer exists.
+        inFlight.removeAll()
     }
 
     // MARK: - Skeleton / payload split

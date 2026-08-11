@@ -89,7 +89,14 @@ struct ChatTurn: Identifiable {
 
     /// A marker turn, rendered as a plain statement rather than a chat exchange.
     static func marker(_ kind: Marker, timestamp: Date = Date()) -> ChatTurn {
-        ChatTurn(userInput: "", timestamp: timestamp, isComplete: true, marker: kind)
+        // The synthetic timestamp is what keeps two markers apart. Sharing one
+        // `contentKey` would collide them in the virtualizer's height cache and
+        // in its index-by-key lookup, so a scroll anchor resting on a gap marker
+        // could resolve to the unavailable-history marker after a splice and
+        // jump the operator's position to the top of the transcript.
+        ChatTurn(userInput: "", timestamp: timestamp,
+                 timestampRaw: "marker-\(kind)-\(timestamp.timeIntervalSince1970)",
+                 isComplete: true, marker: kind)
     }
 
     /// This turn, wearing `other`'s view identity.
@@ -117,8 +124,16 @@ extension ChatTurn {
     /// stable is the pair (record timestamp, user text): both come from the same
     /// JSONL line whether the daemon parsed it live or re-read it from disk.
     var identityKey: String {
-        "\(timestampRaw ?? "-")|\(userInput.prefix(256))"
+        "\(timestampRaw ?? "-")|\(userInput.prefix(Self.identityPrefix))"
     }
+
+    /// How much of `userInput` participates in identity.
+    ///
+    /// Must be **≤ `TurnPayloadStore.prefixLength`**, or a turn that has been
+    /// compacted would compute a different `identityKey` than its uncompacted
+    /// self: the reconciler would then fail to match it against the snapshot and
+    /// insert a gap marker claiming history is missing when it is right there.
+    static let identityPrefix = 240
 
     /// `identityKey` plus the turn's durable block shape.
     ///
@@ -188,15 +203,35 @@ extension TurnBlock {
         }
     }
 
-    /// Character count of the text this block renders. Drives height estimation.
+    /// Approximate character count of the text this block renders. Drives height
+    /// estimation.
+    ///
+    /// `utf8.count` rather than `count`: `String.count` walks the string to
+    /// count graphemes, so this was O(bytes) and it runs on the streaming turn
+    /// once per arriving block — making the cost of a token proportional to how
+    /// much that turn had already emitted, i.e. quadratic within a single long
+    /// turn. `utf8.count` is O(1) for a native string. It over-counts non-ASCII,
+    /// which rounds height estimates up; the measured height replaces the
+    /// estimate the moment the turn materializes anyway.
     var contentCharCount: Int {
         switch self {
-        case .text(let s):          return s.count
-        case .toolCall(let d):      return d.inputSummary.count
-        case .toolResult(let d):    return d.content.count
+        case .text(let s):          return s.utf8.count
+        case .toolCall(let d):      return d.inputSummary.utf8.count
+        case .toolResult(let d):    return d.content.utf8.count
         case .resultSummary:        return 0
-        case .errorMessage(let m):  return m.count
-        case .askQuestion(let d):   return d.question.count
+        case .errorMessage(let m):  return m.utf8.count
+        case .askQuestion(let d):   return d.question.utf8.count
+        }
+    }
+
+    /// Whether `TurnHeightEstimator` needs this block's content length at all.
+    /// A collapsed tool result costs one disclosure row however large it is, so
+    /// measuring a 256 KB payload to render a fixed-height row is pure waste.
+    var heightDependsOnContentLength: Bool {
+        switch self {
+        case .toolCall, .resultSummary:   return false
+        case .toolResult(let d):          return d.isError
+        default:                          return true
         }
     }
 

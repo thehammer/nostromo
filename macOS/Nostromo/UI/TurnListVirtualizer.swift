@@ -59,7 +59,15 @@ final class TurnListVirtualizer {
     /// Fenwick tree over `heights`, 1-based.
     private var tree: [CGFloat] = []
     /// Measured heights, keyed by `"\(contentKey)|\(width)"`.
+    ///
+    /// Bounded, because a streaming turn's `contentKey` changes on every durable
+    /// block append and each key is a ~250-character string: left to grow, a long
+    /// session leaves tens of thousands of dead entries — order tens of megabytes
+    /// — inside the component whose job is bounding memory. Entries are worth
+    /// keeping only for turns near the viewport, so a simple capacity bound with
+    /// wholesale eviction is enough; a miss costs one re-measure.
     private var measured: [String: CGFloat] = [:]
+    private static let measuredCapacity = 4_000
     /// Index lookup for anchor re-resolution after a splice.
     private var indexByKey: [String: Int] = [:]
 
@@ -73,6 +81,9 @@ final class TurnListVirtualizer {
 
     /// Replace all geometry. Used on `.cleared` and on the first layout.
     func reset(turns: [ChatTurn], width: CGFloat) {
+        // Heights measured for a transcript that no longer exists are dead
+        // weight, and New Session goes through here.
+        measured.removeAll(keepingCapacity: true)
         self.width = max(width, 1)
         keys    = turns.map { $0.contentKey }
         heights = turns.map { TurnHeightEstimator.estimate($0, width: self.width) }
@@ -190,11 +201,22 @@ final class TurnListVirtualizer {
 
     /// Record the real measured height of a materialized turn.
     /// Returns the document-height delta the caller must absorb.
+    ///
+    /// Only a **completed** turn's height is cached. `contentKey` is invariant
+    /// while a text block grows in place, so a height measured mid-stream and
+    /// cached under that key would be handed back once the turn completed — and
+    /// `refresh`'s `isComplete` guard would wave it through, marking an
+    /// off-screen turn exact at a height hundreds of points short of the truth.
     @discardableResult
-    func recordMeasured(_ height: CGFloat, at index: Int) -> CGFloat {
+    func recordMeasured(_ height: CGFloat, at index: Int, isComplete: Bool = true) -> CGFloat {
         guard index >= 0, index < count else { return 0 }
-        measured["\(keys[index])|\(width)"] = height
-        isExact[index] = true
+        if isComplete {
+            if measured.count >= Self.measuredCapacity {
+                measured.removeAll(keepingCapacity: true)
+            }
+            measured["\(keys[index])|\(width)"] = height
+        }
+        isExact[index] = isComplete
         return setHeight(height, at: index)
     }
 
@@ -234,7 +256,31 @@ final class TurnListVirtualizer {
 
         var range = first ..< (last + 1)
         if range.count > Self.maxMaterialized {
-            range = (range.upperBound - Self.maxMaterialized) ..< range.upperBound
+            // Two constraints, and the clamp has to honour both.
+            //
+            // The viewport must be covered. `upperBound` sits a whole viewport
+            // height BELOW what is on screen, so simply keeping the last N
+            // spends the budget on turns nobody can see and leaves a blank band
+            // at the top of the viewport — or, on a tall pane of short turns, a
+            // blank viewport.
+            //
+            // Whatever is left over belongs to the bottom. A reader following a
+            // stream is at the newest end, and that is the direction new content
+            // arrives from.
+            let visibleFirst = index(atY: viewport.minY)
+            let visibleLast  = min(count - 1, index(atY: viewport.maxY))
+            let visibleCount = visibleLast - visibleFirst + 1
+
+            var upper = min(range.upperBound,
+                            visibleLast + 1 + max(0, Self.maxMaterialized - visibleCount))
+            var lower = max(range.lowerBound, upper - Self.maxMaterialized)
+            if lower > visibleFirst {
+                // The viewport itself is wider than the budget: keep its top,
+                // which is where reading starts.
+                lower = visibleFirst
+                upper = min(range.upperBound, lower + Self.maxMaterialized)
+            }
+            range = lower ..< upper
         }
         return range
     }

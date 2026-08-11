@@ -289,12 +289,25 @@ final class TurnPayloadStoreTests: XCTestCase {
         XCTAssertEqual(restored.contentLength(ofBlockAt: 0), 5_000)
     }
 
-    func testRecordedLengthsCountCharactersConsistentlyForUnicode() {
+    func testRecordedLengthsUseTheSameUnitAsTheLivePathForUnicode() {
         let turn = makeTurn(user: Self.unicodeSample, blocks: [.text(Self.unicodeSample)])
         let skeleton = TurnPayloadStore.skeleton(of: turn)
 
-        XCTAssertEqual(skeleton.truncatedLengths?.userInput, Self.unicodeSample.count)
-        XCTAssertEqual(skeleton.contentLength(ofBlockAt: 0), Self.unicodeSample.count)
+        // Which unit lengths are counted in is not the requirement — the hot and
+        // cold paths agreeing is. (They are UTF-8 bytes rather than graphemes:
+        // `String.count` walks the string, and it runs on the streaming turn once
+        // per arriving block, which made the cost of a token proportional to how
+        // much that turn had already emitted.)
+        //
+        // Asserting against the live path rather than against a literal catches
+        // the failure that actually matters: a skeleton that measured itself
+        // differently from the turn it replaced would change height at the moment
+        // it went cold, and the transcript would shift under the operator.
+        XCTAssertEqual(skeleton.truncatedLengths?.userInput, turn.userInputLength)
+        XCTAssertEqual(skeleton.contentLength(ofBlockAt: 0), turn.contentLength(ofBlockAt: 0))
+        XCTAssertEqual(TurnHeightEstimator.estimate(skeleton, width: 800),
+                       TurnHeightEstimator.estimate(turn, width: 800),
+                       "a skeleton must hold exactly the place its turn held")
     }
 
     // MARK: - 4. The slope criterion

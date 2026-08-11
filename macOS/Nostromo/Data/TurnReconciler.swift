@@ -155,14 +155,27 @@ enum TurnReconciler {
     /// duplicates a turn — the exact bug being fixed, and visible. A false
     /// positive needs two turns sharing both a millisecond-resolution timestamp
     /// and their first 256 characters, which within one record does not happen.
+    /// Matching **degrades** when a timestamp is missing rather than failing.
+    ///
+    /// `timestamp` is optional on both of the daemon's user-event parse paths
+    /// (`stream_json.rs` `parse_user_event`), and the live stdout stream and the
+    /// stored JSONL are not guaranteed to agree about it. Requiring both sides to
+    /// carry one made the *asymmetric* case — a turn parsed live with no
+    /// timestamp, reconciled against the same turn re-read from disk with one —
+    /// fail to match. That is not a small degradation: it is a gap marker plus 30
+    /// duplicated turns on **every** reconnect, i.e. this bug, reintroduced.
+    ///
+    /// So: the user text must always agree. If both sides also carry a record
+    /// timestamp it must agree too, because that is the strongest signal
+    /// available. If either lacks one, the text plus the positional constraint of
+    /// the longest-overlap search is what we have, and it is enough.
     static func matches(_ a: ChatTurn, _ b: ChatTurn) -> Bool {
         // Markers are synthetic and belong to no record entry.
         guard a.marker == nil, b.marker == nil else { return false }
-        // A turn with no timestamp at all carries too little to anchor identity;
-        // refusing to match is the safe direction (it costs a gap marker, not a
-        // wrong merge).
-        guard a.timestampRaw != nil, b.timestampRaw != nil else { return false }
-        return a.identityKey == b.identityKey
+        guard a.userInput.prefix(ChatTurn.identityPrefix)
+              == b.userInput.prefix(ChatTurn.identityPrefix) else { return false }
+        if let ta = a.timestampRaw, let tb = b.timestampRaw { return ta == tb }
+        return true
     }
 
     /// Largest `k ≥ 1` for which the last `k` of `body` are the first `k` of

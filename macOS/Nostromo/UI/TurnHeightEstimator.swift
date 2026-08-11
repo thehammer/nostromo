@@ -83,9 +83,11 @@ enum TurnHeightEstimator {
 
         let blockWidth = paneWidth * blocksWidthFraction - 14
         for (i, block) in turn.blocks.enumerated() {
-            height += estimate(block: block,
-                               characters: turn.contentLength(ofBlockAt: i),
-                               width: blockWidth)
+            // Ask for the length only when the answer can change the height —
+            // see `TurnBlock.heightDependsOnContentLength`.
+            let characters = block.heightDependsOnContentLength
+                ? turn.contentLength(ofBlockAt: i) : 0
+            height += estimate(block: block, characters: characters, width: blockWidth)
             if i > 0 { height += blockSpacing }
         }
 

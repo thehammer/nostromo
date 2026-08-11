@@ -295,6 +295,20 @@ class ReplView: NSView {
             virtualizer.reset(turns: turns, width: contentWidth)
 
         case .spliced(let from):
+            // Releasing the views from `from` onward is not optional. The
+            // reconciler deliberately carries the OLD id onto the snapshot's
+            // version of each overlapping turn, so those turns have new content
+            // under an id the materialized window still recognises: eviction
+            // keeps them (their ids are wanted) and materialization skips them
+            // (a view already exists). A turn interrupted mid-stream would stay
+            // frozen at whatever blocks arrived before the disconnect —
+            // permanently, and with nothing saying so — while the model held the
+            // complete version.
+            for turn in turns[min(from, turns.count)...] {
+                turnViews.removeValue(forKey: turn.id)?.removeFromSuperview()
+                pendingRemeasure.remove(turn.id)
+                session.payloadStore.unpin(turn.id)
+            }
             virtualizer.splice(turns: turns, from: from)
 
         case .appended(let index):
@@ -379,10 +393,10 @@ class ReplView: NSView {
             if turnViews[turn.id] == nil {
                 let view = makeTurnView(for: turn)
                 turnViews[turn.id] = view
-                measure(view, at: i)          // measured detached — see `measure`
+                measure(view, at: i, isComplete: turn.isComplete)   // detached — see `measure`
                 documentView.addSubview(view)
             } else if pendingRemeasure.contains(turn.id) {
-                measure(turnViews[turn.id]!, at: i)
+                measure(turnViews[turn.id]!, at: i, isComplete: turn.isComplete)
             }
             pendingRemeasure.remove(turn.id)
         }
@@ -447,7 +461,7 @@ class ReplView: NSView {
     ///
     /// The view carries exactly one constraint of its own — its width — which is
     /// what makes `fittingSize.height` well defined while it is still an island.
-    private func measure(_ view: NSView, at index: Int) {
+    private func measure(_ view: NSView, at index: Int, isComplete: Bool) {
         // Measured while **detached**, and that is not incidental.
         //
         // `translatesAutoresizingMaskIntoConstraints = true` makes AppKit install
@@ -467,13 +481,22 @@ class ReplView: NSView {
         view.layoutSubtreeIfNeeded()
         let height = max(view.fittingSize.height, TurnHeightEstimator.minimumTurnHeight)
         view.setFrameSize(NSSize(width: contentWidth, height: height))
-        virtualizer.recordMeasured(height, at: index)
+        virtualizer.recordMeasured(height, at: index, isComplete: isComplete)
 
         superview?.addSubview(view)
     }
 
     private func releaseAllTurnViews() {
-        turnViews.values.forEach { $0.removeFromSuperview() }
+        // Unpinning matters as much as removing. `TurnPayloadStore` refuses to
+        // compact a pinned turn, so a release that left the pins behind would
+        // make `shedMaterializedViews()` structurally unable to compact the very
+        // turns it just released — and the pinned set would grow on every window
+        // resize until compaction was defeated entirely. Backwards, for a memory
+        // fix.
+        for (id, view) in turnViews {
+            view.removeFromSuperview()
+            session.payloadStore.unpin(id)
+        }
         turnViews.removeAll()
         pendingRemeasure.removeAll()
     }
@@ -1145,7 +1168,29 @@ private class ChatTurnView: NSView, TurnIsland {
             ])
         }
 
+        // Every block of an unrecoverable turn is truncated — the user bubble
+        // and the assistant's text as much as its tool results — so an answer
+        // would otherwise stop mid-sentence with nothing to explain it. One
+        // banner at the top of the turn covers all of them; the tool-result
+        // disclosure adds its own line because that content is separately
+        // expandable.
+        if !contentAvailable {
+            blocksStack.addArrangedSubview(Self.makeTruncationBanner())
+        }
         renderNewBlocks(turn.blocks)
+    }
+
+    private static func makeTruncationBanner() -> NSView {
+        let label = NSTextField(labelWithString:
+            "⚠︎  Only the beginning of this turn is still held in this pane. "
+            + "The full text remains in the Claude session transcript on disk.")
+        label.font                 = .systemFont(ofSize: 10)
+        label.textColor            = Theme.amber
+        label.lineBreakMode        = .byWordWrapping
+        label.maximumNumberOfLines = 0
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
     }
 
     required init?(coder: NSCoder) { fatalError() }
