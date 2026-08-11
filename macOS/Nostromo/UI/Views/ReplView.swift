@@ -379,8 +379,8 @@ class ReplView: NSView {
             if turnViews[turn.id] == nil {
                 let view = makeTurnView(for: turn)
                 turnViews[turn.id] = view
+                measure(view, at: i)          // measured detached — see `measure`
                 documentView.addSubview(view)
-                measure(view, at: i)
             } else if pendingRemeasure.contains(turn.id) {
                 measure(turnViews[turn.id]!, at: i)
             }
@@ -448,13 +448,28 @@ class ReplView: NSView {
     /// The view carries exactly one constraint of its own — its width — which is
     /// what makes `fittingSize.height` well defined while it is still an island.
     private func measure(_ view: NSView, at index: Int) {
-        if let island = view as? TurnIsland {
-            island.setIslandWidth(contentWidth)
-        }
+        // Measured while **detached**, and that is not incidental.
+        //
+        // `translatesAutoresizingMaskIntoConstraints = true` makes AppKit install
+        // constraints pinning the view's size to its frame the moment it has a
+        // superview. `fittingSize` then just hands back the frame it already has:
+        // a newly-created view measures as its zero frame (and conflicts with its
+        // own width constraint while doing so), and a streaming turn re-measured
+        // in place keeps reporting the height it had before the block arrived, so
+        // the document silently stops growing.
+        //
+        // Detached, the only constraints it holds are its own width plus its
+        // internal layout — which is exactly the question being asked.
+        let superview = view.superview
+        superview.map { _ in view.removeFromSuperview() }
+
+        (view as? TurnIsland)?.setIslandWidth(contentWidth)
         view.layoutSubtreeIfNeeded()
         let height = max(view.fittingSize.height, TurnHeightEstimator.minimumTurnHeight)
-        virtualizer.recordMeasured(height, at: index)
         view.setFrameSize(NSSize(width: contentWidth, height: height))
+        virtualizer.recordMeasured(height, at: index)
+
+        superview?.addSubview(view)
     }
 
     private func releaseAllTurnViews() {
