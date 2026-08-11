@@ -86,8 +86,11 @@ enum TurnReconciler {
         let echoes  = split.echoes
 
         guard !body.isEmpty else {
+            // Only pending echoes were retained, and they are re-appended with
+            // their ids intact — so no history was dropped and no view needs to
+            // be released.
             return finish(base: snapshot, echoes: echoes, replacedFrom: 0,
-                          didReplaceAll: !retained.isEmpty, insertedGapMarker: false,
+                          didReplaceAll: false, insertedGapMarker: false,
                           overlap: 0)
         }
 
@@ -206,6 +209,15 @@ enum TurnReconciler {
 
     /// Re-appends pending echoes, dropping any the snapshot turns out to have
     /// already recorded.
+    ///
+    /// Two things make this narrow rather than a blanket text match, because the
+    /// failure direction here is losing a message the operator sent:
+    ///
+    ///   - Only turns the snapshot *newly* brought in (index ≥ `replacedFrom`)
+    ///     can be the daemon's record of a pending echo. A match against history
+    ///     we already held is just the operator saying "yes" twice.
+    ///   - Matching is multiset, not set. If the record holds one "yes" and two
+    ///     are pending, exactly one is absorbed and the other survives.
     private static func finish(base: [ChatTurn], echoes: [ChatTurn],
                                replacedFrom: Int, didReplaceAll: Bool,
                                insertedGapMarker: Bool, overlap: Int) -> Outcome {
@@ -214,8 +226,24 @@ enum TurnReconciler {
                            didReplaceAll: didReplaceAll,
                            insertedGapMarker: insertedGapMarker, overlap: overlap)
         }
-        let recent = Set(base.suffix(echoAdoptionWindow).map { $0.userInput })
-        let surviving = echoes.filter { !recent.contains($0.userInput) }
+
+        let floor = max(replacedFrom, base.count - echoAdoptionWindow, 0)
+        var available: [String: Int] = [:]
+        if floor < base.count {
+            for turn in base[floor...] where turn.marker == nil {
+                available[turn.userInput, default: 0] += 1
+            }
+        }
+
+        var surviving: [ChatTurn] = []
+        for echo in echoes {
+            if let remaining = available[echo.userInput], remaining > 0 {
+                available[echo.userInput] = remaining - 1
+            } else {
+                surviving.append(echo)
+            }
+        }
+
         return Outcome(turns: base + surviving,
                        replacedFrom: min(replacedFrom, base.count),
                        didReplaceAll: didReplaceAll,

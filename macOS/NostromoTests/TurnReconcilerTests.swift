@@ -377,6 +377,37 @@ final class TurnReconcilerTests: XCTestCase {
         assertNoDuplicateEntries(outcome.turns)
     }
 
+    func testTurnsStillMatchWhenTheSnapshotHasADifferentNumberOfDurableBlocks() {
+        // A turn interrupted mid-stream differs by however many blocks had
+        // arrived — a *durable* difference that survives into the stored record.
+        // Identity is (record timestamp, user text), so it must still match.
+        let interrupted: [TurnBlock] = [
+            .text("working on it"),
+            .toolCall(ToolCallData(toolName: "Read", inputSummary: "ChatModels.swift",
+                                   inputFull: "{}")),
+        ]
+        let complete: [TurnBlock] = interrupted + [
+            .toolResult(ToolResultData(content: "…file…", isError: false)),
+            .text("done"),
+        ]
+        let retained = makeRetained(Array(0 ..< 30), blocks: interrupted)
+        let snapshot = makeSnapshot(Array(0 ..< 30), epoch: 1, blocks: complete)
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: snapshot,
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(outcome.overlap, 30,
+                       "a turn that gained blocks since we last saw it is still the same "
+                       + "turn — matching must not depend on block shape")
+        XCTAssertEqual(outcome.turns.count, 30)
+        XCTAssertEqual(outcome.turns.map { $0.id }, retained.map { $0.id })
+        XCTAssertEqual(outcome.turns.first?.blocks.count, complete.count,
+                       "the snapshot's fuller view of the turn wins on content")
+        XCTAssertFalse(outcome.insertedGapMarker)
+        assertNoDuplicateEntries(outcome.turns)
+    }
+
     // MARK: - 6. Repeated identical user input at the splice boundary
 
     func testRepeatedIdenticalUserInputAtTheBoundarySplicesAtTheLongestOverlap() {
@@ -409,6 +440,45 @@ final class TurnReconcilerTests: XCTestCase {
         assertUniqueViewIdentities(outcome.turns)
         XCTAssertFalse(outcome.insertedGapMarker)
         assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testAmbiguousRunOfIdenticalTurnsSplicesAtTheLongestOverlap() {
+        // Record timestamps are not always fine-grained enough to separate two
+        // identical messages sent in quick succession. When the tail is genuinely
+        // ambiguous, the splice must take the *longest* consistent overlap —
+        // taking the shortest would re-append a turn we already hold.
+        func ambiguousYes(id: UUID = UUID(), daemonId: String) -> ChatTurn {
+            ChatTurn(id: id, userInput: "yes",
+                     timestamp: Self.baseDate.addingTimeInterval(8),
+                     timestampRaw: Self.rawTimestamp(8),
+                     blocks: [], isComplete: true, daemonId: daemonId, epoch: 0)
+        }
+
+        let head = makeRetained(Array(0 ..< 8))
+        let firstYes  = ambiguousYes(daemonId: "r8")
+        let secondYes = ambiguousYes(daemonId: "r9")
+        let retained  = head + [firstYes, secondYes]
+
+        let snapshot = [ambiguousYes(daemonId: "t0"),
+                        ambiguousYes(daemonId: "t1"),
+                        makeTurn(seq: 9, epoch: 1, daemonId: "t2")]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: snapshot,
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(outcome.overlap, 2,
+                       "both ambiguous turns overlap the snapshot, not just the last one")
+        guard requireCount(outcome.turns, 11,
+                           "8 leading turns + the 2 ambiguous ones + 1 new turn")
+        else { return }
+        XCTAssertEqual(outcome.turns.filter { $0.userInput == "yes" }.count, 2,
+                       "a run of identical messages must not gain a phantom repetition")
+        XCTAssertEqual(outcome.turns[8].id, firstYes.id,
+                       "the earlier ambiguous turn keeps its view identity")
+        XCTAssertEqual(outcome.turns[9].id, secondYes.id,
+                       "the later ambiguous turn keeps its view identity")
+        assertUniqueViewIdentities(outcome.turns)
     }
 
     // MARK: - 7. No overlap, different session

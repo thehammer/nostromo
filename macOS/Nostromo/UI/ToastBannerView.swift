@@ -64,8 +64,19 @@ class ToastBannerView: NSView {
     // MARK: - Public API
 
     func showToast(_ event: PostureThresholdEvent) {
+        showToast(message: "\(event.severity.icon) \(event.toastMessage)",
+                  severity: event.severity)
+    }
+
+    /// Show a toast that has nothing to do with usage posture.
+    ///
+    /// `MemoryWatchdog` needs to name a condition the operator should know about
+    /// — the app holding more memory than is safe — and `PostureThresholdEvent`
+    /// is about token budgets. Overloading it with memory semantics would make
+    /// both harder to read; this is the neutral surface both go through.
+    func showToast(message: String, severity: ToastSeverity) {
         assert(Thread.isMainThread)
-        let view  = makeToastView(event)
+        let view  = makeToastView(message: message, severity: severity)
         let endX  = bounds.width - Self.toastWidth - Self.trailingPad
         let yPos  = topYForNextToast()
 
@@ -142,25 +153,25 @@ class ToastBannerView: NSView {
 
     // MARK: - Toast view factory
 
-    private func makeToastView(_ event: PostureThresholdEvent) -> NSView {
+    private func makeToastView(message: String, severity: ToastSeverity) -> NSView {
         let container = NSView()
         container.wantsLayer = true
         container.layer?.backgroundColor = Theme.bgBar.cgColor
         container.layer?.cornerRadius    = 5
         container.layer?.borderWidth     = 1
-        container.layer?.borderColor     = event.severity.color
+        container.layer?.borderColor     = severity.color
             .withAlphaComponent(0.55).cgColor
 
         // Left severity accent bar
         let accent = NSView()
         accent.wantsLayer = true
-        accent.layer?.backgroundColor = event.severity.color.cgColor
+        accent.layer?.backgroundColor = severity.color.cgColor
         accent.layer?.cornerRadius    = 1.5
         accent.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(accent)
 
         // Message label
-        let label = NSTextField(labelWithString: "\(event.severity.icon) \(event.toastMessage)")
+        let label = NSTextField(labelWithString: message)
         label.font          = Theme.statusFont
         label.textColor     = Theme.fg
         label.lineBreakMode = .byTruncatingTail

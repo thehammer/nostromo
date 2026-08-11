@@ -65,7 +65,9 @@ class AppStore: ObservableObject {
 
     // MARK: - Internals
 
-    private let client  = NostromodClient()
+    /// Exposed so `TranscriptLoadHarness` can inject synthetic daemon traffic
+    /// through the real production code path rather than a parallel one.
+    let client = NostromodClient()
     private let broker  = MotherBrokerClient()
     private var cancellables     = Set<AnyCancellable>()
     /// Per-PR detail cache keyed by "{repo-with-dashes}-{number}".
@@ -80,6 +82,29 @@ class AppStore: ObservableObject {
     private var sessionRegistry: [String: ChatSession] = [:]
 
     private init() {}
+
+    // MARK: - Memory self-defense
+
+    /// Live transcript panes, weakly held, so the watchdog can tell them to shed.
+    private let transcriptPanes = NSHashTable<ReplView>.weakObjects()
+    private let watchdog = MemoryWatchdog()
+    /// Where shed/warning toasts are shown. Set by `MainLayout`.
+    var onMemoryToast: ((String, ToastSeverity) -> Void)?
+
+    func registerTranscriptPane(_ pane: ReplView) {
+        transcriptPanes.add(pane)
+    }
+
+    /// Start watching the app's own footprint. Called once, from `AppDelegate`.
+    func startMemoryWatchdog() {
+        watchdog.onShed = { [weak self] in
+            self?.transcriptPanes.allObjects.forEach { $0.shedMaterializedViews() }
+        }
+        watchdog.onWarn = { [weak self] title, detail in
+            self?.onMemoryToast?("\(title) — \(detail)", .warning)
+        }
+        watchdog.start()
+    }
 
     // MARK: - Session registry
 
@@ -180,7 +205,15 @@ class AppStore: ObservableObject {
             .store(in: &cancellables)
 
         FileWatchers.shared.start()
-        client.start()
+        // Under the load harness the daemon connection is suppressed entirely, so
+        // a measurement run never contends with — or is polluted by — live
+        // sessions. The harness drives `client.messages` / `client.connected`
+        // itself, which is the same path the daemon's traffic takes.
+        if TranscriptLoadHarness.isActive {
+            TranscriptLoadHarness.startIfRequested(client: client)
+        } else {
+            client.start()
+        }
         broker.start()
 
         // Fallback poll: `mother list --format json` every 30 s reconciles any

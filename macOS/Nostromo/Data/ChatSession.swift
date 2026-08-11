@@ -410,6 +410,24 @@ class ChatSession: ObservableObject {
         payloadStore.hydrate(turn)
     }
 
+    /// Compress the entire hot window, not just the turn that fell out of it.
+    /// Called by `MemoryWatchdog` when the footprint crosses the shed threshold
+    /// or the OS reports critical pressure.
+    func shedRetainedContent() {
+        payloadStore.compactBatch(turns) { [weak self] skeletons in
+            guard let self else { return }
+            var byId: [UUID: Int] = [:]
+            for (i, turn) in self.turns.enumerated() { byId[turn.id] = i }
+            for skeleton in skeletons {
+                guard let i = byId[skeleton.id] else { continue }
+                self.turns[i] = skeleton
+            }
+        }
+    }
+
+    /// Turns still holding an uncompressed payload, for diagnostics.
+    var hotPayloadTurnCount: Int { turns.count - payloadStore.stats.coldTurns }
+
     // MARK: - Mapping (daemon model → GUI model)
 
     private static let iso: ISO8601DateFormatter = {

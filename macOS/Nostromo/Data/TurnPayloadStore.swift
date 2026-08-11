@@ -113,6 +113,41 @@ final class TurnPayloadStore {
         }
     }
 
+    /// Compress many turns in one background hop.
+    ///
+    /// The shed path compacts an entire hot window at once; doing that as one
+    /// `compact` call per turn would queue thousands of dispatches at exactly
+    /// the moment the machine is already unhappy.
+    func compactBatch(_ turns: [ChatTurn], completion: @escaping ([ChatTurn]) -> Void) {
+        let candidates = turns.filter {
+            $0.isComplete && $0.marker == nil && blobs[$0.id] == nil
+                && !pinned.contains($0.id) && !dropped.contains($0.id)
+        }
+        guard !candidates.isEmpty else { return }
+        let payloads: [(UUID, Data)] = candidates.compactMap { turn in
+            Self.encodePayload(turn).map { (turn.id, $0) }
+        }
+        queue.async { [weak self] in
+            let compressed: [(UUID, Data)] = payloads.compactMap { id, payload in
+                guard let blob = try? (payload as NSData).compressed(using: .lzfse) as Data
+                else { return nil }
+                return (id, blob)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                var skeletons: [ChatTurn] = []
+                let byId = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
+                for (id, blob) in compressed {
+                    guard !self.dropped.contains(id), !self.pinned.contains(id),
+                          let turn = byId[id] else { continue }
+                    self.blobs[id] = blob
+                    skeletons.append(Self.skeleton(of: turn))
+                }
+                completion(skeletons)
+            }
+        }
+    }
+
     /// Restore a turn's full payload. Hot turns pass straight through.
     func hydrate(_ turn: ChatTurn) -> Hydration {
         guard let blob = blobs[turn.id] else {
