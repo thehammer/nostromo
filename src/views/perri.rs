@@ -200,22 +200,12 @@ impl PerriView {
         highlights: Option<String>,
     ) -> Result<(), String> {
         let state_dir = self.config.perri_state_dir();
-        std::fs::create_dir_all(&state_dir).map_err(|e| format!("io_error: {e}"))?;
-
-        let pointer = serde_json::json!({
-            "number": number,
-            "repo": repo,
-            "highlights": highlights,
-        });
-        let json = serde_json::to_string_pretty(&pointer)
-            .map_err(|e| format!("serialization_failed: {e}"))?;
-
-        let json_path = state_dir.join("current-pr.json");
-        std::fs::write(&json_path, json.as_bytes()).map_err(|e| format!("io_error: {e}"))?;
-
-        // Touch the dirty sentinel to wake the watcher.
-        let dirty_path = state_dir.join("current-pr.dirty");
-        std::fs::write(&dirty_path, b"").map_err(|e| format!("io_error: {e}"))?;
+        crate::data::perri_current_pr::write_pointer(
+            &state_dir,
+            number,
+            &repo,
+            highlights.as_deref(),
+        )?;
 
         // Clear any override so the live diff shows once pr_rx updates.
         self.diff_override = None;
@@ -226,12 +216,7 @@ impl PerriView {
     /// Remove `current-pr.json` and touch the dirty sentinel to clear Perri's diff pane.
     pub fn clear_current_pr(&mut self) -> Result<(), String> {
         let state_dir = self.config.perri_state_dir();
-        let json_path = state_dir.join("current-pr.json");
-        if json_path.exists() {
-            std::fs::remove_file(&json_path).map_err(|e| format!("io_error: {e}"))?;
-        }
-        let dirty_path = state_dir.join("current-pr.dirty");
-        std::fs::write(&dirty_path, b"").map_err(|e| format!("io_error: {e}"))?;
+        crate::data::perri_current_pr::clear_pointer(&state_dir)?;
 
         self.diff_override = None;
         Ok(())

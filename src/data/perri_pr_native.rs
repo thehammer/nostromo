@@ -216,6 +216,13 @@ impl PerriPrNativeSource {
                     debug!("perri diff direct-push refresh signal (MCP)");
                 }
             }
+
+            // A caller (e.g. `perri.load_pr`) may touch the dirty sentinel
+            // *and* send on `refresh_tx` for the same logical change — drain
+            // whichever channel(s) didn't win the select above so a single
+            // change collapses into exactly one fetch cycle instead of two.
+            while dirty_rx.try_recv().is_ok() {}
+            while refresh_rx.try_recv().is_ok() {}
         }
     }
 
@@ -532,6 +539,59 @@ fn split_repo(repo: &str) -> Result<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression guard for the double-wake coalescing fix (D6).
+    ///
+    /// `perri.load_pr` writes `current-pr.json`, touches `current-pr.dirty`
+    /// *and* signals `refresh_tx` for the same logical change. Without the
+    /// post-select drain, that produces two pending wakes and two fetch
+    /// cycles (and two GitHub calls) for one change. This exercises the
+    /// exact `select!` + drain shape used in `run()`, without touching the
+    /// network: it queues both signals, confirms the first select cycle
+    /// fires immediately, drains the leftover signal, then asserts a second
+    /// select waits the full interval — proving no extra cycle followed.
+    #[tokio::test]
+    async fn coalesces_dirty_and_refresh_signals_into_one_wake() {
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+
+        // Simulate the double-wake: both signals pending for one change.
+        dirty_tx.send(()).unwrap();
+        refresh_tx.send(()).unwrap();
+
+        let interval = Duration::from_millis(200);
+
+        // First cycle: one of the two branches fires immediately.
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => panic!("select should fire immediately with signals pending"),
+            Some(_) = dirty_rx.recv() => {}
+            Some(_) = refresh_rx.recv() => {}
+        }
+        // The fix: drain whichever channel didn't win, so the leftover
+        // signal doesn't cause a second cycle.
+        while dirty_rx.try_recv().is_ok() {}
+        while refresh_rx.try_recv().is_ok() {}
+
+        // Second cycle: both channels drained — the select must wait the
+        // full interval, proving the leftover signal did not fire a second
+        // fetch.
+        let start = std::time::Instant::now();
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            Some(_) = dirty_rx.recv() => panic!("dirty branch fired after drain — coalescing failed"),
+            Some(_) = refresh_rx.recv() => panic!("refresh branch fired after drain — coalescing failed"),
+        }
+        assert!(
+            start.elapsed() >= Duration::from_millis(150),
+            "select returned early — a leftover signal was not drained"
+        );
+
+        drop(dirty_tx);
+        drop(refresh_tx);
+    }
 
     // ── diff_is_too_large ──────────────────────────────────────────────────────
 

@@ -39,6 +39,7 @@ fn make_daemon_state() -> Harness {
         pane_registry,
         session_mgr,
         broadcast_tx: broadcast_tx.clone(),
+        perri: nostromo::mcp::PerriDaemonState::default(),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),

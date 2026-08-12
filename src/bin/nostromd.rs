@@ -144,9 +144,15 @@ async fn main() -> Result<()> {
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
     let (perri_queue_rx, perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
-    let (perri_pr_rx, _perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
+    let (perri_pr_rx, perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
     let perri_pr_rx_for_mcp = perri_pr_rx.clone();
+    // Cloned here because `perri_queue_refresh_tx` itself is moved into
+    // `relay_client::spawn` below; the MCP-hosted `perri.load_pr`/
+    // `perri.clear_current_pr` handlers need their own sender to wake the
+    // native sources without touching the dirty-file sentinel's watcher.
+    let perri_queue_refresh_tx_for_mcp = perri_queue_refresh_tx.clone();
+    let perri_pr_refresh_tx_for_mcp = perri_pr_refresh_tx.clone();
 
     // ── Mother jobs channel (spawned early so MCP state gets live receiver) ─────
     let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
@@ -172,6 +178,12 @@ async fn main() -> Result<()> {
                 pane_registry: Arc::clone(&pane_registry),
                 session_mgr: Arc::clone(&session_mgr),
                 broadcast_tx: broadcast_tx.clone(),
+                perri: nostromo::mcp::PerriDaemonState {
+                    state_dir: Some(config.perri_state_dir()),
+                    pr_refresh_tx: Some(perri_pr_refresh_tx_for_mcp.clone()),
+                    queue_refresh_tx: Some(perri_queue_refresh_tx_for_mcp.clone()),
+                    ..Default::default()
+                },
             };
             let state = McpSharedState::for_daemon_with_sources(
                 backend,
