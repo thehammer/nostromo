@@ -52,6 +52,11 @@ impl ApplyLayoutError {
     }
 }
 
+/// Default placeholder text for `perri.get_current_pr` when no PR is loaded.
+/// Shared with `perri_mutators::clear_current_pr`'s daemon branch so the two
+/// can't drift on what "cleared" looks like in the diff pane.
+pub(crate) const NO_PR_LOADED_PLACEHOLDER: &str = "No PR loaded.";
+
 /// The closed set of `source` names a `PaneSpec` may bind to. Adding a new
 /// source is a deliberate code change: add a `match` arm in [`fetch`], list it
 /// here, and ensure the corresponding receiver is wired into the daemon's
@@ -278,6 +283,7 @@ mod tests {
             pane_registry,
             session_mgr,
             broadcast_tx,
+            perri: crate::mcp::PerriDaemonState::default(),
         };
         (McpSharedState::for_daemon(backend), rx)
     }

@@ -375,6 +375,15 @@ impl PerriQueueNativeSource {
                     debug!("perri queue approvals-file signal — re-fetching with new suppression");
                 }
             }
+
+            // A caller (e.g. `perri.clear_current_pr`) may touch the dirty
+            // sentinel *and* send on `refresh_tx` for the same logical
+            // change — drain whichever channel(s) didn't win the select
+            // above so a single change collapses into exactly one fetch
+            // cycle instead of two.
+            while dirty_rx.try_recv().is_ok() {}
+            while refresh_rx.try_recv().is_ok() {}
+            while approvals_rx.try_recv().is_ok() {}
         }
     }
 
@@ -1227,6 +1236,58 @@ mod tests {
         // Keep dirty_tx alive past the select so it's not the closed
         // channel that wins.
         let _ = dirty_tx;
+    }
+
+    /// Regression guard for the double-wake coalescing fix (D6).
+    ///
+    /// `perri.clear_current_pr` touches `queue.dirty` *and* signals
+    /// `refresh_tx` for the same logical change. Without the post-select
+    /// drain, that produces two pending wakes and two fetch cycles (and two
+    /// GitHub search calls) for one change. This exercises the exact
+    /// `select!` + drain shape used in `run()`, without touching the
+    /// network: queue all three signal channels, confirm the first select
+    /// cycle fires immediately, drain the leftovers, then assert a second
+    /// select waits the full interval — proving no extra cycle followed.
+    #[tokio::test]
+    async fn coalesces_dirty_refresh_and_approvals_signals_into_one_wake() {
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+        let (approvals_tx, mut approvals_rx) = mpsc::unbounded_channel::<()>();
+
+        dirty_tx.send(()).unwrap();
+        refresh_tx.send(()).unwrap();
+        approvals_tx.send(()).unwrap();
+
+        let interval = Duration::from_millis(200);
+
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => panic!("select should fire immediately with signals pending"),
+            Some(_) = dirty_rx.recv() => {}
+            Some(_) = refresh_rx.recv() => {}
+            Some(_) = approvals_rx.recv() => {}
+        }
+        while dirty_rx.try_recv().is_ok() {}
+        while refresh_rx.try_recv().is_ok() {}
+        while approvals_rx.try_recv().is_ok() {}
+
+        let start = std::time::Instant::now();
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            Some(_) = dirty_rx.recv() => panic!("dirty branch fired after drain — coalescing failed"),
+            Some(_) = refresh_rx.recv() => panic!("refresh branch fired after drain — coalescing failed"),
+            Some(_) = approvals_rx.recv() => panic!("approvals branch fired after drain — coalescing failed"),
+        }
+        assert!(
+            start.elapsed() >= Duration::from_millis(150),
+            "select returned early — a leftover signal was not drained"
+        );
+
+        drop(dirty_tx);
+        drop(refresh_tx);
+        drop(approvals_tx);
     }
 
     fn make_item(login: &str, draft: bool, updated_at: Option<&str>) -> SearchIssueItem {

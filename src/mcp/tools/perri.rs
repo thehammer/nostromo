@@ -5,9 +5,10 @@
 //! - `perri.get_current_pr()` — snapshot from `perri_pr_rx`
 //! - `perri.get_state()` — composite `{ queue, current_pr, stale }`
 //!
-//! Note: `selected_index` is omitted in Phase 2 (view selection state is not
-//! yet wired into `McpSharedState`; it will be added in Phase 3 alongside
-//! other view-mutation surfaces).
+//! `selected_index` is intentionally not a field of `get_state()` — see the
+//! doc comment on [`get_state`]. It's exposed through the dedicated
+//! `perri.get_selected_index` / `perri.set_selected_index` tools in
+//! [`super::perri_mutators`] instead.
 
 use serde_json::{json, Value};
 
@@ -43,7 +44,11 @@ pub fn get_current_pr(state: &McpSharedState) -> Value {
 ///
 /// Returns `{ queue: [...], current_pr: {...}|null, stale: bool }`.
 ///
-/// Note: `selected_index` is intentionally omitted in Phase 2.
+/// `selected_index` is deliberately not included here: this handler is
+/// synchronous, and on the TUI host reading the selected index means an
+/// async round trip through `PerriView` — adding the key here would make the
+/// response shape differ by host, which is worse for callers than not having
+/// it. Use `perri.get_selected_index` instead.
 pub fn get_state(state: &McpSharedState) -> Value {
     let queue = list_pr_queue(state);
     let current_pr = get_current_pr(state);
