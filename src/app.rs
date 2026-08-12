@@ -304,9 +304,13 @@ pub async fn run(
         PerriQueueSource::spawn(config.clone())
     } else {
         // Phase 4: the second element is the direct-push refresh sender.
-        // The queue source is polled on an interval; MCP tools don't currently
-        // trigger manual queue refreshes, so we discard the sender.
-        let (rx, _queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
+        // Wired to the github-relay subscriber so a relevant GitHub event
+        // (PR opened/merged/reviewed, CI completed) triggers an immediate
+        // re-poll instead of waiting out the interval — the same pattern
+        // nostromd's own daemon-hosted queue already uses. No-ops if
+        // relay_url/relay_token aren't set in config.
+        let (rx, queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
+        crate::data::relay_client::spawn(config.clone(), queue_refresh_tx);
         rx
     };
     let (pr_rx, perri_pr_refresh_tx_opt) = if bash_fallback {
