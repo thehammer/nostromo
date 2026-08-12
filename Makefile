@@ -76,13 +76,23 @@ INSTALLED   = /Applications/Nostromo.app
 
 ## Build the macOS GUI app (uses explicit derivedDataPath so worktree builds
 ## don't scatter extra .app copies into ~/Library/Developer/Xcode/DerivedData)
+## `set -o pipefail` is not decoration. Without it the recipe's status is
+## grep's, and grep succeeds precisely when the build printed `error:` — so a
+## broken build exited 0 and every caller (CI, mother, a human) read it as
+## green. NOT `.SHELLFLAGS`: macOS ships GNU Make 3.81 and `.SHELLFLAGS`
+## arrived in 3.82, so setting it here is silently ignored. A per-recipe
+## prefix works on 3.81, and needs no `SHELL` change — /bin/sh on macOS is
+## bash and supports it.
 mac:
-	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo -configuration Debug \
+	set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo -configuration Debug \
 	  -derivedDataPath build build 2>&1 | grep -E "error:|warning:|BUILD"
 
-## Run the macOS logic test suite (standalone bundle, no test host)
+## Run the macOS logic test suite (standalone bundle, no test host).
+## Same pipefail rationale as `mac`: this target reported success on a failing
+## suite, which is the worst possible thing for a target whose entire job is to
+## tell you whether the suite passed.
 mac-test:
-	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
+	set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
 	  -destination 'platform=macOS' -derivedDataPath build test \
 	  2>&1 | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST"
 
