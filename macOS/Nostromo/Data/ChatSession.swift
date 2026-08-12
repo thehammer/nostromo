@@ -312,6 +312,12 @@ class ChatSession: ObservableObject {
 
         turns = outcome.turns
         enforceRetentionCap()
+        // Heal on the spot. This splice is *the* event that used to strand turns:
+        // it can insert a gap marker and replace a tail in one step, moving the
+        // hot-window boundary past turns the old single-index check would then
+        // never look at again. Waiting for the next live turn is not good enough
+        // — a session can reconnect and go quiet.
+        compactColdTurns()
         // `.cleared` means "release every turn view and re-sync from `turns`",
         // so it covers the replacement snapshot too.
         changes.send(outcome.didReplaceAll ? .cleared : .spliced(replacedFrom: outcome.replacedFrom))
@@ -369,8 +375,10 @@ class ChatSession: ObservableObject {
                 turns.append(Self.mapTurn(turn, epoch: currentEpoch))
                 changes.send(.appended(index: turns.count - 1))
             }
-            compactColdTurn()
+            // Cap first, then compact. Compacting turns that are about to be
+            // dropped is wasted compression work on the main thread's behalf.
             enforceRetentionCap()
+            compactColdTurns()
 
         case .blockAppended(let turnId, let block):
             if let i = index(ofDaemonId: turnId) {
@@ -402,18 +410,47 @@ class ChatSession: ObservableObject {
 
     // MARK: - Retention
 
-    /// Hand the turn that just fell out of the hot window to the payload store.
+    /// Hand every turn that has fallen out of the hot window to the payload store.
     ///
-    /// Compression happens on turn *completion* and off the main thread, so a
-    /// streaming turn never pays for it.
-    private func compactColdTurn() {
-        let index = turns.count - 1 - TurnPayloadStore.hotWindow
-        guard index >= 0, turns[index].isComplete, turns[index].marker == nil else { return }
-        let turn = turns[index]
-        payloadStore.compact(turn) { [weak self] skeleton in
-            guard let self, let i = self.turns.firstIndex(where: { $0.id == skeleton.id })
-            else { return }
-            self.turns[i] = skeleton
+    /// This used to check exactly one computed index (`turns.count - 1 - hotWindow`)
+    /// on each appended turn. Any event that changed the list length by more than
+    /// one moved the boundary past turns that were then never examined again: a
+    /// reconnect's snapshot splice (up to 30 turns), the `historyUnavailable` marker
+    /// insert (shifts every index by one *and* makes the old guard reject), an
+    /// incomplete turn sitting at that index. Those turns kept their full payload
+    /// for the life of the session, with no signal — roughly 29 turns and ~1 MB per
+    /// reconnect, against a 20 MB/1,000-turn criterion with ~20% margin.
+    ///
+    /// A sweep is both simpler than the arithmetic and self-healing: after any
+    /// splice, marker insert or retention drop it re-examines everything below the
+    /// boundary, and it picks up turns that were skipped earlier because they were
+    /// incomplete or pinned by a materialized view.
+    ///
+    /// Deliberately no resume cursor and no index arithmetic. At the 10,000-turn
+    /// retention cap the sweep is ≤9,800 iterations of two optional checks and a
+    /// `Bool` per appended turn — sub-millisecond, against turns that arrive
+    /// seconds apart. Clever index arithmetic is precisely what produced this bug.
+    private func compactColdTurns() {
+        let boundary = turns.count - TurnPayloadStore.hotWindow
+        guard boundary > 0 else { return }
+        var batch: [ChatTurn] = []
+        for i in 0 ..< boundary
+        where turns[i].truncatedLengths == nil && turns[i].marker == nil && turns[i].isComplete {
+            batch.append(turns[i])
+        }
+        guard !batch.isEmpty else { return }
+        // `compactBatch`, not per-turn `compact`: a splice can strand ~30 turns at
+        // once, and this is the same one-background-hop pattern
+        // `shedRetainedContent()` uses. The store already filters pinned, dropped,
+        // in-flight and already-compacted turns, so re-offering one is harmless.
+        payloadStore.compactBatch(batch) { [weak self] skeletons in
+            guard let self else { return }
+            var indexById: [UUID: Int] = [:]
+            for (i, turn) in self.turns.enumerated() { indexById[turn.id] = i }
+            for skeleton in skeletons {
+                guard let i = indexById[skeleton.id] else { continue }
+                self.turns[i] = skeleton
+            }
         }
     }
 

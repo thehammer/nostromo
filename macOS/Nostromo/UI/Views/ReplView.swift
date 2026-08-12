@@ -44,6 +44,10 @@ class ReplView: NSView {
     private var turnViews: [UUID: NSView] = [:]
     /// Turns whose content changed since they were last measured.
     private var pendingRemeasure: Set<UUID> = []
+    /// What the operator has done to each turn — answered cards, expanded tool
+    /// results — held here because turn views no longer survive long enough to
+    /// hold it themselves. See `TurnInteractionStore`.
+    private let interactions = TurnInteractionStore()
     /// At most one materialization pass is ever in flight. Materializing from
     /// inside a layout or scroll callback recurses; this is the same coalescing
     /// guard the old scroll path used, widened to cover the whole pass.
@@ -292,6 +296,10 @@ class ReplView: NSView {
         switch change {
         case .cleared:
             releaseAllTurnViews()
+            // Nothing in `turns` survives, so nothing recorded against them
+            // should either. This is half the bound that stops the interaction
+            // store becoming the leak this work exists to remove.
+            interactions.removeAll()
             virtualizer.reset(turns: turns, width: contentWidth)
 
         case .spliced(let from):
@@ -309,6 +317,13 @@ class ReplView: NSView {
                 pendingRemeasure.remove(turn.id)
                 session.payloadStore.unpin(turn.id)
             }
+            // The other half of the bound. A splice is the one event that can
+            // remove turns from the list, and the retention cap reports itself as
+            // `.spliced(replacedFrom: 0)` — so pruning here also covers dropped
+            // history. Deliberately not done on every materialization pass: that
+            // would put an O(turns) walk on the hot path, and between splices
+            // growth is bounded by the turns a human actually interacted with.
+            interactions.prune(keeping: Set(turns.map(\.id)))
             virtualizer.splice(turns: turns, from: from)
 
         case .appended(let index):
@@ -440,11 +455,25 @@ class ReplView: NSView {
         }
         session.payloadStore.pin(turn.id)
 
-        let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable)
+        let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable,
+                                interaction: interactions.state(for: turn.id))
         view.onSend = { [weak self] text in
             guard let self else { return }
             self.isPinnedToBottom = true
             self.session.send(text)
+        }
+        // An answered question card must come back answered. Rebuilt armed, it
+        // would take one stray click to send a second message into a live agent
+        // session — and eviction plus any width change rebuilds it routinely.
+        view.onAnsweredOption = { [weak self] blockIndex, optionIndex in
+            self?.interactions.recordAnswer(turn: turn.id, block: blockIndex, option: optionIndex)
+        }
+        // Expansion restore also keeps geometry and view agreeing: the height
+        // cache keys measured heights by content, which is invariant across
+        // expansion, so a re-collapsed tool result would leave the virtualizer
+        // holding the expanded height.
+        view.onBlockExpansion = { [weak self] blockIndex, isExpanded in
+            self?.interactions.setExpanded(turn: turn.id, block: blockIndex, isExpanded)
         }
         // Expanding a tool result changes the turn's height, so the geometry has
         // to be told rather than left to discover it.
@@ -531,6 +560,18 @@ class ReplView: NSView {
     }
 
     @objc private func clipBoundsDidChange() {
+        // Scroller drags, Home/End and `scrollToBottom()` move the clip view
+        // without posting a live-scroll notification — which is the entire reason
+        // this observer exists. Updating the pass but not the pinned state meant
+        // dragging up to read history left `isPinnedToBottom == true`, and the
+        // very pass the drag scheduled took the operator straight back to the
+        // bottom (`materialize()`, step 5).
+        //
+        // A bounds change observed while a pass is running was caused by that
+        // pass — the notification is delivered synchronously from inside its own
+        // scroll and frame calls — so it must not be read as operator intent.
+        guard !isMaterializing else { return }
+        updatePinnedState()
         schedulePass()
     }
 
@@ -1102,6 +1143,20 @@ private class ChatTurnView: NSView, TurnIsland {
     /// `ReplView` re-measures rather than leaving the geometry stale.
     var onIntrinsicHeightChange: (() -> Void)?
 
+    /// Fired when the operator answers an `AskUserQuestion` card, so the choice
+    /// can be recorded outside this view — which is destroyed on eviction and on
+    /// every width change. See `TurnInteractionStore`.
+    var onAnsweredOption: ((_ blockIndex: Int, _ optionIndex: Int) -> Void)?
+
+    /// Fired when the operator expands or collapses a tool result. Distinct from
+    /// `onIntrinsicHeightChange`, which is about geometry: this one is about
+    /// persistence, so the state survives the view.
+    var onBlockExpansion: ((_ blockIndex: Int, _ isExpanded: Bool) -> Void)?
+
+    /// Everything the operator has already done to this turn, restored into the
+    /// block views as they are built.
+    private let interaction: TurnInteractionState
+
     func setIslandWidth(_ width: CGFloat) { widthConstraint.constant = width }
 
     /// Reply text injected by the confirm card — suppress its bubble so the card
@@ -1112,8 +1167,9 @@ private class ChatTurnView: NSView, TurnIsland {
     /// Wired by `ReplView` to `session.send(_:)`.
     var onSend: ((String) -> Void)?
 
-    init(turn: ChatTurn, contentAvailable: Bool = true) {
+    init(turn: ChatTurn, contentAvailable: Bool, interaction: TurnInteractionState) {
         self.contentAvailable = contentAvailable
+        self.interaction      = interaction
         super.init(frame: .zero)
         // Positioned by frame inside the document view, with exactly one
         // constraint of its own — its width. Nothing ties it to its container or
@@ -1203,7 +1259,11 @@ private class ChatTurnView: NSView, TurnIsland {
 
     private func renderNewBlocks(_ blocks: [TurnBlock]) {
         for block in blocks {
-            let v = makeBlockView(block)
+            // `renderedCount` is already the index of the block being added, and
+            // it keeps counting across streaming `update(turn:)` calls — so it is
+            // the block index, and a second counter would only be a second thing
+            // to get out of step with it.
+            let v = makeBlockView(block, at: renderedCount)
             v.translatesAutoresizingMaskIntoConstraints = false
             blocksStack.addArrangedSubview(v)
             // Explicitly match width — NSStackView alignment=.width doesn't reliably
@@ -1213,19 +1273,31 @@ private class ChatTurnView: NSView, TurnIsland {
         }
     }
 
-    private func makeBlockView(_ block: TurnBlock) -> NSView {
+    private func makeBlockView(_ block: TurnBlock, at index: Int) -> NSView {
         switch block {
         case .text(let t):           return TextBlockView(text: t)
         case .toolCall(let d):       return ToolCallView(data: d)
         case .toolResult(let d):
-            let v = ToolResultView(data: d, contentAvailable: contentAvailable)
-            v.onExpansionChange = { [weak self] in self?.onIntrinsicHeightChange?() }
+            let v = ToolResultView(data: d, contentAvailable: contentAvailable,
+                                   startExpanded: interaction.expandedBlocks.contains(index))
+            v.onExpansionChange = { [weak self] isExpanded in
+                guard let self else { return }
+                self.onBlockExpansion?(index, isExpanded)
+                self.onIntrinsicHeightChange?()
+            }
             return v
         case .resultSummary(let d):  return ResultChipView(data: d)
         case .errorMessage(let m):   return ErrorBlockView(message: m)
         case .askQuestion(let d):
-            let v = AskQuestionView(data: d)
-            v.onAnswer = { [weak self] answer in self?.onSend?(answer) }
+            let v = AskQuestionView(data: d,
+                                    answeredOptionIndex: interaction.answeredOptions[index])
+            v.onAnswer = { [weak self] answer, optionIndex in
+                guard let self else { return }
+                // Record before sending. If the send path ever tears this view
+                // down, the answer is already outside it.
+                self.onAnsweredOption?(index, optionIndex)
+                self.onSend?(answer)
+            }
             return v
         }
     }
@@ -1617,133 +1689,6 @@ private class ToolCallView: NSView {
     }
 }
 
-// MARK: - ToolResultView
-
-/// Tool result block — collapsed by default showing a line count chip.
-/// Click to expand/collapse. Errors always start expanded.
-private class ToolResultView: NSView {
-
-    private var isExpanded  = false
-    private let disclosure  = NSButton()
-    private let contentWrap = NSView()
-    private let lineCount:  Int
-    private let content:    String
-    private let isError:    Bool
-    /// False when the turn's payload was dropped past the retention cap.
-    /// Expanding then states that plainly instead of showing nothing.
-    private let contentAvailable: Bool
-    /// Guards against building the expensive full-content label more than once.
-    private var labelBuilt  = false
-
-    /// Fired on expand/collapse so the turn's height can be re-measured.
-    var onExpansionChange: (() -> Void)?
-
-    init(data: ToolResultData, contentAvailable: Bool = true) {
-        let nonEmpty = data.content.components(separatedBy: "\n")
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        lineCount  = max(nonEmpty.count, 1)
-        content    = data.content
-        isError    = data.isError
-        self.contentAvailable = contentAvailable
-        isExpanded = data.isError   // errors always open
-
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor(white: 0.07, alpha: 1).cgColor
-        layer?.cornerRadius    = 6
-        layer?.borderWidth     = 1
-        layer?.borderColor     = isError
-            ? Theme.redSweater.withAlphaComponent(0.5).cgColor
-            : Theme.borderInactive.withAlphaComponent(0.6).cgColor
-
-        // Disclosure button (always visible)
-        disclosure.isBordered = false
-        disclosure.target     = self
-        disclosure.action     = #selector(toggleExpand)
-        disclosure.translatesAutoresizingMaskIntoConstraints = false
-
-        // Content label is built lazily (see buildLabelIfNeeded) — most tool
-        // results are non-error and stay collapsed forever, and merely
-        // constructing NSTextField(labelWithString:) with a large blob
-        // triggers a full CoreText glyph-shaping pass via its internal
-        // sizeToFit(), even when the view is immediately hidden. Replaying a
-        // long-lived session's full turn history was paying that cost for
-        // every historical tool result up front, pegging the main thread for
-        // tens of seconds on launch/reconnect for no visible benefit.
-        contentWrap.translatesAutoresizingMaskIntoConstraints = false
-
-        // NSStackView collapses hidden arranged subviews automatically
-        let vStack = NSStackView(views: [disclosure, contentWrap])
-        vStack.orientation = .vertical
-        vStack.spacing     = 4
-        vStack.alignment   = .width
-        vStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(vStack)
-        NSLayoutConstraint.activate([
-            vStack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            vStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            vStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            vStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-            // alignment=.width doesn't reliably fill arranged subviews to stack width
-            disclosure.widthAnchor.constraint(equalTo: vStack.widthAnchor),
-            contentWrap.widthAnchor.constraint(equalTo: vStack.widthAnchor),
-        ])
-
-        applyState()
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func toggleExpand() {
-        isExpanded.toggle()
-        applyState()
-        // The turn's height just changed. `ReplView` owns the geometry now, so
-        // tell it rather than nudging AppKit and hoping — a stale height would
-        // overlap this turn with its neighbour.
-        onExpansionChange?()
-    }
-
-    /// Builds the full-content label on first actual need (see the doc
-    /// comment on `contentWrap` in `init`). Safe to call repeatedly.
-    private func buildLabelIfNeeded() {
-        guard !labelBuilt else { return }
-        labelBuilt = true
-        // Never a silently-empty expansion: if the payload is gone, say so.
-        let body = contentAvailable
-            ? content
-            : "(The full content of this tool result is no longer retained in this pane. "
-              + "It remains in the Claude session transcript on disk.)"
-        let label = NSTextField(labelWithString: body)
-        label.font                 = Theme.monoFont
-        label.textColor            = isError ? Theme.redSweater : Theme.fgMuted
-        label.lineBreakMode        = .byCharWrapping
-        label.maximumNumberOfLines = 0
-        // Biggest balloon driver: long single-line tool output (JSON, git status) had
-        // an intrinsic width of ~8600pt. Yield horizontally so it wraps to the pane.
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        contentWrap.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.topAnchor.constraint(equalTo: contentWrap.topAnchor),
-            label.leadingAnchor.constraint(equalTo: contentWrap.leadingAnchor),
-            label.trailingAnchor.constraint(equalTo: contentWrap.trailingAnchor),
-            label.bottomAnchor.constraint(equalTo: contentWrap.bottomAnchor),
-        ])
-    }
-
-    private func applyState() {
-        let arrow = isExpanded ? "▼" : "▶"
-        let count = "\(lineCount) line\(lineCount == 1 ? "" : "s")"
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font:            NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: Theme.fgMuted,
-        ]
-        disclosure.attributedTitle = NSAttributedString(string: "\(arrow)  \(count)", attributes: attrs)
-        if isExpanded { buildLabelIfNeeded() }
-        contentWrap.isHidden = !isExpanded
-    }
-}
-
 // MARK: - ResultChipView
 
 private class ResultChipView: NSView {
@@ -1776,307 +1721,6 @@ private class ResultChipView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
-}
-
-// MARK: - AskQuestionView
-
-/// Native card rendered when an agent calls `AskUserQuestion`.
-///
-/// The claude CLI can't surface interactive UI in non-interactive (streaming) mode —
-/// it returns "Answer questions?" as a tool error. We intercept the tool_use input
-/// JSON in ChatModels and render it here instead. Tapping an option sends it as a
-/// new user message, so the agent gets the answer and continues naturally.
-private class AskQuestionView: NSView {
-
-    var onAnswer: ((String) -> Void)?
-
-    private let data: AskQuestionData
-    private var answered = false
-    private var headerChip: NSTextField?
-
-    init(data: AskQuestionData) {
-        self.data = data
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor(white: 0.08, alpha: 1).cgColor
-        layer?.cornerRadius    = 8
-        layer?.borderWidth     = 1
-        layer?.borderColor     = Theme.cornflower.withAlphaComponent(0.3).cgColor
-
-        // Header chip (e.g. "Action")
-        var prevAnchor: NSLayoutYAxisAnchor? = nil
-        var topConstant: CGFloat = 12
-
-        if !data.header.isEmpty {
-            let chip = NSTextField(labelWithString: data.header.uppercased())
-            chip.font      = .systemFont(ofSize: 9, weight: .semibold)
-            chip.textColor = Theme.cornflower
-            chip.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(chip)
-            NSLayoutConstraint.activate([
-                chip.topAnchor.constraint(equalTo: topAnchor, constant: topConstant),
-                chip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            ])
-            headerChip  = chip
-            prevAnchor  = chip.bottomAnchor
-            topConstant = 6
-        }
-
-        // Question text
-        let qLabel = NSTextField(labelWithString: data.question)
-        qLabel.font                 = .systemFont(ofSize: 13)
-        qLabel.textColor            = Theme.fg
-        qLabel.lineBreakMode        = .byWordWrapping
-        qLabel.maximumNumberOfLines = 0
-        qLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        qLabel.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(qLabel)
-        NSLayoutConstraint.activate([
-            qLabel.topAnchor.constraint(equalTo: prevAnchor ?? topAnchor, constant: topConstant),
-            qLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            qLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-        ])
-        prevAnchor = qLabel.bottomAnchor
-
-        // Option buttons
-        if data.options.isEmpty {
-            // No options — render a plain text input affordance hint
-            let hint = NSTextField(labelWithString: "Reply below ↓")
-            hint.font      = .systemFont(ofSize: 11)
-            hint.textColor = Theme.fgMuted
-            hint.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(hint)
-            NSLayoutConstraint.activate([
-                hint.topAnchor.constraint(equalTo: prevAnchor!, constant: 10),
-                hint.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                hint.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-            ])
-        } else {
-            // Divider
-            let divider = NSView()
-            divider.wantsLayer = true
-            divider.layer?.backgroundColor = Theme.borderInactive.withAlphaComponent(0.4).cgColor
-            divider.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(divider)
-            NSLayoutConstraint.activate([
-                divider.topAnchor.constraint(equalTo: prevAnchor!, constant: 10),
-                divider.leadingAnchor.constraint(equalTo: leadingAnchor),
-                divider.trailingAnchor.constraint(equalTo: trailingAnchor),
-                divider.heightAnchor.constraint(equalToConstant: 1),
-            ])
-            prevAnchor = divider.bottomAnchor
-
-            for (idx, option) in data.options.enumerated() {
-                let btn = OptionButton(option: option, tag: idx)
-                btn.target = self
-                btn.action = #selector(optionTapped(_:))
-                btn.translatesAutoresizingMaskIntoConstraints = false
-                addSubview(btn)
-                NSLayoutConstraint.activate([
-                    btn.topAnchor.constraint(equalTo: prevAnchor!, constant: idx == 0 ? 0 : 0),
-                    btn.leadingAnchor.constraint(equalTo: leadingAnchor),
-                    btn.trailingAnchor.constraint(equalTo: trailingAnchor),
-                ])
-                prevAnchor = btn.bottomAnchor
-
-                // Row separator between options
-                if idx < data.options.count - 1 {
-                    let sep = NSView()
-                    sep.wantsLayer = true
-                    sep.layer?.backgroundColor = Theme.borderInactive.withAlphaComponent(0.25).cgColor
-                    sep.translatesAutoresizingMaskIntoConstraints = false
-                    addSubview(sep)
-                    NSLayoutConstraint.activate([
-                        sep.topAnchor.constraint(equalTo: prevAnchor!),
-                        sep.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                        sep.trailingAnchor.constraint(equalTo: trailingAnchor),
-                        sep.heightAnchor.constraint(equalToConstant: 1),
-                    ])
-                    prevAnchor = sep.bottomAnchor
-                }
-            }
-
-            prevAnchor?.constraint(equalTo: bottomAnchor).isActive = true
-        }
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func optionTapped(_ sender: OptionButton) {
-        guard !answered else { return }
-        answered = true
-        // Dim all buttons to show selection; disable all to prevent re-tapping.
-        subviews.compactMap { $0 as? OptionButton }.forEach { btn in
-            btn.alphaValue = btn === sender ? 1.0 : 0.35
-            btn.isEnabled  = false
-        }
-        // Animate the chosen-state visuals: checkmark, row tint, chip label/color, card border.
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration    = 0.15
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            sender.markChosen()
-            headerChip?.stringValue = "APPROVED"
-            headerChip?.textColor   = Theme.sage
-            layer?.borderColor      = Theme.sage.withAlphaComponent(0.5).cgColor
-        }
-        // Claude's AskUserQuestion call always errors in -p mode ("Answer questions?").
-        // The user's answer arrives as a new user turn, not a proper tool result.
-        // Send rich context so claude can't miss the connection.
-        let reply: String
-        if data.question.isEmpty {
-            reply = sender.optionLabel
-        } else {
-            reply = "\(sender.optionLabel)\n\n(This answers your question: \"\(data.question)\" — please proceed.)"
-        }
-        onAnswer?(reply)
-    }
-
-    // MARK: - OptionButton
-
-    private class OptionButton: NSButton {
-
-        let optionLabel: String
-
-        private var chosen = false
-        private let checkmark: NSImageView
-        private let label: NSTextField
-        /// Whether this option carries the "(recommended)" suffix — tracked so
-        /// `markChosen()` can rebuild the attributed string instead of clobbering
-        /// its mixed fonts with a uniform `.font` assignment.
-        private let recommended: Bool
-
-        init(option: AskQuestionData.Option, tag: Int) {
-            optionLabel = option.label
-            recommended = option.recommended
-
-            // Checkmark — hidden by default; space is always reserved so revealing
-            // it causes no layout shift (label leading is anchored to checkmark.trailing).
-            let check = NSImageView()
-            check.image = NSImage(systemSymbolName: "checkmark.circle.fill",
-                                  accessibilityDescription: "chosen")
-            check.contentTintColor = Theme.sage
-            check.isHidden  = true
-            check.alphaValue = 0
-            check.translatesAutoresizingMaskIntoConstraints = false
-            checkmark = check
-
-            let labelFont = NSFont.systemFont(ofSize: 12, weight: .medium)
-            let lbl: NSTextField
-            if option.recommended {
-                // Append a muted "(recommended)" suffix so Perri's pick stands out
-                // without implying the other options are wrong.
-                let attributed = NSMutableAttributedString(
-                    string: option.label,
-                    attributes: [.font: labelFont, .foregroundColor: Theme.fg])
-                attributed.append(NSAttributedString(
-                    string: " (recommended)",
-                    attributes: [
-                        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-                        .foregroundColor: Theme.fgMuted,
-                    ]))
-                lbl = NSTextField(labelWithAttributedString: attributed)
-            } else {
-                lbl = NSTextField(labelWithString: option.label)
-                lbl.font      = labelFont
-                lbl.textColor = Theme.fg
-            }
-            lbl.translatesAutoresizingMaskIntoConstraints = false
-            label = lbl
-
-            super.init(frame: .zero)
-            self.tag      = tag
-            title         = ""   // NSButton defaults to "Button" — we render our own label/description subviews
-            isBordered    = false
-            wantsLayer    = true
-
-            var subs: [NSView] = [checkmark, label]
-            var constraints: [NSLayoutConstraint] = [
-                // Checkmark — leading edge, vertically centred, fixed 14×14
-                checkmark.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                checkmark.centerYAnchor.constraint(equalTo: centerYAnchor),
-                checkmark.widthAnchor.constraint(equalToConstant: 14),
-                checkmark.heightAnchor.constraint(equalToConstant: 14),
-                // Label anchored to checkmark trailing so its position is stable
-                // regardless of checkmark visibility.
-                label.leadingAnchor.constraint(equalTo: checkmark.trailingAnchor, constant: 8),
-                label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            ]
-
-            if !option.description.isEmpty {
-                let desc = NSTextField(labelWithString: option.description)
-                desc.font                 = .systemFont(ofSize: 11)
-                desc.textColor            = Theme.fgMuted
-                desc.lineBreakMode        = .byTruncatingTail
-                desc.maximumNumberOfLines = 1
-                desc.translatesAutoresizingMaskIntoConstraints = false
-                subs.append(desc)
-                constraints += [
-                    desc.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 10),
-                    desc.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-                    desc.centerYAnchor.constraint(equalTo: centerYAnchor),
-                ]
-            } else {
-                constraints.append(label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14))
-            }
-
-            for sub in subs { addSubview(sub) }
-            NSLayoutConstraint.activate(constraints + [
-                heightAnchor.constraint(equalToConstant: 36),
-            ])
-        }
-
-        required init?(coder: NSCoder) { fatalError() }
-
-        /// Applies chosen-state visuals: checkmark fade-in, semibold label, green row tint.
-        /// Must be called from within an `NSAnimationContext.runAnimationGroup` block.
-        func markChosen() {
-            chosen = true
-            checkmark.isHidden = false
-            checkmark.animator().alphaValue = 1
-            let chosenFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
-            if recommended {
-                // Setting `.font` directly on an attributed NSTextField flattens
-                // all runs to one style, which would swallow the muted
-                // "(recommended)" suffix — rebuild the attributed string instead.
-                let attributed = NSMutableAttributedString(
-                    string: optionLabel,
-                    attributes: [.font: chosenFont, .foregroundColor: Theme.fg])
-                attributed.append(NSAttributedString(
-                    string: " (recommended)",
-                    attributes: [
-                        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-                        .foregroundColor: Theme.fgMuted,
-                    ]))
-                label.attributedStringValue = attributed
-            } else {
-                label.font = chosenFont
-            }
-            layer?.backgroundColor = Theme.sage.withAlphaComponent(0.12).cgColor
-        }
-
-        override func updateTrackingAreas() {
-            super.updateTrackingAreas()
-            trackingAreas.forEach { removeTrackingArea($0) }
-            // .inVisibleRect restricts tracking to the visible portion of the view
-            // and re-evaluates on scroll — prevents spurious events for off-screen rows.
-            // rect is ignored when .inVisibleRect is set.
-            addTrackingArea(NSTrackingArea(
-                rect: .zero,
-                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-                owner: self, userInfo: nil
-            ))
-        }
-
-        override func mouseEntered(with event: NSEvent) {
-            guard isEnabled, !chosen else { return }
-            layer?.backgroundColor = Theme.cornflower.withAlphaComponent(0.12).cgColor
-        }
-
-        override func mouseExited(with event: NSEvent) {
-            guard !chosen else { return }
-            layer?.backgroundColor = nil
-        }
-    }
 }
 
 // MARK: - ChatTextView

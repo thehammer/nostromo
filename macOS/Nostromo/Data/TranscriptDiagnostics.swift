@@ -91,6 +91,14 @@ enum TranscriptDiagnostics {
         let panes: [PaneReport]
         /// Total turns delivered by the load harness, when one is running.
         let turnsProcessed: Int?
+        /// Panes the load harness actually drove. A run that measured no view
+        /// layer at all must be visible in the report rather than passing every
+        /// view-layer criterion by vacuum. Optional so Debug ▸ Copy transcript
+        /// diagnostics is unchanged outside a harness run.
+        let harnessTargetedPanes: Int?
+        /// Focuses the run asked for, so a run that drove 1 of 8 fails a
+        /// criterion instead of reading as a clean 1-focus run.
+        let harnessRequestedFocuses: Int?
     }
 
     static func snapshot() -> Report {
@@ -110,7 +118,9 @@ enum TranscriptDiagnostics {
                       physFootprintMB: (Double(footprint) / 1_048_576 * 10).rounded() / 10,
                       maxMaterializedPerPane: TurnListVirtualizer.maxMaterialized,
                       panes: reports.sorted { $0.tag < $1.tag },
-                      turnsProcessed: TranscriptLoadHarness.shared?.turnsDelivered)
+                      turnsProcessed: TranscriptLoadHarness.shared?.turnsDelivered,
+                      harnessTargetedPanes: TranscriptLoadHarness.shared?.targetedPaneCount,
+                      harnessRequestedFocuses: TranscriptLoadHarness.shared?.requestedFocusCount)
     }
 
     static func reportJSON() -> String {
@@ -154,6 +164,16 @@ enum TranscriptDiagnostics {
         source.resume()
         timer = source
         log.info("diagnostics stream every \(seconds, privacy: .public)s → \(streamURL.path, privacy: .public)")
+    }
+
+    /// Write one stream line right now, regardless of the timer.
+    ///
+    /// The harness's abort path uses this: a run that targeted no pane must leave
+    /// the report a row to fail on rather than an empty file it can only shrug at.
+    static func emitStreamLineNow() {
+        try? FileManager.default.createDirectory(
+            at: streamURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        appendStreamLine()
     }
 
     private static func appendStreamLine() {

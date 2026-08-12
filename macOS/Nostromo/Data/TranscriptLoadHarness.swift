@@ -49,6 +49,13 @@ final class TranscriptLoadHarness {
 
     private(set) var turnsDelivered = 0
 
+    /// Panes actually driven. 0 until `begin` runs, so a run that never targeted
+    /// anything reports 0 rather than nothing at all.
+    private(set) var targetedPaneCount = 0
+    /// Focuses the run asked for. Reported alongside `targetedPaneCount` so a run
+    /// that drove 1 of 8 fails a criterion instead of passing as a 1-focus run.
+    private(set) var requestedFocusCount = 0
+
     private let client: NostromodClient
     private var tags: [String] = []
     /// Per-tag record of everything delivered, so a reconnect can serve a
@@ -88,28 +95,73 @@ final class TranscriptLoadHarness {
     /// exercised and the view layer — the expensive half, and the half this work
     /// exists to bound — never was.
     private func start() {
-        var attempts = 0
+        // 120 s, not 30. A cold Release launch is slow enough that 30 s was
+        // occasionally a lie, and the consequence of giving up early is now an
+        // abort rather than a quiet guess — so the wait can afford to be
+        // generous. One warning at the 30 s mark keeps a stuck run visible.
+        let pollInterval = 0.5
+        let maxAttempts  = 240
+        var attempts     = 0
+
         func attempt() {
-            var live = TranscriptDiagnostics.registeredTags
-            if !live.isEmpty || attempts > 60 {
-                // Drive the *visible* pane first. A hidden pane has a zero-height
-                // viewport, so it materializes almost nothing — the run would
-                // measure the data path and skip the view path entirely.
-                if let active = AppStore.shared.activeFocusAgentTag,
-                   let i = live.firstIndex(of: active) {
-                    live.swapAt(0, i)
+            let live = TranscriptDiagnostics.registeredTags
+            if !live.isEmpty || attempts >= maxAttempts {
+                let waited = Double(attempts) * pollInterval
+                requestedFocusCount = focusCount
+                switch LoadHarnessTargeting.resolve(registered: live,
+                                                    activeTag: AppStore.shared.activeFocusAgentTag,
+                                                    requested: focusCount,
+                                                    waitedSeconds: waited) {
+                case .success(let plan):
+                    if plan.tags.count < plan.requested {
+                        // Not fatal, and deliberately so: the 8-focus soak is the
+                        // next step, and a tool that refuses to run at all would
+                        // be worse than one that runs and says plainly that it
+                        // drove 1 of 8. The report fails the row.
+                        log.warning("""
+                            load harness: asked for \(plan.requested, privacy: .public) focuses but only \
+                            \(plan.tags.count, privacy: .public) panes are registered — driving what exists
+                            """)
+                    }
+                    begin(tags: plan.tags)
+                case .failure(.noRegisteredPanes(let waitedSeconds)):
+                    abort(noPanesAfter: waitedSeconds)
                 }
-                begin(tags: live.isEmpty ? ["claudia"] : Array(live.prefix(focusCount)))
                 return
             }
+            if attempts == 60 {
+                log.warning("load harness: no transcript panes registered after 30s — still waiting")
+            }
             attempts += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { attempt() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + pollInterval) { attempt() }
         }
         attempt()
     }
 
+    /// No pane ever registered, so there is nothing to measure.
+    ///
+    /// Aborting is the right answer here rather than driving a guessed tag: this
+    /// process is a dedicated harness run, and ninety minutes of data that
+    /// measures nothing is worse than no data — especially since the report would
+    /// otherwise print PASS for every view-layer criterion.
+    private func abort(noPanesAfter waitedSeconds: Double) {
+        let message = """
+            load harness: no transcript panes registered after \(Int(waitedSeconds))s — aborting \
+            rather than driving a guessed tag. Traffic sent to a tag with no ReplView attached \
+            exercises ChatSession and never materializes a view, which is the half of the system \
+            under test.
+            """
+        log.error("\(message, privacy: .public)")
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+        // Force one diagnostics line so the report has a row to fail on rather
+        // than an empty file it can only shrug at.
+        TranscriptDiagnostics.emitStreamLineNow()
+        exit(3)
+    }
+
     private func begin(tags discovered: [String]) {
         tags = discovered
+        targetedPaneCount = discovered.count
         log.info("load harness: driving panes \(discovered.joined(separator: ","), privacy: .public)")
         for tag in tags {
             records[tag]    = []
