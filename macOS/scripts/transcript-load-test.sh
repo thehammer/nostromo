@@ -57,6 +57,13 @@ trap 'kill $APP_PID 2>/dev/null' EXIT
 
 echo "==> waiting for $TURNS turns"
 DEADLINE=$(( $(date +%s) + 7200 ))
+# A run that delivers nothing must not burn the full two-hour deadline. This is
+# the backstop for a harness that could not find a pane to drive: five quiet
+# polls (~150 s) with no new turns and we stop, so the failure shows up in
+# minutes instead of at the end of an afternoon.
+STALL_POLLS=5
+stalled=0
+last_reached=-1
 while :; do
   reached=$(python3 -c "
 import json,os,sys
@@ -69,6 +76,17 @@ print(max([(r.get('turnsProcessed') or 0) for r in rows] or [0]))" 2>/dev/null |
   [ "${reached:-0}" -ge "$TURNS" ] && break
   kill -0 $APP_PID 2>/dev/null || { echo "app exited early — see /tmp/nostromo-load.log"; break; }
   [ "$(date +%s)" -gt "$DEADLINE" ] && { echo "timed out at ${reached} turns"; break; }
+  if [ "${reached:-0}" -gt "$last_reached" ]; then
+    last_reached="${reached:-0}"
+    stalled=0
+  else
+    stalled=$(( stalled + 1 ))
+    if [ "$stalled" -ge "$STALL_POLLS" ]; then
+      echo
+      echo "no turn progress for ~150s at ${reached:-0} turns — aborting"
+      break
+    fi
+  fi
   printf '\r    %s turns' "${reached:-0}"
   sleep 30
 done
@@ -78,14 +96,51 @@ echo
 sleep 15
 
 # --- idle CPU over 60 s -----------------------------------------------------
-cpu_seconds() { ps -o time= -p "$1" | awk -F: '{print ($1*3600)+($2*60)+$3}'; }
-T0=$(cpu_seconds $APP_PID); sleep 60; T1=$(cpu_seconds $APP_PID)
-CPU=$(awk "BEGIN{printf \"%.2f\", ($T1 - $T0) / 60 * 100}")
+# NF-aware, because `ps -o time=` prints [[dd-]hh:]mm:ss[.ss] and the field
+# count varies with runtime. Returns non-zero on empty output rather than
+# emitting an empty string: a process that died during the wait loop used to
+# reach here and produce an awk error plus an argparse failure instead of a
+# named criterion failure.
+cpu_seconds() {
+  local raw
+  raw=$(ps -o time= -p "$1" 2>/dev/null | awk -f "$REPO_ROOT/macOS/scripts/ps-time-seconds.awk") || return 1
+  [ -n "$raw" ] || return 1
+  printf '%s\n' "$raw"
+}
+
+CPU=""
+if kill -0 $APP_PID 2>/dev/null && T0=$(cpu_seconds $APP_PID); then
+  sleep 60
+  if kill -0 $APP_PID 2>/dev/null && T1=$(cpu_seconds $APP_PID); then
+    # `awk -v`, not string interpolation into the program body: an empty or
+    # unexpected shell value must not become awk source.
+    CPU=$(awk -v a="$T0" -v b="$T1" 'BEGIN{printf "%.2f", (b - a) / 60 * 100}')
+  fi
+fi
+[ -n "$CPU" ] || echo "warning: could not measure idle CPU — the report will fail that criterion"
 
 # --- the incident's own signature, inverted ---------------------------------
-sample $APP_PID 5 -file "$SAMPLE_OUT" >/dev/null 2>&1
+# Clear the stale file first. A sample left behind by a previous run was
+# readable as this run's evidence, and `sample`'s own exit status was discarded
+# along with its output.
+rm -f "$SAMPLE_OUT"
+SAMPLE_ARGS=()
+if kill -0 $APP_PID 2>/dev/null; then
+  if sample $APP_PID 5 -file "$SAMPLE_OUT" >/dev/null 2>&1 && [ -s "$SAMPLE_OUT" ]; then
+    SAMPLE_ARGS=(--sample "$SAMPLE_OUT")
+  else
+    echo "warning: sample failed or produced nothing — the report will fail that criterion"
+  fi
+else
+  echo "warning: app is not running — skipping sample; the report will fail that criterion"
+fi
 
-python3 "$REPORT" "$DIAG" --turns "$TURNS" --cpu-percent "$CPU" --sample "$SAMPLE_OUT"
+# An unmeasured criterion is omitted from the arguments, never faked. The report
+# then prints it as a present, failing row, which is the honest outcome.
+CPU_ARGS=()
+[ -n "$CPU" ] && CPU_ARGS=(--cpu-percent "$CPU")
+
+python3 "$REPORT" "$DIAG" --turns "$TURNS" "${CPU_ARGS[@]+"${CPU_ARGS[@]}"}" "${SAMPLE_ARGS[@]+"${SAMPLE_ARGS[@]}"}"
 STATUS=$?
 
 cat <<'NOTE'

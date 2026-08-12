@@ -5,6 +5,12 @@ Split out of transcript-load-test.sh because the arithmetic — a least-squares
 fit, a footprint delta between two turn marks, a CPU rate between two samples —
 is not something to write in jq and trust.
 
+The governing rule here is that **every criterion must be able to fail**. A row
+that is omitted when its input is missing, or that compares a measurement
+against a limit read out of the app under test, is not a criterion — it is a
+decoration that always says PASS. Several rows used to be exactly that; the
+comments below name each one.
+
 Usage:
     transcript-load-report.py [path/to/diagnostics.jsonl] [--turns N]
                               [--sample /tmp/sample.txt] [--cpu-percent X]
@@ -14,9 +20,27 @@ import datetime
 import json
 import os
 import sys
+from typing import NamedTuple
 
 DEFAULT_DIAG = os.path.expanduser(
     "~/Library/Application Support/Nostromo/diagnostics.jsonl")
+
+# `TurnListVirtualizer.maxMaterialized`, hardcoded deliberately.
+#
+# This used to be read from the run's own `maxMaterializedPerPane` field, which
+# means the app under test supplied its own passing grade: raising
+# maxMaterialized to 500 still printed "PASS ... <= 500 (documented maximum)".
+# The number lives here, and the app's reported bound is asserted separately
+# below — so a change to the constant fails this report until someone changes
+# this line on purpose.
+MATERIALIZED_LIMIT = 60
+
+
+class Criterion(NamedTuple):
+    name: str
+    ok: bool
+    measured: str
+    limit: str
 
 
 def load(path):
@@ -75,6 +99,167 @@ def throughput_curve(rows, buckets=6):
     return out
 
 
+def evaluate(rows, *, turns, cpu_percent, sample_path):
+    """Every criterion, as a list of rows that each carry their own verdict.
+
+    Pure, and separated from `main()` so the table can be asserted directly from
+    tests rather than scraped out of stdout.
+    """
+    reached = max(r["turnsProcessed"] for r in rows)
+    results = []
+
+    def add(name, ok, measured, limit):
+        results.append(Criterion(name, bool(ok), measured, limit))
+
+    def peak(row):
+        # No `default=0`. A row with no panes is a run that measured nothing,
+        # and "0 materialized views" used to print as PASS 0 vs 0 — a criterion
+        # satisfied by the absence of the thing it was measuring.
+        return max((p["materializedViews"] for p in row.get("panes", [])), default=None)
+
+    # Footprint delta between the two turn marks.
+    lo, hi = at_turn(rows, 500), at_turn(rows, turns)
+    if lo and hi:
+        delta = hi["physFootprintMB"] - lo["physFootprintMB"]
+        add(f"footprint delta turn-500 → turn-{turns}", delta <= 250,
+            f"{delta:+.1f} MB "
+            f"({lo['physFootprintMB']:.0f} → {hi['physFootprintMB']:.0f})",
+            "<= 250 MB")
+    else:
+        add(f"footprint delta turn-500 → turn-{turns}", False,
+            f"only reached turn {reached}", "<= 250 MB")
+
+    # Slope over the second half.
+    s = slope_mb_per_1000(rows)
+    if s is not None:
+        add("second-half memory slope", s <= 20,
+            f"{s:+.2f} MB / 1000 turns", "<= 20 MB / 1000 turns")
+    else:
+        add("second-half memory slope", False, "insufficient samples",
+            "<= 20 MB / 1000 turns")
+
+    # Materialized views: constant in session length, under the documented max.
+    early = at_turn(rows, 100)
+    late = rows[-1]
+
+    # Absent is not equal. This row used to be emitted only `if early:`, so a run
+    # that never reached turn 100 silently dropped the constant-in-session-length
+    # criterion instead of failing it.
+    if early is None:
+        add(f"materializedViews at turn 100 vs turn {late['turnsProcessed']}", False,
+            f"run never reached turn 100 (max {reached})", "equal")
+    else:
+        e, l = peak(early), peak(late)
+        if e is None or l is None:
+            add(f"materializedViews at turn 100 vs turn {late['turnsProcessed']}", False,
+                "no panes reported — nothing was measured", "equal")
+        else:
+            add(f"materializedViews at turn 100 vs turn {late['turnsProcessed']}",
+                e == l, f"{e} vs {l}", "equal")
+
+    peaks = [p for p in (peak(r) for r in rows) if p is not None]
+    if not peaks or max(peaks) <= 0:
+        # A run with no panes, or one whose panes never materialized anything,
+        # has not demonstrated a bounded window — it has demonstrated nothing.
+        add("materializedViews peak", False,
+            "no materialized views reported — nothing was measured",
+            f"0 < peak <= {MATERIALIZED_LIMIT}")
+    else:
+        worst = max(peaks)
+        add("materializedViews peak", worst <= MATERIALIZED_LIMIT, f"{worst} views",
+            f"0 < peak <= {MATERIALIZED_LIMIT}")
+
+    # The app's own reported bound, asserted separately from the measurement it
+    # used to supply the limit for.
+    reported = [r["maxMaterializedPerPane"] for r in rows
+                if r.get("maxMaterializedPerPane") is not None]
+    if not reported:
+        add("app reports the documented view cap", False,
+            "maxMaterializedPerPane absent from every sample",
+            f"== {MATERIALIZED_LIMIT}")
+    else:
+        add("app reports the documented view cap", max(reported) == MATERIALIZED_LIMIT,
+            f"{max(reported)}", f"== {MATERIALIZED_LIMIT}")
+
+    # The harness actually drove the view layer. Traffic sent to a tag with no
+    # ReplView attached exercises ChatSession and materializes nothing, which
+    # would let every view-layer row above pass by vacuum.
+    targeted = [r["harnessTargetedPanes"] for r in rows
+                if r.get("harnessTargetedPanes") is not None]
+    requested = [r["harnessRequestedFocuses"] for r in rows
+                 if r.get("harnessRequestedFocuses") is not None]
+    if not targeted:
+        add("harnessTargetedPanes == harnessRequestedFocuses", False,
+            "harness did not report targeted panes", "targeted == requested, > 0")
+    else:
+        drove = max(targeted)
+        want = max(requested) if requested else None
+        add("harnessTargetedPanes == harnessRequestedFocuses",
+            drove > 0 and want is not None and drove == want,
+            f"{drove} targeted / {want if want is not None else '?'} requested",
+            "targeted == requested, > 0")
+
+    # Retention actually engaged — otherwise the numbers above prove nothing.
+    hot = max((p["hotPayloadTurns"] for r in rows for p in r.get("panes", [])), default=0)
+    add("hot payload window bounded", hot <= 210, f"{hot} turns hot",
+        "<= 200 + in-flight")
+
+    # A transcript that empties itself is the most alarming thing this pane can
+    # do. Reported explicitly so a drop in retained turns is never a mystery.
+    instrumented = any("transcriptClears" in p for r in rows for p in r.get("panes", []))
+    if instrumented:
+        clears = max((p.get("transcriptClears", 0) for r in rows for p in r.get("panes", [])),
+                     default=0)
+        add("transcript never cleared during the run", clears == 0,
+            f"{clears} clears", "0")
+    else:
+        # Absent is not zero. A run recorded before the counter existed must not
+        # be allowed to report a clean bill of health it never earned.
+        add("transcript never cleared during the run", False,
+            "not instrumented in this run", "0")
+
+    # Retained turns must only ever grow (below the retention cap).
+    worst_drop = 0
+    prev = {}
+    for r in rows:
+        for pane in r.get("panes", []):
+            was = prev.get(pane["tag"], 0)
+            worst_drop = max(worst_drop, was - pane["retainedTurns"])
+            prev[pane["tag"]] = pane["retainedTurns"]
+    add("retained turns monotonic", worst_drop == 0,
+        f"largest drop: {worst_drop} turns", "0 (below the retention cap)")
+
+    # Per-delta cost does not grow with session length.
+    curve = throughput_curve(rows)
+    if len(curve) >= 2:
+        first, last = curve[0][2], curve[-1][2]
+        add("per-delta cost flat in session length", last >= first / 2,
+            f"{first:.2f} → {last:.2f} turns/sec", "final >= 0.5x initial")
+
+    # Unmeasured is a FAIL, not an omission — for both of the rows below.
+    #
+    # They used to be conditional on their argument being present, so when
+    # `sample` failed, the criterion carrying this incident's own signature
+    # silently vanished from the table. This report is a pass/fail table for a
+    # fixed set of criteria; a criterion nobody measured has not passed.
+    if cpu_percent is None:
+        add("idle CPU over 60 s", False, "not measured", "< 2 %")
+    else:
+        add("idle CPU over 60 s", cpu_percent < 2, f"{cpu_percent:.2f} %", "< 2 %")
+
+    if sample_path and os.path.exists(sample_path):
+        with open(sample_path, errors="replace") as handle:
+            text = handle.read()
+        hits = text.count("CoreAutoLayout") + text.count("NSISEngine")
+        add("no CoreAutoLayout/NSISEngine in 5 s sample", hits == 0,
+            f"{hits} frames", "0 frames")
+    else:
+        add("no CoreAutoLayout/NSISEngine in 5 s sample", False,
+            "not measured", "0 frames")
+
+    return results
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("diag", nargs="?", default=DEFAULT_DIAG)
@@ -89,111 +274,26 @@ def main():
         return 2
 
     reached = max(r["turnsProcessed"] for r in rows)
-    results = []   # (criterion, verdict, measured, limit)
+    results = evaluate(rows, turns=args.turns, cpu_percent=args.cpu_percent,
+                       sample_path=args.sample)
 
-    def add(name, ok, measured, limit):
-        results.append((name, "PASS" if ok else "FAIL", measured, limit))
-
-    # Footprint delta between the two turn marks.
-    lo, hi = at_turn(rows, 500), at_turn(rows, args.turns)
-    if lo and hi:
-        delta = hi["physFootprintMB"] - lo["physFootprintMB"]
-        add(f"footprint delta turn-500 → turn-{args.turns}", delta <= 250,
-            f"{delta:+.1f} MB "
-            f"({lo['physFootprintMB']:.0f} → {hi['physFootprintMB']:.0f})",
-            "<= 250 MB")
-    else:
-        add(f"footprint delta turn-500 → turn-{args.turns}", False,
-            f"only reached turn {reached}", "<= 250 MB")
-
-    # Slope over the second half.
-    s = slope_mb_per_1000(rows)
-    if s is not None:
-        add("second-half memory slope", s <= 20,
-            f"{s:+.2f} MB / 1000 turns", "<= 20 MB / 1000 turns")
-    else:
-        add("second-half memory slope", False, "insufficient samples",
-            "<= 20 MB / 1000 turns")
-
-    # Materialized views: constant in session length, under the documented max.
-    limit = max((r.get("maxMaterializedPerPane") or 60) for r in rows)
-    early = at_turn(rows, 100)
-    late = rows[-1]
-
-    def peak(row):
-        return max((p["materializedViews"] for p in row["panes"]), default=0)
-
-    if early:
-        add(f"materializedViews at turn 100 vs turn {late['turnsProcessed']}",
-            peak(early) == peak(late),
-            f"{peak(early)} vs {peak(late)}", "equal")
-    worst = max(peak(r) for r in rows)
-    add("materializedViews peak", worst <= limit, f"{worst} views",
-        f"<= {limit} (documented maximum)")
-
-    # Retention actually engaged — otherwise the numbers above prove nothing.
-    hot = max((p["hotPayloadTurns"] for r in rows for p in r["panes"]), default=0)
-    add("hot payload window bounded", hot <= 210, f"{hot} turns hot",
-        "<= 200 + in-flight")
-
-    # A transcript that empties itself is the most alarming thing this pane can
-    # do. Reported explicitly so a drop in retained turns is never a mystery.
-    instrumented = any("transcriptClears" in p for r in rows for p in r["panes"])
-    if instrumented:
-        clears = max((p.get("transcriptClears", 0) for r in rows for p in r["panes"]),
-                     default=0)
-        add("transcript never cleared during the run", clears == 0,
-            f"{clears} clears", "0")
-    else:
-        # Absent is not zero. A run recorded before the counter existed must not
-        # be allowed to report a clean bill of health it never earned.
-        add("transcript never cleared during the run", False,
-            "not instrumented in this run", "0")
-
-    # Retained turns must only ever grow (below the retention cap).
-    worst_drop = 0
-    prev = {}
-    for r in rows:
-        for pane in r["panes"]:
-            was = prev.get(pane["tag"], 0)
-            worst_drop = max(worst_drop, was - pane["retainedTurns"])
-            prev[pane["tag"]] = pane["retainedTurns"]
-    add("retained turns monotonic", worst_drop == 0,
-        f"largest drop: {worst_drop} turns", "0 (below the retention cap)")
-
-    # Per-delta cost does not grow with session length.
-    curve = throughput_curve(rows)
-    if len(curve) >= 2:
-        first, last = curve[0][2], curve[-1][2]
-        add("per-delta cost flat in session length", last >= first / 2,
-            f"{first:.2f} → {last:.2f} turns/sec", "final >= 0.5x initial")
-
-    if args.cpu_percent is not None:
-        add("idle CPU over 60 s", args.cpu_percent < 2,
-            f"{args.cpu_percent:.2f} %", "< 2 %")
-
-    if args.sample and os.path.exists(args.sample):
-        text = open(args.sample, errors="replace").read()
-        hits = text.count("CoreAutoLayout") + text.count("NSISEngine")
-        add("no CoreAutoLayout/NSISEngine in 5 s sample", hits == 0,
-            f"{hits} frames", "0 frames")
-
-    # --- report ---
-    width = max(len(r[0]) for r in results) + 2
+    width = max(len(c.name) for c in results) + 2
     print(f"\nRun: {reached} turns delivered, {len(rows)} diagnostic samples, "
           f"{(seconds(rows[-1]) - seconds(rows[0])) / 60:.1f} min\n")
     print(f"{'criterion':<{width}} | {'':4} | {'measured':<28} | limit")
     print("-" * (width + 55))
-    for name, verdict, measured, limit in results:
-        print(f"{name:<{width}} | {verdict:4} | {measured:<28} | {limit}")
+    for c in results:
+        print(f"{c.name:<{width}} | {'PASS' if c.ok else 'FAIL':4} | "
+              f"{c.measured:<28} | {c.limit}")
     print("-" * (width + 55))
 
+    curve = throughput_curve(rows)
     if curve:
         print("\nthroughput (per-delta cost vs session length):")
         for a, b, rate in curve:
             print(f"  turns {a:5d}–{b:5d}  {rate:5.2f} turns/sec")
 
-    failed = sum(1 for r in results if r[1] == "FAIL")
+    failed = sum(1 for c in results if not c.ok)
     print(f"\npassed: {len(results) - failed}   failed: {failed}")
     return 1 if failed else 0
 
