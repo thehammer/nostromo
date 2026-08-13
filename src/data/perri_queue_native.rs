@@ -654,92 +654,30 @@ impl PerriQueueNativeSource {
 
             match wake {
                 Wake::Full(reason) => {
-                    // Consume any approvals that arrived since the last cycle
-                    // (or since startup).  Belt-and-suspenders: the approvals_rx
-                    // wake also triggers an immediate re-fetch when the file
-                    // appears, but we consume here unconditionally so a write
-                    // that races past the watcher is never missed.
-                    {
-                        let mut store = suppress.lock().unwrap();
-                        let count = store.consume_approvals_file(&approvals_path, unix_now_secs());
-                        if count > 0 {
-                            store.save();
-                            debug!("perri suppress: consumed {count} new approval(s) before fetch");
-                        }
-                    }
-
-                    let prev = tx.borrow().clone();
-                    // Everything a targeted update claimed a verdict for since
-                    // the last poll.  Taken *before* the fetch so events that
-                    // arrive during it are audited by the *next* poll.
-                    let mut audit_set = std::mem::take(&mut tstate.touched_since_poll);
-
-                    debug!(reason, "perri queue full refresh");
-                    match self.fetch(&client, &me_login, &mut caches, &suppress).await {
-                        Ok(snap) => {
-                            // PRs the search-index-lag grace carried over differ
-                            // from the poll's raw verdict *by design*.
-                            for key in &caches.last_grace_retained {
-                                audit_set.remove(key);
-                            }
-                            self.audit_divergence(&prev, &snap, &audit_set, &tstate);
-                            tstate.prune(&caches.candidates);
-                            self.publish_snapshot(&tx, &client, snap, PrefetchScope::TopThree);
-                        }
-                        Err(e) => {
-                            warn!("perri queue fetch failed: {e:#}");
-                            let mut snap = tx.borrow().clone().unwrap_or_default();
-                            snap.stale = true;
-                            snap.error = Some(e.to_string());
-                            let _ = tx.send(Some(snap));
-                        }
-                    }
+                    self.run_full_refresh(
+                        &client,
+                        &me_login,
+                        &mut caches,
+                        &suppress,
+                        &mut tstate,
+                        &tx,
+                        &approvals_path,
+                        reason,
+                    )
+                    .await;
                 }
 
                 Wake::Targeted(events) => {
-                    // Bound to a local before the `.await`s below: the
-                    // `watch::Ref` guard `borrow()` returns is not `Send`.
-                    let current = tx.borrow().clone();
-                    match current.filter(|s| !s.stale && s.error.is_none()) {
-                        // Nothing coherent to mutate.  The next full fetch
-                        // settles everything anyway, and mutating a broken
-                        // ledger would only publish a differently-wrong
-                        // snapshot.
-                        None => debug!(
-                            events = events.len(),
-                            "perri targeted: no healthy snapshot — deferring to the periodic poll"
-                        ),
-                        Some(current) => {
-                            let mut changed = false;
-                            for ev in &events {
-                                changed |= apply_relay_event(
-                                    &client,
-                                    &me_login,
-                                    ev,
-                                    &mut caches,
-                                    &suppress,
-                                    &mut tstate,
-                                )
-                                .await
-                                .is_changed();
-                            }
-
-                            if changed {
-                                let snap = PrQueueSnapshot {
-                                    generated_at: Some(Utc::now()),
-                                    items: render_with_suppression(&caches, &me_login, &suppress),
-                                    stale: false,
-                                    error: None,
-                                };
-                                self.publish_snapshot(
-                                    &tx,
-                                    &client,
-                                    snap,
-                                    PrefetchScope::NewlyTopThree(&current.items),
-                                );
-                            }
-                        }
-                    }
+                    self.run_targeted_update(
+                        &client,
+                        &me_login,
+                        &mut caches,
+                        &suppress,
+                        &mut tstate,
+                        &tx,
+                        events,
+                    )
+                    .await;
                 }
             }
 
@@ -760,6 +698,114 @@ impl PerriQueueNativeSource {
                 &mut pending,
             )
             .await;
+        }
+    }
+
+    /// Re-derive the whole queue and publish it, auditing the targeted path
+    /// against the result before the ledger it was measured against is gone.
+    ///
+    /// One `Wake::Full` arm of the run loop, pulled out only because `run()`
+    /// otherwise buries this sequence — fetch, audit, prune, publish — inside
+    /// a `match` alongside the targeted arm below.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_full_refresh(
+        &self,
+        client: &GithubClient,
+        me_login: &str,
+        caches: &mut QueueCaches,
+        suppress: &Arc<Mutex<SuppressStore>>,
+        tstate: &mut TargetedState,
+        tx: &watch::Sender<Option<PrQueueSnapshot>>,
+        approvals_path: &Path,
+        reason: &'static str,
+    ) {
+        // Consume any approvals that arrived since the last cycle (or since
+        // startup).  Belt-and-suspenders: the approvals_rx wake also triggers
+        // an immediate re-fetch when the file appears, but we consume here
+        // unconditionally so a write that races past the watcher is never
+        // missed.
+        {
+            let mut store = suppress.lock().unwrap();
+            let count = store.consume_approvals_file(approvals_path, unix_now_secs());
+            if count > 0 {
+                store.save();
+                debug!("perri suppress: consumed {count} new approval(s) before fetch");
+            }
+        }
+
+        let prev = tx.borrow().clone();
+        // Everything a targeted update claimed a verdict for since the last
+        // poll.  Taken *before* the fetch so events that arrive during it are
+        // audited by the *next* poll.
+        let mut audit_set = std::mem::take(&mut tstate.touched_since_poll);
+
+        debug!(reason, "perri queue full refresh");
+        match self.fetch(client, me_login, caches, suppress).await {
+            Ok(snap) => {
+                // PRs the search-index-lag grace carried over differ from the
+                // poll's raw verdict *by design*.
+                for key in &caches.last_grace_retained {
+                    audit_set.remove(key);
+                }
+                self.audit_divergence(&prev, &snap, &audit_set, tstate);
+                tstate.prune(&caches.candidates);
+                self.publish_snapshot(tx, client, snap, PrefetchScope::TopThree);
+            }
+            Err(e) => {
+                warn!("perri queue fetch failed: {e:#}");
+                let mut snap = tx.borrow().clone().unwrap_or_default();
+                snap.stale = true;
+                snap.error = Some(e.to_string());
+                let _ = tx.send(Some(snap));
+            }
+        }
+    }
+
+    /// Apply a batch of relay events to the ledger and publish only if one of
+    /// them actually changed a verdict.
+    ///
+    /// The other `Wake` arm of the run loop, pulled out for the same reason as
+    /// [`Self::run_full_refresh`].
+    #[allow(clippy::too_many_arguments)]
+    async fn run_targeted_update(
+        &self,
+        client: &GithubClient,
+        me_login: &str,
+        caches: &mut QueueCaches,
+        suppress: &Arc<Mutex<SuppressStore>>,
+        tstate: &mut TargetedState,
+        tx: &watch::Sender<Option<PrQueueSnapshot>>,
+        events: Vec<RelayEvent>,
+    ) {
+        // Bound to a local before the `.await`s below: the `watch::Ref` guard
+        // `borrow()` returns is not `Send`.
+        let current = tx.borrow().clone();
+        let Some(current) = current.filter(|s| !s.stale && s.error.is_none()) else {
+            // Nothing coherent to mutate.  The next full fetch settles
+            // everything anyway, and mutating a broken ledger would only
+            // publish a differently-wrong snapshot.
+            debug!(
+                events = events.len(),
+                "perri targeted: no healthy snapshot — deferring to the periodic poll"
+            );
+            return;
+        };
+
+        let mut changed = false;
+        for ev in &events {
+            changed |= apply_relay_event(client, me_login, ev, caches, suppress, tstate)
+                .await
+                .is_changed();
+        }
+
+        if changed {
+            let snap = PrQueueSnapshot {
+                generated_at: Some(Utc::now()),
+                items: render_with_suppression(caches, me_login, suppress),
+                stale: false,
+                error: None,
+            };
+            self.publish_snapshot(tx, client, snap, PrefetchScope::NewlyTopThree(&current.items));
         }
     }
 
