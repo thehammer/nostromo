@@ -39,7 +39,10 @@ use nostromo::{
         perri_queue_native::PerriQueueNativeSource,
         teri_todos::TeriTodosNativeSource,
     },
-    ipc::{pane_registry::PaneRegistry, protocol::ServerMsg, PtyManager, Server, SessionManager},
+    ipc::{
+        pane_registry::PaneRegistry, perri_state::build_perri_state, perri_state::WatchPerriStateProvider,
+        protocol::ServerMsg, PtyManager, Server, SessionManager,
+    },
     mcp::{daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState},
     mother::{self, statusline_cache_path, MotherStatus},
 };
@@ -153,6 +156,21 @@ async fn main() -> Result<()> {
     // native sources without touching the dirty-file sentinel's watcher.
     let perri_queue_refresh_tx_for_mcp = perri_queue_refresh_tx.clone();
     let perri_pr_refresh_tx_for_mcp = perri_pr_refresh_tx.clone();
+
+    // f1: attach-replay for `ServerMsg::PerriState` (see `PerriStateProvider`).
+    // Registered unconditionally, here — not inside the `write_bridge_mcp_config()`
+    // success arm below, where the D8 pane-content provider is registered. Perri
+    // replay has nothing to do with the MCP bridge; nesting it there would
+    // silently disable Perri replay on any machine where the bridge config can't
+    // be written. Registration order doesn't matter — the provider is read
+    // lazily at attach time.
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
+            perri_queue_rx.clone(),
+            perri_pr_rx.clone(),
+        )));
+    }
 
     // ── Mother jobs channel (spawned early so MCP state gets live receiver) ─────
     let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
@@ -483,21 +501,6 @@ async fn run_peek_poller(
 }
 
 // ── perri broadcaster ─────────────────────────────────────────────────────────
-
-/// Build a `ServerMsg::PerriState` from the current watch-channel snapshots.
-///
-/// Extracted as a free function so it can be unit-tested without a running daemon.
-fn build_perri_state(
-    queue_snap: Option<&PrQueueSnapshot>,
-    pr_snap: Option<&PrSnapshot>,
-) -> ServerMsg {
-    ServerMsg::PerriState {
-        queue: queue_snap
-            .map(|s| s.items.clone())
-            .unwrap_or_default(),
-        current: pr_snap.cloned().map(Box::new),
-    }
-}
 
 /// Watch the Perri native sources and broadcast `PerriState` on every change.
 ///

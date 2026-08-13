@@ -194,10 +194,10 @@ extension PaneContentWire: Decodable {
 
 extension PaneContentWire: Equatable {
     /// `.text`/`.loading`/`.error`/`.prList` compare structurally. `.jsonSnapshot`
-    /// and `.unknown` always compare unequal — even given byte-identical
-    /// payloads — a deliberate conservative choice: report "changed" rather
-    /// than risk a false "unchanged" for a payload kind this client can't
-    /// actually compare (they carry `Any`).
+    /// and `.unknown` carry an `Any` payload, so they compare via
+    /// `jsonPayloadsEqual` — structural equality through Foundation bridging.
+    /// Note this means `1` and `1.0` compare equal (NSNumber bridging); for a
+    /// "did this pane's content change" test that's the correct answer.
     public static func == (lhs: PaneContentWire, rhs: PaneContentWire) -> Bool {
         switch (lhs, rhs) {
         case (.text(let a), .text(let b)):
@@ -208,14 +208,27 @@ extension PaneContentWire: Equatable {
             return a == b
         case (.prList(let a), .prList(let b)):
             return a == b
-        case (.jsonSnapshot, .jsonSnapshot):
-            return false
-        case (.unknown, .unknown):
-            return false
+        case (.jsonSnapshot(let a), .jsonSnapshot(let b)):
+            return jsonPayloadsEqual(a, b)
+        case (.unknown(let a), .unknown(let b)):
+            return jsonPayloadsEqual(a, b)
         default:
             return false
         }
     }
+}
+
+/// Structural comparison for the `Any` payloads carried by
+/// `.jsonSnapshot`/`.unknown`. Every value these cases can actually hold
+/// comes from `AnyDecodable`, which only ever produces `String`, `Bool`,
+/// `Int`, `Double`, `[Any]`, or `[String: Any]` — all of which bridge to
+/// Foundation objects with structural `isEqual`, including nested
+/// containers. A payload that somehow doesn't bridge boxes to a distinct
+/// opaque object and compares unequal, preserving the original
+/// conservative "report changed rather than a false unchanged" bias for
+/// anything we genuinely cannot compare.
+private func jsonPayloadsEqual(_ lhs: Any, _ rhs: Any) -> Bool {
+    (lhs as AnyObject).isEqual(rhs as AnyObject)
 }
 
 // MARK: - PaneFreshness

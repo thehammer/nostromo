@@ -28,6 +28,13 @@ import NostromoKit
 /// copies; this file exercises only the macOS one.
 final class PaneContentWireEqualityTests: XCTestCase {
 
+    private let decoder = JSONDecoder()
+
+    private func decode(_ jsonString: String) throws -> PaneContentWire {
+        let data = Data(jsonString.utf8)
+        return try decoder.decode(PaneContentWire.self, from: data)
+    }
+
     private func makeItem(
         title: String = "feat: auth"
     ) -> PrListItemModel {
@@ -84,30 +91,98 @@ final class PaneContentWireEqualityTests: XCTestCase {
         XCTAssertNotEqual(lhs, rhs)
     }
 
-    // MARK: - .jsonSnapshot (conservative "always changed")
+    // MARK: - .jsonSnapshot (structural, via NSObject bridging)
+    //
+    // `.jsonSnapshot` carries `Any`, so `==` bridges the payload to `NSObject`
+    // and compares with `isEqual` — structurally equal payloads (even from two
+    // independent decodes) must compare equal, and `x == x` must always hold,
+    // per `Equatable`'s reflexivity requirement.
+    //
+    // NOTE: the macOS-local `AnyDecodable` (Models.swift) has no keyed-container
+    // decode branch — it can only produce String/Bool/Int/Double/[Any], never
+    // [String: Any]. That's a real, pre-existing, out-of-scope bug, and it means
+    // a nested-*object* payload can't be exercised here (it collapses to an
+    // empty string). Nesting is exercised via an array-of-arrays instead, which
+    // the macOS decoder can build via its unkeyed-container branch.
 
-    func testJsonSnapshotCasesWithIdenticalPayloadsAreNeverEqual() {
-        let payload: [String: Any] = ["x": 1]
-        let lhs = PaneContentWire.jsonSnapshot(payload)
-        let rhs = PaneContentWire.jsonSnapshot(payload)
-        XCTAssertNotEqual(
-            lhs, rhs,
-            ".jsonSnapshot must compare unequal to any other value, even with an identical payload — " +
-            "this is a deliberate conservative choice (report 'changed' rather than risk a false 'unchanged')"
+    func testJsonSnapshotIsReflexive() throws {
+        let value = try decode("""
+        {"kind": "json_snapshot", "value": [[1, 2], [3, 4]]}
+        """)
+        XCTAssertEqual(
+            value, value,
+            "x == x must hold for .jsonSnapshot — Equatable's reflexivity requirement"
         )
     }
 
-    // MARK: - .unknown (conservative "always changed")
+    func testJsonSnapshotCasesWithIdenticalPayloadsAreEqual() throws {
+        // An object `value` would collapse to an empty string via the macOS
+        // decoder's missing keyed-container branch (see note above) — using an
+        // array here keeps this a meaningful (non-trivial) equality check.
+        let json = """
+        {"kind": "json_snapshot", "value": [1, 2, 3]}
+        """
+        let lhs = try decode(json)
+        let rhs = try decode(json)
+        XCTAssertEqual(
+            lhs, rhs,
+            ".jsonSnapshot must compare equal for byte-identical payloads, even though each " +
+            "side was decoded independently"
+        )
+    }
 
-    func testUnknownCasesWithIdenticalPayloadsAreNeverEqual() {
-        let payload: [String: Any] = ["future_field": "value"]
-        let lhs = PaneContentWire.unknown(payload)
-        let rhs = PaneContentWire.unknown(payload)
+    func testJsonSnapshotCasesDifferingInANestedArrayValueAreNotEqual() throws {
+        let lhs = try decode("""
+        {"kind": "json_snapshot", "value": [[1, 2], [3, 4]]}
+        """)
+        let rhs = try decode("""
+        {"kind": "json_snapshot", "value": [[1, 2], [3, 5]]}
+        """)
         XCTAssertNotEqual(
             lhs, rhs,
-            ".unknown must compare unequal to any other value, even with an identical payload — " +
-            "this is a deliberate conservative choice (report 'changed' rather than risk a false 'unchanged')"
+            ".jsonSnapshot must detect a difference nested inside an array-of-arrays payload"
         )
+    }
+
+    // MARK: - .unknown (structural, via NSObject bridging)
+    //
+    // The macOS `default:` decode branch re-decodes the *whole* top-level
+    // object through `AnyDecodable`, which (per the note above) has no
+    // keyed-container branch — so every decoded `.unknown` collapses to the
+    // same `""` payload regardless of the source JSON. Reflexivity and
+    // identical-payload equality still hold meaningfully through the decoder
+    // (and are a real regression guard against the old unconditional
+    // `return false`); differing-payload detection is exercised via direct
+    // case construction instead, since decoding can never produce two
+    // different `.unknown` payloads to compare here.
+
+    func testUnknownIsReflexive() throws {
+        let value = try decode("""
+        {"kind": "future_type_not_yet_known", "some_field": "some_value"}
+        """)
+        XCTAssertEqual(
+            value, value,
+            "x == x must hold for .unknown — Equatable's reflexivity requirement"
+        )
+    }
+
+    func testUnknownCasesWithIdenticalPayloadsAreEqual() throws {
+        let json = """
+        {"kind": "future_type_not_yet_known", "some_field": "some_value"}
+        """
+        let lhs = try decode(json)
+        let rhs = try decode(json)
+        XCTAssertEqual(
+            lhs, rhs,
+            ".unknown must compare equal for byte-identical payloads, even though each side " +
+            "was decoded independently"
+        )
+    }
+
+    func testUnknownCasesWithDifferingPayloadsAreNotEqual() {
+        let lhs = PaneContentWire.unknown(["future_field": "a"])
+        let rhs = PaneContentWire.unknown(["future_field": "b"])
+        XCTAssertNotEqual(lhs, rhs, ".unknown must detect a difference in its payload")
     }
 
     // MARK: - Cross-case inequality

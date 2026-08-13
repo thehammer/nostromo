@@ -7,8 +7,9 @@
 //   - Unknown future kinds do NOT throw (forward-compatibility contract).
 //   - PrListItemModel.toRowModel() maps fields to the expected row model shape.
 //   - Existing text and json_snapshot kinds still decode without regression.
-//   - PrListItemModel/PaneContentWire Equatable conformance, including the
-//     deliberately-conservative "always changed" rule for .jsonSnapshot/.unknown.
+//   - PrListItemModel/PaneContentWire Equatable conformance, including
+//     reflexivity and structural comparison (via NSObject bridging) for the
+//     .jsonSnapshot/.unknown cases, which carry an `Any` payload.
 //   - PaneFreshness decodes as_of/stale/badly_stale, and the pane_content
 //     ServerMsg decodes whether or not a "freshness" key is present on the wire.
 
@@ -285,32 +286,82 @@ final class PaneContentWireTests: XCTestCase {
         XCTAssertNotEqual(lhs, rhs)
     }
 
-    // MARK: - PaneContentWire.Equatable — .jsonSnapshot / .unknown (conservative "always changed")
+    // MARK: - PaneContentWire.Equatable — .jsonSnapshot / .unknown (structural, via NSObject bridging)
+    //
+    // `.jsonSnapshot` and `.unknown` carry `Any`, so `==` bridges the payload
+    // to `NSObject` and compares with `isEqual` — structurally equal payloads
+    // (even from two independent decodes) must compare equal, and `x == x`
+    // must always hold, per `Equatable`'s reflexivity requirement.
 
-    func testJsonSnapshotCasesWithIdenticalPayloadsAreNeverEqual() throws {
+    func testJsonSnapshotIsReflexive() throws {
+        let json = """
+        {"kind": "json_snapshot", "value": {"a": {"b": [1, 2, 3]}}}
+        """
+        let value = try decode(json)
+        XCTAssertEqual(
+            value, value,
+            "x == x must hold for .jsonSnapshot — Equatable's reflexivity requirement"
+        )
+    }
+
+    func testUnknownIsReflexive() throws {
+        let json = """
+        {"kind": "future_type_not_yet_known", "some_field": "some_value"}
+        """
+        let value = try decode(json)
+        XCTAssertEqual(
+            value, value,
+            "x == x must hold for .unknown — Equatable's reflexivity requirement"
+        )
+    }
+
+    func testJsonSnapshotCasesWithIdenticalPayloadsAreEqual() throws {
         let json = """
         {"kind": "json_snapshot", "value": {"x": 1}}
         """
         let lhs = try decode(json)
         let rhs = try decode(json)
-        XCTAssertNotEqual(
+        XCTAssertEqual(
             lhs, rhs,
-            ".jsonSnapshot must compare unequal to any other value, even with an identical payload — " +
-            "this is a deliberate conservative choice (report 'changed' rather than risk a false 'unchanged')"
+            ".jsonSnapshot must compare equal for byte-identical payloads, even though each " +
+            "side was decoded independently"
         )
     }
 
-    func testUnknownCasesWithIdenticalPayloadsAreNeverEqual() throws {
+    func testUnknownCasesWithIdenticalPayloadsAreEqual() throws {
         let json = """
         {"kind": "future_type_not_yet_known", "some_field": "some_value"}
         """
         let lhs = try decode(json)
         let rhs = try decode(json)
+        XCTAssertEqual(
+            lhs, rhs,
+            ".unknown must compare equal for byte-identical payloads, even though each side " +
+            "was decoded independently"
+        )
+    }
+
+    func testJsonSnapshotCasesDifferingInANestedValueAreNotEqual() throws {
+        let lhs = try decode("""
+        {"kind": "json_snapshot", "value": {"a": {"b": [1, 2]}}}
+        """)
+        let rhs = try decode("""
+        {"kind": "json_snapshot", "value": {"a": {"b": [1, 3]}}}
+        """)
         XCTAssertNotEqual(
             lhs, rhs,
-            ".unknown must compare unequal to any other value, even with an identical payload — " +
-            "this is a deliberate conservative choice (report 'changed' rather than risk a false 'unchanged')"
+            ".jsonSnapshot must detect a difference nested inside a dict-of-array payload"
         )
+    }
+
+    func testUnknownCasesDifferingInAFieldAreNotEqual() throws {
+        let lhs = try decode("""
+        {"kind": "future_type_not_yet_known", "some_field": "a"}
+        """)
+        let rhs = try decode("""
+        {"kind": "future_type_not_yet_known", "some_field": "b"}
+        """)
+        XCTAssertNotEqual(lhs, rhs, ".unknown must detect a difference in its payload")
     }
 
     // MARK: - PaneContentWire.Equatable — cross-case

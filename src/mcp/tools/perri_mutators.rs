@@ -803,15 +803,15 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(daemon.perri.selected_index.load(Ordering::SeqCst), 1);
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        assert_eq!(daemon.perri.selected_index.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
     async fn load_pr_leaves_selected_index_unchanged_when_pr_not_in_queue() {
         let (mut state, _tmp, _bcast) = make_daemon_state().await;
-        if let Some(daemon) = &state.daemon {
+        {
+            let daemon = state.daemon.as_ref().unwrap();
             daemon.perri.selected_index.store(3, Ordering::SeqCst);
         }
         seed_queue(&mut state, json!([]));
@@ -820,9 +820,8 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(daemon.perri.selected_index.load(Ordering::SeqCst), 3);
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        assert_eq!(daemon.perri.selected_index.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -908,26 +907,23 @@ mod tests {
         let (state, _tmp, _bcast) = make_daemon_state().await;
         // make_daemon_state() applies "perri-standard", which binds "diff" to
         // perri.get_current_pr — confirm the starting point before mutating.
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
-                Some("perri.get_current_pr")
-            );
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        assert_eq!(
+            daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+            Some("perri.get_current_pr")
+        );
 
         let args = json!({ "number": 42, "repo": "acme/web", "highlights": "check auth" });
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
-                None,
-                "agent-authored highlights are final content — the diff pane must no \
-                 longer be considered live, or the broadcaster would clobber them on \
-                 the next queue/PR change"
-            );
-        }
+        assert_eq!(
+            daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+            None,
+            "agent-authored highlights are final content — the diff pane must no \
+             longer be considered live, or the broadcaster would clobber them on \
+             the next queue/PR change"
+        );
     }
 
     #[tokio::test]
@@ -938,14 +934,13 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
-                Some("perri.get_current_pr"),
-                "no-highlights load_pr must keep (or re-establish) the diff pane's \
-                 live binding, since its rendered content came from that source"
-            );
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        assert_eq!(
+            daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+            Some("perri.get_current_pr"),
+            "no-highlights load_pr must keep (or re-establish) the diff pane's \
+             live binding, since its rendered content came from that source"
+        );
     }
 
     // ── clear_current_pr ─────────────────────────────────────────────────────
@@ -986,19 +981,18 @@ mod tests {
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            let reg = daemon.pane_registry.lock().unwrap();
-            assert_eq!(
-                reg.source_for("perri", "diff"),
-                Some("perri.get_current_pr"),
-                "clearing the current PR must leave diff ready to go live again \
-                 the moment a PR is loaded"
-            );
-            assert_eq!(
-                reg.source_for("perri", "queue"),
-                Some("perri.list_pr_queue")
-            );
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        let reg = daemon.pane_registry.lock().unwrap();
+        assert_eq!(
+            reg.source_for("perri", "diff"),
+            Some("perri.get_current_pr"),
+            "clearing the current PR must leave diff ready to go live again \
+             the moment a PR is loaded"
+        );
+        assert_eq!(
+            reg.source_for("perri", "queue"),
+            Some("perri.list_pr_queue")
+        );
     }
 
     #[tokio::test]

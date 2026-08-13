@@ -15,6 +15,7 @@
 pub mod client;
 pub mod codec;
 pub mod pane_registry;
+pub mod perri_state;
 pub mod protocol;
 pub mod pty_manager;
 pub mod scrollback;

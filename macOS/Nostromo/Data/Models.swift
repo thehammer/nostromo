@@ -816,6 +816,19 @@ struct CalendarSnapshot: Decodable {
 // Wire encoding uses `#[serde(tag = "kind", rename_all = "snake_case")]`, so:
 //   leaf:  { "kind": "leaf",  "pane_id": "repl" }
 //   split: { "kind": "split", "direction": "horizontal", "children": [...], "ratios": [0.5, 0.5] }
+//
+// macOS links NostromoKit and could use its versions of these types, but this
+// file still locally re-declares (and thereby shadows, within the macOS
+// module) `PaneTree`, `PaneContentWire` (+ its `Decodable`/`Equatable`),
+// `SplitDirection`, `FocusLayoutModel`, and the file-private `AnyDecodable`.
+// `PaneFreshness` is no longer among them — it was de-duplicated in favor of
+// `NostromoKit.PaneFreshness`, which is identical in shape and has no
+// behavioural delta from the macOS copy it replaced. The rest are NOT
+// mechanical deletes: `NostromoKit`'s `PaneContentWire: Decodable` throws on
+// a malformed field where this file's silently defaults (`?? [:]`, `?? []`),
+// and this file's local `AnyDecodable` (below) has no keyed-container decode
+// branch, unlike NostromoKit's — unifying them is filed as a todo, not done
+// here.
 
 /// Direction a split lays its children out in.
 enum SplitDirection: String, Decodable, Equatable {
@@ -916,9 +929,10 @@ extension PaneContentWire: Decodable {
 
 extension PaneContentWire: Equatable {
     /// `.text`/`.loading`/`.error`/`.prList` compare structurally. `.jsonSnapshot`
-    /// and `.unknown` always compare unequal — a deliberate conservative choice
-    /// (report "changed" rather than risk a false "unchanged" for a payload
-    /// kind this client can't actually compare; they carry `Any`).
+    /// and `.unknown` carry an `Any` payload, so they compare via
+    /// `jsonPayloadsEqual` — structural equality through Foundation bridging.
+    /// Note this means `1` and `1.0` compare equal (NSNumber bridging); for a
+    /// "did this pane's content change" test that's the correct answer.
     static func == (lhs: PaneContentWire, rhs: PaneContentWire) -> Bool {
         switch (lhs, rhs) {
         case (.text(let a), .text(let b)):
@@ -929,32 +943,28 @@ extension PaneContentWire: Equatable {
             return a == b
         case (.prList(let a), .prList(let b)):
             return a == b
-        case (.jsonSnapshot, .jsonSnapshot):
-            return false
-        case (.unknown, .unknown):
-            return false
+        case (.jsonSnapshot(let a), .jsonSnapshot(let b)):
+            return jsonPayloadsEqual(a, b)
+        case (.unknown(let a), .unknown(let b)):
+            return jsonPayloadsEqual(a, b)
         default:
             return false
         }
     }
 }
 
-/// How trustworthy the content in a `pane_content` push is. Mirrors
-/// `PaneFreshness` in `src/ipc/protocol.rs` (macOS-local copy — see
-/// `NostromoKit.PaneFreshness` for the shared one iOS uses). `stale` is the
-/// source's own transient flag and must NOT be rendered — a single missed
-/// poll is normal. `badlyStale` is the daemon's verdict that the source
-/// hasn't produced good data in a while; it is the only flag rendered.
-struct PaneFreshness: Decodable, Equatable {
-    let asOf: Date?
-    let stale: Bool
-    let badlyStale: Bool
-
-    private enum CodingKeys: String, CodingKey {
-        case asOf = "as_of"
-        case stale
-        case badlyStale = "badly_stale"
-    }
+/// Structural comparison for the `Any` payloads carried by
+/// `.jsonSnapshot`/`.unknown`. Every value these cases can actually hold
+/// comes from this file's local `AnyDecodable`, which only ever produces
+/// `String`, `Bool`, `Int`, `Double`, or `[Any]` (it has no keyed-container
+/// branch — see the note on that type below) — all of which bridge to
+/// Foundation objects with structural `isEqual`, including nested
+/// containers. A payload that somehow doesn't bridge boxes to a distinct
+/// opaque object and compares unequal, preserving the original conservative
+/// "report changed rather than a false unchanged" bias for anything we
+/// genuinely cannot compare.
+private func jsonPayloadsEqual(_ lhs: Any, _ rhs: Any) -> Bool {
+    (lhs as AnyObject).isEqual(rhs as AnyObject)
 }
 
 /// Live layout state for a single focus (stored in AppStore, keyed by tag).

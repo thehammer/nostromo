@@ -268,33 +268,16 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
 mod tests {
     use super::*;
     use crate::ipc::pane_registry::{PaneRegistry, SplitPosition};
-    use crate::ipc::SessionManager;
-    use crate::mcp::DaemonMcpBackend;
     use std::sync::{Arc, Mutex};
-    use tokio::sync::broadcast;
 
     /// Build a daemon-hosted `McpSharedState` sharing the returned
-    /// `pane_registry` handle, mirroring the `make_state()` pattern used by
-    /// `apply_layout.rs`/`refresh_pane.rs`'s tests — but also returning the
-    /// registry `Arc` directly so tests can assert on bindings without
-    /// re-deriving it through `state.daemon`.
+    /// `pane_registry` handle — a thin adapter over
+    /// `test_support::daemon_test_state()` that hands back the registry
+    /// `Arc` directly so tests can assert on bindings without re-deriving it
+    /// through `state.daemon`.
     fn make_state() -> (McpSharedState, Arc<Mutex<PaneRegistry>>) {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
-            tmp.path().join("panes.json"),
-        )));
-        let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
-            tmp.path().join("sessions.json"),
-        )));
-        std::mem::forget(tmp);
-        let (broadcast_tx, _rx) = broadcast::channel(64);
-        let backend = DaemonMcpBackend {
-            pane_registry: pane_registry.clone(),
-            session_mgr,
-            broadcast_tx,
-            perri: crate::mcp::PerriDaemonState::default(),
-        };
-        (McpSharedState::for_daemon(backend), pane_registry)
+        let built = crate::mcp::test_support::daemon_test_state();
+        (built.state, built.pane_registry)
     }
 
     // ── set_pane_content severs a pane's live-source binding ──────────────────

@@ -277,7 +277,6 @@ fn reevaluate_staleness(state: &McpSharedState, last_sent: &mut LastSent) {
 mod tests {
     use super::*;
 
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, Utc};
@@ -286,10 +285,9 @@ mod tests {
 
     use crate::data::perri_pr::PrSnapshot;
     use crate::data::perri_queue::PrQueueSnapshot;
-    use crate::ipc::pane_registry::{PaneRegistry, SplitPosition, REPL_PANE_ID};
+    use crate::ipc::pane_registry::{SplitPosition, REPL_PANE_ID};
     use crate::ipc::protocol::{PaneContentWire, PaneFreshness, ServerMsg};
-    use crate::ipc::SessionManager;
-    use crate::mcp::{DaemonMcpBackend, McpSharedState};
+    use crate::mcp::McpSharedState;
 
     // ── test helpers ─────────────────────────────────────────────────────────
 
@@ -303,34 +301,20 @@ mod tests {
     );
 
     /// Build a daemon-hosted `McpSharedState` with fresh, test-owned
-    /// `perri_queue_rx`/`perri_pr_rx` watch channels (mirrors the
-    /// `make_state()` pattern in `apply_layout.rs`/`refresh_pane.rs`'s tests,
-    /// but also hands back the `Sender` halves so tests can push updates
-    /// after the broadcaster is already running).
+    /// `perri_queue_rx`/`perri_pr_rx` watch channels — a thin adapter over
+    /// `test_support::daemon_test_state()` that additionally hands back the
+    /// `Sender` halves so tests can push updates after the broadcaster is
+    /// already running.
     fn make_state() -> MakeStateResult {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
-            tmp.path().join("panes.json"),
-        )));
-        let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
-            tmp.path().join("sessions.json"),
-        )));
-        std::mem::forget(tmp);
-        let (broadcast_tx, bcast_rx) = broadcast::channel(64);
-        let backend = DaemonMcpBackend {
-            pane_registry,
-            session_mgr,
-            broadcast_tx,
-            perri: crate::mcp::PerriDaemonState::default(),
-        };
-        let mut state = McpSharedState::for_daemon(backend);
+        let built = crate::mcp::test_support::daemon_test_state();
+        let mut state = built.state;
 
         let (queue_tx, queue_rx) = watch::channel(None::<PrQueueSnapshot>);
         let (pr_tx, pr_rx) = watch::channel(None::<PrSnapshot>);
         state.perri_queue_rx = queue_rx;
         state.perri_pr_rx = pr_rx;
 
-        (state, bcast_rx, queue_tx, pr_tx)
+        (state, built.bcast_rx, queue_tx, pr_tx)
     }
 
     /// Register (if needed) and bind a leaf pane split straight off "repl".

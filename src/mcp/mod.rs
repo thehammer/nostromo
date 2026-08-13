@@ -49,6 +49,8 @@ pub mod pane_sources;
 pub mod server;
 pub mod socket;
 pub mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tools;
 
 pub use command::{McpCommand, PaneContent};

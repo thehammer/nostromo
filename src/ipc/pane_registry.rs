@@ -36,7 +36,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::protocol::{PaneTree, ServerMsg, SplitDirection};
 
@@ -50,6 +50,17 @@ pub const REPL_PANE_ID: &str = "repl";
 pub trait PaneContentProvider: Send + Sync {
     /// Current content for every live binding, for replay to a new client.
     fn bound_pane_contents(&self) -> Vec<ServerMsg>;
+}
+
+/// Supplies the current Perri queue + current-PR snapshot for attach replay.
+/// `ServerMsg::PerriState` is otherwise only broadcast on watch change, so a
+/// client attaching to an already-running daemon would wait up to
+/// `pr_queue_poll_secs` (60s) for its first one. Implemented in
+/// `crate::ipc::perri_state` over the daemon's two watch receivers.
+pub trait PerriStateProvider: Send + Sync {
+    /// `Some(ServerMsg::PerriState { .. })`, or `None` if no snapshot has ever
+    /// been fetched yet.
+    fn perri_state(&self) -> Option<ServerMsg>;
 }
 
 // ── errors ──────────────────────────────────────────────────────────────────
@@ -562,6 +573,22 @@ struct StoreV2 {
     bindings: HashMap<String, HashMap<String, String>>,
 }
 
+/// Parse raw store bytes: current V2 envelope first, then the pre-binding V1
+/// bare-map format. `Err` means neither format matched — the caller must
+/// treat that as "discard, and say so" (see `load_store`).
+fn parse_store(
+    bytes: &[u8],
+) -> Result<(HashMap<String, PaneTree>, HashMap<String, HashMap<String, String>>), serde_json::Error> {
+    match serde_json::from_slice::<StoreV2>(bytes) {
+        Ok(store) if store.version == 2 => Ok((store.trees, store.bindings)),
+        _ => {
+            // V1 fallback: a bare `HashMap<String, PaneTree>`, no bindings.
+            serde_json::from_slice::<HashMap<String, PaneTree>>(bytes)
+                .map(|trees| (trees, HashMap::new()))
+        }
+    }
+}
+
 /// Load the on-disk store, returning `(trees, bindings)`. Tries the current
 /// versioned envelope first; falls back to the pre-binding V1 format (a bare
 /// `HashMap<String, PaneTree>`) so an existing `~/.nostromo/daemon-panes.json`
@@ -580,12 +607,18 @@ fn load_store(path: &std::path::Path) -> (HashMap<String, PaneTree>, HashMap<Str
         return (HashMap::new(), HashMap::new());
     };
 
-    let (trees, bindings) = match serde_json::from_slice::<StoreV2>(&bytes) {
-        Ok(store) if store.version == 2 => (store.trees, store.bindings),
-        _ => {
-            // V1 fallback: a bare `HashMap<String, PaneTree>`, no bindings.
-            let trees = serde_json::from_slice::<HashMap<String, PaneTree>>(&bytes).unwrap_or_default();
-            (trees, HashMap::new())
+    let (trees, bindings) = match parse_store(&bytes) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                bytes = bytes.len(),
+                error = %e,
+                "pane store is unparseable as either the V2 envelope or the V1 bare-map \
+                 format; discarding every persisted layout and binding for this daemon run \
+                 (the file is left on disk untouched)"
+            );
+            (HashMap::new(), HashMap::new())
         }
     };
 
@@ -1432,6 +1465,58 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── 18b. `parse_store` — the pure parse helper `load_store` delegates to ──
+
+    #[test]
+    fn parse_store_rejects_garbage_bytes() {
+        assert!(
+            parse_store(b"not json at all").is_err(),
+            "bytes that are not JSON at all must not silently parse as an empty store"
+        );
+        assert!(
+            parse_store(b"{").is_err(),
+            "truncated JSON must not silently parse as an empty store"
+        );
+    }
+
+    #[test]
+    fn parse_store_accepts_a_valid_v2_envelope() {
+        let json = serde_json::json!({
+            "version": 2,
+            "trees": {
+                "mother": { "kind": "leaf", "pane_id": "repl" }
+            },
+            "bindings": {
+                "mother": { "repl": "some.source" }
+            }
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+
+        let (trees, bindings) = parse_store(&bytes).expect("a valid V2 envelope must parse");
+        assert_eq!(trees.get("mother"), Some(&PaneTree::repl_leaf()));
+        assert_eq!(
+            bindings.get("mother").and_then(|panes| panes.get("repl")),
+            Some(&"some.source".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_store_accepts_a_valid_bare_v1_map() {
+        // The pre-binding on-disk shape: a bare `HashMap<String, PaneTree>`,
+        // no version envelope, no bindings field at all.
+        let json = serde_json::json!({
+            "mother": { "kind": "leaf", "pane_id": "repl" }
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+
+        let (trees, bindings) = parse_store(&bytes).expect("a valid bare V1 map must parse");
+        assert_eq!(trees.get("mother"), Some(&PaneTree::repl_leaf()));
+        assert!(
+            bindings.is_empty(),
+            "the V1 shape carries no bindings — parse_store must default to empty, not error"
+        );
     }
 
     // ── 19. A persisted binding to a retired/unknown source is dropped ────────

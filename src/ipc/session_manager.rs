@@ -48,7 +48,7 @@ use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 
-use super::pane_registry::{PaneContentProvider, PaneRegistry};
+use super::pane_registry::{PaneContentProvider, PaneRegistry, PerriStateProvider};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
 use super::stream_json::{load_scrollback, SessionState, SessionTranscript, Turn, TurnDelta};
 
@@ -247,6 +247,11 @@ pub struct SessionManager {
     /// daemon via [`SessionManager::configure_pane_content_provider`]; `None`
     /// in tests / non-daemon use.
     pane_content_provider: Option<Arc<dyn PaneContentProvider>>,
+    /// Supplies the current Perri queue + current-PR snapshot for attach
+    /// replay (f1). Set by the daemon via
+    /// [`SessionManager::configure_perri_state_provider`]; `None` in tests /
+    /// non-daemon use.
+    perri_state_provider: Option<Arc<dyn PerriStateProvider>>,
 }
 
 impl SessionManager {
@@ -264,6 +269,7 @@ impl SessionManager {
             mcp_socket: None,
             mcp_config: None,
             pane_content_provider: None,
+            perri_state_provider: None,
         }
     }
 
@@ -298,6 +304,18 @@ impl SessionManager {
     /// Access the pane-content provider (if wired up).
     pub fn pane_content_provider(&self) -> Option<Arc<dyn PaneContentProvider>> {
         self.pane_content_provider.clone()
+    }
+
+    /// Wire the [`PerriStateProvider`] the daemon exposes over its live Perri
+    /// watch channels, so `server.rs` can replay the current queue/current-PR
+    /// snapshot to a newly (re)connected client (f1).
+    pub fn configure_perri_state_provider(&mut self, provider: Arc<dyn PerriStateProvider>) {
+        self.perri_state_provider = Some(provider);
+    }
+
+    /// Access the Perri-state provider (if wired up).
+    pub fn perri_state_provider(&self) -> Option<Arc<dyn PerriStateProvider>> {
+        self.perri_state_provider.clone()
     }
 
     pub fn client_sender_registry(

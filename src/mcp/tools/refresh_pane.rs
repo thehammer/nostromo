@@ -106,30 +106,12 @@ pub async fn refresh_pane_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::pane_registry::PaneRegistry;
     use crate::ipc::protocol::ServerMsg;
-    use crate::ipc::SessionManager;
-    use crate::mcp::DaemonMcpBackend;
-    use std::sync::{Arc, Mutex};
     use tokio::sync::{broadcast, watch};
 
     fn make_state() -> (McpSharedState, broadcast::Receiver<ServerMsg>) {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
-            tmp.path().join("panes.json"),
-        )));
-        let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
-            tmp.path().join("sessions.json"),
-        )));
-        std::mem::forget(tmp);
-        let (broadcast_tx, rx) = broadcast::channel(64);
-        let backend = DaemonMcpBackend {
-            pane_registry,
-            session_mgr,
-            broadcast_tx,
-            perri: crate::mcp::PerriDaemonState::default(),
-        };
-        (McpSharedState::for_daemon(backend), rx)
+        let built = crate::mcp::test_support::daemon_test_state();
+        (built.state, built.bcast_rx)
     }
 
     fn seeded_queue_state(state: McpSharedState) -> McpSharedState {

@@ -5,14 +5,20 @@ import NostromoKit
 /// (SwiftUI). Content updates flow through `@Published content`/`freshness`
 /// rather than replacing the hosting view's `rootView`, which is what lets
 /// SwiftUI's own diffing preserve scroll position and list-item identity
-/// across a content refresh (see `PaneContentNSView.update`, which is the
-/// only writer of this model — it skips the write entirely when content is
-/// unchanged).
+/// across a content refresh (`PaneContentNSView.update` is the only writer of
+/// `content`/`freshness` — it skips the write entirely when content is
+/// unchanged). `onLoadPR`/`onApprovePR` are injected exactly once, in
+/// `DynamicFocusView.makeLeafView` right after construction, and never
+/// reassigned on a live instance — `@Published` on them is belt-and-braces
+/// for `PaneContentNSView.init`'s ordering (the `NSHostingView` is built
+/// before the two injection `didSet`s fire, so a first `body` evaluation
+/// could otherwise capture the no-op defaults with no invalidation once the
+/// real closures land), not a response to an observed bug.
 final class PaneContentModel: ObservableObject {
     @Published var content:   PaneContentWire?
     @Published var freshness: PaneFreshness?
-    var onLoadPR:    (String, Int) -> Void = { _, _ in }
-    var onApprovePR: (String, Int) -> Void = { _, _ in }
+    @Published var onLoadPR:    (String, Int) -> Void = { _, _ in }
+    @Published var onApprovePR: (String, Int) -> Void = { _, _ in }
 }
 
 /// Thin SwiftUI wrapper that renders `PaneContentModel`'s current state
