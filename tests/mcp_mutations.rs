@@ -382,6 +382,44 @@ async fn perri_set_selected_index_dispatches_command() {
     assert_eq!(result["ok"], true);
 }
 
+/// `perri.get_selected_index` dispatches GetPerriSelectedIndex. This is the
+/// tool the daemon-hosting fix newly registers in `tool_descriptors()` /
+/// `dispatch()` — the TUI-side `McpCommand::GetPerriSelectedIndex` handling
+/// in `app.rs` already existed, it just wasn't reachable over MCP.
+#[tokio::test]
+async fn perri_get_selected_index_dispatches_command() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("mcp_get_sel_idx.sock");
+
+    let (state, mut rx) = make_state_with_channel().await;
+    let _server = McpServer::bind(socket_path.clone(), (*state).clone())
+        .await
+        .unwrap();
+
+    let fake_loop = tokio::spawn(async move {
+        if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
+            if let nostromo::mcp::McpCommand::GetPerriSelectedIndex { reply } = *cmd {
+                let _ = reply.send(Ok(2));
+                return true;
+            }
+        }
+        false
+    });
+
+    let (mut reader, mut writer) = mcp_connect(&socket_path).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "perri.get_selected_index",
+        json!({}),
+    )
+    .await;
+
+    assert!(fake_loop.await.unwrap());
+    assert_eq!(result["index"], 2);
+}
+
 /// `mother.enqueue_job` dispatches MotherEnqueue with the plan_path.
 #[tokio::test]
 async fn mother_enqueue_job_dispatches_command() {

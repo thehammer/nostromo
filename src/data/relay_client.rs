@@ -46,6 +46,15 @@ enum RelayMsg {
     },
     Event {
         event_type: String,
+        /// `owner/name`, present on every event.
+        #[serde(default)]
+        repo: Option<String>,
+        /// PR number — present on `pr.*` events, absent on `ci.completed`.
+        #[serde(default)]
+        number: Option<u64>,
+        /// Check/suite name — present on `ci.completed`, absent on `pr.*`.
+        #[serde(default)]
+        name: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -180,10 +189,18 @@ async fn connect_and_subscribe(
                         // Re-fetch on (re)connect to fill any gap during the outage.
                         let _ = refresh_tx.send(());
                     }
-                    Ok(RelayMsg::Event { event_type }) => {
+                    Ok(RelayMsg::Event { event_type, repo, number, name }) => {
                         debug!("github-relay: event {event_type}");
                         if is_queue_relevant(&event_type) {
-                            info!("github-relay: triggering queue refresh ({event_type})");
+                            let repo = repo.as_deref().unwrap_or("?");
+                            // PR events carry `number`; ci.completed carries `name`
+                            // (the check/suite name) instead — show whichever applies.
+                            let detail = match (number, name) {
+                                (Some(n), _) => format!("#{n}"),
+                                (None, Some(n)) => n,
+                                (None, None) => "?".to_string(),
+                            };
+                            info!("github-relay: triggering queue refresh ({event_type} {repo} {detail})");
                             let _ = refresh_tx.send(());
                         }
                     }

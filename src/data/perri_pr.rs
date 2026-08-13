@@ -43,6 +43,11 @@ pub struct PrSnapshot {
     pub diff: String,
     pub stale: bool,
     pub error: Option<String>,
+    /// When this snapshot was last fetched successfully. `None` when the
+    /// source has never produced good data (see `PaneFreshness`/D6 — a `None`
+    /// combined with `stale: true` means "badly stale immediately").
+    #[serde(default)]
+    pub generated_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Per-check CI results (empty when unknown / not yet fetched).
     #[serde(default)]
     pub ci_checks: Vec<CiCheck>,

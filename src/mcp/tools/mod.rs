@@ -297,25 +297,32 @@ pub fn tool_descriptors() -> Vec<Value> {
         // ── Phase 3: Perri mutations ───────────────────────────────────────
         json!({
             "name": "perri.load_pr",
-            "description": "Load a pull request into Perri's diff pane. Writes current-pr.json and triggers the native watcher.",
+            "description": "Load a pull request into Perri's diff pane. Writes current-pr.json and triggers the native watcher. When hosted in nostromd (daemon): pushes the diff pane's content itself (your `highlights`, if given, become the pane's final content; otherwise a Loading state followed by a server-rendered PR summary once the refetch catches up — bounded by a settle timeout), and moves the agent-scoped selected index to this PR if it's in the current queue. May return `{ \"ok\": true, \"pending\": true }` when the refetch is still in flight after the settle timeout — that is success-with-fetch-pending, not a failure to retry. When hosted in the standalone TUI: writes the file and returns once `PerriView` has applied it, with no pane-push/pending behavior. Errors: invalid_args, not_supported (daemon only, when Perri's state dir isn't configured), io_error, event_loop_closed, event_loop_timeout (TUI only).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "number": { "type": "integer", "description": "PR number" },
+                    "number": { "type": "integer", "description": "PR number (> 0)" },
                     "repo": { "type": "string", "description": "Repository in 'owner/repo' format" },
-                    "highlights": { "type": "string", "description": "Optional review notes or highlight context" }
+                    "highlights": { "type": "string", "description": "Optional review notes or highlight context" },
+                    "view_id": { "type": "string", "description": "Daemon-hosted only: focus/view id owning the diff pane; omit to target the caller's own focus" }
                 },
                 "required": ["number", "repo"]
             }
         }),
         json!({
             "name": "perri.clear_current_pr",
-            "description": "Clear the currently-loaded PR from Perri's diff pane.",
-            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            "description": "Clear the currently-loaded PR from Perri's diff pane. When hosted in nostromd (daemon): also re-pushes the PR queue pane. Errors: not_supported (daemon only), io_error, event_loop_closed, event_loop_timeout (TUI only).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string", "description": "Daemon-hosted only: focus/view id owning the diff/queue panes; omit to target the caller's own focus" }
+                },
+                "required": []
+            }
         }),
         json!({
             "name": "perri.set_selected_index",
-            "description": "Set the selected PR index in Perri's queue list.",
+            "description": "Set the agent-scoped selected PR index in Perri's queue list, clamped to the current queue length (0 when empty). Daemon-hosted: this index is agent-scoped bookkeeping only — it does not move any GUI highlight (no wire/client concept of selection exists yet). TUI-hosted: moves `PerriView`'s own selection, same as keyboard navigation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -323,6 +330,11 @@ pub fn tool_descriptors() -> Vec<Value> {
                 },
                 "required": ["index"]
             }
+        }),
+        json!({
+            "name": "perri.get_selected_index",
+            "description": "Returns the selected PR index in Perri's queue list (see perri.set_selected_index for what \"selected\" means on each host).",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
         // ── Phase 3: Mother mutations ──────────────────────────────────────
         json!({
@@ -550,13 +562,17 @@ pub async fn dispatch(
         // ── Phase 3: Perri mutations ───────────────────────────────────────
         "perri.load_pr" => {
             let args = arguments.cloned().unwrap_or_default();
-            perri_mutators::load_pr(state, &args).await
+            perri_mutators::load_pr(state, &args, pty_id).await
         }
-        "perri.clear_current_pr" => perri_mutators::clear_current_pr(state).await,
+        "perri.clear_current_pr" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri_mutators::clear_current_pr(state, &args, pty_id).await
+        }
         "perri.set_selected_index" => {
             let args = arguments.cloned().unwrap_or_default();
-            perri_mutators::set_selected_index(state, &args).await
+            perri_mutators::set_selected_index(state, &args, pty_id).await
         }
+        "perri.get_selected_index" => perri_mutators::get_selected_index(state, pty_id).await,
 
         // ── Phase 3: Mother mutations ──────────────────────────────────────
         "mother.enqueue_job" => {

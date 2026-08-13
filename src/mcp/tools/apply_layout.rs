@@ -17,8 +17,9 @@
 use serde_json::{json, Value};
 
 use crate::ipc::pane_registry::REPL_PANE_ID;
-use crate::ipc::protocol::{PaneContentWire, PrListItem, ServerMsg};
+use crate::ipc::protocol::{PaneContentWire, PaneFreshness, PrListItem, ServerMsg};
 use crate::mcp::layout_schema::{self, LayoutSchema};
+use crate::mcp::pane_sources::broadcast_pane_content;
 use crate::mcp::state::McpSharedState;
 
 /// Stable, machine-readable failure modes for `apply_layout` and the layout
@@ -52,15 +53,34 @@ impl ApplyLayoutError {
     }
 }
 
+/// Default placeholder text for `perri.get_current_pr` when no PR is loaded.
+/// Shared with `perri_mutators::clear_current_pr`'s daemon branch so the two
+/// can't drift on what "cleared" looks like in the diff pane.
+pub(crate) const NO_PR_LOADED_PLACEHOLDER: &str = "No PR loaded.";
+
+/// The PR-queue fetcher source name. The one place this string is spelled —
+/// `pane_sources.rs` and everything else references this constant.
+pub(crate) const SOURCE_PR_QUEUE: &str = "perri.list_pr_queue";
+/// The current-PR fetcher source name. See [`SOURCE_PR_QUEUE`].
+pub(crate) const SOURCE_CURRENT_PR: &str = "perri.get_current_pr";
+
 /// The closed set of `source` names a `PaneSpec` may bind to. Adding a new
-/// source is a deliberate code change: add a `match` arm in [`fetch`], list it
-/// here, and ensure the corresponding receiver is wired into the daemon's
-/// `McpSharedState`.
-const KNOWN_SOURCES: &[&str] = &["perri.list_pr_queue", "perri.get_current_pr"];
+/// source is a deliberate code change: add a `match` arm in [`fetch`], a
+/// constant above, list it here, and ensure the corresponding receiver is
+/// wired into the daemon's `McpSharedState`.
+const KNOWN_SOURCES: &[&str] = &[SOURCE_PR_QUEUE, SOURCE_CURRENT_PR];
 
 /// True when `source` is in the closed fetcher registry.
 pub(crate) fn source_is_known(source: &str) -> bool {
     KNOWN_SOURCES.contains(&source)
+}
+
+/// The full closed set of known source names — used by `PaneRegistry` to drop
+/// a persisted binding whose source has been retired in a later daemon
+/// version (D3), and by `pane_sources.rs` to drive the automatic broadcaster
+/// without a second list of source strings.
+pub(crate) fn known_sources() -> &'static [&'static str] {
+    KNOWN_SOURCES
 }
 
 /// The `PaneContentWire` surface-name a known `source` actually produces, per
@@ -72,8 +92,8 @@ pub(crate) fn source_is_known(source: &str) -> bool {
 /// dispatches on, kept next to it so the two can't drift apart.
 pub(crate) fn source_content_kind(source: &str) -> Option<&'static str> {
     match source {
-        "perri.list_pr_queue" => Some("pr_list"),
-        "perri.get_current_pr" => Some("text"),
+        SOURCE_PR_QUEUE => Some("pr_list"),
+        SOURCE_CURRENT_PR => Some("text"),
         _ => None,
     }
 }
@@ -114,13 +134,13 @@ pub(crate) fn fetch(
     placeholder: Option<&str>,
 ) -> Result<PaneContentWire, ApplyLayoutError> {
     match source {
-        "perri.list_pr_queue" => {
+        SOURCE_PR_QUEUE => {
             let items_json = crate::mcp::tools::perri::list_pr_queue(state);
             let items: Vec<PrListItem> =
                 serde_json::from_value(items_json).map_err(|_| ApplyLayoutError::FetchFailed)?;
             Ok(PaneContentWire::PrList { items })
         }
-        "perri.get_current_pr" => {
+        SOURCE_CURRENT_PR => {
             let snapshot = crate::mcp::tools::perri::get_current_pr(state);
             if snapshot.is_null() {
                 let text = placeholder.unwrap_or("No PR loaded.").to_string();
@@ -132,6 +152,48 @@ pub(crate) fn fetch(
             }
         }
         _ => Err(ApplyLayoutError::UnknownSource),
+    }
+}
+
+/// Compute how trustworthy `source`'s current data is, independently of what
+/// [`fetch`] renders from it — but dispatching on the exact same `source`
+/// strings, kept in this same function so the two can never drift about which
+/// snapshot backs which source.
+///
+/// A `None` snapshot (source has no data at all yet — e.g. no PR loaded) is
+/// deliberately *not* treated as a staleness condition: `PaneFreshness::default()`.
+pub(crate) fn freshness(source: &str, state: &McpSharedState) -> PaneFreshness {
+    match source {
+        SOURCE_PR_QUEUE => match state.perri_queue_rx.borrow().as_ref() {
+            Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
+            None => PaneFreshness::default(),
+        },
+        SOURCE_CURRENT_PR => match state.perri_pr_rx.borrow().as_ref() {
+            Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
+            None => PaneFreshness::default(),
+        },
+        _ => PaneFreshness::default(),
+    }
+}
+
+/// `badly_stale = stale && (as_of.is_none() || now - as_of > BADLY_STALE_AFTER)`.
+/// A source that is merely `stale` with a recent `as_of` is a routine missed
+/// cycle and stays quiet; one with no `as_of` at all has never produced good
+/// data and is badly stale immediately, not after some delay.
+fn compute_freshness(as_of: Option<chrono::DateTime<chrono::Utc>>, stale: bool) -> PaneFreshness {
+    let badly_stale = stale
+        && match as_of {
+            None => true,
+            Some(t) => match chrono::Utc::now().signed_duration_since(t).to_std() {
+                Ok(elapsed) => elapsed > crate::mcp::pane_sources::badly_stale_after(),
+                // `t` is in the future (clock skew) — not stale.
+                Err(_) => false,
+            },
+        };
+    PaneFreshness {
+        as_of,
+        stale,
+        badly_stale,
     }
 }
 
@@ -228,20 +290,27 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
         let Some(source) = &spec.source else {
             continue;
         };
-        let content = match fetch(source, state, spec.placeholder.as_deref()) {
-            Ok(c) => c,
+        // D4: a source-backed pane is bound the moment apply_layout declares
+        // it, regardless of whether this fetch succeeds — binding records
+        // intent, and the automatic broadcaster (or the next refresh) will
+        // repaint it once the source recovers.
+        {
+            let mut reg = daemon.pane_registry.lock().unwrap();
+            reg.bind_source(&tag, pane_id, source);
+        }
+        let (content, msg_freshness) = match fetch(source, state, spec.placeholder.as_deref()) {
+            Ok(c) => (c, Some(freshness(source, state))),
             Err(e) => {
                 warnings.push(json!({ "pane_id": pane_id, "error": e.code() }));
-                PaneContentWire::Error {
-                    message: format!("apply_layout: {} fetch failed ({})", source, e.code()),
-                }
+                (
+                    PaneContentWire::Error {
+                        message: format!("apply_layout: {} fetch failed ({})", source, e.code()),
+                    },
+                    None,
+                )
             }
         };
-        let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
-            tag: tag.clone(),
-            pane_id: pane_id.clone(),
-            content,
-        });
+        broadcast_pane_content(daemon, &tag, pane_id, content, msg_freshness);
     }
 
     if warnings.is_empty() {
@@ -278,6 +347,7 @@ mod tests {
             pane_registry,
             session_mgr,
             broadcast_tx,
+            perri: crate::mcp::PerriDaemonState::default(),
         };
         (McpSharedState::for_daemon(backend), rx)
     }
@@ -292,6 +362,33 @@ mod tests {
         );
         assert_eq!(ApplyLayoutError::InvalidSchema.code(), "invalid_schema");
         assert_eq!(ApplyLayoutError::FetchFailed.code(), "fetch_failed");
+    }
+
+    #[tokio::test]
+    async fn applying_perri_standard_binds_queue_and_diff_but_never_repl() {
+        let (state, _bcast) = make_state();
+
+        let result =
+            apply_layout(&state, &json!({ "name": "perri-standard" }), Some("perri")).await;
+        assert_eq!(result["ok"], true);
+
+        let daemon = state.daemon.as_ref().unwrap();
+        let reg = daemon.pane_registry.lock().unwrap();
+        assert_eq!(
+            reg.source_for("perri", "queue"),
+            Some("perri.list_pr_queue"),
+            "applying the perri-standard layout must bind \"queue\" to its live source"
+        );
+        assert_eq!(
+            reg.source_for("perri", "diff"),
+            Some("perri.get_current_pr"),
+            "applying the perri-standard layout must bind \"diff\" to its live source"
+        );
+        assert_eq!(
+            reg.source_for("perri", "repl"),
+            None,
+            "the repl pane must never get a live-source binding"
+        );
     }
 
     #[tokio::test]

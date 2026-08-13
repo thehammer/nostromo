@@ -4,8 +4,10 @@
 //! across task boundaries.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 
@@ -52,6 +54,43 @@ pub struct ViewMeta {
 
 // ── daemon backend ─────────────────────────────────────────────────────────────
 
+/// Daemon-side state for Perri's mutating MCP tools (`perri.load_pr`,
+/// `perri.clear_current_pr`, `perri.set_selected_index`,
+/// `perri.get_selected_index`).
+///
+/// `state_dir: None` means "not wired up" — the daemon MCP server was
+/// constructed without Perri's state directory (e.g. `for_test`/`for_daemon`
+/// in unit tests). It must never fall back to `Config::default()`, or a test
+/// could write into the operator's real `~/.claude/state/perri`. Tools branch
+/// on this and return `not_supported` when it's `None`.
+#[derive(Clone)]
+pub struct PerriDaemonState {
+    /// Perri's state directory (holds `current-pr.json`, `queue.dirty`, etc).
+    pub state_dir: Option<PathBuf>,
+    /// Send `()` to trigger an immediate current-PR re-fetch.
+    pub pr_refresh_tx: Option<mpsc::UnboundedSender<()>>,
+    /// Send `()` to trigger an immediate PR-queue re-fetch.
+    pub queue_refresh_tx: Option<mpsc::UnboundedSender<()>>,
+    /// Agent-scoped selected-queue-row index (see `perri_mutators` D5 — moves
+    /// no GUI highlight, just tracks what an agent last selected).
+    pub selected_index: Arc<AtomicUsize>,
+    /// How long `perri.load_pr` waits for the refetched snapshot to match the
+    /// requested `(repo, number)` before returning `pending: true`.
+    pub settle_timeout: Duration,
+}
+
+impl Default for PerriDaemonState {
+    fn default() -> Self {
+        Self {
+            state_dir: None,
+            pr_refresh_tx: None,
+            queue_refresh_tx: None,
+            selected_index: Arc::new(AtomicUsize::new(0)),
+            settle_timeout: Duration::from_secs(12),
+        }
+    }
+}
+
 /// Backend for an MCP server hosted **inside `nostromd`** (rather than the TUI).
 ///
 /// The TUI routes pane mutations through `event_tx` → `AppEvent::McpCommand` →
@@ -70,6 +109,8 @@ pub struct DaemonMcpBackend {
     pub session_mgr: Arc<Mutex<SessionManager>>,
     /// IPC broadcast channel — pane mutations fan out to all clients here.
     pub broadcast_tx: broadcast::Sender<ServerMsg>,
+    /// Perri-specific daemon state (current-PR file writes, selected index).
+    pub perri: PerriDaemonState,
 }
 
 // ── shared state ───────────────────────────────────────────────────────────────

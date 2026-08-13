@@ -66,7 +66,7 @@ final class DynamicFocusView: NSView {
             renderLayout(model)
         } else {
             // Content-only change — update leaf views in place.
-            updateContent(model.paneContent)
+            updateContent(model.paneContent, freshness: model.paneFreshness)
         }
     }
 
@@ -102,7 +102,7 @@ final class DynamicFocusView: NSView {
         ])
 
         // Apply any initial content.
-        updateContent(model.paneContent)
+        updateContent(model.paneContent, freshness: model.paneFreshness)
     }
 
     // MARK: - Tree rendering
@@ -262,10 +262,10 @@ final class DynamicFocusView: NSView {
             .forEach { UserDefaults.standard.removeObject(forKey: $0) }
     }
 
-    private func updateContent(_ paneContent: [String: PaneContentWire]) {
+    private func updateContent(_ paneContent: [String: PaneContentWire], freshness: [String: PaneFreshness]) {
         for (paneId, content) in paneContent {
             guard let leafView = leafViews[paneId] as? PaneContentNSView else { continue }
-            leafView.update(content: content)
+            leafView.update(content: content, freshness: freshness[paneId])
         }
     }
 }
@@ -273,30 +273,45 @@ final class DynamicFocusView: NSView {
 // MARK: - PaneContentNSView
 
 /// An NSView wrapper around the SwiftUI PaneContentView, used for non-repl panes.
+///
+/// Model-driven (D9): the `NSHostingView` is built once in `init` and never
+/// torn down or replaced. `update(content:freshness:)` pushes new state
+/// through `PaneContentModel`'s `@Published` properties instead — SwiftUI's
+/// own diffing on that state is what preserves scroll position and
+/// `pr_list`/text identity across a refresh, which rebuilding the hosting
+/// view on every push (the old approach) reset every time.
 final class PaneContentNSView: NSView {
 
-    private var hostingView: NSHostingView<PaneContentView>?
+    private let model = PaneContentModel()
     private var currentContent: PaneContentWire?
 
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is loaded.
-    var onLoadPR:    (String, Int) -> Void = { _, _ in }
+    var onLoadPR: (String, Int) -> Void = { _, _ in } {
+        didSet { model.onLoadPR = onLoadPR }
+    }
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is approved.
-    var onApprovePR: (String, Int) -> Void = { _, _ in }
+    var onApprovePR: (String, Int) -> Void = { _, _ in } {
+        didSet { model.onApprovePR = onApprovePR }
+    }
     /// Injected by `DynamicFocusView.makeLeafView` — called when the operator
     /// clicks the pane's refresh button.
     var onRefresh: () -> Void = {}
 
-    /// Persistent AppKit chrome — lives above the SwiftUI content, which is
-    /// torn down and rebuilt on every `update(content:)` call.
+    /// Persistent AppKit chrome, added after the (also persistent) SwiftUI
+    /// content so it always renders on top.
     private let refreshButton = NSButton()
+    /// D11: quiet "stale · as of HH:MM" footnote. Hidden unless the pane is
+    /// badly stale, so there is no chrome during normal operation.
+    private let staleLabel = NSTextField(labelWithString: "")
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
-        // Start with an empty state.
-        let hosting = NSHostingView(rootView: PaneContentView(content: nil))
+
+        let hosting = NSHostingView(rootView: PaneContentHost(model: model))
         hosting.translatesAutoresizingMaskIntoConstraints = false
+        hosting.appearance = NSAppearance(named: .darkAqua)
         addSubview(hosting)
         NSLayoutConstraint.activate([
             hosting.topAnchor.constraint(equalTo: topAnchor),
@@ -304,10 +319,9 @@ final class PaneContentNSView: NSView {
             hosting.trailingAnchor.constraint(equalTo: trailingAnchor),
             hosting.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
-        hostingView = hosting
 
         // Force dark appearance explicitly rather than relying on inheritance —
-        // `hosting` below gets the same forced .darkAqua, and a mismatch here
+        // `hosting` above gets the same forced .darkAqua, and a mismatch here
         // (e.g. this button rendering under a light-appearance ancestor while
         // hosting forces dark) can leave the glyph an invisible color against
         // this view's manually-black layer.
@@ -335,36 +349,54 @@ final class PaneContentNSView: NSView {
             refreshButton.widthAnchor.constraint(equalToConstant: 20),
             refreshButton.heightAnchor.constraint(equalToConstant: 20),
         ])
+
+        staleLabel.font             = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        staleLabel.textColor        = .tertiaryLabelColor
+        staleLabel.appearance       = NSAppearance(named: .darkAqua)
+        staleLabel.isBordered       = false
+        staleLabel.drawsBackground  = false
+        staleLabel.isEditable       = false
+        staleLabel.isSelectable     = false
+        staleLabel.isHidden         = true
+        staleLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(staleLabel)
+        NSLayoutConstraint.activate([
+            staleLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            staleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     @objc private func didTapRefresh() { onRefresh() }
 
-    func update(content: PaneContentWire) {
-        // Replace rather than mutate rootView — setting rootView on an existing
-        // NSHostingView inside a split view doesn't reliably trigger a SwiftUI
-        // layout pass. Creating a fresh NSHostingView guarantees the content renders.
-        hostingView?.removeFromSuperview()
-        var view = PaneContentView(content: content)
-        view.onLoadPR    = onLoadPR
-        view.onApprovePR = onApprovePR
-        let hosting = NSHostingView(rootView: view)
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        hosting.appearance = NSAppearance(named: .darkAqua)
-        addSubview(hosting)
-        NSLayoutConstraint.activate([
-            hosting.topAnchor.constraint(equalTo: topAnchor),
-            hosting.leadingAnchor.constraint(equalTo: leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: trailingAnchor),
-            hosting.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
-        hostingView = hosting
-        // Explicitly reassert the button's z-order every time, rather than
-        // trusting a single one-time `positioned:relativeTo:` insertion —
-        // NSHostingView's own layer promotion timing has been unreliable
-        // here, and this is cheap enough to just redo unconditionally.
-        refreshButton.removeFromSuperview()
-        addSubview(refreshButton)
+    /// Push new content/freshness for this pane. Skips the `@Published`
+    /// write entirely when `content` is unchanged (D9) — an idempotent push
+    /// must be visually invisible: no flicker, no scroll reset, no spinner.
+    func update(content: PaneContentWire, freshness: PaneFreshness?) {
+        if content != currentContent {
+            model.content = content
+            currentContent = content
+        }
+        // Freshness is cheap to always re-assign — it never rebuilds anything,
+        // just toggles the footnote below.
+        model.freshness = freshness
+        updateStaleLabel(freshness)
+    }
+
+    private func updateStaleLabel(_ freshness: PaneFreshness?) {
+        guard let freshness, freshness.badlyStale else {
+            staleLabel.isHidden = true
+            return
+        }
+        if let asOf = freshness.asOf {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .none
+            formatter.timeStyle = .short
+            staleLabel.stringValue = "stale · as of \(formatter.string(from: asOf))"
+        } else {
+            staleLabel.stringValue = "stale"
+        }
+        staleLabel.isHidden = false
     }
 }

@@ -290,7 +290,7 @@ where
     // `focused_pane` is omitted (None) — the registry does not persist it;
     // the agent's next `set_pane_focus` call will re-establish it.
     if topics.contains(&Topic::Layout) {
-        let snapshots: Vec<ServerMsg> = {
+        let mut snapshots: Vec<ServerMsg> = {
             let mgr = session_mgr.lock().unwrap();
             if let Some(reg) = mgr.pane_registry() {
                 reg.lock().unwrap()
@@ -306,6 +306,16 @@ where
                 vec![]
             }
         };
+        // Live pane content for every bound pane, so a (re)connecting client
+        // is never left staring at an assembled-but-empty workspace (D8).
+        // Appended after the FocusLayout replay so structure always precedes
+        // content on the wire, matching every other broadcast in this protocol.
+        {
+            let mgr = session_mgr.lock().unwrap();
+            if let Some(provider) = mgr.pane_content_provider() {
+                snapshots.extend(provider.bound_pane_contents());
+            }
+        }
         for msg in snapshots {
             let bytes = serde_json::to_vec(&msg).unwrap_or_default();
             if !bytes.is_empty() {

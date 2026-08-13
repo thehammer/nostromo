@@ -15,6 +15,7 @@ pub mod github_client;
 pub mod graph_client;
 pub mod mother_broker_source;
 pub mod mother_poll;
+pub mod perri_current_pr;
 pub mod perri_pr;
 pub mod perri_pr_native;
 pub mod perri_queue;

@@ -270,6 +270,30 @@ Source: `src/mcp/tools/teri.rs`
 
 ## Phase 3 — Pane mutations and cross-view dispatch
 
+### Live pane-source bindings (live-pane-sources)
+
+The daemon records, per `(view_id, pane_id)`, which server-side `source` (if
+any) currently feeds that pane's content. A **bound** pane is kept live in the
+background by the daemon — no agent/tool-call involved — whenever the
+underlying data changes (see `docs/mcp/panes.md` for the full lifecycle and
+the wire-level `freshness` field). The rule of thumb: **a push that came from
+fetching `source` binds the pane; a push of content the agent wrote by hand
+unbinds it.**
+
+| Tool | Effect on bindings |
+|------|--------------------|
+| `nostromo.apply_layout` | Binds every pane whose schema entry declares a `source`. Never binds `repl`. |
+| `nostromo.refresh_pane_content` | Binds `pane_id` to `source` (same as `apply_layout`) — a pane not yet in the tree is silently not bound. |
+| `nostromo.set_pane_content` | **Unbinds** the pane — agent-authored content is authoritative from here on, or the next automatic push would silently overwrite it. |
+| `perri.load_pr` **with** `highlights` | Unbinds `diff` — highlights are final content. |
+| `perri.load_pr` **without** `highlights` | Binds `diff` to `perri.get_current_pr`. |
+| `perri.clear_current_pr` | Binds both `diff` (to `perri.get_current_pr` — its own empty state) and `queue` (to `perri.list_pr_queue`). |
+
+Bindings persist across a daemon restart; a restarted daemon repaints every
+bound pane immediately, with no tool call.
+
+---
+
 ### `nostromo.set_pane_content`
 
 Set the content of a named pane within a view.
@@ -360,20 +384,53 @@ Source: `src/mcp/tools/switch_view.rs`
 
 ### `perri.load_pr`
 
-Load a pull request into Perri's diff pane.
+Load a pull request into Perri's diff pane. Two hosts, different behavior:
+
+- **Daemon (`nostromd`)**: writes `<perri_state_dir>/current-pr.json` +
+  touches `current-pr.dirty` (the same file contract `PerriView` writes —
+  see `src/data/perri_current_pr.rs`), signals the native PR source's
+  refresh channel, and pushes the resolved focus's `diff` pane itself:
+  - `highlights` given → that text is pushed as the pane's final content —
+    it is never overwritten by a server-rendered summary.
+  - `highlights` omitted → pushes `Loading` (first paint only — suppressed if
+    `diff` already has content, per the live-pane-sources `Loading` rule
+    above), then waits (bounded by a per-daemon settle timeout, default 12s)
+    for the refetched snapshot to
+    match `(repo, number)`, then pushes the same `Text` summary
+    `nostromo.apply_layout`/`nostromo.refresh_pane_content` would render for
+    `perri.get_current_pr`. If the wait times out, pushes a
+    `"Fetching <repo>#<n>… (still loading)"` placeholder and returns
+    `pending: true` — this is success-with-fetch-in-flight, not a failure to
+    retry.
+
+  Also moves the daemon's agent-scoped selected index (see
+  `perri.set_selected_index`) to this PR's position in the current queue,
+  if it's there.
+
+  A pane push that can't be delivered (the resolved focus has no `diff`
+  pane, or the caller has no resolvable focus at all) degrades to a
+  `warnings` entry rather than failing the call — the file write and the
+  refresh signal still happen either way.
+
+- **Standalone TUI**: writes the same file/sentinel through `PerriView`, no
+  pane-push/settle/pending behavior (the TUI's own render loop already
+  reads `current-pr.json`'s watch channel every frame).
 
 **Input**:
 ```json
 {
   "number":     42,
   "repo":       "owner/repo",
-  "highlights": "optional review notes"
+  "highlights": "optional review notes",
+  "view_id":    "optional — daemon-hosted only; omit to target the caller's own focus"
 }
 ```
 
-**Output**: `{ "ok": true }`
+**Output**: `{ "ok": true }`, or `{ "ok": true, "pending": true, "detail": "..." }` (daemon, settle timeout), optionally with a `warnings` array.
 
-Source: `src/mcp/tools/perri_mutators.rs`
+**Errors**: `invalid_args` (missing/zero `number`, missing/empty `repo`, or a repo slug outside `owner/repo` form / `[A-Za-z0-9._-]`), `not_supported` (daemon only — Perri's state dir isn't configured), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only — the daemon path never hits these; that's the bug this tool used to have).
+
+Source: `src/mcp/tools/perri_mutators.rs`, `src/data/perri_current_pr.rs`
 
 ---
 
@@ -381,9 +438,20 @@ Source: `src/mcp/tools/perri_mutators.rs`
 
 Clear the currently-loaded PR from Perri's diff pane.
 
-**Input**: *(none)*
+- **Daemon**: removes `current-pr.json` (a no-op, not an error, if it's
+  already absent), touches both `current-pr.dirty` and `queue.dirty`,
+  signals both native sources' refresh channels, pushes `"No PR loaded."`
+  to the `diff` pane, and pushes `Loading` (first paint only — same
+  suppression rule) then the current PR-queue list to the `queue` pane (via
+  the same fetcher `nostromo.apply_layout` uses).
+- **Standalone TUI**: removes the file/touches the sentinel via `PerriView`
+  only — no pane pushes.
 
-**Output**: `{ "ok": true }`
+**Input**: `{ "view_id": "optional — daemon-hosted only" }`
+
+**Output**: `{ "ok": true }`, optionally with a `warnings` array (daemon).
+
+**Errors**: `not_supported` (daemon only), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only).
 
 Source: `src/mcp/tools/perri_mutators.rs`
 
@@ -391,11 +459,38 @@ Source: `src/mcp/tools/perri_mutators.rs`
 
 ### `perri.set_selected_index`
 
-Set the selected PR index in Perri's queue list.
+Set the selected PR index in Perri's queue list, clamped to the current
+queue length (`0` when the queue is empty).
+
+- **Daemon**: an **agent-scoped, in-memory** index
+  (`DaemonMcpBackend::perri.selected_index`) — bookkeeping only. It moves no
+  GUI highlight; there is no wire/client concept of "selected row" yet (a
+  follow-up, not covered by this tool).
+- **Standalone TUI**: moves `PerriView`'s own selection — the same state
+  keyboard navigation moves, so it does visibly move the highlighted row.
 
 **Input**: `{ "index": 2 }`
 
 **Output**: `{ "ok": true }`
+
+**Errors**: `invalid_args` (missing/non-integer `index`), `event_loop_closed` / `event_loop_timeout` (TUI only).
+
+Source: `src/mcp/tools/perri_mutators.rs`
+
+---
+
+### `perri.get_selected_index`
+
+Returns the selected PR index — see `perri.set_selected_index` for what
+"selected" means on each host. Newly registered by this fix: the handler
+existed but had no `tool_descriptors()` entry or `dispatch()` arm, so it was
+unreachable on **either** host.
+
+**Input**: *(none)*
+
+**Output**: `{ "index": 0 }`
+
+**Errors**: `event_loop_closed` / `event_loop_timeout` (TUI only).
 
 Source: `src/mcp/tools/perri_mutators.rs`
 
