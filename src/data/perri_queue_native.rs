@@ -37,6 +37,7 @@ use crate::{
         perri_pr_native::prefetch_into_cache,
         perri_queue::{CiState, PrQueueItem, PrQueueSnapshot},
         perri_suppress::{SuppressStore, unix_now_secs},
+        relay_client::QueueSignal,
     },
 };
 
@@ -388,20 +389,28 @@ pub struct PerriQueueNativeSource {
 impl PerriQueueNativeSource {
     /// Spawn the data source.
     ///
-    /// Returns `(snapshot_rx, refresh_tx)`.
+    /// Returns `(snapshot_rx, refresh_tx, relay_tx)`.
     ///
-    /// Phase 4: `refresh_tx` allows MCP tools to request an immediate queue
-    /// re-fetch without touching the dirty-file sentinel.
+    /// `refresh_tx` allows MCP tools to request an immediate queue re-fetch
+    /// without touching the dirty-file sentinel (phase 4).
+    ///
+    /// `relay_tx` is the github-relay subscriber's channel.  It is typed and
+    /// carries a full event payload, but **every signal on it currently
+    /// produces the same full refresh** the bare `refresh_tx` does — driving
+    /// targeted per-PR updates from the payload is follow-up work
+    /// (`.claude/plans/targeted-relay-refresh-engine.md`).
     pub fn spawn(
         config: Config,
     ) -> (
         watch::Receiver<Option<PrQueueSnapshot>>,
         mpsc::UnboundedSender<()>,
+        mpsc::UnboundedSender<QueueSignal>,
     ) {
         let (tx, rx) = watch::channel(None);
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
         let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
         let (approvals_tx, mut approvals_rx) = mpsc::unbounded_channel::<()>();
+        let (relay_tx, mut relay_rx) = mpsc::unbounded_channel::<QueueSignal>();
 
         let state_dir = config.perri_state_dir();
         let dirty_path = state_dir.join("queue.dirty");
@@ -423,19 +432,29 @@ impl PerriQueueNativeSource {
         tokio::spawn(async move {
             let source = PerriQueueNativeSource { config };
             source
-                .run(tx, &mut dirty_rx, &mut refresh_rx, &mut approvals_rx, suppress, interval_secs)
+                .run(
+                    tx,
+                    &mut dirty_rx,
+                    &mut refresh_rx,
+                    &mut approvals_rx,
+                    &mut relay_rx,
+                    suppress,
+                    interval_secs,
+                )
                 .await;
         });
 
-        (rx, refresh_tx)
+        (rx, refresh_tx, relay_tx)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run(
         &self,
         tx: watch::Sender<Option<PrQueueSnapshot>>,
         dirty_rx: &mut mpsc::UnboundedReceiver<()>,
         refresh_rx: &mut mpsc::UnboundedReceiver<()>,
         approvals_rx: &mut mpsc::UnboundedReceiver<()>,
+        relay_rx: &mut mpsc::UnboundedReceiver<QueueSignal>,
         suppress: Arc<Mutex<SuppressStore>>,
         interval_secs: u64,
     ) {
@@ -510,7 +529,8 @@ impl PerriQueueNativeSource {
 
             // Every wake produces a full refresh, so the reason is only of
             // interest to the log lines `wait_for_wake` emits itself.
-            let _ = wait_for_wake(dirty_rx, refresh_rx, approvals_rx, interval_secs).await;
+            let _ =
+                wait_for_wake(dirty_rx, refresh_rx, approvals_rx, relay_rx, interval_secs).await;
         }
     }
 
@@ -906,10 +926,15 @@ impl PerriQueueNativeSource {
 ///    `refresh_tx`; without the drain that is two wakes and two full fetch
 ///    cycles for one change.  Regression test:
 ///    `coalesces_dirty_refresh_and_approvals_signals_into_one_wake`.
-async fn wait_for_wake(
+///
+/// Every wake — including both relay signals — produces a full refresh, which
+/// is exactly what happened before the relay had its own channel.  The relay
+/// payload is deliberately not inspected here.
+pub(crate) async fn wait_for_wake(
     dirty_rx: &mut mpsc::UnboundedReceiver<()>,
     refresh_rx: &mut mpsc::UnboundedReceiver<()>,
     approvals_rx: &mut mpsc::UnboundedReceiver<()>,
+    relay_rx: &mut mpsc::UnboundedReceiver<QueueSignal>,
     interval_secs: u64,
 ) -> &'static str {
     let reason = tokio::select! {
@@ -926,11 +951,24 @@ async fn wait_for_wake(
             debug!("perri queue approvals-file signal — re-fetching with new suppression");
             "approvals"
         }
+        Some(signal) = relay_rx.recv() => {
+            match signal {
+                QueueSignal::Reconnected => {
+                    debug!("perri queue relay reconnect — reconciling");
+                    "relay_reconnect"
+                }
+                QueueSignal::Event(_) => {
+                    debug!("perri queue relay event — full refresh");
+                    "relay_event"
+                }
+            }
+        }
     };
 
     while dirty_rx.try_recv().is_ok() {}
     while refresh_rx.try_recv().is_ok() {}
     while approvals_rx.try_recv().is_ok() {}
+    while relay_rx.try_recv().is_ok() {}
 
     reason
 }
