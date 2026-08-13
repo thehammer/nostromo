@@ -696,15 +696,15 @@ impl PerriQueueNativeSource {
                     }
                 }
 
-                // Nothing coherent to mutate when the snapshot is missing,
-                // stale or errored — the next full fetch settles everything
-                // anyway, and mutating a broken ledger would only publish a
-                // differently-wrong snapshot.
                 Wake::Targeted(events) => {
                     // Bound to a local before the `.await`s below: the
                     // `watch::Ref` guard `borrow()` returns is not `Send`.
                     let current = tx.borrow().clone();
                     match current.filter(|s| !s.stale && s.error.is_none()) {
+                        // Nothing coherent to mutate.  The next full fetch
+                        // settles everything anyway, and mutating a broken
+                        // ledger would only publish a differently-wrong
+                        // snapshot.
                         None => debug!(
                             events = events.len(),
                             "perri targeted: no healthy snapshot — deferring to the periodic poll"
@@ -770,11 +770,11 @@ impl PerriQueueNativeSource {
     /// already holds.  Skipped when there is no prior snapshot, when the prior
     /// snapshot was stale or errored (there is nothing trustworthy to compare
     /// against), or when no targeted update has run since the last poll.
-    fn audit_divergence(
+    pub fn audit_divergence(
         &self,
         prev: &Option<PrQueueSnapshot>,
         fresh: &PrQueueSnapshot,
-        audit_set: &std::collections::HashSet<(String, u64)>,
+        audit_set: &HashSet<(String, u64)>,
         tstate: &TargetedState,
     ) {
         if audit_set.is_empty() {
