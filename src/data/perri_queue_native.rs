@@ -16,6 +16,32 @@
 //!
 //! The two search queries for buckets 1 & 2 use ETags so a 304 Not Modified
 //! response reuses the in-memory cache without re-processing.
+//!
+//! # Shape of a fetch
+//!
+//! Everything the queue remembers between cycles lives in [`QueueCaches`].
+//! A fetch runs the three searches, records what they returned in the
+//! **candidate ledger** ([`Candidate`]) — including PRs it will go on to drop —
+//! resolves CI and review state for the candidates that warrant a read, and
+//! then renders the ledger into the snapshot via [`render_items`]/[`classify`].
+//!
+//! The ledger records dropped candidates on purpose: a PR hidden by the
+//! CI-failure filter or by approval suppression is still a PR the queue knows
+//! about, and re-rendering it later must not require re-running a search.
+//!
+//! Which candidates get a GitHub read is behaviour, not an optimisation
+//! detail: drafts, self-authored PRs, and bucket-3 candidates that fail the
+//! review-state or new-activity gate cost **zero** requests, and the queue's
+//! tests measure that.
+//!
+//! # Wake sources
+//!
+//! [`wait_for_wake`] waits on the poll interval, the dirty-file sentinel, the
+//! MCP direct-push channel, the approvals-file watcher, and the typed
+//! github-relay channel. **Every one of them currently produces the same full
+//! refresh.** Driving targeted per-PR updates off the relay payload is
+//! follow-up work (`.claude/plans/targeted-relay-refresh-engine.md`); nothing
+//! here reads a field of `RelayEvent`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -1621,6 +1647,84 @@ mod tests {
         drop(dirty_tx);
         drop(refresh_tx);
         drop(approvals_tx);
+    }
+
+    /// Regression guard for the relay channel being wired into the run loop's
+    /// wake path.
+    ///
+    /// The relay subscriber pushes `QueueSignal`s (reconnects and individual
+    /// GitHub events relayed over the websocket) onto `relay_rx`. If a future
+    /// refactor forgets to select on that branch — or selects on it but with
+    /// a pattern that never matches — a relay signal would be silently
+    /// dropped and the queue would just sit there until the next timer tick
+    /// (or forever, if the branch is missing and the interval is long).
+    /// This calls the real `wait_for_wake` used by `run()` and asserts both
+    /// `QueueSignal` variants produce a prompt, correctly-labeled wake.
+    #[tokio::test]
+    async fn relay_signal_still_triggers_a_full_refresh() {
+        use crate::data::relay_client::RelayEvent;
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+        let (approvals_tx, mut approvals_rx) = mpsc::unbounded_channel::<()>();
+        let (relay_tx, mut relay_rx) = mpsc::unbounded_channel::<QueueSignal>();
+
+        // Generous interval: if the relay branch is missing or mis-patterned,
+        // the call falls through to the timer instead of hanging or panicking,
+        // and the elapsed-time assertion below catches that "the timer won".
+        let interval_secs = 5;
+
+        relay_tx
+            .send(QueueSignal::Event(RelayEvent {
+                event_type: "ci.completed".to_owned(),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let reason = wait_for_wake(
+            &mut dirty_rx,
+            &mut refresh_rx,
+            &mut approvals_rx,
+            &mut relay_rx,
+            interval_secs,
+        )
+        .await;
+        assert_eq!(reason, "relay_event");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "wait_for_wake took {:?} — the relay event branch didn't fire \
+             and the timer won instead",
+            start.elapsed()
+        );
+
+        relay_tx.send(QueueSignal::Reconnected).unwrap();
+
+        let start = std::time::Instant::now();
+        let reason = wait_for_wake(
+            &mut dirty_rx,
+            &mut refresh_rx,
+            &mut approvals_rx,
+            &mut relay_rx,
+            interval_secs,
+        )
+        .await;
+        assert_eq!(reason, "relay_reconnect");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "wait_for_wake took {:?} — the relay reconnect branch didn't fire \
+             and the timer won instead",
+            start.elapsed()
+        );
+
+        // Keep the non-relay senders alive for the duration of both calls so
+        // a dropped-sender branch isn't what's being measured.
+        drop(dirty_tx);
+        drop(refresh_tx);
+        drop(approvals_tx);
+        drop(relay_tx);
     }
 
     fn make_item(login: &str, draft: bool, updated_at: Option<&str>) -> SearchIssueItem {

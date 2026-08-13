@@ -98,6 +98,13 @@ pub struct RelayEvent {
 }
 
 /// What the relay tells the Perri queue.
+///
+/// `Event` is ~330 bytes against `Reconnected`'s zero, which clippy would
+/// rather see boxed.  Not worth it: these arrive a few times a minute at most,
+/// the unbounded channel heap-allocates the node either way, and
+/// `Event(Box<RelayEvent>)` would put an indirection in front of every future
+/// consumer to save stack that is never in a hot path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum QueueSignal {
     /// Connected and the subscription was acked.  The relay buffers nothing for
@@ -115,6 +122,12 @@ pub enum QueueSignal {
 ///
 /// Every body field is `#[serde(default)]` and `Unknown` catches unrecognised
 /// discriminators, so the relay can add to the vocabulary without breaking us.
+///
+/// Same size trade-off as [`QueueSignal`]: one short-lived stack value per
+/// inbound websocket frame, immediately destructured.  Boxing individual
+/// fields to flatten the variant sizes would cost readability and allocations
+/// for nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RelayMsg {
