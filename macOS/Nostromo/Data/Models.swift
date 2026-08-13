@@ -914,6 +914,49 @@ extension PaneContentWire: Decodable {
     }
 }
 
+extension PaneContentWire: Equatable {
+    /// `.text`/`.loading`/`.error`/`.prList` compare structurally. `.jsonSnapshot`
+    /// and `.unknown` always compare unequal — a deliberate conservative choice
+    /// (report "changed" rather than risk a false "unchanged" for a payload
+    /// kind this client can't actually compare; they carry `Any`).
+    static func == (lhs: PaneContentWire, rhs: PaneContentWire) -> Bool {
+        switch (lhs, rhs) {
+        case (.text(let a), .text(let b)):
+            return a == b
+        case (.loading, .loading):
+            return true
+        case (.error(let a), .error(let b)):
+            return a == b
+        case (.prList(let a), .prList(let b)):
+            return a == b
+        case (.jsonSnapshot, .jsonSnapshot):
+            return false
+        case (.unknown, .unknown):
+            return false
+        default:
+            return false
+        }
+    }
+}
+
+/// How trustworthy the content in a `pane_content` push is. Mirrors
+/// `PaneFreshness` in `src/ipc/protocol.rs` (macOS-local copy — see
+/// `NostromoKit.PaneFreshness` for the shared one iOS uses). `stale` is the
+/// source's own transient flag and must NOT be rendered — a single missed
+/// poll is normal. `badlyStale` is the daemon's verdict that the source
+/// hasn't produced good data in a while; it is the only flag rendered.
+struct PaneFreshness: Decodable, Equatable {
+    let asOf: Date?
+    let stale: Bool
+    let badlyStale: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case asOf = "as_of"
+        case stale
+        case badlyStale = "badly_stale"
+    }
+}
+
 /// Live layout state for a single focus (stored in AppStore, keyed by tag).
 struct FocusLayoutModel {
     /// The pane tree for this focus.
@@ -922,6 +965,9 @@ struct FocusLayoutModel {
     var focusedPane: String?
     /// Per-pane text/json content, keyed by pane_id.
     var paneContent: [String: PaneContentWire] = [:]
+    /// Per-pane freshness, keyed by pane_id. Absent entry == no freshness
+    /// concept for that pane (e.g. agent-authored content via `set_pane_content`).
+    var paneFreshness: [String: PaneFreshness] = [:]
 
     static let initial = FocusLayoutModel(tree: .replLeaf, focusedPane: nil)
 }

@@ -45,6 +45,7 @@
 
 pub mod command;
 pub mod layout_schema;
+pub mod pane_sources;
 pub mod server;
 pub mod socket;
 pub mod state;

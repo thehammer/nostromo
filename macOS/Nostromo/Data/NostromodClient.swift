@@ -126,8 +126,10 @@ enum ServerMsg {
     /// reconnecting client renders the already-assembled workspace.
     case focusLayout(tag: String, tree: PaneTree, focusedPane: String?)
     /// Content push for a single pane; never carries split geometry so an
-    /// operator's drag-resize survives content refreshes.
-    case paneContent(tag: String, paneId: String, content: PaneContentWire)
+    /// operator's drag-resize survives content refreshes. `freshness` is
+    /// `nil` for content with no staleness concept and for frames from a
+    /// daemon that predates this field — always decodes successfully either way.
+    case paneContent(tag: String, paneId: String, content: PaneContentWire, freshness: PaneFreshness?)
     /// An agent-spawned focus was created; every client should add the new tab.
     case focusCreated(meta: FocusCreatedMeta)
     case unknown
@@ -680,7 +682,7 @@ class NostromodClient {
 
         case "pane_content":
             if let m = try? decoder.decode(PaneContentResp.self, from: raw) {
-                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content)
+                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content, freshness: m.freshness)
             }
 
         case "focus_created":
@@ -705,9 +707,10 @@ private struct FocusLayoutResp: Decodable {
 }
 
 private struct PaneContentResp: Decodable {
-    let tag:     String
-    let pane_id: String
-    let content: PaneContentWire
+    let tag:       String
+    let pane_id:   String
+    let content:   PaneContentWire
+    let freshness: PaneFreshness?
 }
 
 private struct FocusCreatedResp: Decodable {

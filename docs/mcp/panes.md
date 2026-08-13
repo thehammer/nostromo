@@ -20,6 +20,81 @@ payloads each pane accepts or rejects.
 
 ---
 
+## Live pane-source bindings (live-pane-sources)
+
+Every pane the daemon (`nostromd`) hosts can optionally be **bound** to a
+server-side `source` — one of the closed set of fetchers in
+`src/mcp/tools/apply_layout.rs::known_sources()` (currently
+`perri.list_pr_queue` and `perri.get_current_pr`). A binding is structural
+metadata stored on `PaneRegistry` — `(tag, pane_id) -> source` — never
+content. It answers one question: "does this pane refresh itself?"
+
+### Lifecycle
+
+- **One source per pane.** Binding a pane that's already bound replaces the
+  old source; it never accumulates.
+- **`repl` can never be bound**, and a pane not currently a leaf of the
+  focus's tree is silently refused (logged at `debug!`, not an error).
+- **A binding dies with its pane.** `reset_panes` drops every binding for
+  that tag; `set_pane_layout` with a tree that omits a previously-bound pane
+  drops just that pane's binding.
+- **A binding survives a daemon restart.** It's persisted alongside the pane
+  tree in `~/.nostromo/daemon-panes.json`. On restart, a binding whose source
+  has been retired (no longer in `known_sources()`) is dropped, and the
+  daemon repaints every reloaded binding immediately — no tool call needed.
+- **Who binds, who unbinds** — see the table in `docs/mcp/tools.md`'s "Live
+  pane-source bindings" section. The short version: a push that came from
+  fetching `source` binds the pane; a push of content an agent wrote by hand
+  (`set_pane_content`, or `perri.load_pr` with `highlights`) unbinds it.
+
+### The automatic broadcaster
+
+A bound pane is kept live by a background task (`run_pane_source_broadcaster`
+in `src/mcp/pane_sources.rs`) that watches the underlying data sources and
+re-pushes `PaneContent` whenever they change — well under a second for a
+relay-driven GitHub event, no agent/tool-call involved. It never broadcasts
+`Loading` or `Error`: on a fetch failure it leaves the pane's last-good
+content alone (the periodic staleness check below is what surfaces that a
+source has gone quiet). An unchanged push (identical content **and**
+freshness) is never re-sent.
+
+### The `freshness` field
+
+Every daemon-originated `ServerMsg::PaneContent` may carry a `freshness`
+object:
+
+```json
+{ "as_of": "2026-07-30T12:00:00Z", "stale": false, "badly_stale": false }
+```
+
+- `as_of` — when the source last produced good data (absent if it never has).
+- `stale` — the source's own transient flag. **Clients must not render this**
+  — a single missed poll is routine.
+- `badly_stale` — the daemon's verdict that the source hasn't produced good
+  data for more than five minutes (five consecutive missed poll cycles).
+  **This is the only flag a client renders**, as a quiet as-of footnote — never
+  an interruption, never a layout shift, and it clears on the next good push
+  with no agent action. Overridable for manual testing only via
+  `NOSTROMO_BADLY_STALE_SECS` — never a documented user setting.
+
+`freshness` is `None`/absent for content that has no staleness concept (e.g.
+agent-authored `set_pane_content`) and — by design, via `#[serde(default)]` /
+optional decoding on every client — for frames from a daemon build that
+predates this field. Both directions decode cleanly.
+
+### `Loading` is a first-paint-only signal
+
+`PaneContentWire::Loading` is broadcast **only** the first time a pane is
+about to receive content (tracked by a non-persisted "has this pane ever been
+painted" bit on `PaneRegistry`). A pane that already has content — from any
+source, agent-authored or automatic — never sees a spinner replace it, whether
+the refresh was triggered by `nostromo.refresh_pane_content` or by the
+automatic broadcaster (which never sends `Loading` at all). Clients
+additionally refuse to *render* an incoming `Loading` over existing non-loading
+content, as a second line of defense against an older daemon or a race.
+
+---
+
 ## Views and panes
 
 ### `perri` — PR review view

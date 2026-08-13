@@ -48,7 +48,7 @@ use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 
-use super::pane_registry::PaneRegistry;
+use super::pane_registry::{PaneContentProvider, PaneRegistry};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
 use super::stream_json::{load_scrollback, SessionState, SessionTranscript, Turn, TurnDelta};
 
@@ -243,6 +243,10 @@ pub struct SessionManager {
     mcp_socket: Option<PathBuf>,
     /// `--mcp-config` file path registering the `nostromo-mcp-bridge` stdio server.
     mcp_config: Option<PathBuf>,
+    /// Supplies current pane content for attach replay (D8). Set by the
+    /// daemon via [`SessionManager::configure_pane_content_provider`]; `None`
+    /// in tests / non-daemon use.
+    pane_content_provider: Option<Arc<dyn PaneContentProvider>>,
 }
 
 impl SessionManager {
@@ -259,6 +263,7 @@ impl SessionManager {
             pane_registry: None,
             mcp_socket: None,
             mcp_config: None,
+            pane_content_provider: None,
         }
     }
 
@@ -281,6 +286,18 @@ impl SessionManager {
     /// the Arc through every accept-loop call site.
     pub fn pane_registry(&self) -> Option<Arc<Mutex<PaneRegistry>>> {
         self.pane_registry.clone()
+    }
+
+    /// Wire the [`PaneContentProvider`] the daemon exposes over its
+    /// `McpSharedState`, so `server.rs` can replay live pane content to a
+    /// newly (re)connected client (D8).
+    pub fn configure_pane_content_provider(&mut self, provider: Arc<dyn PaneContentProvider>) {
+        self.pane_content_provider = Some(provider);
+    }
+
+    /// Access the pane-content provider (if wired up).
+    pub fn pane_content_provider(&self) -> Option<Arc<dyn PaneContentProvider>> {
+        self.pane_content_provider.clone()
     }
 
     pub fn client_sender_registry(

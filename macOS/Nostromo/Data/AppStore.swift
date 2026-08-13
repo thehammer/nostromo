@@ -125,19 +125,6 @@ class AppStore: ObservableObject {
             .sink { [weak self] in self?.posture = $0 }
             .store(in: &cancellables)
 
-        FileWatchers.shared.perriQueue
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] items in
-                guard let self else { return }
-                self.perriQueue      = items
-                self.perriQueueStale = false
-                self.perriQueueError = nil
-                // Keep the queue pane current whenever the cache updates —
-                // this makes content survive app restarts without agent involvement.
-                self.pushQueueToQueuePane(items)
-            }
-            .store(in: &cancellables)
-
         // Perri detail — arrives when current-pr-detail.json is written by the daemon.
         FileWatchers.shared.perriDetail
             .receive(on: DispatchQueue.main)
@@ -204,10 +191,12 @@ class AppStore: ObservableObject {
             .sink { [weak self] _ in self?.pushFocusRegistry() }
             .store(in: &cancellables)
 
-        // Perri queue: the Rust daemon (nostromd) is the authoritative writer of
-        // .queue.cache.json via the native queue source.  Swift reads it via
-        // FSEvents (FileWatchers.perriQueue above) — no periodic bash shell-out needed.
-        // The refresh button writes queue.dirty to ask the daemon for an immediate cycle.
+        // Perri queue: the daemon keeps the "queue" pane live on its own via
+        // the live-pane-sources source-binding broadcaster — no FSEvents
+        // watcher and no periodic bash shell-out needed on this side anymore.
+        // The refresh button writes queue.dirty to ask the daemon for an
+        // immediate cycle; `nostromo.refresh_pane_content` does the same
+        // for an agent-driven refresh.
     }
 
     private func pushFocusRegistry() {
@@ -550,27 +539,6 @@ class AppStore: ObservableObject {
         }
     }
 
-    /// Push the current queue into the Perri queue pane as a pr_list.
-    /// Called whenever the queue cache updates, including on startup — making
-    /// the queue pane durable across app restarts without agent involvement.
-    ///
-    /// Builds a minimal JSON array using the snake_case keys that PrListItemModel
-    /// expects, avoiding a direct NostromoKit import (which causes CiState ambiguity).
-    func pushQueueToQueuePane(_ items: [PRQueueItem]) {
-        // JSON encode PRQueueItem (snake_case keys match PrListItemModel CodingKeys)
-        // then decode as the NostromoKit type via the shared PaneContentWire path.
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        // Decode into PaneContentWire.prList via a wrapper that the wire decoder understands.
-        let wrapper = """
-        {"kind":"pr_list","items":\(String(data: data, encoding: .utf8) ?? "[]")}
-        """
-        guard let wrapperData = wrapper.data(using: .utf8),
-              let content = try? JSONDecoder().decode(PaneContentWire.self, from: wrapperData)
-        else { return }
-        var model = focusLayouts["perri"] ?? FocusLayoutModel.initial
-        model.paneContent["queue"] = content
-        focusLayouts["perri"] = model
-    }
 
     /// Push a formatted PRDetail summary into the Perri diff pane.
     private func pushDetailToDiffPane(_ detail: PRDetail) {
@@ -751,11 +719,26 @@ class AppStore: ObservableObject {
             model.focusedPane = focusedPane
             focusLayouts[tag] = model
 
-        case .paneContent(let tag, let paneId, let content):
+        case .paneContent(let tag, let paneId, let content, let freshness):
             // Content update — update the leaf without touching tree geometry so
             // operator drag-resizes survive.
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
+            let existingContent = model.paneContent[paneId]
+            // A `.loading` update must never clobber content the operator is
+            // already looking at — render it only on first paint (D10): no
+            // prior content for this pane, or the prior content was itself
+            // `.loading`.
+            if content == .loading, let existingContent, existingContent != .loading {
+                return
+            }
+            // No-op write guard (D9): an idempotent push (identical content
+            // and freshness) causes zero @Published churn downstream — no
+            // flicker, no scroll reset, no spinner.
+            if existingContent == content && model.paneFreshness[paneId] == freshness {
+                return
+            }
             model.paneContent[paneId] = content
+            model.paneFreshness[paneId] = freshness
             focusLayouts[tag] = model
 
         case .focusCreated(let meta):

@@ -23,8 +23,9 @@
 use serde_json::{json, Value};
 
 use crate::ipc::protocol::{PaneContentWire, ServerMsg};
+use crate::mcp::pane_sources::{broadcast_loading_if_first_paint, broadcast_pane_content};
 use crate::mcp::state::McpSharedState;
-use crate::mcp::tools::apply_layout::{fetch, source_is_known, target_tag};
+use crate::mcp::tools::apply_layout::{fetch, freshness, source_is_known, target_tag};
 
 /// Handle `nostromo.refresh_pane_content`.
 pub async fn refresh_pane_content(
@@ -61,33 +62,40 @@ pub async fn refresh_pane_content(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // ── loading, then fetch + content/error — in that order, deterministically ──
-    // broadcast_tx.send is synchronous and ordered, and fetch() below has no
-    // .await between the two sends, so there is no interleaving window: every
-    // subscriber always sees Loading strictly before the real content.
-    let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
-        tag: tag.clone(),
-        pane_id: pane_id.clone(),
-        content: PaneContentWire::Loading,
-    });
+    // D4: an explicit refresh binds this pane to `source`, same as
+    // apply_layout — the pane is now considered live and will keep getting
+    // automatic updates. D1's guard makes this a silent no-op for a pane
+    // that isn't (yet) in `tag`'s tree, which is exactly the case the
+    // never-registered-tag tests below exercise.
+    daemon
+        .pane_registry
+        .lock()
+        .unwrap()
+        .bind_source(&tag, &pane_id, &source);
+
+    // ── loading (first paint only), then fetch + content/error, in that order,
+    // deterministically — every call here is synchronous with no `.await`
+    // between them, so there is no interleaving window: a subscriber that
+    // sees Loading always sees it strictly before the real content.
+    broadcast_loading_if_first_paint(daemon, &tag, &pane_id);
 
     match fetch(&source, state, placeholder.as_deref()) {
         Ok(content) => {
-            let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
-                tag,
-                pane_id,
-                content,
-            });
+            let fr = freshness(&source, state);
+            broadcast_pane_content(daemon, &tag, &pane_id, content, Some(fr));
             json!({ "ok": true })
         }
         Err(e) => {
-            // Push an Error content so the pane never sticks on Loading.
+            // Push a visible Error so the pane never sticks on Loading — the
+            // explicit path stays loud, unlike the automatic broadcaster.
             let message = format!("refresh_pane_content: {source} fetch failed ({})", e.code());
-            let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
-                tag,
-                pane_id,
-                content: PaneContentWire::Error { message },
-            });
+            broadcast_pane_content(
+                daemon,
+                &tag,
+                &pane_id,
+                PaneContentWire::Error { message },
+                None,
+            );
             json!({ "error": e.code() })
         }
     }
@@ -170,6 +178,7 @@ mod tests {
                 tag,
                 pane_id,
                 content,
+                ..
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
@@ -184,6 +193,7 @@ mod tests {
                 tag,
                 pane_id,
                 content,
+                ..
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
@@ -204,6 +214,64 @@ mod tests {
             let reg = daemon.pane_registry.lock().unwrap();
             assert!(!reg.contains("perri"));
         }
+    }
+
+    #[tokio::test]
+    async fn refresh_after_a_prior_paint_skips_loading_and_goes_straight_to_content() {
+        // `apply_layout` paints "queue" once as part of assembling the
+        // "perri-standard" layout (its own PaneContent broadcast marks the
+        // pane painted — the same D5 rule this file's happy-path test above
+        // relies on for a *never-registered* pane). Once a pane has been
+        // painted at least once, a second `refresh_pane_content` call for
+        // that same pane must NOT re-send the transient Loading indicator —
+        // only the fresh content.
+        let (state, _bcast) = make_state();
+        let state = seeded_queue_state(state);
+
+        let result = crate::mcp::tools::apply_layout::apply_layout(
+            &state,
+            &json!({ "name": "perri-standard" }),
+            Some("perri"),
+        )
+        .await;
+        assert_eq!(result["ok"], true);
+
+        // Subscribe fresh so apply_layout's own FocusLayout/PaneContent
+        // broadcasts are never in this receiver's backlog at all — this test
+        // only cares what `refresh_pane_content` itself broadcasts next.
+        let daemon = state.daemon.as_ref().unwrap();
+        let mut bcast = daemon.broadcast_tx.subscribe();
+
+        let args =
+            json!({ "view_id": "perri", "pane_id": "queue", "source": "perri.list_pr_queue" });
+        let result = refresh_pane_content(&state, &args, None).await;
+        assert_eq!(result["ok"], true);
+
+        match bcast.recv().await.expect("a broadcast for this refresh") {
+            ServerMsg::PaneContent {
+                tag,
+                pane_id,
+                content,
+                ..
+            } => {
+                assert_eq!(tag, "perri");
+                assert_eq!(pane_id, "queue");
+                assert!(
+                    !matches!(content, PaneContentWire::Loading),
+                    "an already-painted pane must not see Loading on a subsequent refresh"
+                );
+                assert!(matches!(content, PaneContentWire::PrList { .. }));
+            }
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+
+        // Exactly one broadcast for this refresh — no Loading-then-content pair.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), bcast.recv())
+                .await
+                .is_err(),
+            "a painted pane's refresh must be a single content push, not two"
+        );
     }
 
     #[tokio::test]

@@ -40,7 +40,11 @@ struct DynamicFocusView: View {
                     .tabItem { Label("Repl", systemImage: "terminal") }
 
                 ForEach(paneIds.filter { $0 != "repl" }, id: \.self) { paneId in
-                    PaneTab(paneId: paneId, content: layout.paneContent[paneId])
+                    PaneTab(
+                        paneId: paneId,
+                        content: layout.paneContent[paneId],
+                        freshness: layout.paneFreshness[paneId]
+                    )
                         .environmentObject(store)
                         .navigationTitle(paneId.capitalized)
                         .navigationBarTitleDisplayMode(.inline)
@@ -77,8 +81,9 @@ struct DynamicFocusView: View {
 /// A single non-repl pane rendered from `PaneContentWire` content.
 /// Receives `DaemonStore` via `@EnvironmentObject` for `pr_list` action dispatch.
 private struct PaneTab: View {
-    let paneId:  String
-    let content: PaneContentWire?
+    let paneId:    String
+    let content:   PaneContentWire?
+    let freshness: PaneFreshness?
 
     @EnvironmentObject var store: DaemonStore
 
@@ -130,6 +135,19 @@ private struct PaneTab: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .unknown(let raw):
                 ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        // D11: a quiet as-of footnote when this pane's data hasn't refreshed in
+        // a while. Never shown for a normal transient miss — only `badlyStale`
+        // (never `stale`) is rendered, and it disappears on the next push with
+        // no agent action.
+        .overlay(alignment: .bottomTrailing) {
+            if let freshness, freshness.badlyStale {
+                Text(staleLabelText(freshness))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .padding(.trailing, 6)
+                    .padding(.bottom, 4)
             }
         }
         // Confirmation gate — nothing reaches GitHub until the user taps "Approve" here.
@@ -220,6 +238,16 @@ private struct PaneTab: View {
             }
             .listStyle(.insetGrouped)
         }
+    }
+
+    // MARK: - Staleness footnote
+
+    private func staleLabelText(_ freshness: PaneFreshness) -> String {
+        guard let asOf = freshness.asOf else { return "stale" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return "stale · as of \(formatter.string(from: asOf))"
     }
 
     // MARK: - Text / JSON renderers

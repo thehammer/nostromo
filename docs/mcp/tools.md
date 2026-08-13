@@ -270,6 +270,30 @@ Source: `src/mcp/tools/teri.rs`
 
 ## Phase 3 — Pane mutations and cross-view dispatch
 
+### Live pane-source bindings (live-pane-sources)
+
+The daemon records, per `(view_id, pane_id)`, which server-side `source` (if
+any) currently feeds that pane's content. A **bound** pane is kept live in the
+background by the daemon — no agent/tool-call involved — whenever the
+underlying data changes (see `docs/mcp/panes.md` for the full lifecycle and
+the wire-level `freshness` field). The rule of thumb: **a push that came from
+fetching `source` binds the pane; a push of content the agent wrote by hand
+unbinds it.**
+
+| Tool | Effect on bindings |
+|------|--------------------|
+| `nostromo.apply_layout` | Binds every pane whose schema entry declares a `source`. Never binds `repl`. |
+| `nostromo.refresh_pane_content` | Binds `pane_id` to `source` (same as `apply_layout`) — a pane not yet in the tree is silently not bound. |
+| `nostromo.set_pane_content` | **Unbinds** the pane — agent-authored content is authoritative from here on, or the next automatic push would silently overwrite it. |
+| `perri.load_pr` **with** `highlights` | Unbinds `diff` — highlights are final content. |
+| `perri.load_pr` **without** `highlights` | Binds `diff` to `perri.get_current_pr`. |
+| `perri.clear_current_pr` | Binds both `diff` (to `perri.get_current_pr` — its own empty state) and `queue` (to `perri.list_pr_queue`). |
+
+Bindings persist across a daemon restart; a restarted daemon repaints every
+bound pane immediately, with no tool call.
+
+---
+
 ### `nostromo.set_pane_content`
 
 Set the content of a named pane within a view.

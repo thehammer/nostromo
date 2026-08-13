@@ -13,6 +13,7 @@ use crate::event::AppEvent;
 use crate::ipc::protocol::{PaneContentWire, PrListItem, ServerMsg};
 use crate::mcp::{
     command::{McpCommand, PaneContent},
+    pane_sources::broadcast_pane_content,
     state::McpSharedState,
 };
 
@@ -57,11 +58,15 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
             PaneContent::Loading          => PaneContentWire::Loading,
             PaneContent::Error(msg)       => PaneContentWire::Error { message: msg },
         };
-        let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
-            tag: view_id,
-            pane_id,
-            content: wire,
-        });
+        // D4: agent-authored content is authoritative from here on — sever any
+        // live-source binding, or the next automatic broadcast would silently
+        // clobber what the agent just wrote by hand.
+        daemon
+            .pane_registry
+            .lock()
+            .unwrap()
+            .unbind_source(&view_id, &pane_id);
+        broadcast_pane_content(daemon, &view_id, &pane_id, wire, None);
         return json!({ "ok": true });
     }
 
@@ -262,6 +267,97 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::pane_registry::{PaneRegistry, SplitPosition};
+    use crate::ipc::SessionManager;
+    use crate::mcp::DaemonMcpBackend;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::broadcast;
+
+    /// Build a daemon-hosted `McpSharedState` sharing the returned
+    /// `pane_registry` handle, mirroring the `make_state()` pattern used by
+    /// `apply_layout.rs`/`refresh_pane.rs`'s tests — but also returning the
+    /// registry `Arc` directly so tests can assert on bindings without
+    /// re-deriving it through `state.daemon`.
+    fn make_state() -> (McpSharedState, Arc<Mutex<PaneRegistry>>) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
+            tmp.path().join("panes.json"),
+        )));
+        let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+            tmp.path().join("sessions.json"),
+        )));
+        std::mem::forget(tmp);
+        let (broadcast_tx, _rx) = broadcast::channel(64);
+        let backend = DaemonMcpBackend {
+            pane_registry: pane_registry.clone(),
+            session_mgr,
+            broadcast_tx,
+            perri: crate::mcp::PerriDaemonState::default(),
+        };
+        (McpSharedState::for_daemon(backend), pane_registry)
+    }
+
+    // ── set_pane_content severs a pane's live-source binding ──────────────────
+
+    #[tokio::test]
+    async fn set_pane_content_removes_the_pane_s_existing_source_binding() {
+        let (state, pane_registry) = make_state();
+        {
+            let mut reg = pane_registry.lock().unwrap();
+            reg.init_focus("perri");
+            reg.create_pane("perri", "queue", SplitPosition::Right, "repl")
+                .unwrap();
+            reg.bind_source("perri", "queue", "perri.list_pr_queue");
+        }
+        assert_eq!(
+            pane_registry.lock().unwrap().source_for("perri", "queue"),
+            Some("perri.list_pr_queue")
+        );
+
+        let args = json!({
+            "view_id": "perri", "pane_id": "queue",
+            "content": { "type": "text", "text": "manual override" }
+        });
+        let result = set_pane_content(&state, &args).await;
+        assert_eq!(result["ok"], true);
+
+        assert_eq!(
+            pane_registry.lock().unwrap().source_for("perri", "queue"),
+            None,
+            "an explicit set_pane_content must sever the pane's live-source binding, \
+             or a manual edit would get silently overwritten by the next broadcaster tick"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_pane_content_leaves_other_panes_bindings_untouched() {
+        let (state, pane_registry) = make_state();
+        {
+            let mut reg = pane_registry.lock().unwrap();
+            reg.init_focus("perri");
+            reg.create_pane("perri", "queue", SplitPosition::Right, "repl")
+                .unwrap();
+            reg.create_pane("perri", "diff", SplitPosition::Below, "queue")
+                .unwrap();
+            reg.bind_source("perri", "queue", "perri.list_pr_queue");
+            reg.bind_source("perri", "diff", "perri.get_current_pr");
+        }
+
+        let args = json!({
+            "view_id": "perri", "pane_id": "queue",
+            "content": { "type": "text", "text": "manual override" }
+        });
+        let result = set_pane_content(&state, &args).await;
+        assert_eq!(result["ok"], true);
+
+        let reg = pane_registry.lock().unwrap();
+        assert_eq!(reg.source_for("perri", "queue"), None);
+        assert_eq!(
+            reg.source_for("perri", "diff"),
+            Some("perri.get_current_pr"),
+            "unbinding one pane must not touch a sibling pane's binding"
+        );
+    }
 
     #[test]
     fn json_snapshot_wrapping_pr_list_is_rejected() {

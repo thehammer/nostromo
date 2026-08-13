@@ -287,6 +287,25 @@ pub enum PaneContentWire {
     Error { message: String },
 }
 
+/// How trustworthy the data in a `PaneContent` push is. Computed daemon-side
+/// (see `apply_layout::freshness`) so every client agrees without
+/// reimplementing the policy: `stale` is the source's own transient flag and
+/// must NOT be rendered (a single missed poll is normal); `badly_stale` is the
+/// daemon's verdict that the source hasn't produced good data within
+/// `pane_sources::BADLY_STALE_AFTER`, and is the only flag a client renders.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PaneFreshness {
+    /// When the underlying source last produced good data.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub as_of: Option<chrono::DateTime<chrono::Utc>>,
+    /// The source's own transient-stale flag. Not rendered by clients.
+    #[serde(default)]
+    pub stale: bool,
+    /// The daemon's badly-stale verdict. The only flag a client renders.
+    #[serde(default)]
+    pub badly_stale: bool,
+}
+
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────
 
 pub(crate) mod base64_bytes {
@@ -682,6 +701,11 @@ pub enum ServerMsg {
         tag: String,
         pane_id: String,
         content: PaneContentWire,
+        /// How trustworthy this content is. `None` for content that has no
+        /// staleness concept (e.g. agent-authored `set_pane_content`) and for
+        /// frames from an older daemon that predates this field.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        freshness: Option<PaneFreshness>,
     },
 
     /// The daemon announces an agent-spawned focus (via `create_focus`) so every
@@ -1074,6 +1098,7 @@ mod tests {
             content: PaneContentWire::Text {
                 text: "hello".into(),
             },
+            freshness: None,
         });
         round_trip_server(ServerMsg::PaneContent {
             tag: "mother".into(),
@@ -1081,6 +1106,7 @@ mod tests {
             content: PaneContentWire::JsonSnapshot {
                 value: serde_json::json!({ "jobs": [1, 2, 3] }),
             },
+            freshness: None,
         });
         round_trip_server(ServerMsg::FocusCreated {
             meta: FocusMeta {
@@ -1093,6 +1119,66 @@ mod tests {
                 session_summary: None,
             },
         });
+    }
+
+    // ── PaneFreshness ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn pane_content_with_badly_stale_freshness_round_trips() {
+        use chrono::{TimeZone, Utc};
+
+        let as_of = Utc.with_ymd_and_hms(2026, 7, 30, 12, 0, 0).unwrap();
+        round_trip_server(ServerMsg::PaneContent {
+            tag: "perri".into(),
+            pane_id: "queue".into(),
+            content: PaneContentWire::Text {
+                text: "stale placeholder".into(),
+            },
+            freshness: Some(PaneFreshness {
+                as_of: Some(as_of),
+                stale: true,
+                badly_stale: true,
+            }),
+        });
+    }
+
+    #[test]
+    fn pane_content_with_no_freshness_round_trips_as_none() {
+        round_trip_server(ServerMsg::PaneContent {
+            tag: "perri".into(),
+            pane_id: "queue".into(),
+            content: PaneContentWire::Text { text: "fresh".into() },
+            freshness: None,
+        });
+    }
+
+    /// An old daemon build (pre-freshness) never emits a `"freshness"` key at
+    /// all. A hand-written JSON literal — not a serialize-then-deserialize
+    /// round trip — simulates that exact wire shape and must still parse,
+    /// with `freshness` landing as `None`.
+    #[test]
+    fn pane_content_without_freshness_key_deserializes_with_freshness_none() {
+        let raw = r#"{
+            "type": "pane_content",
+            "tag": "perri",
+            "pane_id": "queue",
+            "content": { "kind": "text", "text": "from an old daemon" }
+        }"#;
+        let msg: ServerMsg = serde_json::from_str(raw).expect("old-shaped frame must still parse");
+        match msg {
+            ServerMsg::PaneContent {
+                tag,
+                pane_id,
+                content,
+                freshness,
+            } => {
+                assert_eq!(tag, "perri");
+                assert_eq!(pane_id, "queue");
+                assert!(matches!(content, PaneContentWire::Text { text } if text == "from an old daemon"));
+                assert_eq!(freshness, None, "an absent \"freshness\" key must deserialize to None");
+            }
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1258,6 +1344,7 @@ mod tests {
             changed_files: 2,
             head_sha: "abc123".into(),
             diff_too_large: false,
+            generated_at: None,
         };
 
         round_trip_server(ServerMsg::PerriState {
@@ -1372,6 +1459,7 @@ mod tests {
                     head_sha:     "abc123".into(),
                 }],
             },
+            freshness: None,
         });
     }
 
