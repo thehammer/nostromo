@@ -593,9 +593,7 @@ fn load_store(path: &std::path::Path) -> (HashMap<String, PaneTree>, HashMap<Str
     let filtered: HashMap<String, HashMap<String, String>> = bindings
         .into_iter()
         .filter_map(|(tag, panes)| {
-            let Some(tree) = trees.get(&tag) else {
-                return None;
-            };
+            let tree = trees.get(&tag)?;
             let live: HashSet<String> = tree.pane_ids().into_iter().collect();
             let kept: HashMap<String, String> = panes
                 .into_iter()

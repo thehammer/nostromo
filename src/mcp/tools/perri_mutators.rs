@@ -32,7 +32,7 @@ use tokio::sync::{oneshot, watch};
 
 use crate::data::{perri_current_pr, perri_pr::PrSnapshot};
 use crate::event::AppEvent;
-use crate::ipc::protocol::{PaneContentWire, PaneFreshness, ServerMsg};
+use crate::ipc::protocol::{PaneContentWire, PaneFreshness};
 use crate::mcp::pane_sources::{broadcast_loading_if_first_paint, broadcast_pane_content};
 use crate::mcp::state::DaemonMcpBackend;
 use crate::mcp::tools::apply_layout::{self, SOURCE_CURRENT_PR, SOURCE_PR_QUEUE};
@@ -533,6 +533,7 @@ mod tests {
     use crate::data::perri_pr::PrSnapshot;
     use crate::data::perri_queue::PrQueueSnapshot;
     use crate::ipc::pane_registry::PaneRegistry;
+    use crate::ipc::protocol::ServerMsg;
     use crate::ipc::SessionManager;
     use crate::mcp::{DaemonMcpBackend, PerriDaemonState};
     use std::sync::atomic::AtomicUsize;
@@ -678,10 +679,9 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
 
-        let (pane_id, content) = recv_pane_content(&mut bcast).await;
-        assert_eq!(pane_id, "diff");
-        assert!(matches!(content, PaneContentWire::Loading));
-
+        // make_daemon_state() already painted "diff" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here — the
+        // pane goes straight to its final content.
         let (pane_id, content) = recv_pane_content(&mut bcast).await;
         assert_eq!(pane_id, "diff");
         match content {
@@ -715,8 +715,8 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
 
-        let (_pane_id, content) = recv_pane_content(&mut bcast).await; // Loading
-        assert!(matches!(content, PaneContentWire::Loading));
+        // make_daemon_state() already painted "diff" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here.
         let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
         match content {
             PaneContentWire::Text { text } => assert!(text.contains("Add widget")),
@@ -734,8 +734,9 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["pending"], true);
 
-        let (_pane_id, content) = recv_pane_content(&mut bcast).await; // Loading
-        assert!(matches!(content, PaneContentWire::Loading));
+        // make_daemon_state() already painted "diff" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here — the
+        // pane goes straight to the "still loading" placeholder text.
         let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
         match content {
             PaneContentWire::Text { text } => assert!(text.contains("acme/web#99")),
@@ -839,7 +840,8 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        let _ = recv_pane_content(&mut bcast).await; // Loading
+        // make_daemon_state() already painted "diff" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here.
         let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
         match content {
             PaneContentWire::Text { text } => assert_eq!(text, expected),
@@ -969,10 +971,9 @@ mod tests {
             other => panic!("expected Text, got {other:?}"),
         }
 
-        let (pane_id, content) = recv_pane_content(&mut bcast).await;
-        assert_eq!(pane_id, "queue");
-        assert!(matches!(content, PaneContentWire::Loading));
-
+        // make_daemon_state() already painted "queue" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here — the
+        // pane goes straight to the refetched list.
         let (pane_id, content) = recv_pane_content(&mut bcast).await;
         assert_eq!(pane_id, "queue");
         assert!(matches!(content, PaneContentWire::PrList { .. }));

@@ -18,7 +18,7 @@ use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::pane_registry::{PaneRegistry, SplitPosition};
 use nostromo::ipc::protocol::{ClientMsg, PaneContentWire, ServerMsg, Topic};
 use nostromo::ipc::{PtyManager, Server, SessionManager};
-use nostromo::mcp::pane_sources::bound_pane_contents;
+use nostromo::mcp::pane_sources::{bound_pane_contents, McpPaneContentProvider};
 use nostromo::mcp::tools::apply_layout::apply_layout;
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
 use serde_json::json;
@@ -91,6 +91,15 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
         perri: PerriDaemonState::default(),
     };
     let state = McpSharedState::for_daemon(backend);
+
+    // Wire the PaneContentProvider the same way `nostromd.rs` does — without
+    // it, `server.rs`'s attach-replay path (D8) has nothing to draw live pane
+    // content from, and this test would only ever observe the FocusLayout
+    // replay.
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_pane_content_provider(Arc::new(McpPaneContentProvider(state.clone())));
+    }
 
     // Assemble the "perri" focus in-process — this exercises the very same
     // PaneRegistry + broadcast_tx the raw IPC server replays from, so no

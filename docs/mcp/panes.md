@@ -366,12 +366,14 @@ the native PR list). Use `set_pane_content` for content you author yourself —
 freeform text, an explicit error, an explicit loading state, or any data that
 isn't behind a registered source.
 
-**Loading, then content, in one call.** The tool broadcasts a transient
-`Loading` state immediately, then the fetched content (or an `Error` if the
-fetch failed, so the pane never sticks on `Loading`) — both as ordinary
-`PaneContent` broadcasts. The JSON response returns only after both have been
-sent, so `{ "ok": true }` means the content is actually on screen, not merely
-"a fetch was kicked off."
+**Loading only on first paint, then content, in one call.** The tool binds the
+pane to `source` and broadcasts a transient `Loading` state immediately — but
+only if the pane has never been painted before (see "`Loading` is a
+first-paint-only signal" above). It then broadcasts the fetched content (or an
+`Error` if the fetch failed, so the pane never sticks on `Loading`), as an
+ordinary `PaneContent` broadcast. The JSON response returns only after the
+terminal broadcast has been sent, so `{ "ok": true }` means the content is
+actually on screen, not merely "a fetch was kicked off."
 
 ### Error codes
 

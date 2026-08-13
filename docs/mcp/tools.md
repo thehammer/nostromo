@@ -392,8 +392,10 @@ Load a pull request into Perri's diff pane. Two hosts, different behavior:
   refresh channel, and pushes the resolved focus's `diff` pane itself:
   - `highlights` given → that text is pushed as the pane's final content —
     it is never overwritten by a server-rendered summary.
-  - `highlights` omitted → pushes `Loading`, then waits (bounded by a
-    per-daemon settle timeout, default 12s) for the refetched snapshot to
+  - `highlights` omitted → pushes `Loading` (first paint only — suppressed if
+    `diff` already has content, per the live-pane-sources `Loading` rule
+    above), then waits (bounded by a per-daemon settle timeout, default 12s)
+    for the refetched snapshot to
     match `(repo, number)`, then pushes the same `Text` summary
     `nostromo.apply_layout`/`nostromo.refresh_pane_content` would render for
     `perri.get_current_pr`. If the wait times out, pushes a
@@ -439,8 +441,9 @@ Clear the currently-loaded PR from Perri's diff pane.
 - **Daemon**: removes `current-pr.json` (a no-op, not an error, if it's
   already absent), touches both `current-pr.dirty` and `queue.dirty`,
   signals both native sources' refresh channels, pushes `"No PR loaded."`
-  to the `diff` pane, and pushes `Loading` then the current PR-queue list to
-  the `queue` pane (via the same fetcher `nostromo.apply_layout` uses).
+  to the `diff` pane, and pushes `Loading` (first paint only — same
+  suppression rule) then the current PR-queue list to the `queue` pane (via
+  the same fetcher `nostromo.apply_layout` uses).
 - **Standalone TUI**: removes the file/touches the sentinel via `PerriView`
   only — no pane pushes.
 

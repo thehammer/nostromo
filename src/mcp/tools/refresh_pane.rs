@@ -4,10 +4,10 @@
 //! refreshes a single pane's content from a registered server-side data
 //! source — the same closed fetcher registry [`apply_layout`](super::apply_layout)
 //! uses — **without** touching pane geometry. It never mutates the
-//! `PaneRegistry` and never broadcasts `ServerMsg::FocusLayout`; it emits
-//! exactly two `ServerMsg::PaneContent` broadcasts (a transient `Loading`,
-//! then the fetched content or an `Error`) and returns only once both have
-//! been sent.
+//! `PaneRegistry` and never broadcasts `ServerMsg::FocusLayout`; it binds the
+//! pane to `source` (D4), then broadcasts a transient `Loading` only on first
+//! paint (D5), followed by the fetched content or an `Error`, and returns
+//! only once the terminal broadcast has been sent.
 //!
 //! This is the fix for the failure mode `apply_layout` doesn't cover: an
 //! agent that has already assembled its workspace still needs to refresh a
@@ -22,7 +22,7 @@
 
 use serde_json::{json, Value};
 
-use crate::ipc::protocol::{PaneContentWire, ServerMsg};
+use crate::ipc::protocol::PaneContentWire;
 use crate::mcp::pane_sources::{broadcast_loading_if_first_paint, broadcast_pane_content};
 use crate::mcp::state::McpSharedState;
 use crate::mcp::tools::apply_layout::{fetch, freshness, source_is_known, target_tag};
@@ -107,6 +107,7 @@ pub async fn refresh_pane_content(
 mod tests {
     use super::*;
     use crate::ipc::pane_registry::PaneRegistry;
+    use crate::ipc::protocol::ServerMsg;
     use crate::ipc::SessionManager;
     use crate::mcp::DaemonMcpBackend;
     use std::sync::{Arc, Mutex};

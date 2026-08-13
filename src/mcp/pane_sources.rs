@@ -293,17 +293,21 @@ mod tests {
 
     // ── test helpers ─────────────────────────────────────────────────────────
 
+    /// Return type of [`make_state`] — named so clippy's `type_complexity`
+    /// lint doesn't fire on the bare tuple.
+    type MakeStateResult = (
+        McpSharedState,
+        broadcast::Receiver<ServerMsg>,
+        watch::Sender<Option<PrQueueSnapshot>>,
+        watch::Sender<Option<PrSnapshot>>,
+    );
+
     /// Build a daemon-hosted `McpSharedState` with fresh, test-owned
     /// `perri_queue_rx`/`perri_pr_rx` watch channels (mirrors the
     /// `make_state()` pattern in `apply_layout.rs`/`refresh_pane.rs`'s tests,
     /// but also hands back the `Sender` halves so tests can push updates
     /// after the broadcaster is already running).
-    fn make_state() -> (
-        McpSharedState,
-        broadcast::Receiver<ServerMsg>,
-        watch::Sender<Option<PrQueueSnapshot>>,
-        watch::Sender<Option<PrSnapshot>>,
-    ) {
+    fn make_state() -> MakeStateResult {
         let tmp = tempfile::TempDir::new().unwrap();
         let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
             tmp.path().join("panes.json"),
@@ -922,13 +926,14 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
         {
             saw_any = true;
-            if let ServerMsg::PaneContent { freshness, .. } = msg {
-                if let Some(f) = freshness {
-                    assert!(
-                        !f.badly_stale,
-                        "a transient ~30s-old failure must not be flagged badly stale"
-                    );
-                }
+            if let ServerMsg::PaneContent {
+                freshness: Some(f), ..
+            } = msg
+            {
+                assert!(
+                    !f.badly_stale,
+                    "a transient ~30s-old failure must not be flagged badly stale"
+                );
             }
         }
         let _ = saw_any; // whether a content push happens at all isn't the point here.
