@@ -68,7 +68,7 @@ struct SearchResponse {
 }
 
 #[derive(Deserialize, Clone)]
-struct SearchIssueItem {
+pub(crate) struct SearchIssueItem {
     number: u64,
     title: String,
     html_url: String,
@@ -79,7 +79,7 @@ struct SearchIssueItem {
 }
 
 #[derive(Deserialize, Clone)]
-struct GhUser {
+pub(crate) struct GhUser {
     login: String,
 }
 
@@ -155,6 +155,230 @@ enum GetPrHeadResult {
     Terminal,
 }
 
+// ── Queue caches ──────────────────────────────────────────────────────────────
+
+/// Every piece of mutable state the queue carries across fetch cycles, in one
+/// place.
+///
+/// These were eight separate locals in `run()` threaded individually into
+/// `fetch()`.  Bundling them means a caller that wants to update the queue
+/// reads and writes *the same* state `fetch()` does — a property of the type
+/// rather than a promise in a comment.
+///
+/// The four `Arc<Mutex<…>>` members are shared with the concurrent per-PR
+/// futures inside `fetch()`'s `join_all`, which is why they are not plain
+/// maps.  The rest are only touched from the single fetch driver.
+///
+/// Note: the authenticated user login (`me`) is deliberately *not* here — it is
+/// a one-shot identity lookup, not a cache the queue mutates per cycle.
+#[derive(Default)]
+pub(crate) struct QueueCaches {
+    /// ETag cache per search query string.
+    pub etags: HashMap<String, String>,
+    /// Item cache per search query (for 304 reuse).
+    pub item_cache: HashMap<String, Vec<SearchIssueItem>>,
+    /// `updated_at` seen on last fetch per (repo, number) — used to skip review
+    /// re-fetches.
+    pub last_seen_updated: HashMap<(String, u64), String>,
+    /// Cached last review state per (repo, number).
+    pub review_state_cache: HashMap<(String, u64), (String, Option<String>)>,
+    /// Last-known HEAD SHA per (repo, number).  Persists across loop iterations
+    /// so successive cycles skip the check-runs call when HEAD hasn't moved.
+    pub head_sha_cache: Arc<Mutex<HashMap<(String, u64), String>>>,
+    /// Maps HEAD SHA → (display CiState, Actions-failure filter bool).
+    pub ci_state_cache: Arc<Mutex<HashMap<String, (CiState, bool)>>>,
+    /// ETag cache for per-endpoint conditional GETs (get_pr_head_sha,
+    /// fetch_check_runs_state, get_our_last_review).  Keyed by full URL so a
+    /// single map covers all three endpoints without collisions.
+    pub endpoint_etags: Arc<Mutex<HashMap<String, String>>>,
+    /// Response-body cache paired with `endpoint_etags`, same keying.
+    pub endpoint_body_cache: Arc<Mutex<HashMap<String, String>>>,
+    /// The candidate ledger — every PR the last fetch's searches returned,
+    /// *including* ones the CI filter or approval suppression hide.  New state:
+    /// it replaces nothing that existed before.
+    pub candidates: HashMap<(String, u64), Candidate>,
+    /// Monotonic insertion counter feeding `Candidate::seq`.
+    pub next_seq: u64,
+}
+
+/// One PR the queue knows about, and everything needed to decide whether it
+/// belongs in the snapshot — without re-running a search.
+///
+/// A candidate is recorded whether or not it ships: drafts, self-authored PRs,
+/// CI-failed PRs and suppressed PRs all get entries.  [`classify`] is what
+/// turns an entry into a [`PrQueueItem`] or into nothing.
+pub(crate) struct Candidate {
+    pub repo: String,
+    pub number: u64,
+    /// Insertion order, which is snapshot order.
+    pub seq: u64,
+    pub title: String,
+    pub url: String,
+    /// REST-shaped login; empty string when the search item had no user.
+    pub author: String,
+    pub is_bot: bool,
+    pub draft: bool,
+    pub updated_at: Option<String>,
+    /// Empty until a CI read resolves it.
+    pub head_sha: String,
+    pub ci_state: CiState,
+    /// The CI drop filter — a GitHub Actions run concluded `failure`, or the
+    /// PR turned out to be closed/merged.
+    pub actions_failed: bool,
+    /// Seen in `review-requested:@me` (bucket 1).
+    pub in_requested: bool,
+    /// Seen in `review:required` (bucket 2).
+    pub in_needs_review: bool,
+    /// Our most recent review on this PR, as `(state, submitted_at)`.
+    pub my_review: Option<(String, Option<String>)>,
+    /// `Some(unix_secs)` when this entry was last written by a targeted probe
+    /// rather than a search hit.  Always `None` today — the targeted-update
+    /// engine (`.claude/plans/targeted-relay-refresh-engine.md`) is the only
+    /// writer, and it does not exist yet.
+    #[allow(dead_code)]
+    pub targeted_seen_at: Option<u64>,
+}
+
+impl Candidate {
+    /// Record a PR discovered by a search, if it isn't in the ledger already.
+    ///
+    /// First discovery wins for the descriptive fields *and* for `seq`, so a PR
+    /// found by two searches keeps the position of the bucket that found it
+    /// first — which is how bucket 1 takes priority over bucket 2.
+    fn upsert<'a>(
+        candidates: &'a mut HashMap<(String, u64), Candidate>,
+        next_seq: &mut u64,
+        repo: String,
+        item: &SearchIssueItem,
+    ) -> &'a mut Candidate {
+        let key = (repo.clone(), item.number);
+        candidates.entry(key).or_insert_with(|| {
+            let author = item
+                .user
+                .as_ref()
+                .map(|u| u.login.clone())
+                .unwrap_or_default();
+            let seq = *next_seq;
+            *next_seq += 1;
+            Candidate {
+                repo,
+                number: item.number,
+                seq,
+                title: item.title.clone(),
+                url: item.html_url.clone(),
+                is_bot: is_bot(&author),
+                author,
+                draft: item.draft.unwrap_or(false),
+                updated_at: item.updated_at.clone(),
+                head_sha: String::new(),
+                ci_state: CiState::Unknown,
+                actions_failed: false,
+                in_requested: false,
+                in_needs_review: false,
+                my_review: None,
+                targeted_seen_at: None,
+            }
+        })
+    }
+}
+
+/// The bucket verdict for a ledger entry: `(bucket, new_activity)`, or `None`
+/// if the PR doesn't belong in the snapshot on its own merits.
+///
+/// This is everything [`classify`] decides *except* approval suppression, which
+/// is time-dependent and therefore separable.  The order of the checks is the
+/// behaviour; changing it changes the queue.
+pub(crate) fn classify_bucket(c: &Candidate, me: &str) -> Option<(&'static str, bool)> {
+    // 1. Drafts and our own PRs are never ours to review (`is_filtered`).
+    //    Bots are deliberately *not* excluded here — they get their own bucket.
+    if c.draft || c.author == me {
+        return None;
+    }
+
+    // 2. The CI drop filter.
+    if c.actions_failed {
+        return None;
+    }
+
+    // 3. Bucket precedence.  `qualifies_b3` is the bucket-3 gate: we asked for
+    //    changes and the author has since responded.
+    let qualifies_b3 = c.my_review.as_ref().is_some_and(|(state, submitted_at)| {
+        state == "CHANGES_REQUESTED"
+            && has_new_activity(submitted_at.as_deref(), c.updated_at.as_deref())
+    });
+    if c.is_bot && (c.in_requested || c.in_needs_review || qualifies_b3) {
+        Some(("dependabot", false))
+    } else if c.in_requested {
+        Some(("requested", false))
+    } else if c.in_needs_review {
+        Some(("needs_review", false))
+    } else if qualifies_b3 {
+        Some(("changes_req", true))
+    } else {
+        None
+    }
+}
+
+/// Render one ledger entry into a queue item, or `None` if it doesn't belong in
+/// the snapshot.
+pub(crate) fn classify(
+    c: &Candidate,
+    me: &str,
+    suppress: &SuppressStore,
+    now_secs: u64,
+) -> Option<PrQueueItem> {
+    let (bucket, new_activity) = classify_bucket(c, me)?;
+
+    // Approval suppression, applied last.  An unresolved (empty) head_sha never
+    // matches a recorded entry.
+    if suppress.is_suppressed(&c.repo, c.number, &c.head_sha, now_secs) {
+        return None;
+    }
+
+    Some(PrQueueItem {
+        repo: c.repo.clone(),
+        number: c.number,
+        title: c.title.clone(),
+        author: c.author.clone(),
+        bucket: bucket.to_owned(),
+        new_activity,
+        url: c.url.clone(),
+        ci_state: c.ci_state,
+        head_sha: c.head_sha.clone(),
+        is_bot: c.is_bot,
+    })
+}
+
+/// What one bucket-3 probe learned about a PR, folded back into the ledger
+/// after the concurrent probes join.
+#[derive(Default)]
+struct B3Outcome {
+    key: (String, u64),
+    /// Our last review on the PR, when the probe resolved one (from the cache
+    /// or from the API).
+    my_review: Option<(String, Option<String>)>,
+    /// `(ci_state, actions_failed, head_sha)` — present only when the probe got
+    /// far enough to read CI.
+    ci: Option<(CiState, bool, String)>,
+    /// A review-state cache entry to write back, when the API was called.
+    new_cache_entry: Option<(String, Option<String>)>,
+}
+
+/// Render the whole ledger, in insertion order, into the snapshot's item list.
+pub(crate) fn render_items(
+    candidates: &HashMap<(String, u64), Candidate>,
+    me: &str,
+    suppress: &SuppressStore,
+    now_secs: u64,
+) -> Vec<PrQueueItem> {
+    let mut ordered: Vec<&Candidate> = candidates.values().collect();
+    ordered.sort_by_key(|c| c.seq);
+    ordered
+        .into_iter()
+        .filter_map(|c| classify(c, me, suppress, now_secs))
+        .collect()
+}
+
 // ── Source ────────────────────────────────────────────────────────────────────
 
 pub struct PerriQueueNativeSource {
@@ -228,31 +452,10 @@ impl PerriQueueNativeSource {
             }
         };
 
-        // ETag cache per search query string.
-        let mut etags: HashMap<String, String> = HashMap::new();
-        // Item cache per search query (for 304 reuse).
-        let mut item_cache: HashMap<String, Vec<SearchIssueItem>> = HashMap::new();
-        // updated_at seen on last fetch per (repo, number) — used to skip review re-fetches.
-        let mut last_seen_updated: HashMap<(String, u64), String> = HashMap::new();
-        // Cached last review state per (repo, number).
-        let mut review_state_cache: HashMap<(String, u64), (String, Option<String>)> =
-            HashMap::new();
+        // All cross-cycle mutable queue state lives here (see `QueueCaches`).
+        let mut caches = QueueCaches::default();
         // Authenticated user login — fetched once and reused.
         let mut me: Option<String> = None;
-        // CI caches — persist across loop iterations so successive cycles skip
-        // the check-runs call when the HEAD SHA hasn't changed.
-        let head_sha_cache: Arc<Mutex<HashMap<(String, u64), String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        // Maps HEAD SHA → (display CiState, Actions-failure filter bool).
-        let ci_state_cache: Arc<Mutex<HashMap<String, (CiState, bool)>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        // ETag + body caches for per-endpoint conditional GETs (get_pr_head_sha,
-        // fetch_check_runs_state, get_our_last_review).  Keyed by full URL so
-        // a single map covers all three endpoints without collisions.
-        let endpoint_etags: Arc<Mutex<HashMap<String, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let endpoint_body_cache: Arc<Mutex<HashMap<String, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
 
         // Path to the approvals JSONL signal file.
         let approvals_path = self.config.perri_state_dir().join("approvals.jsonl");
@@ -292,63 +495,10 @@ impl PerriQueueNativeSource {
             };
 
             match self
-                .fetch(
-                    &client,
-                    &me_login,
-                    &mut etags,
-                    &mut item_cache,
-                    &mut last_seen_updated,
-                    &mut review_state_cache,
-                    &head_sha_cache,
-                    &ci_state_cache,
-                    &endpoint_etags,
-                    &endpoint_body_cache,
-                    &suppress,
-                )
+                .fetch(&client, &me_login, &mut caches, &suppress)
                 .await
             {
-                Ok(snap) => {
-                    debug!(prs = snap.items.len(), "perri queue refreshed");
-
-                    // Write the queue cache atomically so Swift reads a complete file.
-                    let state_dir = self.config.perri_state_dir();
-                    let cache_path = state_dir.join(".queue.cache.json");
-                    match serde_json::to_string(&snap) {
-                        Ok(json) => {
-                            if let Err(e) = write_json_atomic(&cache_path, &json) {
-                                warn!("perri queue cache write failed: {e:#}");
-                            } else {
-                                debug!("perri queue cache written: {}", cache_path.display());
-                            }
-                        }
-                        Err(e) => warn!("perri queue cache serialize failed: {e:#}"),
-                    }
-
-                    // Pre-fetch detail for the top-3 PRs in bucket-priority order.
-                    let top_three = top_three_items(&snap.items);
-                    for item in top_three {
-                        let cfg = self.config.clone();
-                        let client_clone = client.clone();
-                        let repo = item.repo.clone();
-                        let number = item.number;
-                        let sha = item.head_sha.clone();
-                        let sd = state_dir.clone();
-                        tokio::spawn(async move {
-                            // Skip if a fresh cache file already exists for this (repo, number, sha).
-                            if cache_is_fresh(&sd, &repo, number, &sha) {
-                                debug!("perri prefetch {repo}#{number} cache fresh — skipping");
-                                return;
-                            }
-                            if let Err(e) =
-                                prefetch_into_cache(&cfg, &client_clone, &repo, number).await
-                            {
-                                debug!("perri prefetch {repo}#{number} failed: {e:#}");
-                            }
-                        });
-                    }
-
-                    let _ = tx.send(Some(snap));
-                }
+                Ok(snap) => self.publish_snapshot(&tx, &client, snap),
                 Err(e) => {
                     warn!("perri queue fetch failed: {e:#}");
                     let mut snap = tx.borrow().clone().unwrap_or_default();
@@ -358,50 +508,77 @@ impl PerriQueueNativeSource {
                 }
             }
 
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
-                // `Some(_) = ...` disables the branch when the channel is
-                // closed (recv() yields None).  The plain `_ = recv()` form
-                // matches None too, which causes the branch to fire on every
-                // poll once the sender is dropped — producing a tight loop
-                // that hammers the GitHub search API.
-                Some(_) = dirty_rx.recv() => {
-                    debug!("perri queue dirty-file signal");
-                }
-                Some(_) = refresh_rx.recv() => {
-                    debug!("perri queue direct-push refresh signal (MCP)");
-                }
-                Some(_) = approvals_rx.recv() => {
-                    debug!("perri queue approvals-file signal — re-fetching with new suppression");
-                }
-            }
-
-            // A caller (e.g. `perri.clear_current_pr`) may touch the dirty
-            // sentinel *and* send on `refresh_tx` for the same logical
-            // change — drain whichever channel(s) didn't win the select
-            // above so a single change collapses into exactly one fetch
-            // cycle instead of two.
-            while dirty_rx.try_recv().is_ok() {}
-            while refresh_rx.try_recv().is_ok() {}
-            while approvals_rx.try_recv().is_ok() {}
+            // Every wake produces a full refresh, so the reason is only of
+            // interest to the log lines `wait_for_wake` emits itself.
+            let _ = wait_for_wake(dirty_rx, refresh_rx, approvals_rx, interval_secs).await;
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Publish a freshly-fetched snapshot: write the on-disk queue cache, kick
+    /// off top-3 detail prefetch, then hand the snapshot to the watch channel.
+    ///
+    /// Ordering matters — the cache file is written *before* the watch send so
+    /// a reader woken by the send always finds a file that already matches.
+    fn publish_snapshot(
+        &self,
+        tx: &watch::Sender<Option<PrQueueSnapshot>>,
+        client: &GithubClient,
+        snap: PrQueueSnapshot,
+    ) {
+        debug!(prs = snap.items.len(), "perri queue refreshed");
+
+        // Write the queue cache atomically so Swift reads a complete file.
+        let state_dir = self.config.perri_state_dir();
+        let cache_path = state_dir.join(".queue.cache.json");
+        match serde_json::to_string(&snap) {
+            Ok(json) => {
+                if let Err(e) = write_json_atomic(&cache_path, &json) {
+                    warn!("perri queue cache write failed: {e:#}");
+                } else {
+                    debug!("perri queue cache written: {}", cache_path.display());
+                }
+            }
+            Err(e) => warn!("perri queue cache serialize failed: {e:#}"),
+        }
+
+        // Pre-fetch detail for the top-3 PRs in bucket-priority order.
+        let top_three = top_three_items(&snap.items);
+        for item in top_three {
+            let cfg = self.config.clone();
+            let client_clone = client.clone();
+            let repo = item.repo.clone();
+            let number = item.number;
+            let sha = item.head_sha.clone();
+            let sd = state_dir.clone();
+            tokio::spawn(async move {
+                // Skip if a fresh cache file already exists for this (repo, number, sha).
+                if cache_is_fresh(&sd, &repo, number, &sha) {
+                    debug!("perri prefetch {repo}#{number} cache fresh — skipping");
+                    return;
+                }
+                if let Err(e) = prefetch_into_cache(&cfg, &client_clone, &repo, number).await {
+                    debug!("perri prefetch {repo}#{number} failed: {e:#}");
+                }
+            });
+        }
+
+        let _ = tx.send(Some(snap));
+    }
+
     async fn fetch(
         &self,
         client: &GithubClient,
         me: &str,
-        etags: &mut HashMap<String, String>,
-        item_cache: &mut HashMap<String, Vec<SearchIssueItem>>,
-        last_seen_updated: &mut HashMap<(String, u64), String>,
-        review_state_cache: &mut HashMap<(String, u64), (String, Option<String>)>,
-        head_sha_cache: &Arc<Mutex<HashMap<(String, u64), String>>>,
-        ci_state_cache: &Arc<Mutex<HashMap<String, (CiState, bool)>>>,
-        endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
-        endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
+        caches: &mut QueueCaches,
         suppress: &Arc<Mutex<SuppressStore>>,
     ) -> Result<PrQueueSnapshot> {
+        // Owned handles to the shared caches, so the concurrent futures below
+        // don't borrow `caches` (which the search/review paths need mutably).
+        let head_sha_cache = Arc::clone(&caches.head_sha_cache);
+        let ci_state_cache = Arc::clone(&caches.ci_state_cache);
+        let endpoint_etags = Arc::clone(&caches.endpoint_etags);
+        let endpoint_body_cache = Arc::clone(&caches.endpoint_body_cache);
+
         // ── Run the three search queries ──────────────────────────────────────
         let q_requested =
             "is:open is:pr review-requested:@me org:Carefeed archived:false".to_owned();
@@ -410,9 +587,12 @@ impl PerriQueueNativeSource {
 
         // Searches must run sequentially because they share the mutable ETag
         // and item caches.  This is fine — the poll interval is 60s.
-        let requested_items = search_issues(client, &q_requested, etags, item_cache).await?;
-        let needs_items = search_issues(client, &q_needs, etags, item_cache).await?;
-        let reviewed_items = search_issues(client, &q_reviewed, etags, item_cache).await?;
+        let requested_items =
+            search_issues(client, &q_requested, &mut caches.etags, &mut caches.item_cache).await?;
+        let needs_items =
+            search_issues(client, &q_needs, &mut caches.etags, &mut caches.item_cache).await?;
+        let reviewed_items =
+            search_issues(client, &q_reviewed, &mut caches.etags, &mut caches.item_cache).await?;
 
         debug!(
             me,
@@ -422,95 +602,95 @@ impl PerriQueueNativeSource {
             "perri queue search results"
         );
 
-        // ── Build bucket 1 & 2 candidates (dedup, basic filters) ─────────────
-        // requested takes priority; needs_review fills in the rest.
-        let requested_urls: std::collections::HashSet<&str> = requested_items
-            .iter()
-            .map(|i| i.html_url.as_str())
-            .collect();
+        // The ledger describes *this* fetch's search results — a PR the searches
+        // no longer return is gone, not stale.  Replace, don't merge.
+        caches.candidates.clear();
 
-        let b12_candidates: Vec<(SearchIssueItem, &str)> = requested_items
+        // ── Record bucket 1 & 2 candidates in the ledger ─────────────────────
+        // `requested` is recorded first so it takes priority over `needs_review`
+        // for any PR both searches return (first insertion wins the seq and the
+        // bucket).  Drafts and self-authored PRs are recorded too, but skip the
+        // CI read — resolving CI for a PR we'll never show is wasted budget.
+        let mut b12_ci_targets: Vec<(String, u64)> = Vec::new();
+        for (item, in_requested) in requested_items
             .iter()
-            .map(|i| (i.clone(), "requested"))
-            .chain(
-                needs_items
-                    .iter()
-                    .filter(|i| !requested_urls.contains(i.html_url.as_str()))
-                    .map(|i| (i.clone(), "needs_review")),
-            )
-            .filter_map(|(i, original_bucket)| {
-                if is_filtered(&i, me) {
-                    debug!(
-                        url = %i.html_url,
-                        author = i.user.as_ref().map(|u| u.login.as_str()).unwrap_or("(none)"),
-                        draft = i.draft.unwrap_or(false),
-                        "is_filtered: dropping"
-                    );
-                    return None;
-                }
-                // Bot-authored PRs land in the "dependabot" bucket instead of the
-                // human-review bucket they were discovered in.
-                let author = i.user.as_ref().map(|u| u.login.as_str()).unwrap_or("");
-                let effective_bucket = if is_bot(author) { "dependabot" } else { original_bucket };
-                Some((i, effective_bucket))
-            })
-            .collect();
+            .map(|i| (i, true))
+            .chain(needs_items.iter().map(|i| (i, false)))
+        {
+            let repo = repo_from_url(&item.repository_url);
+            let first_sighting = !caches.candidates.contains_key(&(repo.clone(), item.number));
+            let c = Candidate::upsert(
+                &mut caches.candidates,
+                &mut caches.next_seq,
+                repo.clone(),
+                item,
+            );
+            if in_requested {
+                c.in_requested = true;
+            } else {
+                c.in_needs_review = true;
+            }
+            if !first_sighting {
+                // Already queued for (or excluded from) a CI read this cycle.
+                continue;
+            }
+            if is_filtered(item, me) {
+                debug!(
+                    url = %item.html_url,
+                    author = item.user.as_ref().map(|u| u.login.as_str()).unwrap_or("(none)"),
+                    draft = item.draft.unwrap_or(false),
+                    "is_filtered: dropping"
+                );
+                continue;
+            }
+            b12_ci_targets.push((repo, item.number));
+        }
 
-        debug!(b12_candidates = b12_candidates.len(), "after is_filtered");
+        debug!(b12_candidates = b12_ci_targets.len(), "after is_filtered");
 
         // ── CI-filter buckets 1 & 2 concurrently ─────────────────────────────
-        let b12_futures: Vec<_> = b12_candidates
+        let b12_futures: Vec<_> = b12_ci_targets
             .into_iter()
-            .map(|(item, bucket)| {
+            .map(|(repo, number)| {
                 let client = client.clone();
-                let head_sha_cache = Arc::clone(head_sha_cache);
-                let ci_state_cache = Arc::clone(ci_state_cache);
-                let endpoint_etags = Arc::clone(endpoint_etags);
-                let endpoint_body_cache = Arc::clone(endpoint_body_cache);
+                let head_sha_cache = Arc::clone(&head_sha_cache);
+                let ci_state_cache = Arc::clone(&ci_state_cache);
+                let endpoint_etags = Arc::clone(&endpoint_etags);
+                let endpoint_body_cache = Arc::clone(&endpoint_body_cache);
                 async move {
-                    let repo = repo_from_url(&item.repository_url);
                     let (ci_state, failed, head_sha) = ci_state_cached(
                         &client,
                         &repo,
-                        item.number,
+                        number,
                         &head_sha_cache,
                         &ci_state_cache,
                         &endpoint_etags,
                         &endpoint_body_cache,
                     )
                     .await;
-                    if failed {
-                        return None;
-                    }
-                    let author = item
-                        .user
-                        .as_ref()
-                        .map(|u| u.login.clone())
-                        .unwrap_or_default();
-                    let item_is_bot = is_bot(&author);
-                    Some(PrQueueItem {
-                        repo,
-                        number: item.number,
-                        title: item.title.clone(),
-                        author,
-                        bucket: bucket.to_owned(),
-                        new_activity: false,
-                        url: item.html_url.clone(),
-                        ci_state,
-                        head_sha,
-                        is_bot: item_is_bot,
-                    })
+                    ((repo, number), ci_state, failed, head_sha)
                 }
             })
             .collect();
 
-        let b12_items: Vec<PrQueueItem> = futures::future::join_all(b12_futures)
-            .await
-            .into_iter()
-            .flatten()
-            .collect();
+        // URLs already covered by buckets 1 & 2 — skip them in bucket 3.  A
+        // candidate the CI filter dropped is deliberately *not* "covered": it
+        // still gets a bucket-3 look, exactly as it did before the ledger.
+        let mut known_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut b12_survivors = 0usize;
+        for (key, ci_state, failed, head_sha) in futures::future::join_all(b12_futures).await {
+            if let Some(c) = caches.candidates.get_mut(&key) {
+                c.ci_state = ci_state;
+                c.actions_failed = failed;
+                c.head_sha = head_sha;
+                if !failed {
+                    known_urls.insert(c.url.clone());
+                    b12_survivors += 1;
+                }
+            }
+        }
 
-        debug!(b12_items = b12_items.len(), "after CI filter");
+        debug!(b12_items = b12_survivors, "after CI filter");
 
         // Prune ci_state_cache: remove SHA entries that are no longer referenced
         // by any current PR head.  Runs after every cycle — the set is tiny.
@@ -523,19 +703,27 @@ impl PerriQueueNativeSource {
                 .retain(|sha, _| current_shas.contains(sha));
         }
 
-        // URLs already covered by buckets 1 & 2 — skip in bucket 3
-        let known_urls: std::collections::HashSet<&str> =
-            b12_items.iter().map(|i| i.url.as_str()).collect();
-
         // ── Bucket 3: changes_req with new_activity ───────────────────────────
         // For each reviewed-by-me PR not already in b1/b2:
         //   - fetch our last review state via the reviews API
         //   - include only if state == CHANGES_REQUESTED and updated_at > submitted_at + 30s
-        let b3_candidates: Vec<&SearchIssueItem> = reviewed_items
-            .iter()
-            .filter(|i| !known_urls.contains(i.html_url.as_str()))
-            .filter(|i| !is_filtered(i, me))
-            .collect();
+        //
+        // Every reviewed PR is recorded in the ledger first, including the ones
+        // that don't qualify for a review lookup — the ledger is the record of
+        // what the searches saw, not of what shipped.
+        let mut b3_candidates: Vec<&SearchIssueItem> = Vec::new();
+        for item in &reviewed_items {
+            let repo = repo_from_url(&item.repository_url);
+            Candidate::upsert(
+                &mut caches.candidates,
+                &mut caches.next_seq,
+                repo,
+                item,
+            );
+            if !known_urls.contains(&item.html_url) && !is_filtered(item, me) {
+                b3_candidates.push(item);
+            }
+        }
 
         // For each candidate, snapshot the cache state synchronously before spawning
         // futures.  The futures run concurrently via join_all and cannot hold &mut refs
@@ -551,14 +739,14 @@ impl PerriQueueNativeSource {
                 let cached = review_from_cache(
                     &key,
                     item.updated_at.as_deref(),
-                    last_seen_updated,
-                    review_state_cache,
+                    &caches.last_seen_updated,
+                    &caches.review_state_cache,
                 );
 
-                let head_sha_cache = Arc::clone(head_sha_cache);
-                let ci_state_cache = Arc::clone(ci_state_cache);
-                let endpoint_etags = Arc::clone(endpoint_etags);
-                let endpoint_body_cache = Arc::clone(endpoint_body_cache);
+                let head_sha_cache = Arc::clone(&head_sha_cache);
+                let ci_state_cache = Arc::clone(&ci_state_cache);
+                let endpoint_etags = Arc::clone(&endpoint_etags);
+                let endpoint_body_cache = Arc::clone(&endpoint_body_cache);
                 async move {
                     let (state, submitted_at, new_cache_entry) = match cached {
                         Some((s, sub)) => {
@@ -583,27 +771,29 @@ impl PerriQueueNativeSource {
                                 let entry = Some((s.clone(), sub.clone()));
                                 (s, sub, entry)
                             }
-                            None => return (key, None, None),
+                            // No review of ours to speak of — nothing learned.
+                            None => return B3Outcome { key, ..Default::default() },
                         },
                     };
 
-                    if state != "CHANGES_REQUESTED" {
-                        return (key, None, new_cache_entry);
-                    }
-
-                    // Only include if the author has responded since our review
-                    // (30s grace window to avoid self-triggering on our own submission).
-                    let new_activity = match (&submitted_at, &item.updated_at) {
-                        (Some(rev_ts), Some(pr_ts)) => {
-                            let review_epoch = parse_epoch(rev_ts);
-                            let pr_epoch = parse_epoch(pr_ts);
-                            pr_epoch.saturating_sub(review_epoch) > 30
-                        }
-                        _ => false,
+                    let my_review = Some((state.clone(), submitted_at.clone()));
+                    let unresolved = B3Outcome {
+                        key: key.clone(),
+                        my_review: my_review.clone(),
+                        ci: None,
+                        new_cache_entry: new_cache_entry.clone(),
                     };
 
-                    if !new_activity {
-                        return (key, None, new_cache_entry);
+                    if state != "CHANGES_REQUESTED" {
+                        return unresolved;
+                    }
+
+                    // Only read CI once the author has actually responded since
+                    // our review (30s grace window to avoid self-triggering on
+                    // our own submission).  Skipping the read is the point: a
+                    // gate-failing candidate must cost zero GitHub requests.
+                    if !has_new_activity(submitted_at.as_deref(), item.updated_at.as_deref()) {
+                        return unresolved;
                     }
 
                     let (ci_state, failed, head_sha) = ci_state_cached(
@@ -616,41 +806,33 @@ impl PerriQueueNativeSource {
                         &endpoint_body_cache,
                     )
                     .await;
-                    if failed {
-                        return (key, None, new_cache_entry);
-                    }
 
-                    let b3_author = item
-                        .user
-                        .as_ref()
-                        .map(|u| u.login.clone())
-                        .unwrap_or_default();
-                    let b3_is_bot = is_bot(&b3_author);
-                    let pr_item = PrQueueItem {
-                        repo,
-                        number: item.number,
-                        title: item.title.clone(),
-                        author: b3_author,
-                        bucket: if b3_is_bot { "dependabot".to_owned() } else { "changes_req".to_owned() },
-                        new_activity: !b3_is_bot,
-                        url: item.html_url.clone(),
-                        ci_state,
-                        head_sha,
-                        is_bot: b3_is_bot,
-                    };
-                    (key, Some(pr_item), new_cache_entry)
+                    B3Outcome {
+                        key,
+                        my_review,
+                        ci: Some((ci_state, failed, head_sha)),
+                        new_cache_entry,
+                    }
                 }
             })
             .collect();
 
-        // Reduce: flush new review-state entries into the cache and collect items.
-        let mut b3_items: Vec<PrQueueItem> = Vec::new();
-        for (key, item, new_entry) in futures::future::join_all(b3_futures).await {
-            if let Some(entry) = new_entry {
-                review_state_cache.insert(key, entry);
+        // Reduce: flush new review-state entries into the cache and fold what
+        // each probe learned back into the ledger.
+        for outcome in futures::future::join_all(b3_futures).await {
+            if let Some(entry) = outcome.new_cache_entry {
+                caches.review_state_cache.insert(outcome.key.clone(), entry);
             }
-            if let Some(pr) = item {
-                b3_items.push(pr);
+            let Some(c) = caches.candidates.get_mut(&outcome.key) else {
+                continue;
+            };
+            if let Some(review) = outcome.my_review {
+                c.my_review = Some(review);
+            }
+            if let Some((ci_state, failed, head_sha)) = outcome.ci {
+                c.ci_state = ci_state;
+                c.actions_failed = failed;
+                c.head_sha = head_sha;
             }
         }
 
@@ -659,32 +841,37 @@ impl PerriQueueNativeSource {
         for item in &reviewed_items {
             if let Some(updated_at) = &item.updated_at {
                 let repo = repo_from_url(&item.repository_url);
-                last_seen_updated.insert((repo, item.number), updated_at.clone());
+                caches
+                    .last_seen_updated
+                    .insert((repo, item.number), updated_at.clone());
             }
         }
 
-        let mut items: Vec<PrQueueItem> = b12_items.into_iter().chain(b3_items).collect();
-
-        // ── Apply approval suppression ────────────────────────────────────────
-        // Prune expired entries then filter out any PR whose current head_sha
-        // exactly matches a live suppression entry.  PRs with an empty head_sha
-        // (unresolved) are never suppressed — an empty string cannot match a
-        // real recorded sha (is_suppressed() guards this explicitly).
-        {
+        // ── Render the ledger into the snapshot ───────────────────────────────
+        // Pruning expired suppression entries is a side effect and stays here;
+        // deciding what ships is `classify`'s job.  A PR whose current head_sha
+        // exactly matches a live suppression entry is hidden — PRs with an
+        // empty head_sha (unresolved) never match (is_suppressed() guards it).
+        // One lock acquisition covers the prune and the whole render.
+        let items = {
             let now = unix_now_secs();
             let mut store = suppress.lock().unwrap();
             if store.prune(now) {
                 store.save();
             }
-            let before = items.len();
-            items.retain(|item| {
-                !store.is_suppressed(&item.repo, item.number, &item.head_sha, now)
-            });
-            let suppressed = before - items.len();
+            let suppressed = caches
+                .candidates
+                .values()
+                .filter(|c| {
+                    classify_bucket(c, me).is_some()
+                        && store.is_suppressed(&c.repo, c.number, &c.head_sha, now)
+                })
+                .count();
             if suppressed > 0 {
                 debug!("perri suppress: hid {suppressed} just-approved PR(s) from snapshot");
             }
-        }
+            render_items(&caches.candidates, me, &store, now)
+        };
 
         Ok(PrQueueSnapshot {
             generated_at: Some(Utc::now()),
@@ -698,6 +885,54 @@ impl PerriQueueNativeSource {
         let hosts_path = self.config.github_token_path.as_deref();
         GithubClient::new(hosts_path)
     }
+}
+
+// ── Run-loop wake ─────────────────────────────────────────────────────────────
+
+/// Block until the queue should re-fetch, then drain every signal channel and
+/// report which one woke us.
+///
+/// Two properties here are load-bearing and must not be "simplified":
+///
+/// 1. **`Some(_) = rx.recv()`, never `_ = rx.recv()`.** `recv()` on a closed
+///    channel returns `Poll::Ready(None)` forever; the `_` pattern matches it,
+///    so the branch would fire on every poll and spin the loop into a tight
+///    hammering of the GitHub search API.  `Some(_)` doesn't match `None`,
+///    which makes `tokio::select!` *disable* the branch instead.
+///    Regression test: `select_does_not_hot_fire_when_refresh_sender_dropped`.
+///
+/// 2. **The post-select drain of *all* channels.** One logical change (e.g.
+///    `perri.clear_current_pr`) can touch the dirty sentinel *and* send on
+///    `refresh_tx`; without the drain that is two wakes and two full fetch
+///    cycles for one change.  Regression test:
+///    `coalesces_dirty_refresh_and_approvals_signals_into_one_wake`.
+async fn wait_for_wake(
+    dirty_rx: &mut mpsc::UnboundedReceiver<()>,
+    refresh_rx: &mut mpsc::UnboundedReceiver<()>,
+    approvals_rx: &mut mpsc::UnboundedReceiver<()>,
+    interval_secs: u64,
+) -> &'static str {
+    let reason = tokio::select! {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => "interval",
+        Some(_) = dirty_rx.recv() => {
+            debug!("perri queue dirty-file signal");
+            "dirty"
+        }
+        Some(_) = refresh_rx.recv() => {
+            debug!("perri queue direct-push refresh signal (MCP)");
+            "refresh"
+        }
+        Some(_) = approvals_rx.recv() => {
+            debug!("perri queue approvals-file signal — re-fetching with new suppression");
+            "approvals"
+        }
+    };
+
+    while dirty_rx.try_recv().is_ok() {}
+    while refresh_rx.try_recv().is_ok() {}
+    while approvals_rx.try_recv().is_ok() {}
+
+    reason
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -740,6 +975,29 @@ fn parse_epoch(ts: &str) -> u64 {
     chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S")
         .map(|dt| dt.and_utc().timestamp() as u64)
         .unwrap_or(0)
+}
+
+/// The bucket-3 grace window: has the PR author responded since we last
+/// reviewed?
+///
+/// `true` only when both timestamps are present and the PR was updated **more
+/// than 30 seconds** after our review was submitted.  The window exists so
+/// submitting a review — which itself bumps `updated_at` — doesn't immediately
+/// re-surface the PR as "the author responded".
+///
+/// This is the single definition of that rule; nothing recomputes it inline.
+pub(crate) fn has_new_activity(
+    review_submitted_at: Option<&str>,
+    pr_updated_at: Option<&str>,
+) -> bool {
+    match (review_submitted_at, pr_updated_at) {
+        (Some(rev_ts), Some(pr_ts)) => {
+            let review_epoch = parse_epoch(rev_ts);
+            let pr_epoch = parse_epoch(pr_ts);
+            pr_epoch.saturating_sub(review_epoch) > 30
+        }
+        _ => false,
+    }
 }
 
 /// Returns the cached `(state, submitted_at)` for `key` if the PR's
@@ -875,30 +1133,67 @@ pub async fn ci_state_cached(
         None => return (CiState::Unknown, false, String::new()),
     };
 
+    let (state, failed) = ci_state_for_sha(
+        client,
+        repo,
+        number,
+        &sha,
+        head_sha_cache,
+        ci_state_cache,
+        endpoint_etags,
+        endpoint_body_cache,
+    )
+    .await;
+    (state, failed, sha)
+}
+
+/// The half of [`ci_state_cached`] that runs once the HEAD SHA is already
+/// known — from a relay event, a targeted probe, or the `/pulls/{n}` read
+/// [`ci_state_cached`] itself performs.
+///
+/// Records `sha` in `head_sha_cache`, serves a cached terminal result if one
+/// exists for that SHA, and otherwise calls `fetch_check_runs_state` exactly
+/// once.  Issues **no** `/pulls/{number}` request — that is the caller's job.
+///
+/// Only terminal states (Success, Failure) are served from cache; Pending and
+/// Unknown are transitional and re-fetch each cycle so completing checks are
+/// detected.
+#[allow(clippy::too_many_arguments)]
+pub async fn ci_state_for_sha(
+    client: &GithubClient,
+    repo: &str,
+    number: u64,
+    sha: &str,
+    head_sha_cache: &Arc<Mutex<HashMap<(String, u64), String>>>,
+    ci_state_cache: &Arc<Mutex<HashMap<String, (CiState, bool)>>>,
+    endpoint_etags: &Arc<Mutex<HashMap<String, String>>>,
+    endpoint_body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> (CiState, bool) {
     // Record current head SHA (brief lock, no await).
     head_sha_cache
         .lock()
         .unwrap()
-        .insert((repo.to_owned(), number), sha.clone());
+        .insert((repo.to_owned(), number), sha.to_owned());
 
     // Return cached result if the SHA hasn't changed since last cycle.
-    // Only cache terminal states (Success, Failure) — Pending is transitional
-    // and must re-fetch each cycle so we detect when checks complete.
     {
         let lock = ci_state_cache.lock().unwrap();
-        if let Some(&(state, failed)) = lock.get(&sha) {
+        if let Some(&(state, failed)) = lock.get(sha) {
             if state != CiState::Pending && state != CiState::Unknown {
                 debug!(%repo, number, "ci_state cache hit (sha unchanged)");
-                return (state, failed, sha);
+                return (state, failed);
             }
         }
     }
 
     // Cache miss — fetch check-runs and store the result.
     let result =
-        fetch_check_runs_state(client, repo, &sha, endpoint_etags, endpoint_body_cache).await;
-    ci_state_cache.lock().unwrap().insert(sha.clone(), result);
-    (result.0, result.1, sha)
+        fetch_check_runs_state(client, repo, sha, endpoint_etags, endpoint_body_cache).await;
+    ci_state_cache
+        .lock()
+        .unwrap()
+        .insert(sha.to_owned(), result);
+    result
 }
 
 /// Fetch and parse check-runs for a known HEAD SHA.
@@ -1448,28 +1743,9 @@ mod tests {
         suppress: Arc<Mutex<SuppressStore>>,
     ) -> PrQueueSnapshot {
         let client = source.build_client().unwrap();
-        let mut etags = HashMap::new();
-        let mut item_cache = HashMap::new();
-        let mut last_seen = HashMap::new();
-        let mut review_cache = HashMap::new();
-        let head_sha_cache = Arc::new(Mutex::new(HashMap::new()));
-        let ci_state_cache = Arc::new(Mutex::new(HashMap::new()));
-        let endpoint_etags = Arc::new(Mutex::new(HashMap::new()));
-        let endpoint_body = Arc::new(Mutex::new(HashMap::new()));
+        let mut caches = QueueCaches::default();
         source
-            .fetch(
-                &client,
-                "tester",
-                &mut etags,
-                &mut item_cache,
-                &mut last_seen,
-                &mut review_cache,
-                &head_sha_cache,
-                &ci_state_cache,
-                &endpoint_etags,
-                &endpoint_body,
-                &suppress,
-            )
+            .fetch(&client, "tester", &mut caches, &suppress)
             .await
             .expect("fetch() should succeed")
     }
