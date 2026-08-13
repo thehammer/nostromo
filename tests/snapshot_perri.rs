@@ -65,6 +65,7 @@ fn fake_pr() -> PrSnapshot {
         changed_files: 0,
         head_sha: String::new(),
         diff_too_large: false,
+        generated_at: None,
     }
 }
 

@@ -17,8 +17,6 @@ class FileWatchers {
 
     let rateLimits   = CurrentValueSubject<RateLimits?,      Never>(nil)
     let posture      = CurrentValueSubject<PostureSnapshot?,  Never>(nil)
-    /// Items from ~/.claude/state/perri/.queue.cache.json — updated via FSEvents.
-    let perriQueue   = CurrentValueSubject<[PRQueueItem],     Never>([])
 
     /// Full PR detail decoded from current-pr-detail.json — updated via FSEvents.
     let perriDetail  = CurrentValueSubject<PRDetail?,         Never>(nil)
@@ -34,10 +32,6 @@ class FileWatchers {
     private var timer:          Timer?
     private var lastRateLimits: String?
     private var lastPosture:    String?
-
-    // FSEvent watcher for the perri queue cache file
-    private var perriQueueSource: DispatchSourceFileSystemObject?
-    private var perriQueueFd:     Int32 = -1
 
     // FSEvent watcher for current-pr-detail.json
     private var perriDetailSource: DispatchSourceFileSystemObject?
@@ -67,7 +61,6 @@ class FileWatchers {
             self?.poll()
         }
         RunLoop.main.add(timer!, forMode: .common)
-        startPerriQueueWatcher()
         startPerriDetailWatcher()
         startPrCacheWatcher()
         startThresholdWatcher()
@@ -98,54 +91,6 @@ class FileWatchers {
         let snap = PostureSnapshot.load()
         log.debug("budget-posture changed: \(snap?.posture.rawValue ?? "nil", privacy: .public)")
         posture.send(snap)
-    }
-
-    // MARK: - Perri queue cache watcher
-
-    private static var cacheURL: URL = {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/state/perri/.queue.cache.json")
-    }()
-
-    private func startPerriQueueWatcher() {
-        // Read immediately so the pane has data before AppStore fires a slow refresh.
-        readPerriQueueCache()
-
-        let path = Self.cacheURL.path
-        let fd   = open(path, O_EVTONLY)
-        guard fd >= 0 else {
-            log.warning("perri queue cache not found at \(path, privacy: .public) — watcher skipped")
-            return
-        }
-        perriQueueFd = fd
-
-        let src = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask:      [.write, .rename, .delete],
-            queue:          .global(qos: .utility)
-        )
-        src.setEventHandler { [weak self] in
-            guard let self else { return }
-            // After a write/rename, allow the file to flush before reading.
-            Thread.sleep(forTimeInterval: 0.05)
-            let items = Self.parseCache()
-            DispatchQueue.main.async { [weak self] in
-                self?.perriQueue.send(items)
-            }
-        }
-        src.setCancelHandler { [weak self] in
-            if let fd = self?.perriQueueFd, fd >= 0 { close(fd) }
-        }
-        src.resume()
-        perriQueueSource = src
-        log.info("perri queue cache watcher active: \(path, privacy: .public)")
-    }
-
-    private func readPerriQueueCache() {
-        let items = Self.parseCache()
-        DispatchQueue.main.async { [weak self] in
-            self?.perriQueue.send(items)
-        }
     }
 
     // MARK: - Perri detail file watcher
@@ -352,37 +297,4 @@ class FileWatchers {
         )
     }
 
-    static func parseCache() -> [PRQueueItem] {
-        guard
-            let data = try? Data(contentsOf: cacheURL),
-            let raw  = try? JSONSerialization.jsonObject(with: data)
-        else { return [] }
-
-        // Cache may be a bare array (TUI writes) or a wrapped object (perri-queue-pane --json writes)
-        let rawItems: [[String: Any]]
-        if let arr = raw as? [[String: Any]] {
-            rawItems = arr
-        } else if let obj = raw as? [String: Any], let arr = obj["items"] as? [[String: Any]] {
-            rawItems = arr
-        } else {
-            return []
-        }
-
-        return rawItems.compactMap { d in
-            guard
-                let repo   = d["repo"]   as? String,
-                let number = d["number"] as? Int,
-                let title  = d["title"]  as? String,
-                let author = d["author"] as? String,
-                let bucket = d["bucket"] as? String,
-                let url    = d["url"]    as? String
-            else { return nil }
-            return PRQueueItem(repo: repo, number: number, title: title,
-                               author: author, bucket: bucket,
-                               newActivity: d["new_activity"] as? Bool ?? false,
-                               url: url,
-                               ciState: CiState.from(ciStateString: d["ci_state"] as? String),
-                               headSha: d["head_sha"] as? String ?? "")
-        }
-    }
 }

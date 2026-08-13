@@ -53,6 +53,7 @@
 		FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
 		FF00000000000000000000A3 /* SidenavGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
 		FF00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000B1 /* SidenavGroupingTests.swift */; };
+		HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */; };
 		CC00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		GG00000000000000000000C1 /* NostromoKit in Frameworks (NostromoTests) */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 /* End PBXBuildFile section */
@@ -97,6 +98,7 @@
 		DD00000000000000000000A0 /* SessionHealthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHealthTests.swift; sourceTree = "<group>"; };
 		FF00000000000000000000A1 /* SidenavGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGrouping.swift; sourceTree = "<group>"; };
 		FF00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
+		HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentWireEqualityTests.swift; sourceTree = "<group>"; };
 		BB00000000000000000000G1 /* NostromoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NostromoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -210,6 +212,7 @@
 				DD00000000000000000000A0 /* SessionHealthTests.swift */,
 				FF00000000000000000000B1 /* SidenavGroupingTests.swift */,
 				GG00000000000000000000B1 /* ProcessRunnerTests.swift */,
+				HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -356,6 +359,7 @@
 				FF00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */,
 				GG00000000000000000000A3 /* ProcessRunner.swift in TestSources */,
 				GG00000000000000000000B2 /* ProcessRunnerTests.swift in Sources */,
+				HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -1,6 +1,32 @@
 import SwiftUI
 import NostromoKit
 
+/// Observable bridge between `PaneContentNSView` (AppKit) and `PaneContentHost`
+/// (SwiftUI). Content updates flow through `@Published content`/`freshness`
+/// rather than replacing the hosting view's `rootView`, which is what lets
+/// SwiftUI's own diffing preserve scroll position and list-item identity
+/// across a content refresh (see `PaneContentNSView.update`, which is the
+/// only writer of this model — it skips the write entirely when content is
+/// unchanged).
+final class PaneContentModel: ObservableObject {
+    @Published var content:   PaneContentWire?
+    @Published var freshness: PaneFreshness?
+    var onLoadPR:    (String, Int) -> Void = { _, _ in }
+    var onApprovePR: (String, Int) -> Void = { _, _ in }
+}
+
+/// Thin SwiftUI wrapper that renders `PaneContentModel`'s current state
+/// through the existing `PaneContentView`. Exists only so `PaneContentNSView`
+/// can build a single `NSHostingView` once and drive it via `@Published`
+/// state instead of tearing it down and rebuilding it on every update.
+struct PaneContentHost: View {
+    @ObservedObject var model: PaneContentModel
+
+    var body: some View {
+        PaneContentView(content: model.content, onLoadPR: model.onLoadPR, onApprovePR: model.onApprovePR)
+    }
+}
+
 /// SwiftUI renderer for `PaneContentWire` pushed by `set_pane_content`.
 ///
 /// Renders text as a monospaced/markdown-compatible scroll view, and

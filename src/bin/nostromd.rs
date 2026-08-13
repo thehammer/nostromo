@@ -191,6 +191,30 @@ async fn main() -> Result<()> {
                 perri_pr_rx_for_mcp,
                 jobs_rx_for_mcp,
             );
+
+            // ── Pane-source liveness (live-pane-sources) ────────────────────────
+            // D8: a (re)connecting client is never left staring at an
+            // assembled-but-empty workspace — server.rs replays this alongside
+            // the existing FocusLayout replay.
+            {
+                let mut mgr = session_mgr.lock().unwrap();
+                mgr.configure_pane_content_provider(Arc::new(
+                    nostromo::mcp::pane_sources::McpPaneContentProvider(state.clone()),
+                ));
+            }
+            // D3: repaint every already-bound pane once, immediately — a
+            // restarted daemon brings a persisted binding back to life without
+            // waiting for the next source change or a client re-running
+            // apply_layout.
+            nostromo::mcp::pane_sources::repaint_bound_panes(&state);
+            // D7: keep every bound pane's content live in the background, with
+            // no agent/tool-call involved.
+            tokio::spawn(nostromo::mcp::pane_sources::run_pane_source_broadcaster(
+                state.clone(),
+                state.perri_queue_rx.clone(),
+                state.perri_pr_rx.clone(),
+            ));
+
             match McpServer::bind(mcp_socket.clone(), state).await {
                 Ok(srv) => {
                     info!(socket = %mcp_socket.display(), "daemon MCP server listening");

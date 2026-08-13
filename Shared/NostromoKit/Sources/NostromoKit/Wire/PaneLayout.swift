@@ -74,7 +74,7 @@ extension PaneTree: Decodable {
 
 /// One item in a `pr_list` pane payload.
 /// Mirrors `PrListItem` from `src/ipc/protocol.rs`.
-public struct PrListItemModel: Decodable, Identifiable {
+public struct PrListItemModel: Decodable, Identifiable, Equatable {
     /// Stable identity: `"owner/name#number"` — matching `PrQueueItem.id`.
     public var id: String { "\(repo)#\(number)" }
     public let repo:        String
@@ -148,8 +148,9 @@ public struct PrListItemModel: Decodable, Identifiable {
 
 // MARK: - PaneContentWire
 
-/// Content pushed to a pane via `set_pane_content`. Not Equatable because
-/// the `jsonSnapshot` and `unknown` cases carry `Any`.
+/// Content pushed to a pane via `set_pane_content`. `Equatable` is implemented
+/// by hand below (the `jsonSnapshot`/`unknown` cases carry `Any`, so they
+/// can't be synthesized).
 public enum PaneContentWire {
     case text(String)
     case jsonSnapshot(Any)
@@ -191,6 +192,57 @@ extension PaneContentWire: Decodable {
     }
 }
 
+extension PaneContentWire: Equatable {
+    /// `.text`/`.loading`/`.error`/`.prList` compare structurally. `.jsonSnapshot`
+    /// and `.unknown` always compare unequal — even given byte-identical
+    /// payloads — a deliberate conservative choice: report "changed" rather
+    /// than risk a false "unchanged" for a payload kind this client can't
+    /// actually compare (they carry `Any`).
+    public static func == (lhs: PaneContentWire, rhs: PaneContentWire) -> Bool {
+        switch (lhs, rhs) {
+        case (.text(let a), .text(let b)):
+            return a == b
+        case (.loading, .loading):
+            return true
+        case (.error(let a), .error(let b)):
+            return a == b
+        case (.prList(let a), .prList(let b)):
+            return a == b
+        case (.jsonSnapshot, .jsonSnapshot):
+            return false
+        case (.unknown, .unknown):
+            return false
+        default:
+            return false
+        }
+    }
+}
+
+// MARK: - PaneFreshness
+
+/// How trustworthy the content in a `pane_content` push is. Mirrors
+/// `PaneFreshness` in `src/ipc/protocol.rs`. `stale` is the source's own
+/// transient flag and must NOT be rendered — a single missed poll is normal.
+/// `badlyStale` is the daemon's verdict that the source hasn't produced good
+/// data in a while; it is the only flag a client renders.
+public struct PaneFreshness: Decodable, Equatable {
+    public let asOf: Date?
+    public let stale: Bool
+    public let badlyStale: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case asOf = "as_of"
+        case stale
+        case badlyStale = "badly_stale"
+    }
+
+    public init(asOf: Date?, stale: Bool, badlyStale: Bool) {
+        self.asOf = asOf
+        self.stale = stale
+        self.badlyStale = badlyStale
+    }
+}
+
 // MARK: - FocusLayoutModel
 
 /// In-memory model of a focus's layout state, rebuilt entirely from daemon
@@ -199,18 +251,28 @@ public struct FocusLayoutModel {
     public var tree:        PaneTree
     public var focusedPane: String?
     public var paneContent: [String: PaneContentWire]
+    /// Per-pane freshness, keyed by `pane_id`. Absent entry == no freshness
+    /// concept for that pane (e.g. agent-authored content via `set_pane_content`).
+    public var paneFreshness: [String: PaneFreshness]
 
     /// Initial state for a focus whose layout hasn't arrived yet.
     public static let initial = FocusLayoutModel(
         tree:        .replLeaf,
         focusedPane: nil,
-        paneContent: [:]
+        paneContent: [:],
+        paneFreshness: [:]
     )
 
-    public init(tree: PaneTree, focusedPane: String?, paneContent: [String: PaneContentWire]) {
-        self.tree        = tree
-        self.focusedPane = focusedPane
-        self.paneContent = paneContent
+    public init(
+        tree: PaneTree,
+        focusedPane: String?,
+        paneContent: [String: PaneContentWire],
+        paneFreshness: [String: PaneFreshness] = [:]
+    ) {
+        self.tree          = tree
+        self.focusedPane   = focusedPane
+        self.paneContent   = paneContent
+        self.paneFreshness = paneFreshness
     }
 }
 

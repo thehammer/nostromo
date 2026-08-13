@@ -32,9 +32,10 @@ use tokio::sync::{oneshot, watch};
 
 use crate::data::{perri_current_pr, perri_pr::PrSnapshot};
 use crate::event::AppEvent;
-use crate::ipc::protocol::{PaneContentWire, ServerMsg};
+use crate::ipc::protocol::{PaneContentWire, PaneFreshness};
+use crate::mcp::pane_sources::{broadcast_loading_if_first_paint, broadcast_pane_content};
 use crate::mcp::state::DaemonMcpBackend;
-use crate::mcp::tools::apply_layout;
+use crate::mcp::tools::apply_layout::{self, SOURCE_CURRENT_PR, SOURCE_PR_QUEUE};
 use crate::mcp::{command::McpCommand, state::McpSharedState};
 
 const COMMAND_TIMEOUT_SECS: u64 = 5;
@@ -225,6 +226,12 @@ async fn load_pr_daemon(
 
     match highlights {
         Some(text) => {
+            // D4: highlights are agent-authored final content — sever the
+            // diff pane's live binding, or the broadcaster would clobber them
+            // with the plain rendered summary within seconds.
+            if let Some(t) = tag.as_deref() {
+                daemon.pane_registry.lock().unwrap().unbind_source(t, "diff");
+            }
             // D3: highlights are the pane's final content — no fetch, no wait.
             push_pane_content(
                 daemon,
@@ -233,15 +240,26 @@ async fn load_pr_daemon(
                 PaneContentWire::Text {
                     text: text.to_string(),
                 },
+                None,
                 &mut warnings,
             );
         }
         None => {
+            // D4: no highlights — diff renders straight from
+            // perri.get_current_pr, so keep (or re-establish) that binding.
+            if let Some(t) = tag.as_deref() {
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .bind_source(t, "diff", SOURCE_CURRENT_PR);
+            }
             push_pane_content(
                 daemon,
                 tag.as_deref(),
                 "diff",
                 PaneContentWire::Loading,
+                None,
                 &mut warnings,
             );
 
@@ -251,9 +269,17 @@ async fn load_pr_daemon(
                     .await;
 
             if matched {
-                match apply_layout::fetch("perri.get_current_pr", state, None) {
+                match apply_layout::fetch(SOURCE_CURRENT_PR, state, None) {
                     Ok(content) => {
-                        push_pane_content(daemon, tag.as_deref(), "diff", content, &mut warnings)
+                        let fr = apply_layout::freshness(SOURCE_CURRENT_PR, state);
+                        push_pane_content(
+                            daemon,
+                            tag.as_deref(),
+                            "diff",
+                            content,
+                            Some(fr),
+                            &mut warnings,
+                        )
                     }
                     Err(e) => {
                         warnings.push(json!({ "pane_id": "diff", "error": e.code() }));
@@ -267,6 +293,7 @@ async fn load_pr_daemon(
                                     e.code()
                                 ),
                             },
+                            None,
                             &mut warnings,
                         );
                     }
@@ -280,6 +307,7 @@ async fn load_pr_daemon(
                     PaneContentWire::Text {
                         text: format!("Fetching {repo}#{number}\u{2026} (still loading)"),
                     },
+                    None,
                     &mut warnings,
                 );
             }
@@ -343,6 +371,17 @@ async fn clear_current_pr_daemon(
     let tag = apply_layout::target_tag(args, pty_id).map(|s| s.to_string());
     let mut warnings = Vec::new();
 
+    // D4: both panes bind (not unbind) to their live sources — the diff
+    // placeholder is that source's own empty state (the same string
+    // `fetch(SOURCE_CURRENT_PR, ..)` returns for a null snapshot), so diff
+    // should go live again the instant a PR loads; the queue refetch is
+    // exactly what apply_layout would have bound it to.
+    if let Some(t) = tag.as_deref() {
+        let mut reg = daemon.pane_registry.lock().unwrap();
+        reg.bind_source(t, "diff", SOURCE_CURRENT_PR);
+        reg.bind_source(t, "queue", SOURCE_PR_QUEUE);
+    }
+
     push_pane_content(
         daemon,
         tag.as_deref(),
@@ -350,6 +389,7 @@ async fn clear_current_pr_daemon(
         PaneContentWire::Text {
             text: apply_layout::NO_PR_LOADED_PLACEHOLDER.to_string(),
         },
+        None,
         &mut warnings,
     );
 
@@ -358,10 +398,21 @@ async fn clear_current_pr_daemon(
         tag.as_deref(),
         "queue",
         PaneContentWire::Loading,
+        None,
         &mut warnings,
     );
-    match apply_layout::fetch("perri.list_pr_queue", state, None) {
-        Ok(content) => push_pane_content(daemon, tag.as_deref(), "queue", content, &mut warnings),
+    match apply_layout::fetch(SOURCE_PR_QUEUE, state, None) {
+        Ok(content) => {
+            let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state);
+            push_pane_content(
+                daemon,
+                tag.as_deref(),
+                "queue",
+                content,
+                Some(fr),
+                &mut warnings,
+            )
+        }
         Err(e) => {
             warnings.push(json!({ "pane_id": "queue", "error": e.code() }));
             push_pane_content(
@@ -374,6 +425,7 @@ async fn clear_current_pr_daemon(
                         e.code()
                     ),
                 },
+                None,
                 &mut warnings,
             );
         }
@@ -392,11 +444,17 @@ async fn clear_current_pr_daemon(
 /// registry actually has that pane registered for `tag` (D7). A resolved tag
 /// with no such pane, or no tag at all, degrades to a `warnings` entry
 /// instead of failing the call or broadcasting to a pane that doesn't exist.
+///
+/// Delegates the actual send to the D5 choke point: a `Loading` push goes
+/// through [`broadcast_loading_if_first_paint`] (so a pane that's already
+/// showing content never sees a spinner), everything else goes through
+/// [`broadcast_pane_content`] with the given `freshness`.
 fn push_pane_content(
     daemon: &DaemonMcpBackend,
     tag: Option<&str>,
     pane_id: &str,
     content: PaneContentWire,
+    freshness: Option<PaneFreshness>,
     warnings: &mut Vec<Value>,
 ) {
     let Some(tag) = tag else {
@@ -415,11 +473,11 @@ fn push_pane_content(
         .any(|p| p == pane_id);
 
     if known {
-        let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
-            tag: tag.to_string(),
-            pane_id: pane_id.to_string(),
-            content,
-        });
+        if matches!(content, PaneContentWire::Loading) {
+            broadcast_loading_if_first_paint(daemon, tag, pane_id);
+        } else {
+            broadcast_pane_content(daemon, tag, pane_id, content, freshness);
+        }
     } else if !warnings
         .iter()
         .any(|w| w.get("pane_id").and_then(|v| v.as_str()) == Some(pane_id))
@@ -475,6 +533,7 @@ mod tests {
     use crate::data::perri_pr::PrSnapshot;
     use crate::data::perri_queue::PrQueueSnapshot;
     use crate::ipc::pane_registry::PaneRegistry;
+    use crate::ipc::protocol::ServerMsg;
     use crate::ipc::SessionManager;
     use crate::mcp::{DaemonMcpBackend, PerriDaemonState};
     use std::sync::atomic::AtomicUsize;
@@ -620,10 +679,9 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
 
-        let (pane_id, content) = recv_pane_content(&mut bcast).await;
-        assert_eq!(pane_id, "diff");
-        assert!(matches!(content, PaneContentWire::Loading));
-
+        // make_daemon_state() already painted "diff" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here — the
+        // pane goes straight to its final content.
         let (pane_id, content) = recv_pane_content(&mut bcast).await;
         assert_eq!(pane_id, "diff");
         match content {
@@ -657,8 +715,8 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
 
-        let (_pane_id, content) = recv_pane_content(&mut bcast).await; // Loading
-        assert!(matches!(content, PaneContentWire::Loading));
+        // make_daemon_state() already painted "diff" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here.
         let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
         match content {
             PaneContentWire::Text { text } => assert!(text.contains("Add widget")),
@@ -676,8 +734,9 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["pending"], true);
 
-        let (_pane_id, content) = recv_pane_content(&mut bcast).await; // Loading
-        assert!(matches!(content, PaneContentWire::Loading));
+        // make_daemon_state() already painted "diff" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here — the
+        // pane goes straight to the "still loading" placeholder text.
         let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
         match content {
             PaneContentWire::Text { text } => assert!(text.contains("acme/web#99")),
@@ -781,7 +840,8 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        let _ = recv_pane_content(&mut bcast).await; // Loading
+        // make_daemon_state() already painted "diff" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here.
         let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
         match content {
             PaneContentWire::Text { text } => assert_eq!(text, expected),
@@ -841,6 +901,53 @@ mod tests {
         );
     }
 
+    // ── load_pr / diff binding ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn load_pr_with_highlights_severs_the_diff_pane_s_live_binding() {
+        let (state, _tmp, _bcast) = make_daemon_state().await;
+        // make_daemon_state() applies "perri-standard", which binds "diff" to
+        // perri.get_current_pr — confirm the starting point before mutating.
+        if let Some(daemon) = &state.daemon {
+            assert_eq!(
+                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                Some("perri.get_current_pr")
+            );
+        }
+
+        let args = json!({ "number": 42, "repo": "acme/web", "highlights": "check auth" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+        assert_eq!(result["ok"], true);
+
+        if let Some(daemon) = &state.daemon {
+            assert_eq!(
+                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                None,
+                "agent-authored highlights are final content — the diff pane must no \
+                 longer be considered live, or the broadcaster would clobber them on \
+                 the next queue/PR change"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn load_pr_without_highlights_keeps_diff_bound_to_its_live_source() {
+        let (state, _tmp, _bcast) = make_daemon_state().await;
+
+        let args = json!({ "number": 42, "repo": "acme/web" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+        assert_eq!(result["ok"], true);
+
+        if let Some(daemon) = &state.daemon {
+            assert_eq!(
+                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                Some("perri.get_current_pr"),
+                "no-highlights load_pr must keep (or re-establish) the diff pane's \
+                 live binding, since its rendered content came from that source"
+            );
+        }
+    }
+
     // ── clear_current_pr ─────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -864,13 +971,34 @@ mod tests {
             other => panic!("expected Text, got {other:?}"),
         }
 
-        let (pane_id, content) = recv_pane_content(&mut bcast).await;
-        assert_eq!(pane_id, "queue");
-        assert!(matches!(content, PaneContentWire::Loading));
-
+        // make_daemon_state() already painted "queue" via the perri-standard
+        // apply_layout call, so D5 suppresses the Loading push here — the
+        // pane goes straight to the refetched list.
         let (pane_id, content) = recv_pane_content(&mut bcast).await;
         assert_eq!(pane_id, "queue");
         assert!(matches!(content, PaneContentWire::PrList { .. }));
+    }
+
+    #[tokio::test]
+    async fn clear_current_pr_leaves_diff_and_queue_bound_to_their_live_sources() {
+        let (state, _tmp, _bcast) = make_daemon_state().await;
+
+        let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
+        assert_eq!(result["ok"], true);
+
+        if let Some(daemon) = &state.daemon {
+            let reg = daemon.pane_registry.lock().unwrap();
+            assert_eq!(
+                reg.source_for("perri", "diff"),
+                Some("perri.get_current_pr"),
+                "clearing the current PR must leave diff ready to go live again \
+                 the moment a PR is loaded"
+            );
+            assert_eq!(
+                reg.source_for("perri", "queue"),
+                Some("perri.list_pr_queue")
+            );
+        }
     }
 
     #[tokio::test]

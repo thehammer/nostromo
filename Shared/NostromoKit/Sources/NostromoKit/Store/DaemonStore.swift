@@ -254,9 +254,17 @@ public final class DaemonStore: ObservableObject {
             model.focusedPane = focusedPane
             focusLayouts[tag] = model
 
-        case .paneContent(let tag, let paneId, let content):
+        case .paneContent(let tag, let paneId, let content, let freshness):
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
+            // A `.loading` update must never clobber content the operator is
+            // already looking at — render it only on first paint (no prior
+            // content for this pane, or the prior content was itself `.loading`).
+            let existing = model.paneContent[paneId]
+            if content == .loading, let existing, existing != .loading {
+                return
+            }
             model.paneContent[paneId] = content
+            model.paneFreshness[paneId] = freshness
             focusLayouts[tag] = model
 
         case .focusCreated(let meta):

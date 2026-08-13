@@ -270,6 +270,30 @@ Source: `src/mcp/tools/teri.rs`
 
 ## Phase 3 — Pane mutations and cross-view dispatch
 
+### Live pane-source bindings (live-pane-sources)
+
+The daemon records, per `(view_id, pane_id)`, which server-side `source` (if
+any) currently feeds that pane's content. A **bound** pane is kept live in the
+background by the daemon — no agent/tool-call involved — whenever the
+underlying data changes (see `docs/mcp/panes.md` for the full lifecycle and
+the wire-level `freshness` field). The rule of thumb: **a push that came from
+fetching `source` binds the pane; a push of content the agent wrote by hand
+unbinds it.**
+
+| Tool | Effect on bindings |
+|------|--------------------|
+| `nostromo.apply_layout` | Binds every pane whose schema entry declares a `source`. Never binds `repl`. |
+| `nostromo.refresh_pane_content` | Binds `pane_id` to `source` (same as `apply_layout`) — a pane not yet in the tree is silently not bound. |
+| `nostromo.set_pane_content` | **Unbinds** the pane — agent-authored content is authoritative from here on, or the next automatic push would silently overwrite it. |
+| `perri.load_pr` **with** `highlights` | Unbinds `diff` — highlights are final content. |
+| `perri.load_pr` **without** `highlights` | Binds `diff` to `perri.get_current_pr`. |
+| `perri.clear_current_pr` | Binds both `diff` (to `perri.get_current_pr` — its own empty state) and `queue` (to `perri.list_pr_queue`). |
+
+Bindings persist across a daemon restart; a restarted daemon repaints every
+bound pane immediately, with no tool call.
+
+---
+
 ### `nostromo.set_pane_content`
 
 Set the content of a named pane within a view.
@@ -368,8 +392,10 @@ Load a pull request into Perri's diff pane. Two hosts, different behavior:
   refresh channel, and pushes the resolved focus's `diff` pane itself:
   - `highlights` given → that text is pushed as the pane's final content —
     it is never overwritten by a server-rendered summary.
-  - `highlights` omitted → pushes `Loading`, then waits (bounded by a
-    per-daemon settle timeout, default 12s) for the refetched snapshot to
+  - `highlights` omitted → pushes `Loading` (first paint only — suppressed if
+    `diff` already has content, per the live-pane-sources `Loading` rule
+    above), then waits (bounded by a per-daemon settle timeout, default 12s)
+    for the refetched snapshot to
     match `(repo, number)`, then pushes the same `Text` summary
     `nostromo.apply_layout`/`nostromo.refresh_pane_content` would render for
     `perri.get_current_pr`. If the wait times out, pushes a
@@ -415,8 +441,9 @@ Clear the currently-loaded PR from Perri's diff pane.
 - **Daemon**: removes `current-pr.json` (a no-op, not an error, if it's
   already absent), touches both `current-pr.dirty` and `queue.dirty`,
   signals both native sources' refresh channels, pushes `"No PR loaded."`
-  to the `diff` pane, and pushes `Loading` then the current PR-queue list to
-  the `queue` pane (via the same fetcher `nostromo.apply_layout` uses).
+  to the `diff` pane, and pushes `Loading` (first paint only — same
+  suppression rule) then the current PR-queue list to the `queue` pane (via
+  the same fetcher `nostromo.apply_layout` uses).
 - **Standalone TUI**: removes the file/touches the sentinel via `PerriView`
   only — no pane pushes.
 

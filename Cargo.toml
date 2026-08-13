@@ -96,6 +96,10 @@ unicode-width = "0.1"
 insta = { version = "1", features = ["yaml"] }
 wiremock = "0.6"
 tempfile = "3"
+# Enables tokio::time::{pause, advance} for deterministic staleness-tick tests
+# (pane_source_liveness / pane_sources staleness tests). Unified with the main
+# `tokio` dependency's feature set at build time (single-crate, not a workspace).
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 opt-level = 3

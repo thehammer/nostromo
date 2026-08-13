@@ -7,6 +7,10 @@
 //   - Unknown future kinds do NOT throw (forward-compatibility contract).
 //   - PrListItemModel.toRowModel() maps fields to the expected row model shape.
 //   - Existing text and json_snapshot kinds still decode without regression.
+//   - PrListItemModel/PaneContentWire Equatable conformance, including the
+//     deliberately-conservative "always changed" rule for .jsonSnapshot/.unknown.
+//   - PaneFreshness decodes as_of/stale/badly_stale, and the pane_content
+//     ServerMsg decodes whether or not a "freshness" key is present on the wire.
 
 import XCTest
 @testable import NostromoKit
@@ -177,5 +181,241 @@ final class PaneContentWireTests: XCTestCase {
                 return
             }
         }
+    }
+
+    // MARK: - PrListItemModel.Equatable
+
+    private func makeItem(
+        repo:        String  = "acme/web",
+        number:      Int     = 42,
+        title:       String  = "feat: auth",
+        author:      String  = "alice",
+        bucket:      String  = "requested",
+        ciState:     CiState = .success,
+        newActivity: Bool    = true,
+        url:         String  = "https://github.com/acme/web/pull/42",
+        headSha:     String  = "abc123"
+    ) -> PrListItemModel {
+        PrListItemModel(
+            repo: repo, number: number, title: title, author: author,
+            bucket: bucket, ciState: ciState, newActivity: newActivity,
+            url: url, headSha: headSha
+        )
+    }
+
+    func testPrListItemModelsWithIdenticalFieldsAreEqual() {
+        XCTAssertEqual(makeItem(), makeItem())
+    }
+
+    func testPrListItemModelsDifferingByRepoAreNotEqual() {
+        XCTAssertNotEqual(makeItem(), makeItem(repo: "acme/other"))
+    }
+
+    func testPrListItemModelsDifferingByNumberAreNotEqual() {
+        XCTAssertNotEqual(makeItem(), makeItem(number: 43))
+    }
+
+    func testPrListItemModelsDifferingByTitleAreNotEqual() {
+        XCTAssertNotEqual(makeItem(), makeItem(title: "fix: bug"))
+    }
+
+    func testPrListItemModelsDifferingByAuthorAreNotEqual() {
+        XCTAssertNotEqual(makeItem(), makeItem(author: "bob"))
+    }
+
+    func testPrListItemModelsDifferingByBucketAreNotEqual() {
+        XCTAssertNotEqual(makeItem(), makeItem(bucket: "needs_review"))
+    }
+
+    func testPrListItemModelsDifferingByCiStateAreNotEqual() {
+        XCTAssertNotEqual(makeItem(), makeItem(ciState: .failure))
+    }
+
+    func testPrListItemModelsDifferingByNewActivityAreNotEqual() {
+        XCTAssertNotEqual(makeItem(), makeItem(newActivity: false))
+    }
+
+    func testPrListItemModelsDifferingByUrlAreNotEqual() {
+        XCTAssertNotEqual(makeItem(), makeItem(url: "https://github.com/acme/web/pull/99"))
+    }
+
+    func testPrListItemModelsDifferingByHeadShaAreNotEqual() {
+        XCTAssertNotEqual(makeItem(), makeItem(headSha: "def456"))
+    }
+
+    // MARK: - PaneContentWire.Equatable — .text / .loading / .error
+
+    func testTextCasesWithSameStringAreEqual() {
+        XCTAssertEqual(PaneContentWire.text("hello"), PaneContentWire.text("hello"))
+    }
+
+    func testTextCasesWithDifferentStringsAreNotEqual() {
+        XCTAssertNotEqual(PaneContentWire.text("hello"), PaneContentWire.text("goodbye"))
+    }
+
+    func testLoadingCasesAreAlwaysEqual() {
+        XCTAssertEqual(PaneContentWire.loading, PaneContentWire.loading)
+    }
+
+    func testErrorCasesWithSameMessageAreEqual() {
+        XCTAssertEqual(PaneContentWire.error("boom"), PaneContentWire.error("boom"))
+    }
+
+    func testErrorCasesWithDifferentMessagesAreNotEqual() {
+        XCTAssertNotEqual(PaneContentWire.error("boom"), PaneContentWire.error("kaboom"))
+    }
+
+    // MARK: - PaneContentWire.Equatable — .prList
+
+    func testPrListCasesWithIdenticalItemArraysAreEqual() {
+        let lhs = PaneContentWire.prList([makeItem()])
+        let rhs = PaneContentWire.prList([makeItem()])
+        XCTAssertEqual(lhs, rhs)
+    }
+
+    func testPrListCasesWithADifferingItemAreNotEqual() {
+        let lhs = PaneContentWire.prList([makeItem()])
+        let rhs = PaneContentWire.prList([makeItem(title: "fix: something else")])
+        XCTAssertNotEqual(lhs, rhs)
+    }
+
+    func testPrListCasesWithDifferentCountsAreNotEqual() {
+        let lhs = PaneContentWire.prList([makeItem()])
+        let rhs = PaneContentWire.prList([makeItem(), makeItem(number: 43)])
+        XCTAssertNotEqual(lhs, rhs)
+    }
+
+    // MARK: - PaneContentWire.Equatable — .jsonSnapshot / .unknown (conservative "always changed")
+
+    func testJsonSnapshotCasesWithIdenticalPayloadsAreNeverEqual() throws {
+        let json = """
+        {"kind": "json_snapshot", "value": {"x": 1}}
+        """
+        let lhs = try decode(json)
+        let rhs = try decode(json)
+        XCTAssertNotEqual(
+            lhs, rhs,
+            ".jsonSnapshot must compare unequal to any other value, even with an identical payload — " +
+            "this is a deliberate conservative choice (report 'changed' rather than risk a false 'unchanged')"
+        )
+    }
+
+    func testUnknownCasesWithIdenticalPayloadsAreNeverEqual() throws {
+        let json = """
+        {"kind": "future_type_not_yet_known", "some_field": "some_value"}
+        """
+        let lhs = try decode(json)
+        let rhs = try decode(json)
+        XCTAssertNotEqual(
+            lhs, rhs,
+            ".unknown must compare unequal to any other value, even with an identical payload — " +
+            "this is a deliberate conservative choice (report 'changed' rather than risk a false 'unchanged')"
+        )
+    }
+
+    // MARK: - PaneContentWire.Equatable — cross-case
+
+    func testDifferentCasesAreNeverEqual() {
+        XCTAssertNotEqual(PaneContentWire.text("hello"), PaneContentWire.loading)
+        XCTAssertNotEqual(PaneContentWire.error("boom"), PaneContentWire.text("boom"))
+        XCTAssertNotEqual(PaneContentWire.prList([makeItem()]), PaneContentWire.loading)
+    }
+
+    // MARK: - PaneFreshness decoding
+
+    func testPaneFreshnessDecodesAsOfAsDateAndSurvivesBoolLiterals() throws {
+        let json = """
+        {
+            "as_of": "2026-05-30T09:30:56.510874Z",
+            "stale": true,
+            "badly_stale": false
+        }
+        """.data(using: .utf8)!
+
+        let freshness = try JSONDecoder.nostromo.decode(PaneFreshness.self, from: json)
+
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expected = try XCTUnwrap(fmt.date(from: "2026-05-30T09:30:56.510874Z"))
+
+        XCTAssertEqual(freshness.asOf, expected)
+        XCTAssertTrue(freshness.stale)
+        XCTAssertFalse(freshness.badlyStale)
+    }
+
+    func testPaneFreshnessDecodesWithoutAsOfKey() throws {
+        let json = """
+        {
+            "stale": false,
+            "badly_stale": true
+        }
+        """.data(using: .utf8)!
+
+        let freshness = try JSONDecoder.nostromo.decode(PaneFreshness.self, from: json)
+        XCTAssertNil(freshness.asOf)
+        XCTAssertFalse(freshness.stale)
+        XCTAssertTrue(freshness.badlyStale)
+    }
+
+    // MARK: - ServerMsg pane_content decoding of freshness
+
+    func testServerMsgPaneContentDecodesFreshnessWhenPresent() throws {
+        let json = """
+        {
+            "type": "pane_content",
+            "tag": "focus1",
+            "pane_id": "pane1",
+            "content": {"kind": "text", "text": "hello"},
+            "freshness": {
+                "as_of": "2026-05-30T09:30:56.510874Z",
+                "stale": false,
+                "badly_stale": false
+            }
+        }
+        """.data(using: .utf8)!
+
+        let msg = ServerMsg.decode(from: json)
+        guard case .paneContent(_, _, _, let freshness) = msg else {
+            XCTFail("Expected .paneContent, got \(msg)")
+            return
+        }
+
+        let f = try XCTUnwrap(freshness, "freshness should decode when the key is present on the wire")
+
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expected = try XCTUnwrap(fmt.date(from: "2026-05-30T09:30:56.510874Z"))
+
+        XCTAssertEqual(f.asOf, expected)
+        XCTAssertFalse(f.stale)
+        XCTAssertFalse(f.badlyStale)
+    }
+
+    func testServerMsgPaneContentDecodesSuccessfullyWithoutFreshnessKey() throws {
+        // Old-daemon compatibility: a pane_content frame with no "freshness"
+        // key at all must still decode successfully, with freshness == nil.
+        let json = """
+        {
+            "type": "pane_content",
+            "tag": "focus1",
+            "pane_id": "pane1",
+            "content": {"kind": "text", "text": "hello"}
+        }
+        """.data(using: .utf8)!
+
+        let msg = ServerMsg.decode(from: json)
+        guard case .paneContent(let tag, let paneId, let content, let freshness) = msg else {
+            XCTFail("Expected .paneContent, got \(msg)")
+            return
+        }
+
+        XCTAssertEqual(tag, "focus1")
+        XCTAssertEqual(paneId, "pane1")
+        guard case .text(let value) = content else {
+            XCTFail("Expected .text content, got \(content)")
+            return
+        }
+        XCTAssertEqual(value, "hello")
+        XCTAssertNil(freshness, "freshness must be nil when the key is absent, not a decode failure")
     }
 }

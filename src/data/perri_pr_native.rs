@@ -322,6 +322,7 @@ impl PerriPrNativeSource {
             diff_too_large,
             stale: false,
             error: None,
+            generated_at: Some(chrono::Utc::now()),
             ci_checks,
             additions,
             deletions,
