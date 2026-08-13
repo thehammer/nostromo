@@ -42,8 +42,15 @@ fi
 echo "==> building Release"
 make -C "$REPO_ROOT" mac-release >/dev/null || { echo "mac-release failed"; exit 1; }
 
-mkdir -p "$(dirname "$DIAG")"
-: > "$DIAG"
+# f6: check the truncation. This script runs under `set -uo pipefail` with no
+# `-e`, so an unchecked failure here does not stop the run — it silently leaves
+# the *previous* run's diagnostics in place and the report then grades that file
+# as this run's evidence. Worse, the wait loop below reads $DIAG to decide when
+# the run is done, so a stale file already at $TURNS breaks the loop instantly
+# and "measures" the previous run in full. Same stale-evidence hazard $SAMPLE_OUT
+# is guarded against further down.
+mkdir -p "$(dirname "$DIAG")" || { echo "cannot create $(dirname "$DIAG")"; exit 1; }
+: > "$DIAG" || { echo "cannot truncate $DIAG"; exit 1; }
 
 echo "==> launching: turns=$TURNS focuses=$FOCUSES reconnects=$RECONNECTS"
 NOSTROMO_LOAD_HARNESS=1 \

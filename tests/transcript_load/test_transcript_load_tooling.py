@@ -229,6 +229,20 @@ class PsTimeSecondsAwkTests(unittest.TestCase):
 # Part B: transcript-load-report.py evaluate()
 # --------------------------------------------------------------------------
 
+# f13: a sample file is only evidence if it looks like `sample(1)` output.
+# macOS `sample` always writes a "Call graph:" section, so its absence means
+# the sample failed and the file is not a measurement. Fixtures that stand in
+# for a healthy run must therefore look like a real sample, not be empty.
+GOOD_SAMPLE = """\
+Analysis of sampling Nostromo (pid 123) every 1 millisecond
+
+Call graph:
+    2669 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)
+      2669 start_wqthread + 8
+
+Binary Images:
+"""
+
 
 class ModuleConstantsTests(unittest.TestCase):
     def test_materialized_limit_matches_turn_list_virtualizer_max_materialized(self):
@@ -243,7 +257,7 @@ class EvaluateKnownGoodRunTests(unittest.TestCase):
 
     def test_every_criterion_passes_on_a_well_behaved_run(self):
         rows = make_rows()
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
 
         criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
@@ -273,7 +287,7 @@ class EvaluateKnownGoodRunTests(unittest.TestCase):
 
     def test_criterion_is_the_documented_namedtuple_shape(self):
         rows = make_rows()
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
         criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
         first = criteria[0]
@@ -295,7 +309,7 @@ class EvaluateMaterializedViewLimitTests(unittest.TestCase):
 
     def test_inflated_reported_limit_does_not_rescue_a_peak_above_the_hardcoded_limit(self):
         rows = make_rows(max_materialized_per_pane=500, peak_materialized=300)
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
 
         criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
@@ -316,13 +330,41 @@ class EvaluateNoPanesTests(unittest.TestCase):
 
     def test_run_with_no_panes_fails_the_materialized_view_criterion(self):
         rows = make_rows(include_panes=False)
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
 
         criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
 
         peak_row = find_row(criteria, "materializedViews peak")
         self.assertFalse(peak_row.ok)
+
+    def test_run_with_no_panes_fails_hot_payload_window_bounded(self):
+        # f2: hot payload window bounded used `max(..., default=0)`, so a
+        # run with zero panes measured 0 <= 210 and PASSed. Absence of a
+        # measurement is not evidence the window is bounded.
+        rows = make_rows(include_panes=False)
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "hot payload window bounded")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "no panes reported — nothing was measured")
+
+    def test_run_with_no_panes_fails_retained_turns_monotonic(self):
+        # f3: retained turns monotonic tracked worst_drop starting at 0 and
+        # never observed a pane, so a run that measured nothing PASSed with
+        # "largest drop: 0 turns". No pane observed is not "never dropped".
+        rows = make_rows(include_panes=False)
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "retained turns monotonic")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "no panes reported — nothing was measured")
 
 
 class EvaluateTurn100RowAlwaysPresentTests(unittest.TestCase):
@@ -334,7 +376,7 @@ class EvaluateTurn100RowAlwaysPresentTests(unittest.TestCase):
 
     def test_run_that_never_reaches_turn_100_still_emits_a_failing_row(self):
         rows = make_rows(total_turns=50, n_samples=6)
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
 
         criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
@@ -352,7 +394,7 @@ class EvaluateIdleCpuUnmeasuredTests(unittest.TestCase):
 
     def test_unmeasured_cpu_yields_a_failing_row_not_an_absent_one(self):
         rows = make_rows()
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
 
         criteria = report.evaluate(rows, turns=5000, cpu_percent=None, sample_path=sample_path)
@@ -392,11 +434,15 @@ class EvaluateSampleDetectsIncidentSignatureTests(unittest.TestCase):
     """
 
     def test_sample_containing_signature_frames_fails(self):
+        # The fixture must contain a real "Call graph" section (per f13) —
+        # otherwise this would fail for having no call graph, not for
+        # carrying the incident's own signature, and would silently stop
+        # testing what it claims to test.
         cases = ["CoreAutoLayout", "NSISEngine"]
         for token in cases:
             with self.subTest(token=token):
                 rows = make_rows()
-                sample_path = write_text_file(f"0x1234 {token} + 12\n" * 3)
+                sample_path = write_text_file(GOOD_SAMPLE + f"0x1234 {token} + 12\n" * 3)
                 self.addCleanup(os.remove, sample_path)
 
                 criteria = report.evaluate(
@@ -404,6 +450,7 @@ class EvaluateSampleDetectsIncidentSignatureTests(unittest.TestCase):
                 )
                 row = find_row(criteria, "CoreAutoLayout")
                 self.assertFalse(row.ok)
+                self.assertIn("3 frames", row.measured)
 
 
 class EvaluateHarnessTargetingTests(unittest.TestCase):
@@ -414,7 +461,7 @@ class EvaluateHarnessTargetingTests(unittest.TestCase):
 
     def test_field_absent_fails(self):
         rows = make_rows(include_harness_fields=False)
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
         criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
         row = find_row(criteria, "harnessTargetedPanes")
@@ -422,7 +469,7 @@ class EvaluateHarnessTargetingTests(unittest.TestCase):
 
     def test_zero_targeted_panes_fails(self):
         rows = make_rows(harness_targeted_panes=0, harness_requested_focuses=8)
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
         criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
         row = find_row(criteria, "harnessTargetedPanes")
@@ -430,7 +477,7 @@ class EvaluateHarnessTargetingTests(unittest.TestCase):
 
     def test_targeted_panes_below_requested_focuses_fails(self):
         rows = make_rows(harness_targeted_panes=1, harness_requested_focuses=8)
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
         criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
         row = find_row(criteria, "harnessTargetedPanes")
@@ -438,11 +485,239 @@ class EvaluateHarnessTargetingTests(unittest.TestCase):
 
     def test_targeted_panes_equal_requested_focuses_passes(self):
         rows = make_rows(harness_targeted_panes=8, harness_requested_focuses=8)
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
         criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
         row = find_row(criteria, "harnessTargetedPanes")
         self.assertTrue(row.ok)
+
+
+class EvaluateSingleSampleTests(unittest.TestCase):
+    """f1/f4/f10: a run that only ever produced one diagnostics sample is
+    the sharpest version of "comparison against yourself always passes" —
+    every two-point comparison (throughput curve, footprint delta between
+    two turn marks, materializedViews at turn 100 vs the last sample)
+    degenerates to comparing a sample to itself. None of these are
+    measurements; all three must fail and say so.
+    """
+
+    def test_single_sample_run_fails_per_delta_cost_flat(self):
+        rows = make_rows(n_samples=1, total_turns=5000)
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "per-delta cost flat in session length")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "insufficient samples")
+
+    def test_single_sample_run_fails_footprint_delta(self):
+        rows = make_rows(n_samples=1, total_turns=5000)
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "footprint delta turn-500")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "only one sample covers both marks")
+
+    def test_single_sample_run_fails_materialized_views_at_turn_100(self):
+        rows = make_rows(n_samples=1, total_turns=5000)
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "materializedViews at turn 100")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "only one sample covers turn 100 and turn 5000")
+
+
+class EvaluateAbortedRunMaterializedViewTests(unittest.TestCase):
+    """f10, distinct from EvaluateSingleSampleTests above: this is the
+    realistic version of the defect, not an exotic edge case. A run that
+    died right after turn 100 — two samples, the second already past 100 —
+    hits the exact same self-comparison bug with no contrived input at all.
+    If this needs a fix separate from the single-sample case, that's the
+    signal the single-sample fix was too narrow.
+    """
+
+    def test_run_that_dies_just_after_turn_100_fails_the_comparison(self):
+        rows = make_rows(n_samples=2, total_turns=400)
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=400, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "materializedViews at turn 100")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "only one sample covers turn 100 and turn 400")
+
+
+class EvaluateViewCapMixedReportingTests(unittest.TestCase):
+    """f11: the view-cap criterion used `max(reported) == MATERIALIZED_LIMIT`,
+    so a run where most samples reported the cap correctly but some reported
+    something else (a mid-run config change, a stale build) PASSed as long as
+    the maximum happened to equal 60. Every sample must agree.
+    """
+
+    def test_disagreeing_reported_caps_fail_and_name_both_values(self):
+        rows = make_rows()
+        for i in range(0, len(rows), 2):
+            rows[i]["maxMaterializedPerPane"] = 30
+
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "documented view cap")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "[30, 60]")
+
+    def test_uniform_reported_cap_still_passes(self):
+        # The fix must not make this row impossible to pass — a genuinely
+        # uniform, correct run still needs to PASS.
+        rows = make_rows()
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "documented view cap")
+        self.assertTrue(row.ok)
+        self.assertEqual(row.measured, "60")
+
+
+class EvaluatePartiallyInstrumentedPanesTests(unittest.TestCase):
+    """f12: "transcript never cleared" was gated on ANY pane anywhere
+    carrying the transcriptClears key, then read every pane lacking it as
+    zero clears via `.get(..., 0)`. A run where one pane is instrumented and
+    another silently is not therefore PASSed on the strength of the
+    instrumented pane alone, while the uninstrumented pane's clears (if any)
+    were invisible. Every pane in every sample must report the key.
+    """
+
+    def test_some_panes_missing_the_key_fails_and_counts_them(self):
+        rows = make_rows()
+        for row in rows:
+            row["panes"].append({
+                "tag": "b", "retainedTurns": 10, "materializedViews": 42,
+                "hotPayloadTurns": 200, "compressedPayloadBytes": 0,
+                "estimatedDocHeight": 1000.0,
+            })
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "transcript never cleared")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "26 pane samples did not report transcriptClears")
+
+    def test_no_pane_anywhere_instrumented_still_fails_as_not_instrumented(self):
+        rows = make_rows(include_transcript_clears=False)
+        sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "transcript never cleared")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "not instrumented in this run")
+
+
+class EvaluateSampleFileMustContainCallGraphTests(unittest.TestCase):
+    """f13: the existence of a sample file is not evidence of a
+    measurement. `sample` can write an empty or truncated file (permissions,
+    a killed process, a too-short duration) with no "Call graph:" section at
+    all, and the old code counted 0 signature-frame hits in that file as a
+    clean PASS. A file is only a measurement if it actually contains a call
+    graph.
+    """
+
+    def test_empty_sample_file_fails_as_unmeasured_not_as_a_clean_pass(self):
+        rows = make_rows()
+        sample_path = write_text_file("")
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "CoreAutoLayout")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "sample file has no call graph — nothing was measured")
+
+    def test_garbage_sample_file_fails_as_unmeasured_not_as_a_clean_pass(self):
+        rows = make_rows()
+        sample_path = write_text_file("sample: could not attach\n")
+        self.addCleanup(os.remove, sample_path)
+
+        criteria = report.evaluate(rows, turns=5000, cpu_percent=0.04, sample_path=sample_path)
+
+        row = find_row(criteria, "CoreAutoLayout")
+        self.assertFalse(row.ok)
+        self.assertEqual(row.measured, "sample file has no call graph — nothing was measured")
+
+
+class EvaluateRowSetIsFixedTests(unittest.TestCase):
+    """f14, the guard against a fourth review round: every fix above must
+    change whether a row PASSes or FAILs, never whether it exists. evaluate()
+    must return the exact same set of criteria — same names (up to the
+    dynamic turn numbers interpolated into a few of them), same count — no
+    matter what the input looks like. A dropped row and a stray extra row
+    are exactly the two failure modes this whole PR was written to close off
+    permanently; this test parameterizes over inputs designed to surface
+    both.
+    """
+
+    def _assert_row_set_matches(self, criteria, label):
+        missing = []
+        for substring in report.CRITERIA:
+            try:
+                find_row(criteria, substring)
+            except AssertionError:
+                missing.append(substring)
+        names = [c.name for c in criteria]
+        self.assertEqual(
+            missing, [],
+            f"[{label}] missing criteria for substrings {missing!r}; "
+            f"names present:\n  " + "\n  ".join(names),
+        )
+        self.assertEqual(
+            len(criteria), len(report.CRITERIA),
+            f"[{label}] expected exactly {len(report.CRITERIA)} rows "
+            f"(one per entry in report.CRITERIA), got {len(criteria)}:\n  "
+            + "\n  ".join(names),
+        )
+
+    def test_row_set_is_identical_across_every_kind_of_input(self):
+        good_rows = make_rows()
+        good_sample_path = write_text_file(GOOD_SAMPLE)
+        self.addCleanup(os.remove, good_sample_path)
+
+        fixtures = [
+            ("known-good", make_rows(), dict(turns=5000, cpu_percent=0.04,
+                                              sample_path=good_sample_path)),
+            ("no panes", make_rows(include_panes=False),
+             dict(turns=5000, cpu_percent=0.04, sample_path=good_sample_path)),
+            ("single sample", make_rows(n_samples=1),
+             dict(turns=5000, cpu_percent=0.04, sample_path=good_sample_path)),
+            ("aborted run", make_rows(n_samples=2, total_turns=400),
+             dict(turns=400, cpu_percent=0.04, sample_path=good_sample_path)),
+            ("no harness fields", make_rows(include_harness_fields=False),
+             dict(turns=5000, cpu_percent=0.04, sample_path=good_sample_path)),
+            ("no transcript clears field", make_rows(include_transcript_clears=False),
+             dict(turns=5000, cpu_percent=0.04, sample_path=good_sample_path)),
+            ("cpu_percent is None", good_rows,
+             dict(turns=5000, cpu_percent=None, sample_path=good_sample_path)),
+            ("sample_path is None", good_rows,
+             dict(turns=5000, cpu_percent=0.04, sample_path=None)),
+        ]
+
+        for label, rows, kwargs in fixtures:
+            with self.subTest(label=label):
+                criteria = report.evaluate(rows, **kwargs)
+                self._assert_row_set_matches(criteria, label)
 
 
 class MainExitCodeTests(unittest.TestCase):
@@ -452,14 +727,14 @@ class MainExitCodeTests(unittest.TestCase):
 
     def test_all_passing_run_exits_zero(self):
         rows = make_rows()
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
         exit_code = run_main(rows, ["--cpu-percent", "0.04", "--sample", sample_path])
         self.assertEqual(exit_code, 0)
 
     def test_run_with_any_failure_exits_one(self):
         rows = make_rows(include_panes=False)
-        sample_path = write_text_file("")
+        sample_path = write_text_file(GOOD_SAMPLE)
         self.addCleanup(os.remove, sample_path)
         exit_code = run_main(rows, ["--cpu-percent", "0.04", "--sample", sample_path])
         self.assertEqual(exit_code, 1)

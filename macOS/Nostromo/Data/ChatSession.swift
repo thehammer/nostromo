@@ -443,6 +443,12 @@ class ChatSession: ObservableObject {
         // once, and this is the same one-background-hop pattern
         // `shedRetainedContent()` uses. The store already filters pinned, dropped,
         // in-flight and already-compacted turns, so re-offering one is harmless.
+        //
+        // That last clause was false until f7: `compactBatch` read the in-flight
+        // set but never wrote it, so this sweep — which runs on every
+        // `.turnStarted` — re-encoded and re-compressed turns a prior sweep had
+        // not finished, on the main thread. It is true now, and it is what makes
+        // calling this unconditionally cheap. Do not weaken that registration.
         payloadStore.compactBatch(batch) { [weak self] skeletons in
             guard let self else { return }
             var indexById: [UUID: Int] = [:]

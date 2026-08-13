@@ -637,6 +637,137 @@ final class TurnPayloadStoreTests: XCTestCase {
             XCTAssertFalse(reported.userInput.isEmpty, "never a silently-empty expansion")
         }
     }
+
+    // MARK: - 10. Overlapping compaction sweeps (f7)
+
+    /// Pins the defect where `compactBatch` reads `inFlight` (`!inFlight.contains($0.id)`
+    /// in its candidate filter) but — unlike the older single-turn `compact` —
+    /// never *writes* to it. `blobs[id]` is only populated once the first
+    /// sweep's completion lands on main, so a second sweep issued for the same
+    /// turns before that completion arrives sees an empty `blobs` and an empty
+    /// `inFlight`, computes the exact same candidate set, and redundantly runs
+    /// `encodePayload` synchronously on main plus a second LZFSE pass in the
+    /// background — for turns the first sweep already owns.
+    ///
+    /// This is not a hypothetical race: `ChatSession.compactColdTurns()` calls
+    /// `compactBatch` on every `.turnStarted`, so overlapping sweeps queuing
+    /// before the prior one's completion lands are the common case during an
+    /// active stream, not an edge case.
+    ///
+    /// Both calls below are made synchronously back-to-back on the main
+    /// thread, so the first call's `queue.async` compression cannot possibly
+    /// have completed (and hopped back to main) before the second call's own
+    /// synchronous candidate filter runs — exactly the window the bug lives
+    /// in.
+    func testCompactBatchDoesNotReCompressTurnsAnEarlierSweepAlreadyOwns() {
+        let store = TurnPayloadStore()
+        let turns = (0 ..< 5).map { seq in
+            makeTurn(seq: seq, user: ascii(500), blocks: [.text(ascii(20_000))])
+        }
+
+        var firstIds:  [UUID] = []
+        var secondIds: [UUID] = []
+
+        let firstDone = expectation(description: "first sweep's completion")
+        store.compactBatch(turns) { skeletons in
+            firstIds = skeletons.map(\.id)
+            firstDone.fulfill()
+        }
+
+        // Fired synchronously, immediately after — before the first sweep's
+        // background compression can have run, let alone posted back to main.
+        var secondFired = false
+        store.compactBatch(turns) { skeletons in
+            secondFired = true
+            secondIds = skeletons.map(\.id)
+        }
+
+        wait(for: [firstDone], timeout: 10)
+
+        // The fixed contract may look like either shape: the second sweep's
+        // candidate list already excludes turns the first sweep claimed (so it
+        // never calls its completion at all — `compactBatch` returns early on
+        // an empty candidate list), or it calls back with an empty/disjoint
+        // skeleton array. Either way the *union* delivered across both
+        // completions must contain each turn id exactly once. So this waits
+        // for a settle window rather than requiring the second completion to
+        // fire — an unfulfilled expectation here is not a failure, it is one
+        // of the two valid fixed shapes.
+        let settle = expectation(description: "let any pending second-sweep completion land")
+        settle.isInverted = true
+        wait(for: [settle], timeout: 0.5)
+        _ = secondFired // observed only for debugging; not asserted on directly
+
+        let deliveredIds = firstIds + secondIds
+        let turnIds = turns.map(\.id)
+        XCTAssertEqual(Set(deliveredIds), Set(turnIds),
+                       "every turn offered to compactBatch must eventually be compacted")
+        XCTAssertEqual(deliveredIds.count, turnIds.count,
+                       "f7: a turn still in flight from an earlier sweep must not be re-offered and " +
+                       "re-compressed by a later sweep — got \(deliveredIds.count) skeletons for " +
+                       "\(turnIds.count) turns")
+    }
+
+    // MARK: - 11. Forget racing an in-flight completion (f15)
+
+    /// Pins the defect where de-registering an id does not cancel a
+    /// compression already dispatched for it. `forget(_:)` means "this blob is
+    /// stale, the turn's content was replaced" and clears
+    /// `blobs`/`pinned`/`inFlight`/`dropped` for the id — but a compaction
+    /// dispatched moments earlier is still running on the background queue,
+    /// and its completion's only remaining guard is `!self.dropped.contains(id)`.
+    /// `forget` does not add to `dropped` (that is `drop`'s job), so the guard
+    /// passes and the completion writes `blobs[id] = <blob of the OLD content>`
+    /// under an id that is, by the time the write happens, live again with
+    /// fresh content. A later `hydrate` for that fresh content then
+    /// decompresses the stale blob and resurrects the pre-forget text as if it
+    /// were current — silently stale content, which this file's own comments
+    /// call worse than an outright decode failure.
+    ///
+    /// `forget` is called synchronously, immediately after `compact`, so the
+    /// background compression cannot have completed yet. The settle wait
+    /// below then gives that in-flight compression's main-queue completion a
+    /// window to land — using the same bounded, inverted-expectation idiom
+    /// this file already uses elsewhere to let a background+main hop resolve
+    /// without requiring it to fire (see e.g.
+    /// `testPinningPreventsCompactionAndUnpinningAllowsItAgain`). Whether the
+    /// stale completion still calls back at all is not part of the contract
+    /// pinned here — only that no blob for the old content survives under
+    /// this id afterward.
+    func testForgetBeforeAnInFlightCompletionLandsPreventsTheStaleBlobFromSurvivingUnderTheLiveId() {
+        let store = TurnPayloadStore()
+        let staleText = "STALE-ORIGINAL-" + ascii(4_000)
+        let original = makeTurn(user: ascii(500), blocks: [.text(staleText)])
+
+        store.compact(original) { _ in }
+
+        // Synchronously, before the background compressor for `original` can
+        // possibly have finished and hopped back to main.
+        store.forget(original.id)
+
+        // Give the in-flight compression's completion a bounded window to
+        // land, without requiring it to.
+        let settle = expectation(description: "let the in-flight completion, if any, land")
+        settle.isInverted = true
+        wait(for: [settle], timeout: 0.5)
+
+        // The turn's content has since been replaced — same identity, fresh
+        // text, same block shape — exactly the situation `forget` exists for.
+        let freshText = "FRESH-REPLACEMENT-" + ascii(4_000)
+        var replacement = original
+        replacement.blocks = [.text(freshText)]
+
+        guard let restored = assertFull(store.hydrate(replacement)) else { return }
+        guard case .text(let s)? = restored.blocks.first else {
+            return XCTFail("block shape must survive")
+        }
+        XCTAssertFalse(s.hasPrefix("STALE-ORIGINAL-"),
+                       "f15: a compaction that raced `forget` wrote the pre-forget blob back under " +
+                       "the still-live id, and hydrate resurrected it as the turn's current content")
+        XCTAssertTrue(s.hasPrefix("FRESH-REPLACEMENT-"),
+                     "hydrating the replacement must return the replacement's own content, not a " +
+                     "decode of stale bytes; got prefix \(s.prefix(24))")
+    }
 }
 
 // MARK: - Synthetic corpus

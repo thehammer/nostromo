@@ -13,6 +13,24 @@ import Combine
 ///   3. Accepts the connection in a background thread.
 ///   4. Exchanges pre-canned NDJSON lines with the client.
 ///   5. Observes published events via Combine.
+///
+/// ## f9 — why the unwraps here are `try XCTUnwrap` and the timeouts are 10 s
+///
+/// Three tests below used to read `wait(for:timeout: 3)`, then
+/// `XCTAssertNotNil(x)`, then `x!`. `XCTAssertNotNil` does **not** stop
+/// execution on failure, so a timed-out wait fell straight through to the force
+/// unwrap and trapped — killing the whole xctest process, not the one test.
+/// Observed once in three full-suite runs as `Executed 168 tests, with 0
+/// failures` followed by `** TEST FAILED **`: 31 of 199 tests silently never
+/// ran while the visible line read "0 failures". A suite that can void a sixth
+/// of itself and still print a clean number cannot verify anything.
+///
+/// So: `try XCTUnwrap` (fails the single test cleanly), and every
+/// socket-dependent wait raised from 3 s to 10 s. `wait(for:)` returns the
+/// instant the expectation fulfils, so the higher ceiling costs a passing run
+/// nothing while removing a timeout-under-load flake in the slowest class in
+/// the suite. The two `timeout: 1` waits are self-fulfilling main-queue drains
+/// and are deliberately short — leave them.
 final class MotherBrokerClientTests: XCTestCase {
 
     var client:    MotherBrokerClient!
@@ -105,7 +123,7 @@ final class MotherBrokerClientTests: XCTestCase {
     func performHandshake() {
         // Start client, wait for connection, send hello, consume subscribe
         client.start()
-        let _ = accepted.wait(timeout: .now() + 5)  // server accepted
+        XCTAssertEqual(accepted.wait(timeout: .now() + 5), .success, "test server never accepted the client connection")  // server accepted
         serverWrite(helloJSON)                        // send hello → client sends subscribe
         _ = serverReadLine()                          // discard subscribe command
     }
@@ -134,7 +152,7 @@ final class MotherBrokerClientTests: XCTestCase {
         {"v":1,"dir":"event","t":"snapshot","id":"1","ts":"2026-06-01T00:00:00.000Z","data":{"sub":"queue","jobs":[{"id":"job-millis","state":"running","repo":"carefeed","isolation":"none","title":"Millis job","created_at":"2026-06-01T12:00:00.000Z","started_at":"2026-06-01T12:00:01.000Z","finished_at":null},{"id":"job-basic","state":"queued","repo":"carefeed","isolation":"none","title":"Basic ts job","created_at":"2026-06-01T12:00:00Z","started_at":null,"finished_at":null}]}}
         """)
 
-        wait(for: [snapshotExp], timeout: 3)
+        wait(for: [snapshotExp], timeout: 10)
         XCTAssertEqual(receivedJobs.count, 2)
         let millsJob = receivedJobs.first { $0.id == "job-millis" }
         let basicJob = receivedJobs.first { $0.id == "job-basic"  }
@@ -167,11 +185,11 @@ final class MotherBrokerClientTests: XCTestCase {
         }.store(in: &cancellables)
 
         client.start()
-        let _ = accepted.wait(timeout: .now() + 5)
+        XCTAssertEqual(accepted.wait(timeout: .now() + 5), .success, "test server never accepted the client connection")
         serverWrite(helloJSON)
         _ = serverReadLine()  // discard subscribe
 
-        wait(for: [helloExp], timeout: 3)
+        wait(for: [helloExp], timeout: 10)
 
         if case .hello(let ver, let caps) = helloEvent {
             XCTAssertEqual(ver, 1)
@@ -185,7 +203,7 @@ final class MotherBrokerClientTests: XCTestCase {
         {"v":1,"dir":"event","t":"snapshot","id":"2","ts":"2026-06-01T00:00:00.000Z","data":{"sub":"queue","jobs":[{"id":"abc123","state":"running","repo":"carefeed","isolation":"worktree","title":"Build feature","created_at":"2026-06-01T00:00:00.000Z","started_at":"2026-06-01T00:00:01.000Z","finished_at":null}]}}
         """)
 
-        wait(for: [snapshotExp], timeout: 3)
+        wait(for: [snapshotExp], timeout: 10)
         XCTAssertEqual(snapshotJobs.count, 1)
         XCTAssertEqual(snapshotJobs[0].id,    "abc123")
         XCTAssertEqual(snapshotJobs[0].state, "running")
@@ -208,7 +226,7 @@ final class MotherBrokerClientTests: XCTestCase {
         }.store(in: &cancellables)
 
         client.start()
-        let _ = accepted.wait(timeout: .now() + 5)
+        XCTAssertEqual(accepted.wait(timeout: .now() + 5), .success, "test server never accepted the client connection")
         serverWrite(helloJSON)
         _ = serverReadLine()  // discard subscribe
 
@@ -233,7 +251,7 @@ final class MotherBrokerClientTests: XCTestCase {
         // Now complete the line with part 2 + \n
         serverWrite(snapshotPart2)
 
-        wait(for: [snapshotExp], timeout: 3)
+        wait(for: [snapshotExp], timeout: 10)
         XCTAssertEqual(receivedJobs.count, 1)
         XCTAssertEqual(receivedJobs[0].id, "split-job")
     }
@@ -243,7 +261,7 @@ final class MotherBrokerClientTests: XCTestCase {
     //         Out-of-order: ping arrives before the ack.
     // ──────────────────────────────────────────────────────────────────────────
 
-    func testCommandCorrelation_cancelResolvesOnMatchingAck_withPingInterleave() {
+    func testCommandCorrelation_cancelResolvesOnMatchingAck_withPingInterleave() throws {
         let cancelExp = XCTestExpectation(description: "cancel completion called")
         var cancelResult: Result<Void, BrokerError>?
 
@@ -258,7 +276,7 @@ final class MotherBrokerClientTests: XCTestCase {
         let connExp = XCTestExpectation(description: "connected")
         client.connected.filter { $0 }.first().sink { _ in connExp.fulfill() }
             .store(in: &cancellables)
-        wait(for: [connExp], timeout: 3)
+        wait(for: [connExp], timeout: 10)
 
         // Issue cancel — client sends a cmd with a UUID id
         client.cancel(job: "job-abc") { result in
@@ -287,10 +305,10 @@ final class MotherBrokerClientTests: XCTestCase {
         {"v":1,"dir":"ack","t":"cancel","id":"\(cmdId)","ts":"2026-06-01T00:00:00.000Z","data":{"ok":true,"job":"job-abc"}}
         """)
 
-        wait(for: [cancelExp], timeout: 3)
-        XCTAssertNotNil(cancelResult)
-        if case .success = cancelResult! { /* expected */ } else {
-            XCTFail("expected .success, got \(String(describing: cancelResult))")
+        wait(for: [cancelExp], timeout: 10)
+        let cancel = try XCTUnwrap(cancelResult, "cancel completion never delivered a result")
+        if case .success = cancel { /* expected */ } else {
+            XCTFail("expected .success, got \(cancel)")
         }
     }
 
@@ -298,7 +316,7 @@ final class MotherBrokerClientTests: XCTestCase {
     // TEST 5: Error mapping — failure ack → correct BrokerError case.
     // ──────────────────────────────────────────────────────────────────────────
 
-    func testErrorMapping_noSuchJobAck() {
+    func testErrorMapping_noSuchJobAck() throws {
         let retryExp = XCTestExpectation(description: "retry completion called")
         var retryResult: Result<Void, BrokerError>?
 
@@ -307,7 +325,7 @@ final class MotherBrokerClientTests: XCTestCase {
         let connExp = XCTestExpectation(description: "connected")
         client.connected.filter { $0 }.first().sink { _ in connExp.fulfill() }
             .store(in: &cancellables)
-        wait(for: [connExp], timeout: 3)
+        wait(for: [connExp], timeout: 10)
 
         client.retry(job: "gone-job") { result in
             retryResult = result
@@ -327,9 +345,9 @@ final class MotherBrokerClientTests: XCTestCase {
         {"v":1,"dir":"ack","t":"retry","id":"\(cmdId)","ts":"2026-06-01T00:00:00.000Z","data":{"ok":false,"error":{"code":"no_such_job","message":"job gone-job not found"}}}
         """)
 
-        wait(for: [retryExp], timeout: 3)
-        XCTAssertNotNil(retryResult)
-        if case .failure(let err) = retryResult! {
+        wait(for: [retryExp], timeout: 10)
+        let retry = try XCTUnwrap(retryResult, "retry completion never delivered a result")
+        if case .failure(let err) = retry {
             if case .code(let code, _) = err {
                 XCTAssertEqual(code, .noSuchJob)
             } else {
@@ -344,7 +362,7 @@ final class MotherBrokerClientTests: XCTestCase {
     // TEST 6: State event — stateChange published with correct fold fields.
     // ──────────────────────────────────────────────────────────────────────────
 
-    func testStateEventFold_awaitingInputEvent() {
+    func testStateEventFold_awaitingInputEvent() throws {
         let stateExp = XCTestExpectation(description: "stateChange received")
         var changedEvent: BrokerEvent?
 
@@ -361,9 +379,9 @@ final class MotherBrokerClientTests: XCTestCase {
         {"v":1,"dir":"event","t":"awaiting_input","id":"6","ts":"2026-06-01T00:00:00.000Z","data":{"job":"job-xyz","category":"await","question":"Should I proceed?"}}
         """)
 
-        wait(for: [stateExp], timeout: 3)
-        XCTAssertNotNil(changedEvent)
-        if case .stateChange(let jobId, let kind, let question, _, _) = changedEvent! {
+        wait(for: [stateExp], timeout: 10)
+        let changed = try XCTUnwrap(changedEvent, "no stateChange event was published")
+        if case .stateChange(let jobId, let kind, let question, _, _) = changed {
             XCTAssertEqual(jobId,    "job-xyz")
             XCTAssertEqual(kind,     "awaiting_input")
             XCTAssertEqual(question, "Should I proceed?")
@@ -378,7 +396,7 @@ final class MotherBrokerClientTests: XCTestCase {
 
     func testSubscribe_sentAfterHello() {
         client.start()
-        let _ = accepted.wait(timeout: .now() + 5)
+        XCTAssertEqual(accepted.wait(timeout: .now() + 5), .success, "test server never accepted the client connection")
         serverWrite(helloJSON)
 
         // Read the subscribe command sent by the client

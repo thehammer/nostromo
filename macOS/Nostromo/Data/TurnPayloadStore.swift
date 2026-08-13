@@ -95,12 +95,41 @@ final class TurnPayloadStore {
     /// Turns whose payload was compressed and then dropped — asked for again,
     /// they must report unavailability rather than emptiness.
     private var dropped: Set<UUID> = []
-    /// Turns currently being compressed on `queue`. Without this, two `compact`
-    /// calls for the same turn before the first returns both compress it and
-    /// both fire their completion — the `blobs[id] == nil` guard is evaluated
-    /// synchronously but the blob is written asynchronously.
-    private var inFlight: Set<UUID> = []
+    /// Turns currently being compressed on `queue`, each stamped with the
+    /// dispatch that owns it. Without this, two `compact` calls for the same
+    /// turn before the first returns both compress it and both fire their
+    /// completion — the `blobs[id] == nil` guard is evaluated synchronously but
+    /// the blob is written asynchronously.
+    ///
+    /// A bare `Set` is not enough (f15). `forget`, `drop` and `clear` remove the
+    /// id, but the closure they were racing is already dispatched and would
+    /// still write its now-stale blob under a live id — the
+    /// stale-content-rendered-as-current failure `forget` exists to prevent. A
+    /// completion may only touch `blobs[id]` while its own stamp is still the
+    /// one on record, so a forget-then-recompact sequence cannot be won by the
+    /// older dispatch.
+    private var inFlight: [UUID: Int] = [:]
+    private var nextDispatchStamp = 0
     private let queue = DispatchQueue(label: "com.hammer.nostromo.payload", qos: .utility)
+
+    /// Registers `ids` to a new dispatch and returns its stamp.
+    private func beginCompaction(of ids: [UUID]) -> Int {
+        nextDispatchStamp += 1
+        for id in ids { inFlight[id] = nextDispatchStamp }
+        return nextDispatchStamp
+    }
+
+    /// True while some dispatch owns `id`.
+    private func isInFlight(_ id: UUID) -> Bool { inFlight[id] != nil }
+
+    /// De-registers `id` iff `stamp` still owns it. `false` means this dispatch
+    /// was superseded — by a `forget`, `drop` or `clear`, or by a newer
+    /// compaction of the same turn — and must not write anything.
+    private func finishCompaction(of id: UUID, stamp: Int) -> Bool {
+        guard inFlight[id] == stamp else { return false }
+        inFlight.removeValue(forKey: id)
+        return true
+    }
 
     // MARK: - Stats (for TranscriptDiagnostics)
 
@@ -125,17 +154,21 @@ final class TurnPayloadStore {
     func compact(_ turn: ChatTurn, completion: @escaping (ChatTurn) -> Void) {
         guard turn.isComplete, turn.marker == nil,
               blobs[turn.id] == nil, !pinned.contains(turn.id), !dropped.contains(turn.id),
-              !inFlight.contains(turn.id),
+              !isInFlight(turn.id),
               let payload = Self.encodePayload(turn)
         else { return }
 
         let id = turn.id
-        inFlight.insert(id)
+        let stamp = beginCompaction(of: [id])
         queue.async { [weak self] in
             let blob = try? (payload as NSData).compressed(using: .lzfse) as Data
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.inFlight.remove(id)
+                // f15: only this dispatch's own stamp entitles it to write. A
+                // `forget`/`drop`/`clear` between dispatch and completion has
+                // already removed the registration, and this blob describes
+                // content that is no longer current.
+                guard self.finishCompaction(of: id, stamp: stamp) else { return }
                 guard let blob, !self.dropped.contains(id) else { return }
                 self.blobs[id] = blob
                 completion(Self.skeleton(of: turn))
@@ -152,12 +185,23 @@ final class TurnPayloadStore {
         let candidates = turns.filter {
             $0.isComplete && $0.marker == nil && blobs[$0.id] == nil
                 && !pinned.contains($0.id) && !dropped.contains($0.id)
-                && !inFlight.contains($0.id)
+                && !isInFlight($0.id)
         }
-        guard !candidates.isEmpty else { return }
         let payloads: [(UUID, Data)] = candidates.compactMap { turn in
             Self.encodePayload(turn).map { (turn.id, $0) }
         }
+        // f7: this filter read `inFlight` but nothing ever wrote it, so with
+        // `compactColdTurns()` sweeping on every `.turnStarted` each sweep
+        // re-offered turns a prior sweep was still compressing — `blobs[id]` is
+        // only populated in the completion below. That is a redundant
+        // `encodePayload` on the *main thread* plus a redundant LZFSE pass per
+        // sweep, scaling with how far compression trails the append rate: the
+        // exact main-thread-cost-grows-with-session-length dimension this store
+        // exists to bound. Register before dispatching. Guard on `payloads`
+        // rather than `candidates` — only turns that actually encoded get
+        // dispatched, and registering one that didn't would strand it.
+        guard !payloads.isEmpty else { return }
+        let stamp = beginCompaction(of: payloads.map { $0.0 })
         queue.async { [weak self] in
             let compressed: [(UUID, Data)] = payloads.compactMap { id, payload in
                 guard let blob = try? (payload as NSData).compressed(using: .lzfse) as Data
@@ -166,9 +210,16 @@ final class TurnPayloadStore {
             }
             DispatchQueue.main.async {
                 guard let self else { return }
+                // De-register every id this dispatch still owns, first and
+                // unconditionally: an id whose LZFSE pass failed is absent from
+                // `compressed` and would otherwise stay in flight for ever,
+                // permanently unbounded. Ids we no longer own were superseded
+                // (f15) and must not be written.
+                let owned = Set(payloads.map { $0.0 }
+                    .filter { self.finishCompaction(of: $0, stamp: stamp) })
                 var skeletons: [ChatTurn] = []
                 let byId = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
-                for (id, blob) in compressed {
+                for (id, blob) in compressed where owned.contains(id) {
                     guard !self.dropped.contains(id), !self.pinned.contains(id),
                           let turn = byId[id] else { continue }
                     self.blobs[id] = blob
@@ -204,7 +255,7 @@ final class TurnPayloadStore {
         blobs.removeValue(forKey: id)
         dropped.insert(id)
         pinned.remove(id)
-        inFlight.remove(id)
+        inFlight.removeValue(forKey: id)
     }
 
     /// Discard any stored payload for `id` **without** marking it unavailable.
@@ -213,10 +264,19 @@ final class TurnPayloadStore {
     /// replaced with a fresh, complete copy, so there is nothing lost and nothing
     /// to warn about. `drop` means "this content is gone"; this means "this blob
     /// is stale".
+    ///
+    /// Dropping the in-flight registration is what makes this safe against a
+    /// compression dispatched moments ago (f15): that closure is already queued
+    /// and cannot be cancelled, but it checks its stamp against `inFlight`
+    /// before writing, so it now finds itself superseded and writes nothing.
+    /// Without that check it would store a blob of the *old* content under an id
+    /// that is still live, and a later `hydrate` would render the previous
+    /// version of the turn as current — worse than an outright decode failure,
+    /// because nothing says so.
     func forget(_ id: UUID) {
         blobs.removeValue(forKey: id)
         pinned.remove(id)
-        inFlight.remove(id)
+        inFlight.removeValue(forKey: id)
         dropped.remove(id)
     }
 
@@ -224,8 +284,12 @@ final class TurnPayloadStore {
         blobs.removeAll()
         pinned.removeAll()
         dropped.removeAll()
-        // A compaction still in flight would otherwise land after the clear and
-        // write an orphan blob for a turn that no longer exists.
+        // Clearing the registrations is what invalidates any compaction still in
+        // flight: the dispatch cannot be cancelled, but it may only write while
+        // its own stamp is still on record, so after this it lands and does
+        // nothing. Previously this line was believed to have that effect and did
+        // not — the closure wrote an orphan blob for a turn that no longer
+        // exists, retained for the lifetime of the store.
         inFlight.removeAll()
     }
 
