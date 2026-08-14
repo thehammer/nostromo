@@ -1703,8 +1703,14 @@ private class ToolCallView: NSView {
         dotLabel.setContentHuggingPriority(.required, for: .horizontal)
 
         let summaryLabel = NSTextField(labelWithString: data.inputSummary)
-        summaryLabel.font          = Theme.monoFont
-        summaryLabel.textColor     = Theme.fg
+        // Literal command text (flags like `--stat`, `->` in scripts, etc.) — disable
+        // Fira Code's default ligatures so it renders verbatim. See ToolResultView's
+        // buildLabelIfNeeded() for the full explanation of this default-on behavior.
+        summaryLabel.attributedStringValue = NSAttributedString(string: data.inputSummary, attributes: [
+            .font:            Theme.monoFont,
+            .foregroundColor: Theme.fg,
+            .ligature:        0,
+        ])
         summaryLabel.lineBreakMode = .byTruncatingMiddle
         summaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -1813,8 +1819,13 @@ private class ErrorBlockView: NSView {
         layer?.borderColor     = Theme.redSweater.withAlphaComponent(0.4).cgColor
 
         let label = NSTextField(labelWithString: message)
-        label.font                = Theme.monoFont
-        label.textColor           = Theme.redSweater
+        // Literal error text — disable Fira Code's default ligatures so it renders
+        // verbatim. See ToolResultView's buildLabelIfNeeded() for the full explanation.
+        label.attributedStringValue = NSAttributedString(string: message, attributes: [
+            .font:            Theme.monoFont,
+            .foregroundColor: Theme.redSweater,
+            .ligature:        0,
+        ])
         label.lineBreakMode       = .byWordWrapping
         label.maximumNumberOfLines = 0
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

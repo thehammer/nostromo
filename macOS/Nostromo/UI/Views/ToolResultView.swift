@@ -114,10 +114,21 @@ final class ToolResultView: NSView {
             : "(The full content of this tool result is no longer retained in this pane. "
               + "It remains in the Claude session transcript on disk.)"
         let label = NSTextField(labelWithString: body)
-        label.font                 = Theme.monoFont
-        label.textColor            = isError ? Theme.redSweater : Theme.fgMuted
         label.lineBreakMode        = .byCharWrapping
         label.maximumNumberOfLines = 0
+        // This is raw tool output (shell text, JSON, diffs) — it must render
+        // character-for-character. Fira Code's `calt`-driven programming
+        // ligatures apply by default to static NSTextField labels (unlike
+        // NSTextView, which needs an explicit opt-in — see ChatTextView's
+        // `.ligature = 2`), and they merge runs of hyphens (`---`) into a
+        // single em-dash-like glyph and collapse things like `->`/`!=`. That
+        // reads as data corruption when the text is meant to be verbatim, so
+        // ligatures are explicitly disabled here.
+        label.attributedStringValue = NSAttributedString(string: body, attributes: [
+            .font:            Theme.monoFont,
+            .foregroundColor: isError ? Theme.redSweater : Theme.fgMuted,
+            .ligature:        0,
+        ])
         // Biggest balloon driver: long single-line tool output (JSON, git status) had
         // an intrinsic width of ~8600pt. Yield horizontally so it wraps to the pane.
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
