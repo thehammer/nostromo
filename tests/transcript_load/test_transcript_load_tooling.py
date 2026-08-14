@@ -930,7 +930,9 @@ class CriterionSensitivityTests(unittest.TestCase):
 # checked in both directions: every criterion that depends on a source must be
 # non-PASS when the run omits it, and every criterion that does not must still
 # PASS. The second half is what stops the declaration being gamed by naming
-# everything.
+# everything. And a pinned exemption list is what stops it being gamed by
+# naming *nothing*, which is a stronger loophole than naming everything
+# because it silences one test and conscripts the other into demanding a PASS.
 # --------------------------------------------------------------------------
 
 
@@ -960,10 +962,6 @@ def absence_fixtures(tc):
     ]
 
 #: registry key -> the evidence sources above that criterion reads.
-#:
-#: `stream-parses-cleanly` reads the file rather than anything inside a sample,
-#: and is the one row that declares nothing here. Its barren case is T1a's: an
-#: empty, absent or entirely unparseable file, where it too is non-passing.
 EVIDENCE_DEPENDENCIES = {
     "samples-are-from-this-run": {"runID"},
     "stream-parses-cleanly": set(),
@@ -981,16 +979,58 @@ EVIDENCE_DEPENDENCIES = {
     "no-coreautolayout-frames": {"sample_path"},
 }
 
+#: The criteria that legitimately read no evidence source above, pinned exactly
+#: so the set cannot widen without someone editing this line on purpose.
+#:
+#: `stream-parses-cleanly` grades the *file* — whether the lines it holds parse —
+#: which is a property of the stream itself and not of any field inside a sample,
+#: so there is nothing above for it to name. Its barren case is T1a's: an empty,
+#: absent or entirely unparseable file, where it too is non-passing.
+#:
+#: Every other row reads at least one thing a run can fail to report, and an
+#: empty declaration for such a row is invisible to both directional tests below:
+#: the "must not pass" half never selects it (no source is ever in an empty set)
+#: and the "must keep grading" half then *requires* it to PASS on all nine
+#: absence fixtures. That is exactly f2's escape route — a criterion whose
+#: degenerate default reads as a real measurement, declaring nothing, PASSing on
+#: a healthy 26-sample run that never reported its field.
+EMPTY_DEPENDENCY_EXEMPTIONS = {"stream-parses-cleanly"}
 
-class CriterionEvidenceDependencyTests(unittest.TestCase):
+
+class _EvidenceDependencyAssertions:
+    """The assertion body of the declaration guard, factored out so
+    `EvidenceDependencyDeclarationBitesTests` can prove it bites by running
+    *this* logic against a criterion that declares nothing. A reimplementation
+    there would prove nothing about the real test.
+    """
+
+    def assert_only_exempt_criteria_declare_nothing(self, dependencies, exemptions):
+        declared_nothing = {reg.key for reg in report.CRITERIA
+                            if not dependencies.get(reg.key)}
+        unexempted = sorted(declared_nothing - exemptions)
+        stale = sorted(exemptions - declared_nothing)
+        self.assertEqual(
+            declared_nothing, exemptions,
+            "\n".join(
+                [f"declares no evidence and is not exempt: {key}" for key in unexempted]
+                + [f"exempt but now declares evidence (drop the exemption): {key}"
+                   for key in stale]
+            ) or "the exemption set no longer matches the criteria registry",
+        )
+
+
+class CriterionEvidenceDependencyTests(_EvidenceDependencyAssertions, unittest.TestCase):
     """Every criterion names the evidence it reads, and is held to it.
 
     A criterion that keeps grading after the run stopped reporting its subject
     is grading nothing — the recurrence class this whole file exists for. A
     criterion that stops grading when some *unrelated* field goes missing is
     over-coupled, and will false-fail a run that is fine, which is how a check
-    gets switched off. Both directions are asserted below, so the declaration
-    cannot be satisfied either by naming nothing or by naming everything.
+    gets switched off. Three directions are asserted below: a criterion must
+    not pass when the run omits evidence it declares reading; it must keep
+    grading when evidence it does not read is absent; and it must name at
+    least one evidence source unless it is on the pinned exemption list, since
+    an empty declaration is answerable to neither of the first two tests.
     """
 
     def test_every_registered_criterion_declares_the_evidence_it_reads(self):
@@ -1032,6 +1072,77 @@ class CriterionEvidenceDependencyTests(unittest.TestCase):
                         f"{source} was absent, which it does not read: "
                         f"{verdicts[reg.key]}",
                     )
+
+    def test_only_the_pinned_exemption_declares_no_evidence_at_all(self):
+        # The third direction, and the one the two above cannot cover. An empty
+        # declaration is not "reads nothing", it is "answerable to nothing":
+        # both tests above skip it, so the criterion is held to no absence
+        # fixture at all while still being required to PASS on every one.
+        self.assert_only_exempt_criteria_declare_nothing(
+            EVIDENCE_DEPENDENCIES, EMPTY_DEPENDENCY_EXEMPTIONS)
+
+
+class EvidenceDependencyDeclarationBitesTests(_EvidenceDependencyAssertions,
+                                              unittest.TestCase):
+    """Proof that the declaration guard is not itself vacuous.
+
+    Registers a criterion of exactly the shape f2 had — `max(vals) if vals else
+    0`, a degenerate default read as a real measurement — declaring the empty
+    set, and runs the *same* assertion body the real test runs, expecting it to
+    object. If the guard is ever weakened into something that cannot, this test
+    starts failing first.
+
+    The spelling is deliberate. `pane.get(field, 0)` and `max(..., default=0)`
+    are both caught by T4's AST checks; `max(vals) if vals else 0` walks past
+    them, which is why the behavioural net underneath has to hold.
+    """
+
+    KEY = "compressed-payload-bounded"
+
+    def _register_criterion_that_declares_nothing(self):
+        saved = report.CRITERIA[:]
+        self.addCleanup(report.CRITERIA.__setitem__, slice(None), saved)
+
+        @report.criterion(self.KEY, limit="<= 999 bytes")
+        def _bounded(ev):
+            vals = [pane["compressedPayloadBytes"]
+                    for row in ev.rows for pane in row.get("panes", ())
+                    if "compressedPayloadBytes" in pane]
+            worst = max(vals) if vals else 0
+            return report.graded(
+                self.KEY, "compressed payload stays bounded",
+                observations=len(ev.rows), ok=worst <= 999,
+                measured=f"worst {worst} bytes", limit="<= 999 bytes")
+
+        return dict(EVIDENCE_DEPENDENCIES, **{self.KEY: set()})
+
+    def test_a_criterion_declaring_the_empty_set_is_rejected(self):
+        dependencies = self._register_criterion_that_declares_nothing()
+        with self.assertRaises(self.failureException) as caught:
+            self.assert_only_exempt_criteria_declare_nothing(
+                dependencies, EMPTY_DEPENDENCY_EXEMPTIONS)
+        self.assertIn(self.KEY, str(caught.exception))
+
+    def test_the_only_way_to_silence_it_is_a_visible_edit_to_the_pinned_set(self):
+        # The escape hatch exists and is deliberately loud: naming the criterion
+        # in the exempt set is the one move that satisfies the guard, and it is
+        # an edit to a pinned literal that a reviewer sees in the diff, not an
+        # omission that nobody notices.
+        dependencies = self._register_criterion_that_declares_nothing()
+        self.assert_only_exempt_criteria_declare_nothing(
+            dependencies, EMPTY_DEPENDENCY_EXEMPTIONS | {self.KEY})
+
+    def test_such_a_criterion_passes_a_healthy_run_that_never_reported_its_field(self):
+        # Why the pin earns its place. This is not endorsing the PASS — it pins
+        # the damage an empty declaration buys: 26 samples, every other counter
+        # present, panes never reported, and the row reads PASS off a default it
+        # mistook for a measurement. Both directional tests above are silent
+        # here, which is the whole finding.
+        self._register_criterion_that_declares_nothing()
+        row = keyed(report.evaluate(make_rows(include_panes=False),
+                                    **healthy_context(self)))[self.KEY]
+        self.assertEqual(row.state, report.PASS)
+        self.assertEqual(row.observations, 26)
 
 
 class EvaluateMaterializedViewLimitTests(unittest.TestCase):
