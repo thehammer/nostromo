@@ -44,7 +44,10 @@
 //! * [`Wake::Full`] — the fetch described above. Produced by the interval, the
 //!   dirty file, the MCP push, the approvals file, and a relay *(re)connect*
 //!   (the relay buffers nothing for an absent subscriber, so a reconnect is a
-//!   reconciliation and there is no event describing it).
+//!   reconciliation and there is no event describing it). A reconnect's own
+//!   events are carried in `Wake::Full`'s `deferred` field: the reconciling
+//!   fetch runs first, then `deferred` is applied as the very next wake — a
+//!   reconnect reconciles first, then applies the batch.
 //! * [`Wake::Targeted`] — a batch of relay events, each applied to a single PR
 //!   by [`perri_queue_targeted`], with **zero** search requests. No relay
 //!   *event* produces a full refresh; an event that can't be settled from
@@ -83,10 +86,10 @@ use crate::{
         perri_pr_native::prefetch_into_cache,
         perri_queue::{CiState, PrQueueItem, PrQueueSnapshot},
         perri_queue_targeted::{
-            apply_relay_event, ci_for_probed_head, diff_snapshots, probe_pr, upsert_from_probe,
+            apply_relay_event, diff_snapshots, probe_and_upsert, qualifies, remove_candidate,
             ProbeResult, TargetedState,
         },
-        perri_suppress::{SuppressStore, unix_now_secs},
+        perri_suppress::{unix_now_secs, SuppressStore},
         relay_client::{QueueSignal, RelayEvent},
     },
 };
@@ -337,11 +340,17 @@ pub struct Candidate {
     pub in_needs_review: bool,
     /// Our most recent review on this PR, as `(state, submitted_at)`.
     pub my_review: Option<(String, Option<String>)>,
-    /// `Some(unix_secs)` when this entry was last written by a targeted probe
-    /// rather than a search hit.  Always `None` today — the targeted-update
-    /// engine (`.claude/plans/targeted-relay-refresh-engine.md`) is the only
-    /// writer, and it does not exist yet.
-    #[allow(dead_code)]
+    /// Unix seconds of the last targeted probe that wrote this entry, or
+    /// `None` if it was written only by a search hit.
+    ///
+    /// This is what drives the [`SEARCH_LAG_GRACE_SECS`] carry-over window in
+    /// [`collect_search_lag_candidates`]: a candidate a targeted probe vouched
+    /// for recently enough survives a poll whose search results don't (yet)
+    /// confirm it. The non-obvious part is that [`apply_search_lag_grace`]
+    /// preserves the *original* stamp across a re-probe rather than re-stamping
+    /// it — re-stamping would re-arm the grace window on every poll and let a
+    /// PR the search index never confirms be carried forever instead of for two
+    /// cycles.
     pub targeted_seen_at: Option<u64>,
 }
 
@@ -624,10 +633,10 @@ impl PerriQueueNativeSource {
 
         // The first pass is always a full fetch — a cold daemon has no ledger to
         // update, and every targeted action is defined relative to one.
-        let mut wake = Wake::Full("startup");
-        // Events that arrived alongside a relay reconnect: applied *after* the
-        // reconciling fetch rather than discarded.
-        let mut pending: Vec<RelayEvent> = Vec::new();
+        let mut wake = Wake::Full {
+            reason: "startup",
+            deferred: Vec::new(),
+        };
 
         loop {
             let me_login = match &me {
@@ -644,16 +653,25 @@ impl PerriQueueNativeSource {
                         snap.error = Some(format!("GitHub auth check failed: {e:#}"));
                         let _ = tx.send(Some(snap));
                         tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
-                        // Nothing was applied; retry as a plain full refresh
-                        // rather than replaying whatever woke us.
-                        wake = Wake::Full("auth retry");
+                        // A reconnect's deferred batch must survive an auth
+                        // retry, exactly as the old `pending` local did. A
+                        // targeted batch is still not replayed — the full
+                        // refresh supersedes it.
+                        let deferred = match &mut wake {
+                            Wake::Full { deferred, .. } => std::mem::take(deferred),
+                            Wake::Targeted(_) => Vec::new(),
+                        };
+                        wake = Wake::Full {
+                            reason: "auth retry",
+                            deferred,
+                        };
                         continue;
                     }
                 },
             };
 
-            match wake {
-                Wake::Full(reason) => {
+            let next = match wake {
+                Wake::Full { reason, deferred } => {
                     self.run_full_refresh(
                         &client,
                         &me_login,
@@ -665,6 +683,9 @@ impl PerriQueueNativeSource {
                         reason,
                     )
                     .await;
+                    // A reconnect's stashed events are applied on the very
+                    // next iteration, so they are never silently dropped.
+                    (!deferred.is_empty()).then_some(Wake::Targeted(deferred))
                 }
 
                 Wake::Targeted(events) => {
@@ -678,13 +699,12 @@ impl PerriQueueNativeSource {
                         events,
                     )
                     .await;
+                    None
                 }
-            }
+            };
 
-            // A reconnect's stashed events are applied on the very next
-            // iteration, so they are never silently dropped.
-            if !pending.is_empty() {
-                wake = Wake::Targeted(std::mem::take(&mut pending));
+            if let Some(next) = next {
+                wake = next;
                 continue;
             }
 
@@ -695,7 +715,6 @@ impl PerriQueueNativeSource {
                 relay_rx,
                 interval_secs,
                 targeted_enabled,
-                &mut pending,
             )
             .await;
         }
@@ -753,6 +772,10 @@ impl PerriQueueNativeSource {
             }
             Err(e) => {
                 warn!("perri queue fetch failed: {e:#}");
+                // A failed poll audited nothing, so the set has to survive to
+                // the next one — `extend`, not assign: targeted events may
+                // have landed during the failed fetch.
+                tstate.touched_since_poll.extend(audit_set);
                 let mut snap = tx.borrow().clone().unwrap_or_default();
                 snap.stale = true;
                 snap.error = Some(e.to_string());
@@ -805,7 +828,12 @@ impl PerriQueueNativeSource {
                 stale: false,
                 error: None,
             };
-            self.publish_snapshot(tx, client, snap, PrefetchScope::NewlyTopThree(&current.items));
+            self.publish_snapshot(
+                tx,
+                client,
+                snap,
+                PrefetchScope::NewlyTopThree(&current.items),
+            );
         }
     }
 
@@ -927,12 +955,22 @@ impl PerriQueueNativeSource {
 
         // Searches must run sequentially because they share the mutable ETag
         // and item caches.  This is fine — the poll interval is 60s.
-        let requested_items =
-            search_issues(client, &q_requested, &mut caches.etags, &mut caches.item_cache).await?;
+        let requested_items = search_issues(
+            client,
+            &q_requested,
+            &mut caches.etags,
+            &mut caches.item_cache,
+        )
+        .await?;
         let needs_items =
             search_issues(client, &q_needs, &mut caches.etags, &mut caches.item_cache).await?;
-        let reviewed_items =
-            search_issues(client, &q_reviewed, &mut caches.etags, &mut caches.item_cache).await?;
+        let reviewed_items = search_issues(
+            client,
+            &q_reviewed,
+            &mut caches.etags,
+            &mut caches.item_cache,
+        )
+        .await?;
 
         debug!(
             me,
@@ -1065,12 +1103,7 @@ impl PerriQueueNativeSource {
         let mut b3_candidates: Vec<&SearchIssueItem> = Vec::new();
         for item in &reviewed_items {
             let repo = repo_from_url(&item.repository_url);
-            Candidate::upsert(
-                &mut caches.candidates,
-                &mut caches.next_seq,
-                repo,
-                item,
-            );
+            Candidate::upsert(&mut caches.candidates, &mut caches.next_seq, repo, item);
             if !known_urls.contains(&item.html_url) && !is_filtered(item, me) {
                 b3_candidates.push(item);
             }
@@ -1123,7 +1156,12 @@ impl PerriQueueNativeSource {
                                 (s, sub, entry)
                             }
                             // No review of ours to speak of — nothing learned.
-                            None => return B3Outcome { key, ..Default::default() },
+                            None => {
+                                return B3Outcome {
+                                    key,
+                                    ..Default::default()
+                                }
+                            }
                         },
                     };
 
@@ -1198,7 +1236,8 @@ impl PerriQueueNativeSource {
             }
         }
 
-        self.apply_search_lag_grace(client, me, caches, carried).await;
+        self.apply_search_lag_grace(client, me, caches, carried)
+            .await;
 
         // ── Render the ledger into the snapshot ───────────────────────────────
         // Deciding what ships is `classify`'s job; pruning expired suppression
@@ -1236,17 +1275,16 @@ impl PerriQueueNativeSource {
         caches.last_grace_retained.clear();
         for (repo, number, first_seen_at) in carried {
             let key = (repo.clone(), number);
-            let ProbeResult::Open(probed) = probe_pr(client, &repo, number, me).await else {
-                debug!(
-                    %repo, number,
-                    "perri queue: recently-probed candidate is gone or unreadable — dropping"
-                );
-                continue;
-            };
-
-            let (ci_state, actions_failed) =
-                ci_for_probed_head(client, caches, &repo, number, &probed.head_sha).await;
-            upsert_from_probe(caches, &probed, ci_state, actions_failed);
+            match probe_and_upsert(client, me, caches, &key).await {
+                ProbeResult::Open(_) => {}
+                _ => {
+                    debug!(
+                        %repo, number,
+                        "perri queue: recently-probed candidate is gone or unreadable — dropping"
+                    );
+                    continue;
+                }
+            }
 
             // Keep the *original* probe timestamp.  `upsert_from_probe` stamps
             // "now", which would re-arm the grace on every poll — a PR the
@@ -1257,9 +1295,10 @@ impl PerriQueueNativeSource {
             }
 
             // The poll stays authoritative: the PR survives only if it still
-            // belongs in a bucket.
-            if classify_bucket(&caches.candidates[&key], me).is_none() {
-                caches.candidates.remove(&key);
+            // belongs in a bucket.  A missing entry takes this branch too — no
+            // direct index, no panic.
+            if !qualifies(caches, &key, me) {
+                remove_candidate(caches, &key);
                 debug!(
                     %repo, number,
                     "perri queue: recently-probed candidate no longer qualifies — dropping"
@@ -1286,9 +1325,15 @@ impl PerriQueueNativeSource {
 /// Why the run loop woke, and therefore what it should do.
 #[derive(Debug)]
 pub enum Wake {
-    /// Re-derive the whole queue from the three searches.  The `&str` is the
-    /// wake source, for logs.
-    Full(&'static str),
+    /// Re-derive the whole queue from the three searches.  `reason` is the
+    /// wake source, for logs.  `deferred` is a relay reconnect's own events —
+    /// empty for every other source.  A reconnect reconciles first: the fetch
+    /// this variant drives runs before `deferred` is applied, on the very
+    /// next wake, so a reconnect's batch is never silently dropped.
+    Full {
+        reason: &'static str,
+        deferred: Vec<RelayEvent>,
+    },
     /// Apply this batch of relay events to the ledger, touching only the PRs
     /// they name.  Never issues a search request.
     Targeted(Vec<RelayEvent>),
@@ -1334,7 +1379,6 @@ pub async fn wait_for_wake(
     relay_rx: &mut mpsc::UnboundedReceiver<QueueSignal>,
     interval_secs: u64,
     targeted_enabled: bool,
-    pending: &mut Vec<RelayEvent>,
 ) -> Wake {
     /// Which branch won, before any draining.
     ///
@@ -1366,13 +1410,14 @@ pub async fn wait_for_wake(
 
     // The non-relay channels are always drained together — one logical change
     // can touch several of them (see property 2 above).
-    let drain_non_relay = |dirty_rx: &mut mpsc::UnboundedReceiver<()>,
-                           refresh_rx: &mut mpsc::UnboundedReceiver<()>,
-                           approvals_rx: &mut mpsc::UnboundedReceiver<()>| {
-        while dirty_rx.try_recv().is_ok() {}
-        while refresh_rx.try_recv().is_ok() {}
-        while approvals_rx.try_recv().is_ok() {}
-    };
+    let drain_non_relay =
+        |dirty_rx: &mut mpsc::UnboundedReceiver<()>,
+         refresh_rx: &mut mpsc::UnboundedReceiver<()>,
+         approvals_rx: &mut mpsc::UnboundedReceiver<()>| {
+            while dirty_rx.try_recv().is_ok() {}
+            while refresh_rx.try_recv().is_ok() {}
+            while approvals_rx.try_recv().is_ok() {}
+        };
 
     let signal = match first {
         First::Full(reason) => {
@@ -1382,7 +1427,10 @@ pub async fn wait_for_wake(
             // yet, so discarding it because an unrelated dirty-file refresh
             // happened first would lose news the fetch cannot recover.  It costs
             // at most one extra loop iteration.
-            return Wake::Full(reason);
+            return Wake::Full {
+                reason,
+                deferred: Vec::new(),
+            };
         }
         First::Relay(signal) => signal,
     };
@@ -1410,7 +1458,10 @@ pub async fn wait_for_wake(
             "relay_event"
         };
         debug!("perri queue relay signal — full refresh ({reason}, targeted path disabled)");
-        return Wake::Full(reason);
+        return Wake::Full {
+            reason,
+            deferred: Vec::new(),
+        };
     }
 
     if reconnected {
@@ -1421,11 +1472,16 @@ pub async fn wait_for_wake(
             events = events.len(),
             "perri queue relay reconnect — reconciling, then applying the batch"
         );
-        pending.extend(events);
-        return Wake::Full("relay_reconnect");
+        return Wake::Full {
+            reason: "relay_reconnect",
+            deferred: events,
+        };
     }
 
-    debug!(events = events.len(), "perri queue relay events — targeted update");
+    debug!(
+        events = events.len(),
+        "perri queue relay events — targeted update"
+    );
     Wake::Targeted(events)
 }
 
@@ -1480,10 +1536,7 @@ fn parse_epoch(ts: &str) -> u64 {
 /// re-surface the PR as "the author responded".
 ///
 /// This is the single definition of that rule; nothing recomputes it inline.
-pub fn has_new_activity(
-    review_submitted_at: Option<&str>,
-    pr_updated_at: Option<&str>,
-) -> bool {
+pub fn has_new_activity(review_submitted_at: Option<&str>, pr_updated_at: Option<&str>) -> bool {
     match (review_submitted_at, pr_updated_at) {
         (Some(rev_ts), Some(pr_ts)) => {
             let review_epoch = parse_epoch(rev_ts);
@@ -1688,19 +1741,32 @@ pub async fn ci_state_for_sha(
         }
     }
 
-    // Cache miss — fetch check-runs and store the result.
-    let result =
-        fetch_check_runs_state(client, repo, sha, endpoint_etags, endpoint_body_cache).await;
-    ci_state_cache
-        .lock()
-        .unwrap()
-        .insert(sha.to_owned(), result);
-    result
+    // Cache miss — fetch check-runs. A failed read (`None`) establishes no
+    // verdict, so it must not be cached: caching it would let a transient
+    // transport hiccup calcify into a stale `Unknown` for every future cycle
+    // that hits this SHA, instead of just retrying next time.
+    match fetch_check_runs_state(client, repo, sha, endpoint_etags, endpoint_body_cache).await {
+        Some(result) => {
+            ci_state_cache
+                .lock()
+                .unwrap()
+                .insert(sha.to_owned(), result);
+            result
+        }
+        None => (CiState::Unknown, false),
+    }
 }
 
 /// Fetch and parse check-runs for a known HEAD SHA.
 ///
-/// Returns `(display_state, actions_failure_filter)`:
+/// Returns `None` when the read itself failed — a transport error, a non-2xx,
+/// or an unparseable body — and `Some((display_state, actions_failure_filter))`
+/// when it succeeded, which includes the "nothing configured on this SHA"
+/// case (`Some((CiState::Unknown, false))`, from an empty `check_runs` array).
+/// The distinction matters to callers: a failed read established no verdict
+/// and must not be treated the same as a SHA GitHub has genuinely never run
+/// anything on.
+///
 /// - `display_state` — rolled-up `CiState` over all check-runs (D1)
 /// - `actions_failure_filter` — `true` iff a GitHub Actions run has
 ///   `conclusion == "failure"` (preserves the old check-suites filter
@@ -1711,20 +1777,14 @@ pub(crate) async fn fetch_check_runs_state(
     sha: &str,
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> (CiState, bool) {
+) -> Option<(CiState, bool)> {
     let url = format!(
         "{}/repos/{repo}/commits/{sha}/check-runs?per_page=100",
         api_base()
     );
-    let body = match etag_get(client, &url, etags, body_cache).await {
-        Some(b) => b,
-        None => return (CiState::Unknown, false),
-    };
+    let body = etag_get(client, &url, etags, body_cache).await?;
 
-    let resp: CheckRunsResponse = match serde_json::from_str(&body) {
-        Ok(r) => r,
-        Err(_) => return (CiState::Unknown, false),
-    };
+    let resp: CheckRunsResponse = serde_json::from_str(&body).ok()?;
 
     let display_state = CiState::rollup(
         resp.check_runs
@@ -1737,7 +1797,7 @@ pub(crate) async fn fetch_check_runs_state(
             && CiState::from_check(r.status.as_deref(), r.conclusion.as_deref()) == CiState::Failure
     });
 
-    (display_state, actions_failure)
+    Some((display_state, actions_failure))
 }
 
 /// Thin wrapper kept for backwards-compatibility with `tests/ci_failure_cache.rs`.
@@ -1916,7 +1976,10 @@ pub fn top_three_items(items: &[PrQueueItem]) -> Vec<&PrQueueItem> {
 ///
 /// Pure, so the "a glyph change that doesn't reorder the top 3 prefetches
 /// nothing" rule is testable without observing spawned tasks.
-pub fn prefetch_targets<'a>(scope: &PrefetchScope<'_>, items: &'a [PrQueueItem]) -> Vec<&'a PrQueueItem> {
+pub fn prefetch_targets<'a>(
+    scope: &PrefetchScope<'_>,
+    items: &'a [PrQueueItem],
+) -> Vec<&'a PrQueueItem> {
     let next = top_three_items(items);
     match scope {
         PrefetchScope::TopThree => next,
@@ -2191,7 +2254,10 @@ mod tests {
     #[test]
     fn is_bot_recognises_all_bot_logins() {
         for login in &["dependabot", "dependabot[bot]", "carefeed-ci"] {
-            assert!(is_bot(login), "expected '{login}' to be recognised as a bot");
+            assert!(
+                is_bot(login),
+                "expected '{login}' to be recognised as a bot"
+            );
         }
     }
 
@@ -2291,7 +2357,10 @@ mod tests {
         // review-requested — empty (PR is only in needs_review)
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr review-requested:@me org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr review-requested:@me org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(server)
             .await;
@@ -2299,7 +2368,10 @@ mod tests {
         // review:required — returns PR #42
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr review:required org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr review:required org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "items": [{
                     "number": 42,
@@ -2317,7 +2389,10 @@ mod tests {
         // reviewed-by — empty (no bucket-3 PRs)
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr reviewed-by:@me org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr reviewed-by:@me org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(server)
             .await;
@@ -2395,7 +2470,8 @@ mod tests {
 
         let snap = run_fetch(&source, suppress).await;
         assert_eq!(
-            snap.items.len(), 1,
+            snap.items.len(),
+            1,
             "PR with different sha should appear in snapshot"
         );
         assert_eq!(snap.items[0].number, 42);
@@ -2418,7 +2494,11 @@ mod tests {
         let suppress = Arc::new(Mutex::new(store));
 
         let snap = run_fetch(&source, suppress).await;
-        assert_eq!(snap.items.len(), 1, "unsuppressed PR should appear in snapshot");
+        assert_eq!(
+            snap.items.len(),
+            1,
+            "unsuppressed PR should appear in snapshot"
+        );
         assert_eq!(snap.items[0].number, 42);
         assert_eq!(snap.items[0].head_sha, "sha-abc");
     }
@@ -2460,7 +2540,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr review-requested:@me org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr review-requested:@me org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(server)
             .await;
@@ -2468,7 +2551,10 @@ mod tests {
         let head_sha_owned = head_sha.to_owned();
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr review:required org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr review:required org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "items": [{
                     "number": 100,
@@ -2485,7 +2571,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr reviewed-by:@me org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr reviewed-by:@me org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(server)
             .await;
@@ -2531,10 +2620,17 @@ mod tests {
 
         let snap = run_fetch(&source, suppress).await;
 
-        assert_eq!(snap.items.len(), 1, "dependabot PR should appear in snapshot");
+        assert_eq!(
+            snap.items.len(),
+            1,
+            "dependabot PR should appear in snapshot"
+        );
         let item = &snap.items[0];
         assert_eq!(item.number, 100);
-        assert_eq!(item.bucket, "dependabot", "dependabot PR must land in 'dependabot' bucket");
+        assert_eq!(
+            item.bucket, "dependabot",
+            "dependabot PR must land in 'dependabot' bucket"
+        );
         assert!(item.is_bot, "is_bot must be true for a dependabot PR");
         assert_eq!(item.head_sha, "bot-sha-1");
     }
@@ -2556,7 +2652,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr review-requested:@me org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr review-requested:@me org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(server)
             .await;
@@ -2564,7 +2663,10 @@ mod tests {
         // Search index still returns PR #55 as open (lag)
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr review:required org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr review:required org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "items": [{
                     "number": 55,
@@ -2581,7 +2683,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr reviewed-by:@me org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr reviewed-by:@me org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(server)
             .await;
@@ -2643,14 +2748,20 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr review-requested:@me org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr review-requested:@me org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(&server)
             .await;
 
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr review:required org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr review:required org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "items": [{
                     "number": 66,
@@ -2667,7 +2778,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/search/issues"))
-            .and(query_param("q", "is:open is:pr reviewed-by:@me org:Carefeed archived:false"))
+            .and(query_param(
+                "q",
+                "is:open is:pr reviewed-by:@me org:Carefeed archived:false",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(&server)
             .await;
@@ -2695,6 +2809,73 @@ mod tests {
             "closed (unmerged) PR must not appear in snapshot; \
              got: {:?}",
             snap.items.iter().map(|i| i.number).collect::<Vec<_>>()
+        );
+    }
+
+    // ── run_full_refresh: a failed poll must not discard the audit set ────────
+
+    /// `run_full_refresh`'s `Err` arm used to publish a stale snapshot and
+    /// return, dropping whatever `touched_since_poll` it had just taken
+    /// ownership of on the floor. A poll that fails — a transient GitHub
+    /// outage, a rate limit — must not silently erase the record of which PRs a
+    /// targeted update touched since the last successful poll: losing that set
+    /// means the *next* successful poll's divergence audit runs against an
+    /// empty audit set and silently stops checking the very PRs it exists to
+    /// check.
+    #[tokio::test]
+    async fn failed_poll_preserves_the_audit_set_instead_of_dropping_it() {
+        use wiremock::MockServer;
+
+        // No mocks mounted at all — the first search call gets an unmatched
+        // 404, so `fetch()` returns `Err(...)`.
+        let server = MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let (source, dir) = make_source();
+        let client = source.build_client().unwrap();
+        let mut caches = QueueCaches::default();
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            dir.path().join("approvals-state.json"),
+            std::time::Duration::from_secs(900),
+        )));
+
+        let mut tstate = TargetedState::default();
+        let seeded_key = ("Carefeed/admin-portal".to_owned(), 42u64);
+        tstate.touched_since_poll.insert(seeded_key.clone());
+
+        // A healthy "previous" snapshot: not stale, no error.
+        let (tx, _rx) = watch::channel(Some(PrQueueSnapshot::default()));
+
+        // `consume_approvals_file` early-returns 0 when the path is absent.
+        let approvals_path = dir.path().join("does-not-exist-approvals.jsonl");
+
+        source
+            .run_full_refresh(
+                &client,
+                "tester",
+                &mut caches,
+                &suppress,
+                &mut tstate,
+                &tx,
+                &approvals_path,
+                "test",
+            )
+            .await;
+
+        assert!(
+            tstate.touched_since_poll.contains(&seeded_key),
+            "a failed poll must not discard the audit set it took ownership of; \
+             got {:?}",
+            tstate.touched_since_poll
+        );
+
+        let published = tx
+            .borrow()
+            .clone()
+            .expect("a snapshot must still be published");
+        assert!(
+            published.stale,
+            "a failed poll must mark the republished snapshot stale"
         );
     }
 }

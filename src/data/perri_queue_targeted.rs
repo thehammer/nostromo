@@ -49,7 +49,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::data::{
     github_client::GithubClient,
@@ -68,6 +68,11 @@ use crate::data::{
 ///
 /// The variants are ordered by cost, cheapest first. Everything except
 /// [`Action::Probe`] and [`Action::CiOnly`] is free.
+///
+/// `Remove`, `LeaveBuckets12` and `Probe` carry the `(repo, number)` key that
+/// [`classify_event`] already proved exists — so [`apply_relay_event`] reads
+/// it off the action rather than re-deriving it from the event and re-asserting
+/// an invariant across a function boundary with an `.expect()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// No state change, no GitHub call. The overwhelmingly common case for an
@@ -75,14 +80,14 @@ pub enum Action {
     Ignore,
     /// Drop the PR from the ledger. Zero GitHub calls — every search the full
     /// fetch runs is `is:open`, so a merged or closed PR is never a member.
-    Remove,
+    Remove { key: (String, u64) },
     /// Clear buckets 1 and 2 and record our `CHANGES_REQUESTED` review. Zero
     /// GitHub calls: the event carries everything needed.
-    LeaveBuckets12,
+    LeaveBuckets12 { key: (String, u64) },
     /// Read this one PR: 1 GraphQL request, plus 0-or-1 check-runs request.
-    Probe,
+    Probe { key: (String, u64) },
     /// Re-read check-runs for one SHA: exactly 1 non-search request.
-    CiOnly { head_sha: String },
+    CiOnly { repo: String, head_sha: String },
 }
 
 /// What applying an event did to the ledger.
@@ -132,6 +137,7 @@ pub fn classify_event(ev: &RelayEvent, me: &str, caches: &QueueCaches) -> Action
             .any(|c| c.repo == repo && c.head_sha == sha);
         return if is_candidate_head {
             Action::CiOnly {
+                repo: repo.to_owned(),
                 head_sha: sha.to_owned(),
             }
         } else {
@@ -143,19 +149,15 @@ pub fn classify_event(ev: &RelayEvent, me: &str, caches: &QueueCaches) -> Action
     let Some(number) = ev.number else {
         return Action::Ignore;
     };
-    let in_ledger = caches
-        .candidates
-        .contains_key(&(repo.to_owned(), number));
-    let reviewer_is_me = ev
-        .reviewer
-        .as_deref()
-        .is_some_and(|r| logins_match(r, me));
+    let key = (repo.to_owned(), number);
+    let in_ledger = caches.candidates.contains_key(&key);
+    let reviewer_is_me = ev.reviewer.as_deref().is_some_and(|r| logins_match(r, me));
 
     match ev.event_type.as_str() {
         // All three searches are `is:open`; a terminal PR is never a member.
         "pr.merged" | "pr.closed" => {
             if in_ledger {
-                Action::Remove
+                Action::Remove { key }
             } else {
                 Action::Ignore
             }
@@ -168,7 +170,7 @@ pub fn classify_event(ev: &RelayEvent, me: &str, caches: &QueueCaches) -> Action
         // the probe settles.
         "pr.review_requested" | "pr.review_request_removed" => {
             if reviewer_is_me {
-                Action::Probe
+                Action::Probe { key }
             } else {
                 Action::Ignore
             }
@@ -182,17 +184,17 @@ pub fn classify_event(ev: &RelayEvent, me: &str, caches: &QueueCaches) -> Action
                     // Leaves buckets 1 and 2 and does *not* enter bucket 3 yet
                     // — the 30s grace window means it returns only once the
                     // author responds.
-                    Some("changes_requested") => Action::LeaveBuckets12,
+                    Some("changes_requested") => Action::LeaveBuckets12 { key },
                     // One approval may not satisfy the branch's requirement,
                     // so bucket-2 membership has to be re-read.
-                    Some("approved") => Action::Probe,
+                    Some("approved") => Action::Probe { key },
                     // Unknown/absent review state — nothing defensible to do.
                     _ => Action::Ignore,
                 }
             } else if in_ledger {
                 // Someone else's review can end `review:required` and drop the
                 // PR out of bucket 2. It can never *add* a PR to my queue.
-                Action::Probe
+                Action::Probe { key }
             } else {
                 Action::Ignore
             }
@@ -201,11 +203,11 @@ pub fn classify_event(ev: &RelayEvent, me: &str, caches: &QueueCaches) -> Action
         // A push moves the head SHA (CI must be re-read), can dismiss stale
         // approvals and restore `review:required`, can flip bucket 3's
         // `new_activity`, and can un-hide a candidate that only a red CI hid.
-        "pr.synchronize" => Action::Probe,
+        "pr.synchronize" => Action::Probe { key },
 
         // A brand-new PR can enter `needs_review` immediately — and the direct
         // read is *fresher* than the search index, which may not list it yet.
-        "pr.opened" | "pr.reopened" => Action::Probe,
+        "pr.opened" | "pr.reopened" => Action::Probe { key },
 
         // Event types outside the subscribed vocabulary are ignored, not an
         // error. Widening what the relay *forwards* must not widen what the
@@ -243,6 +245,13 @@ const SEEN_ID_CAPACITY: usize = 512;
 /// seen across the whole org.
 const LAST_APPLIED_SOFT_CAP: usize = 1024;
 
+/// Consecutive probe failures before the first `warn!`.  Two in a row is a
+/// plausible transient; three is a pattern.
+const PROBE_FAILURE_WARN_AFTER: u32 = 3;
+/// Re-warn cadence past the threshold, so a wedged token stays audible in a
+/// long-running daemon without one line per event.
+const PROBE_FAILURE_WARN_EVERY: u32 = 20;
+
 /// Cross-event state the targeted path carries between wakes.
 #[derive(Default)]
 pub struct TargetedState {
@@ -258,6 +267,11 @@ pub struct TargetedState {
     /// So "the relay is sending events without ids" is logged once, not once
     /// per event.
     missing_event_id_logged: bool,
+    /// Consecutive `ProbeResult::Failed` outcomes seen by [`apply_probe`],
+    /// reset to zero on any reached verdict (`Open` or `Terminal`). Drives the
+    /// rate-limited `warn!` that makes a persistently-broken probe path
+    /// audible — see [`PROBE_FAILURE_WARN_AFTER`].
+    consecutive_probe_failures: u32,
 }
 
 impl TargetedState {
@@ -380,12 +394,13 @@ pub async fn apply_relay_event(
         }
     }
 
-    // 3. Classify and act.
+    // 3. Classify and act. Each `Action` variant already carries the key
+    //    `classify_event` proved exists — no re-derivation, no `.expect()`
+    //    re-asserting the proof across this function boundary.
     let action = classify_event(ev, me, caches);
     let outcome = match action {
         Action::Ignore => Outcome::Unchanged,
-        Action::Remove => {
-            let key = pr_key(ev).expect("Remove implies repo+number");
+        Action::Remove { key } => {
             state.mark_touched(&key, incoming);
             if remove_candidate(caches, &key) {
                 Outcome::Changed
@@ -393,16 +408,11 @@ pub async fn apply_relay_event(
                 Outcome::Unchanged
             }
         }
-        Action::LeaveBuckets12 => {
-            let key = pr_key(ev).expect("LeaveBuckets12 implies repo+number");
-            apply_leave_buckets_12(caches, &key, state, incoming)
-        }
-        Action::CiOnly { head_sha } => {
-            let repo = ev.repo.clone().expect("CiOnly implies repo");
+        Action::LeaveBuckets12 { key } => apply_leave_buckets_12(caches, &key, state, incoming),
+        Action::CiOnly { repo, head_sha } => {
             apply_ci_only(client, &repo, &head_sha, caches, state, incoming).await
         }
-        Action::Probe => {
-            let key = pr_key(ev).expect("Probe implies repo+number");
+        Action::Probe { key } => {
             apply_probe(client, me, &key, caches, suppress, state, incoming).await
         }
     };
@@ -415,17 +425,13 @@ pub async fn apply_relay_event(
     outcome
 }
 
-fn pr_key(ev: &RelayEvent) -> Option<(String, u64)> {
-    Some((ev.repo.clone()?, ev.number?))
-}
-
 /// Drop a PR from the ledger and from every per-PR cache keyed to it.
 ///
 /// Clearing the caches is not just hygiene: leaving `last_seen_updated` behind
 /// would let a stale `review_state_cache` entry be served if the PR ever came
 /// back, and both maps would otherwise grow without bound over a long daemon
 /// session.
-fn remove_candidate(caches: &mut QueueCaches, key: &(String, u64)) -> bool {
+pub(crate) fn remove_candidate(caches: &mut QueueCaches, key: &(String, u64)) -> bool {
     let existed = caches.candidates.remove(key).is_some();
     caches.last_seen_updated.remove(key);
     caches.review_state_cache.remove(key);
@@ -459,9 +465,10 @@ fn apply_leave_buckets_12(
     c.in_needs_review = false;
     c.my_review = Some(("CHANGES_REQUESTED".to_owned(), Some(submitted_at.clone())));
 
-    caches
-        .review_state_cache
-        .insert(key.clone(), ("CHANGES_REQUESTED".to_owned(), Some(submitted_at)));
+    caches.review_state_cache.insert(
+        key.clone(),
+        ("CHANGES_REQUESTED".to_owned(), Some(submitted_at)),
+    );
     // Cache-coherence invariant: we learned a review state without observing
     // the PR's `updated_at`, so the pairing that lets `review_from_cache()`
     // serve this entry must be broken. Costs one `/reviews` call next poll.
@@ -477,6 +484,12 @@ fn apply_leave_buckets_12(
 /// SHA's rollup changed, so serving the terminal cache entry would return the
 /// stale verdict the event just invalidated. The request is still
 /// ETag-conditional, so a 304 costs no rate-limit budget.
+///
+/// A failed read (`fetch_check_runs_state` returning `None` — a transport
+/// error or a non-2xx) defers rather than writing a verdict: the same tuple,
+/// `(CiState::Unknown, false)`, means both "nothing configured on this SHA"
+/// and "the read failed", and writing it for the latter would un-hide a PR a
+/// red CI is legitimately hiding for up to 60s on a mere transport hiccup.
 async fn apply_ci_only(
     client: &GithubClient,
     repo: &str,
@@ -485,21 +498,27 @@ async fn apply_ci_only(
     state: &mut TargetedState,
     incoming: Incoming<'_>,
 ) -> Outcome {
-    let result = fetch_check_runs_state(
+    let Some((ci_state, actions_failed)) = fetch_check_runs_state(
         client,
         repo,
         sha,
         &caches.endpoint_etags,
         &caches.endpoint_body_cache,
     )
-    .await;
+    .await
+    else {
+        debug!(
+            %repo, sha,
+            "perri targeted: check-runs read failed — deferring to the periodic poll"
+        );
+        return Outcome::Deferred;
+    };
     caches
         .ci_state_cache
         .lock()
         .unwrap()
-        .insert(sha.to_owned(), result);
+        .insert(sha.to_owned(), (ci_state, actions_failed));
 
-    let (ci_state, actions_failed) = result;
     let mut changed = false;
     let mut touched: Vec<(String, u64)> = Vec::new();
     for (key, c) in caches.candidates.iter_mut() {
@@ -522,6 +541,31 @@ async fn apply_ci_only(
     }
 }
 
+/// Probe one PR and, on `Open`, fold the verdict into the ledger.
+///
+/// The three steps both callers ([`apply_probe`] and
+/// [`super::perri_queue_native::PerriQueueNativeSource::apply_search_lag_grace`])
+/// share: one GraphQL probe, CI for the observed head through the full fetch's
+/// own `ci_state_for_sha`, and the ledger write. On `Open` the candidate,
+/// `review_state_cache` and `last_seen_updated` have already been updated when
+/// this returns; the caller owns only what is specific to it (suppression
+/// hygiene, qualification policy, the audit set).
+pub(crate) async fn probe_and_upsert(
+    client: &GithubClient,
+    me: &str,
+    caches: &mut QueueCaches,
+    key: &(String, u64),
+) -> ProbeResult {
+    let (repo, number) = (key.0.as_str(), key.1);
+    let result = probe_pr(client, repo, number, me).await;
+    if let ProbeResult::Open(probed) = &result {
+        let (ci_state, actions_failed) =
+            ci_for_probed_head(client, caches, repo, number, &probed.head_sha).await;
+        upsert_from_probe(caches, probed, ci_state, actions_failed);
+    }
+    result
+}
+
 /// Settle one PR from a GraphQL probe plus (at most) one check-runs read.
 async fn apply_probe(
     client: &GithubClient,
@@ -533,19 +577,44 @@ async fn apply_probe(
     incoming: Incoming<'_>,
 ) -> Outcome {
     let (repo, number) = (key.0.as_str(), key.1);
-    match probe_pr(client, repo, number, me).await {
+    // Captured *before* the probe: `probe_and_upsert` inserts into the ledger
+    // on `Open`, so this has to be known beforehand.
+    let was_known = caches.candidates.contains_key(key);
+    match probe_and_upsert(client, me, caches, key).await {
         // No ledger write, no snapshot change, no full refresh. The poll owns
         // it — this is the whole point of having no immediate fallback.
-        ProbeResult::Failed => {
+        //
+        // Per-failure detail stays at `debug!` — probes can run several times
+        // a minute against an org-wide subscription, and promoting every one
+        // to `warn!` would also fire on isolated transient 502s, training the
+        // reader to ignore the warn. A *sustained* run of failures is the
+        // signal that actually distinguishes "GitHub hiccuped" from "this path
+        // is wedged", so that gets exactly one `warn!` on the threshold
+        // crossing, then a re-warn every `PROBE_FAILURE_WARN_EVERY` after.
+        ProbeResult::Failed(kind) => {
+            state.consecutive_probe_failures += 1;
+            let count = state.consecutive_probe_failures;
             debug!(
-                %repo, number,
+                %repo, number, ?kind,
                 event_type = %incoming.ev.event_type,
                 "perri targeted: probe unusable — deferring to the periodic poll"
             );
+            if count == PROBE_FAILURE_WARN_AFTER
+                || (count > PROBE_FAILURE_WARN_AFTER
+                    && (count - PROBE_FAILURE_WARN_AFTER).is_multiple_of(PROBE_FAILURE_WARN_EVERY))
+            {
+                warn!(
+                    %repo, number, ?kind,
+                    consecutive_failures = count,
+                    "perri targeted: repeated probe failures — queue is running on \
+                     60s-poll latency for probed PRs"
+                );
+            }
             Outcome::Deferred
         }
         // Same verdict `get_pr_head_sha` reaches for a terminal PR.
         ProbeResult::Terminal => {
+            state.consecutive_probe_failures = 0;
             state.mark_touched(key, incoming);
             if remove_candidate(caches, key) {
                 Outcome::Changed
@@ -554,13 +623,12 @@ async fn apply_probe(
             }
         }
         ProbeResult::Open(probed) => {
-            let was_known = caches.candidates.contains_key(key);
+            state.consecutive_probe_failures = 0;
+            // Needs `probed.head_sha`, so it runs after the upsert rather than
+            // before — observationally equivalent, since neither
+            // `ci_for_probed_head` nor `upsert_from_probe` reads the
+            // suppression store.
             clear_superseded_suppression(suppress, repo, number, &probed.head_sha);
-
-            let (ci_state, actions_failed) =
-                ci_for_probed_head(client, caches, repo, number, &probed.head_sha).await;
-
-            upsert_from_probe(caches, &probed, ci_state, actions_failed);
 
             // A PR that doesn't belong in any bucket and wasn't a candidate
             // before is not ours: `pr.opened` fires for every PR in the org, and
@@ -624,7 +692,7 @@ pub(crate) async fn ci_for_probed_head(
 ///
 /// Delegates to the full fetch's own [`classify_bucket`] — the targeted path
 /// must never carry a second copy of the bucket rules.
-fn qualifies(caches: &QueueCaches, key: &(String, u64), me: &str) -> bool {
+pub(crate) fn qualifies(caches: &QueueCaches, key: &(String, u64), me: &str) -> bool {
     caches
         .candidates
         .get(key)
@@ -703,7 +771,9 @@ pub(crate) fn upsert_from_probe(
     // an absent entry costs one `/reviews` call next poll and cannot lie.)
     match &probed.my_review {
         Some(review) => {
-            caches.review_state_cache.insert(key.clone(), review.clone());
+            caches
+                .review_state_cache
+                .insert(key.clone(), review.clone());
         }
         None => {
             caches.review_state_cache.remove(&key);
@@ -736,14 +806,29 @@ pub struct ProbedPr {
     pub my_review: Option<(String, Option<String>)>,
 }
 
+/// Why a probe produced no verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeFailure {
+    BadRepoSlug,
+    Transport,
+    Status(u16),
+    BodyRead,
+    Unparseable,
+    GraphqlErrors,
+    NoSuchPr,
+    /// The response's `pullRequest.number` disagreed with the number
+    /// requested — a protocol violation, not a case to accommodate.
+    NumberMismatch,
+}
+
 /// The outcome of a probe.
 #[derive(Debug, Clone)]
 pub enum ProbeResult {
     Open(Box<ProbedPr>),
     /// Closed or merged — the same verdict `get_pr_head_sha` reaches.
     Terminal,
-    /// Transport error, non-2xx, a GraphQL `errors` array, or a null PR.
-    Failed,
+    /// No verdict was established — see [`ProbeFailure`].
+    Failed(ProbeFailure),
 }
 
 /// One PR, one point of the 5000/hour GraphQL budget, zero search budget.
@@ -795,7 +880,7 @@ const PR_PROBE_QUERY: &str = r#"query PrProbe($owner: String!, $name: String!, $
 pub async fn probe_pr(client: &GithubClient, repo: &str, number: u64, me: &str) -> ProbeResult {
     let Some((owner, name)) = repo.split_once('/') else {
         debug!(%repo, "perri targeted: probe repo is not owner/name");
-        return ProbeResult::Failed;
+        return ProbeResult::Failed(ProbeFailure::BadRepoSlug);
     };
 
     let payload = serde_json::json!({
@@ -814,20 +899,21 @@ pub async fn probe_pr(client: &GithubClient, repo: &str, number: u64, me: &str) 
         Ok(r) => r,
         Err(e) => {
             debug!(%repo, number, "perri targeted: probe request failed: {e:#}");
-            return ProbeResult::Failed;
+            return ProbeResult::Failed(ProbeFailure::Transport);
         }
     };
 
     if !resp.status().is_success() {
-        debug!(%repo, number, status = %resp.status(), "perri targeted: probe non-2xx");
-        return ProbeResult::Failed;
+        let status = resp.status();
+        debug!(%repo, number, %status, "perri targeted: probe non-2xx");
+        return ProbeResult::Failed(ProbeFailure::Status(status.as_u16()));
     }
 
     let body = match resp.text().await {
         Ok(b) => b,
         Err(e) => {
             debug!(%repo, number, "perri targeted: probe body read failed: {e:#}");
-            return ProbeResult::Failed;
+            return ProbeResult::Failed(ProbeFailure::BodyRead);
         }
     };
 
@@ -835,14 +921,14 @@ pub async fn probe_pr(client: &GithubClient, repo: &str, number: u64, me: &str) 
         Ok(p) => p,
         Err(e) => {
             debug!(%repo, number, "perri targeted: probe response unparseable: {e:#}");
-            return ProbeResult::Failed;
+            return ProbeResult::Failed(ProbeFailure::Unparseable);
         }
     };
 
     // A partial GraphQL response (200 + `errors`) is not a verdict.
     if parsed.errors.as_ref().is_some_and(|e| !e.is_empty()) {
         debug!(%repo, number, "perri targeted: probe returned GraphQL errors");
-        return ProbeResult::Failed;
+        return ProbeResult::Failed(ProbeFailure::GraphqlErrors);
     }
 
     let Some(pr) = parsed
@@ -851,11 +937,25 @@ pub async fn probe_pr(client: &GithubClient, repo: &str, number: u64, me: &str) 
         .and_then(|r| r.pull_request)
     else {
         debug!(%repo, number, "perri targeted: probe found no such pull request");
-        return ProbeResult::Failed;
+        return ProbeResult::Failed(ProbeFailure::NoSuchPr);
     };
 
     if pr.merged || pr.state != "OPEN" {
         return ProbeResult::Terminal;
+    }
+
+    // The query is `pullRequest(number: $number)`, so a response naming a
+    // different PR is a protocol violation, not a case to accommodate.
+    // `upsert_from_probe` keys its ledger write off `probed.number` — if that
+    // ever disagreed with the key the caller requested (and therefore looks
+    // up), the ledger entry the caller thinks it just wrote would not be the
+    // one that changed.
+    if pr.number != number {
+        debug!(
+            %repo, number, response_number = pr.number,
+            "perri targeted: probe response named a different PR"
+        );
+        return ProbeResult::Failed(ProbeFailure::NumberMismatch);
     }
 
     let author = pr
@@ -872,7 +972,10 @@ pub async fn probe_pr(client: &GithubClient, repo: &str, number: u64, me: &str) 
         .filter_map(|node| node.requested_reviewer)
         .any(|reviewer| {
             reviewer.typename.as_deref() == Some("User")
-                && reviewer.login.as_deref().is_some_and(|l| logins_match(l, me))
+                && reviewer
+                    .login
+                    .as_deref()
+                    .is_some_and(|l| logins_match(l, me))
         });
 
     // "Last review by me wins" — the same rule as `get_our_last_review`'s
@@ -892,7 +995,11 @@ pub async fn probe_pr(client: &GithubClient, repo: &str, number: u64, me: &str) 
 
     ProbeResult::Open(Box::new(ProbedPr {
         repo: repo.to_owned(),
-        number: pr.number,
+        // The requested number, not `pr.number` — the mismatch check above
+        // already proved they agree, but keying off the request rather than
+        // the echo is what makes that guarantee airtight for every future
+        // caller, not just this one.
+        number,
         title: pr.title,
         url: pr.url,
         author,
