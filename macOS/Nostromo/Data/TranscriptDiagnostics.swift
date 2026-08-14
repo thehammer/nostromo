@@ -83,8 +83,26 @@ enum TranscriptDiagnostics {
         let transcriptClears: Int
     }
 
+    /// Identity for every line this process writes, generated once per launch.
+    ///
+    /// `diagnostics.jsonl` is append-only across app launches, and two Nostromo
+    /// instances — a normal GUI plus a harness build — write to the same path
+    /// within one run. Without this the report had no way to tell where the
+    /// current run starts: it read every row ever written, so the footprint delta
+    /// straddled two runs and a fresh run of three samples could be graded
+    /// entirely on a previous run's numbers and print PASS on the headline memory
+    /// figure. `transcript-load-report.py` groups on this field and grades only
+    /// the newest run, and fails a criterion outright when the stream carries no
+    /// identity at all.
+    private static let runID = UUID().uuidString
+
     struct Report: Encodable {
         let timestamp: String
+        /// Which run wrote this line. See `TranscriptDiagnostics.runID`.
+        let runID: String
+        /// Which process wrote it, so two concurrent instances are
+        /// distinguishable by eye in the raw file and not only by run id.
+        let pid: Int
         let physFootprintBytes: Int
         let physFootprintMB: Double
         let maxMaterializedPerPane: Int
@@ -114,6 +132,8 @@ enum TranscriptDiagnostics {
                               transcriptClears: pane.transcriptClearCount)
         }
         return Report(timestamp: ISO8601DateFormatter().string(from: Date()),
+                      runID: runID,
+                      pid: Int(ProcessInfo.processInfo.processIdentifier),
                       physFootprintBytes: footprint,
                       physFootprintMB: (Double(footprint) / 1_048_576 * 10).rounded() / 10,
                       maxMaterializedPerPane: TurnListVirtualizer.maxMaterialized,
@@ -176,17 +196,44 @@ enum TranscriptDiagnostics {
         appendStreamLine()
     }
 
+    /// Append one line. **Never** shortens the file, on any path.
+    ///
+    /// This function had two ways to destroy a whole run's evidence in four
+    /// lines. `FileHandle(forWritingTo:)` fails when the file does not exist, so
+    /// the fallback existed to create it — but it was `try? data.write(to:)`,
+    /// which *truncates*, so any other cause of a failed open on an existing file
+    /// (permissions, a lock, an exhausted descriptor table) replaced the entire
+    /// run with a single line. And `_ = try? handle.seekToEnd()` discarded its
+    /// error, so a failed seek left the handle at offset 0 and the following
+    /// write overwrote the start of the file.
+    ///
+    /// An error path must never destroy previously-written evidence. A dropped
+    /// sample costs one data point and shows up as a criterion reading
+    /// INCONCLUSIVE; a truncated file makes every criterion in the report grade
+    /// somebody else's numbers, and says nothing.
     private static func appendStreamLine() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         guard var data = try? encoder.encode(snapshot()) else { return }
         data.append(0x0A)
-        if let handle = try? FileHandle(forWritingTo: streamURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        } else {
-            try? data.write(to: streamURL)
+
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: streamURL.path) {
+            fm.createFile(atPath: streamURL.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: streamURL) else {
+            log.error("""
+                diagnostics stream: cannot open \(streamURL.path, privacy: .public) \
+                — sample dropped, prior evidence intact
+                """)
+            return
+        }
+        defer { try? handle.close() }
+        do {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {
+            log.error("diagnostics stream: append failed — sample dropped, prior evidence intact")
         }
     }
 }

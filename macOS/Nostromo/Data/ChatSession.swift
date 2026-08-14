@@ -450,13 +450,28 @@ class ChatSession: ObservableObject {
         // not finished, on the main thread. It is true now, and it is what makes
         // calling this unconditionally cheap. Do not weaken that registration.
         payloadStore.compactBatch(batch) { [weak self] skeletons in
-            guard let self else { return }
-            var indexById: [UUID: Int] = [:]
-            for (i, turn) in self.turns.enumerated() { indexById[turn.id] = i }
-            for skeleton in skeletons {
-                guard let i = indexById[skeleton.id] else { continue }
-                self.turns[i] = skeleton
-            }
+            self?.applySkeletons(skeletons)
+        }
+    }
+
+    /// Swap compacted skeletons back into `turns`, matching on turn id.
+    ///
+    /// Extracted because `compactColdTurns` and `shedRetainedContent` each carried
+    /// their own copy of this block, identical but for the name of the local
+    /// dictionary. Two copies of an index-rebuild-then-overwrite loop is two
+    /// places for the next off-by-one to live.
+    ///
+    /// Matching on id and not on position is the point: compaction is
+    /// asynchronous, and `turns` can have been spliced, capped or replaced by a
+    /// reconnect snapshot while the LZFSE pass was running. A skeleton for a turn
+    /// that is no longer retained is dropped rather than written somewhere else.
+    private func applySkeletons(_ skeletons: [ChatTurn]) {
+        guard !skeletons.isEmpty else { return }
+        var indexById: [UUID: Int] = [:]
+        for (i, turn) in turns.enumerated() { indexById[turn.id] = i }
+        for skeleton in skeletons {
+            guard let i = indexById[skeleton.id] else { continue }
+            turns[i] = skeleton
         }
     }
 
@@ -491,16 +506,19 @@ class ChatSession: ObservableObject {
     /// Compress the entire hot window, not just the turn that fell out of it.
     /// Called by `MemoryWatchdog` when the footprint crosses the shed threshold
     /// or the OS reports critical pressure.
-    func shedRetainedContent() {
-        payloadStore.compactBatch(turns) { [weak self] skeletons in
-            guard let self else { return }
-            var byId: [UUID: Int] = [:]
-            for (i, turn) in self.turns.enumerated() { byId[turn.id] = i }
-            for skeleton in skeletons {
-                guard let i = byId[skeleton.id] else { continue }
-                self.turns[i] = skeleton
-            }
+    ///
+    /// `completion` fires **exactly once, on the main queue**, after the
+    /// compression has actually landed — including when nothing was eligible, in
+    /// which case it fires immediately. The watchdog measures the memory it freed
+    /// and then decides whether to keep escalating, and compaction is a
+    /// background LZFSE pass: returning before it lands meant the watchdog was
+    /// reading its "after" number before a single byte had been released.
+    func shedRetainedContent(completion: @escaping () -> Void = {}) {
+        let dispatched = payloadStore.compactBatch(turns) { [weak self] skeletons in
+            self?.applySkeletons(skeletons)
+            completion()
         }
+        if !dispatched { completion() }
     }
 
     /// Turns still holding an uncompressed payload, for diagnostics.

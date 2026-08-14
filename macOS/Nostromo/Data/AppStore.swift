@@ -97,8 +97,22 @@ class AppStore: ObservableObject {
 
     /// Start watching the app's own footprint. Called once, from `AppDelegate`.
     func startMemoryWatchdog() {
-        watchdog.onShed = { [weak self] in
-            self?.transcriptPanes.allObjects.forEach { $0.shedMaterializedViews() }
+        // `done` is called once every pane has finished compacting, so the
+        // watchdog measures memory that has actually been freed rather than
+        // memory it has only asked for. Two panes can share one `ChatSession`
+        // (same tag): the second `compactBatch` finds every candidate already in
+        // flight, returns `false`, and its completion fires immediately — so the
+        // group still balances.
+        watchdog.onShed = { [weak self] done in
+            guard let self else { done(); return }
+            let panes = self.transcriptPanes.allObjects
+            guard !panes.isEmpty else { done(); return }
+            let group = DispatchGroup()
+            for pane in panes {
+                group.enter()
+                pane.shedMaterializedViews { group.leave() }
+            }
+            group.notify(queue: .main) { done() }
         }
         watchdog.onWarn = { [weak self] title, detail in
             self?.onMemoryToast?("\(title) — \(detail)", .warning)

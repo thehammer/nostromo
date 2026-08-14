@@ -89,6 +89,19 @@ final class TurnPayloadStore {
 
     // MARK: - State
 
+    /// ## Threading contract
+    ///
+    /// **Every public method, and all state below, is main-queue only.** `queue`
+    /// exists for exactly one thing: the LZFSE pass inside `compact` and
+    /// `compactBatch`, which reads a `Data` it was handed by value and touches no
+    /// stored property. Both dispatches hop back to `.main` before going near
+    /// `blobs`, `pinned`, `dropped` or `inFlight`.
+    ///
+    /// Written down because it was already load-bearing and nowhere stated: the
+    /// in-flight stamping below is a plain `Dictionary` mutated from completions,
+    /// and it is only sound because those completions are serialised on one
+    /// queue. Calling `pin`, `drop` or `compactBatch` from a background thread
+    /// would corrupt it silently rather than trap.
     private var blobs: [UUID: Data] = [:]
     /// Turns held uncompressed on request (currently materialized views).
     private var pinned: Set<UUID> = []
@@ -148,31 +161,18 @@ final class TurnPayloadStore {
     /// Compress `turn`'s bulk payload off the main thread and call back on main
     /// with the skeleton to retain in its place.
     ///
-    /// A turn's payload is immutable once it completes, which is what makes this
-    /// safe to do asynchronously: nothing can append to it while the compressor
-    /// is running.
+    /// Deliberately a thin delegation to `compactBatch` and **not** a second
+    /// implementation. It was one, and it had drifted: `compactBatch`'s completion
+    /// guards `!dropped.contains(id)` *and* `!pinned.contains(id)`, while this one
+    /// had only the `dropped` half — so it wrote a compressed blob for a turn that
+    /// was pinned between dispatch and completion, "pinned" meaning "held
+    /// uncompressed while materialized", which is the entire contract `pin`
+    /// exists to enforce. It drifted unnoticed because it has no production
+    /// callers left; only the tests call it. Re-syncing the two would leave the
+    /// next divergence just as easy, so there is now only one implementation.
     func compact(_ turn: ChatTurn, completion: @escaping (ChatTurn) -> Void) {
-        guard turn.isComplete, turn.marker == nil,
-              blobs[turn.id] == nil, !pinned.contains(turn.id), !dropped.contains(turn.id),
-              !isInFlight(turn.id),
-              let payload = Self.encodePayload(turn)
-        else { return }
-
-        let id = turn.id
-        let stamp = beginCompaction(of: [id])
-        queue.async { [weak self] in
-            let blob = try? (payload as NSData).compressed(using: .lzfse) as Data
-            DispatchQueue.main.async {
-                guard let self else { return }
-                // f15: only this dispatch's own stamp entitles it to write. A
-                // `forget`/`drop`/`clear` between dispatch and completion has
-                // already removed the registration, and this blob describes
-                // content that is no longer current.
-                guard self.finishCompaction(of: id, stamp: stamp) else { return }
-                guard let blob, !self.dropped.contains(id) else { return }
-                self.blobs[id] = blob
-                completion(Self.skeleton(of: turn))
-            }
+        compactBatch([turn]) { skeletons in
+            if let skeleton = skeletons.first { completion(skeleton) }
         }
     }
 
@@ -181,11 +181,41 @@ final class TurnPayloadStore {
     /// The shed path compacts an entire hot window at once; doing that as one
     /// `compact` call per turn would queue thousands of dispatches at exactly
     /// the moment the machine is already unhappy.
-    func compactBatch(_ turns: [ChatTurn], completion: @escaping ([ChatTurn]) -> Void) {
-        let candidates = turns.filter {
-            $0.isComplete && $0.marker == nil && blobs[$0.id] == nil
-                && !pinned.contains($0.id) && !dropped.contains($0.id)
-                && !isInFlight($0.id)
+    ///
+    /// - Returns: `true` when a background compaction was dispatched, and
+    ///   therefore `completion` **will** be called (exactly once, on main);
+    ///   `false` when nothing was eligible and it will **not** be called.
+    ///
+    ///   The "no completion for ineligible turns" half is long-standing behaviour
+    ///   that `TurnPayloadStoreTests` pins, and it is right — a caller with
+    ///   nothing to do should not be handed an empty array to apply. But it makes
+    ///   this method unusable for anyone who has to *wait*: `MemoryWatchdog`
+    ///   measures the footprint it freed, and a `DispatchGroup` around a
+    ///   completion that may never arrive never balances. The return value is the
+    ///   exactly-once signal that makes the wait possible without changing the
+    ///   completion contract.
+    @discardableResult
+    func compactBatch(_ turns: [ChatTurn], completion: @escaping ([ChatTurn]) -> Void) -> Bool {
+        // De-duplicated by id (f15). The eligibility test reads `isInFlight`,
+        // which nothing has written yet — `beginCompaction` runs below — so the
+        // same turn appearing twice in `turns` passes it twice, and a reconciler
+        // splice is exactly where a repeated id shows up. Two entries for one turn
+        // then compress the same payload twice, hand the completion the same
+        // skeleton twice, and (before this) trapped in
+        // `Dictionary(uniqueKeysWithValues:)` on the low-memory path.
+        //
+        // An explicit loop rather than a `filter` whose predicate also mutates
+        // `seen` — see the de-registration loop below for why a correctness
+        // invariant must not ride on a closure's evaluation order.
+        var candidates: [ChatTurn] = []
+        var seen: Set<UUID> = []
+        for turn in turns {
+            guard turn.isComplete, turn.marker == nil, blobs[turn.id] == nil,
+                  !pinned.contains(turn.id), !dropped.contains(turn.id),
+                  !isInFlight(turn.id), !seen.contains(turn.id)
+            else { continue }
+            seen.insert(turn.id)
+            candidates.append(turn)
         }
         let payloads: [(UUID, Data)] = candidates.compactMap { turn in
             Self.encodePayload(turn).map { (turn.id, $0) }
@@ -200,7 +230,7 @@ final class TurnPayloadStore {
         // exists to bound. Register before dispatching. Guard on `payloads`
         // rather than `candidates` — only turns that actually encoded get
         // dispatched, and registering one that didn't would strand it.
-        guard !payloads.isEmpty else { return }
+        guard !payloads.isEmpty else { return false }
         let stamp = beginCompaction(of: payloads.map { $0.0 })
         queue.async { [weak self] in
             let compressed: [(UUID, Data)] = payloads.compactMap { id, payload in
@@ -215,10 +245,26 @@ final class TurnPayloadStore {
                 // `compressed` and would otherwise stay in flight for ever,
                 // permanently unbounded. Ids we no longer own were superseded
                 // (f15) and must not be written.
-                let owned = Set(payloads.map { $0.0 }
-                    .filter { self.finishCompaction(of: $0, stamp: stamp) })
+                //
+                // An explicit loop, not `.filter { self.finishCompaction(...) }`.
+                // `finishCompaction` mutates `inFlight`, and a de-registration
+                // invariant must not ride on the evaluation order of a `filter`
+                // predicate — a lazy or reordered `filter` would leave ids in
+                // flight for ever, and nothing in the type system says it can't.
+                var owned: Set<UUID> = []
+                for (id, _) in payloads where self.finishCompaction(of: id, stamp: stamp) {
+                    owned.insert(id)
+                }
                 var skeletons: [ChatTurn] = []
-                let byId = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
+                // NOT `Dictionary(uniqueKeysWithValues:)`, which **traps** on a
+                // duplicate id. `candidates` is de-duplicated above, so this
+                // cannot fire today — and it is written this way anyway because
+                // this runs on the low-memory path, where a trap crashes the app
+                // at the exact moment the watchdog is trying to save it. The
+                // uniqueness of `candidates` is an invariant twenty lines away;
+                // that is not a good enough reason to make it load-bearing here.
+                let byId = Dictionary(candidates.map { ($0.id, $0) },
+                                      uniquingKeysWith: { _, new in new })
                 for (id, blob) in compressed where owned.contains(id) {
                     guard !self.dropped.contains(id), !self.pinned.contains(id),
                           let turn = byId[id] else { continue }
@@ -228,6 +274,7 @@ final class TurnPayloadStore {
                 completion(skeletons)
             }
         }
+        return true
     }
 
     /// Restore a turn's full payload. Hot turns pass straight through.

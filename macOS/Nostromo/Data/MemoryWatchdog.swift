@@ -27,11 +27,23 @@ final class MemoryWatchdog {
     static let shedBytes: Int    = 1_600 * 1_048_576   // 1.6 GB
     static let pollInterval: TimeInterval = 30
 
-    /// Called when the app should shed. Wired to every live `ReplView` and
+    /// Called when the app should shed, with a completion the receiver must call
+    /// once every pane has finished compacting. Wired to every live `ReplView` and
     /// `ChatSession` by `AppStore`.
-    var onShed: (() -> Void)?
+    ///
+    /// The completion is not decoration. Shedding ends in a background LZFSE pass
+    /// whose skeletons are applied in a main-queue callback, so a `Void`-returning
+    /// `onShed` returned before anything had actually been freed — see `shed`.
+    var onShed: ((@escaping () -> Void) -> Void)?
     /// Called with (title, detail) when the operator should be told.
     var onWarn: ((String, String) -> Void)?
+
+    /// How long to wait for `onShed`'s completion before measuring anyway.
+    var shedCompletionTimeout: TimeInterval = 5
+    /// Seams, so the ordering below is assertable in the logic test target
+    /// without a running app or a real allocator.
+    var footprint: () -> Int = { TranscriptDiagnostics.physicalFootprint() }
+    var relievePressure: () -> Void = { malloc_zone_pressure_relief(nil, 0) }
 
     private var pressureSource: DispatchSourceMemoryPressure?
     private var pollTimer: DispatchSourceTimer?
@@ -39,6 +51,10 @@ final class MemoryWatchdog {
     /// footprint falls back below the warning level.
     private var hasWarned = false
     private var lastShed = Date.distantPast
+    /// True from the moment a shed starts until its completion (or its timeout)
+    /// has run. A shed is now asynchronous, so the `lastShed` rate limit alone no
+    /// longer prevents a second one starting inside the first.
+    private var isShedding = false
 
     func start() {
         let pressure = DispatchSource.makeMemoryPressureSource(
@@ -49,7 +65,7 @@ final class MemoryWatchdog {
                 log.error("OS reported critical memory pressure — shedding")
                 self.shed(reason: "the system reported critical memory pressure")
             } else {
-                self.warn(footprint: TranscriptDiagnostics.physicalFootprint(),
+                self.warn(footprint: self.footprint(),
                           detail: "The system is under memory pressure.")
             }
         }
@@ -66,11 +82,11 @@ final class MemoryWatchdog {
     // MARK: - Polling
 
     private func poll() {
-        let footprint = TranscriptDiagnostics.physicalFootprint()
-        if footprint >= Self.shedBytes {
-            shed(reason: "Nostromo is holding \(Self.megabytes(footprint)) MB")
-        } else if footprint >= Self.warningBytes {
-            warn(footprint: footprint, detail: "Nostromo is holding \(Self.megabytes(footprint)) MB.")
+        let bytes = footprint()
+        if bytes >= Self.shedBytes {
+            shed(reason: "Nostromo is holding \(Self.megabytes(bytes)) MB")
+        } else if bytes >= Self.warningBytes {
+            warn(footprint: bytes, detail: "Nostromo is holding \(Self.megabytes(bytes)) MB.")
         } else {
             hasWarned = false
         }
@@ -86,31 +102,77 @@ final class MemoryWatchdog {
     }
 
     /// Collapse every pane to its minimum materialization window, compress every
-    /// hot payload, hand freed pages back to the OS, and re-measure.
-    private func shed(reason: String) {
+    /// hot payload, hand freed pages back to the OS, and re-measure — in that
+    /// order, which is the whole point.
+    ///
+    /// The chain `onShed` starts is asynchronous: `AppStore` fans out to every
+    /// pane's `shedMaterializedViews`, which calls `ChatSession.shedRetainedContent`,
+    /// which calls `TurnPayloadStore.compactBatch`, which dispatches LZFSE to a
+    /// `.utility` queue and applies the skeletons in a main-queue callback. So
+    /// `onShed` used to return immediately, and everything after it ran before a
+    /// single byte had been freed: pressure relief handed back nothing because the
+    /// allocations still existed, and the "after" figure was the "before" figure
+    /// with extra steps. That made the log line and the operator's toast
+    /// meaningless, and it meant the last-resort safety mechanism for this whole
+    /// feature was deciding on stale numbers.
+    ///
+    /// Internal rather than private so `MemoryWatchdogTests` can drive it.
+    func shed(reason: String) {
         // Shedding is not free; do not do it in a tight loop if the footprint
-        // stays high because something else is holding the memory.
-        guard Date().timeIntervalSince(lastShed) > Self.pollInterval else { return }
+        // stays high because something else is holding the memory. `isShedding`
+        // is the second half of that guard now that a shed spans several run-loop
+        // turns — the `lastShed` clock alone cannot stop a re-entrant start.
+        guard !isShedding, Date().timeIntervalSince(lastShed) > Self.pollInterval
+        else { return }
+        isShedding = true
         lastShed = Date()
 
-        let before = TranscriptDiagnostics.physicalFootprint()
-        onShed?()
+        let before = footprint()
+        var finished = false
+        let finish: () -> Void = { [weak self] in
+            guard let self, !finished else { return }
+            finished = true
+            self.isShedding = false
 
-        // Freed Swift String allocations return to libmalloc's pools, which do
-        // not always hand pages straight back to the OS — so the footprint can
-        // look sticky after eviction even though the memory is genuinely free.
-        // Allocations over 128 KB (the ≥256 KB tool results, the big items) are
-        // mmap'd and release cleanly on their own; this covers the rest.
-        malloc_zone_pressure_relief(nil, 0)
+            // Freed Swift String allocations return to libmalloc's pools, which do
+            // not always hand pages straight back to the OS — so the footprint can
+            // look sticky after eviction even though the memory is genuinely free.
+            // Allocations over 128 KB (the ≥256 KB tool results, the big items) are
+            // mmap'd and release cleanly on their own; this covers the rest. It has
+            // to run *after* compaction: the pages it hands back are the ones the
+            // LZFSE pass just stopped needing.
+            self.relievePressure()
 
-        let after = TranscriptDiagnostics.physicalFootprint()
-        log.error("""
-            shed: \(Self.megabytes(before))MB → \(Self.megabytes(after))MB (\(reason, privacy: .public))
-            """)
-        onWarn?("Shed retained content",
-                "\(reason.prefix(1).uppercased() + reason.dropFirst()), so older transcript "
-                + "content was released. Footprint \(Self.megabytes(before)) → "
-                + "\(Self.megabytes(after)) MB. Scroll-back will reload it on demand.")
+            let after = self.footprint()
+            log.error("""
+                shed: \(Self.megabytes(before))MB → \(Self.megabytes(after))MB \
+                (\(reason, privacy: .public))
+                """)
+            self.onWarn?("Shed retained content",
+                         "\(reason.prefix(1).uppercased() + reason.dropFirst()), so older "
+                         + "transcript content was released. Footprint "
+                         + "\(Self.megabytes(before)) → \(Self.megabytes(after)) MB. "
+                         + "Scroll-back will reload it on demand.")
+        }
+
+        guard let onShed else { finish(); return }
+        onShed(finish)
+
+        // A completion that never arrives must not disable the app's last-resort
+        // memory defence for the rest of the session. A late shed is a bug; a
+        // permanently wedged watchdog is the incident this class exists to
+        // prevent. `finish` is idempotent, so the timeout and the real completion
+        // racing is harmless.
+        let timeout = shedCompletionTimeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+            if !finished {
+                log.error("""
+                    shed completion did not arrive within \(timeout, privacy: .public)s \
+                    — measuring anyway
+                    """)
+            }
+            finish()
+        }
     }
 
     private static func megabytes(_ bytes: Int) -> Int { bytes / 1_048_576 }
