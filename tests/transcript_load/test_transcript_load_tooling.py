@@ -356,8 +356,9 @@ def _panes_all_zero():
     """One sample whose single pane reported every counter at zero.
 
     A pane that reported itself with nothing in it is a pane the run never
-    drove. This is the same defect one level in: presence read as
-    instrumentation, and every number behind the gate a zero nobody measured.
+    drove. This repeats the all-zero-pane defect one level in: presence read
+    as instrumentation, and every number behind the gate a zero nobody
+    measured.
     """
     rows = make_rows(n_samples=1, total_turns=6000, peak_materialized=0,
                      hot_payload_turns=0)
@@ -1594,7 +1595,7 @@ class ReportScriptShapeTests(unittest.TestCase):
 
 
 class RegistryIntegrityTests(unittest.TestCase):
-    """The guard against a regression class of its own: every fix must change
+    """The guard against a whole class of regression: every fix must change
     whether a row PASSes or FAILs, never whether it exists.
 
     The table's row set *is* the registry, so a row cannot vanish, duplicate or

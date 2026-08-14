@@ -443,9 +443,9 @@ def driven_pane_samples(rows):
 
     A pane that reported itself with every counter at zero is a pane the run
     never drove, and its mere presence is not evidence about materialization,
-    retention or the hot window. Accepting presence alone is the same defect one
-    level in: the instrumentation gate opens, and the numbers behind it are all
-    zeros nobody measured.
+    retention or the hot window. Accepting presence alone repeats the
+    all-zero-pane defect one level in: the instrumentation gate opens, and
+    the numbers behind it are all zeros nobody measured.
     """
     out = []
     for row in rows:
