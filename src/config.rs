@@ -79,6 +79,14 @@ pub struct Config {
     /// Bearer token for the github-relay WebSocket endpoint.
     /// Obtain via `https://github-relay.carefeed.com/auth/token` (VPN required).
     pub relay_token: Option<String>,
+    /// Kill switch for the targeted relay-update engine (default: `true`).
+    ///
+    /// Set `perri_targeted_relay = false` in `~/.config/nostromo/config.toml` to
+    /// make every relay event trigger a full queue refresh again — the exact
+    /// pre-engine behaviour, at the cost of three org-wide search calls per
+    /// event.  Present so the engine can be disabled in the field without a
+    /// rebuild if its per-PR verdicts turn out to disagree with the poll's.
+    pub perri_targeted_relay: bool,
 
     /// VIP sender addresses (lowercase); emails from these addresses are
     /// highlighted in the mailbox panel.
@@ -103,6 +111,7 @@ impl Default for Config {
             github_token_path: None,
             relay_url: None,
             relay_token: None,
+            perri_targeted_relay: true,
             vip_senders: Vec::new(),
         }
     }

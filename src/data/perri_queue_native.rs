@@ -34,16 +34,36 @@
 //! review-state or new-activity gate cost **zero** requests, and the queue's
 //! tests measure that.
 //!
-//! # Wake sources
+//! # Wake sources, and the two update paths
 //!
 //! [`wait_for_wake`] waits on the poll interval, the dirty-file sentinel, the
 //! MCP direct-push channel, the approvals-file watcher, and the typed
-//! github-relay channel. **Every one of them currently produces the same full
-//! refresh.** Driving targeted per-PR updates off the relay payload is
-//! follow-up work (`.claude/plans/targeted-relay-refresh-engine.md`); nothing
-//! here reads a field of `RelayEvent`.
+//! github-relay channel, and returns a [`Wake`] saying which of two things to
+//! do:
+//!
+//! * [`Wake::Full`] — the fetch described above. Produced by the interval, the
+//!   dirty file, the MCP push, the approvals file, and a relay *(re)connect*
+//!   (the relay buffers nothing for an absent subscriber, so a reconnect is a
+//!   reconciliation and there is no event describing it).
+//! * [`Wake::Targeted`] — a batch of relay events, each applied to a single PR
+//!   by [`perri_queue_targeted`], with **zero** search requests. No relay
+//!   *event* produces a full refresh; an event that can't be settled from
+//!   scoped reads changes nothing and is left to the next poll.
+//!
+//! The poll is therefore not a legacy path but the floor under the targeted
+//! one. It is the correctness backstop — relay delivery is at-most-once with no
+//! backfill, and real queue changes (suppression expiry, draft toggles, team
+//! review requests, branch-protection changes) arrive with no event at all —
+//! *and* the audit vantage point: after each poll, every PR a targeted update
+//! touched since the last one is diffed against the fresh verdict and any
+//! disagreement is logged at `warn` (see `audit_divergence`).
+//!
+//! `perri_targeted_relay = false` in the config turns the targeted path off
+//! entirely, restoring the pre-engine behaviour.
+//!
+//! [`perri_queue_targeted`]: crate::data::perri_queue_targeted
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -62,8 +82,12 @@ use crate::{
         github_client::GithubClient,
         perri_pr_native::prefetch_into_cache,
         perri_queue::{CiState, PrQueueItem, PrQueueSnapshot},
+        perri_queue_targeted::{
+            apply_relay_event, ci_for_probed_head, diff_snapshots, probe_pr, upsert_from_probe,
+            ProbeResult, TargetedState,
+        },
         perri_suppress::{SuppressStore, unix_now_secs},
-        relay_client::QueueSignal,
+        relay_client::{QueueSignal, RelayEvent},
     },
 };
 
@@ -79,7 +103,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-fn api_base() -> String {
+pub(crate) fn api_base() -> String {
     API_BASE_OVERRIDE.with(|o| {
         o.borrow()
             .clone()
@@ -95,7 +119,7 @@ struct SearchResponse {
 }
 
 #[derive(Deserialize, Clone)]
-pub(crate) struct SearchIssueItem {
+pub struct SearchIssueItem {
     number: u64,
     title: String,
     html_url: String,
@@ -106,7 +130,7 @@ pub(crate) struct SearchIssueItem {
 }
 
 #[derive(Deserialize, Clone)]
-pub(crate) struct GhUser {
+pub struct GhUser {
     login: String,
 }
 
@@ -199,7 +223,7 @@ enum GetPrHeadResult {
 /// Note: the authenticated user login (`me`) is deliberately *not* here — it is
 /// a one-shot identity lookup, not a cache the queue mutates per cycle.
 #[derive(Default)]
-pub(crate) struct QueueCaches {
+pub struct QueueCaches {
     /// ETag cache per search query string.
     pub etags: HashMap<String, String>,
     /// Item cache per search query (for 304 reuse).
@@ -226,6 +250,61 @@ pub(crate) struct QueueCaches {
     pub candidates: HashMap<(String, u64), Candidate>,
     /// Monotonic insertion counter feeding `Candidate::seq`.
     pub next_seq: u64,
+    /// PRs the last fetch carried over because the search index hadn't caught
+    /// up with a targeted probe yet.  The divergence audit exempts them: their
+    /// difference from the poll's raw verdict is explained, not drift.
+    pub last_grace_retained: HashSet<(String, u64)>,
+}
+
+/// How long a targeted probe's verdict outlives a search that doesn't confirm
+/// it: two poll cycles.  Long enough for GitHub's index to catch up, short
+/// enough that a wrong probe cannot linger.
+const SEARCH_LAG_GRACE_SECS: u64 = 120;
+
+/// At most this many grace re-probes per poll, so a pathological ledger can't
+/// turn one poll into a probe storm.  Oldest probe first.
+const SEARCH_LAG_GRACE_MAX: usize = 5;
+
+/// Which ledger entries a fresh set of search results failed to confirm, but
+/// which a targeted probe vouched for recently enough to deserve a re-probe.
+fn collect_search_lag_candidates(
+    candidates: &HashMap<(String, u64), Candidate>,
+    requested: &[SearchIssueItem],
+    needs: &[SearchIssueItem],
+    reviewed: &[SearchIssueItem],
+    now_secs: u64,
+) -> Vec<(String, u64, u64)> {
+    let returned: HashSet<(String, u64)> = requested
+        .iter()
+        .chain(needs)
+        .chain(reviewed)
+        .map(|i| (repo_from_url(&i.repository_url), i.number))
+        .collect();
+
+    // Sorted by `targeted_seen_at` ascending, so the cap below drops the
+    // *newest* — those have the most grace left to spend on a later poll.
+    let mut fresh: Vec<(u64, (String, u64))> = candidates
+        .iter()
+        .filter(|(key, _)| !returned.contains(*key))
+        .filter_map(|(key, c)| {
+            let seen_at = c.targeted_seen_at?;
+            (now_secs.saturating_sub(seen_at) <= SEARCH_LAG_GRACE_SECS)
+                .then(|| (seen_at, key.clone()))
+        })
+        .collect();
+
+    fresh.sort();
+    if fresh.len() > SEARCH_LAG_GRACE_MAX {
+        debug!(
+            dropped = fresh.len() - SEARCH_LAG_GRACE_MAX,
+            "perri queue: search-lag grace cap reached — some recently-probed candidates dropped"
+        );
+        fresh.truncate(SEARCH_LAG_GRACE_MAX);
+    }
+    fresh
+        .into_iter()
+        .map(|(seen_at, (repo, number))| (repo, number, seen_at))
+        .collect()
 }
 
 /// One PR the queue knows about, and everything needed to decide whether it
@@ -234,7 +313,7 @@ pub(crate) struct QueueCaches {
 /// A candidate is recorded whether or not it ships: drafts, self-authored PRs,
 /// CI-failed PRs and suppressed PRs all get entries.  [`classify`] is what
 /// turns an entry into a [`PrQueueItem`] or into nothing.
-pub(crate) struct Candidate {
+pub struct Candidate {
     pub repo: String,
     pub number: u64,
     /// Insertion order, which is snapshot order.
@@ -315,7 +394,7 @@ impl Candidate {
 /// This is everything [`classify`] decides *except* approval suppression, which
 /// is time-dependent and therefore separable.  The order of the checks is the
 /// behaviour; changing it changes the queue.
-pub(crate) fn classify_bucket(c: &Candidate, me: &str) -> Option<(&'static str, bool)> {
+pub fn classify_bucket(c: &Candidate, me: &str) -> Option<(&'static str, bool)> {
     // 1. Drafts and our own PRs are never ours to review (`is_filtered`).
     //    Bots are deliberately *not* excluded here — they get their own bucket.
     if c.draft || c.author == me {
@@ -348,7 +427,7 @@ pub(crate) fn classify_bucket(c: &Candidate, me: &str) -> Option<(&'static str, 
 
 /// Render one ledger entry into a queue item, or `None` if it doesn't belong in
 /// the snapshot.
-pub(crate) fn classify(
+pub fn classify(
     c: &Candidate,
     me: &str,
     suppress: &SuppressStore,
@@ -391,8 +470,38 @@ struct B3Outcome {
     new_cache_entry: Option<(String, Option<String>)>,
 }
 
+/// Render the ledger with the live suppression store: prune expired entries
+/// (persisting if anything went), then render.
+///
+/// Both publish paths go through this so a targeted publish can never resurrect
+/// a suppression the full fetch would have pruned, or hide a PR the full fetch
+/// would have shown.  One lock acquisition covers the prune and the render.
+pub fn render_with_suppression(
+    caches: &QueueCaches,
+    me: &str,
+    suppress: &Arc<Mutex<SuppressStore>>,
+) -> Vec<PrQueueItem> {
+    let now = unix_now_secs();
+    let mut store = suppress.lock().unwrap();
+    if store.prune(now) {
+        store.save();
+    }
+    let suppressed = caches
+        .candidates
+        .values()
+        .filter(|c| {
+            classify_bucket(c, me).is_some()
+                && store.is_suppressed(&c.repo, c.number, &c.head_sha, now)
+        })
+        .count();
+    if suppressed > 0 {
+        debug!("perri suppress: hid {suppressed} just-approved PR(s) from snapshot");
+    }
+    render_items(&caches.candidates, me, &store, now)
+}
+
 /// Render the whole ledger, in insertion order, into the snapshot's item list.
-pub(crate) fn render_items(
+pub fn render_items(
     candidates: &HashMap<(String, u64), Candidate>,
     me: &str,
     suppress: &SuppressStore,
@@ -413,6 +522,12 @@ pub struct PerriQueueNativeSource {
 }
 
 impl PerriQueueNativeSource {
+    /// Build a source without spawning its run loop — for tests and callers
+    /// that want to drive one `fetch()` or one targeted update by hand.
+    pub fn new(config: Config) -> Self {
+        Self { config }
+    }
+
     /// Spawn the data source.
     ///
     /// Returns `(snapshot_rx, refresh_tx, relay_tx)`.
@@ -420,11 +535,10 @@ impl PerriQueueNativeSource {
     /// `refresh_tx` allows MCP tools to request an immediate queue re-fetch
     /// without touching the dirty-file sentinel (phase 4).
     ///
-    /// `relay_tx` is the github-relay subscriber's channel.  It is typed and
-    /// carries a full event payload, but **every signal on it currently
-    /// produces the same full refresh** the bare `refresh_tx` does — driving
-    /// targeted per-PR updates from the payload is follow-up work
-    /// (`.claude/plans/targeted-relay-refresh-engine.md`).
+    /// `relay_tx` is the github-relay subscriber's channel.  A batch of events
+    /// on it drives a *targeted* per-PR update that issues no search request; a
+    /// (re)connect on it is the one relay signal that still forces a full
+    /// refresh.  See the module docs.
     pub fn spawn(
         config: Config,
     ) -> (
@@ -499,27 +613,23 @@ impl PerriQueueNativeSource {
 
         // All cross-cycle mutable queue state lives here (see `QueueCaches`).
         let mut caches = QueueCaches::default();
+        // Dedup / ordering / audit bookkeeping for the targeted path.
+        let mut tstate = TargetedState::default();
         // Authenticated user login — fetched once and reused.
         let mut me: Option<String> = None;
 
         // Path to the approvals JSONL signal file.
         let approvals_path = self.config.perri_state_dir().join("approvals.jsonl");
+        let targeted_enabled = self.config.perri_targeted_relay;
+
+        // The first pass is always a full fetch — a cold daemon has no ledger to
+        // update, and every targeted action is defined relative to one.
+        let mut wake = Wake::Full("startup");
+        // Events that arrived alongside a relay reconnect: applied *after* the
+        // reconciling fetch rather than discarded.
+        let mut pending: Vec<RelayEvent> = Vec::new();
 
         loop {
-            // Consume any approvals that arrived since the last cycle (or since
-            // startup).  Belt-and-suspenders: the approvals_rx branch in the
-            // select! below also triggers an immediate re-fetch when the file
-            // appears, but we consume here unconditionally so a write that races
-            // past the watcher is never missed.
-            {
-                let mut store = suppress.lock().unwrap();
-                let count = store.consume_approvals_file(&approvals_path, unix_now_secs());
-                if count > 0 {
-                    store.save();
-                    debug!("perri suppress: consumed {count} new approval(s) before fetch");
-                }
-            }
-
             let me_login = match &me {
                 Some(m) => m.clone(),
                 None => match get_authenticated_user(&client).await {
@@ -534,42 +644,223 @@ impl PerriQueueNativeSource {
                         snap.error = Some(format!("GitHub auth check failed: {e:#}"));
                         let _ = tx.send(Some(snap));
                         tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+                        // Nothing was applied; retry as a plain full refresh
+                        // rather than replaying whatever woke us.
+                        wake = Wake::Full("auth retry");
                         continue;
                     }
                 },
             };
 
-            match self
-                .fetch(&client, &me_login, &mut caches, &suppress)
-                .await
-            {
-                Ok(snap) => self.publish_snapshot(&tx, &client, snap),
-                Err(e) => {
-                    warn!("perri queue fetch failed: {e:#}");
-                    let mut snap = tx.borrow().clone().unwrap_or_default();
-                    snap.stale = true;
-                    snap.error = Some(e.to_string());
-                    let _ = tx.send(Some(snap));
+            match wake {
+                Wake::Full(reason) => {
+                    self.run_full_refresh(
+                        &client,
+                        &me_login,
+                        &mut caches,
+                        &suppress,
+                        &mut tstate,
+                        &tx,
+                        &approvals_path,
+                        reason,
+                    )
+                    .await;
+                }
+
+                Wake::Targeted(events) => {
+                    self.run_targeted_update(
+                        &client,
+                        &me_login,
+                        &mut caches,
+                        &suppress,
+                        &mut tstate,
+                        &tx,
+                        events,
+                    )
+                    .await;
                 }
             }
 
-            // Every wake produces a full refresh, so the reason is only of
-            // interest to the log lines `wait_for_wake` emits itself.
-            let _ =
-                wait_for_wake(dirty_rx, refresh_rx, approvals_rx, relay_rx, interval_secs).await;
+            // A reconnect's stashed events are applied on the very next
+            // iteration, so they are never silently dropped.
+            if !pending.is_empty() {
+                wake = Wake::Targeted(std::mem::take(&mut pending));
+                continue;
+            }
+
+            wake = wait_for_wake(
+                dirty_rx,
+                refresh_rx,
+                approvals_rx,
+                relay_rx,
+                interval_secs,
+                targeted_enabled,
+                &mut pending,
+            )
+            .await;
         }
     }
 
-    /// Publish a freshly-fetched snapshot: write the on-disk queue cache, kick
-    /// off top-3 detail prefetch, then hand the snapshot to the watch channel.
+    /// Re-derive the whole queue and publish it, auditing the targeted path
+    /// against the result before the ledger it was measured against is gone.
+    ///
+    /// One `Wake::Full` arm of the run loop, pulled out only because `run()`
+    /// otherwise buries this sequence — fetch, audit, prune, publish — inside
+    /// a `match` alongside the targeted arm below.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_full_refresh(
+        &self,
+        client: &GithubClient,
+        me_login: &str,
+        caches: &mut QueueCaches,
+        suppress: &Arc<Mutex<SuppressStore>>,
+        tstate: &mut TargetedState,
+        tx: &watch::Sender<Option<PrQueueSnapshot>>,
+        approvals_path: &Path,
+        reason: &'static str,
+    ) {
+        // Consume any approvals that arrived since the last cycle (or since
+        // startup).  Belt-and-suspenders: the approvals_rx wake also triggers
+        // an immediate re-fetch when the file appears, but we consume here
+        // unconditionally so a write that races past the watcher is never
+        // missed.
+        {
+            let mut store = suppress.lock().unwrap();
+            let count = store.consume_approvals_file(approvals_path, unix_now_secs());
+            if count > 0 {
+                store.save();
+                debug!("perri suppress: consumed {count} new approval(s) before fetch");
+            }
+        }
+
+        let prev = tx.borrow().clone();
+        // Everything a targeted update claimed a verdict for since the last
+        // poll.  Taken *before* the fetch so events that arrive during it are
+        // audited by the *next* poll.
+        let mut audit_set = std::mem::take(&mut tstate.touched_since_poll);
+
+        debug!(reason, "perri queue full refresh");
+        match self.fetch(client, me_login, caches, suppress).await {
+            Ok(snap) => {
+                // PRs the search-index-lag grace carried over differ from the
+                // poll's raw verdict *by design*.
+                for key in &caches.last_grace_retained {
+                    audit_set.remove(key);
+                }
+                self.audit_divergence(&prev, &snap, &audit_set, tstate);
+                tstate.prune(&caches.candidates);
+                self.publish_snapshot(tx, client, snap, PrefetchScope::TopThree);
+            }
+            Err(e) => {
+                warn!("perri queue fetch failed: {e:#}");
+                let mut snap = tx.borrow().clone().unwrap_or_default();
+                snap.stale = true;
+                snap.error = Some(e.to_string());
+                let _ = tx.send(Some(snap));
+            }
+        }
+    }
+
+    /// Apply a batch of relay events to the ledger and publish only if one of
+    /// them actually changed a verdict.
+    ///
+    /// The other `Wake` arm of the run loop, pulled out for the same reason as
+    /// [`Self::run_full_refresh`].
+    #[allow(clippy::too_many_arguments)]
+    async fn run_targeted_update(
+        &self,
+        client: &GithubClient,
+        me_login: &str,
+        caches: &mut QueueCaches,
+        suppress: &Arc<Mutex<SuppressStore>>,
+        tstate: &mut TargetedState,
+        tx: &watch::Sender<Option<PrQueueSnapshot>>,
+        events: Vec<RelayEvent>,
+    ) {
+        // Bound to a local before the `.await`s below: the `watch::Ref` guard
+        // `borrow()` returns is not `Send`.
+        let current = tx.borrow().clone();
+        let Some(current) = current.filter(|s| !s.stale && s.error.is_none()) else {
+            // Nothing coherent to mutate.  The next full fetch settles
+            // everything anyway, and mutating a broken ledger would only
+            // publish a differently-wrong snapshot.
+            debug!(
+                events = events.len(),
+                "perri targeted: no healthy snapshot — deferring to the periodic poll"
+            );
+            return;
+        };
+
+        let mut changed = false;
+        for ev in &events {
+            changed |= apply_relay_event(client, me_login, ev, caches, suppress, tstate)
+                .await
+                .is_changed();
+        }
+
+        if changed {
+            let snap = PrQueueSnapshot {
+                generated_at: Some(Utc::now()),
+                items: render_with_suppression(caches, me_login, suppress),
+                stale: false,
+                error: None,
+            };
+            self.publish_snapshot(tx, client, snap, PrefetchScope::NewlyTopThree(&current.items));
+        }
+    }
+
+    /// Log every field on which a fresh poll disagrees with the
+    /// targeted-maintained snapshot, for the PRs a targeted update touched.
+    ///
+    /// Issues **no** GitHub request: it is a diff of two item lists the daemon
+    /// already holds.  Skipped when there is no prior snapshot, when the prior
+    /// snapshot was stale or errored (there is nothing trustworthy to compare
+    /// against), or when no targeted update has run since the last poll.
+    pub fn audit_divergence(
+        &self,
+        prev: &Option<PrQueueSnapshot>,
+        fresh: &PrQueueSnapshot,
+        audit_set: &HashSet<(String, u64)>,
+        tstate: &TargetedState,
+    ) {
+        if audit_set.is_empty() {
+            return;
+        }
+        let Some(prev) = prev.as_ref().filter(|p| !p.stale && p.error.is_none()) else {
+            return;
+        };
+        for d in diff_snapshots(&prev.items, &fresh.items, audit_set) {
+            let last = tstate.last_event.get(&(d.repo.clone(), d.number));
+            warn!(
+                repo = %d.repo,
+                number = d.number,
+                field = d.field,
+                poll_verdict = %d.poll,
+                targeted_verdict = %d.targeted,
+                last_event_type = last.map(|l| l.event_type.as_str()).unwrap_or("?"),
+                last_event_id = last.map(|l| l.event_id.as_str()).unwrap_or("?"),
+                last_event_at = last.map(|l| l.at.to_rfc3339()).unwrap_or_else(|| "?".to_owned()),
+                "perri queue: targeted update diverged from periodic poll"
+            );
+        }
+    }
+
+    /// Publish a snapshot: write the on-disk queue cache, kick off detail
+    /// prefetch, then hand the snapshot to the watch channel.
     ///
     /// Ordering matters — the cache file is written *before* the watch send so
     /// a reader woken by the send always finds a file that already matches.
-    fn publish_snapshot(
+    ///
+    /// **Both** the full-refresh and the targeted paths publish through here, so
+    /// no consumer can tell which one produced a snapshot.  They differ only in
+    /// `scope`: a full refresh reconsiders the whole top 3, a targeted update
+    /// only prefetches PRs that newly entered it.
+    pub fn publish_snapshot(
         &self,
         tx: &watch::Sender<Option<PrQueueSnapshot>>,
         client: &GithubClient,
         snap: PrQueueSnapshot,
+        scope: PrefetchScope<'_>,
     ) {
         debug!(prs = snap.items.len(), "perri queue refreshed");
 
@@ -587,9 +878,8 @@ impl PerriQueueNativeSource {
             Err(e) => warn!("perri queue cache serialize failed: {e:#}"),
         }
 
-        // Pre-fetch detail for the top-3 PRs in bucket-priority order.
-        let top_three = top_three_items(&snap.items);
-        for item in top_three {
+        // Pre-fetch detail for the selected PRs in bucket-priority order.
+        for item in prefetch_targets(&scope, &snap.items) {
             let cfg = self.config.clone();
             let client_clone = client.clone();
             let repo = item.repo.clone();
@@ -611,7 +901,11 @@ impl PerriQueueNativeSource {
         let _ = tx.send(Some(snap));
     }
 
-    async fn fetch(
+    /// Re-derive the whole queue from the three org-wide searches.
+    ///
+    /// `pub` so integration tests can drive one cycle directly; the daemon only
+    /// ever calls it from `run()`.
+    pub async fn fetch(
         &self,
         client: &GithubClient,
         me: &str,
@@ -646,6 +940,17 @@ impl PerriQueueNativeSource {
             needs = needs_items.len(),
             reviewed = reviewed_items.len(),
             "perri queue search results"
+        );
+
+        // A PR a targeted probe added moments ago can be genuinely absent from
+        // the search index (see `apply_search_lag_grace`).  Note which ones
+        // *before* the ledger is replaced; they are re-probed at the end.
+        let carried = collect_search_lag_candidates(
+            &caches.candidates,
+            &requested_items,
+            &needs_items,
+            &reviewed_items,
+            unix_now_secs(),
         );
 
         // The ledger describes *this* fetch's search results — a PR the searches
@@ -893,31 +1198,14 @@ impl PerriQueueNativeSource {
             }
         }
 
+        self.apply_search_lag_grace(client, me, caches, carried).await;
+
         // ── Render the ledger into the snapshot ───────────────────────────────
-        // Pruning expired suppression entries is a side effect and stays here;
-        // deciding what ships is `classify`'s job.  A PR whose current head_sha
-        // exactly matches a live suppression entry is hidden — PRs with an
-        // empty head_sha (unresolved) never match (is_suppressed() guards it).
-        // One lock acquisition covers the prune and the whole render.
-        let items = {
-            let now = unix_now_secs();
-            let mut store = suppress.lock().unwrap();
-            if store.prune(now) {
-                store.save();
-            }
-            let suppressed = caches
-                .candidates
-                .values()
-                .filter(|c| {
-                    classify_bucket(c, me).is_some()
-                        && store.is_suppressed(&c.repo, c.number, &c.head_sha, now)
-                })
-                .count();
-            if suppressed > 0 {
-                debug!("perri suppress: hid {suppressed} just-approved PR(s) from snapshot");
-            }
-            render_items(&caches.candidates, me, &store, now)
-        };
+        // Deciding what ships is `classify`'s job; pruning expired suppression
+        // entries is a side effect that rides along.  A PR whose current
+        // head_sha exactly matches a live suppression entry is hidden — PRs with
+        // an empty head_sha (unresolved) never match (is_suppressed() guards it).
+        let items = render_with_suppression(caches, me, suppress);
 
         Ok(PrQueueSnapshot {
             generated_at: Some(Utc::now()),
@@ -925,6 +1213,66 @@ impl PerriQueueNativeSource {
             stale: false,
             error: None,
         })
+    }
+
+    /// Carry over PRs a targeted probe added that this poll's searches did not
+    /// return — GitHub's search index lags the events the relay delivers, and
+    /// without this a PR that appeared within ~3s of `pr.opened` would be
+    /// yanked back out on the very next poll and flicker for a minute.
+    ///
+    /// Each carried PR is re-probed (1 GraphQL, **zero** search) so the poll's
+    /// verdict stays authoritative: it survives only if it still qualifies.
+    /// Capped so a pathological ledger can't turn one poll into a probe storm.
+    ///
+    /// Removals need no equivalent grace — a merged PR the index still lists is
+    /// already dropped by `get_pr_head_sha` returning `Terminal`.
+    async fn apply_search_lag_grace(
+        &self,
+        client: &GithubClient,
+        me: &str,
+        caches: &mut QueueCaches,
+        carried: Vec<(String, u64, u64)>,
+    ) {
+        caches.last_grace_retained.clear();
+        for (repo, number, first_seen_at) in carried {
+            let key = (repo.clone(), number);
+            let ProbeResult::Open(probed) = probe_pr(client, &repo, number, me).await else {
+                debug!(
+                    %repo, number,
+                    "perri queue: recently-probed candidate is gone or unreadable — dropping"
+                );
+                continue;
+            };
+
+            let (ci_state, actions_failed) =
+                ci_for_probed_head(client, caches, &repo, number, &probed.head_sha).await;
+            upsert_from_probe(caches, &probed, ci_state, actions_failed);
+
+            // Keep the *original* probe timestamp.  `upsert_from_probe` stamps
+            // "now", which would re-arm the grace on every poll — a PR the
+            // search index never returns would then be carried forever instead
+            // of for two cycles.
+            if let Some(c) = caches.candidates.get_mut(&key) {
+                c.targeted_seen_at = Some(first_seen_at);
+            }
+
+            // The poll stays authoritative: the PR survives only if it still
+            // belongs in a bucket.
+            if classify_bucket(&caches.candidates[&key], me).is_none() {
+                caches.candidates.remove(&key);
+                debug!(
+                    %repo, number,
+                    "perri queue: recently-probed candidate no longer qualifies — dropping"
+                );
+                continue;
+            }
+
+            debug!(
+                %repo, number,
+                "perri queue: search index has not caught up — carrying targeted candidate over"
+            );
+            caches.last_grace_retained.insert(key);
+        }
     }
 
     fn build_client(&self) -> Result<GithubClient> {
@@ -935,8 +1283,30 @@ impl PerriQueueNativeSource {
 
 // ── Run-loop wake ─────────────────────────────────────────────────────────────
 
-/// Block until the queue should re-fetch, then drain every signal channel and
-/// report which one woke us.
+/// Why the run loop woke, and therefore what it should do.
+#[derive(Debug)]
+pub enum Wake {
+    /// Re-derive the whole queue from the three searches.  The `&str` is the
+    /// wake source, for logs.
+    Full(&'static str),
+    /// Apply this batch of relay events to the ledger, touching only the PRs
+    /// they name.  Never issues a search request.
+    Targeted(Vec<RelayEvent>),
+}
+
+/// Which PRs a publish should kick off detail prefetch for.
+pub enum PrefetchScope<'a> {
+    /// The top 3, skipping any whose per-PR cache is already fresh.  What a
+    /// full refresh has always done.
+    TopThree,
+    /// Only PRs that were *not* in the previous snapshot's top 3 and are in
+    /// this one's.  A targeted CI-glyph change that doesn't reorder the top 3
+    /// therefore prefetches nothing.
+    NewlyTopThree(&'a [PrQueueItem]),
+}
+
+/// Block until the queue should act, then drain the signal channels and report
+/// what to do.
 ///
 /// Two properties here are load-bearing and must not be "simplified":
 ///
@@ -953,50 +1323,110 @@ impl PerriQueueNativeSource {
 ///    cycles for one change.  Regression test:
 ///    `coalesces_dirty_refresh_and_approvals_signals_into_one_wake`.
 ///
-/// Every wake — including both relay signals — produces a full refresh, which
-/// is exactly what happened before the relay had its own channel.  The relay
-/// payload is deliberately not inspected here.
-pub(crate) async fn wait_for_wake(
+/// Relay signals are the one wake source that does **not** always mean "full
+/// refresh": a batch of events becomes [`Wake::Targeted`], and only a
+/// (re)connect — which the relay cannot describe as an event, because it
+/// buffers nothing for an absent subscriber — becomes a `Wake::Full`.
+pub async fn wait_for_wake(
     dirty_rx: &mut mpsc::UnboundedReceiver<()>,
     refresh_rx: &mut mpsc::UnboundedReceiver<()>,
     approvals_rx: &mut mpsc::UnboundedReceiver<()>,
     relay_rx: &mut mpsc::UnboundedReceiver<QueueSignal>,
     interval_secs: u64,
-) -> &'static str {
-    let reason = tokio::select! {
-        _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => "interval",
+    targeted_enabled: bool,
+    pending: &mut Vec<RelayEvent>,
+) -> Wake {
+    /// Which branch won, before any draining.
+    ///
+    /// Same size trade-off as `QueueSignal` itself: one short-lived stack value
+    /// per wake, immediately destructured.  Boxing to flatten the variants would
+    /// cost an allocation on a path that runs a few times a minute.
+    #[allow(clippy::large_enum_variant)]
+    enum First {
+        Full(&'static str),
+        Relay(QueueSignal),
+    }
+
+    let first = tokio::select! {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => First::Full("interval"),
         Some(_) = dirty_rx.recv() => {
             debug!("perri queue dirty-file signal");
-            "dirty"
+            First::Full("dirty")
         }
         Some(_) = refresh_rx.recv() => {
             debug!("perri queue direct-push refresh signal (MCP)");
-            "refresh"
+            First::Full("refresh")
         }
         Some(_) = approvals_rx.recv() => {
             debug!("perri queue approvals-file signal — re-fetching with new suppression");
-            "approvals"
+            First::Full("approvals")
         }
-        Some(signal) = relay_rx.recv() => {
-            match signal {
-                QueueSignal::Reconnected => {
-                    debug!("perri queue relay reconnect — reconciling");
-                    "relay_reconnect"
-                }
-                QueueSignal::Event(_) => {
-                    debug!("perri queue relay event — full refresh");
-                    "relay_event"
-                }
-            }
-        }
+        Some(signal) = relay_rx.recv() => First::Relay(signal),
     };
 
-    while dirty_rx.try_recv().is_ok() {}
-    while refresh_rx.try_recv().is_ok() {}
-    while approvals_rx.try_recv().is_ok() {}
-    while relay_rx.try_recv().is_ok() {}
+    // The non-relay channels are always drained together — one logical change
+    // can touch several of them (see property 2 above).
+    let drain_non_relay = |dirty_rx: &mut mpsc::UnboundedReceiver<()>,
+                           refresh_rx: &mut mpsc::UnboundedReceiver<()>,
+                           approvals_rx: &mut mpsc::UnboundedReceiver<()>| {
+        while dirty_rx.try_recv().is_ok() {}
+        while refresh_rx.try_recv().is_ok() {}
+        while approvals_rx.try_recv().is_ok() {}
+    };
 
-    reason
+    let signal = match first {
+        First::Full(reason) => {
+            drain_non_relay(dirty_rx, refresh_rx, approvals_rx);
+            // `relay_rx` is deliberately **not** drained here.  A relay event
+            // describes a change GitHub's search index may not have picked up
+            // yet, so discarding it because an unrelated dirty-file refresh
+            // happened first would lose news the fetch cannot recover.  It costs
+            // at most one extra loop iteration.
+            return Wake::Full(reason);
+        }
+        First::Relay(signal) => signal,
+    };
+
+    // Drain the relay channel into one batch so a burst of events for the same
+    // PR collapses into a single update and a single publish.
+    let mut events: Vec<RelayEvent> = Vec::new();
+    let mut reconnected = false;
+    let mut absorb = |signal: QueueSignal| match signal {
+        QueueSignal::Reconnected => reconnected = true,
+        QueueSignal::Event(ev) => events.push(ev),
+    };
+    absorb(signal);
+    while let Ok(signal) = relay_rx.try_recv() {
+        absorb(signal);
+    }
+
+    if !targeted_enabled {
+        // Kill switch: behave exactly as the queue did before the targeted
+        // engine existed — every relay signal is a full refresh.
+        drain_non_relay(dirty_rx, refresh_rx, approvals_rx);
+        let reason = if reconnected {
+            "relay_reconnect"
+        } else {
+            "relay_event"
+        };
+        debug!("perri queue relay signal — full refresh ({reason}, targeted path disabled)");
+        return Wake::Full(reason);
+    }
+
+    if reconnected {
+        // The relay buffered nothing while we were away, so reconcile first —
+        // but keep the batch: these events may describe changes the reconciling
+        // fetch's searches are still too stale to see.
+        debug!(
+            events = events.len(),
+            "perri queue relay reconnect — reconciling, then applying the batch"
+        );
+        pending.extend(events);
+        return Wake::Full("relay_reconnect");
+    }
+
+    debug!(events = events.len(), "perri queue relay events — targeted update");
+    Wake::Targeted(events)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1007,7 +1437,7 @@ pub(crate) async fn wait_for_wake(
 /// This is the **single source of truth** for bot identity — the `review-prs`
 /// skill delegates to the daemon queue's `is_bot` field and does not maintain
 /// its own dependabot-discovery query.
-pub(crate) fn is_bot(author: &str) -> bool {
+pub fn is_bot(author: &str) -> bool {
     matches!(author, "dependabot" | "dependabot[bot]" | "carefeed-ci")
 }
 
@@ -1050,7 +1480,7 @@ fn parse_epoch(ts: &str) -> u64 {
 /// re-surface the PR as "the author responded".
 ///
 /// This is the single definition of that rule; nothing recomputes it inline.
-pub(crate) fn has_new_activity(
+pub fn has_new_activity(
     review_submitted_at: Option<&str>,
     pr_updated_at: Option<&str>,
 ) -> bool {
@@ -1158,7 +1588,15 @@ async fn get_our_last_review(
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<(String, Option<String>)> {
-    let url = format!("{}/repos/{repo}/pulls/{number}/reviews", api_base());
+    // `per_page=100` matters for parity, not just for long PRs: without it
+    // GitHub returns the *oldest 30* reviews, so on a PR with more than 30 the
+    // full fetch would pick a superseded review while the GraphQL probe
+    // (`reviews(last: 100)`) picks the current one — the two paths would
+    // disagree and this one would be wrong.
+    let url = format!(
+        "{}/repos/{repo}/pulls/{number}/reviews?per_page=100",
+        api_base()
+    );
     let body = etag_get(client, &url, etags, body_cache).await?;
     let reviews: Vec<ReviewItem> = serde_json::from_str(&body).ok()?;
     // Find our last review (last in the list wins).
@@ -1267,7 +1705,7 @@ pub async fn ci_state_for_sha(
 /// - `actions_failure_filter` — `true` iff a GitHub Actions run has
 ///   `conclusion == "failure"` (preserves the old check-suites filter
 ///   semantics, D2)
-async fn fetch_check_runs_state(
+pub(crate) async fn fetch_check_runs_state(
     client: &GithubClient,
     repo: &str,
     sha: &str,
@@ -1435,7 +1873,7 @@ async fn etag_get(
 }
 
 /// Build the standard GitHub API request headers.
-fn base_headers(client: &GithubClient) -> HeaderMap {
+pub(crate) fn base_headers(client: &GithubClient) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, "application/vnd.github+json".parse().unwrap());
     headers.insert("X-GitHub-Api-Version", "2022-11-28".parse().unwrap());
@@ -1450,7 +1888,7 @@ fn base_headers(client: &GithubClient) -> HeaderMap {
 
 /// Write `json` to `path` atomically via a temp-file + rename so a concurrent
 /// reader never sees a partial write.
-pub(crate) fn write_json_atomic(path: &Path, json: &str) -> std::io::Result<()> {
+pub fn write_json_atomic(path: &Path, json: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, path)
@@ -1461,7 +1899,7 @@ pub(crate) fn write_json_atomic(path: &Path, json: &str) -> std::io::Result<()> 
 ///
 /// Dependabot PRs sit last — they rarely require reading the diff, so prefetching
 /// them over a human-review PR wastes the limited prefetch budget.
-fn top_three_items(items: &[PrQueueItem]) -> Vec<&PrQueueItem> {
+pub fn top_three_items(items: &[PrQueueItem]) -> Vec<&PrQueueItem> {
     let bucket_order = |b: &str| match b {
         "requested" => 0usize,
         "needs_review" => 1,
@@ -1472,6 +1910,26 @@ fn top_three_items(items: &[PrQueueItem]) -> Vec<&PrQueueItem> {
     let mut sorted: Vec<&PrQueueItem> = items.iter().collect();
     sorted.sort_by_key(|i| bucket_order(&i.bucket));
     sorted.into_iter().take(3).collect()
+}
+
+/// The PRs a publish should prefetch detail for.
+///
+/// Pure, so the "a glyph change that doesn't reorder the top 3 prefetches
+/// nothing" rule is testable without observing spawned tasks.
+pub fn prefetch_targets<'a>(scope: &PrefetchScope<'_>, items: &'a [PrQueueItem]) -> Vec<&'a PrQueueItem> {
+    let next = top_three_items(items);
+    match scope {
+        PrefetchScope::TopThree => next,
+        PrefetchScope::NewlyTopThree(prev) => {
+            let was: std::collections::HashSet<(&str, u64)> = top_three_items(prev)
+                .into_iter()
+                .map(|i| (i.repo.as_str(), i.number))
+                .collect();
+            next.into_iter()
+                .filter(|i| !was.contains(&(i.repo.as_str(), i.number)))
+                .collect()
+        }
+    }
 }
 
 /// Returns `true` iff the per-PR cache file for `(repo, number)` exists, its
@@ -1647,84 +2105,6 @@ mod tests {
         drop(dirty_tx);
         drop(refresh_tx);
         drop(approvals_tx);
-    }
-
-    /// Regression guard for the relay channel being wired into the run loop's
-    /// wake path.
-    ///
-    /// The relay subscriber pushes `QueueSignal`s (reconnects and individual
-    /// GitHub events relayed over the websocket) onto `relay_rx`. If a future
-    /// refactor forgets to select on that branch — or selects on it but with
-    /// a pattern that never matches — a relay signal would be silently
-    /// dropped and the queue would just sit there until the next timer tick
-    /// (or forever, if the branch is missing and the interval is long).
-    /// This calls the real `wait_for_wake` used by `run()` and asserts both
-    /// `QueueSignal` variants produce a prompt, correctly-labeled wake.
-    #[tokio::test]
-    async fn relay_signal_still_triggers_a_full_refresh() {
-        use crate::data::relay_client::RelayEvent;
-        use std::time::Duration;
-        use tokio::sync::mpsc;
-
-        let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
-        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
-        let (approvals_tx, mut approvals_rx) = mpsc::unbounded_channel::<()>();
-        let (relay_tx, mut relay_rx) = mpsc::unbounded_channel::<QueueSignal>();
-
-        // Generous interval: if the relay branch is missing or mis-patterned,
-        // the call falls through to the timer instead of hanging or panicking,
-        // and the elapsed-time assertion below catches that "the timer won".
-        let interval_secs = 5;
-
-        relay_tx
-            .send(QueueSignal::Event(RelayEvent {
-                event_type: "ci.completed".to_owned(),
-                ..Default::default()
-            }))
-            .unwrap();
-
-        let start = std::time::Instant::now();
-        let reason = wait_for_wake(
-            &mut dirty_rx,
-            &mut refresh_rx,
-            &mut approvals_rx,
-            &mut relay_rx,
-            interval_secs,
-        )
-        .await;
-        assert_eq!(reason, "relay_event");
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "wait_for_wake took {:?} — the relay event branch didn't fire \
-             and the timer won instead",
-            start.elapsed()
-        );
-
-        relay_tx.send(QueueSignal::Reconnected).unwrap();
-
-        let start = std::time::Instant::now();
-        let reason = wait_for_wake(
-            &mut dirty_rx,
-            &mut refresh_rx,
-            &mut approvals_rx,
-            &mut relay_rx,
-            interval_secs,
-        )
-        .await;
-        assert_eq!(reason, "relay_reconnect");
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "wait_for_wake took {:?} — the relay reconnect branch didn't fire \
-             and the timer won instead",
-            start.elapsed()
-        );
-
-        // Keep the non-relay senders alive for the duration of both calls so
-        // a dropped-sender branch isn't what's being measured.
-        drop(dirty_tx);
-        drop(refresh_tx);
-        drop(approvals_tx);
-        drop(relay_tx);
     }
 
     fn make_item(login: &str, draft: bool, updated_at: Option<&str>) -> SearchIssueItem {
