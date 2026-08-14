@@ -388,7 +388,39 @@ class ReplView: NSView {
         let viewport = scrollView.contentView.bounds
         // 1. Name where the operator is reading, BEFORE any height changes.
         let anchor = isPinnedToBottom ? nil : virtualizer.captureAnchor(viewportTop: viewport.minY)
+
+        // 1b. Re-sync geometry to the turn array this pass is actually going to
+        //     index, before asking it for a window.
+        //
+        //     `virtualizer.count` describes `session.turns` as of the last
+        //     *delivered* change event, and `session.changes` is
+        //     `receive(on: .main)` — one async hop minimum — so `session.turns` is
+        //     always momentarily ahead of the geometry. Meanwhile scroll, clip
+        //     bounds, intrinsic-height and scripted-scroll callbacks all schedule
+        //     passes that never go through `apply(_:)` at all.
+        //
+        //     A pass landing in that gap indexed `turns` with a window sized from
+        //     a stale `count`: **past the end** when the list shrank — the
+        //     retention cap's `removeSubrange`, or a reconnect installing a
+        //     shorter snapshot, both of which mutate `turns` synchronously and
+        //     deliver their `.spliced` event behind the already-queued pass — and
+        //     at wrong offsets when it grew. The load harness drives the scripted
+        //     scroll round trip on a 0.05 s timer while turns arrive, so this is
+        //     reachable exactly when the report is being read.
+        //
+        //     `splice(turns:from: 0)`, not `reset`: splice re-estimates but calls
+        //     `adoptMeasuredHeights`, keeping every measured height, where `reset`
+        //     clears the cache wholesale. The anchor captured above names a content
+        //     key, so it survives the re-sync and still re-resolves the reading
+        //     position in step 5. The `count` checks in `layout()` and
+        //     `viewDidMoveToWindow()` are now redundant but harmless; this is the
+        //     authoritative one, because it sits at the point of use.
+        if virtualizer.count != turns.count {
+            virtualizer.splice(turns: turns, from: 0)
+        }
         let window = virtualizer.visibleWindow(viewport: viewport)
+        assert(window.upperBound <= turns.count,
+               "visibleWindow \(window) exceeds \(turns.count) turns — geometry is out of sync")
 
         // 2. Evict. Removing the subview releases the whole subtree and every
         //    constraint in it — recycling has to actually release, not merely
@@ -532,10 +564,16 @@ class ReplView: NSView {
 
     /// Release every materialized view and re-materialize only what the viewport
     /// needs. Called by `MemoryWatchdog` on the shed path.
-    func shedMaterializedViews() {
+    ///
+    /// `completion` fires once the session's compaction has landed, so the
+    /// watchdog can measure memory that is genuinely free rather than memory it
+    /// has merely asked for.
+    func shedMaterializedViews(completion: @escaping () -> Void = {}) {
         releaseAllTurnViews()
-        session.shedRetainedContent()
-        schedulePass()
+        session.shedRetainedContent { [weak self] in
+            self?.schedulePass()
+            completion()
+        }
     }
 
     private func scrollToBottom() {
@@ -1181,9 +1219,18 @@ private class ChatTurnView: NSView, TurnIsland {
         widthConstraint = widthAnchor.constraint(equalToConstant: 400)
         widthConstraint.isActive = true
 
-        // Blocks container — AI response, left-aligned at 82% width
+        // Blocks container — AI response, left-aligned at 82% width.
+        //
+        // The width fractions and the stack spacing here are read back by
+        // `TurnHeightEstimator`, which has to reproduce this layout arithmetically
+        // to estimate a turn's height before it is built. They are referenced from
+        // there rather than repeated, so a change to the layout cannot silently
+        // desynchronise the estimator. The remaining calibration constants in that
+        // file are *sums* of several constraint constants below (chrome, padding);
+        // folding those together needs a real refactor of these views and is
+        // deliberately not part of this change.
         blocksStack.orientation = .vertical
-        blocksStack.spacing     = 6
+        blocksStack.spacing     = TurnHeightEstimator.blockSpacing
         blocksStack.alignment   = .width
         blocksStack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1199,7 +1246,9 @@ private class ChatTurnView: NSView, TurnIsland {
             NSLayoutConstraint.activate([
                 blocksStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
                 blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                blocksStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
+                blocksStack.widthAnchor.constraint(equalTo: widthAnchor,
+                                                   multiplier: TurnHeightEstimator.blocksWidthFraction,
+                                                   constant: -14),
                 blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
             ])
         } else {
@@ -1215,11 +1264,14 @@ private class ChatTurnView: NSView, TurnIsland {
                 bubble.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
                 // Fixed 75 % width so AutoLayout never needs intrinsicContentSize — the
                 // unconstrained single-line NSTextField width overflowed the right edge.
-                bubble.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.75),
+                bubble.widthAnchor.constraint(equalTo: widthAnchor,
+                                              multiplier: TurnHeightEstimator.bubbleWidthFraction),
 
                 blocksStack.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 8),
                 blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                blocksStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
+                blocksStack.widthAnchor.constraint(equalTo: widthAnchor,
+                                                   multiplier: TurnHeightEstimator.blocksWidthFraction,
+                                                   constant: -14),
                 blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
             ])
         }

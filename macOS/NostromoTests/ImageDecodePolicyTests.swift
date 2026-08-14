@@ -28,12 +28,35 @@ final class ImageDecodePolicyTests: XCTestCase {
     /// in the list above.
     private static let allowedFiles: Set<String> = ["ThumbnailLoader.swift"]
 
-    func testChatSurfacesDecodeImagesOnlyThroughThumbnailLoader() throws {
-        let roots = [Self.sourceRoot.appendingPathComponent("UI"),
-                     Self.sourceRoot.appendingPathComponent("Data")]
+    /// ## f11 — floors, because a scan that reads nothing satisfies every rule
+    ///
+    /// `swiftFiles(under:)` used to answer `[]` for a root it could not read, and
+    /// the policy then reported "no offenders" having opened no files — the same
+    /// vacuous pass this PR exists to remove. The root stops resolving whenever
+    /// this test file moves, `UI/` or `Data/` is renamed, or the target is built
+    /// from a different layout.
+    ///
+    /// Note what a nil-enumerator check alone would have missed:
+    /// `FileManager.enumerator(at:)` returns a **non-nil** enumerator for a
+    /// directory that does not exist and simply yields nothing (verified, not
+    /// assumed). So "throw when the enumerator is nil" never fires on the failure
+    /// it was meant to catch. The floors below are what actually catch it, and
+    /// they exist to say the thing out loud: **an empty or near-empty scan is a
+    /// broken test, not a clean codebase.**
+    ///
+    /// `UI/` holds 23 `.swift` files today and `Data/` 16. The floors sit well
+    /// below both so they fire on "the root vanished" and stay quiet when the
+    /// tree is merely reorganised or thinned — they are not a file census.
+    private static let minimumSwiftFilesPerRoot = 8
+    private static let minimumSwiftFilesAcrossRoots = 24
 
+    /// The largest view in the chat surface. If the scan cannot see this file it
+    /// is not looking at the app, whatever count it reports.
+    private static let scanSentinel = "UI/Views/ReplView.swift"
+
+    func testChatSurfacesDecodeImagesOnlyThroughThumbnailLoader() throws {
         var offenders: [String] = []
-        for root in roots {
+        for root in Self.policyRoots {
             for url in try Self.swiftFiles(under: root) {
                 guard !Self.allowedFiles.contains(url.lastPathComponent) else { continue }
                 let source = try String(contentsOf: url, encoding: .utf8)
@@ -74,6 +97,32 @@ final class ImageDecodePolicyTests: XCTestCase {
                       """)
     }
 
+    /// The policy assertions above are only as good as the scan under them, and
+    /// the scan is silent about its own reach. This states the reach: enough
+    /// files to be the real tree, and one named file that must be in it.
+    func testSourceScanActuallyFindsTheSources() throws {
+        var scanned: [URL] = []
+        for root in Self.policyRoots {
+            scanned += try Self.swiftFiles(under: root)
+        }
+
+        XCTAssertGreaterThanOrEqual(scanned.count, Self.minimumSwiftFilesAcrossRoots, """
+            The policy scan reached only \(scanned.count) Swift files under
+            \(Self.sourceRoot.path). Every assertion in this class passes against
+            an empty scan, so read this as a broken test rather than a clean
+            codebase: check that #filePath still resolves into macOS/NostromoTests
+            and that UI/ and Data/ are still where sourceRoot expects them.
+            """)
+
+        XCTAssertTrue(scanned.contains { $0.path.hasSuffix(Self.scanSentinel) }, """
+            \(Self.scanSentinel) was not among the \(scanned.count) files scanned
+            under \(Self.sourceRoot.path). A count alone can be met by the wrong
+            directory tree; the sentinel is what pins the scan to the chat surface
+            the policy is about. If the file was legitimately renamed, update
+            `scanSentinel` to another file that cannot plausibly disappear.
+            """)
+    }
+
     // MARK: - Helpers
 
     /// Walks up from this file to `macOS/Nostromo`. Uses `#filePath` rather than
@@ -86,9 +135,56 @@ final class ImageDecodePolicyTests: XCTestCase {
             .appendingPathComponent("Nostromo")
     }
 
+    /// The two chat-surface trees the policy governs.
+    private static var policyRoots: [URL] {
+        [sourceRoot.appendingPathComponent("UI"),
+         sourceRoot.appendingPathComponent("Data")]
+    }
+
+    /// Throws rather than returning a suspiciously short list, so the floor is
+    /// inherited by every caller instead of depending on
+    /// `testSourceScanActuallyFindsTheSources` happening to run first — XCTest
+    /// gives no ordering guarantee, and a guarantee one test provides for the
+    /// others is not a guarantee.
     private static func swiftFiles(under root: URL) throws -> [URL] {
+        // The existence check is not redundant with the nil check below: a
+        // missing directory yields a non-nil enumerator over nothing, so nil is
+        // the rare failure and this is the likely one.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw PolicyScanFailure.rootDidNotResolve(root)
+        }
         guard let walker = FileManager.default.enumerator(
-            at: root, includingPropertiesForKeys: nil) else { return [] }
-        return walker.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+            at: root, includingPropertiesForKeys: nil) else {
+            throw PolicyScanFailure.rootDidNotResolve(root)
+        }
+        let files = walker.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+        guard files.count >= minimumSwiftFilesPerRoot else {
+            throw PolicyScanFailure.implausiblyFewFiles(
+                root: root, found: files.count, expected: minimumSwiftFilesPerRoot)
+        }
+        return files
+    }
+}
+
+// MARK: - Scan failures
+
+/// f11 — these two cases are the difference between a policy that found nothing
+/// wrong and a policy that looked at nothing. Both used to surface as a pass.
+private enum PolicyScanFailure: Error, CustomStringConvertible {
+    case rootDidNotResolve(URL)
+    case implausiblyFewFiles(root: URL, found: Int, expected: Int)
+
+    var description: String {
+        switch self {
+        case .rootDidNotResolve(let root):
+            return "image-decode policy root is not a readable directory: \(root.path) — "
+                 + "the scan would have read no files, so the policy would have checked nothing"
+        case .implausiblyFewFiles(let root, let found, let expected):
+            return "image-decode policy scanned \(found) Swift files under \(root.path), "
+                 + "expected at least \(expected) — a near-empty scan means the root moved, "
+                 + "not that the codebase is clean"
+        }
     }
 }

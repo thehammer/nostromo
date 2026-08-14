@@ -849,4 +849,273 @@ final class TurnListVirtualizerTests: XCTestCase {
         }
         assertInBounds(v.visibleWindow(viewport: viewport(top: 0, height: 600)), count: 5)
     }
+
+    // MARK: - 11. Geometry describes the turn array it was last handed (f1)
+
+    /// The invariant `ReplView.materialize()` step "1b" depends on, stated at the
+    /// level where it can actually be exhausted.
+    ///
+    /// `materialize()` snapshots `let turns = session.turns`, asks the virtualizer
+    /// for a window — clamped to `count`, which describes `session.turns` as of the
+    /// last *delivered* change event — and then indexes the snapshot with it.
+    /// `session.changes` is `receive(on: .main)`, so `turns` is always at least one
+    /// hop ahead of the geometry, and several `schedulePass()` callers (live scroll,
+    /// clip bounds, intrinsic height, shed, the scripted scroll round trip) never go
+    /// through `apply(_:)` at all. When `ChatSession` **shrank** `turns`
+    /// synchronously — `enforceRetentionCap()`'s `removeSubrange`, or a reconnect
+    /// installing a shorter snapshot — the queued pass indexed a shorter array with
+    /// a window sized from the longer, stale count, and trapped on index out of
+    /// range. Not a theoretical race: the load harness drives the scripted scroll
+    /// round trip on a 0.05 s timer while turns arrive, so it is reachable exactly
+    /// when the report is being read.
+    ///
+    /// Two halves, and the virtualizer owns both of them:
+    ///
+    ///  - `count` must equal the length of the last turn array handed in, whatever
+    ///    the sequence of `reset` / `append` / `splice` that got it there. That is
+    ///    what makes `virtualizer.count != turns.count` a trustworthy staleness
+    ///    test in the first place.
+    ///  - `visibleWindow(viewport:).upperBound` must never exceed `count`, for any
+    ///    viewport, in any of those states.
+
+    /// One step in a population sequence. Deliberately expressed as intent
+    /// ("shrink to 10", "grow to 120") rather than as a literal array, so the
+    /// table below reads as the situations `ReplView` actually gets into.
+    private enum PopulationStep {
+        /// Replace everything with `count` fresh turns.
+        case reset(count: Int)
+        /// One turn arrives at the end.
+        case append
+        /// Re-deliver the transcript as `count` turns, re-deriving from `from`.
+        /// The prefix is the turns we already had; anything beyond is fresh.
+        case splice(count: Int, from: Int)
+    }
+
+    /// Applies `steps`, checking after every single one that the geometry still
+    /// describes the array it was handed. Returns each intermediate state so a
+    /// caller can interrogate the windows too.
+    ///
+    /// The turn array is maintained here in exactly the way `ChatSession` maintains
+    /// `turns`, so the assertion is the real one: `count` against the caller's own
+    /// list, not against a number the virtualizer also computed.
+    @discardableResult
+    private func drive(_ steps: [PopulationStep],
+                       makeTurn: (Int) -> ChatTurn,
+                       label: String,
+                       file: StaticString = #filePath, line: UInt = #line)
+        -> (virtualizer: TurnListVirtualizer, states: [[ChatTurn]]) {
+        let v = TurnListVirtualizer()
+        var turns: [ChatTurn] = []
+        var nextID = 0
+        var states: [[ChatTurn]] = []
+
+        func fresh(_ n: Int) -> [ChatTurn] {
+            (0 ..< n).map { _ in defer { nextID += 1 }; return makeTurn(nextID) }
+        }
+
+        v.reset(turns: [], width: Self.paneWidth)
+        for (stepIndex, step) in steps.enumerated() {
+            switch step {
+            case .reset(let count):
+                turns = fresh(count)
+                v.reset(turns: turns, width: Self.paneWidth)
+            case .append:
+                let turn = fresh(1)[0]
+                turns.append(turn)
+                v.append(turn)
+            case .splice(let count, let from):
+                if count <= turns.count {
+                    turns = Array(turns.prefix(count))
+                } else {
+                    turns += fresh(count - turns.count)
+                }
+                v.splice(turns: turns, from: from)
+            }
+            XCTAssertEqual(v.count, turns.count,
+                           "\(label) step \(stepIndex) (\(step)): geometry describes \(v.count) "
+                           + "turns but the caller handed it \(turns.count) — a window sized from "
+                           + "this count would index past the end of the array it came from",
+                           file: file, line: line)
+            states.append(turns)
+        }
+        return (v, states)
+    }
+
+    /// Every viewport worth asking about: inside the document, past its end, before
+    /// its start, degenerate, and one far taller than `maxMaterialized` can cover.
+    private func probeViewports(documentHeight: CGFloat) -> [CGRect] {
+        [viewport(top: 0, height: 600),
+         viewport(top: max(0, documentHeight / 2), height: 600),
+         viewport(top: max(0, documentHeight - 300), height: 600),
+         viewport(top: documentHeight * 5 + 10_000, height: 600),
+         viewport(top: -5_000, height: 600),
+         viewport(top: max(0, documentHeight / 3), height: 100_000),
+         CGRect(x: 0, y: 1_000, width: Self.paneWidth, height: 0),
+         CGRect(x: 0, y: 0, width: 0, height: 0)]
+    }
+
+    /// The sequences. Each one is a situation `ReplView` reaches: a session
+    /// filling up, the retention cap cutting it back, a reconnect installing a
+    /// shorter or longer snapshot, and a splice index that no longer describes
+    /// either list.
+    private static let populationSequences: [(String, [PopulationStep])] = [
+        ("an empty transcript spliced to empty",
+         [.reset(count: 0), .splice(count: 0, from: 0)]),
+        ("a session filling up from nothing",
+         [.reset(count: 0), .append, .append, .append, .append, .append]),
+        ("the retention cap cutting a long session back",
+         [.reset(count: 50)] + Array(repeating: PopulationStep.append, count: 200)
+            + [.splice(count: 10, from: 0)]),
+        ("a reconnect installing a longer snapshot",
+         [.reset(count: 50), .splice(count: 120, from: 50)]),
+        ("a splice index past both the old and the new length",
+         [.reset(count: 30), .splice(count: 5, from: 999)]),
+        ("a splice index at exactly both lengths",
+         [.reset(count: 100), .splice(count: 100, from: 100)]),
+        ("a splice index inside the old list but past the new one",
+         [.reset(count: 10), .append, .append, .append, .append, .append,
+          .splice(count: 3, from: 7)]),
+        ("a long transcript collapsing to one turn",
+         [.reset(count: 200), .splice(count: 1, from: 0)]),
+        ("shrink, grow, shrink again",
+         [.reset(count: 80), .splice(count: 12, from: 0), .splice(count: 90, from: 12),
+          .append, .splice(count: 4, from: 60), .append, .append]),
+        ("appends after a shrink",
+         [.reset(count: 300), .splice(count: 5, from: 0)]
+            + Array(repeating: PopulationStep.append, count: 40)),
+    ]
+
+    func testCountAlwaysDescribesTheTurnArrayItWasLastHandedIn() {
+        for (label, steps) in Self.populationSequences {
+            drive(steps, makeTurn: { uniformTurn($0) }, label: "\(label) [uniform]")
+            drive(steps, makeTurn: { shortTurn($0) }, label: "\(label) [short]")
+        }
+    }
+
+    func testVisibleWindowNeverIndexesPastTheTurnArrayTheGeometryCameFrom() {
+        // Short turns as well as tall ones: a document of short turns is where the
+        // `maxMaterialized` clamp becomes the binding constraint, and the clamp is
+        // the part of `visibleWindow` that does arithmetic on `count`.
+        for (label, steps) in Self.populationSequences {
+            for (kind, maker) in [("uniform", { self.uniformTurn($0) }),
+                                  ("short",   { self.shortTurn($0) })]
+                as [(String, (Int) -> ChatTurn)] {
+                let v = TurnListVirtualizer()
+                var turns: [ChatTurn] = []
+                var nextID = 0
+                v.reset(turns: [], width: Self.paneWidth)
+
+                for (stepIndex, step) in steps.enumerated() {
+                    switch step {
+                    case .reset(let count):
+                        turns = (0 ..< count).map { _ in defer { nextID += 1 }; return maker(nextID) }
+                        v.reset(turns: turns, width: Self.paneWidth)
+                    case .append:
+                        let turn = maker(nextID); nextID += 1
+                        turns.append(turn)
+                        v.append(turn)
+                    case .splice(let count, let from):
+                        if count <= turns.count {
+                            turns = Array(turns.prefix(count))
+                        } else {
+                            turns += (0 ..< (count - turns.count)).map { _ in
+                                defer { nextID += 1 }; return maker(nextID)
+                            }
+                        }
+                        v.splice(turns: turns, from: from)
+                    }
+
+                    let where_ = "\(label) [\(kind)] step \(stepIndex):"
+                    for box in probeViewports(documentHeight: v.documentHeight) {
+                        let window = v.visibleWindow(viewport: box)
+                        assertInBounds(window, count: turns.count, "\(where_) viewport \(box)")
+                        // The trap itself. `ReplView.materialize()` does exactly
+                        // this — `turns[window]` — and this is the line that used
+                        // to die with index out of range.
+                        _ = turns[window]
+                    }
+                }
+            }
+        }
+    }
+
+    /// The concrete crash, reproduced at the level the fix lives at.
+    ///
+    /// Geometry describing three hundred turns, a `turns` array of forty, and a
+    /// pass landing in between. The fixture asserts that the *stale* window really
+    /// does overrun the shorter array first, because a regression test for an
+    /// out-of-range read is worthless if the window happened to fit anyway.
+    func testAPassLandingAfterTheTurnArrayShrankDoesNotIndexPastItsEnd() {
+        let long = uniformTurns(300)
+        let v = makeVirtualizer(long)
+        // Real measurements, so the re-sync below is proved to keep them.
+        for i in 0 ..< 60 { v.recordMeasured(400 + CGFloat(i), at: i) }
+
+        // The reader is deep in the transcript when the retention cap fires.
+        let box = viewport(top: v.offset(of: 250), height: 700)
+        let shorter = Array(long.prefix(40))
+
+        let stale = v.visibleWindow(viewport: box)
+        XCTAssertGreaterThan(stale.upperBound, shorter.count,
+                            "fixture must actually reproduce the overrun: a window sized from the "
+                            + "300-turn geometry has to reach past a 40-turn array")
+
+        // What `materialize()` step 1b now does before asking for a window.
+        if v.count != shorter.count { v.splice(turns: shorter, from: 0) }
+
+        let window = v.visibleWindow(viewport: box)
+        assertInBounds(window, count: shorter.count)
+        _ = shorter[window]   // the line that used to trap
+
+        for i in 0 ..< 40 {
+            XCTAssertEqual(v.height(at: i), 400 + CGFloat(i), accuracy: 0.001,
+                           "turn \(i) survived the shrink and must keep the height it was "
+                           + "measured at — re-syncing must not cost a whole re-layout")
+        }
+    }
+
+    /// Why the re-sync uses `splice`, not `reset`.
+    ///
+    /// `ReplView` re-syncs on every pass that lands in the gap, which during an
+    /// active stream is many passes per second. `reset` clears the measured cache
+    /// wholesale, so a `reset`-based re-sync would throw away every real
+    /// measurement the pane had made and re-estimate the whole document — jitter
+    /// under the reader, and a re-layout of the visible window, on a timer.
+    func testSpliceFromZeroKeepsMeasuredHeightsSoTheReSyncIsCheap() {
+        let turns = uniformTurns(40)
+        let v = makeVirtualizer(turns)
+        v.recordMeasured(742, at: 12)
+        v.recordMeasured(311, at: 33)
+        XCTAssertTrue(v.isHeightExact(at: 12))
+
+        v.splice(turns: turns, from: 0)
+
+        XCTAssertEqual(v.height(at: 12), 742, accuracy: 0.001,
+                       "a full-length re-sync must not discard a measurement that is still valid")
+        XCTAssertTrue(v.isHeightExact(at: 12))
+        XCTAssertEqual(v.height(at: 33), 311, accuracy: 0.001)
+        XCTAssertTrue(v.isHeightExact(at: 33))
+
+        // And the shrinking case, which is the one that crashed.
+        v.splice(turns: Array(turns.prefix(20)), from: 0)
+        XCTAssertEqual(v.count, 20)
+        XCTAssertEqual(v.height(at: 12), 742, accuracy: 0.001,
+                       "a turn that survived the shrink kept its identity and its layout")
+        XCTAssertTrue(v.isHeightExact(at: 12))
+    }
+
+    func testResetDiscardsMeasuredHeightsDeliberately() {
+        let turns = uniformTurns(40)
+        let v = makeVirtualizer(turns)
+        v.recordMeasured(742, at: 12)
+        XCTAssertTrue(v.isHeightExact(at: 12))
+
+        v.reset(turns: turns, width: Self.paneWidth)
+
+        XCTAssertNotEqual(v.height(at: 12), 742,
+                          "reset means New Session or .cleared; heights measured for a transcript "
+                          + "that no longer exists are dead weight, and keeping them here would "
+                          + "make the two population paths indistinguishable")
+        XCTAssertFalse(v.isHeightExact(at: 12))
+    }
 }

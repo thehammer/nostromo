@@ -79,17 +79,22 @@ final class TurnListVirtualizer {
 
     // MARK: - Population
 
-    /// Replace all geometry. Used on `.cleared` and on the first layout.
+    /// Replace all geometry, discarding every measurement. Used on `.cleared` and
+    /// on the first layout.
+    ///
+    /// Discarding is deliberate — New Session goes through here, and heights
+    /// measured for a transcript that no longer exists are dead weight. Which is
+    /// why there is no `adoptMeasuredHeights()` call: there used to be one, two
+    /// lines after `measured.removeAll()`, so it was unconditionally a no-op
+    /// (`adoptMeasuredHeights` opens with `guard !measured.isEmpty`) and `isExact`
+    /// was unconditionally all-false. Dead code that read as a safeguard.
     func reset(turns: [ChatTurn], width: CGFloat) {
-        // Heights measured for a transcript that no longer exists are dead
-        // weight, and New Session goes through here.
         measured.removeAll(keepingCapacity: true)
         self.width = max(width, 1)
         keys    = turns.map { $0.contentKey }
         heights = turns.map { TurnHeightEstimator.estimate($0, width: self.width) }
         isExact = Array(repeating: false, count: turns.count)
         count   = turns.count
-        adoptMeasuredHeights()
         rebuildTree()
         reindex()
     }
@@ -379,7 +384,13 @@ final class TurnListVirtualizer {
     }
 
     /// Adopt any already-measured height for turns from `floor` onward, so a
-    /// splice or reset does not throw away measurements that are still valid.
+    /// **splice** does not throw away measurements that are still valid.
+    ///
+    /// Only splice. `reset` discards measurements on purpose — see its comment —
+    /// and this doc used to claim it covered reset too, which was the opposite of
+    /// what the code did. `ReplView.materialize()` re-syncs stale geometry through
+    /// `splice` rather than `reset` precisely so that this keeps every measured
+    /// height across the re-sync; do not "simplify" that away.
     private func adoptMeasuredHeights(from floor: Int = 0) {
         guard !measured.isEmpty else { return }
         for i in floor ..< count {

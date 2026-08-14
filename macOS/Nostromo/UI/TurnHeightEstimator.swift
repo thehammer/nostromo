@@ -21,6 +21,15 @@ enum TurnHeightEstimator {
     // fonts, padding, stack spacing, and fixed row heights. Where a view's
     // height is fixed by a constraint the number is exact; where it wraps text
     // the average-glyph-width figure is what makes it an estimate.
+    //
+    // Three of them — `blockSpacing`, `blocksWidthFraction`, `bubbleWidthFraction`
+    // — are the *same* number as a constraint in `ChatTurnView`, and that view now
+    // reads them from here rather than repeating the literal, so the two cannot
+    // drift apart. The rest cannot be consolidated the same way: each is a **sum**
+    // of several separate constraint constants (top padding plus bottom padding
+    // plus an inter-view gap), and giving them a single home means restructuring
+    // those views. Until that happens the prose above each constant naming its
+    // origin is the link, and a change to a block view means checking here.
 
     /// Average advance width as a fraction of point size, for the system font at
     /// 13 pt over English prose. Used to turn a character count into a line count.
