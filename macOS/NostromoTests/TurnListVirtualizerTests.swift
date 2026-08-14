@@ -850,7 +850,7 @@ final class TurnListVirtualizerTests: XCTestCase {
         assertInBounds(v.visibleWindow(viewport: viewport(top: 0, height: 600)), count: 5)
     }
 
-    // MARK: - 11. Geometry describes the turn array it was last handed (f1)
+    // MARK: - 11. Geometry describes the turn array it was last handed
 
     /// The invariant `ReplView.materialize()` step "1b" depends on, stated at the
     /// level where it can actually be exhausted.

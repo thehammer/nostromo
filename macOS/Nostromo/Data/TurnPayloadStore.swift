@@ -114,7 +114,7 @@ final class TurnPayloadStore {
     /// completion — the `blobs[id] == nil` guard is evaluated synchronously but
     /// the blob is written asynchronously.
     ///
-    /// A bare `Set` is not enough (f15). `forget`, `drop` and `clear` remove the
+    /// A bare `Set` is not enough. `forget`, `drop` and `clear` remove the
     /// id, but the closure they were racing is already dispatched and would
     /// still write its now-stale blob under a live id — the
     /// stale-content-rendered-as-current failure `forget` exists to prevent. A
@@ -196,7 +196,7 @@ final class TurnPayloadStore {
     ///   completion contract.
     @discardableResult
     func compactBatch(_ turns: [ChatTurn], completion: @escaping ([ChatTurn]) -> Void) -> Bool {
-        // De-duplicated by id (f15). The eligibility test reads `isInFlight`,
+        // De-duplicated by id. The eligibility test reads `isInFlight`,
         // which nothing has written yet — `beginCompaction` runs below — so the
         // same turn appearing twice in `turns` passes it twice, and a reconciler
         // splice is exactly where a repeated id shows up. Two entries for one turn
@@ -220,7 +220,7 @@ final class TurnPayloadStore {
         let payloads: [(UUID, Data)] = candidates.compactMap { turn in
             Self.encodePayload(turn).map { (turn.id, $0) }
         }
-        // f7: this filter read `inFlight` but nothing ever wrote it, so with
+        // This filter once read `inFlight` while nothing ever wrote it, so with
         // `compactColdTurns()` sweeping on every `.turnStarted` each sweep
         // re-offered turns a prior sweep was still compressing — `blobs[id]` is
         // only populated in the completion below. That is a redundant
@@ -244,7 +244,7 @@ final class TurnPayloadStore {
                 // unconditionally: an id whose LZFSE pass failed is absent from
                 // `compressed` and would otherwise stay in flight for ever,
                 // permanently unbounded. Ids we no longer own were superseded
-                // (f15) and must not be written.
+                // and must not be written.
                 //
                 // An explicit loop, not `.filter { self.finishCompaction(...) }`.
                 // `finishCompaction` mutates `inFlight`, and a de-registration
@@ -313,7 +313,7 @@ final class TurnPayloadStore {
     /// is stale".
     ///
     /// Dropping the in-flight registration is what makes this safe against a
-    /// compression dispatched moments ago (f15): that closure is already queued
+    /// compression dispatched moments ago: that closure is already queued
     /// and cannot be cancelled, but it checks its stamp against `inFlight`
     /// before writing, so it now finds itself superseded and writes nothing.
     /// Without that check it would store a blob of the *old* content under an id

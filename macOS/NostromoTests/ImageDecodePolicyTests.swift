@@ -28,11 +28,11 @@ final class ImageDecodePolicyTests: XCTestCase {
     /// in the list above.
     private static let allowedFiles: Set<String> = ["ThumbnailLoader.swift"]
 
-    /// ## f11 — floors, because a scan that reads nothing satisfies every rule
+    /// ## Floors, because a scan that reads nothing satisfies every rule
     ///
     /// `swiftFiles(under:)` used to answer `[]` for a root it could not read, and
     /// the policy then reported "no offenders" having opened no files — the same
-    /// vacuous pass this PR exists to remove. The root stops resolving whenever
+    /// vacuous pass this check exists to remove. The root stops resolving whenever
     /// this test file moves, `UI/` or `Data/` is renamed, or the target is built
     /// from a different layout.
     ///
@@ -170,7 +170,7 @@ final class ImageDecodePolicyTests: XCTestCase {
 
 // MARK: - Scan failures
 
-/// f11 — these two cases are the difference between a policy that found nothing
+/// These two cases are the difference between a policy that found nothing
 /// wrong and a policy that looked at nothing. Both used to surface as a pass.
 private enum PolicyScanFailure: Error, CustomStringConvertible {
     case rootDidNotResolve(URL)

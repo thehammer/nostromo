@@ -39,10 +39,14 @@ Each iterates `report.CRITERIA`, so a criterion registered tomorrow is covered
 with no new test written. T2 is the mandatory counterpart — every row PASSes on
 a healthy fixture — without which T1 would be satisfied by a report that always
 FAILs, the same vacuity one level up. T3 pins, per registry key, one mutation
-that must flip *that* row, and fails if a key has no entry. T4 reads the script
-with `ast` to catch the literal textual shapes of rounds 1-3 at review time
-rather than at soak time. T5 pins the registry's integrity and the exit
-contract.
+that must flip *that* row, and fails if a key has no entry. T3b declares each
+criterion's evidence dependencies — which sources it reads — and asserts them
+in both directions: non-PASS when a declared source is missing from an
+otherwise healthy run, still PASS when it isn't. T4 reads the script with
+`ast` to catch specific literal shapes that hide a missing measurement as a
+zero one — `max(..., default=...)` and a two-argument `.get()` with a numeric
+fallback — at review time rather than at soak time. T5 pins the registry's
+integrity and the exit contract.
 
 Run with:
     /usr/bin/python3 -m unittest discover -s tests/transcript_load
@@ -315,7 +319,7 @@ class PsTimeSecondsAwkTests(unittest.TestCase):
 # Part B: the criteria registry
 # --------------------------------------------------------------------------
 
-# f13: a sample file is only evidence if it looks like `sample(1)` output.
+# A sample file is only evidence if it looks like `sample(1)` output.
 # macOS `sample` always writes a "Call graph:" section, so its absence means
 # the sample failed and the file is not a measurement. Fixtures that stand in
 # for a healthy run must therefore look like a real sample, not be empty.
@@ -352,8 +356,9 @@ def _panes_all_zero():
     """One sample whose single pane reported every counter at zero.
 
     A pane that reported itself with nothing in it is a pane the run never
-    drove. Round 2's f12 was this defect one level in: presence read as
-    instrumentation, and every number behind the gate a zero nobody measured.
+    drove. This repeats the all-zero-pane defect one level in: presence read
+    as instrumentation, and every number behind the gate a zero nobody
+    measured.
     """
     rows = make_rows(n_samples=1, total_turns=6000, peak_materialized=0,
                      hot_payload_turns=0)
@@ -364,7 +369,7 @@ def _panes_all_zero():
 
 ONE_SAMPLE_PANES_ALL_ZERO = _panes_all_zero()
 
-#: One healthy-looking sample sitting past every mark — the f4 shape, where
+#: One healthy-looking sample sitting past every mark, where
 #: `at_turn(rows, 500)` and `at_turn(rows, 5000)` resolve to the same row and
 #: the criterion subtracts a measurement from itself.
 SINGLE_SAMPLE_PAST_ALL_MARKS = make_rows(n_samples=1, total_turns=6000)
@@ -574,9 +579,9 @@ class UniversalVacuityTests(_VacuityAssertions, unittest.TestCase):
     a criterion added tomorrow is covered without anyone writing a test.
 
     The seven historical defects were seven spellings of one sentence: the
-    criterion was satisfied by the absence of the thing it measures. Rounds 2
-    and 3 each found new instances because the tests were one per criterion —
-    a criterion nobody wrote a barren-input test for is a criterion nobody
+    criterion was satisfied by the absence of the thing it measures. New
+    instances kept surfacing because the tests were one per criterion — a
+    criterion nobody wrote a barren-input test for is a criterion nobody
     checked. These tests remove the "nobody wrote one" step.
     """
 
@@ -744,7 +749,7 @@ def mutate_peak_above_documented_cap(tc):
 
 def mutate_disagreeing_view_caps(tc):
     """Half the samples report a different cap. `max()` over disagreeing
-    samples was f11: the run passed on the maximum while demonstrably running
+    samples let the run pass on the maximum while demonstrably running
     with a different cap for part of it."""
     rows = make_rows()
     for i in range(0, len(rows), 2):
@@ -918,13 +923,14 @@ class CriterionSensitivityTests(unittest.TestCase):
 # T3b: what each criterion reads, and what happens when the run does not
 # report it.
 #
-# T1b covers a run with too few samples. It does not cover the shape f2, f3,
-# f7 and f12 actually had: a long, healthy, 26-sample run — clean footprint
-# curve, plausible throughput, every turn mark reached — that simply never
-# reported the thing one criterion measures. `graded()`'s two-observation floor
-# is no help there, because such a criterion can truthfully count 26 samples
-# while having read zero panes; f2's `max(..., default=0)` did exactly that and
-# printed PASS in the middle of an otherwise green table.
+# T1b covers a run with too few samples. It does not cover the shape that a
+# criterion silently ignoring its own missing evidence can have: a long,
+# healthy, 26-sample run — clean footprint curve, plausible throughput, every
+# turn mark reached — that simply never reported the thing one criterion
+# measures. `graded()`'s two-observation floor is no help there, because such
+# a criterion can truthfully count 26 samples while having read zero panes;
+# `max(..., default=0)` did exactly that and printed PASS in the middle of an
+# otherwise green table.
 #
 # So each criterion declares the evidence it reads, and the declaration is
 # checked in both directions: every criterion that depends on a source must be
@@ -991,9 +997,9 @@ EVIDENCE_DEPENDENCIES = {
 #: empty declaration for such a row is invisible to both directional tests below:
 #: the "must not pass" half never selects it (no source is ever in an empty set)
 #: and the "must keep grading" half then *requires* it to PASS on all nine
-#: absence fixtures. That is exactly f2's escape route — a criterion whose
-#: degenerate default reads as a real measurement, declaring nothing, PASSing on
-#: a healthy 26-sample run that never reported its field.
+#: absence fixtures. That is exactly the escape route a criterion whose
+#: degenerate default reads as a real measurement would take: declare nothing,
+#: PASS on a healthy 26-sample run that never reported its field.
 EMPTY_DEPENDENCY_EXEMPTIONS = {"stream-parses-cleanly"}
 
 
@@ -1086,8 +1092,8 @@ class EvidenceDependencyDeclarationBitesTests(_EvidenceDependencyAssertions,
                                               unittest.TestCase):
     """Proof that the declaration guard is not itself vacuous.
 
-    Registers a criterion of exactly the shape f2 had — `max(vals) if vals else
-    0`, a degenerate default read as a real measurement — declaring the empty
+    Registers a criterion with a degenerate-default shape — `max(vals) if vals
+    else 0`, a default read as a real measurement — declaring the empty
     set, and runs the *same* assertion body the real test runs, expecting it to
     object. If the guard is ever weakened into something that cannot, this test
     starts failing first.
@@ -1184,7 +1190,7 @@ class EvaluateNoPanesTests(unittest.TestCase):
         self.assertFalse(peak_row.ok)
 
     def test_run_with_no_panes_fails_hot_payload_window_bounded(self):
-        # f2: hot payload window bounded used `max(..., default=0)`, so a
+        # Hot payload window bounded used `max(..., default=0)`, so a
         # run with zero panes measured 0 <= 210 and PASSed. Absence of a
         # measurement is not evidence the window is bounded.
         criteria = report.evaluate(make_rows(include_panes=False),
@@ -1194,7 +1200,7 @@ class EvaluateNoPanesTests(unittest.TestCase):
         self.assertEqual(row.measured, "no panes reported — nothing was measured")
 
     def test_run_with_no_panes_fails_retained_turns_monotonic(self):
-        # f3: retained turns monotonic tracked worst_drop starting at 0 and
+        # Retained turns monotonic tracked worst_drop starting at 0 and
         # never observed a pane, so a run that measured nothing PASSed with
         # "largest drop: 0 turns". No pane observed is not "never dropped".
         criteria = report.evaluate(make_rows(include_panes=False),
@@ -1267,7 +1273,7 @@ class EvaluateSampleUnmeasuredTests(unittest.TestCase):
 
 
 class EvaluateHarnessTargetingTests(unittest.TestCase):
-    """f7: harnessTargetedPanes must be present, > 0, and equal
+    """harnessTargetedPanes must be present, > 0, and equal
     harnessRequestedFocuses — proof the harness actually drove the number of
     panes it meant to, not just that panes existed. The targeted-below-
     requested case lives in the T3 table; these are the cases that table does
@@ -1296,7 +1302,7 @@ class EvaluateHarnessTargetingTests(unittest.TestCase):
 
 
 class EvaluateSingleSampleTests(unittest.TestCase):
-    """f1/f4/f10: a run that only ever produced one diagnostics sample is
+    """A run that only ever produced one diagnostics sample is
     the sharpest version of "comparison against yourself always passes" —
     every two-point comparison (throughput curve, footprint delta between
     two turn marks, materializedViews at turn 100 vs the last sample)
@@ -1331,7 +1337,7 @@ class EvaluateSingleSampleTests(unittest.TestCase):
 
 
 class EvaluateAbortedRunMaterializedViewTests(unittest.TestCase):
-    """f10, distinct from EvaluateSingleSampleTests above: this is the
+    """Distinct from EvaluateSingleSampleTests above: this is the
     realistic version of the defect, not an exotic edge case. A run that
     died right after turn 100 — two samples, the second already past 100 —
     hits the exact same self-comparison bug with no contrived input at all.
@@ -1349,7 +1355,7 @@ class EvaluateAbortedRunMaterializedViewTests(unittest.TestCase):
 
 
 class EvaluateViewCapMixedReportingTests(unittest.TestCase):
-    """f11: the view-cap criterion used `max(reported) == MATERIALIZED_LIMIT`,
+    """The view-cap criterion used `max(reported) == MATERIALIZED_LIMIT`,
     so a run where most samples reported the cap correctly but some reported
     something else (a mid-run config change, a stale build) PASSed as long as
     the maximum happened to equal 60. Every sample must agree.
@@ -1376,7 +1382,7 @@ class EvaluateViewCapMixedReportingTests(unittest.TestCase):
 
 
 class EvaluatePartiallyInstrumentedPanesTests(unittest.TestCase):
-    """f12: "transcript never cleared" was gated on ANY pane anywhere
+    """The "transcript never cleared" criterion was gated on ANY pane anywhere
     carrying the transcriptClears key, then read every pane lacking it as
     zero clears via `.get(..., 0)`. A run where one pane is instrumented and
     another silently is not therefore PASSed on the strength of the
@@ -1407,7 +1413,7 @@ class EvaluatePartiallyInstrumentedPanesTests(unittest.TestCase):
 
 
 class EvaluateSampleFileMustContainCallGraphTests(unittest.TestCase):
-    """f13: the existence of a sample file is not evidence of a
+    """The existence of a sample file is not evidence of a
     measurement. `sample` can write an empty or truncated file (permissions,
     a killed process, a too-short duration) with no "Call graph:" section at
     all, and the old code counted 0 signature-frame hits in that file as a
@@ -1483,15 +1489,14 @@ def _enclosing_functions(tree):
 class ReportScriptShapeTests(unittest.TestCase):
     """Structural assertions on the report script's source.
 
-    Three consecutive reviews each found *new* instances of the same defect,
-    and every one of them had a literal textual signature: `max(..., default=0)`
-    standing in for a measurement, `.get(key, 0)` reading absent as zero, a
-    criterion assembling its own `Verdict` and so choosing its own state, a
-    `graded()` call that forgot to say how many points it read. Behavioural
-    tests catch these once the criterion exists and someone writes a fixture
-    for it. These catch the *shape* on the next round of review, before a soak
-    run is spent discovering it — which is the difference between round 4
-    finding an eighth instance and there not being one.
+    The same defect kept recurring with a literal textual signature:
+    `max(..., default=0)` standing in for a measurement, `.get(key, 0)`
+    reading absent as zero, a criterion assembling its own `Verdict` and so
+    choosing its own state, a `graded()` call that forgot to say how many
+    points it read. Behavioural tests catch these once the criterion exists
+    and someone writes a fixture for it. These catch the *shape* at review
+    time, before a soak run is spent discovering it — which is the
+    difference between finding an eighth instance and there not being one.
     """
 
     @classmethod
@@ -1541,9 +1546,9 @@ class ReportScriptShapeTests(unittest.TestCase):
         self.assertEqual(offenders, [], "\n".join(offenders))
 
     def test_no_max_or_min_call_uses_a_default_keyword(self):
-        # `max(..., default=0)` is the literal text of rounds 1-3: an empty
-        # input yields zero, zero compares favourably against the limit, and
-        # the row prints PASS on a run that measured nothing.
+        # `max(..., default=0)` hides a missing measurement as a zero one: an
+        # empty input yields zero, zero compares favourably against the limit,
+        # and the row prints PASS on a run that measured nothing.
         offenders = []
         for name in ("max", "min"):
             for call in _calls_named(self.tree, name):
@@ -1554,7 +1559,7 @@ class ReportScriptShapeTests(unittest.TestCase):
         self.assertEqual(offenders, [], "\n".join(offenders))
 
     def test_no_two_argument_get_falls_back_to_a_numeric_literal(self):
-        # "Absent is not zero", the rule f12 was written down for and then
+        # "Absent is not zero" — a rule that can be written down and then
         # violated one line later: `pane.get("transcriptClears", 0)` turns a
         # pane that never reported the counter into a clean bill of health.
         offenders = []
@@ -1590,7 +1595,7 @@ class ReportScriptShapeTests(unittest.TestCase):
 
 
 class RegistryIntegrityTests(unittest.TestCase):
-    """f14, the guard against a fourth review round: every fix must change
+    """The guard against a whole class of regression: every fix must change
     whether a row PASSes or FAILs, never whether it exists.
 
     The table's row set *is* the registry, so a row cannot vanish, duplicate or
