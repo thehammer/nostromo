@@ -279,9 +279,18 @@ async fn mount_searches(
     reviewed: Vec<serde_json::Value>,
 ) {
     for (q, items) in [
-        ("is:open is:pr review-requested:@me org:Carefeed archived:false", requested),
-        ("is:open is:pr review:required org:Carefeed archived:false", needs),
-        ("is:open is:pr reviewed-by:@me org:Carefeed archived:false", reviewed),
+        (
+            "is:open is:pr review-requested:@me org:Carefeed archived:false",
+            requested,
+        ),
+        (
+            "is:open is:pr review:required org:Carefeed archived:false",
+            needs,
+        ),
+        (
+            "is:open is:pr reviewed-by:@me org:Carefeed archived:false",
+            reviewed,
+        ),
     ] {
         Mock::given(method("GET"))
             .and(path("/search/issues"))
@@ -443,12 +452,35 @@ fn classify_event_table() {
     let known = 42;
     let unknown = 999;
 
+    let known_key = (REPO.to_owned(), known);
+    let unknown_key = (REPO.to_owned(), unknown);
+
     let cases: Vec<(&str, RelayEvent, Action)> = vec![
         // Terminal PR events: free either way.
-        ("merged, in ledger", ev("pr.merged").num(known), Action::Remove),
-        ("closed, in ledger", ev("pr.closed").num(known), Action::Remove),
-        ("merged, unknown PR", ev("pr.merged").num(unknown), Action::Ignore),
-        ("closed, unknown PR", ev("pr.closed").num(unknown), Action::Ignore),
+        (
+            "merged, in ledger",
+            ev("pr.merged").num(known),
+            Action::Remove {
+                key: known_key.clone(),
+            },
+        ),
+        (
+            "closed, in ledger",
+            ev("pr.closed").num(known),
+            Action::Remove {
+                key: known_key.clone(),
+            },
+        ),
+        (
+            "merged, unknown PR",
+            ev("pr.merged").num(unknown),
+            Action::Ignore,
+        ),
+        (
+            "closed, unknown PR",
+            ev("pr.closed").num(unknown),
+            Action::Ignore,
+        ),
         // Review requests are only about bucket 1, which is only about me.
         (
             "review_requested, someone else",
@@ -458,7 +490,9 @@ fn classify_event_table() {
         (
             "review_requested, me",
             ev("pr.review_requested").num(unknown).reviewer(ME),
-            Action::Probe,
+            Action::Probe {
+                key: unknown_key.clone(),
+            },
         ),
         (
             "review_request_removed, someone else",
@@ -468,7 +502,9 @@ fn classify_event_table() {
         (
             "review_request_removed, me — not a blind removal",
             ev("pr.review_request_removed").num(known).reviewer(ME),
-            Action::Probe,
+            Action::Probe {
+                key: known_key.clone(),
+            },
         ),
         // My own reviews.
         (
@@ -485,7 +521,9 @@ fn classify_event_table() {
                 .num(known)
                 .reviewer(ME)
                 .review_state("changes_requested"),
-            Action::LeaveBuckets12,
+            Action::LeaveBuckets12 {
+                key: known_key.clone(),
+            },
         ),
         (
             "my approval may not satisfy the branch requirement",
@@ -493,7 +531,9 @@ fn classify_event_table() {
                 .num(known)
                 .reviewer(ME)
                 .review_state("approved"),
-            Action::Probe,
+            Action::Probe {
+                key: known_key.clone(),
+            },
         ),
         (
             "bot-suffixed reviewer still matches me",
@@ -518,17 +558,38 @@ fn classify_event_table() {
                 .num(known)
                 .reviewer("bob")
                 .review_state("approved"),
-            Action::Probe,
+            Action::Probe {
+                key: known_key.clone(),
+            },
         ),
         // A push or a new PR always warrants a read.
-        ("synchronize", ev("pr.synchronize").num(known), Action::Probe),
-        ("opened", ev("pr.opened").num(unknown), Action::Probe),
-        ("reopened", ev("pr.reopened").num(unknown), Action::Probe),
+        (
+            "synchronize",
+            ev("pr.synchronize").num(known),
+            Action::Probe {
+                key: known_key.clone(),
+            },
+        ),
+        (
+            "opened",
+            ev("pr.opened").num(unknown),
+            Action::Probe {
+                key: unknown_key.clone(),
+            },
+        ),
+        (
+            "reopened",
+            ev("pr.reopened").num(unknown),
+            Action::Probe {
+                key: unknown_key.clone(),
+            },
+        ),
         // CI: matched by SHA, because ci.completed carries no PR number.
         (
             "ci for a candidate head",
             ev("ci.completed").sha("sha-known"),
             Action::CiOnly {
+                repo: REPO.to_owned(),
                 head_sha: "sha-known".to_owned(),
             },
         ),
@@ -544,9 +605,21 @@ fn classify_event_table() {
             Action::Ignore,
         ),
         // Malformed or unrecognised: ignored, never an error.
-        ("unknown event type", ev("pr.labeled").num(known), Action::Ignore),
-        ("wholly unknown type", ev("issue.commented").num(known), Action::Ignore),
-        ("pr event with no number", ev("pr.synchronize"), Action::Ignore),
+        (
+            "unknown event type",
+            ev("pr.labeled").num(known),
+            Action::Ignore,
+        ),
+        (
+            "wholly unknown type",
+            ev("issue.commented").num(known),
+            Action::Ignore,
+        ),
+        (
+            "pr event with no number",
+            ev("pr.synchronize"),
+            Action::Ignore,
+        ),
         (
             "event with no repo",
             RelayEvent {
@@ -646,12 +719,18 @@ fn diff_snapshots_reports_presence_both_directions() {
     let dropped = diff_snapshots(&present, &absent, &audit_set(&[1]));
     assert_eq!(dropped.len(), 1);
     assert_eq!(dropped[0].field, "presence");
-    assert_eq!((dropped[0].targeted.as_str(), dropped[0].poll.as_str()), ("present", "absent"));
+    assert_eq!(
+        (dropped[0].targeted.as_str(), dropped[0].poll.as_str()),
+        ("present", "absent")
+    );
 
     let added = diff_snapshots(&absent, &present, &audit_set(&[1]));
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].field, "presence");
-    assert_eq!((added[0].targeted.as_str(), added[0].poll.as_str()), ("absent", "present"));
+    assert_eq!(
+        (added[0].targeted.as_str(), added[0].poll.as_str()),
+        ("absent", "present")
+    );
 }
 
 /// Every diverging field is reported, not just the first — a wrong verdict
@@ -739,7 +818,13 @@ async fn pr_merged_removes_pr_with_no_github_calls() {
     );
 
     // The index still lists it — but `/pulls/42` says closed, so the poll agrees.
-    mount_searches(&server, vec![], vec![search_item(42, "alice", false, "2026-06-07T12:00:00Z")], vec![]).await;
+    mount_searches(
+        &server,
+        vec![],
+        vec![search_item(42, "alice", false, "2026-06-07T12:00:00Z")],
+        vec![],
+    )
+    .await;
     mount_pr_detail(&server, 42, "sha-1", true).await;
     mount_check_runs_any(&server, "success").await;
 
@@ -869,7 +954,11 @@ async fn my_changes_requested_leaves_buckets_1_and_2_without_entering_bucket_3()
     mount_check_runs_for(&server, "sha-2", "success").await;
 
     let outcome = h
-        .apply(&ev("pr.synchronize").num(42).delivered(at(2026, 6, 7, 12, 1, 31)))
+        .apply(
+            &ev("pr.synchronize")
+                .num(42)
+                .delivered(at(2026, 6, 7, 12, 1, 31)),
+        )
         .await;
     assert_eq!(outcome, Outcome::Changed);
 
@@ -879,7 +968,11 @@ async fn my_changes_requested_leaves_buckets_1_and_2_without_entering_bucket_3()
         items[0].new_activity,
         "the author responded more than 30s after the review"
     );
-    assert_eq!(calls(&server).await.search, before.search, "still no search");
+    assert_eq!(
+        calls(&server).await.search,
+        before.search,
+        "still no search"
+    );
 }
 
 /// Other people's CI is the single highest-volume event class in the org. If it
@@ -926,7 +1019,10 @@ async fn ci_completed_for_candidate_head_issues_exactly_one_non_search_request()
 
     let before = calls(&server).await;
     let untouched_before = serde_json::to_string(
-        &h.items().into_iter().filter(|i| i.number != 42).collect::<Vec<_>>(),
+        &h.items()
+            .into_iter()
+            .filter(|i| i.number != 42)
+            .collect::<Vec<_>>(),
     )
     .unwrap();
 
@@ -935,7 +1031,11 @@ async fn ci_completed_for_candidate_head_issues_exactly_one_non_search_request()
 
     let after = calls(&server).await;
     assert_eq!(after.total - before.total, 1, "exactly one request");
-    assert_eq!(after.check_runs - before.check_runs, 1, "and it is check-runs");
+    assert_eq!(
+        after.check_runs - before.check_runs,
+        1,
+        "and it is check-runs"
+    );
     assert_eq!(after.search, before.search, "zero search requests");
     assert_eq!(after.graphql, before.graphql, "zero GraphQL requests");
 
@@ -965,12 +1065,74 @@ async fn ci_completed_restores_candidate_hidden_only_by_red_ci() {
     mount_check_runs_for(&server, "sha-42", "success").await;
     let before = calls(&server).await;
 
-    assert_eq!(h.apply(&ev("ci.completed").sha("sha-42")).await, Outcome::Changed);
+    assert_eq!(
+        h.apply(&ev("ci.completed").sha("sha-42")).await,
+        Outcome::Changed
+    );
 
     let items = h.items();
     assert_eq!(numbers(&items), vec![42]);
     assert_eq!(items[0].ci_state, CiState::Success);
-    assert_eq!(calls(&server).await.search, before.search, "zero search requests");
+    assert_eq!(
+        calls(&server).await.search,
+        before.search,
+        "zero search requests"
+    );
+}
+
+/// The inverse of the test above: a CI read that *fails* — a transient 502/500,
+/// a dropped connection, an unparseable body — used to be indistinguishable
+/// from "nothing configured on this SHA" and get written into the ledger and
+/// the cache as `(CiState::Unknown, false)`, un-hiding a PR that a genuinely red
+/// CI was legitimately hiding for up to 60s on a mere transport hiccup. A
+/// failed read must defer instead: the red verdict stands, and the cache must
+/// not be poisoned with a bogus one.
+#[tokio::test]
+async fn ci_read_failure_defers_and_does_not_unhide_a_red_ci_pr() {
+    let server = MockServer::start().await;
+    let mut h = Harness::new(&server);
+    let mut hidden = candidate(42, "sha-42");
+    hidden.ci_state = CiState::Failure;
+    hidden.actions_failed = true;
+    seed(&mut h.caches, hidden);
+    assert!(h.items().is_empty(), "starts hidden by the CI filter");
+
+    Mock::given(method("GET"))
+        .and(path(format!("/repos/{REPO}/commits/sha-42/check-runs")))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let outcome = h.apply(&ev("ci.completed").sha("sha-42")).await;
+
+    assert_eq!(
+        outcome,
+        Outcome::Deferred,
+        "a failed CI read must defer to the periodic poll, not write a verdict"
+    );
+    assert_eq!(
+        h.candidate(42).unwrap().ci_state,
+        CiState::Failure,
+        "the red verdict must stand"
+    );
+    assert!(
+        h.candidate(42).unwrap().actions_failed,
+        "the Actions-failure flag must stand"
+    );
+    assert!(
+        h.items().is_empty(),
+        "the PR the red CI is hiding must stay hidden; got {:?}",
+        h.items()
+    );
+    assert!(
+        h.caches
+            .ci_state_cache
+            .lock()
+            .unwrap()
+            .get("sha-42")
+            .is_none(),
+        "a failed read must not poison the cache with a bogus verdict"
+    );
 }
 
 /// A PR assigned to me appears immediately, even though GitHub's search index
@@ -1002,7 +1164,11 @@ async fn review_requested_for_me_adds_pr_with_no_search_call() {
     let c = calls(&server).await;
     assert_eq!(c.search, 0, "no search endpoint may be touched");
     assert_eq!(c.graphql, 1, "one probe");
-    assert!(c.check_runs <= 1, "at most one check-runs read, got {}", c.check_runs);
+    assert!(
+        c.check_runs <= 1,
+        "at most one check-runs read, got {}",
+        c.check_runs
+    );
 }
 
 /// Dependabot PRs get their own bucket rather than being dropped, and the daemon
@@ -1019,7 +1185,8 @@ async fn review_requested_for_me_routes_a_bot_pr_to_the_dependabot_bucket() {
     mount_probe(&server, &probe).await;
     mount_check_runs_for(&server, "bot-sha", "success").await;
 
-    h.apply(&ev("pr.review_requested").num(100).reviewer(ME)).await;
+    h.apply(&ev("pr.review_requested").num(100).reviewer(ME))
+        .await;
 
     let items = h.items();
     assert_eq!(items.len(), 1, "got {items:?}");
@@ -1042,9 +1209,10 @@ async fn probing_a_pr_that_belongs_in_no_bucket_leaves_no_trace() {
         ("self-authored", |p: &mut Probe| {
             p.author = (ME.to_owned(), "User".to_owned())
         }),
-        ("no review requirement, not requested from me", |p: &mut Probe| {
-            p.review_decision = None
-        }),
+        (
+            "no review requirement, not requested from me",
+            |p: &mut Probe| p.review_decision = None,
+        ),
     ] {
         let server = MockServer::start().await;
         let mut h = Harness::new(&server);
@@ -1057,8 +1225,14 @@ async fn probing_a_pr_that_belongs_in_no_bucket_leaves_no_trace() {
         let outcome = h.apply(&ev("pr.opened").num(42)).await;
 
         assert_eq!(outcome, Outcome::Unchanged, "{label}");
-        assert!(h.items().is_empty(), "{label}: must not appear in the snapshot");
-        assert!(h.candidate(42).is_none(), "{label}: and must not linger in the ledger");
+        assert!(
+            h.items().is_empty(),
+            "{label}: must not appear in the snapshot"
+        );
+        assert!(
+            h.candidate(42).is_none(),
+            "{label}: and must not linger in the ledger"
+        );
         assert_eq!(calls(&server).await.search, 0, "{label}");
     }
 }
@@ -1079,7 +1253,8 @@ async fn review_request_removed_for_me_does_not_blindly_remove() {
     mount_probe(&server, &Probe::new(42, "sha-42")).await; // REVIEW_REQUIRED, no requests
     mount_check_runs_for(&server, "sha-42", "success").await;
 
-    h.apply(&ev("pr.review_request_removed").num(42).reviewer(ME)).await;
+    h.apply(&ev("pr.review_request_removed").num(42).reviewer(ME))
+        .await;
 
     let items = h.items();
     assert_eq!(
@@ -1102,7 +1277,8 @@ async fn review_request_removed_for_me_does_not_blindly_remove() {
     mount_probe(&server, &probe).await;
     mount_check_runs_for(&server, "sha-42", "success").await;
 
-    h.apply(&ev("pr.review_request_removed").num(42).reviewer(ME)).await;
+    h.apply(&ev("pr.review_request_removed").num(42).reviewer(ME))
+        .await;
     assert!(h.items().is_empty(), "got {:?}", h.items());
     assert_eq!(calls(&server).await.search, 0);
 }
@@ -1171,7 +1347,10 @@ async fn other_users_review_reevaluates_only_that_pr() {
     seed(&mut h.caches, other);
 
     let untouched_before = serde_json::to_string(
-        &h.items().into_iter().filter(|i| i.number != 42).collect::<Vec<_>>(),
+        &h.items()
+            .into_iter()
+            .filter(|i| i.number != 42)
+            .collect::<Vec<_>>(),
     )
     .unwrap();
 
@@ -1230,14 +1409,179 @@ async fn probe_failure_defers_and_issues_no_search_call() {
         let outcome = h.apply(&ev("pr.synchronize").num(42)).await;
 
         assert_eq!(outcome, Outcome::Deferred, "{label}");
-        assert_eq!(h.items(), before_items, "{label}: snapshot must be untouched");
+        assert_eq!(
+            h.items(),
+            before_items,
+            "{label}: snapshot must be untouched"
+        );
         assert_eq!(
             h.candidate(42).unwrap().head_sha,
             before_sha,
             "{label}: ledger must be untouched"
         );
-        assert_eq!(calls(&server).await.search, 0, "{label}: no search fallback");
+        assert_eq!(
+            calls(&server).await.search,
+            0,
+            "{label}: no search fallback"
+        );
     }
+}
+
+/// A wedged probe path (a token that lost a scope, sustained GitHub 5xx) is
+/// invisible today: every failure defers quietly to the poll, so the queue
+/// degrades to 60-second-poll-only latency for every event that would have
+/// been settled by a probe, and nothing at info-or-above ever says so.
+///
+/// Three consecutive `Failed` outcomes for the same PR must produce exactly one
+/// `warn!`. The first two are silent at WARN (only `debug!`). The warn names
+/// the repo, the PR number, the failure kind, and the consecutive count — the
+/// first four things you'd want when triaging "why did this take a minute to
+/// show up".
+///
+/// NOTE for Cody: the implementation's `warn!` message must contain the
+/// substring `"repeated probe failures"`, and its structured fields must
+/// include the repo (bare, e.g. via `%repo`), `number=<n>`, a `kind` field
+/// whose `Debug` rendering of the `ProbeFailure` appears verbatim (e.g.
+/// `Status(500)`), and a `consecutive_failures=<n>` field. This test's
+/// assertions are written against exactly that shape.
+#[tokio::test]
+async fn probe_failure_warns_after_three_consecutive_failures_then_resets() {
+    let server = MockServer::start().await;
+    let mut h = Harness::new(&server);
+    seed(&mut h.caches, candidate(42, "sha-42"));
+
+    mount_probe_raw(&server, 500, json!({})).await;
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    // `apply` is async, so the subscriber has to stay the thread-local default
+    // across `.await` points — `with_default`'s closure can't do that, but a
+    // held `set_default` guard can.
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let outcome1 = h.apply(&ev("pr.synchronize").num(42)).await;
+    assert_eq!(outcome1, Outcome::Deferred, "1st failure");
+    assert!(
+        !logs.text().contains("repeated probe failures"),
+        "must stay quiet after 1 consecutive failure; got:\n{}",
+        logs.text()
+    );
+
+    let outcome2 = h.apply(&ev("pr.synchronize").num(42)).await;
+    assert_eq!(outcome2, Outcome::Deferred, "2nd failure");
+    assert!(
+        !logs.text().contains("repeated probe failures"),
+        "must stay quiet after 2 consecutive failures; got:\n{}",
+        logs.text()
+    );
+
+    let outcome3 = h.apply(&ev("pr.synchronize").num(42)).await;
+    assert_eq!(outcome3, Outcome::Deferred, "3rd failure");
+    let text = logs.text();
+    assert!(
+        text.contains("repeated probe failures"),
+        "the 3rd consecutive failure must warn; got:\n{text}"
+    );
+    assert!(
+        text.contains(REPO),
+        "the warn must name the repo; got:\n{text}"
+    );
+    assert!(
+        text.contains("number=42"),
+        "and the PR number; got:\n{text}"
+    );
+    assert!(
+        text.contains("Status(500)"),
+        "and the failure kind; got:\n{text}"
+    );
+    assert!(
+        text.contains("consecutive_failures=3"),
+        "and the consecutive count; got:\n{text}"
+    );
+    assert_eq!(calls(&server).await.search, 0, "no search fallback, ever");
+
+    drop(_guard);
+
+    // A successful probe must reset the counter to zero.
+    server.reset().await;
+    mount_check_runs_for(&server, "sha-42", "success").await;
+    mount_probe(&server, &Probe::new(42, "sha-42")).await;
+
+    let outcome4 = h.apply(&ev("pr.synchronize").num(42)).await;
+    assert_eq!(outcome4, Outcome::Changed, "a clean probe must succeed");
+
+    server.reset().await;
+    mount_probe_raw(&server, 500, json!({})).await;
+
+    let logs2 = CapturedLogs::default();
+    let subscriber2 = tracing_subscriber::fmt()
+        .with_writer(logs2.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard2 = tracing::subscriber::set_default(subscriber2);
+
+    let outcome5 = h.apply(&ev("pr.synchronize").num(42)).await;
+    assert_eq!(
+        outcome5,
+        Outcome::Deferred,
+        "the lone failure after the reset"
+    );
+    assert!(
+        !logs2.text().contains("repeated probe failures"),
+        "a single failure right after a success must not warn — the counter \
+         must have reset to 0; got:\n{}",
+        logs2.text()
+    );
+}
+
+/// The GraphQL response's echoed `pullRequest.number` used to be trusted
+/// uncritically: `apply_probe` looks the candidate up by the *requested* key
+/// (from the event), but `upsert_from_probe` writes under `probed.number` — the
+/// number the response claims. A response naming a different PR (a caching
+/// proxy artifact, a batching bug, a misbehaving fake) used to desync those two
+/// keys: the ledger entry the caller thinks it just wrote is not the one that
+/// changed. `probe_pr` must defer instead of building a `ProbedPr` when the
+/// numbers disagree.
+#[tokio::test]
+async fn probe_number_mismatch_defers_instead_of_desyncing_the_ledger() {
+    let server = MockServer::start().await;
+    let mut h = Harness::new(&server);
+    seed(&mut h.caches, candidate(42, "sha-42"));
+    let before_items = h.items();
+    let before_sha = h.candidate(42).unwrap().head_sha.clone();
+    let before_title = h.candidate(42).unwrap().title.clone();
+
+    // Answers the GraphQL request for #42, but the body echoes PR #99.
+    mount_probe_raw(&server, 200, Probe::new(99, "sha-x").body()).await;
+
+    let outcome = h.apply(&ev("pr.synchronize").num(42)).await;
+
+    assert_eq!(
+        outcome,
+        Outcome::Deferred,
+        "a mismatched PR number must defer, not write"
+    );
+    assert_eq!(h.items(), before_items, "the snapshot must be untouched");
+    assert_eq!(
+        h.candidate(42).unwrap().head_sha,
+        before_sha,
+        "the ledger entry for #42 must be untouched"
+    );
+    assert_eq!(
+        h.candidate(42).unwrap().title,
+        before_title,
+        "nothing about #42 changed, not merely head_sha"
+    );
+    assert!(
+        h.candidate(99).is_none(),
+        "the echoed number must not create a phantom ledger entry either"
+    );
+    assert_eq!(calls(&server).await.search, 0, "no search fallback");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1280,7 +1624,11 @@ async fn targeted_and_full_fetch_agree_on_changes_req_item() {
     mount_check_runs_for(&server, SHA, "success").await;
 
     let from_poll = h.fetch().await.items;
-    assert_eq!(numbers(&from_poll), vec![42], "fixture should yield bucket 3");
+    assert_eq!(
+        numbers(&from_poll),
+        vec![42],
+        "fixture should yield bucket 3"
+    );
     assert_eq!(from_poll[0].bucket, "changes_req");
     assert!(from_poll[0].new_activity);
 
@@ -1296,8 +1644,16 @@ async fn targeted_and_full_fetch_agree_on_changes_req_item() {
     probe.review_decision = None;
     probe.updated_at = UPDATED_AT.to_owned();
     probe.reviews = vec![
-        ("APPROVED".to_owned(), "2026-06-01T09:00:00Z".to_owned(), ME.to_owned()),
-        ("CHANGES_REQUESTED".to_owned(), REVIEWED_AT.to_owned(), ME.to_owned()),
+        (
+            "APPROVED".to_owned(),
+            "2026-06-01T09:00:00Z".to_owned(),
+            ME.to_owned(),
+        ),
+        (
+            "CHANGES_REQUESTED".to_owned(),
+            REVIEWED_AT.to_owned(),
+            ME.to_owned(),
+        ),
     ];
     mount_probe(&server, &probe).await;
     mount_check_runs_for(&server, SHA, "success").await;
@@ -1309,7 +1665,11 @@ async fn targeted_and_full_fetch_agree_on_changes_req_item() {
         from_targeted, from_poll,
         "the two paths must produce an identical item for identical GitHub state"
     );
-    assert_eq!(calls(&server).await.search, 0, "and the targeted one for free");
+    assert_eq!(
+        calls(&server).await.search,
+        0,
+        "and the targeted one for free"
+    );
 }
 
 /// The cache-coherence footgun, pinned.
@@ -1406,7 +1766,10 @@ async fn get_our_last_review_requests_per_page_100() {
         .into_iter()
         .filter(|r| r.url.path().ends_with("/reviews"))
         .collect();
-    assert!(!reviews_requests.is_empty(), "the fixture must exercise bucket 3");
+    assert!(
+        !reviews_requests.is_empty(),
+        "the fixture must exercise bucket 3"
+    );
     for r in &reviews_requests {
         assert_eq!(
             r.url.query(),
@@ -1442,7 +1805,11 @@ async fn duplicate_event_id_applied_twice_matches_applying_once() {
         "the redelivery must be dropped"
     );
     assert_eq!(h.items(), after_once, "same snapshot");
-    assert_eq!(calls(&server).await, calls_once, "and the same request count");
+    assert_eq!(
+        calls(&server).await,
+        calls_once,
+        "and the same request count"
+    );
 }
 
 /// The relay does not guarantee ordering. A stale event overwriting a newer
@@ -1459,8 +1826,12 @@ async fn older_delivered_at_does_not_overwrite_newer_verdict() {
     mount_probe(&server, &newer).await;
     mount_check_runs_for(&server, "sha-new", "success").await;
 
-    h.apply(&ev("pr.synchronize").num(42).delivered(at(2026, 6, 7, 12, 5, 0)))
-        .await;
+    h.apply(
+        &ev("pr.synchronize")
+            .num(42)
+            .delivered(at(2026, 6, 7, 12, 5, 0)),
+    )
+    .await;
     assert_eq!(h.candidate(42).unwrap().head_sha, "sha-new");
     let after_newer = h.items();
 
@@ -1469,7 +1840,11 @@ async fn older_delivered_at_does_not_overwrite_newer_verdict() {
         .apply(&ev("pr.merged").num(42).delivered(at(2026, 6, 7, 12, 0, 0)))
         .await;
 
-    assert_eq!(outcome, Outcome::Unchanged, "the older event must be dropped");
+    assert_eq!(
+        outcome,
+        Outcome::Unchanged,
+        "the older event must be dropped"
+    );
     assert_eq!(h.items(), after_newer, "the newer verdict stands");
     assert!(h.candidate(42).is_some());
 }
@@ -1483,10 +1858,15 @@ async fn equal_delivered_at_is_not_treated_as_out_of_order() {
     seed(&mut h.caches, candidate(42, "sha-42"));
     let t = at(2026, 6, 7, 12, 0, 0);
 
-    h.apply(&ev("ci.completed").sha("sha-42").delivered(t)).await;
+    h.apply(&ev("ci.completed").sha("sha-42").delivered(t))
+        .await;
     let outcome = h.apply(&ev("pr.merged").num(42).delivered(t)).await;
 
-    assert_eq!(outcome, Outcome::Changed, "a same-instant event must still apply");
+    assert_eq!(
+        outcome,
+        Outcome::Changed,
+        "a same-instant event must still apply"
+    );
     assert!(h.candidate(42).is_none());
 }
 
@@ -1517,7 +1897,8 @@ async fn targeted_publish_writes_queue_cache_and_bumps_generated_at() {
         .publish_snapshot(&tx, &h.client, snap, PrefetchScope::NewlyTopThree(&[]));
 
     let written: PrQueueSnapshot =
-        serde_json::from_slice(&std::fs::read(&cache_path).expect("cache file must exist")).unwrap();
+        serde_json::from_slice(&std::fs::read(&cache_path).expect("cache file must exist"))
+            .unwrap();
     assert_eq!(numbers(&written.items), vec![42]);
     assert_eq!(written.generated_at, Some(at(2026, 6, 7, 12, 0, 0)));
     assert!(!written.stale);
@@ -1558,7 +1939,10 @@ async fn search_index_lag_grace_retains_recently_added_pr() {
         vec![42],
         "the PR must survive the poll that couldn't see it"
     );
-    assert!(h.caches.last_grace_retained.contains(&(REPO.to_owned(), 42)));
+    assert!(h
+        .caches
+        .last_grace_retained
+        .contains(&(REPO.to_owned(), 42)));
 
     let after = calls(&server).await;
     assert_eq!(
@@ -1644,7 +2028,7 @@ impl WakeChannels {
 
     /// A generous interval, so a wake that falls through to the timer instead of
     /// firing on its branch is detectable by elapsed time rather than by hanging.
-    async fn wait(&mut self, targeted_enabled: bool, pending: &mut Vec<RelayEvent>) -> Wake {
+    async fn wait(&mut self, targeted_enabled: bool) -> Wake {
         wait_for_wake(
             &mut self.dirty_rx,
             &mut self.refresh_rx,
@@ -1652,7 +2036,6 @@ impl WakeChannels {
             &mut self.relay_rx,
             5,
             targeted_enabled,
-            pending,
         )
         .await
     }
@@ -1670,18 +2053,37 @@ impl WakeChannels {
 #[tokio::test]
 async fn kill_switch_falls_back_to_full_refresh() {
     let mut ch = WakeChannels::new();
-    let mut pending = Vec::new();
 
     ch.send_event(ev("ci.completed").sha("x"));
     let start = std::time::Instant::now();
-    let wake = ch.wait(false, &mut pending).await;
-    assert!(matches!(wake, Wake::Full("relay_event")), "got {wake:?}");
-    assert!(start.elapsed() < Duration::from_secs(1), "the timer won instead");
-    assert!(pending.is_empty(), "with the engine off there is nothing to apply later");
+    let wake = ch.wait(false).await;
+    match wake {
+        Wake::Full { reason, deferred } => {
+            assert_eq!(reason, "relay_event");
+            assert!(
+                deferred.is_empty(),
+                "with the engine off there is nothing to apply later"
+            );
+        }
+        other => panic!("got {other:?}"),
+    }
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "the timer won instead"
+    );
 
     ch.relay_tx.send(QueueSignal::Reconnected).unwrap();
-    let wake = ch.wait(false, &mut pending).await;
-    assert!(matches!(wake, Wake::Full("relay_reconnect")), "got {wake:?}");
+    let wake = ch.wait(false).await;
+    assert!(
+        matches!(
+            wake,
+            Wake::Full {
+                reason: "relay_reconnect",
+                ..
+            }
+        ),
+        "got {wake:?}"
+    );
 }
 
 /// With the engine on, a batch of events becomes a targeted update — and a
@@ -1691,11 +2093,10 @@ async fn kill_switch_falls_back_to_full_refresh() {
 #[tokio::test]
 async fn relay_events_become_a_targeted_wake_and_a_reconnect_still_reconciles() {
     let mut ch = WakeChannels::new();
-    let mut pending = Vec::new();
 
     ch.send_event(ev("pr.merged").num(1));
     ch.send_event(ev("pr.merged").num(2));
-    let wake = ch.wait(true, &mut pending).await;
+    let wake = ch.wait(true).await;
     match wake {
         Wake::Targeted(events) => {
             assert_eq!(
@@ -1709,13 +2110,18 @@ async fn relay_events_become_a_targeted_wake_and_a_reconnect_still_reconciles() 
 
     ch.relay_tx.send(QueueSignal::Reconnected).unwrap();
     ch.send_event(ev("pr.merged").num(3));
-    let wake = ch.wait(true, &mut pending).await;
-    assert!(matches!(wake, Wake::Full("relay_reconnect")), "got {wake:?}");
-    assert_eq!(
-        pending.iter().filter_map(|e| e.number).collect::<Vec<_>>(),
-        vec![3],
-        "the batch must be stashed for after the reconciling fetch, not discarded"
-    );
+    let wake = ch.wait(true).await;
+    match wake {
+        Wake::Full { reason, deferred } => {
+            assert_eq!(reason, "relay_reconnect");
+            assert_eq!(
+                deferred.iter().filter_map(|e| e.number).collect::<Vec<_>>(),
+                vec![3],
+                "the batch must be stashed for after the reconciling fetch, not discarded"
+            );
+        }
+        other => panic!("got {other:?}"),
+    }
 }
 
 /// A relay event describes a change GitHub's search index may not have picked up
@@ -1724,7 +2130,6 @@ async fn relay_events_become_a_targeted_wake_and_a_reconnect_still_reconciles() 
 #[tokio::test]
 async fn relay_wake_does_not_discard_events_on_an_unrelated_full_refresh() {
     let mut ch = WakeChannels::new();
-    let mut pending = Vec::new();
 
     // `tokio::select!` picks randomly among ready branches, so which one wins is
     // not the contract — what survives the wake is. Drive it until the dirty
@@ -1733,25 +2138,25 @@ async fn relay_wake_does_not_discard_events_on_an_unrelated_full_refresh() {
         ch.dirty_tx.send(()).unwrap();
         ch.send_event(ev("pr.opened").num(9));
 
-        match ch.wait(true, &mut pending).await {
+        match ch.wait(true).await {
             // The relay branch won this round; the event was consumed legitimately.
             Wake::Targeted(_) => continue,
-            Wake::Full("dirty") => {
-                match ch.wait(true, &mut pending).await {
-                    Wake::Targeted(events) => {
-                        assert_eq!(
-                            events.iter().filter_map(|e| e.number).collect::<Vec<_>>(),
-                            vec![9],
-                            "the relay event must survive the unrelated refresh"
-                        );
-                        return;
-                    }
-                    other => panic!(
-                        "attempt {attempt}: the relay event was dropped by the dirty wake; \
-                         next wake was {other:?}"
-                    ),
+            Wake::Full {
+                reason: "dirty", ..
+            } => match ch.wait(true).await {
+                Wake::Targeted(events) => {
+                    assert_eq!(
+                        events.iter().filter_map(|e| e.number).collect::<Vec<_>>(),
+                        vec![9],
+                        "the relay event must survive the unrelated refresh"
+                    );
+                    return;
                 }
-            }
+                other => panic!(
+                    "attempt {attempt}: the relay event was dropped by the dirty wake; \
+                         next wake was {other:?}"
+                ),
+            },
             other => panic!("attempt {attempt}: unexpected wake {other:?}"),
         }
     }
@@ -1767,12 +2172,7 @@ async fn relay_wake_does_not_discard_events_on_an_unrelated_full_refresh() {
 /// a handful of events about PRs actually in my queue.
 async fn replay_org_activity(h: &mut Harness, server: &MockServer, count: usize) {
     // Anything the ~20 "touching the ledger" events probe must have an answer.
-    mount_probe_raw(
-        server,
-        200,
-        Probe::new(42, "sha-42").body(),
-    )
-    .await;
+    mount_probe_raw(server, 200, Probe::new(42, "sha-42").body()).await;
     mount_check_runs_any(server, "success").await;
 
     for i in 0..count {
@@ -1804,7 +2204,13 @@ async fn search_calls_do_not_scale_with_relay_event_volume() {
     let control = MockServer::start().await;
     let mut hc = Harness::new(&control);
     mount_user(&control).await;
-    mount_searches(&control, vec![], vec![search_item(42, "alice", false, "2026-06-07T12:00:00Z")], vec![]).await;
+    mount_searches(
+        &control,
+        vec![],
+        vec![search_item(42, "alice", false, "2026-06-07T12:00:00Z")],
+        vec![],
+    )
+    .await;
     mount_pr_detail(&control, 42, "sha-42", false).await;
     mount_check_runs_any(&control, "success").await;
     hc.fetch().await;
@@ -1815,7 +2221,13 @@ async fn search_calls_do_not_scale_with_relay_event_volume() {
     let server = MockServer::start().await;
     let mut h = Harness::new(&server);
     mount_user(&server).await;
-    mount_searches(&server, vec![], vec![search_item(42, "alice", false, "2026-06-07T12:00:00Z")], vec![]).await;
+    mount_searches(
+        &server,
+        vec![],
+        vec![search_item(42, "alice", false, "2026-06-07T12:00:00Z")],
+        vec![],
+    )
+    .await;
     mount_pr_detail(&server, 42, "sha-42", false).await;
     h.fetch().await;
     let after_poll = calls(&server).await;
@@ -1956,9 +2368,18 @@ async fn divergence_warn_fires_on_disagreement() {
         text.contains("targeted update diverged from periodic poll"),
         "no divergence warn was emitted; captured:\n{text}"
     );
-    assert!(text.contains(REPO), "the warn must name the repo; got:\n{text}");
-    assert!(text.contains("number=42"), "and the PR number; got:\n{text}");
-    assert!(text.contains("bucket"), "and the diverging field; got:\n{text}");
+    assert!(
+        text.contains(REPO),
+        "the warn must name the repo; got:\n{text}"
+    );
+    assert!(
+        text.contains("number=42"),
+        "and the PR number; got:\n{text}"
+    );
+    assert!(
+        text.contains("bucket"),
+        "and the diverging field; got:\n{text}"
+    );
     assert!(
         text.contains("poll_verdict=changes_req") && text.contains("targeted_verdict=needs_review"),
         "and both verdicts, labelled; got:\n{text}"
@@ -2027,7 +2448,11 @@ async fn divergence_audit_stays_quiet_without_a_trustworthy_baseline() {
     for (label, prev, set) in [
         ("no prior snapshot", None, audit_set(&[42])),
         ("stale prior snapshot", Some(stale_prev), audit_set(&[42])),
-        ("errored prior snapshot", Some(errored_prev), audit_set(&[42])),
+        (
+            "errored prior snapshot",
+            Some(errored_prev),
+            audit_set(&[42]),
+        ),
         ("nothing was touched", Some(healthy_prev), HashSet::new()),
     ] {
         let logs = CapturedLogs::default();
@@ -2057,15 +2482,14 @@ async fn divergence_audit_stays_quiet_without_a_trustworthy_baseline() {
 #[tokio::test]
 async fn non_relay_signals_coalesce_into_one_full_wake() {
     let mut ch = WakeChannels::new();
-    let mut pending = Vec::new();
 
     ch.dirty_tx.send(()).unwrap();
     ch.refresh_tx.send(()).unwrap();
     ch.approvals_tx.send(()).unwrap();
 
     let start = std::time::Instant::now();
-    let wake = ch.wait(true, &mut pending).await;
-    assert!(matches!(wake, Wake::Full(_)), "got {wake:?}");
+    let wake = ch.wait(true).await;
+    assert!(matches!(wake, Wake::Full { .. }), "got {wake:?}");
     assert!(
         start.elapsed() < Duration::from_secs(1),
         "a pending signal must wake immediately, not wait out the interval"
@@ -2073,7 +2497,7 @@ async fn non_relay_signals_coalesce_into_one_full_wake() {
 
     // Nothing left over: a second wait has to fall through to the timer.
     let start = std::time::Instant::now();
-    let wake = tokio::time::timeout(Duration::from_millis(600), ch.wait(true, &mut pending)).await;
+    let wake = tokio::time::timeout(Duration::from_millis(600), ch.wait(true)).await;
     assert!(
         wake.is_err(),
         "a leftover signal produced a second wake ({:?} after {:?}) — the three \
