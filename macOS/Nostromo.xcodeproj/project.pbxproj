@@ -56,6 +56,36 @@
 		HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */; };
 		CC00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		GG00000000000000000000C1 /* NostromoKit in Frameworks (NostromoTests) */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
+		HH000000000000000000011 /* TurnReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000010 /* TurnReconciler.swift */; };
+		HH000000000000000000012 /* TurnReconciler.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000010 /* TurnReconciler.swift */; };
+		HH000000000000000000021 /* TurnPayloadStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000020 /* TurnPayloadStore.swift */; };
+		HH000000000000000000022 /* TurnPayloadStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000020 /* TurnPayloadStore.swift */; };
+		HH000000000000000000031 /* ThumbnailLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000030 /* ThumbnailLoader.swift */; };
+		HH000000000000000000041 /* MemoryWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000040 /* MemoryWatchdog.swift */; };
+		HH000000000000000000042 /* MemoryWatchdog.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000040 /* MemoryWatchdog.swift */; };
+		HH000000000000000000051 /* TranscriptDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000050 /* TranscriptDiagnostics.swift */; };
+		HH000000000000000000061 /* TranscriptLoadHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000060 /* TranscriptLoadHarness.swift */; };
+		HH000000000000000000071 /* TurnListVirtualizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000070 /* TurnListVirtualizer.swift */; };
+		HH000000000000000000072 /* TurnListVirtualizer.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000070 /* TurnListVirtualizer.swift */; };
+		HH000000000000000000081 /* TurnHeightEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000080 /* TurnHeightEstimator.swift */; };
+		HH000000000000000000082 /* TurnHeightEstimator.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000080 /* TurnHeightEstimator.swift */; };
+		HH000000000000000000102 /* TurnReconcilerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000100 /* TurnReconcilerTests.swift */; };
+		HH000000000000000000112 /* TurnPayloadStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000110 /* TurnPayloadStoreTests.swift */; };
+		HH000000000000000000122 /* TurnListVirtualizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000120 /* TurnListVirtualizerTests.swift */; };
+		HH000000000000000000132 /* TurnHeightEstimatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000130 /* TurnHeightEstimatorTests.swift */; };
+		HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000140 /* ImageDecodePolicyTests.swift */; };
+		HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000150 /* MemoryWatchdogTests.swift */; };
+		II000000000000000000011 /* TurnInteractionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000010 /* TurnInteractionStore.swift */; };
+		II000000000000000000012 /* TurnInteractionStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000010 /* TurnInteractionStore.swift */; };
+		II000000000000000000021 /* AskQuestionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000020 /* AskQuestionView.swift */; };
+		II000000000000000000022 /* AskQuestionView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000020 /* AskQuestionView.swift */; };
+		II000000000000000000031 /* ToolResultView.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000030 /* ToolResultView.swift */; };
+		II000000000000000000032 /* ToolResultView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000030 /* ToolResultView.swift */; };
+		II000000000000000000041 /* LoadHarnessTargeting.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000040 /* LoadHarnessTargeting.swift */; };
+		II000000000000000000042 /* LoadHarnessTargeting.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000040 /* LoadHarnessTargeting.swift */; };
+		II000000000000000000102 /* TurnInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000100 /* TurnInteractionTests.swift */; };
+		II000000000000000000112 /* ChatSessionCompactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000110 /* ChatSessionCompactionTests.swift */; };
+		II000000000000000000122 /* LoadHarnessTargetingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000120 /* LoadHarnessTargetingTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -100,6 +130,27 @@
 		FF00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
 		HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentWireEqualityTests.swift; sourceTree = "<group>"; };
 		BB00000000000000000000G1 /* NostromoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NostromoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		HH000000000000000000010 /* TurnReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnReconciler.swift; sourceTree = "<group>"; };
+		HH000000000000000000020 /* TurnPayloadStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPayloadStore.swift; sourceTree = "<group>"; };
+		HH000000000000000000030 /* ThumbnailLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailLoader.swift; sourceTree = "<group>"; };
+		HH000000000000000000040 /* MemoryWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdog.swift; sourceTree = "<group>"; };
+		HH000000000000000000050 /* TranscriptDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptDiagnostics.swift; sourceTree = "<group>"; };
+		HH000000000000000000060 /* TranscriptLoadHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptLoadHarness.swift; sourceTree = "<group>"; };
+		HH000000000000000000070 /* TurnListVirtualizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnListVirtualizer.swift; sourceTree = "<group>"; };
+		HH000000000000000000080 /* TurnHeightEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnHeightEstimator.swift; sourceTree = "<group>"; };
+		HH000000000000000000100 /* TurnReconcilerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnReconcilerTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000110 /* TurnPayloadStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPayloadStoreTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000120 /* TurnListVirtualizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnListVirtualizerTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000130 /* TurnHeightEstimatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnHeightEstimatorTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000140 /* ImageDecodePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDecodePolicyTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000150 /* MemoryWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdogTests.swift; sourceTree = "<group>"; };
+		II000000000000000000010 /* TurnInteractionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionStore.swift; sourceTree = "<group>"; };
+		II000000000000000000020 /* AskQuestionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskQuestionView.swift; sourceTree = "<group>"; };
+		II000000000000000000030 /* ToolResultView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolResultView.swift; sourceTree = "<group>"; };
+		II000000000000000000040 /* LoadHarnessTargeting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadHarnessTargeting.swift; sourceTree = "<group>"; };
+		II000000000000000000100 /* TurnInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionTests.swift; sourceTree = "<group>"; };
+		II000000000000000000110 /* ChatSessionCompactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionCompactionTests.swift; sourceTree = "<group>"; };
+		II000000000000000000120 /* LoadHarnessTargetingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadHarnessTargetingTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -157,6 +208,13 @@
 		AA0000020000000000000010 /* Data */ = {
 			isa = PBXGroup;
 			children = (
+				HH000000000000000000010 /* TurnReconciler.swift */,
+				HH000000000000000000020 /* TurnPayloadStore.swift */,
+				HH000000000000000000030 /* ThumbnailLoader.swift */,
+				HH000000000000000000040 /* MemoryWatchdog.swift */,
+				HH000000000000000000050 /* TranscriptDiagnostics.swift */,
+				HH000000000000000000060 /* TranscriptLoadHarness.swift */,
+				II000000000000000000040 /* LoadHarnessTargeting.swift */,
 				AA0000020000000000000001 /* Models.swift */,
 				AA0000020000000000000002 /* NostromodClient.swift */,
 				AA0000020000000000000003 /* FileWatchers.swift */,
@@ -173,6 +231,9 @@
 		AA0000020000000000000011 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				HH000000000000000000070 /* TurnListVirtualizer.swift */,
+				HH000000000000000000080 /* TurnHeightEstimator.swift */,
+				II000000000000000000010 /* TurnInteractionStore.swift */,
 				AA0000020000000000000005 /* Theme.swift */,
 				AA0000020000000000000006 /* TabBarView.swift */,
 				AA0000020000000000000007 /* StatusBarView.swift */,
@@ -196,6 +257,8 @@
 				AA0000020000000000000025 /* FredView.swift */,
 				EE00000000000000000000A0 /* QuickActionStripView.swift */,
 				AA0000020000000000000023 /* ReplView.swift */,
+				II000000000000000000020 /* AskQuestionView.swift */,
+				II000000000000000000030 /* ToolResultView.swift */,
 				EE00000000000000000000C0 /* MarkdownCardView.swift */,
 				EE00000000000000000000D0 /* DynamicFocusView.swift */,
 				EE00000000000000000000E0 /* PaneContentView.swift */,
@@ -206,6 +269,15 @@
 		BB00000000000000000000C1 /* NostromoTests */ = {
 			isa = PBXGroup;
 			children = (
+				HH000000000000000000100 /* TurnReconcilerTests.swift */,
+				HH000000000000000000110 /* TurnPayloadStoreTests.swift */,
+				HH000000000000000000120 /* TurnListVirtualizerTests.swift */,
+				HH000000000000000000130 /* TurnHeightEstimatorTests.swift */,
+				HH000000000000000000140 /* ImageDecodePolicyTests.swift */,
+				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
+				II000000000000000000100 /* TurnInteractionTests.swift */,
+				II000000000000000000110 /* ChatSessionCompactionTests.swift */,
+				II000000000000000000120 /* LoadHarnessTargetingTests.swift */,
 				BB00000000000000000000B1 /* MotherBrokerClientTests.swift */,
 				BB00000000000000000000C2 /* PhaseRibbonTests.swift */,
 				CC00000000000000000000A0 /* PerriModelTests.swift */,
@@ -307,6 +379,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				HH000000000000000000011 /* TurnReconciler.swift in Sources */,
+				HH000000000000000000021 /* TurnPayloadStore.swift in Sources */,
+				HH000000000000000000031 /* ThumbnailLoader.swift in Sources */,
+				HH000000000000000000041 /* MemoryWatchdog.swift in Sources */,
+				HH000000000000000000051 /* TranscriptDiagnostics.swift in Sources */,
+				HH000000000000000000061 /* TranscriptLoadHarness.swift in Sources */,
+				HH000000000000000000071 /* TurnListVirtualizer.swift in Sources */,
+				HH000000000000000000081 /* TurnHeightEstimator.swift in Sources */,
 				AA0000000000000000000011 /* main.swift in Sources */,
 				AA0000000000000000000012 /* AppDelegate.swift in Sources */,
 				AA0000000000000000000013 /* NostromoWindow.swift in Sources */,
@@ -337,6 +417,10 @@
 				CC00000000000000000000A5 /* DiffColoring.swift in Sources */,
 				FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */,
 				GG00000000000000000000A2 /* ProcessRunner.swift in Sources */,
+				II000000000000000000011 /* TurnInteractionStore.swift in Sources */,
+				II000000000000000000021 /* AskQuestionView.swift in Sources */,
+				II000000000000000000031 /* ToolResultView.swift in Sources */,
+				II000000000000000000041 /* LoadHarnessTargeting.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -344,6 +428,17 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				HH000000000000000000012 /* TurnReconciler.swift in TestSources */,
+				HH000000000000000000022 /* TurnPayloadStore.swift in TestSources */,
+				HH000000000000000000042 /* MemoryWatchdog.swift in TestSources */,
+				HH000000000000000000072 /* TurnListVirtualizer.swift in TestSources */,
+				HH000000000000000000082 /* TurnHeightEstimator.swift in TestSources */,
+				HH000000000000000000102 /* TurnReconcilerTests.swift in Sources */,
+				HH000000000000000000112 /* TurnPayloadStoreTests.swift in Sources */,
+				HH000000000000000000122 /* TurnListVirtualizerTests.swift in Sources */,
+				HH000000000000000000132 /* TurnHeightEstimatorTests.swift in Sources */,
+				HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */,
+				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
 				BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */,
 				BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */,
 				BB00000000000000000000B4 /* Models.swift in TestSources */,
@@ -360,6 +455,13 @@
 				GG00000000000000000000A3 /* ProcessRunner.swift in TestSources */,
 				GG00000000000000000000B2 /* ProcessRunnerTests.swift in Sources */,
 				HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */,
+				II000000000000000000012 /* TurnInteractionStore.swift in TestSources */,
+				II000000000000000000022 /* AskQuestionView.swift in TestSources */,
+				II000000000000000000032 /* ToolResultView.swift in TestSources */,
+				II000000000000000000042 /* LoadHarnessTargeting.swift in TestSources */,
+				II000000000000000000102 /* TurnInteractionTests.swift in Sources */,
+				II000000000000000000112 /* ChatSessionCompactionTests.swift in Sources */,
+				II000000000000000000122 /* LoadHarnessTargetingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

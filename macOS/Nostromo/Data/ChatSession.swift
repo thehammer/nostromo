@@ -6,6 +6,27 @@ private let log = Logger(subsystem: "com.hammer.nostromo", category: "chat")
 
 // MARK: - SessionHealth
 
+// MARK: - TurnChange
+
+/// A precise description of what just changed in `ChatSession.turns`.
+///
+/// `turns` remains the addressable model — virtualization needs random access by
+/// index — but it is not what drives rendering. `ReplView` used to respond to
+/// every published change by walking the *entire* turn array, so the cost of
+/// painting one streamed token rose linearly with session length. Subscribers
+/// use this instead and do O(changed) work, consulting `turns` only by index.
+enum TurnChange {
+    /// One turn was appended at `index`.
+    case appended(index: Int)
+    /// `addedCount` blocks were appended to the turn at `index`.
+    case updatedBlocks(index: Int, addedCount: Int)
+    /// Turns from `replacedFrom` onward were replaced (attach reconcile).
+    /// Everything before that index kept its identity and its rendered view.
+    case spliced(replacedFrom: Int)
+    /// The transcript was emptied. Every turn view must be released.
+    case cleared
+}
+
 /// Observable health state of a daemon-hosted focus session.
 ///
 /// Derivation rules (from daemon events):
@@ -39,7 +60,20 @@ class ChatSession: ObservableObject {
     let displayName: String    // `-n` / `--remote-control` name (phone-facing label)
     let workingDirectory: String?
 
-    @Published private(set) var turns:          [ChatTurn]    = []
+    /// The addressable transcript. Deliberately NOT `@Published`.
+    ///
+    /// `@Published` has no `_modify` accessor, so every in-place mutation goes
+    /// get → mutate copy → set. That leaves the array buffer non-uniquely
+    /// referenced, and each of the ~15 block appends per turn pays a full O(n)
+    /// element copy — 5,000 struct copies with their retains and releases, per
+    /// streamed block. Measured on the load harness: throughput collapsed to
+    /// roughly one turn per second by turn 130, which is the same O(n²) shape
+    /// this change exists to remove, just moved down a layer.
+    ///
+    /// Nothing observes `$turns` any more — `ReplView` renders from `changes`
+    /// (see `TurnChange`) and reads `turns` by index. Re-adding `@Published`
+    /// here, or any whole-array subscriber, reintroduces that cost.
+    private(set) var turns: [ChatTurn] = []
     @Published private(set) var isRunning:      Bool          = false
     @Published private(set) var pendingCount:   Int           = 0     // daemon queues; reserved
     /// Derived from daemon health events. Drives the sidebar badge and pace-bars status strip.
@@ -58,6 +92,27 @@ class ChatSession: ObservableObject {
     /// The health value to show in the UI. Returns `.healthy` when the indicator
     /// has been dismissed, so callers don't need to check `isDismissed` separately.
     var displayedHealth: SessionHealth { isDismissed ? .healthy : health }
+
+    /// Incremental companion to `$turns`. See `TurnChange`.
+    let changes = PassthroughSubject<TurnChange, Never>()
+
+    /// Which daemon-side transcript lifetime the current `daemonId`s belong to.
+    ///
+    /// The daemon numbers turns `t0, t1, …` from a counter that lives on its
+    /// `SessionTranscript`, and that struct is rebuilt from scratch whenever the
+    /// daemon restarts. So the turn that was `t450` comes back as `t7`. Now that
+    /// turns are *retained* across a reattach rather than replaced, an unscoped
+    /// `daemonId` lookup would happily append a new epoch's blocks to an ancient
+    /// turn that happens to share the id. Every delta lookup filters on this.
+    private(set) var currentEpoch = 0
+
+    /// The daemon's session id, as reported by `.sessionSpawned`. Used only to
+    /// tell "different conversation" from "we were away too long" when an attach
+    /// snapshot shares no common ground with what we retained.
+    private(set) var currentSessionId: String?
+
+    /// Skeleton/payload split for retained turns. See `TurnPayloadStore`.
+    let payloadStore = TurnPayloadStore()
 
     private let client: NostromodClient
     private var cancellables = Set<AnyCancellable>()
@@ -111,7 +166,17 @@ class ChatSession: ObservableObject {
     /// Clear the local display and start a fresh daemon session (new claude
     /// session id on the next message).
     func newSession() {
+        // Counted and reported. A transcript that empties itself is the single
+        // most alarming thing this pane can do, and working out *why* after the
+        // fact — from a diagnostics stream that only recorded the turn count
+        // going 57 -> 2 — is not something to do twice.
+        transcriptClears += 1
+        log.info("ChatSession[\(self.tag, privacy: .public)] newSession — transcript cleared (clears=\(self.transcriptClears))")
         turns = []
+        payloadStore.clear()
+        currentSessionId = nil
+        currentEpoch += 1
+        changes.send(.cleared)
         contextFraction = nil
         // The daemon's `new_session` stops the child, drops the session from its
         // registry, and clears the stored id ("next spawn is fresh"). If we don't
@@ -134,7 +199,8 @@ class ChatSession: ObservableObject {
         // what felt laggy). The local turn has no daemonId; apply(.turnStarted)
         // adopts it when the daemon's matching turn arrives (dedupe by text), so
         // subsequent block deltas attach to it.
-        turns.append(ChatTurn(userInput: trimmed, timestamp: Date()))
+        turns.append(ChatTurn(userInput: trimmed, timestamp: Date(), epoch: currentEpoch))
+        changes.send(.appended(index: turns.count - 1))
         client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path })
     }
 
@@ -161,8 +227,15 @@ class ChatSession: ObservableObject {
 
     private func handle(_ msg: ServerMsg) {
         switch msg {
+        case .sessionSpawned(let t, let sessionId) where t == tag:
+            // The daemon sends this on every idempotent re-spawn, so it lands
+            // before the attach snapshot on the same connection — which is what
+            // lets the reconciler tell a different conversation apart from a
+            // long absence.
+            if let sessionId { currentSessionId = sessionId }
+
         case .sessionTurns(let t, let daemonTurns) where t == tag:
-            turns = daemonTurns.map(Self.mapTurn)
+            adoptSnapshot(daemonTurns)
 
         case .sessionTurnDelta(let t, let delta) where t == tag:
             apply(delta)
@@ -202,43 +275,260 @@ class ChatSession: ObservableObject {
         health = newHealth
     }
 
+    // MARK: - Attach snapshot
+
+    /// Splice an attach snapshot into what we already hold, rather than
+    /// replacing it. See `TurnReconciler` for the full rationale.
+    private func adoptSnapshot(_ daemonTurns: [DaemonTurn]) {
+        currentEpoch += 1
+        let sessionIdChanged = lastReconciledSessionId != nil
+            && currentSessionId != nil
+            && lastReconciledSessionId != currentSessionId
+        lastReconciledSessionId = currentSessionId
+
+        let snapshot = daemonTurns.map { Self.mapTurn($0, epoch: currentEpoch) }
+        let outcome  = TurnReconciler.reconcile(retained: turns,
+                                                snapshot: snapshot,
+                                                sessionIdChanged: sessionIdChanged)
+
+        if outcome.didReplaceAll {
+            transcriptClears += 1
+            payloadStore.clear()
+        } else {
+            // Turns the splice dropped (a replaced tail) release their payloads.
+            let survivors = Set(outcome.turns.map { $0.id })
+            for turn in turns where !survivors.contains(turn.id) {
+                payloadStore.drop(turn.id)
+            }
+            // Overlapping turns keep their id but take the snapshot's content, so
+            // any blob still held under that id describes the *previous* view of
+            // the turn. Decoding it into the new block shape either fails (and
+            // reports unavailable) or, worse, lines up and renders stale content
+            // as current with nothing saying so. Forget them; they are hot again.
+            for turn in outcome.turns[min(outcome.replacedFrom, outcome.turns.count)...] {
+                payloadStore.forget(turn.id)
+            }
+        }
+
+        turns = outcome.turns
+        enforceRetentionCap()
+        // Heal on the spot. This splice is *the* event that used to strand turns:
+        // it can insert a gap marker and replace a tail in one step, moving the
+        // hot-window boundary past turns the old single-index check would then
+        // never look at again. Waiting for the next live turn is not good enough
+        // — a session can reconnect and go quiet.
+        compactColdTurns()
+        // `.cleared` means "release every turn view and re-sync from `turns`",
+        // so it covers the replacement snapshot too.
+        changes.send(outcome.didReplaceAll ? .cleared : .spliced(replacedFrom: outcome.replacedFrom))
+        log.info("""
+            ChatSession[\(self.tag, privacy: .public)] attach reconcile: \
+            epoch=\(self.currentEpoch) snapshot=\(snapshot.count) overlap=\(outcome.overlap) \
+            retained=\(self.turns.count) gap=\(outcome.insertedGapMarker) replaced=\(outcome.didReplaceAll)
+            """)
+    }
+
+    /// The session id in force the last time a snapshot was reconciled. Compared
+    /// against `currentSessionId` to detect a genuinely different conversation.
+    private var lastReconciledSessionId: String?
+
+    // MARK: - Live deltas
+
+    /// Index of the turn a delta addresses, scoped to the current epoch.
+    ///
+    /// The epoch filter is what stops a re-issued `t7` from landing on the
+    /// `t7` of a previous daemon lifetime, five hundred turns back.
+    private func index(ofDaemonId turnId: String) -> Int? {
+        turns.lastIndex { $0.daemonId == turnId && $0.epoch == currentEpoch }
+    }
+
     private func apply(_ delta: DaemonTurnDelta) {
         switch delta {
         case .turnStarted(let turn):
             // Reconcile with an optimistic local echo (same text, not yet bound
             // to a daemon id). If none (e.g. a phone-originated message), append.
-            if let i = turns.lastIndex(where: { $0.daemonId == nil && $0.userInput == turn.userInput }) {
-                turns[i].daemonId   = turn.id
-                turns[i].isComplete = turn.isComplete
-                if !turn.blocks.isEmpty { turns[i].blocks = turn.blocks.map(Self.mapBlock) }
-            } else {
-                turns.append(Self.mapTurn(turn))
+            //
+            // Bounded to the newest few turns: an unbounded search would let an
+            // identical message sent an hour ago ("yes", "continue") swallow
+            // this turn and strand every subsequent block delta.
+            let searchFloor = max(0, turns.count - TurnReconciler.echoAdoptionWindow)
+            let echoIndex = turns[searchFloor...].lastIndex {
+                $0.daemonId == nil && $0.marker == nil && $0.userInput == turn.userInput
             }
+            if let i = echoIndex {
+                turns[i].daemonId   = turn.id
+                turns[i].epoch      = currentEpoch
+                turns[i].isComplete = turn.isComplete
+                // Adopt the record's own timestamp. The optimistic echo stamped
+                // itself with `Date()`, which is not the value the daemon will
+                // report for this turn on a later reattach — leaving it would
+                // make the turn unmatchable and duplicate it on reconnect.
+                turns[i].timestampRaw = turn.timestamp
+                if let parsed = turn.timestamp.flatMap({ Self.iso.date(from: $0) }) {
+                    turns[i].timestamp = parsed
+                }
+                if !turn.blocks.isEmpty {
+                    turns[i].blocks = turn.blocks.map(Self.mapBlock)
+                    changes.send(.updatedBlocks(index: i, addedCount: turns[i].blocks.count))
+                }
+            } else {
+                turns.append(Self.mapTurn(turn, epoch: currentEpoch))
+                changes.send(.appended(index: turns.count - 1))
+            }
+            // Cap first, then compact. Compacting turns that are about to be
+            // dropped is wasted compression work on the main thread's behalf.
+            enforceRetentionCap()
+            compactColdTurns()
 
         case .blockAppended(let turnId, let block):
-            if let i = turns.firstIndex(where: { $0.daemonId == turnId }) {
+            if let i = index(ofDaemonId: turnId) {
                 turns[i].blocks.append(Self.mapBlock(block))
+                changes.send(.updatedBlocks(index: i, addedCount: 1))
             }
 
         case .turnCompleted(let turnId, let summary, let contextTokens):
-            if let i = turns.firstIndex(where: { $0.daemonId == turnId }) {
+            if let i = index(ofDaemonId: turnId) {
                 turns[i].blocks.append(.resultSummary(ResultSummaryData(
                     durationMs: summary.durationMs,
                     costUSD:    summary.costUsd,
                     isError:    summary.isError)))
                 turns[i].isComplete = true
+                changes.send(.updatedBlocks(index: i, addedCount: 1))
             }
             if let ct = contextTokens, ct > 0 {
                 contextFraction = min(1.0, Double(ct) / Self.contextLimit)
             }
 
         case .turnErrored(let turnId, let message):
-            if let i = turns.firstIndex(where: { $0.daemonId == turnId }) {
+            if let i = index(ofDaemonId: turnId) {
                 turns[i].blocks.append(.errorMessage(message))
                 turns[i].isComplete = true
+                changes.send(.updatedBlocks(index: i, addedCount: 1))
             }
         }
     }
+
+    // MARK: - Retention
+
+    /// Hand every turn that has fallen out of the hot window to the payload store.
+    ///
+    /// This used to check exactly one computed index (`turns.count - 1 - hotWindow`)
+    /// on each appended turn. Any event that changed the list length by more than
+    /// one moved the boundary past turns that were then never examined again: a
+    /// reconnect's snapshot splice (up to 30 turns), the `historyUnavailable` marker
+    /// insert (shifts every index by one *and* makes the old guard reject), an
+    /// incomplete turn sitting at that index. Those turns kept their full payload
+    /// for the life of the session, with no signal — roughly 29 turns and ~1 MB per
+    /// reconnect, against a 20 MB/1,000-turn criterion with ~20% margin.
+    ///
+    /// A sweep is both simpler than the arithmetic and self-healing: after any
+    /// splice, marker insert or retention drop it re-examines everything below the
+    /// boundary, and it picks up turns that were skipped earlier because they were
+    /// incomplete or pinned by a materialized view.
+    ///
+    /// Deliberately no resume cursor and no index arithmetic. At the 10,000-turn
+    /// retention cap the sweep is ≤9,800 iterations of two optional checks and a
+    /// `Bool` per appended turn — sub-millisecond, against turns that arrive
+    /// seconds apart. Clever index arithmetic is precisely what produced this bug.
+    private func compactColdTurns() {
+        let boundary = turns.count - TurnPayloadStore.hotWindow
+        guard boundary > 0 else { return }
+        var batch: [ChatTurn] = []
+        for i in 0 ..< boundary
+        where turns[i].truncatedLengths == nil && turns[i].marker == nil && turns[i].isComplete {
+            batch.append(turns[i])
+        }
+        guard !batch.isEmpty else { return }
+        // `compactBatch`, not per-turn `compact`: a splice can strand ~30 turns at
+        // once, and this is the same one-background-hop pattern
+        // `shedRetainedContent()` uses. The store already filters pinned, dropped,
+        // in-flight and already-compacted turns, so re-offering one is harmless.
+        //
+        // That last clause was false until f7: `compactBatch` read the in-flight
+        // set but never wrote it, so this sweep — which runs on every
+        // `.turnStarted` — re-encoded and re-compressed turns a prior sweep had
+        // not finished, on the main thread. It is true now, and it is what makes
+        // calling this unconditionally cheap. Do not weaken that registration.
+        payloadStore.compactBatch(batch) { [weak self] skeletons in
+            self?.applySkeletons(skeletons)
+        }
+    }
+
+    /// Swap compacted skeletons back into `turns`, matching on turn id.
+    ///
+    /// Extracted because `compactColdTurns` and `shedRetainedContent` each carried
+    /// their own copy of this block, identical but for the name of the local
+    /// dictionary. Two copies of an index-rebuild-then-overwrite loop is two
+    /// places for the next off-by-one to live.
+    ///
+    /// Matching on id and not on position is the point: compaction is
+    /// asynchronous, and `turns` can have been spliced, capped or replaced by a
+    /// reconnect snapshot while the LZFSE pass was running. A skeleton for a turn
+    /// that is no longer retained is dropped rather than written somewhere else.
+    private func applySkeletons(_ skeletons: [ChatTurn]) {
+        guard !skeletons.isEmpty else { return }
+        var indexById: [UUID: Int] = [:]
+        for (i, turn) in turns.enumerated() { indexById[turn.id] = i }
+        for skeleton in skeletons {
+            guard let i = indexById[skeleton.id] else { continue }
+            turns[i] = skeleton
+        }
+    }
+
+    /// Drop the oldest turns once retention exceeds the skeleton cap, and say so
+    /// at the top of the transcript. This is the one place history genuinely
+    /// becomes unreachable, so it is never silent.
+    private func enforceRetentionCap() {
+        // The marker must not be counted toward the cap, and must not be the
+        // thing removed. Counting it meant that once the cap was reached, each
+        // new turn removed the marker (it sits at index 0), re-inserted it, and
+        // left the list still one over — so the marker churned on every turn
+        // for ever and no real history was ever actually dropped.
+        let hasMarker  = turns.first?.marker == .historyUnavailable
+        let start      = hasMarker ? 1 : 0
+        let realCount  = turns.count - start
+        guard realCount > TurnPayloadStore.maxRetainedTurns else { return }
+
+        let overflow = realCount - TurnPayloadStore.maxRetainedTurns
+        for turn in turns[start ..< (start + overflow)] { payloadStore.drop(turn.id) }
+        turns.removeSubrange(start ..< (start + overflow))
+        if !hasMarker { turns.insert(.marker(.historyUnavailable), at: 0) }
+        log.info("ChatSession[\(self.tag, privacy: .public)] retention cap: dropped \(overflow) turns")
+        changes.send(.spliced(replacedFrom: 0))
+    }
+
+    /// Full content for a turn whose payload was compressed, for the moment a
+    /// view materializes it. Turns still in the hot window are returned as-is.
+    func hydrated(_ turn: ChatTurn) -> TurnPayloadStore.Hydration {
+        payloadStore.hydrate(turn)
+    }
+
+    /// Compress the entire hot window, not just the turn that fell out of it.
+    /// Called by `MemoryWatchdog` when the footprint crosses the shed threshold
+    /// or the OS reports critical pressure.
+    ///
+    /// `completion` fires **exactly once, on the main queue**, after the
+    /// compression has actually landed — including when nothing was eligible, in
+    /// which case it fires immediately. The watchdog measures the memory it freed
+    /// and then decides whether to keep escalating, and compaction is a
+    /// background LZFSE pass: returning before it lands meant the watchdog was
+    /// reading its "after" number before a single byte had been released.
+    func shedRetainedContent(completion: @escaping () -> Void = {}) {
+        let dispatched = payloadStore.compactBatch(turns) { [weak self] skeletons in
+            self?.applySkeletons(skeletons)
+            completion()
+        }
+        if !dispatched { completion() }
+    }
+
+    /// Turns still holding an uncompressed payload, for diagnostics.
+    var hotPayloadTurnCount: Int { turns.count - payloadStore.stats.coldTurns }
+
+    /// How many times this transcript has been emptied — by New Session, by a
+    /// quick action with `clearFirst`, or by an attach snapshot that shared no
+    /// common ground with a *different* session id. Reported by
+    /// `TranscriptDiagnostics` so a drop in retained turns is never a mystery.
+    private(set) var transcriptClears = 0
 
     // MARK: - Mapping (daemon model → GUI model)
 
@@ -248,12 +538,14 @@ class ChatSession: ObservableObject {
         return f
     }()
 
-    private static func mapTurn(_ t: DaemonTurn) -> ChatTurn {
-        ChatTurn(userInput:  t.userInput,
-                 timestamp:  t.timestamp.flatMap { iso.date(from: $0) } ?? Date(),
-                 blocks:     t.blocks.map(mapBlock),
-                 isComplete: t.isComplete,
-                 daemonId:   t.id)
+    private static func mapTurn(_ t: DaemonTurn, epoch: Int) -> ChatTurn {
+        ChatTurn(userInput:    t.userInput,
+                 timestamp:    t.timestamp.flatMap { iso.date(from: $0) } ?? Date(),
+                 timestampRaw: t.timestamp,
+                 blocks:       t.blocks.map(mapBlock),
+                 isComplete:   t.isComplete,
+                 daemonId:     t.id,
+                 epoch:        epoch)
     }
 
     private static func mapBlock(_ b: DaemonTurnBlock) -> TurnBlock {

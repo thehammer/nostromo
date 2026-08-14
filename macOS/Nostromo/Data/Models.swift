@@ -54,6 +54,10 @@ struct Focus: Codable, Hashable, Identifiable {
         return projectPath == nil ? "Personal" : "Carefeed"
     }
 
+    // NOTE: `init(from:)` is deliberately in an extension below rather than here —
+    // declaring any initializer in the body would suppress the memberwise init
+    // that most of the app constructs `Focus` with.
+
     static let builtIns: [Focus] = [
         Focus(id: "fred",   agentTag: "fred",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
         Focus(id: "mother", agentTag: "mother", projectPath: nil, isBuiltIn: true, org: "Carefeed"),
@@ -74,6 +78,31 @@ struct Focus: Codable, Hashable, Identifiable {
               ], org: "Carefeed"),
         Focus(id: "teri",   agentTag: "teri",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
     ]
+}
+
+extension Focus {
+    /// Hand-written because Swift's synthesized `Decodable` ignores property
+    /// default values.
+    ///
+    /// `quickActions` is non-optional with a default, so the synthesized decoder
+    /// demands the key: a `Focus` written to the registry before that property
+    /// existed did not fail to decode *that field*, it failed to decode at all,
+    /// and took the whole saved focus list with it. The optionals are fine — the
+    /// synthesized decoder already treats a missing key as nil — it is only the
+    /// non-optional-with-a-default that has to be said out loud.
+    ///
+    /// (Found by making `make mac-test` able to fail. The test asserting this had
+    /// been red for some time behind a target that always exited 0.)
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id             = try c.decode(String.self, forKey: .id)
+        agentTag       = try c.decode(String.self, forKey: .agentTag)
+        projectPath    = try c.decodeIfPresent(String.self, forKey: .projectPath)
+        isBuiltIn      = try c.decode(Bool.self, forKey: .isBuiltIn)
+        quickActions   = try c.decodeIfPresent([QuickAction].self, forKey: .quickActions) ?? []
+        org            = try c.decodeIfPresent(String.self, forKey: .org)
+        sessionSummary = try c.decodeIfPresent(String.self, forKey: .sessionSummary)
+    }
 }
 
 // MARK: - Mother — job phase types (Wedge C)

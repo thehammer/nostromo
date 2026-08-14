@@ -26,6 +26,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupMenu()
         AppStore.shared.start()
+        AppStore.shared.startMemoryWatchdog()
+        TranscriptDiagnostics.startStreamingIfRequested()
         appLog.info("Opening windows for \(NSScreen.screens.count, privacy: .public) screen(s)")
         for (index, screen) in NSScreen.screens.enumerated() {
             openWindow(for: screen, index: index)
@@ -83,6 +85,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    // MARK: - Debug
+
+    @objc private func copyTranscriptDiagnostics() {
+        TranscriptDiagnostics.copyReportToPasteboard()
+    }
+
     // MARK: - Private
 
     private func setupMenu() {
@@ -111,6 +119,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(.separator())
         editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
         editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
+
+        // Debug menu — the app's answer to "is it holding more than it should?"
+        // without attaching a debugger. Several acceptance criteria for the
+        // bounded-transcript work are numeric, and a number nobody can read is
+        // not a criterion.
+        let debugMenuItem = NSMenuItem()
+        mainMenu.addItem(debugMenuItem)
+        let debugMenu = NSMenu(title: "Debug")
+        debugMenuItem.submenu = debugMenu
+        let diagItem = NSMenuItem(title: "Copy transcript diagnostics",
+                                  action: #selector(copyTranscriptDiagnostics),
+                                  keyEquivalent: "d")
+        diagItem.keyEquivalentModifierMask = [.command, .shift]
+        diagItem.target = self
+        debugMenu.addItem(diagItem)
 
         NSApplication.shared.mainMenu = mainMenu
     }

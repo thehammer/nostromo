@@ -120,6 +120,11 @@ class MainLayout: NSView {
             .sink { [weak self] event in self?.toastView.showToast(event) }
             .store(in: &cancellables)
 
+        // Memory warnings and shed notices → the same banner surface.
+        AppStore.shared.onMemoryToast = { [weak self] message, severity in
+            self?.toastView.showToast(message: message, severity: severity)
+        }
+
         // Publish the initial active focus so StatusBarView has a tag from the start.
         AppStore.shared.setActiveFocusAgentTag(activeFocus.agentTag)
 

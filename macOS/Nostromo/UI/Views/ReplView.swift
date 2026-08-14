@@ -7,11 +7,29 @@ import Combine
 ///
 /// Layout: scrolling turn history (top) + input bar (bottom).
 /// Turn views accumulate live blocks as Claude streams output.
+/// ## Virtualization
+///
+/// The transcript's document view is a plain, frame-positioned `NSView`, not an
+/// `NSStackView`, and only the turns near the viewport exist as views at all.
+///
+/// Auto Layout's engine is per-window, so its cost scales with the number of
+/// *constrained* views present. An `NSStackView` chains all N arranged subviews
+/// into one system and each turn's internal subgraph stays resident forever, so
+/// one scroll view accumulated every constraint the session had ever produced
+/// and re-solved it on every layout pass. Here each materialized turn is an
+/// Auto Layout **island**: positioned by `frame`, holding exactly one
+/// self-contained width constraint, with no constraint of any kind linking it to
+/// the document view or to its siblings. Evicting one removes its whole subtree
+/// from the engine.
+///
+/// `TurnListVirtualizer` owns the geometry — where every turn sits, which ones
+/// intersect the viewport, and the anchor that keeps the operator's reading
+/// position still while heights are corrected underneath them.
 class ReplView: NSView {
 
     private let session:    ChatSession
     private let scrollView = NSScrollView()
-    private let stackView  = NSStackView()
+    private let documentView = TranscriptDocumentView()
     private let inputBar   = ReplInputBar()
 
     private var inputBarHeightConstraint: NSLayoutConstraint!
@@ -19,8 +37,31 @@ class ReplView: NSView {
     private var quickActionStrip: QuickActionStripView?
     private let contextMeter = ContextMeterView()
 
-    private var turnViews:   [UUID: ChatTurnView] = [:]
-    private var scrollPending = false
+    /// Geometry for *every* turn; views for only a window of them.
+    private let virtualizer = TurnListVirtualizer()
+    /// The materialized window — never larger than
+    /// `TurnListVirtualizer.maxMaterialized`.
+    private var turnViews: [UUID: NSView] = [:]
+    /// Turns whose content changed since they were last measured.
+    private var pendingRemeasure: Set<UUID> = []
+    /// What the operator has done to each turn — answered cards, expanded tool
+    /// results — held here because turn views no longer survive long enough to
+    /// hold it themselves. See `TurnInteractionStore`.
+    private let interactions = TurnInteractionStore()
+    /// At most one materialization pass is ever in flight. Materializing from
+    /// inside a layout or scroll callback recurses; this is the same coalescing
+    /// guard the old scroll path used, widened to cover the whole pass.
+    private var passPending = false
+    /// True for the duration of a pass, so the frame and scroll changes it makes
+    /// cannot schedule another one. See `schedulePass`.
+    private var isMaterializing = false
+    /// Set when a *content* change asked for a pass. Cleared as a pass begins,
+    /// so a change that lands while one is running still gets rendered — the
+    /// `isMaterializing` guard suppresses self-inflicted requests, and dropping
+    /// a real update alongside them would be a very quiet rendering bug.
+    private var contentDirty = false
+    /// Pane width the geometry was last computed for.
+    private var laidOutWidth: CGFloat = 0
     private var cancellables = Set<AnyCancellable>()
 
     /// True while the transcript should auto-scroll to the newest content.
@@ -38,12 +79,14 @@ class ReplView: NSView {
         session = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
         super.init(frame: .zero)
         setup()
+        TranscriptDiagnostics.register(self)
+        AppStore.shared.registerTranscriptPane(self)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     deinit {
-        NotificationCenter.default.removeObserver(self, name: NSScrollView.didLiveScrollNotification, object: scrollView)
+        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: Setup
@@ -122,25 +165,25 @@ class ReplView: NSView {
             self, selector: #selector(liveScrollDidChange),
             name: NSScrollView.didLiveScrollNotification, object: scrollView)
 
-        // Stack — turns stacked vertically, full width
-        stackView.orientation = .vertical
-        stackView.spacing     = 0
-        stackView.alignment   = .width
-        stackView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = stackView
-        NSLayoutConstraint.activate([
-            stackView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            // Pin leading AND trailing to the clip view rather than binding
-            // stackView.width == clipView.width. The clip view's width is frame-driven
-            // by the scroll view (tile()), so pinning both edges clamps the stack to the
-            // visible width and lets the scroll view ABSORB long content (wrap/truncate)
-            // instead of propagating its required width up and ballooning the window.
-            stackView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            stackView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            // Ensure document view height is at least the visible area when empty,
-            // preventing ambiguous height that causes scroll flicker on first layout.
-            stackView.bottomAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.bottomAnchor),
-        ])
+        // Programmatic scrolls (scroller drags, scrollToBottom, Home/End) do not
+        // post live-scroll notifications, so the materialization pass would miss
+        // them and the operator would drag into a blank region.
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(clipBoundsDidChange),
+            name: NSView.boundsDidChangeNotification, object: clip)
+
+        // Scripted scroll for the acceptance run — see TranscriptLoadHarness.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(runScriptedScrollRoundTrip),
+            name: .transcriptLoadHarnessScroll, object: nil)
+
+        // Frame-positioned document view. No constraints — not to the clip view,
+        // not between turns. Its size is set from the virtualizer's own height
+        // cache, never read back from AppKit.
+        documentView.translatesAutoresizingMaskIntoConstraints = true
+        documentView.frame = NSRect(x: 0, y: 0, width: 400, height: 1)
+        scrollView.documentView = documentView
 
         // Input bar — fixed at bottom
         inputBar.translatesAutoresizingMaskIntoConstraints = false
@@ -212,10 +255,16 @@ class ReplView: NSView {
             }
         }
 
-        // Combine
-        session.$turns
+        // Combine.
+        //
+        // Note this subscribes to `session.changes`, NOT `session.$turns`.
+        // `@Published` fires on every block append and the old handler responded
+        // by walking the entire turn array, so the cost of painting one streamed
+        // token rose linearly with session length. Adding a `$turns` subscriber
+        // anywhere would reintroduce that.
+        session.changes
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] turns in self?.turnsDidUpdate(turns) }
+            .sink { [weak self] change in self?.apply(change) }
             .store(in: &cancellables)
 
         session.$isRunning
@@ -236,46 +285,301 @@ class ReplView: NSView {
 
     // MARK: Turn management
 
-    private func turnsDidUpdate(_ turns: [ChatTurn]) {
-        for turn in turns {
-            if let existing = turnViews[turn.id] {
-                existing.update(turn: turn)
-            } else {
-                let v = ChatTurnView(turn: turn)
-                v.translatesAutoresizingMaskIntoConstraints = false
-                v.onSend = { [weak self] text in
-                    guard let self else { return }
-                    self.isPinnedToBottom = true
-                    self.session.send(text)
-                }
-                turnViews[turn.id] = v
-                stackView.addArrangedSubview(v)
-                // Explicit width — NSStackView alignment=.width doesn't reliably
-                // constrain custom views with no intrinsic size
-                v.widthAnchor.constraint(equalTo: stackView.widthAnchor).isActive = true
+    /// Width available to a turn view. Read from the clip view's bounds, which
+    /// is frame-driven by the scroll view's `tile()` and so is never dirty.
+    private var contentWidth: CGFloat {
+        max(scrollView.contentView.bounds.width, 1)
+    }
+
+    private func apply(_ change: TurnChange) {
+        let turns = session.turns
+        switch change {
+        case .cleared:
+            releaseAllTurnViews()
+            // Nothing in `turns` survives, so nothing recorded against them
+            // should either. This is half the bound that stops the interaction
+            // store becoming the leak this work exists to remove.
+            interactions.removeAll()
+            virtualizer.reset(turns: turns, width: contentWidth)
+
+        case .spliced(let from):
+            // Releasing the views from `from` onward is not optional. The
+            // reconciler deliberately carries the OLD id onto the snapshot's
+            // version of each overlapping turn, so those turns have new content
+            // under an id the materialized window still recognises: eviction
+            // keeps them (their ids are wanted) and materialization skips them
+            // (a view already exists). A turn interrupted mid-stream would stay
+            // frozen at whatever blocks arrived before the disconnect —
+            // permanently, and with nothing saying so — while the model held the
+            // complete version.
+            for turn in turns[min(from, turns.count)...] {
+                turnViews.removeValue(forKey: turn.id)?.removeFromSuperview()
+                pendingRemeasure.remove(turn.id)
+                session.payloadStore.unpin(turn.id)
+            }
+            // The other half of the bound. A splice is the one event that can
+            // remove turns from the list, and the retention cap reports itself as
+            // `.spliced(replacedFrom: 0)` — so pruning here also covers dropped
+            // history. Deliberately not done on every materialization pass: that
+            // would put an O(turns) walk on the hot path, and between splices
+            // growth is bounded by the turns a human actually interacted with.
+            interactions.prune(keeping: Set(turns.map(\.id)))
+            virtualizer.splice(turns: turns, from: from)
+
+        case .appended(let index):
+            guard index < turns.count else { return }
+            virtualizer.append(turns[index])
+
+        case .updatedBlocks(let index, _):
+            guard index < turns.count else { return }
+            let turn = turns[index]
+            virtualizer.refresh(turn, at: index)
+            // A streaming turn is materialized by definition, so append only the
+            // blocks that are new rather than rebuilding its subtree.
+            if let view = turnViews[turn.id] as? ChatTurnView {
+                view.update(turn: turn)
+                pendingRemeasure.insert(turn.id)
             }
         }
-        // Scroll to bottom after layout settles — coalesced so rapid streaming
-        // tokens don't queue a separate dispatch per token (O(n) dispatches × O(n)
-        // layout = O(n^2) CPU). Only one scroll dispatch is outstanding at any time.
-        // Gated on isPinnedToBottom so a user who's scrolled up to read history
-        // doesn't get yanked back down by every background block delta.
-        if !scrollPending {
-            scrollPending = true
-            DispatchQueue.main.async { [weak self] in
-                self?.scrollPending = false
-                guard let self, self.isPinnedToBottom else { return }
-                self.scrollToBottom()
+        // Distinguished from a scroll- or frame-driven request: a content change
+        // must never be dropped, whereas a bounds notification the pass caused
+        // itself must be.
+        contentDirty = true
+        schedulePass()
+    }
+
+    /// Queue a materialization pass. Never runs one synchronously: materializing
+    /// from inside `layout()` or a scroll callback re-enters layout.
+    ///
+    /// The `isMaterializing` guard closes a feedback loop that is easy to miss
+    /// and total when you hit it: the pass sets the document view's frame and
+    /// scrolls the clip view, both of which post `boundsDidChangeNotification`
+    /// synchronously, whose handler schedules another pass. Measured on the load
+    /// harness, that saturated the run loop and throughput collapsed to about
+    /// one turn every five seconds.
+    private func schedulePass() {
+        guard !passPending, !isMaterializing else { return }
+        passPending = true
+        DispatchQueue.main.async { [weak self] in
+            self?.passPending = false
+            self?.materialize()
+        }
+    }
+
+    /// Reconcile the materialized views with the viewport, in five steps that
+    /// must happen in this order.
+    private func materialize() {
+        let turns = session.turns
+        guard contentWidth > 1, !isMaterializing else { return }
+        isMaterializing = true
+        contentDirty = false
+        defer {
+            isMaterializing = false
+            if contentDirty { schedulePass() }
+        }
+
+        guard !turns.isEmpty else {
+            releaseAllTurnViews()
+            documentView.setFrameSize(NSSize(width: contentWidth,
+                                             height: max(1, scrollView.contentView.bounds.height)))
+            return
+        }
+
+        let viewport = scrollView.contentView.bounds
+        // 1. Name where the operator is reading, BEFORE any height changes.
+        let anchor = isPinnedToBottom ? nil : virtualizer.captureAnchor(viewportTop: viewport.minY)
+
+        // 1b. Re-sync geometry to the turn array this pass is actually going to
+        //     index, before asking it for a window.
+        //
+        //     `virtualizer.count` describes `session.turns` as of the last
+        //     *delivered* change event, and `session.changes` is
+        //     `receive(on: .main)` — one async hop minimum — so `session.turns` is
+        //     always momentarily ahead of the geometry. Meanwhile scroll, clip
+        //     bounds, intrinsic-height and scripted-scroll callbacks all schedule
+        //     passes that never go through `apply(_:)` at all.
+        //
+        //     A pass landing in that gap indexed `turns` with a window sized from
+        //     a stale `count`: **past the end** when the list shrank — the
+        //     retention cap's `removeSubrange`, or a reconnect installing a
+        //     shorter snapshot, both of which mutate `turns` synchronously and
+        //     deliver their `.spliced` event behind the already-queued pass — and
+        //     at wrong offsets when it grew. The load harness drives the scripted
+        //     scroll round trip on a 0.05 s timer while turns arrive, so this is
+        //     reachable exactly when the report is being read.
+        //
+        //     `splice(turns:from: 0)`, not `reset`: splice re-estimates but calls
+        //     `adoptMeasuredHeights`, keeping every measured height, where `reset`
+        //     clears the cache wholesale. The anchor captured above names a content
+        //     key, so it survives the re-sync and still re-resolves the reading
+        //     position in step 5. The `count` checks in `layout()` and
+        //     `viewDidMoveToWindow()` are now redundant but harmless; this is the
+        //     authoritative one, because it sits at the point of use.
+        if virtualizer.count != turns.count {
+            virtualizer.splice(turns: turns, from: 0)
+        }
+        let window = virtualizer.visibleWindow(viewport: viewport)
+        assert(window.upperBound <= turns.count,
+               "visibleWindow \(window) exceeds \(turns.count) turns — geometry is out of sync")
+
+        // 2. Evict. Removing the subview releases the whole subtree and every
+        //    constraint in it — recycling has to actually release, not merely
+        //    stop adding.
+        let wanted = Set(turns[window].map { $0.id })
+        for (id, view) in turnViews where !wanted.contains(id) {
+            view.removeFromSuperview()
+            turnViews.removeValue(forKey: id)
+            pendingRemeasure.remove(id)
+            session.payloadStore.unpin(id)
+        }
+
+        // 3. Materialize what is missing and correct its estimated height to the
+        //    real measured one.
+        for i in window {
+            let turn = turns[i]
+            if turnViews[turn.id] == nil {
+                let view = makeTurnView(for: turn)
+                turnViews[turn.id] = view
+                measure(view, at: i, isComplete: turn.isComplete)   // detached — see `measure`
+                documentView.addSubview(view)
+            } else if pendingRemeasure.contains(turn.id) {
+                measure(turnViews[turn.id]!, at: i, isComplete: turn.isComplete)
+            }
+            pendingRemeasure.remove(turn.id)
+        }
+
+        // 4. Position, and size the document from the virtualizer's own cache —
+        //    never by reading `documentView.frame`, which forces a synchronous
+        //    layout pass on a dirty view.
+        for i in window {
+            turnViews[turns[i].id]?.setFrameOrigin(NSPoint(x: 0, y: virtualizer.offset(of: i)))
+        }
+        documentView.setFrameSize(NSSize(width: contentWidth,
+                                         height: max(virtualizer.documentHeight, viewport.height)))
+
+        // 5. Put the reading position back, or follow the newest content.
+        if isPinnedToBottom {
+            scrollToBottom()
+        } else if let anchor {
+            let top = virtualizer.restoredTop(for: anchor)
+            if abs(top - viewport.minY) > 0.5 {
+                scrollView.contentView.scroll(NSPoint(x: 0, y: top))
+                scrollView.reflectScrolledClipView(scrollView.contentView)
             }
         }
     }
 
+    /// Build a turn view, hydrating its payload first if it has gone cold.
+    private func makeTurnView(for turn: ChatTurn) -> NSView {
+        if let marker = turn.marker {
+            return MarkerTurnView(marker: marker)
+        }
+
+        // Decompression measures ~0.06 ms for a 36 KB turn, so a full window is
+        // a few milliseconds — inside one layout pass, and roughly eighty times
+        // under the 250 ms budget. A turn that cannot be recovered says so
+        // rather than rendering as an empty exchange.
+        let hydrated: ChatTurn
+        let contentAvailable: Bool
+        switch session.hydrated(turn) {
+        case .full(let t):        hydrated = t; contentAvailable = true
+        case .unavailable(let t): hydrated = t; contentAvailable = false
+        }
+        session.payloadStore.pin(turn.id)
+
+        let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable,
+                                interaction: interactions.state(for: turn.id))
+        view.onSend = { [weak self] text in
+            guard let self else { return }
+            self.isPinnedToBottom = true
+            self.session.send(text)
+        }
+        // An answered question card must come back answered. Rebuilt armed, it
+        // would take one stray click to send a second message into a live agent
+        // session — and eviction plus any width change rebuilds it routinely.
+        view.onAnsweredOption = { [weak self] blockIndex, optionIndex in
+            self?.interactions.recordAnswer(turn: turn.id, block: blockIndex, option: optionIndex)
+        }
+        // Expansion restore also keeps geometry and view agreeing: the height
+        // cache keys measured heights by content, which is invariant across
+        // expansion, so a re-collapsed tool result would leave the virtualizer
+        // holding the expanded height.
+        view.onBlockExpansion = { [weak self] blockIndex, isExpanded in
+            self?.interactions.setExpanded(turn: turn.id, block: blockIndex, isExpanded)
+        }
+        // Expanding a tool result changes the turn's height, so the geometry has
+        // to be told rather than left to discover it.
+        view.onIntrinsicHeightChange = { [weak self] in
+            guard let self else { return }
+            self.pendingRemeasure.insert(turn.id)
+            self.schedulePass()
+        }
+        return view
+    }
+
+    /// Measure a materialized turn at the current pane width and hand the real
+    /// height to the virtualizer, replacing its estimate.
+    ///
+    /// The view carries exactly one constraint of its own — its width — which is
+    /// what makes `fittingSize.height` well defined while it is still an island.
+    private func measure(_ view: NSView, at index: Int, isComplete: Bool) {
+        // Measured while **detached**, and that is not incidental.
+        //
+        // `translatesAutoresizingMaskIntoConstraints = true` makes AppKit install
+        // constraints pinning the view's size to its frame the moment it has a
+        // superview. `fittingSize` then just hands back the frame it already has:
+        // a newly-created view measures as its zero frame (and conflicts with its
+        // own width constraint while doing so), and a streaming turn re-measured
+        // in place keeps reporting the height it had before the block arrived, so
+        // the document silently stops growing.
+        //
+        // Detached, the only constraints it holds are its own width plus its
+        // internal layout — which is exactly the question being asked.
+        let superview = view.superview
+        superview.map { _ in view.removeFromSuperview() }
+
+        (view as? TurnIsland)?.setIslandWidth(contentWidth)
+        view.layoutSubtreeIfNeeded()
+        let height = max(view.fittingSize.height, TurnHeightEstimator.minimumTurnHeight)
+        view.setFrameSize(NSSize(width: contentWidth, height: height))
+        virtualizer.recordMeasured(height, at: index, isComplete: isComplete)
+
+        superview?.addSubview(view)
+    }
+
+    private func releaseAllTurnViews() {
+        // Unpinning matters as much as removing. `TurnPayloadStore` refuses to
+        // compact a pinned turn, so a release that left the pins behind would
+        // make `shedMaterializedViews()` structurally unable to compact the very
+        // turns it just released — and the pinned set would grow on every window
+        // resize until compaction was defeated entirely. Backwards, for a memory
+        // fix.
+        for (id, view) in turnViews {
+            view.removeFromSuperview()
+            session.payloadStore.unpin(id)
+        }
+        turnViews.removeAll()
+        pendingRemeasure.removeAll()
+    }
+
+    /// Release every materialized view and re-materialize only what the viewport
+    /// needs. Called by `MemoryWatchdog` on the shed path.
+    ///
+    /// `completion` fires once the session's compaction has landed, so the
+    /// watchdog can measure memory that is genuinely free rather than memory it
+    /// has merely asked for.
+    func shedMaterializedViews(completion: @escaping () -> Void = {}) {
+        releaseAllTurnViews()
+        session.shedRetainedContent { [weak self] in
+            self?.schedulePass()
+            completion()
+        }
+    }
+
     private func scrollToBottom() {
-        guard let doc = scrollView.documentView else { return }
         // Scroll to an arbitrarily large Y — AppKit clamps to the actual maximum.
-        // Avoids accessing doc.frame entirely: accessing .frame on a dirty NSView
-        // triggers a synchronous layout pass (the same O(n^2) NSTextField constraint
-        // solve we were trying to avoid), even without an explicit layoutSubtreeIfNeeded().
+        // Avoids accessing documentView.frame: reading `.frame` on a dirty NSView
+        // triggers a synchronous layout pass.
         scrollView.contentView.scroll(NSPoint(x: 0, y: CGFloat.greatestFiniteMagnitude))
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
@@ -289,11 +593,78 @@ class ReplView: NSView {
     }
 
     @objc private func liveScrollDidChange() {
-        guard let doc = scrollView.documentView else { return }
+        updatePinnedState()
+        schedulePass()
+    }
+
+    @objc private func clipBoundsDidChange() {
+        // Scroller drags, Home/End and `scrollToBottom()` move the clip view
+        // without posting a live-scroll notification — which is the entire reason
+        // this observer exists. Updating the pass but not the pinned state meant
+        // dragging up to read history left `isPinnedToBottom == true`, and the
+        // very pass the drag scheduled took the operator straight back to the
+        // bottom (`materialize()`, step 5).
+        //
+        // A bounds change observed while a pass is running was caused by that
+        // pass — the notification is delivered synchronously from inside its own
+        // scroll and frame calls — so it must not be read as operator intent.
+        guard !isMaterializing else { return }
+        updatePinnedState()
+        schedulePass()
+    }
+
+    /// Scroll bottom → top → bottom, one viewport at a time, so the acceptance
+    /// script can check that recycling actually releases (memory returns to
+    /// within 50 MB of where it started) without driving UI automation.
+    @objc private func runScriptedScrollRoundTrip() {
+        let step = max(scrollView.contentView.bounds.height, 1)
+        var y = virtualizer.documentHeight
+        var goingUp = true
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            if goingUp {
+                y -= step
+                if y <= 0 { y = 0; goingUp = false }
+            } else {
+                y += step
+                if y >= self.virtualizer.documentHeight {
+                    self.isPinnedToBottom = true
+                    self.schedulePass()
+                    timer.invalidate()
+                    return
+                }
+            }
+            self.isPinnedToBottom = false
+            self.scrollView.contentView.scroll(NSPoint(x: 0, y: y))
+            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func updatePinnedState() {
         let visibleMaxY = scrollView.contentView.bounds.maxY
         // Within a small threshold of the true bottom counts as "pinned" —
-        // demanding an exact match would fight sub-pixel rounding.
-        isPinnedToBottom = doc.frame.height - visibleMaxY < 40
+        // demanding an exact match would fight sub-pixel rounding. Compares
+        // against the virtualizer's cached height rather than the document
+        // view's frame, for the reason in `scrollToBottom`.
+        isPinnedToBottom = virtualizer.documentHeight - visibleMaxY < 40
+    }
+
+    override func layout() {
+        super.layout()
+        // A width change invalidates every estimate and every measurement, since
+        // both were taken at the old width. Re-estimating five thousand turns is
+        // a few million float ops — which is what keeps a resize interactive.
+        let width = contentWidth
+        guard width > 1, abs(width - laidOutWidth) > 0.5 else { return }
+        laidOutWidth = width
+        if virtualizer.count == session.turns.count {
+            virtualizer.invalidateWidth(width, turns: session.turns)
+        } else {
+            virtualizer.reset(turns: session.turns, width: width)
+        }
+        releaseAllTurnViews()   // every measurement was taken at the old width
+        schedulePass()
     }
 
     override func viewDidMoveToWindow() {
@@ -301,6 +672,12 @@ class ReplView: NSView {
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
             window.makeFirstResponder(self.inputBar.textView)
+        }
+        // A pane rebuild reuses this instance (see DynamicFocusView), so scroll
+        // position and pinned state survive it. A fresh instance re-syncs here.
+        if window != nil, virtualizer.count != session.turns.count {
+            virtualizer.reset(turns: session.turns, width: contentWidth)
+            schedulePass()
         }
     }
 
@@ -321,9 +698,8 @@ class ReplView: NSView {
         guard let window else { return }
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .alertFirstButtonReturn else { return }
-            // Clear turn views
-            self.turnViews.values.forEach { $0.removeFromSuperview() }
-            self.turnViews = [:]
+            // `newSession()` emits `.cleared`, which releases every turn view and
+            // resets the geometry.
             self.session.newSession()
         }
     }
@@ -333,8 +709,6 @@ class ReplView: NSView {
             // Mirror newSessionTapped's local-history clear so the transcript
             // empties immediately, then start a fresh daemon session.
             // No confirmation dialog — quick actions are intentional one-tap affordances.
-            turnViews.values.forEach { $0.removeFromSuperview() }
-            turnViews = [:]
             session.newSession()
         }
         let prompt = action.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -345,10 +719,107 @@ class ReplView: NSView {
     }
 }
 
+// MARK: - Diagnostics
+
+extension ReplView: TranscriptDiagnostics.Reporting {
+    var diagnosticsTag: String          { session.tag }
+    var retainedTurnCount: Int          { session.turns.count }
+    /// Constant in session length, and never above
+    /// `TurnListVirtualizer.maxMaterialized` — the criterion this whole change
+    /// turns on.
+    var materializedViewCount: Int      { turnViews.count }
+    var hotPayloadTurnCount: Int        { session.hotPayloadTurnCount }
+    var compressedPayloadBytes: Int     { session.payloadStore.stats.compressedBytes }
+    var estimatedDocumentHeight: Double { Double(virtualizer.documentHeight) }
+    var transcriptClearCount: Int       { session.transcriptClears }
+}
+
 // MARK: - ReplClipView
 
 private class ReplClipView: NSClipView {
     override var isFlipped: Bool { true }
+}
+
+// MARK: - TranscriptDocumentView
+
+/// The scroll view's document view: a plain container whose height comes from
+/// `TurnListVirtualizer` and whose children are positioned by frame.
+///
+/// Flipped so y grows downward and turn offsets are the virtualizer's own
+/// coordinates with no conversion. Deliberately has no constraints and no
+/// `layout()` of its own — a document view that participates in Auto Layout is
+/// precisely what made the constraint graph scale with session length.
+private class TranscriptDocumentView: NSView {
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+}
+
+// MARK: - TurnIsland
+
+/// A turn view that owns exactly one constraint of its own — its width — so it
+/// can be measured with `fittingSize` before it is inserted anywhere, and can be
+/// re-widened on a pane resize without ever being constrained to its container.
+private protocol TurnIsland: NSView {
+    func setIslandWidth(_ width: CGFloat)
+}
+
+// MARK: - MarkerTurnView
+
+/// Renders the transcript's statements about history it cannot show.
+///
+/// The PRD is explicit that the one thing worse than losing scrollback is the
+/// operator judging what an agent did from a transcript that quietly omitted
+/// part of it. So these are plain, unmissable, and rendered in place.
+private class MarkerTurnView: NSView, TurnIsland {
+
+    private var widthConstraint: NSLayoutConstraint!
+
+    init(marker: ChatTurn.Marker) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = true
+        wantsLayer = true
+
+        let text: String
+        switch marker {
+        case .gap:
+            text = "⋯  Earlier turns may be missing here — this pane was disconnected for longer than the daemon keeps in its attach window."
+        case .historyUnavailable:
+            text = "⋯  Earlier history is no longer available in this pane. The full record remains on disk in the Claude session transcript."
+        }
+
+        let label = NSTextField(labelWithString: text)
+        label.font                 = .systemFont(ofSize: 11)
+        label.textColor            = Theme.fgMuted
+        label.lineBreakMode        = .byWordWrapping
+        label.maximumNumberOfLines = 0
+        label.alignment            = .center
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+
+        let rule = NSView()
+        rule.wantsLayer = true
+        rule.layer?.backgroundColor = Theme.borderInactive.withAlphaComponent(0.6).cgColor
+        rule.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(rule)
+
+        widthConstraint = widthAnchor.constraint(equalToConstant: 400)
+        NSLayoutConstraint.activate([
+            widthConstraint,
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+            rule.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 8),
+            rule.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
+            rule.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+            rule.heightAnchor.constraint(equalToConstant: 1),
+            rule.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setIslandWidth(_ width: CGFloat) { widthConstraint.constant = width }
 }
 
 // MARK: - ReplInputBar
@@ -512,7 +983,10 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         textView.string  = ""
         pendingImages    = []
         placeholder.isHidden = false
-        imageTray.isHidden   = true
+        // Hiding the tray does not release its chips. Each one holds a decoded
+        // image, and they stayed retained for the lifetime of the pane —
+        // `removeImageChip` got this right and the send path did not.
+        clearImageTray()
         onHeightChange?(Self.minHeight)
         onSend?(text, imagesToSend)
     }
@@ -577,8 +1051,12 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         chip.translatesAutoresizingMaskIntoConstraints = false
 
         let img = NSImageView()
-        img.image = NSImage(contentsOf: url)
+        // Decoded to chip size, never to source size — see ThumbnailLoader.
         img.imageScaling = .scaleProportionallyUpOrDown
+        let scale = window?.backingScaleFactor ?? 2
+        ThumbnailLoader.load(url, scale: max(2, scale)) { [weak img] thumbnail in
+            img?.image = thumbnail
+        }
         img.translatesAutoresizingMaskIntoConstraints = false
         chip.addSubview(img)
 
@@ -626,6 +1104,16 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
     }
 
     private static var urlKey = 0
+
+    /// Tear the tray down to nothing. `NSStackView.removeArrangedSubview` only
+    /// stops managing a view; releasing it needs `removeFromSuperview` too.
+    private func clearImageTray() {
+        for chip in imageTray.arrangedSubviews {
+            imageTray.removeArrangedSubview(chip)
+            chip.removeFromSuperview()
+        }
+        imageTray.isHidden = true
+    }
 
     @objc private func removeImageChip(_ sender: NSButton) {
         guard let chip = sender.superview else { return }
@@ -680,10 +1168,34 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
 
 // MARK: - ChatTurnView
 
-private class ChatTurnView: NSView {
+private class ChatTurnView: NSView, TurnIsland {
 
     private let blocksStack   = NSStackView()
     private var renderedCount = 0
+    private var widthConstraint: NSLayoutConstraint!
+    /// False when this turn's payload was dropped past the retention cap. Its
+    /// blocks say so rather than rendering as empty.
+    private let contentAvailable: Bool
+
+    /// Fired when a block changes its own height (a tool result expanding), so
+    /// `ReplView` re-measures rather than leaving the geometry stale.
+    var onIntrinsicHeightChange: (() -> Void)?
+
+    /// Fired when the operator answers an `AskUserQuestion` card, so the choice
+    /// can be recorded outside this view — which is destroyed on eviction and on
+    /// every width change. See `TurnInteractionStore`.
+    var onAnsweredOption: ((_ blockIndex: Int, _ optionIndex: Int) -> Void)?
+
+    /// Fired when the operator expands or collapses a tool result. Distinct from
+    /// `onIntrinsicHeightChange`, which is about geometry: this one is about
+    /// persistence, so the state survives the view.
+    var onBlockExpansion: ((_ blockIndex: Int, _ isExpanded: Bool) -> Void)?
+
+    /// Everything the operator has already done to this turn, restored into the
+    /// block views as they are built.
+    private let interaction: TurnInteractionState
+
+    func setIslandWidth(_ width: CGFloat) { widthConstraint.constant = width }
 
     /// Reply text injected by the confirm card — suppress its bubble so the card
     /// itself serves as the only visible acknowledgement of the user's choice.
@@ -693,13 +1205,32 @@ private class ChatTurnView: NSView {
     /// Wired by `ReplView` to `session.send(_:)`.
     var onSend: ((String) -> Void)?
 
-    init(turn: ChatTurn) {
+    init(turn: ChatTurn, contentAvailable: Bool, interaction: TurnInteractionState) {
+        self.contentAvailable = contentAvailable
+        self.interaction      = interaction
         super.init(frame: .zero)
+        // Positioned by frame inside the document view, with exactly one
+        // constraint of its own — its width. Nothing ties it to its container or
+        // to its siblings, so the constraint engine holds one independent
+        // component per materialized turn instead of one graph spanning the
+        // session, and evicting it removes that component entirely.
+        translatesAutoresizingMaskIntoConstraints = true
         wantsLayer = true
+        widthConstraint = widthAnchor.constraint(equalToConstant: 400)
+        widthConstraint.isActive = true
 
-        // Blocks container — AI response, left-aligned at 82% width
+        // Blocks container — AI response, left-aligned at 82% width.
+        //
+        // The width fractions and the stack spacing here are read back by
+        // `TurnHeightEstimator`, which has to reproduce this layout arithmetically
+        // to estimate a turn's height before it is built. They are referenced from
+        // there rather than repeated, so a change to the layout cannot silently
+        // desynchronise the estimator. The remaining calibration constants in that
+        // file are *sums* of several constraint constants below (chrome, padding);
+        // folding those together needs a real refactor of these views and is
+        // deliberately not part of this change.
         blocksStack.orientation = .vertical
-        blocksStack.spacing     = 6
+        blocksStack.spacing     = TurnHeightEstimator.blockSpacing
         blocksStack.alignment   = .width
         blocksStack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -715,7 +1246,9 @@ private class ChatTurnView: NSView {
             NSLayoutConstraint.activate([
                 blocksStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
                 blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                blocksStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
+                blocksStack.widthAnchor.constraint(equalTo: widthAnchor,
+                                                   multiplier: TurnHeightEstimator.blocksWidthFraction,
+                                                   constant: -14),
                 blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
             ])
         } else {
@@ -731,16 +1264,41 @@ private class ChatTurnView: NSView {
                 bubble.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
                 // Fixed 75 % width so AutoLayout never needs intrinsicContentSize — the
                 // unconstrained single-line NSTextField width overflowed the right edge.
-                bubble.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.75),
+                bubble.widthAnchor.constraint(equalTo: widthAnchor,
+                                              multiplier: TurnHeightEstimator.bubbleWidthFraction),
 
                 blocksStack.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 8),
                 blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                blocksStack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.82, constant: -14),
+                blocksStack.widthAnchor.constraint(equalTo: widthAnchor,
+                                                   multiplier: TurnHeightEstimator.blocksWidthFraction,
+                                                   constant: -14),
                 blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
             ])
         }
 
+        // Every block of an unrecoverable turn is truncated — the user bubble
+        // and the assistant's text as much as its tool results — so an answer
+        // would otherwise stop mid-sentence with nothing to explain it. One
+        // banner at the top of the turn covers all of them; the tool-result
+        // disclosure adds its own line because that content is separately
+        // expandable.
+        if !contentAvailable {
+            blocksStack.addArrangedSubview(Self.makeTruncationBanner())
+        }
         renderNewBlocks(turn.blocks)
+    }
+
+    private static func makeTruncationBanner() -> NSView {
+        let label = NSTextField(labelWithString:
+            "⚠︎  Only the beginning of this turn is still held in this pane. "
+            + "The full text remains in the Claude session transcript on disk.")
+        label.font                 = .systemFont(ofSize: 10)
+        label.textColor            = Theme.amber
+        label.lineBreakMode        = .byWordWrapping
+        label.maximumNumberOfLines = 0
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -753,7 +1311,11 @@ private class ChatTurnView: NSView {
 
     private func renderNewBlocks(_ blocks: [TurnBlock]) {
         for block in blocks {
-            let v = makeBlockView(block)
+            // `renderedCount` is already the index of the block being added, and
+            // it keeps counting across streaming `update(turn:)` calls — so it is
+            // the block index, and a second counter would only be a second thing
+            // to get out of step with it.
+            let v = makeBlockView(block, at: renderedCount)
             v.translatesAutoresizingMaskIntoConstraints = false
             blocksStack.addArrangedSubview(v)
             // Explicitly match width — NSStackView alignment=.width doesn't reliably
@@ -763,16 +1325,31 @@ private class ChatTurnView: NSView {
         }
     }
 
-    private func makeBlockView(_ block: TurnBlock) -> NSView {
+    private func makeBlockView(_ block: TurnBlock, at index: Int) -> NSView {
         switch block {
         case .text(let t):           return TextBlockView(text: t)
         case .toolCall(let d):       return ToolCallView(data: d)
-        case .toolResult(let d):     return ToolResultView(data: d)
+        case .toolResult(let d):
+            let v = ToolResultView(data: d, contentAvailable: contentAvailable,
+                                   startExpanded: interaction.expandedBlocks.contains(index))
+            v.onExpansionChange = { [weak self] isExpanded in
+                guard let self else { return }
+                self.onBlockExpansion?(index, isExpanded)
+                self.onIntrinsicHeightChange?()
+            }
+            return v
         case .resultSummary(let d):  return ResultChipView(data: d)
         case .errorMessage(let m):   return ErrorBlockView(message: m)
         case .askQuestion(let d):
-            let v = AskQuestionView(data: d)
-            v.onAnswer = { [weak self] answer in self?.onSend?(answer) }
+            let v = AskQuestionView(data: d,
+                                    answeredOptionIndex: interaction.answeredOptions[index])
+            v.onAnswer = { [weak self] answer, optionIndex in
+                guard let self else { return }
+                // Record before sending. If the send path ever tears this view
+                // down, the answer is already outside it.
+                self.onAnsweredOption?(index, optionIndex)
+                self.onSend?(answer)
+            }
             return v
         }
     }
@@ -1164,124 +1741,6 @@ private class ToolCallView: NSView {
     }
 }
 
-// MARK: - ToolResultView
-
-/// Tool result block — collapsed by default showing a line count chip.
-/// Click to expand/collapse. Errors always start expanded.
-private class ToolResultView: NSView {
-
-    private var isExpanded  = false
-    private let disclosure  = NSButton()
-    private let contentWrap = NSView()
-    private let lineCount:  Int
-    private let content:    String
-    private let isError:    Bool
-    /// Guards against building the expensive full-content label more than once.
-    private var labelBuilt  = false
-
-    init(data: ToolResultData) {
-        let nonEmpty = data.content.components(separatedBy: "\n")
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        lineCount  = max(nonEmpty.count, 1)
-        content    = data.content
-        isError    = data.isError
-        isExpanded = data.isError   // errors always open
-
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor(white: 0.07, alpha: 1).cgColor
-        layer?.cornerRadius    = 6
-        layer?.borderWidth     = 1
-        layer?.borderColor     = isError
-            ? Theme.redSweater.withAlphaComponent(0.5).cgColor
-            : Theme.borderInactive.withAlphaComponent(0.6).cgColor
-
-        // Disclosure button (always visible)
-        disclosure.isBordered = false
-        disclosure.target     = self
-        disclosure.action     = #selector(toggleExpand)
-        disclosure.translatesAutoresizingMaskIntoConstraints = false
-
-        // Content label is built lazily (see buildLabelIfNeeded) — most tool
-        // results are non-error and stay collapsed forever, and merely
-        // constructing NSTextField(labelWithString:) with a large blob
-        // triggers a full CoreText glyph-shaping pass via its internal
-        // sizeToFit(), even when the view is immediately hidden. Replaying a
-        // long-lived session's full turn history was paying that cost for
-        // every historical tool result up front, pegging the main thread for
-        // tens of seconds on launch/reconnect for no visible benefit.
-        contentWrap.translatesAutoresizingMaskIntoConstraints = false
-
-        // NSStackView collapses hidden arranged subviews automatically
-        let vStack = NSStackView(views: [disclosure, contentWrap])
-        vStack.orientation = .vertical
-        vStack.spacing     = 4
-        vStack.alignment   = .width
-        vStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(vStack)
-        NSLayoutConstraint.activate([
-            vStack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            vStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            vStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            vStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-            // alignment=.width doesn't reliably fill arranged subviews to stack width
-            disclosure.widthAnchor.constraint(equalTo: vStack.widthAnchor),
-            contentWrap.widthAnchor.constraint(equalTo: vStack.widthAnchor),
-        ])
-
-        applyState()
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func toggleExpand() {
-        isExpanded.toggle()
-        applyState()
-        // Walk up to nudge the scroll stack to re-measure
-        var v: NSView? = superview
-        while let sv = v {
-            sv.needsLayout = true
-            if sv is NSScrollView { break }
-            v = sv.superview
-        }
-    }
-
-    /// Builds the full-content label on first actual need (see the doc
-    /// comment on `contentWrap` in `init`). Safe to call repeatedly.
-    private func buildLabelIfNeeded() {
-        guard !labelBuilt else { return }
-        labelBuilt = true
-        let label = NSTextField(labelWithString: content)
-        label.font                 = Theme.monoFont
-        label.textColor            = isError ? Theme.redSweater : Theme.fgMuted
-        label.lineBreakMode        = .byCharWrapping
-        label.maximumNumberOfLines = 0
-        // Biggest balloon driver: long single-line tool output (JSON, git status) had
-        // an intrinsic width of ~8600pt. Yield horizontally so it wraps to the pane.
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        contentWrap.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.topAnchor.constraint(equalTo: contentWrap.topAnchor),
-            label.leadingAnchor.constraint(equalTo: contentWrap.leadingAnchor),
-            label.trailingAnchor.constraint(equalTo: contentWrap.trailingAnchor),
-            label.bottomAnchor.constraint(equalTo: contentWrap.bottomAnchor),
-        ])
-    }
-
-    private func applyState() {
-        let arrow = isExpanded ? "▼" : "▶"
-        let count = "\(lineCount) line\(lineCount == 1 ? "" : "s")"
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font:            NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: Theme.fgMuted,
-        ]
-        disclosure.attributedTitle = NSAttributedString(string: "\(arrow)  \(count)", attributes: attrs)
-        if isExpanded { buildLabelIfNeeded() }
-        contentWrap.isHidden = !isExpanded
-    }
-}
-
 // MARK: - ResultChipView
 
 private class ResultChipView: NSView {
@@ -1314,307 +1773,6 @@ private class ResultChipView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
-}
-
-// MARK: - AskQuestionView
-
-/// Native card rendered when an agent calls `AskUserQuestion`.
-///
-/// The claude CLI can't surface interactive UI in non-interactive (streaming) mode —
-/// it returns "Answer questions?" as a tool error. We intercept the tool_use input
-/// JSON in ChatModels and render it here instead. Tapping an option sends it as a
-/// new user message, so the agent gets the answer and continues naturally.
-private class AskQuestionView: NSView {
-
-    var onAnswer: ((String) -> Void)?
-
-    private let data: AskQuestionData
-    private var answered = false
-    private var headerChip: NSTextField?
-
-    init(data: AskQuestionData) {
-        self.data = data
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor(white: 0.08, alpha: 1).cgColor
-        layer?.cornerRadius    = 8
-        layer?.borderWidth     = 1
-        layer?.borderColor     = Theme.cornflower.withAlphaComponent(0.3).cgColor
-
-        // Header chip (e.g. "Action")
-        var prevAnchor: NSLayoutYAxisAnchor? = nil
-        var topConstant: CGFloat = 12
-
-        if !data.header.isEmpty {
-            let chip = NSTextField(labelWithString: data.header.uppercased())
-            chip.font      = .systemFont(ofSize: 9, weight: .semibold)
-            chip.textColor = Theme.cornflower
-            chip.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(chip)
-            NSLayoutConstraint.activate([
-                chip.topAnchor.constraint(equalTo: topAnchor, constant: topConstant),
-                chip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            ])
-            headerChip  = chip
-            prevAnchor  = chip.bottomAnchor
-            topConstant = 6
-        }
-
-        // Question text
-        let qLabel = NSTextField(labelWithString: data.question)
-        qLabel.font                 = .systemFont(ofSize: 13)
-        qLabel.textColor            = Theme.fg
-        qLabel.lineBreakMode        = .byWordWrapping
-        qLabel.maximumNumberOfLines = 0
-        qLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        qLabel.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(qLabel)
-        NSLayoutConstraint.activate([
-            qLabel.topAnchor.constraint(equalTo: prevAnchor ?? topAnchor, constant: topConstant),
-            qLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            qLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-        ])
-        prevAnchor = qLabel.bottomAnchor
-
-        // Option buttons
-        if data.options.isEmpty {
-            // No options — render a plain text input affordance hint
-            let hint = NSTextField(labelWithString: "Reply below ↓")
-            hint.font      = .systemFont(ofSize: 11)
-            hint.textColor = Theme.fgMuted
-            hint.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(hint)
-            NSLayoutConstraint.activate([
-                hint.topAnchor.constraint(equalTo: prevAnchor!, constant: 10),
-                hint.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                hint.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-            ])
-        } else {
-            // Divider
-            let divider = NSView()
-            divider.wantsLayer = true
-            divider.layer?.backgroundColor = Theme.borderInactive.withAlphaComponent(0.4).cgColor
-            divider.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(divider)
-            NSLayoutConstraint.activate([
-                divider.topAnchor.constraint(equalTo: prevAnchor!, constant: 10),
-                divider.leadingAnchor.constraint(equalTo: leadingAnchor),
-                divider.trailingAnchor.constraint(equalTo: trailingAnchor),
-                divider.heightAnchor.constraint(equalToConstant: 1),
-            ])
-            prevAnchor = divider.bottomAnchor
-
-            for (idx, option) in data.options.enumerated() {
-                let btn = OptionButton(option: option, tag: idx)
-                btn.target = self
-                btn.action = #selector(optionTapped(_:))
-                btn.translatesAutoresizingMaskIntoConstraints = false
-                addSubview(btn)
-                NSLayoutConstraint.activate([
-                    btn.topAnchor.constraint(equalTo: prevAnchor!, constant: idx == 0 ? 0 : 0),
-                    btn.leadingAnchor.constraint(equalTo: leadingAnchor),
-                    btn.trailingAnchor.constraint(equalTo: trailingAnchor),
-                ])
-                prevAnchor = btn.bottomAnchor
-
-                // Row separator between options
-                if idx < data.options.count - 1 {
-                    let sep = NSView()
-                    sep.wantsLayer = true
-                    sep.layer?.backgroundColor = Theme.borderInactive.withAlphaComponent(0.25).cgColor
-                    sep.translatesAutoresizingMaskIntoConstraints = false
-                    addSubview(sep)
-                    NSLayoutConstraint.activate([
-                        sep.topAnchor.constraint(equalTo: prevAnchor!),
-                        sep.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                        sep.trailingAnchor.constraint(equalTo: trailingAnchor),
-                        sep.heightAnchor.constraint(equalToConstant: 1),
-                    ])
-                    prevAnchor = sep.bottomAnchor
-                }
-            }
-
-            prevAnchor?.constraint(equalTo: bottomAnchor).isActive = true
-        }
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func optionTapped(_ sender: OptionButton) {
-        guard !answered else { return }
-        answered = true
-        // Dim all buttons to show selection; disable all to prevent re-tapping.
-        subviews.compactMap { $0 as? OptionButton }.forEach { btn in
-            btn.alphaValue = btn === sender ? 1.0 : 0.35
-            btn.isEnabled  = false
-        }
-        // Animate the chosen-state visuals: checkmark, row tint, chip label/color, card border.
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration    = 0.15
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            sender.markChosen()
-            headerChip?.stringValue = "APPROVED"
-            headerChip?.textColor   = Theme.sage
-            layer?.borderColor      = Theme.sage.withAlphaComponent(0.5).cgColor
-        }
-        // Claude's AskUserQuestion call always errors in -p mode ("Answer questions?").
-        // The user's answer arrives as a new user turn, not a proper tool result.
-        // Send rich context so claude can't miss the connection.
-        let reply: String
-        if data.question.isEmpty {
-            reply = sender.optionLabel
-        } else {
-            reply = "\(sender.optionLabel)\n\n(This answers your question: \"\(data.question)\" — please proceed.)"
-        }
-        onAnswer?(reply)
-    }
-
-    // MARK: - OptionButton
-
-    private class OptionButton: NSButton {
-
-        let optionLabel: String
-
-        private var chosen = false
-        private let checkmark: NSImageView
-        private let label: NSTextField
-        /// Whether this option carries the "(recommended)" suffix — tracked so
-        /// `markChosen()` can rebuild the attributed string instead of clobbering
-        /// its mixed fonts with a uniform `.font` assignment.
-        private let recommended: Bool
-
-        init(option: AskQuestionData.Option, tag: Int) {
-            optionLabel = option.label
-            recommended = option.recommended
-
-            // Checkmark — hidden by default; space is always reserved so revealing
-            // it causes no layout shift (label leading is anchored to checkmark.trailing).
-            let check = NSImageView()
-            check.image = NSImage(systemSymbolName: "checkmark.circle.fill",
-                                  accessibilityDescription: "chosen")
-            check.contentTintColor = Theme.sage
-            check.isHidden  = true
-            check.alphaValue = 0
-            check.translatesAutoresizingMaskIntoConstraints = false
-            checkmark = check
-
-            let labelFont = NSFont.systemFont(ofSize: 12, weight: .medium)
-            let lbl: NSTextField
-            if option.recommended {
-                // Append a muted "(recommended)" suffix so Perri's pick stands out
-                // without implying the other options are wrong.
-                let attributed = NSMutableAttributedString(
-                    string: option.label,
-                    attributes: [.font: labelFont, .foregroundColor: Theme.fg])
-                attributed.append(NSAttributedString(
-                    string: " (recommended)",
-                    attributes: [
-                        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-                        .foregroundColor: Theme.fgMuted,
-                    ]))
-                lbl = NSTextField(labelWithAttributedString: attributed)
-            } else {
-                lbl = NSTextField(labelWithString: option.label)
-                lbl.font      = labelFont
-                lbl.textColor = Theme.fg
-            }
-            lbl.translatesAutoresizingMaskIntoConstraints = false
-            label = lbl
-
-            super.init(frame: .zero)
-            self.tag      = tag
-            title         = ""   // NSButton defaults to "Button" — we render our own label/description subviews
-            isBordered    = false
-            wantsLayer    = true
-
-            var subs: [NSView] = [checkmark, label]
-            var constraints: [NSLayoutConstraint] = [
-                // Checkmark — leading edge, vertically centred, fixed 14×14
-                checkmark.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                checkmark.centerYAnchor.constraint(equalTo: centerYAnchor),
-                checkmark.widthAnchor.constraint(equalToConstant: 14),
-                checkmark.heightAnchor.constraint(equalToConstant: 14),
-                // Label anchored to checkmark trailing so its position is stable
-                // regardless of checkmark visibility.
-                label.leadingAnchor.constraint(equalTo: checkmark.trailingAnchor, constant: 8),
-                label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            ]
-
-            if !option.description.isEmpty {
-                let desc = NSTextField(labelWithString: option.description)
-                desc.font                 = .systemFont(ofSize: 11)
-                desc.textColor            = Theme.fgMuted
-                desc.lineBreakMode        = .byTruncatingTail
-                desc.maximumNumberOfLines = 1
-                desc.translatesAutoresizingMaskIntoConstraints = false
-                subs.append(desc)
-                constraints += [
-                    desc.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 10),
-                    desc.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-                    desc.centerYAnchor.constraint(equalTo: centerYAnchor),
-                ]
-            } else {
-                constraints.append(label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14))
-            }
-
-            for sub in subs { addSubview(sub) }
-            NSLayoutConstraint.activate(constraints + [
-                heightAnchor.constraint(equalToConstant: 36),
-            ])
-        }
-
-        required init?(coder: NSCoder) { fatalError() }
-
-        /// Applies chosen-state visuals: checkmark fade-in, semibold label, green row tint.
-        /// Must be called from within an `NSAnimationContext.runAnimationGroup` block.
-        func markChosen() {
-            chosen = true
-            checkmark.isHidden = false
-            checkmark.animator().alphaValue = 1
-            let chosenFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
-            if recommended {
-                // Setting `.font` directly on an attributed NSTextField flattens
-                // all runs to one style, which would swallow the muted
-                // "(recommended)" suffix — rebuild the attributed string instead.
-                let attributed = NSMutableAttributedString(
-                    string: optionLabel,
-                    attributes: [.font: chosenFont, .foregroundColor: Theme.fg])
-                attributed.append(NSAttributedString(
-                    string: " (recommended)",
-                    attributes: [
-                        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-                        .foregroundColor: Theme.fgMuted,
-                    ]))
-                label.attributedStringValue = attributed
-            } else {
-                label.font = chosenFont
-            }
-            layer?.backgroundColor = Theme.sage.withAlphaComponent(0.12).cgColor
-        }
-
-        override func updateTrackingAreas() {
-            super.updateTrackingAreas()
-            trackingAreas.forEach { removeTrackingArea($0) }
-            // .inVisibleRect restricts tracking to the visible portion of the view
-            // and re-evaluates on scroll — prevents spurious events for off-screen rows.
-            // rect is ignored when .inVisibleRect is set.
-            addTrackingArea(NSTrackingArea(
-                rect: .zero,
-                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-                owner: self, userInfo: nil
-            ))
-        }
-
-        override func mouseEntered(with event: NSEvent) {
-            guard isEnabled, !chosen else { return }
-            layer?.backgroundColor = Theme.cornflower.withAlphaComponent(0.12).cgColor
-        }
-
-        override func mouseExited(with event: NSEvent) {
-            guard !chosen else { return }
-            layer?.backgroundColor = nil
-        }
-    }
 }
 
 // MARK: - ChatTextView
