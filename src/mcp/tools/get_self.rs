@@ -196,6 +196,7 @@ mod tests {
             pane_registry,
             session_mgr,
             broadcast_tx,
+            perri: crate::mcp::PerriDaemonState::default(),
         };
         McpSharedState::for_daemon(backend)
     }
