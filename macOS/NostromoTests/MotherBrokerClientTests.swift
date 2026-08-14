@@ -14,7 +14,7 @@ import Combine
 ///   4. Exchanges pre-canned NDJSON lines with the client.
 ///   5. Observes published events via Combine.
 ///
-/// ## f9 — why the unwraps here are `try XCTUnwrap` and the timeouts are 10 s
+/// ## Why the unwraps here are `try XCTUnwrap` and the timeouts are 10 s
 ///
 /// Three tests below used to read `wait(for:timeout: 3)`, then
 /// `XCTAssertNotNil(x)`, then `x!`. `XCTAssertNotNil` does **not** stop
@@ -32,7 +32,7 @@ import Combine
 /// the suite. The two `timeout: 1` waits are self-fulfilling main-queue drains
 /// and are deliberately short — leave them.
 ///
-/// ## f2 — why setup throws rather than asserting, and why never `XCTSkip`
+/// ## Why setup throws rather than asserting, and why never `XCTSkip`
 ///
 /// The same shape one frame earlier, and worse, because `setUp` runs before
 /// every test. It created the listening socket and on failure did
@@ -170,7 +170,7 @@ final class MotherBrokerClientTests: XCTestCase {
     /// the hello to `serverFd`, still -1, which fails silently, and the test
     /// dies 10 s later at a `wait(for:)` timeout naming an expectation rather
     /// than the connection that was never accepted. Same assert-then-continue
-    /// idiom the f9 note above condemns. Throwing stops at the cause.
+    /// idiom the note above condemns. Throwing stops at the cause.
     func waitForServerAccept() throws {
         guard accepted.wait(timeout: .now() + 5) == .success else {
             throw HandshakeFailure.serverNeverAccepted(seconds: 5)
@@ -268,7 +268,7 @@ final class MotherBrokerClientTests: XCTestCase {
     // TEST 3: Line framing — partial line buffered until \n arrives.
     // ──────────────────────────────────────────────────────────────────────────
 
-    /// ## f12 — the negative this test is named for is now actually asserted
+    /// ## The negative this test is named for is now actually asserted
     ///
     /// It wrote half a line, slept 0.15 s under a comment reading "it should NOT
     /// have decoded the snapshot yet", and then never asserted it. The only
@@ -558,7 +558,7 @@ final class MotherBrokerClientTests: XCTestCase {
 
 // MARK: - Fake broker failures
 
-/// f2 — thrown, not asserted, so a broker socket that cannot be created stops
+/// Thrown, not asserted, so a broker socket that cannot be created stops
 /// the test at the line that failed instead of falling through to a nil
 /// `client` and trapping the process. `CustomStringConvertible` because XCTest
 /// prints the description of a thrown error, and `strerror` is the difference

@@ -122,7 +122,7 @@ final class ChatSessionCompactionTests: XCTestCase {
     /// test below calls this — proving delivery — before it ever asks whether
     /// what was delivered went cold. An invariant helper must not be
     /// satisfiable by the absence of the thing it measures; that is exactly the
-    /// class of defect this PR exists to fix, and reintroducing it here would
+    /// class of defect the bounded-transcript work exists to fix, and reintroducing it here would
     /// make these tests pass for the wrong reason.
     @discardableResult
     private func waitUntilDelivered(_ expectedTurnCount: Int, timeout: TimeInterval = 15,

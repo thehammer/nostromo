@@ -21,12 +21,12 @@ fix, not the app itself:
   panes, a run whose `sample` failed. `EvaluateRowSetIsFixedTests` asserts
   this across eight degenerate fixtures.
 
-  This is the invariant, not a stylistic preference. This PR failed review
-  twice on the same defect class — a criterion that silently vanishes when its
-  input is missing, or that compares a measurement to itself, reads as "not a
-  problem" in a table where every other line says PASS. A criterion nobody
-  measured has not passed. Adding a row to `evaluate()` means adding its
-  substring to `CRITERIA`; making one conditional means failing that test.
+  This is the invariant, not a stylistic preference. A criterion that
+  silently vanishes when its input is missing, or that compares a measurement
+  to itself, reads as "not a problem" in a table where every other line says
+  PASS. A criterion nobody measured has not passed. Adding a row to
+  `evaluate()` means adding its substring to `CRITERIA`; making one
+  conditional means failing that test.
 - `macOS/scripts/transcript-load-test.sh` — syntax (`bash -n`, and
   `shellcheck` if installed), static structural assertions on the script
   text, and one live exercise of the CPU-measurement dead-pid guard (via a

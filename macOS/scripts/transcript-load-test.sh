@@ -42,7 +42,7 @@ fi
 echo "==> building Release"
 make -C "$REPO_ROOT" mac-release >/dev/null || { echo "mac-release failed"; exit 1; }
 
-# f6: check the truncation. This script runs under `set -uo pipefail` with no
+# Check the truncation. This script runs under `set -uo pipefail` with no
 # `-e`, so an unchecked failure here does not stop the run — it silently leaves
 # the *previous* run's diagnostics in place and the report then grades that file
 # as this run's evidence. Worse, the wait loop below reads $DIAG to decide when

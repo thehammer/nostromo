@@ -13,10 +13,9 @@ says PASS.
 
 ## Why this file is shaped the way it is
 
-Three consecutive independent reviews of the PR that introduced this report each
-found *new* instances of that same bug, seven in total, every one a different
-spelling of "the criterion was satisfied by the absence of the thing it
-measures":
+Review of this report repeatedly found *new* instances of that same bug, seven
+in total, every one a different spelling of "the criterion was satisfied by
+the absence of the thing it measures":
 
   - `max(..., default=0)` treated as a real measurement
   - a comparison that degenerates into comparing a value with itself
@@ -46,7 +45,7 @@ decision moved to a choke point:
      `kind=RUN` criterion makes a claim about the run — a delta, a slope, a
      peak, an agreement, an absence of an event *during* the run — and none of
      those is observable from a single point. `graded()` enforces it, so the
-     f4-class "subtracted a measurement from itself" defect cannot be
+     "subtracted a measurement from itself" defect cannot be
      reintroduced by a criterion body no matter how it is written.
   4. Duplicate measurements are collapsed once, in `load()`, rather than guarded
      against twelve times. Two lines carrying the same timestamp *and* the same
@@ -143,12 +142,13 @@ def graded(key, name, *, observations, ok, measured, limit, required=2):
     from a single point. Below `required` the verdict is INCONCLUSIVE and `ok` is
     never consulted.
 
-    This is the structural answer to three rounds of review findings in this
-    file, every one of which was some variant of "the criterion was satisfied by
-    the absence of the thing it measures": a `default=0`, a comparison of a value
-    with itself, a loop that never ran, an `any()` gate one instrumented sample
-    could open. Individual criteria no longer decide that empty input passes,
-    because they no longer construct their own verdict state.
+    This is the structural answer to a recurring class of defect in this
+    file, every instance of which was some variant of "the criterion was
+    satisfied by the absence of the thing it measures": a `default=0`, a
+    comparison of a value with itself, a loop that never ran, an `any()` gate
+    one instrumented sample could open. Individual criteria no longer decide
+    that empty input passes, because they no longer construct their own
+    verdict state.
 
     Note what `observations` must count: *distinct measurements*, not rows.
     `load()` collapses duplicate samples precisely so that a criterion counting
@@ -423,9 +423,10 @@ def peak_materialized(row):
     """The largest `materializedViews` any pane in `row` reported, or None.
 
     Returns None rather than 0 for a row with no panes, and does it with an
-    explicit list rather than `max(..., default=None)` — the textual shape that
-    recurred through three review rounds — so the count of panes actually read is
-    available to the caller instead of being swallowed by the aggregator.
+    explicit list rather than `max(..., default=None)` — a shape that silently
+    turns "nothing measured" into a measurement — so the count of panes
+    actually read is available to the caller instead of being swallowed by the
+    aggregator.
     """
     views = [pane["materializedViews"] for pane in row.get("panes", [])
              if pane.get("materializedViews") is not None]
@@ -442,7 +443,7 @@ def driven_pane_samples(rows):
 
     A pane that reported itself with every counter at zero is a pane the run
     never drove, and its mere presence is not evidence about materialization,
-    retention or the hot window. Accepting presence alone is round 2's f12 one
+    retention or the hot window. Accepting presence alone is the same defect one
     level in: the instrumentation gate opens, and the numbers behind it are all
     zeros nobody measured.
     """
@@ -617,9 +618,9 @@ def _footprint_delta(ev):
     The two marks must resolve to two *different* samples. `at_turn` returns the
     first sample at-or-after a mark, so a single sample past both marks satisfied
     `lo and hi` and the criterion then subtracted a measurement from itself: a
-    guaranteed `+0.0 MB` PASS on this PR's single most important number. A
-    `--turns 500` invocation is degenerate in the same way and fails here for the
-    same honest reason.
+    guaranteed `+0.0 MB` PASS on the single most important number this report
+    produces. A `--turns 500` invocation is degenerate in the same way and
+    fails here for the same honest reason.
     """
     key = "footprint-delta"
     name = f"footprint delta turn-500 → turn-{ev.turns}"
@@ -958,7 +959,7 @@ def _no_coreautolayout_frames(ev):
 
     Existence is not measurement. A zero-byte file, or one holding "sample: could
     not attach", counts zero signature frames and used to print PASS — the
-    criterion this PR is named for, satisfied by the absence of the thing it
+    criterion this check is named for, satisfied by the absence of the thing it
     measures. macOS `sample` always writes a "Call graph:" section, including for
     an unresponsive process, so its absence means the sample failed rather than
     that the app was clean. A false FAIL here is the safe direction: the shell

@@ -17,9 +17,9 @@ test:
 
 ## Run the Python tooling test suites (load-test report script, doctor, shell
 ## driver checks). One command so CI and a local run cannot drift apart — these
-## suites existed for three review rounds and ran nowhere but a developer's
-## shell, which for the report-script suite in particular is the same defect the
-## suite is about: a check nobody executes is a check that always passes.
+## suites otherwise ran nowhere but a developer's shell, which for the
+## report-script suite in particular is the same defect the suite is about: a
+## check nobody executes is a check that always passes.
 python-test:
 	python3 -m unittest discover -s tests/transcript_load -v
 	python3 -m unittest discover -s tests/doctor -v

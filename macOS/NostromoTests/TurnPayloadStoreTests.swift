@@ -638,7 +638,7 @@ final class TurnPayloadStoreTests: XCTestCase {
         }
     }
 
-    // MARK: - 10. Overlapping compaction sweeps (f7)
+    // MARK: - 10. Overlapping compaction sweeps
 
     /// Pins the defect where `compactBatch` reads `inFlight` (`!inFlight.contains($0.id)`
     /// in its candidate filter) but — unlike the older single-turn `compact` —
@@ -703,12 +703,12 @@ final class TurnPayloadStoreTests: XCTestCase {
         XCTAssertEqual(Set(deliveredIds), Set(turnIds),
                        "every turn offered to compactBatch must eventually be compacted")
         XCTAssertEqual(deliveredIds.count, turnIds.count,
-                       "f7: a turn still in flight from an earlier sweep must not be re-offered and " +
+                       "a turn still in flight from an earlier sweep must not be re-offered and " +
                        "re-compressed by a later sweep — got \(deliveredIds.count) skeletons for " +
                        "\(turnIds.count) turns")
     }
 
-    // MARK: - 11. Forget racing an in-flight completion (f15)
+    // MARK: - 11. Forget racing an in-flight completion
 
     /// Pins the defect where de-registering an id does not cancel a
     /// compression already dispatched for it. `forget(_:)` means "this blob is
@@ -762,7 +762,7 @@ final class TurnPayloadStoreTests: XCTestCase {
             return XCTFail("block shape must survive")
         }
         XCTAssertFalse(s.hasPrefix("STALE-ORIGINAL-"),
-                       "f15: a compaction that raced `forget` wrote the pre-forget blob back under " +
+                       "a compaction that raced `forget` wrote the pre-forget blob back under " +
                        "the still-live id, and hydrate resurrected it as the turn's current content")
         XCTAssertTrue(s.hasPrefix("FRESH-REPLACEMENT-"),
                      "hydrating the replacement must return the replacement's own content, not a " +

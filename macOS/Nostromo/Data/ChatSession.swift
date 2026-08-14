@@ -444,7 +444,7 @@ class ChatSession: ObservableObject {
         // `shedRetainedContent()` uses. The store already filters pinned, dropped,
         // in-flight and already-compacted turns, so re-offering one is harmless.
         //
-        // That last clause was false until f7: `compactBatch` read the in-flight
+        // That last clause used to be false: `compactBatch` read the in-flight
         // set but never wrote it, so this sweep — which runs on every
         // `.turnStarted` — re-encoded and re-compressed turns a prior sweep had
         // not finished, on the main thread. It is true now, and it is what makes
