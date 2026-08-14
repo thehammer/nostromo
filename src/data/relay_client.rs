@@ -1,9 +1,9 @@
 //! github-relay WebSocket subscriber.
 //!
-//! Connects to the github-relay service and triggers an immediate Perri queue
-//! refresh whenever a relevant GitHub event arrives (PR lifecycle, CI completion).
-//! The relay delivers events within ~3 seconds of the GitHub webhook firing,
-//! replacing the queue's poll-cycle lag with near-real-time updates.
+//! Connects to the github-relay service and forwards every GitHub event it
+//! receives to the Perri queue. The relay delivers events within ~3 seconds of
+//! the GitHub webhook firing, replacing the queue's poll-cycle lag with
+//! near-real-time updates.
 //!
 //! # The queue signal
 //!
@@ -11,11 +11,13 @@
 //! `()`, carrying the relay's full description of what happened — repo, PR
 //! number, HEAD SHA, reviewer, review state, and so on.
 //!
-//! **Today the queue ignores the payload and does a full refresh for every
-//! signal**, exactly as it did when the signal was a bare `()`. The payload is
-//! carried now so the wire format lands once; making each event drive a
-//! *targeted* update is follow-up work
-//! (`.claude/plans/targeted-relay-refresh-engine.md`).
+//! **This module makes no relevance judgements.** It parses and forwards; the
+//! queue's classifier (`perri_queue_targeted::classify_event`) decides what
+//! each event means, including that an unrecognised event type means nothing.
+//! Keeping that decision in one place is the point: a filter here plus a
+//! classifier there is two lists that can drift apart. The subscription itself
+//! is still narrow — the relay only *sends* the nine queue-relevant types (see
+//! the `subscribe` frame below).
 //!
 //! Fields the relay marks as hints — `draft`, `author`, `is_bot`, `ci_state` —
 //! are for logging and cheap short-circuits only. Where a hint and a direct
@@ -27,7 +29,9 @@
 //! The relay is at-most-once; it buffers nothing. On any disconnect the client:
 //!   1. Reconnects with exponential backoff (1s → 2s → 4s … capped at 60s).
 //!   2. Re-declares the subscription.
-//!   3. Sends a refresh signal so the queue re-fetches from GitHub to fill any gap.
+//!   3. Sends [`QueueSignal::Reconnected`], which is the one relay signal that
+//!      still forces a **full** refresh — the queue has to reconcile whatever
+//!      it missed, and there is no event describing that.
 //!
 //! A 401 on the initial handshake is non-retryable — the token is bad and the
 //! loop exits permanently (no point burning CPU on a bad credential).
@@ -111,7 +115,7 @@ pub enum QueueSignal {
     /// an absent client, so the queue must do a **full** refresh to reconcile
     /// whatever it missed while disconnected.
     Reconnected,
-    /// A queue-relevant GitHub event arrived.
+    /// A GitHub event arrived.  Relevance is the queue's call, not ours.
     Event(RelayEvent),
 }
 
@@ -189,30 +193,11 @@ fn parse_delivered_at(raw: Option<&str>) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
-// ── event filter ─────────────────────────────────────────────────────────────
-
-/// Returns true for event types that should trigger an immediate queue refresh.
-fn is_queue_relevant(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "pr.opened"
-            | "pr.closed"
-            | "pr.merged"
-            | "pr.reopened"
-            | "pr.synchronize"
-            | "pr.review_requested"
-            | "pr.review_request_removed"
-            | "pr.review_submitted"
-            | "ci.completed"
-    )
-}
-
 // ── public entry point ────────────────────────────────────────────────────────
 
 /// Spawn a long-running task that maintains a WebSocket connection to the
-/// github-relay and sends a [`QueueSignal`] on `signal_tx` whenever a
-/// queue-relevant event arrives.  Returns immediately; the task runs for the
-/// lifetime of the daemon.
+/// github-relay and sends a [`QueueSignal`] on `signal_tx` for every event it
+/// parses.  Returns immediately; the task runs for the lifetime of the daemon.
 ///
 /// Does nothing if `relay_url` or `relay_token` is absent from the config.
 pub fn spawn(config: Config, signal_tx: mpsc::UnboundedSender<QueueSignal>) {
@@ -338,42 +323,40 @@ async fn connect_and_subscribe(
                         url,
                         name,
                     }) => {
-                        debug!("github-relay: event {event_type}");
-                        // The relevance filter stays here for now: the queue's
-                        // only handler is "full refresh", so forwarding
-                        // irrelevant types would start triggering refreshes that
-                        // don't happen today.  Folding relevance into the
-                        // queue's classifier is the targeted-update engine's job.
-                        if is_queue_relevant(&event_type) {
-                            let repo_label = repo.as_deref().unwrap_or("?");
-                            // PR events carry `number`; ci.completed carries `name`
-                            // (the check/suite name) instead — show whichever applies.
-                            let detail = match (number, name.clone()) {
-                                (Some(n), _) => format!("#{n}"),
-                                (None, Some(n)) => n,
-                                (None, None) => "?".to_string(),
-                            };
-                            info!("github-relay: triggering queue refresh ({event_type} {repo_label} {detail})");
-                            let _ = signal_tx.send(QueueSignal::Event(RelayEvent {
-                                event_type,
-                                event_id,
-                                delivered_at: Some(parse_delivered_at(delivered_at.as_deref())),
-                                repo,
-                                number,
-                                head_sha,
-                                reviewer,
-                                review_state,
-                                state,
-                                merged,
-                                draft,
-                                author,
-                                is_bot,
-                                ci_state,
-                                title,
-                                url,
-                                name,
-                            }));
-                        }
+                        let repo_label = repo.as_deref().unwrap_or("?");
+                        // PR events carry `number`; ci.completed carries `name`
+                        // (the check/suite name) instead — show whichever applies.
+                        let detail = match (number, name.clone()) {
+                            (Some(n), _) => format!("#{n}"),
+                            (None, Some(n)) => n,
+                            (None, None) => "?".to_string(),
+                        };
+                        info!("github-relay: event {event_type} {repo_label} {detail}");
+                        // Every parsed event is forwarded.  Deciding what an
+                        // event *means* — including that an unrecognised type
+                        // means nothing — belongs to the queue's classifier
+                        // (`perri_queue_targeted::classify_event`) so it lives
+                        // in one place instead of two that can drift.  The cost
+                        // of forwarding is an in-process channel send.
+                        let _ = signal_tx.send(QueueSignal::Event(RelayEvent {
+                            event_type,
+                            event_id,
+                            delivered_at: Some(parse_delivered_at(delivered_at.as_deref())),
+                            repo,
+                            number,
+                            head_sha,
+                            reviewer,
+                            review_state,
+                            state,
+                            merged,
+                            draft,
+                            author,
+                            is_bot,
+                            ci_state,
+                            title,
+                            url,
+                            name,
+                        }));
                     }
                     Ok(RelayMsg::Unknown) | Err(_) => {
                         // Unknown message type or parse error — ignore per protocol.
