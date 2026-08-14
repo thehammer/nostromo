@@ -143,15 +143,11 @@ async fn main() -> Result<()> {
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
-    let (perri_queue_rx, perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
+    let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx) =
+        PerriQueueNativeSource::spawn(config.clone());
     let (perri_pr_rx, perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
     let perri_pr_rx_for_mcp = perri_pr_rx.clone();
-    // Cloned here because `perri_queue_refresh_tx` itself is moved into
-    // `relay_client::spawn` below; the MCP-hosted `perri.load_pr`/
-    // `perri.clear_current_pr` handlers need their own sender to wake the
-    // native sources without touching the dirty-file sentinel's watcher.
-    let perri_queue_refresh_tx_for_mcp = perri_queue_refresh_tx.clone();
     let perri_pr_refresh_tx_for_mcp = perri_pr_refresh_tx.clone();
 
     // ── Mother jobs channel (spawned early so MCP state gets live receiver) ─────
@@ -181,7 +177,7 @@ async fn main() -> Result<()> {
                 perri: nostromo::mcp::PerriDaemonState {
                     state_dir: Some(config.perri_state_dir()),
                     pr_refresh_tx: Some(perri_pr_refresh_tx_for_mcp.clone()),
-                    queue_refresh_tx: Some(perri_queue_refresh_tx_for_mcp.clone()),
+                    queue_refresh_tx: Some(perri_queue_refresh_tx.clone()),
                     ..Default::default()
                 },
             };
@@ -252,7 +248,7 @@ async fn main() -> Result<()> {
     // Connects to the relay WebSocket and triggers an immediate queue refresh
     // on every relevant GitHub event, reducing PR-queue lag from the poll
     // interval (~60s) to ~3s. No-ops if relay_url/relay_token are not set.
-    nostromo::data::relay_client::spawn(config.clone(), perri_queue_refresh_tx);
+    nostromo::data::relay_client::spawn(config.clone(), perri_queue_relay_tx);
 
     // ── Perri broadcaster ─────────────────────────────────────────────────────
     // (Sources were spawned earlier so the MCP state could get live receivers.)

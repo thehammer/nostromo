@@ -303,14 +303,14 @@ pub async fn run(
     let queue_rx = if bash_fallback {
         PerriQueueSource::spawn(config.clone())
     } else {
-        // Phase 4: the second element is the direct-push refresh sender.
-        // Wired to the github-relay subscriber so a relevant GitHub event
-        // (PR opened/merged/reviewed, CI completed) triggers an immediate
-        // re-poll instead of waiting out the interval — the same pattern
-        // nostromd's own daemon-hosted queue already uses. No-ops if
-        // relay_url/relay_token aren't set in config.
-        let (rx, queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
-        crate::data::relay_client::spawn(config.clone(), queue_refresh_tx);
+        // The third element is the typed github-relay channel, so a relevant
+        // GitHub event (PR opened/merged/reviewed, CI completed) triggers an
+        // immediate re-poll instead of waiting out the interval — the same
+        // pattern nostromd's own daemon-hosted queue already uses. No-ops if
+        // relay_url/relay_token aren't set in config. (The second element is
+        // the phase-4 direct-push refresh sender, unused on this path.)
+        let (rx, _queue_refresh_tx, queue_relay_tx) = PerriQueueNativeSource::spawn(config.clone());
+        crate::data::relay_client::spawn(config.clone(), queue_relay_tx);
         rx
     };
     let (pr_rx, perri_pr_refresh_tx_opt) = if bash_fallback {
