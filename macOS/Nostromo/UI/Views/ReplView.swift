@@ -539,7 +539,26 @@ class ReplView: NSView {
         superview.map { _ in view.removeFromSuperview() }
 
         (view as? TurnIsland)?.setIslandWidth(contentWidth)
-        view.layoutSubtreeIfNeeded()
+
+        // A width-dependent intrinsic size (MarkdownCardView, for one — see its
+        // "Why not layout()" doc comment) can't be resolved in a single solve: its
+        // *first* layout() runs before `bounds.width` has settled, computes a
+        // height against a fallback/stale width, then calls
+        // invalidateIntrinsicContentSize() — which only schedules a *later* pass
+        // to pick up the correction, it doesn't force one now. A single
+        // `layoutSubtreeIfNeeded()` call stops right there, so `fittingSize` below
+        // would read the pre-correction height and freeze it into the virtualizer
+        // forever (a completed turn's measured height is cached and never
+        // revisited). Repeat until `fittingSize` stops moving so the same
+        // self-correction that ordinary on-screen relayout gets for free also
+        // applies to this one-shot, detached measurement.
+        var previousHeight: CGFloat = -1
+        for _ in 0..<4 {
+            view.layoutSubtreeIfNeeded()
+            let current = view.fittingSize.height
+            if abs(current - previousHeight) < 0.5 { break }
+            previousHeight = current
+        }
         let height = max(view.fittingSize.height, TurnHeightEstimator.minimumTurnHeight)
         view.setFrameSize(NSSize(width: contentWidth, height: height))
         virtualizer.recordMeasured(height, at: index, isComplete: isComplete)
