@@ -103,7 +103,7 @@ enum MarkdownRenderer {
         )
         return NSAttributedString(string: text, attributes: [
             .font: font,
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: Theme.fg,
             .paragraphStyle: style,
         ])
     }
@@ -179,8 +179,8 @@ enum MarkdownRenderer {
                 let codeFont = Theme.firaCode(size: 12)
                 let codeAttrs: [NSAttributedString.Key: Any] = [
                     .font: codeFont,
-                    .foregroundColor: NSColor.labelColor,
-                    .backgroundColor: NSColor.tertiaryLabelColor.withAlphaComponent(0.12),
+                    .foregroundColor: Theme.fg,
+                    .backgroundColor: NSColor.white.withAlphaComponent(0.12),
                 ]
                 str.replaceCharacters(in: span.range, with: NSAttributedString(string: inner, attributes: codeAttrs))
 
@@ -192,7 +192,7 @@ enum MarkdownRenderer {
                 let boldFont = NSFontManager.shared.convert(baseFont, toHaveTrait: .boldFontMask)
                 let attrs: [NSAttributedString.Key: Any] = [
                     .font: boldFont,
-                    .foregroundColor: NSColor.labelColor,
+                    .foregroundColor: Theme.fg,
                 ]
                 str.replaceCharacters(in: span.range, with: NSAttributedString(string: inner, attributes: attrs))
 
@@ -206,7 +206,7 @@ enum MarkdownRenderer {
                 let italicFont = NSFontManager.shared.convert(baseFont, toHaveTrait: .italicFontMask)
                 let attrs: [NSAttributedString.Key: Any] = [
                     .font: italicFont,
-                    .foregroundColor: NSColor.labelColor,
+                    .foregroundColor: Theme.fg,
                 ]
                 str.replaceCharacters(in: span.range, with: NSAttributedString(string: inner, attributes: attrs))
             }
@@ -361,13 +361,20 @@ final class MarkdownCardView: NSView {
 
     // MARK: - Appearance
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateLayerColors()
-    }
-
+    /// Fixed dark-theme colors, not `NSColor.controlBackgroundColor`/`.separatorColor`.
+    ///
+    /// This card used to use those system-adaptive colors, which resolve against
+    /// the Mac's actual System Settings ▸ Appearance — light or dark — rather
+    /// than Nostromo's own always-dark theme (every sibling view in this file's
+    /// pane, `ToolResultView`, `ToolCallChipView`, etc., hardcodes a literal
+    /// `Theme`/`NSColor(white:...)` value for exactly this reason: the app never
+    /// sets `NSApp.appearance`, so nothing forces these otherwise). On a Mac set
+    /// to Light Mode, `.controlBackgroundColor` resolves to near-white with
+    /// near-black text — a card that looks blank at a glance sitting incongruously
+    /// in Nostromo's otherwise-dark UI. There is no longer an appearance-change
+    /// override here because these colors no longer depend on it.
     private func updateLayerColors() {
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        layer?.borderColor     = NSColor.separatorColor.cgColor
+        layer?.backgroundColor = Theme.bgBar.cgColor
+        layer?.borderColor     = Theme.borderInactive.withAlphaComponent(0.6).cgColor
     }
 }
