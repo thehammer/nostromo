@@ -42,6 +42,13 @@
 //! one pane from the same fetcher registry `apply_layout` uses, with no
 //! geometry change — no `FocusLayout`, no `PaneRegistry` mutation, just the
 //! `PaneContent` broadcast(s) for that pane.
+//!
+//! **`nostromo.get_daemon_diagnostics`** is an on-demand latency snapshot for
+//! the daemon's own MCP tool surface: every successful `tools/call` dispatch
+//! is timed once, keyed by tool name, in [`tool_stats::ToolStats`] (an
+//! in-memory, bounded rolling window — not a metrics pipeline, no
+//! persistence, resets on daemon restart). The tool reports per-tool call
+//! counts and p50/p95/max wall-clock durations plus process uptime.
 
 pub mod command;
 pub mod layout_schema;
@@ -49,9 +56,11 @@ pub mod pane_sources;
 pub mod server;
 pub mod socket;
 pub mod state;
+pub mod tool_stats;
 pub mod tools;
 
 pub use command::{McpCommand, PaneContent};
 pub use server::McpServer;
 pub use socket::{daemon_socket_path, default_socket_path, write_bridge_mcp_config};
 pub use state::{DaemonMcpBackend, McpSharedState, PerriDaemonState, PtyIdentity, ViewMeta};
+pub use tool_stats::ToolStats;

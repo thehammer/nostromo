@@ -9,6 +9,7 @@
 pub mod apply_layout;
 pub mod create_focus;
 pub mod create_pane;
+pub mod daemon_diagnostics;
 pub mod fred;
 pub mod get_self;
 pub mod get_view_state;
@@ -440,6 +441,12 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "required": ["view_id", "segment_id"]
             }
         }),
+        // ── diagnostics ──────────────────────────────────────────────────────
+        json!({
+            "name": "nostromo.get_daemon_diagnostics",
+            "description": "Returns an on-demand latency snapshot for the daemon's MCP tool surface: per-tool call counts and p50/p95/max wall-clock durations in ms, plus process uptime and total call count. In-memory and bounded (last 256 samples per tool); resets on daemon restart. p50/p95 are over the retained window; calls and max are all-time.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        }),
     ]
 }
 
@@ -454,7 +461,28 @@ pub enum ToolResult {
 }
 
 /// Dispatch a `tools/call` request.
+///
+/// This is the single timing point for the whole tool surface: it wraps
+/// [`dispatch_inner`] and, on success, records the elapsed wall-clock time in
+/// `state.tool_stats` keyed by `name`. Unknown tool names are deliberately
+/// excluded — recording them would let a misbehaving caller grow the stats
+/// map without bound, since `name` is caller-supplied and unvalidated.
 pub async fn dispatch(
+    name: &str,
+    arguments: Option<&Value>,
+    state: &McpSharedState,
+    pty_id: Option<&str>,
+) -> ToolResult {
+    let started = std::time::Instant::now();
+    let result = dispatch_inner(name, arguments, state, pty_id).await;
+    if matches!(result, ToolResult::Ok(_)) {
+        state.tool_stats.record(name, started.elapsed());
+    }
+    result
+}
+
+/// Perform the actual `tools/call` dispatch.
+async fn dispatch_inner(
     name: &str,
     arguments: Option<&Value>,
     state: &McpSharedState,
@@ -609,6 +637,9 @@ pub async fn dispatch(
             let args = arguments.cloned().unwrap_or_default();
             status_segment::clear(state, &args).await
         }
+
+        // ── diagnostics ──────────────────────────────────────────────────────
+        "nostromo.get_daemon_diagnostics" => daemon_diagnostics::handle(state),
 
         other => return ToolResult::UnknownTool(other.to_string()),
     };

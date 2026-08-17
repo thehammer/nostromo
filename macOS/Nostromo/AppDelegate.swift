@@ -91,6 +91,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         TranscriptDiagnostics.copyReportToPasteboard()
     }
 
+    @objc private func copyDaemonDiagnostics() {
+        DaemonDiagnostics.copyReportToPasteboard()
+    }
+
     // MARK: - Private
 
     private func setupMenu() {
@@ -134,6 +138,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         diagItem.keyEquivalentModifierMask = [.command, .shift]
         diagItem.target = self
         debugMenu.addItem(diagItem)
+        let daemonDiagItem = NSMenuItem(title: "Copy daemon diagnostics",
+                                        action: #selector(copyDaemonDiagnostics),
+                                        keyEquivalent: "i")
+        daemonDiagItem.keyEquivalentModifierMask = [.command, .shift]
+        daemonDiagItem.target = self
+        debugMenu.addItem(daemonDiagItem)
 
         NSApplication.shared.mainMenu = mainMenu
     }
