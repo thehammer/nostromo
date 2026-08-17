@@ -26,6 +26,11 @@ private struct ClientSubscribe: Encodable {
     }
 }
 
+private struct ClientPingMsg: Encodable {
+    let type_ = "ping"
+    enum CodingKeys: String, CodingKey { case type_ = "type" }
+}
+
 // MARK: - Mother peek wire types
 
 struct MotherPeekItem: Decodable {
@@ -347,6 +352,11 @@ class NostromodClient {
     /// without the init+welcome double that caused duplicate-rendered turns.
     let connected = CurrentValueSubject<Bool, Never>(false)
 
+    /// IPC round-trip / frame latency stats. Instance-owned (not global) so
+    /// tests construct their own `NostromodClient` and inspect independent
+    /// stats. See `IPCLatencyStats` for the correlation rules.
+    let latency = IPCLatencyStats()
+
     private var fd: Int32 = -1            // POSIX AF_UNIX socket (NWConnection's
                                          // .unix endpoint fails with ENETDOWN).
     private let sendLock = NSLock()
@@ -429,6 +439,7 @@ class NostromodClient {
         reconnectDelay = 1.0
         sendHello()
         connected.send(true)
+        latency.noteConnect()
         // Blocking frame reader on a dedicated background queue.
         DispatchQueue.global(qos: .utility).async { [weak self] in self?.readLoop(sock) }
     }
@@ -446,9 +457,16 @@ class NostromodClient {
     private func sendHello() {
         // protocol v4 adds the focus registry push/pull family. The daemon holds
         // MIN_CLIENT_VERSION at 2, so the shipped GUI keeps working against older daemons.
-        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
+        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4), type: "hello")
         // "layout" subscribes to FocusLayout / PaneContent / FocusCreated broadcasts.
-        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout"]))
+        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout"]), type: "subscribe")
+    }
+
+    /// Clean, unambiguous round-trip probe: no side effects, no fan-out
+    /// ambiguity (unlike `session_send`, which is answered by a broadcast
+    /// every attached client receives).
+    func ping() {
+        send(ClientPingMsg(), type: "ping")
     }
 
     // MARK: - Session commands (protocol v3)
@@ -457,24 +475,29 @@ class NostromodClient {
     func sessionSpawn(tag: String, agentName: String, viewName: String,
                       cwd: String?, sessionId: String?, remoteControl: Bool) {
         send(SessionSpawnMsg(tag: tag, agentName: agentName, viewName: viewName,
-                             cwd: cwd, sessionId: sessionId, remoteControl: remoteControl))
+                             cwd: cwd, sessionId: sessionId, remoteControl: remoteControl),
+             type: "session_spawn", tag: tag)
     }
 
     /// Attach to a session — daemon replies with a `SessionTurns` snapshot then
     /// streams `SessionTurnDelta`/`SessionState`.
-    func sessionAttach(tag: String) { send(SessionAttachMsg(tag: tag)) }
+    func sessionAttach(tag: String) {
+        send(SessionAttachMsg(tag: tag), type: "session_attach", tag: tag)
+    }
 
     /// Stop receiving deltas for a session without stopping the child.
-    func sessionDetach(tag: String) { send(SessionDetachMsg(tag: tag)) }
+    func sessionDetach(tag: String) {
+        send(SessionDetachMsg(tag: tag), type: "session_detach", tag: tag)
+    }
 
     /// Enqueue a user message; the daemon writes it to the child's stdin.
     func sessionSend(tag: String, text: String, imagePaths: [String] = []) {
-        send(SessionSendMsg(tag: tag, text: text, images: imagePaths))
+        send(SessionSendMsg(tag: tag, text: text, images: imagePaths), type: "session_send", tag: tag)
     }
 
     /// Lifecycle control: "stop" | "restart" | "new_session".
     func sessionControl(tag: String, action: String) {
-        send(SessionControlMsg(tag: tag, action: action))
+        send(SessionControlMsg(tag: tag, action: action), type: "session_control", tag: tag)
     }
 
     // MARK: - Focus registry commands (Phase 1)
@@ -497,10 +520,16 @@ class NostromodClient {
 
     /// Publish the full focus registry to the daemon, replacing its in-memory registry.
     func focusRegistryPush(_ focuses: [FocusMetaWire]) {
-        send(FocusRegistryPushMsg(focuses: focuses))
+        send(FocusRegistryPushMsg(focuses: focuses), type: "focus_registry_push")
     }
 
-    private func send(_ msg: some Encodable) {
+    /// Encode and send `msg`. `type`/`tag` identify the frame for
+    /// `IPCLatencyStats` correlation — they must match the wire `type` field
+    /// (and, where present, the `tag` field) the `Encodable` struct itself
+    /// emits. The send is only recorded once every byte has actually left
+    /// the process: recording a send that never left would leave a pending
+    /// entry in `latency` that can never match, inflating `unmatchedPending`.
+    private func send(_ msg: some Encodable, type: String, tag: String? = nil) {
         guard fd >= 0, let body = try? encoder.encode(msg)
         else { log.debug("send dropped — not connected (fd=\(self.fd, privacy: .public))"); return }
 
@@ -511,14 +540,19 @@ class NostromodClient {
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
         guard curFd >= 0 else { return }
+        var wroteFully = false
         frame.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             guard let base = raw.baseAddress else { return }
             var off = 0
             while off < raw.count {
                 let n = Darwin.write(curFd, base.advanced(by: off), raw.count - off)
-                if n <= 0 { log.warning("write failed errno=\(errno, privacy: .public)"); break }
+                if n <= 0 { log.warning("write failed errno=\(errno, privacy: .public)"); return }
                 off += n
             }
+            wroteFully = true
+        }
+        if wroteFully {
+            latency.recordSend(type: type, tag: tag, bytes: frame.count)
         }
     }
 
@@ -538,6 +572,7 @@ class NostromodClient {
         Darwin.close(sock)
         if fd == sock { fd = -1 }
         connected.send(false)
+        latency.noteDisconnect()
         scheduleReconnect()
     }
 
@@ -564,7 +599,19 @@ class NostromodClient {
               let type_ = json["type"] as? String
         else { return }
 
+        let t0 = Date()
         let msg = decode(type_: type_, json: json, raw: data)
+        let decodeSeconds = Date().timeIntervalSince(t0)
+        // `session_turn_delta` nests its discriminator: {"type":"session_turn_delta",
+        // "tag":…,"delta":{"delta":"turn_started",…}} — the top-level object has no
+        // `delta` string field of its own.
+        latency.recordReceive(
+            type: type_,
+            tag: json["tag"] as? String,
+            deltaKind: (json["delta"] as? [String: Any])?["delta"] as? String,
+            bytes: data.count,
+            decodeSeconds: decodeSeconds)
+
         log.debug("← \(type_, privacy: .public) (\(data.count, privacy: .public) bytes)")
         DispatchQueue.main.async { [weak self] in
             self?.messages.send(msg)

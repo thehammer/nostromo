@@ -22,6 +22,7 @@ use crate::{
     },
     event::AppEvent,
     ipc::{pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
+    mcp::tool_stats::ToolStats,
     mother::{MotherJob, MotherStatus},
 };
 
@@ -167,6 +168,15 @@ pub struct McpSharedState {
 
     /// Mirror of the most recent `AppEvent::PostureChanged`.
     pub budget_posture_rx: watch::Receiver<Option<BudgetPosture>>,
+
+    /// On-demand MCP tool-dispatch latency store (see [`crate::mcp::tool_stats`]).
+    ///
+    /// Shared across every connection because `McpSharedState` is
+    /// `Arc`-cheap-clone. Created once per MCP server (inside `new`, not as a
+    /// constructor parameter — `new` already has ten arguments and is
+    /// `#[allow(clippy::too_many_arguments)]`), so for the `nostromd`-hosted
+    /// server its uptime is effectively daemon uptime.
+    pub tool_stats: Arc<ToolStats>,
 }
 
 impl McpSharedState {
@@ -198,6 +208,7 @@ impl McpSharedState {
             mother_status_rx,
             rate_limits_rx,
             budget_posture_rx,
+            tool_stats: Arc::new(ToolStats::new()),
         }
     }
 

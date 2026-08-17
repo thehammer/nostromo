@@ -13,6 +13,8 @@
 		AA0000000000000000000013 /* NostromoWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000003 /* NostromoWindow.swift */; };
 		AA0000020000000000000101 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000001 /* Models.swift */; };
 		AA0000020000000000000102 /* NostromodClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002 /* NostromodClient.swift */; };
+		JJ0000000000000000000011 /* IPCLatencyStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000001 /* IPCLatencyStats.swift */; };
+		JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000002 /* DaemonDiagnostics.swift */; };
 		AA0000020000000000000103 /* FileWatchers.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000003 /* FileWatchers.swift */; };
 		AA0000020000000000000104 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000004 /* AppStore.swift */; };
 		AA0000020000000000000105 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000005 /* Theme.swift */; };
@@ -48,6 +50,8 @@
 		CC00000000000000000000A5 /* DiffColoring.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000B0 /* DiffColoring.swift */; };
 		DD00000000000000000000A1 /* SessionHealthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD00000000000000000000A0 /* SessionHealthTests.swift */; };
 		DD00000000000000000000A2 /* NostromodClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002 /* NostromodClient.swift */; };
+		JJ0000000000000000000012 /* IPCLatencyStats.swift in TestSources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000001 /* IPCLatencyStats.swift */; };
+		JJ0000000000000000000014 /* IPCLatencyStatsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */; };
 		DD00000000000000000000A3 /* ChatModels.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000030 /* ChatModels.swift */; };
 		DD00000000000000000000A4 /* ChatSession.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000031 /* ChatSession.swift */; };
 		FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
@@ -129,6 +133,9 @@
 		FF00000000000000000000A1 /* SidenavGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGrouping.swift; sourceTree = "<group>"; };
 		FF00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
 		HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentWireEqualityTests.swift; sourceTree = "<group>"; };
+		JJ0000000000000000000001 /* IPCLatencyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStats.swift; sourceTree = "<group>"; };
+		JJ0000000000000000000002 /* DaemonDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiagnostics.swift; sourceTree = "<group>"; };
+		JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStatsTests.swift; sourceTree = "<group>"; };
 		BB00000000000000000000G1 /* NostromoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NostromoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		HH000000000000000000010 /* TurnReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnReconciler.swift; sourceTree = "<group>"; };
 		HH000000000000000000020 /* TurnPayloadStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPayloadStore.swift; sourceTree = "<group>"; };
@@ -224,6 +231,8 @@
 				AA0000020000000000000030 /* ChatModels.swift */,
 				AA0000020000000000000031 /* ChatSession.swift */,
 				AA0000020000000000000032 /* FocusStore.swift */,
+				JJ0000000000000000000001 /* IPCLatencyStats.swift */,
+				JJ0000000000000000000002 /* DaemonDiagnostics.swift */,
 			);
 			path = Data;
 			sourceTree = "<group>";
@@ -285,6 +294,7 @@
 				FF00000000000000000000B1 /* SidenavGroupingTests.swift */,
 				GG00000000000000000000B1 /* ProcessRunnerTests.swift */,
 				HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */,
+				JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -421,6 +431,8 @@
 				II000000000000000000021 /* AskQuestionView.swift in Sources */,
 				II000000000000000000031 /* ToolResultView.swift in Sources */,
 				II000000000000000000041 /* LoadHarnessTargeting.swift in Sources */,
+				JJ0000000000000000000011 /* IPCLatencyStats.swift in Sources */,
+				JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -462,6 +474,8 @@
 				II000000000000000000102 /* TurnInteractionTests.swift in Sources */,
 				II000000000000000000112 /* ChatSessionCompactionTests.swift in Sources */,
 				II000000000000000000122 /* LoadHarnessTargetingTests.swift in Sources */,
+				JJ0000000000000000000012 /* IPCLatencyStats.swift in TestSources */,
+				JJ0000000000000000000014 /* IPCLatencyStatsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
