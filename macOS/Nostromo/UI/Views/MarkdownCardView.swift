@@ -359,6 +359,38 @@ final class MarkdownCardView: NSView {
         }
     }
 
+    // MARK: - Window attachment
+
+    /// Forces a fresh layout ensure + redraw the moment this view has a real window.
+    ///
+    /// `ReplView.measure()` measures a brand-new turn's whole island — including
+    /// every `MarkdownCardView` nested inside it — while it is completely
+    /// detached: no superview, no window, ever (see that function's own doc
+    /// comment). That's deliberate and necessary for the virtualizer, which
+    /// needs each turn's exact height *before* it can be positioned. But it
+    /// means this card's `textView` computes its glyph layout for the very
+    /// first time while windowless, and a card carrying a large, real turn
+    /// (the kind big enough to actually notice) has been observed rendering
+    /// as an empty box at the right size once finally attached — correct
+    /// geometry, nothing painted. `invalidateLayout` + `ensureLayout` here,
+    /// at the one moment `window` actually becomes non-nil, forces AppKit to
+    /// redo (not just reuse) the glyph generation with a real window/screen
+    /// behind it, regardless of the precise reason the windowless pass left
+    /// it unpainted.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer,
+              let storage = textView.textStorage
+        else { return }
+        layoutManager.invalidateLayout(forCharacterRange: NSRange(location: 0, length: storage.length),
+                                        actualCharacterRange: nil)
+        layoutManager.ensureLayout(for: textContainer)
+        textView.needsDisplay = true
+        needsDisplay = true
+    }
+
     // MARK: - Appearance
 
     /// Fixed dark-theme colors, not `NSColor.controlBackgroundColor`/`.separatorColor`.
