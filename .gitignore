@@ -7,6 +7,7 @@ __pycache__/
 
 # Xcode
 macOS/build/
+iOS/build/
 macOS/*.xcodeproj/xcuserdata/
 macOS/*.xcodeproj/project.xcworkspace/xcuserdata/
 macOS/*.xcworkspace/xcuserdata/
