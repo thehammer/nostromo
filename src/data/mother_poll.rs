@@ -91,6 +91,13 @@ fn spawn_job_poller(tx: mpsc::UnboundedSender<AppEvent>) {
         let mut seen_awaiting: HashSet<String> = HashSet::new();
         // Track last known states to detect transitions.
         let mut last_states: HashMap<String, String> = HashMap::new();
+        // Last list actually broadcast. `None` until the first successful poll,
+        // so that poll always broadcasts regardless of content — every later
+        // one only broadcasts on an actual change. Without this, an idle queue
+        // still re-serializes and fans the full job list out to every connected
+        // client every 2 seconds, forever: ~43k subprocess spawns and tens of
+        // megabytes of identical IPC traffic a day for nothing.
+        let mut last_broadcast: Option<Vec<mother::MotherJob>> = None;
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -124,8 +131,11 @@ fn spawn_job_poller(tx: mpsc::UnboundedSender<AppEvent>) {
                         last_states.insert(job.id.clone(), job.state.clone());
                     }
 
-                    if tx.send(AppEvent::MotherJobs(jobs)).is_err() {
-                        break;
+                    if last_broadcast.as_ref() != Some(&jobs) {
+                        if tx.send(AppEvent::MotherJobs(jobs.clone())).is_err() {
+                            break;
+                        }
+                        last_broadcast = Some(jobs);
                     }
                 }
                 Err(e) => {

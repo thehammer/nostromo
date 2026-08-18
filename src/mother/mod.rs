@@ -156,7 +156,7 @@ pub struct CycleInfo {
 ///
 /// All optional fields are `None` when absent in the JSON; extra fields added
 /// by future Mother versions are silently ignored via `#[serde(default)]`.
-#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq)]
 pub struct MotherJob {
     pub id: String,
     pub state: String,
