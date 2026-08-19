@@ -38,6 +38,12 @@ pub enum ApplyLayoutError {
     InvalidSchema,
     /// A fetcher ran but failed to produce content.
     FetchFailed,
+    /// A `tabs` region named `repl` among its tabs (W1 — curated-agent-views).
+    /// Distinct from `InvalidSchema`: the document is well-formed, but this
+    /// particular placement of `repl` is never valid — the REPL is where the
+    /// operator's hands are, and hiding it behind a tab is never what an
+    /// agent means.
+    ReplInTabs,
 }
 
 impl ApplyLayoutError {
@@ -49,6 +55,7 @@ impl ApplyLayoutError {
             ApplyLayoutError::InvalidContentKind => "invalid_content_kind",
             ApplyLayoutError::InvalidSchema => "invalid_schema",
             ApplyLayoutError::FetchFailed => "fetch_failed",
+            ApplyLayoutError::ReplInTabs => "repl_in_tabs",
         }
     }
 }
@@ -362,6 +369,7 @@ mod tests {
         );
         assert_eq!(ApplyLayoutError::InvalidSchema.code(), "invalid_schema");
         assert_eq!(ApplyLayoutError::FetchFailed.code(), "fetch_failed");
+        assert_eq!(ApplyLayoutError::ReplInTabs.code(), "repl_in_tabs");
     }
 
     #[tokio::test]

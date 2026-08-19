@@ -2,7 +2,8 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// Renders a focus's agent-authored pane tree as nested NSSplitViews.
+/// Renders a focus's agent-authored pane tree as nested NSSplitViews (plus, as
+/// of W1 — curated-agent-views, `TabRegionView` for any `PaneTree.tabs` node).
 ///
 /// The tree shape comes from `AppStore.focusLayouts[focus.tag]` and is rebuilt
 /// whenever the daemon broadcasts a structural `FocusLayout` message. Content
@@ -12,8 +13,10 @@ import SwiftUI
 ///
 /// Split ratios are persisted in `UserDefaults` keyed by focus tag + tree path
 /// so the workspace looks the same after switching tabs or restarting the app.
-/// Only a structural `FocusLayout` broadcast (create_pane / reset_panes /
-/// set_pane_layout) overrides the saved ratios.
+/// Only a genuine split-topology change (see `LayoutChangeClassifier`) overrides
+/// the saved ratios — opening, closing, or switching an agent-authored tab does
+/// not, and neither does the very first render of a freshly (re)launched app
+/// (see `renderLayout(_:clearRatios:)`).
 final class DynamicFocusView: NSView {
 
     // MARK: - Init
@@ -22,10 +25,28 @@ final class DynamicFocusView: NSView {
     private var cancellables = Set<AnyCancellable>()
 
     /// Leaf views keyed by pane_id (ReplView or PaneContentNSView wrappers).
+    /// Includes panes hosted inside a `TabRegionView` — the tabs container is
+    /// purely a presentation wrapper; this map always holds the raw content view.
     private var leafViews: [String: NSView] = [:]
 
-    /// The tree that's currently rendered (used to detect structural changes).
-    private var renderedTreePaneIds: [String] = []
+    /// The tree that's currently rendered, used to classify the next incoming
+    /// tree via `LayoutChangeClassifier`. `nil` only before the first render.
+    private var renderedTree: PaneTree?
+
+    /// Every live `TabRegionView`, keyed by its structural path (the same
+    /// dotted path scheme `LayoutChangeClassifier` uses), so a
+    /// `.activeTabOnly`/`.tabMembership` update can find the right container
+    /// without a full rebuild.
+    private var tabRegionsByPath: [String: TabRegionView] = [:]
+
+    /// Reverse lookup: which `TabRegionView` (if any) currently hosts a given
+    /// pane id — used by `updateContent` to route captions/unread state.
+    private var tabRegionForPaneId: [String: TabRegionView] = [:]
+
+    /// Tokens for every `NSSplitView.didResizeSubviewsNotification` observer
+    /// registered by `makeSplitView`, so a structural rebuild can remove them
+    /// all instead of leaking one observer per split per rebuild (D7).
+    private var splitObserverTokens: [NSObjectProtocol] = []
 
     init(focus: Focus) {
         self.focus = focus
@@ -35,15 +56,24 @@ final class DynamicFocusView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    deinit {
+        removeSplitObservers()
+    }
+
     // MARK: - Setup
 
     private func setup() {
         wantsLayer = true
         layer?.backgroundColor = .clear
 
-        // Render whatever layout the store already has.
+        // Render whatever layout the store already has. This is NOT a
+        // `.splitTopology` change (there is no previous tree to compare
+        // against), so saved ratios are left alone — this is what makes a
+        // relaunch's first `FocusLayout` broadcast able to actually restore
+        // the operator's last dragged ratios instead of wiping them.
         let initial = AppStore.shared.focusLayouts[focus.sessionTag] ?? FocusLayoutModel.initial
-        renderLayout(initial)
+        renderLayout(initial, clearRatios: false)
+        applyFocusedPaneHint(initial.focusedPane)
 
         // Subscribe to layout changes.
         AppStore.shared.$focusLayouts
@@ -60,36 +90,82 @@ final class DynamicFocusView: NSView {
     // MARK: - Layout update handling
 
     private func handleLayoutUpdate(_ model: FocusLayoutModel) {
-        let newIds = model.tree.paneIds
-        if newIds != renderedTreePaneIds {
-            // Structural change — rebuild the whole split view.
-            renderLayout(model)
-        } else {
-            // Content-only change — update leaf views in place.
-            updateContent(model.paneContent, freshness: model.paneFreshness)
+        guard let previousTree = renderedTree else {
+            renderLayout(model, clearRatios: false)
+            return
         }
+
+        switch LayoutChangeClassifier.classify(old: previousTree, new: model.tree) {
+        case .identical, .contentOnly:
+            renderedTree = model.tree
+            updateContent(model.paneContent, freshness: model.paneFreshness, address: model.paneAddress)
+
+        case .activeTabOnly(let paths):
+            renderedTree = model.tree
+            applyActiveTabOnly(paths: paths, newTree: model.tree)
+            updateContent(model.paneContent, freshness: model.paneFreshness, address: model.paneAddress)
+
+        case .tabMembership(let paths):
+            renderedTree = model.tree
+            applyTabMembership(paths: paths, newTree: model.tree)
+            updateContent(model.paneContent, freshness: model.paneFreshness, address: model.paneAddress)
+
+        case .splitTopology:
+            // The only case that clears saved ratios — an agent-authored
+            // structural change (a real split direction/ratio/shape change,
+            // not merely a tab being opened/closed/switched) supersedes
+            // whatever the operator had dragged.
+            renderLayout(model, clearRatios: true)
+        }
+
+        // `focused_pane` is authoritative over a tabs node's own `active`
+        // index (D1): when it names a live tab child, bring that tab to
+        // front. Applied on every branch above (not just structural ones) —
+        // a `FocusLayout` broadcast can update `focused_pane` alone.
+        applyFocusedPaneHint(model.focusedPane)
     }
 
-    private func renderLayout(_ model: FocusLayoutModel) {
+    /// When `paneId` names a pane currently hosted inside a `TabRegionView`,
+    /// bring that tab to front. A no-op for `nil`, for a pane not (yet) in
+    /// any tabs region, or for a pane already frontmost.
+    private func applyFocusedPaneHint(_ paneId: String?) {
+        guard let paneId, let region = tabRegionForPaneId[paneId] else { return }
+        region.selectTab(paneId)
+    }
+
+    /// Full rebuild. `clearRatios` is true only for a genuine
+    /// `.splitTopology` classification — the initial render in `setup()`
+    /// passes `false` so a freshly (re)launched app can still read back
+    /// ratios the operator dragged in a previous session (D7).
+    private func renderLayout(_ model: FocusLayoutModel, clearRatios: Bool) {
         // Snapshot existing leaf views before tearing anything down. A leaf
         // whose pane_id persists across this structural change — "repl" in
         // particular, whose content has nothing to do with tree shape — gets
-        // re-parented into the new split hierarchy below instead of being
-        // destroyed and recreated. Recreating ReplView on every structural
-        // rebuild (every apply_layout/create_pane/reset_panes call) was
+        // re-parented into the new hierarchy below instead of being destroyed
+        // and recreated. Recreating ReplView on every structural rebuild was
         // silently resetting scroll position and the pinned-to-bottom state
         // on a fresh instance each time, undoing the user's manual scroll.
         let previousLeafViews = leafViews
 
+        // Remove every registered split-resize observer before tearing down
+        // the views that own them — otherwise each rebuild leaks one
+        // observer per split, forever (D7).
+        removeSplitObservers()
+
         // Remove existing content.
         subviews.forEach { $0.removeFromSuperview() }
         leafViews = [:]
-        renderedTreePaneIds = model.tree.paneIds
-        // Clear any previously saved operator-drag ratios so the agent's
-        // layout intent takes effect on each structural rebuild. The operator
-        // can drag to adjust after the agent assembles; those new ratios will
-        // be persisted until the next structural change.
-        clearSavedRatios(for: focus.sessionTag)
+        tabRegionsByPath = [:]
+        tabRegionForPaneId = [:]
+        renderedTree = model.tree
+
+        if clearRatios {
+            // Clear any previously saved operator-drag ratios so the agent's
+            // layout intent takes effect on this structural rebuild. The
+            // operator can drag to adjust after the agent assembles; those
+            // new ratios will be persisted until the next such change.
+            clearSavedRatios(for: focus.sessionTag)
+        }
 
         let rootView = buildView(for: model.tree, tag: focus.sessionTag, path: "root", reusing: previousLeafViews)
         rootView.translatesAutoresizingMaskIntoConstraints = false
@@ -102,7 +178,7 @@ final class DynamicFocusView: NSView {
         ])
 
         // Apply any initial content.
-        updateContent(model.paneContent, freshness: model.paneFreshness)
+        updateContent(model.paneContent, freshness: model.paneFreshness, address: model.paneAddress)
     }
 
     // MARK: - Tree rendering
@@ -116,6 +192,15 @@ final class DynamicFocusView: NSView {
                 direction: direction,
                 children: children,
                 ratios: ratios,
+                tag: tag,
+                path: path,
+                reusing: previous
+            )
+        case .tabs(let children, let labels, let active):
+            return makeTabsView(
+                children: children,
+                labels: labels,
+                active: active,
                 tag: tag,
                 path: path,
                 reusing: previous
@@ -199,8 +284,10 @@ final class DynamicFocusView: NSView {
             self.applyRatios(effectiveRatios, to: split)
         }
 
-        // Persist the operator's drag-resize.
-        NotificationCenter.default.addObserver(
+        // Persist the operator's drag-resize. The token is retained so a
+        // future structural rebuild can remove this observer instead of
+        // leaking it (D7) — see `removeSplitObservers`.
+        let token = NotificationCenter.default.addObserver(
             forName: NSSplitView.didResizeSubviewsNotification,
             object: split,
             queue: .main
@@ -208,8 +295,151 @@ final class DynamicFocusView: NSView {
             let newRatios = DynamicFocusView.currentRatios(for: split)
             UserDefaults.standard.set(newRatios, forKey: udKey)
         }
+        splitObserverTokens.append(token)
 
         return split
+    }
+
+    /// Build a `TabRegionView` for a `PaneTree.tabs` node (W1). In v1 every
+    /// tab child is a `Leaf` (enforced by the registry), so each tab's pane id
+    /// is simply that leaf's id; `buildView` is still used to construct the
+    /// child so leaf reuse/`leafViews` bookkeeping stays uniform with the
+    /// split path.
+    private func makeTabsView(
+        children: [PaneTree],
+        labels: [String],
+        active: Int,
+        tag: String,
+        path: String,
+        reusing previous: [String: NSView]
+    ) -> NSView {
+        let (tabs, activePaneId) = buildTabs(children: children, labels: labels, active: active, tag: tag, path: path, reusing: previous)
+        let region = TabRegionView(tabs: tabs, activePaneId: activePaneId)
+        registerTabRegion(region, tabs: tabs, at: path)
+        return region
+    }
+
+    /// Build the `[TabRegionView.Tab]`/active-pane-id pair a tabs node's
+    /// children resolve to — shared by `makeTabsView` (a fresh tabs node
+    /// during a full rebuild) and `applyTabMembership` (rebuilding just one
+    /// tabs node's children in place). Both contexts differ only in which
+    /// `reusing` dict they pass (the whole previous tree vs. a pruned one) —
+    /// this helper doesn't need to know which.
+    private func buildTabs(
+        children: [PaneTree],
+        labels: [String],
+        active: Int,
+        tag: String,
+        path: String,
+        reusing previous: [String: NSView]
+    ) -> (tabs: [TabRegionView.Tab], activePaneId: String) {
+        var tabs: [TabRegionView.Tab] = []
+        for (i, child) in children.enumerated() {
+            let childView = buildView(for: child, tag: tag, path: "\(path).tab\(i)", reusing: previous)
+            let paneId = child.paneIds.first ?? "unknown"
+            let label = i < labels.count ? labels[i] : paneId
+            tabs.append(TabRegionView.Tab(paneId: paneId, label: label, view: childView))
+        }
+        let activePaneId = tabs.indices.contains(active) ? tabs[active].paneId : (tabs.first?.paneId ?? "")
+        return (tabs, activePaneId)
+    }
+
+    /// Record `region`'s path and every one of its tabs' pane ids in the two
+    /// lookup tables `applyFocusedPaneHint`/`updateContent` consult — shared
+    /// by `makeTabsView` and `applyTabMembership`.
+    private func registerTabRegion(_ region: TabRegionView, tabs: [TabRegionView.Tab], at path: String) {
+        tabRegionsByPath[path] = region
+        for tab in tabs {
+            tabRegionForPaneId[tab.paneId] = region
+        }
+    }
+
+    // MARK: - Targeted tabs updates (LayoutChangeClassifier: no full rebuild)
+
+    /// One or more tabs nodes changed only which child is `active` — flip
+    /// visibility/selection in place, no teardown, no saved-ratio impact.
+    private func applyActiveTabOnly(paths: [String], newTree: PaneTree) {
+        for path in paths {
+            guard let region = tabRegionsByPath[path],
+                  case .tabs(let children, _, let active)? = node(at: path, in: newTree),
+                  children.indices.contains(active)
+            else { continue }
+            let activePaneId = children[active].paneIds.first ?? ""
+            region.selectTab(activePaneId)
+        }
+    }
+
+    /// One or more tabs nodes' `children`/`labels` changed (a tab opened,
+    /// closed, reordered, or relabeled) while the surrounding split topology
+    /// did not — rebuild only the affected `TabRegionView`s in place, and
+    /// deliberately do NOT call `clearSavedRatios`.
+    private func applyTabMembership(paths: [String], newTree: PaneTree) {
+        for path in paths {
+            guard let oldRegion = tabRegionsByPath[path],
+                  case .tabs(let children, let labels, let active)? = node(at: path, in: newTree)
+            else { continue }
+
+            // Drop bookkeeping for any pane this region no longer hosts.
+            let newPaneIds = Set(children.compactMap { $0.paneIds.first })
+            for oldPaneId in oldRegion.paneIds where !newPaneIds.contains(oldPaneId) {
+                leafViews.removeValue(forKey: oldPaneId)
+                tabRegionForPaneId.removeValue(forKey: oldPaneId)
+            }
+
+            let previousLeafViews = leafViews
+            let (tabs, activePaneId) = buildTabs(children: children, labels: labels, active: active, tag: focus.sessionTag, path: path, reusing: previousLeafViews)
+            let newRegion = TabRegionView(tabs: tabs, activePaneId: activePaneId)
+
+            replaceInPlace(oldRegion, with: newRegion)
+
+            registerTabRegion(newRegion, tabs: tabs, at: path)
+        }
+    }
+
+    /// Swap `oldView` for `newView` in whatever container currently holds it
+    /// — an `NSSplitView`'s arranged subviews (preserving position), or a
+    /// plain superview (the rare case of a tabs node at the tree root).
+    private func replaceInPlace(_ oldView: NSView, with newView: NSView) {
+        guard let parent = oldView.superview else { return }
+        if let splitParent = parent as? NSSplitView, let idx = splitParent.arrangedSubviews.firstIndex(of: oldView) {
+            splitParent.removeArrangedSubview(oldView)
+            oldView.removeFromSuperview()
+            splitParent.insertArrangedSubview(newView, at: idx)
+        } else {
+            newView.translatesAutoresizingMaskIntoConstraints = false
+            parent.addSubview(newView)
+            NSLayoutConstraint.activate([
+                newView.topAnchor.constraint(equalTo: parent.topAnchor),
+                newView.leadingAnchor.constraint(equalTo: parent.leadingAnchor),
+                newView.trailingAnchor.constraint(equalTo: parent.trailingAnchor),
+                newView.bottomAnchor.constraint(equalTo: parent.bottomAnchor),
+            ])
+            oldView.removeFromSuperview()
+        }
+    }
+
+    /// Walk `tree` along `path` (`LayoutChangeClassifier`'s dotted scheme:
+    /// `"root"`, `"root.0"`, `"root.tab1"`, …) and return the node found
+    /// there, or `nil` if the path no longer resolves.
+    private func node(at path: String, in tree: PaneTree) -> PaneTree? {
+        let components = path.split(separator: ".").dropFirst() // drop leading "root"
+        var current = tree
+        for component in components {
+            switch current {
+            case .split(_, let children, _):
+                guard let idx = Int(component), children.indices.contains(idx) else { return nil }
+                current = children[idx]
+            case .tabs(let children, _, _):
+                guard component.hasPrefix("tab"),
+                      let idx = Int(component.dropFirst(3)),
+                      children.indices.contains(idx)
+                else { return nil }
+                current = children[idx]
+            case .leaf:
+                return nil
+            }
+        }
+        return current
     }
 
     // MARK: - Ratio helpers
@@ -262,10 +492,29 @@ final class DynamicFocusView: NSView {
             .forEach { UserDefaults.standard.removeObject(forKey: $0) }
     }
 
-    private func updateContent(_ paneContent: [String: PaneContentWire], freshness: [String: PaneFreshness]) {
+    private func removeSplitObservers() {
+        for token in splitObserverTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+        splitObserverTokens.removeAll()
+    }
+
+    private func updateContent(
+        _ paneContent: [String: PaneContentWire],
+        freshness: [String: PaneFreshness],
+        address: [String: PaneAddress]
+    ) {
         for (paneId, content) in paneContent {
             guard let leafView = leafViews[paneId] as? PaneContentNSView else { continue }
-            leafView.update(content: content, freshness: freshness[paneId])
+            leafView.update(content: content, freshness: freshness[paneId], address: address[paneId])
+
+            // A tabs-hosted pane also gets its caption refreshed and, when
+            // it isn't the frontmost tab, an unread indication — both purely
+            // client-derived (D6), never sent by the daemon.
+            if let region = tabRegionForPaneId[paneId] {
+                region.setCaption(address[paneId]?.reason, for: paneId)
+                region.noteContentPushed(for: paneId)
+            }
         }
     }
 }
@@ -370,17 +619,21 @@ final class PaneContentNSView: NSView {
 
     @objc private func didTapRefresh() { onRefresh() }
 
-    /// Push new content/freshness for this pane. Skips the `@Published`
-    /// write entirely when `content` is unchanged (D9) — an idempotent push
-    /// must be visually invisible: no flicker, no scroll reset, no spinner.
-    func update(content: PaneContentWire, freshness: PaneFreshness?) {
+    /// Push new content/freshness/address for this pane. Skips the
+    /// `@Published` content write entirely when `content` is unchanged (D9)
+    /// — an idempotent push must be visually invisible: no flicker, no
+    /// scroll reset, no spinner.
+    func update(content: PaneContentWire, freshness: PaneFreshness?, address: PaneAddress? = nil) {
         if content != currentContent {
             model.content = content
             currentContent = content
         }
-        // Freshness is cheap to always re-assign — it never rebuilds anything,
-        // just toggles the footnote below.
+        // Freshness and address are cheap to always re-assign — neither ever
+        // rebuilds anything; freshness toggles the footnote below, and
+        // address's `reason` is read by the caller (`DynamicFocusView`) to
+        // drive the owning `TabRegionView`'s caption, not rendered here.
         model.freshness = freshness
+        model.address = address
         updateStaleLabel(freshness)
     }
 

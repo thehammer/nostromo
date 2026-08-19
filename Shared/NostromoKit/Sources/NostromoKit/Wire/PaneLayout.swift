@@ -22,10 +22,13 @@ public enum SplitDirection: String, Decodable, Equatable {
 // MARK: - PaneTree
 
 /// Recursive pane tree. Leaf nodes hold a `pane_id`; split nodes contain
-/// two or more ordered children with corresponding layout ratios.
+/// two or more ordered children with corresponding layout ratios; `tabs`
+/// nodes (W1 — curated-agent-views) host several panes with exactly one
+/// frontmost, `labels` parallel to `children`.
 public indirect enum PaneTree: Equatable {
     case leaf(paneId: String)
     case split(direction: SplitDirection, children: [PaneTree], ratios: [Double])
+    case tabs(children: [PaneTree], labels: [String], active: Int)
 
     /// Convenience: a single `"repl"` leaf (the initial state for every focus).
     public static let replLeaf = PaneTree.leaf(paneId: "repl")
@@ -36,6 +39,8 @@ public indirect enum PaneTree: Equatable {
         case .leaf(let paneId):
             return [paneId]
         case .split(_, let children, _):
+            return children.flatMap { $0.paneIds }
+        case .tabs(let children, _, _):
             return children.flatMap { $0.paneIds }
         }
     }
@@ -48,6 +53,8 @@ extension PaneTree: Decodable {
         case direction
         case children
         case ratios
+        case labels
+        case active
     }
 
     public init(from d: Decoder) throws {
@@ -61,11 +68,26 @@ extension PaneTree: Decodable {
                 children:  try c.decode([PaneTree].self,     forKey: .children),
                 ratios:    try c.decode([Double].self,       forKey: .ratios)
             )
-        case let other:
-            throw DecodingError.dataCorruptedError(
-                forKey: .kind, in: c,
-                debugDescription: "unknown PaneTree kind: \(other)"
+        case "tabs":
+            self = .tabs(
+                children: try c.decode([PaneTree].self, forKey: .children),
+                labels:   try c.decode([String].self,   forKey: .labels),
+                active:   try c.decode(Int.self,        forKey: .active)
             )
+        default:
+            // An unrecognised kind (a future node type this client version
+            // doesn't know about yet) must never throw — that would make the
+            // whole `focus_layout` frame undecodable — and must never
+            // fabricate a second `.replLeaf` (the pre-existing macOS-side
+            // fallback did exactly that, silently creating a duplicate repl
+            // pane on the client). Degrade instead: decode the node's first
+            // child if it has one (best-effort — something renders), else a
+            // harmless non-repl placeholder leaf.
+            if let children = try? c.decode([PaneTree].self, forKey: .children), let first = children.first {
+                self = first
+            } else {
+                self = .leaf(paneId: "unknown")
+            }
         }
     }
 }
@@ -243,6 +265,121 @@ public struct PaneFreshness: Decodable, Equatable {
     }
 }
 
+// MARK: - Anchor / Emphasis / PaneAddress (W1 — curated-agent-views)
+
+/// A single point of interest inside a pane's content — "the one place to
+/// land." Mirrors `Anchor` in `src/ipc/protocol.rs`. W1 transports every
+/// variant but renders none of them; only `PaneAddress.reason` is rendered
+/// (as a tab caption) in this wedge.
+public enum Anchor: Equatable {
+    case line(path: String?, line: Int)
+    case comment(id: String)
+    case section(name: String)
+    case queueRow(repo: String, number: Int)
+}
+
+extension Anchor: Decodable {
+    private enum K: String, CodingKey { case kind, path, line, id, name, repo, number }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "line":
+            self = .line(
+                path: try c.decodeIfPresent(String.self, forKey: .path),
+                line: try c.decode(Int.self, forKey: .line)
+            )
+        case "comment":
+            self = .comment(id: try c.decode(String.self, forKey: .id))
+        case "section":
+            self = .section(name: try c.decode(String.self, forKey: .name))
+        case "queue_row":
+            self = .queueRow(
+                repo:   try c.decode(String.self, forKey: .repo),
+                number: try c.decode(Int.self,    forKey: .number)
+            )
+        case let other:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: c,
+                debugDescription: "unknown Anchor kind: \(other)"
+            )
+        }
+    }
+}
+
+/// A range to highlight within a pane's content. See `Anchor` for the
+/// single-point counterpart. Mirrors `Emphasis` in `src/ipc/protocol.rs`.
+public enum Emphasis: Equatable {
+    case lineRange(path: String?, start: Int, end: Int)
+    case comment(id: String)
+    case section(name: String)
+    case textRange(start: Int, end: Int)
+    case queueRow(repo: String, number: Int)
+}
+
+extension Emphasis: Decodable {
+    private enum K: String, CodingKey { case kind, path, start, end, id, name, repo, number }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "line_range":
+            self = .lineRange(
+                path:  try c.decodeIfPresent(String.self, forKey: .path),
+                start: try c.decode(Int.self, forKey: .start),
+                end:   try c.decode(Int.self, forKey: .end)
+            )
+        case "comment":
+            self = .comment(id: try c.decode(String.self, forKey: .id))
+        case "section":
+            self = .section(name: try c.decode(String.self, forKey: .name))
+        case "text_range":
+            self = .textRange(
+                start: try c.decode(Int.self, forKey: .start),
+                end:   try c.decode(Int.self, forKey: .end)
+            )
+        case "queue_row":
+            self = .queueRow(
+                repo:   try c.decode(String.self, forKey: .repo),
+                number: try c.decode(Int.self,    forKey: .number)
+            )
+        case let other:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: c,
+                debugDescription: "unknown Emphasis kind: \(other)"
+            )
+        }
+    }
+}
+
+/// Where to look inside a pane's content, and why. Mirrors `PaneAddress` in
+/// `src/ipc/protocol.rs` — a sibling of `PaneFreshness` on `pane_content`,
+/// not folded into `PaneContentWire`, so it can be re-sent cheaply without
+/// re-sending content. Every field is optional/defaulted so a frame from a
+/// daemon that predates this type — or one with nothing to point at — still
+/// decodes.
+public struct PaneAddress: Decodable, Equatable {
+    public let anchor:   Anchor?
+    public let emphasis: [Emphasis]
+    /// One short human-readable phrase explaining why this was shown.
+    public let reason:   String?
+
+    private enum CodingKeys: String, CodingKey { case anchor, emphasis, reason }
+
+    public init(anchor: Anchor?, emphasis: [Emphasis], reason: String?) {
+        self.anchor   = anchor
+        self.emphasis = emphasis
+        self.reason   = reason
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        anchor   = try c.decodeIfPresent(Anchor.self, forKey: .anchor)
+        emphasis = (try? c.decode([Emphasis].self, forKey: .emphasis)) ?? []
+        reason   = try c.decodeIfPresent(String.self, forKey: .reason)
+    }
+}
+
 // MARK: - FocusLayoutModel
 
 /// In-memory model of a focus's layout state, rebuilt entirely from daemon
@@ -254,25 +391,31 @@ public struct FocusLayoutModel {
     /// Per-pane freshness, keyed by `pane_id`. Absent entry == no freshness
     /// concept for that pane (e.g. agent-authored content via `set_pane_content`).
     public var paneFreshness: [String: PaneFreshness]
+    /// Per-pane address, keyed by `pane_id` (W1 — curated-agent-views).
+    /// Absent entry == no addressing concept pushed for that pane yet.
+    public var paneAddress: [String: PaneAddress]
 
     /// Initial state for a focus whose layout hasn't arrived yet.
     public static let initial = FocusLayoutModel(
         tree:        .replLeaf,
         focusedPane: nil,
         paneContent: [:],
-        paneFreshness: [:]
+        paneFreshness: [:],
+        paneAddress: [:]
     )
 
     public init(
         tree: PaneTree,
         focusedPane: String?,
         paneContent: [String: PaneContentWire],
-        paneFreshness: [String: PaneFreshness] = [:]
+        paneFreshness: [String: PaneFreshness] = [:],
+        paneAddress: [String: PaneAddress] = [:]
     ) {
         self.tree          = tree
         self.focusedPane   = focusedPane
         self.paneContent   = paneContent
         self.paneFreshness = paneFreshness
+        self.paneAddress   = paneAddress
     }
 }
 

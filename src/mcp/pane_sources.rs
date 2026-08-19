@@ -36,7 +36,7 @@ use tracing::debug;
 use crate::data::perri_pr::PrSnapshot;
 use crate::data::perri_queue::PrQueueSnapshot;
 use crate::ipc::pane_registry::PaneContentProvider;
-use crate::ipc::protocol::{PaneContentWire, PaneFreshness, ServerMsg};
+use crate::ipc::protocol::{PaneAddress, PaneContentWire, PaneFreshness, ServerMsg};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
 use crate::mcp::tools::apply_layout::{self, SOURCE_CURRENT_PR, SOURCE_PR_QUEUE};
 
@@ -75,11 +75,29 @@ pub(crate) fn broadcast_pane_content(
     content: PaneContentWire,
     freshness: Option<PaneFreshness>,
 ) {
+    broadcast_pane_content_with_address(daemon, tag, pane_id, content, freshness, None);
+}
+
+/// [`broadcast_pane_content`] plus an optional [`PaneAddress`] (W1 —
+/// curated-agent-views). Still the one choke point every daemon-side
+/// `PaneContent` send goes through — `broadcast_pane_content` is a thin
+/// `address: None` wrapper over this rather than a second implementation, so
+/// "mark the pane painted" and "never re-send `Loading` over existing
+/// content" can't drift between callers that do and don't address a pane.
+pub(crate) fn broadcast_pane_content_with_address(
+    daemon: &DaemonMcpBackend,
+    tag: &str,
+    pane_id: &str,
+    content: PaneContentWire,
+    freshness: Option<PaneFreshness>,
+    address: Option<PaneAddress>,
+) {
     let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
         tag: tag.to_string(),
         pane_id: pane_id.to_string(),
         content,
         freshness,
+        address,
     });
     daemon
         .pane_registry
@@ -134,6 +152,7 @@ pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
                 pane_id,
                 content,
                 freshness: Some(fr),
+                address: None,
             })
         })
         .collect()
@@ -173,10 +192,15 @@ impl PaneContentProvider for McpPaneContentProvider {
 
 // ── the broadcaster (D7) ─────────────────────────────────────────────────────
 
-/// `(tag, pane_id) -> (content, freshness)` last actually broadcast by this
-/// process, used both to dedup an unchanged push and to know which panes the
-/// staleness ticker is allowed to re-evaluate (see the module doc comment).
-type LastSent = HashMap<(String, String), (PaneContentWire, PaneFreshness)>;
+/// `(tag, pane_id) -> (content, freshness, address)` last actually broadcast
+/// by this process, used both to dedup an unchanged push and to know which
+/// panes the staleness ticker is allowed to re-evaluate (see the module doc
+/// comment). `address` (W1 — curated-agent-views) is part of the dedup key
+/// so an address-only change is a real change and gets broadcast — the
+/// automatic broadcaster below always fetches with `address: None` (no known
+/// source produces one yet), so this only matters once a future source
+/// starts attaching one.
+type LastSent = HashMap<(String, String), (PaneContentWire, PaneFreshness, Option<PaneAddress>)>;
 
 /// Watches the PR-queue and current-PR watch channels and, on every change,
 /// re-fetches and re-broadcasts content for every binding pointed at that
@@ -236,10 +260,10 @@ fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSen
         };
         let fr = apply_layout::freshness(source, state);
         let key = (tag.clone(), pane_id.clone());
-        if last_sent.get(&key) == Some(&(content.clone(), fr.clone())) {
+        if last_sent.get(&key) == Some(&(content.clone(), fr.clone(), None)) {
             continue;
         }
-        last_sent.insert(key, (content.clone(), fr.clone()));
+        last_sent.insert(key, (content.clone(), fr.clone(), None));
         broadcast_pane_content(daemon, &tag, &pane_id, content, Some(fr));
     }
 }
@@ -258,7 +282,7 @@ fn reevaluate_staleness(state: &McpSharedState, last_sent: &mut LastSent) {
 
     for (tag, pane_id, source) in bindings {
         let key = (tag.clone(), pane_id.clone());
-        let Some((_, prev_fr)) = last_sent.get(&key) else {
+        let Some((_, prev_fr, _)) = last_sent.get(&key) else {
             continue;
         };
         let fr = apply_layout::freshness(&source, state);
@@ -268,7 +292,7 @@ fn reevaluate_staleness(state: &McpSharedState, last_sent: &mut LastSent) {
         let Ok(content) = apply_layout::fetch(&source, state, None) else {
             continue;
         };
-        last_sent.insert(key, (content.clone(), fr.clone()));
+        last_sent.insert(key, (content.clone(), fr.clone(), None));
         broadcast_pane_content(daemon, &tag, &pane_id, content, Some(fr));
     }
 }
@@ -418,11 +442,13 @@ mod tests {
                 pane_id,
                 content,
                 freshness,
+                address,
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
                 assert!(matches!(content, PaneContentWire::Text { text } if text == "hi"));
                 assert!(freshness.is_none());
+                assert!(address.is_none(), "broadcast_pane_content must default address to None");
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -459,6 +485,73 @@ mod tests {
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
+    }
+
+    // ── broadcast_pane_content_with_address (W1 — curated-agent-views) ───────
+
+    #[test]
+    fn broadcast_pane_content_with_address_attaches_the_given_address() {
+        let (state, mut bcast, _qtx, _ptx) = make_state();
+        {
+            let daemon = state.daemon.as_ref().unwrap();
+            let mut reg = daemon.pane_registry.lock().unwrap();
+            reg.init_focus("perri");
+            reg.create_pane("perri", "ticket", SplitPosition::Right, "repl")
+                .unwrap();
+        }
+        let daemon = state.daemon.as_ref().unwrap();
+
+        let address = PaneAddress {
+            anchor: None,
+            emphasis: vec![],
+            reason: Some("opened from the queue".into()),
+        };
+        broadcast_pane_content_with_address(
+            daemon,
+            "perri",
+            "ticket",
+            PaneContentWire::Text { text: "CORE-1234".into() },
+            None,
+            Some(address.clone()),
+        );
+
+        match bcast.try_recv().unwrap() {
+            ServerMsg::PaneContent { address: a, .. } => assert_eq!(a, Some(address)),
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn last_sent_dedup_tuple_treats_an_address_only_difference_as_a_real_change() {
+        // Mirrors the daemon-side dedup key `push_for_source` compares against
+        // (D5): `LastSent` stores `(content, freshness, address)`, so two
+        // otherwise-identical entries differing only by address must NOT
+        // compare equal — an address-only change is a real change and must
+        // not be silently swallowed as a duplicate.
+        let content = PaneContentWire::Text { text: "hi".into() };
+        let freshness = PaneFreshness::default();
+
+        let no_address: (PaneContentWire, PaneFreshness, Option<PaneAddress>) =
+            (content.clone(), freshness.clone(), None);
+        let with_address: (PaneContentWire, PaneFreshness, Option<PaneAddress>) = (
+            content.clone(),
+            freshness.clone(),
+            Some(PaneAddress {
+                anchor: None,
+                emphasis: vec![],
+                reason: Some("flagged".into()),
+            }),
+        );
+
+        assert_ne!(
+            no_address, with_address,
+            "an address-only difference must make the dedup tuple unequal"
+        );
+        assert_eq!(
+            no_address,
+            (content, freshness, None),
+            "sanity: identical tuples (including address) must still compare equal"
+        );
     }
 
     // ── broadcast_loading_if_first_paint ─────────────────────────────────────

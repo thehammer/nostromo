@@ -465,7 +465,7 @@ fn split_leaf(
             };
             true
         }
-        PaneTree::Split { children, .. } => {
+        PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. } => {
             for child in children.iter_mut() {
                 // Move-out workaround: split_leaf needs `new_leaf` by value, but
                 // we may recurse into multiple children. Clone is cheap (a leaf).
@@ -479,30 +479,39 @@ fn split_leaf(
 }
 
 /// Apply a flat `pane_id -> ratio` map to every split whose direct children are
-/// all leaves named in the map. Ratios are normalised to sum to 1.0.
+/// all leaves named in the map. Ratios are normalised to sum to 1.0. A `Tabs`
+/// node has no ratios of its own — recurse into its children (in case one of
+/// them is itself a split), but otherwise leave it untouched.
 fn apply_ratio_map(node: &mut PaneTree, ratios: &HashMap<String, f32>) {
-    if let PaneTree::Split {
-        children,
-        ratios: r,
-        ..
-    } = node
-    {
-        let direct: Option<Vec<f32>> = children
-            .iter()
-            .map(|c| match c {
-                PaneTree::Leaf { pane_id } => ratios.get(pane_id).copied(),
-                _ => None,
-            })
-            .collect();
-        if let Some(values) = direct {
-            let sum: f32 = values.iter().sum();
-            if sum > 0.0 {
-                *r = values.iter().map(|v| v / sum).collect();
+    match node {
+        PaneTree::Split {
+            children,
+            ratios: r,
+            ..
+        } => {
+            let direct: Option<Vec<f32>> = children
+                .iter()
+                .map(|c| match c {
+                    PaneTree::Leaf { pane_id } => ratios.get(pane_id).copied(),
+                    _ => None,
+                })
+                .collect();
+            if let Some(values) = direct {
+                let sum: f32 = values.iter().sum();
+                if sum > 0.0 {
+                    *r = values.iter().map(|v| v / sum).collect();
+                }
+            }
+            for child in children.iter_mut() {
+                apply_ratio_map(child, ratios);
             }
         }
-        for child in children.iter_mut() {
-            apply_ratio_map(child, ratios);
+        PaneTree::Tabs { children, .. } => {
+            for child in children.iter_mut() {
+                apply_ratio_map(child, ratios);
+            }
         }
+        PaneTree::Leaf { .. } => {}
     }
 }
 
@@ -521,23 +530,53 @@ fn validate_tree(tree: &PaneTree) -> Result<(), PaneError> {
             return Err(PaneError::InvalidLayout);
         }
     }
-    // Well-formed splits.
-    validate_splits(tree)
+    // Well-formed splits and tabs nodes.
+    validate_node(tree)
 }
 
-fn validate_splits(node: &PaneTree) -> Result<(), PaneError> {
-    if let PaneTree::Split {
-        children, ratios, ..
-    } = node
-    {
-        if children.len() < 2 || children.len() != ratios.len() {
-            return Err(PaneError::InvalidLayout);
+/// Recursively validate every interior node's shape: a `Split` must have
+/// `children.len() == ratios.len() >= 2`; a `Tabs` node must have at least one
+/// child, `labels.len() == children.len()`, `active < children.len()`, and no
+/// `repl` leaf among its (possibly nested) descendants — hiding the REPL
+/// behind a tab is never what an agent means, since the REPL is where the
+/// operator's hands are.
+fn validate_node(node: &PaneTree) -> Result<(), PaneError> {
+    match node {
+        PaneTree::Leaf { .. } => Ok(()),
+        PaneTree::Split {
+            children, ratios, ..
+        } => {
+            if children.len() < 2 || children.len() != ratios.len() {
+                return Err(PaneError::InvalidLayout);
+            }
+            for child in children {
+                validate_node(child)?;
+            }
+            Ok(())
         }
-        for child in children {
-            validate_splits(child)?;
+        PaneTree::Tabs {
+            children,
+            labels,
+            active,
+        } => {
+            if children.is_empty()
+                || labels.len() != children.len()
+                || *active >= children.len()
+            {
+                return Err(PaneError::InvalidLayout);
+            }
+            if children
+                .iter()
+                .any(|c| c.pane_ids().iter().any(|id| id == REPL_PANE_ID))
+            {
+                return Err(PaneError::InvalidLayout);
+            }
+            for child in children {
+                validate_node(child)?;
+            }
+            Ok(())
         }
     }
-    Ok(())
 }
 
 // ── persistence helpers ──────────────────────────────────────────────────────
@@ -554,6 +593,15 @@ pub fn default_store_path() -> PathBuf {
 /// On-disk store format (D3). `version` is always 2 for anything this code
 /// writes; `bindings` defaults to empty so a V2 file written by an earlier
 /// build of this same version (before a hypothetical V3) still loads.
+///
+/// The shape here needs no change for `PaneTree::Tabs` (W1 —
+/// curated-agent-views) — the tree serialises itself, tabs included. The one
+/// consequence: a store persisted by a build with `Tabs` support, containing a
+/// focus whose tree has a tabs node, is unreadable by a pre-W1 binary (the
+/// `kind: "tabs"` discriminator has no matching variant there). `load_store`'s
+/// existing failure path already degrades gracefully in that case — a parse
+/// failure falls back to the V1 bare-`HashMap` shape, which also fails, and
+/// the registry simply starts empty for that focus rather than crashing.
 #[derive(Serialize, Deserialize)]
 struct StoreV2 {
     version: u32,
@@ -1094,6 +1142,197 @@ mod tests {
         let payload = serde_json::to_value(&bad_tree).unwrap();
         let err = reg.set_layout("mother", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    // ── 12b. PaneTree::Tabs validation (W1 — curated-agent-views) ────────────
+
+    /// A well-formed tree with a tabs node: repl alongside a two-child tabs
+    /// region.
+    fn tree_with_tabs_region(tab_children: Vec<PaneTree>, labels: Vec<&str>, active: usize) -> PaneTree {
+        PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Leaf {
+                    pane_id: "repl".into(),
+                },
+                PaneTree::Tabs {
+                    children: tab_children,
+                    labels: labels.into_iter().map(String::from).collect(),
+                    active,
+                },
+            ],
+            ratios: vec![0.5, 0.5],
+        }
+    }
+
+    #[test]
+    fn set_layout_with_well_formed_tabs_node_is_accepted() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        let tree = tree_with_tabs_region(
+            vec![
+                PaneTree::Leaf { pane_id: "ticket".into() },
+                PaneTree::Leaf { pane_id: "activity".into() },
+            ],
+            vec!["Ticket", "Activity"],
+            0,
+        );
+        let payload = serde_json::to_value(&tree).unwrap();
+        let result = reg.set_layout("mother", &payload).unwrap();
+
+        assert_eq!(reg.pane_ids("mother"), vec!["repl", "ticket", "activity"]);
+        assert_eq!(result, tree);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_with_mismatched_labels_length_is_rejected() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        let tree = tree_with_tabs_region(
+            vec![
+                PaneTree::Leaf { pane_id: "ticket".into() },
+                PaneTree::Leaf { pane_id: "activity".into() },
+            ],
+            vec!["Ticket"],
+            0,
+        );
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+        assert_eq!(reg.pane_ids("mother"), vec!["repl"], "tree must be left unchanged");
+    }
+
+    #[test]
+    fn set_layout_tabs_node_with_active_out_of_range_is_rejected() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        let tree = tree_with_tabs_region(
+            vec![
+                PaneTree::Leaf { pane_id: "ticket".into() },
+                PaneTree::Leaf { pane_id: "activity".into() },
+            ],
+            vec!["Ticket", "Activity"],
+            2,
+        );
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_with_zero_children_is_rejected() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        let tree = tree_with_tabs_region(vec![], vec![], 0);
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_containing_repl_leaf_is_rejected() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        // The tabs region itself hosts "repl" — hiding the REPL behind a tab
+        // is never valid, regardless of whether a repl leaf exists elsewhere.
+        let tree = PaneTree::Tabs {
+            children: vec![
+                PaneTree::Leaf { pane_id: "repl".into() },
+                PaneTree::Leaf { pane_id: "ticket".into() },
+            ],
+            labels: vec!["Repl".into(), "Ticket".into()],
+            active: 0,
+        };
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_nested_inside_a_split_still_rejects_a_nested_repl() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        // "repl" appears nested two levels deep inside the tabs region's own
+        // inner split — the repl-inside-tabs check must walk the tabs
+        // subtree recursively, not just its direct children. (This also
+        // means the tree has no repl leaf anywhere else, so a naive
+        // "exactly one repl" check alone wouldn't catch this — it's the
+        // tabs-specific rule that must fire.)
+        let tree = PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Leaf { pane_id: "other".into() },
+                PaneTree::Tabs {
+                    children: vec![
+                        PaneTree::Split {
+                            direction: SplitDirection::Vertical,
+                            children: vec![
+                                PaneTree::Leaf { pane_id: "repl".into() },
+                                PaneTree::Leaf { pane_id: "activity".into() },
+                            ],
+                            ratios: vec![0.5, 0.5],
+                        },
+                        PaneTree::Leaf { pane_id: "ticket".into() },
+                    ],
+                    labels: vec!["Nested".into(), "Ticket".into()],
+                    active: 0,
+                },
+            ],
+            ratios: vec![0.5, 0.5],
+        };
+
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_with_nested_split_recurses_ratio_validation() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        // A tabs child that is itself a malformed split (mismatched ratio
+        // count) must still be caught — validation recurses into tab children.
+        let tree = tree_with_tabs_region(
+            vec![PaneTree::Split {
+                direction: SplitDirection::Horizontal,
+                children: vec![
+                    PaneTree::Leaf { pane_id: "a".into() },
+                    PaneTree::Leaf { pane_id: "b".into() },
+                ],
+                ratios: vec![1.0], // wrong length
+            }],
+            vec!["Broken"],
+            0,
+        );
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn tabs_node_pane_ids_are_reachable_through_create_pane_and_bindable() {
+        // A tabs child is an ordinary leaf pane once installed — it can be
+        // targeted by create_pane (splitting it further) and bound to a source
+        // exactly like any other leaf.
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+        let tree = tree_with_tabs_region(
+            vec![PaneTree::Leaf { pane_id: "ticket".into() }],
+            vec!["Ticket"],
+            0,
+        );
+        reg.set_layout("mother", &serde_json::to_value(&tree).unwrap())
+            .unwrap();
+
+        reg.bind_source("mother", "ticket", "perri.list_pr_queue");
+        assert_eq!(reg.source_for("mother", "ticket"), Some("perri.list_pr_queue"));
     }
 
     // ── 13. PaneError::code() returns stable snake_case strings ──────────────

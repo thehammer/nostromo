@@ -375,7 +375,7 @@ final class PaneContentWireTests: XCTestCase {
         """.data(using: .utf8)!
 
         let msg = ServerMsg.decode(from: json)
-        guard case .paneContent(_, _, _, let freshness) = msg else {
+        guard case .paneContent(_, _, _, let freshness, _) = msg else {
             XCTFail("Expected .paneContent, got \(msg)")
             return
         }
@@ -404,7 +404,7 @@ final class PaneContentWireTests: XCTestCase {
         """.data(using: .utf8)!
 
         let msg = ServerMsg.decode(from: json)
-        guard case .paneContent(let tag, let paneId, let content, let freshness) = msg else {
+        guard case .paneContent(let tag, let paneId, let content, let freshness, let address) = msg else {
             XCTFail("Expected .paneContent, got \(msg)")
             return
         }
@@ -417,5 +417,107 @@ final class PaneContentWireTests: XCTestCase {
         }
         XCTAssertEqual(value, "hello")
         XCTAssertNil(freshness, "freshness must be nil when the key is absent, not a decode failure")
+        XCTAssertNil(address, "address must be nil when the key is absent, not a decode failure")
+    }
+
+    // MARK: - PaneAddress / Anchor / Emphasis decoding (W1 — curated-agent-views)
+
+    func testServerMsgPaneContentDecodesAddressWhenPresent() throws {
+        let json = """
+        {
+            "type": "pane_content",
+            "tag": "ticket",
+            "pane_id": "ticket",
+            "content": {"kind": "text", "text": "CORE-1234"},
+            "address": {
+                "anchor": {"kind": "line", "path": "src/main.rs", "line": 42},
+                "emphasis": [{"kind": "text_range", "start": 0, "end": 4}],
+                "reason": "opened from the queue"
+            }
+        }
+        """.data(using: .utf8)!
+
+        let msg = ServerMsg.decode(from: json)
+        guard case .paneContent(_, _, _, _, let address) = msg else {
+            XCTFail("Expected .paneContent, got \(msg)")
+            return
+        }
+        let a = try XCTUnwrap(address)
+        XCTAssertEqual(a.anchor, .line(path: "src/main.rs", line: 42))
+        XCTAssertEqual(a.emphasis, [.textRange(start: 0, end: 4)])
+        XCTAssertEqual(a.reason, "opened from the queue")
+    }
+
+    func testServerMsgPaneContentDecodesSuccessfullyWithoutAddressKey() throws {
+        let json = """
+        {
+            "type": "pane_content",
+            "tag": "focus1",
+            "pane_id": "pane1",
+            "content": {"kind": "text", "text": "hello"}
+        }
+        """.data(using: .utf8)!
+
+        let msg = ServerMsg.decode(from: json)
+        guard case .paneContent(_, _, _, _, let address) = msg else {
+            XCTFail("Expected .paneContent, got \(msg)")
+            return
+        }
+        XCTAssertNil(address, "address must be nil when the key is absent, not a decode failure")
+    }
+
+    func testEveryAnchorVariantDecodes() throws {
+        func decodeAnchor(_ json: String) throws -> Anchor {
+            try JSONDecoder().decode(Anchor.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(
+            try decodeAnchor(#"{"kind": "line", "line": 7}"#),
+            .line(path: nil, line: 7)
+        )
+        XCTAssertEqual(
+            try decodeAnchor(#"{"kind": "comment", "id": "c-1"}"#),
+            .comment(id: "c-1")
+        )
+        XCTAssertEqual(
+            try decodeAnchor(#"{"kind": "section", "name": "Overview"}"#),
+            .section(name: "Overview")
+        )
+        XCTAssertEqual(
+            try decodeAnchor(#"{"kind": "queue_row", "repo": "acme/web", "number": 42}"#),
+            .queueRow(repo: "acme/web", number: 42)
+        )
+    }
+
+    func testEveryEmphasisVariantDecodes() throws {
+        func decodeEmphasis(_ json: String) throws -> Emphasis {
+            try JSONDecoder().decode(Emphasis.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(
+            try decodeEmphasis(#"{"kind": "line_range", "start": 1, "end": 2}"#),
+            .lineRange(path: nil, start: 1, end: 2)
+        )
+        XCTAssertEqual(
+            try decodeEmphasis(#"{"kind": "comment", "id": "c-2"}"#),
+            .comment(id: "c-2")
+        )
+        XCTAssertEqual(
+            try decodeEmphasis(#"{"kind": "section", "name": "Risks"}"#),
+            .section(name: "Risks")
+        )
+        XCTAssertEqual(
+            try decodeEmphasis(#"{"kind": "text_range", "start": 0, "end": 12}"#),
+            .textRange(start: 0, end: 12)
+        )
+        XCTAssertEqual(
+            try decodeEmphasis(#"{"kind": "queue_row", "repo": "acme/web", "number": 7}"#),
+            .queueRow(repo: "acme/web", number: 7)
+        )
+    }
+
+    func testPaneAddressWithNoKeysDecodesToAllDefaults() throws {
+        let addr = try JSONDecoder().decode(PaneAddress.self, from: Data("{}".utf8))
+        XCTAssertNil(addr.anchor)
+        XCTAssertEqual(addr.emphasis, [])
+        XCTAssertNil(addr.reason)
     }
 }

@@ -58,6 +58,10 @@
 		FF00000000000000000000A3 /* SidenavGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
 		FF00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000B1 /* SidenavGroupingTests.swift */; };
 		HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */; };
+		KK0000000000000000000011 /* LayoutChangeClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000001 /* LayoutChangeClassifier.swift */; };
+		KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000001 /* LayoutChangeClassifier.swift */; };
+		KK0000000000000000000021 /* TabRegionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000002 /* TabRegionView.swift */; };
+		KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */; };
 		CC00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		GG00000000000000000000C1 /* NostromoKit in Frameworks (NostromoTests) */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		HH000000000000000000011 /* TurnReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000010 /* TurnReconciler.swift */; };
@@ -133,6 +137,9 @@
 		FF00000000000000000000A1 /* SidenavGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGrouping.swift; sourceTree = "<group>"; };
 		FF00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
 		HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentWireEqualityTests.swift; sourceTree = "<group>"; };
+		KK0000000000000000000001 /* LayoutChangeClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifier.swift; sourceTree = "<group>"; };
+		KK0000000000000000000002 /* TabRegionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRegionView.swift; sourceTree = "<group>"; };
+		KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifierTests.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000001 /* IPCLatencyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStats.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000002 /* DaemonDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiagnostics.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStatsTests.swift; sourceTree = "<group>"; };
@@ -253,6 +260,7 @@
 				AA0000020000000000000024 /* CreateFocusSheet.swift */,
 				FF00000000000000000000A1 /* SidenavGrouping.swift */,
 				CC00000000000000000000B0 /* DiffColoring.swift */,
+				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
 				AA0000020000000000000021 /* Views */,
 			);
 			path = UI;
@@ -271,6 +279,7 @@
 				EE00000000000000000000C0 /* MarkdownCardView.swift */,
 				EE00000000000000000000D0 /* DynamicFocusView.swift */,
 				EE00000000000000000000E0 /* PaneContentView.swift */,
+				KK0000000000000000000002 /* TabRegionView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -295,6 +304,7 @@
 				GG00000000000000000000B1 /* ProcessRunnerTests.swift */,
 				HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */,
 				JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */,
+				KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -433,6 +443,8 @@
 				II000000000000000000041 /* LoadHarnessTargeting.swift in Sources */,
 				JJ0000000000000000000011 /* IPCLatencyStats.swift in Sources */,
 				JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */,
+				KK0000000000000000000011 /* LayoutChangeClassifier.swift in Sources */,
+				KK0000000000000000000021 /* TabRegionView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -476,6 +488,8 @@
 				II000000000000000000122 /* LoadHarnessTargetingTests.swift in Sources */,
 				JJ0000000000000000000012 /* IPCLatencyStats.swift in TestSources */,
 				JJ0000000000000000000014 /* IPCLatencyStatsTests.swift in Sources */,
+				KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */,
+				KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
