@@ -269,7 +269,7 @@ async fn load_pr_daemon(
                     .await;
 
             if matched {
-                match apply_layout::fetch(SOURCE_CURRENT_PR, state, None) {
+                match apply_layout::fetch(SOURCE_CURRENT_PR, state, apply_layout::FetchArgs::default()) {
                     Ok(content) => {
                         let fr = apply_layout::freshness(SOURCE_CURRENT_PR, state);
                         push_pane_content(
@@ -401,7 +401,7 @@ async fn clear_current_pr_daemon(
         None,
         &mut warnings,
     );
-    match apply_layout::fetch(SOURCE_PR_QUEUE, state, None) {
+    match apply_layout::fetch(SOURCE_PR_QUEUE, state, apply_layout::FetchArgs::default()) {
         Ok(content) => {
             let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state);
             push_pane_content(
@@ -833,7 +833,7 @@ mod tests {
         let (_tx, pr_rx) = watch::channel(Some(pr_snapshot("acme/web", 42, "Add widget")));
         state.perri_pr_rx = pr_rx;
 
-        let expected = match apply_layout::fetch("perri.get_current_pr", &state, None).unwrap() {
+        let expected = match apply_layout::fetch("perri.get_current_pr", &state, apply_layout::FetchArgs::default()).unwrap() {
             PaneContentWire::Text { text } => text,
             other => panic!("expected Text, got {other:?}"),
         };

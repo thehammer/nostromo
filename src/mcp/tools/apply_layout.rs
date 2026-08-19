@@ -16,8 +16,11 @@
 
 use serde_json::{json, Value};
 
+use crate::data::file_source::{self, FileRequest, FileSourceError};
 use crate::ipc::pane_registry::REPL_PANE_ID;
-use crate::ipc::protocol::{PaneContentWire, PaneFreshness, PrListItem, ServerMsg};
+use crate::ipc::protocol::{
+    Anchor, PaneAddress, PaneContentWire, PaneFreshness, PrListItem, ServerMsg,
+};
 use crate::mcp::layout_schema::{self, LayoutSchema};
 use crate::mcp::pane_sources::broadcast_pane_content;
 use crate::mcp::state::McpSharedState;
@@ -44,6 +47,8 @@ pub enum ApplyLayoutError {
     /// operator's hands are, and hiding it behind a tab is never what an
     /// agent means.
     ReplInTabs,
+    /// A file/diff source's `params` object was absent or malformed (W2).
+    FileRefused(FileSourceError),
 }
 
 impl ApplyLayoutError {
@@ -56,7 +61,28 @@ impl ApplyLayoutError {
             ApplyLayoutError::InvalidSchema => "invalid_schema",
             ApplyLayoutError::FetchFailed => "fetch_failed",
             ApplyLayoutError::ReplInTabs => "repl_in_tabs",
+            ApplyLayoutError::FileRefused(e) => e.code(),
         }
+    }
+
+    /// Whether a caller that already has content on this pane must leave it
+    /// alone rather than replacing it with an `Error` frame (W2 —
+    /// curated-agent-views).
+    ///
+    /// "A bad show never destroys what Hammer was reading" is a product
+    /// criterion, and it is specifically about *refusals*: an agent asking for
+    /// line 9000 of a 200-line file made a mistake, and the right answer is to
+    /// tell it so while the operator keeps reading whatever was already there.
+    /// A `FetchFailed` on a live source is a different thing — the pane's data
+    /// really is gone — and stays loud.
+    pub fn leaves_content_intact(self) -> bool {
+        matches!(self, ApplyLayoutError::FileRefused(_))
+    }
+}
+
+impl From<FileSourceError> for ApplyLayoutError {
+    fn from(e: FileSourceError) -> Self {
+        ApplyLayoutError::FileRefused(e)
     }
 }
 
@@ -70,12 +96,25 @@ pub(crate) const NO_PR_LOADED_PLACEHOLDER: &str = "No PR loaded.";
 pub(crate) const SOURCE_PR_QUEUE: &str = "perri.list_pr_queue";
 /// The current-PR fetcher source name. See [`SOURCE_PR_QUEUE`].
 pub(crate) const SOURCE_CURRENT_PR: &str = "perri.get_current_pr";
+/// The structured-PR-diff fetcher source name (W2 — curated-agent-views).
+/// Watch-driven off the same `perri_pr_rx` channel as [`SOURCE_CURRENT_PR`],
+/// so a pane bound to it refreshes itself with no tool call.
+pub(crate) const SOURCE_PR_DIFF: &str = "perri.get_pr_diff";
+/// The file fetcher source name (W2 — curated-agent-views). Deliberately NOT
+/// watch-driven: a `file` pane is a snapshot of a revision, and live-updating
+/// it under the operator would contradict the revision it says it is showing.
+pub(crate) const SOURCE_FILE: &str = "nostromo.get_file";
 
 /// The closed set of `source` names a `PaneSpec` may bind to. Adding a new
 /// source is a deliberate code change: add a `match` arm in [`fetch`], a
 /// constant above, list it here, and ensure the corresponding receiver is
 /// wired into the daemon's `McpSharedState`.
-const KNOWN_SOURCES: &[&str] = &[SOURCE_PR_QUEUE, SOURCE_CURRENT_PR];
+const KNOWN_SOURCES: &[&str] = &[
+    SOURCE_PR_QUEUE,
+    SOURCE_CURRENT_PR,
+    SOURCE_PR_DIFF,
+    SOURCE_FILE,
+];
 
 /// True when `source` is in the closed fetcher registry.
 pub(crate) fn source_is_known(source: &str) -> bool {
@@ -101,6 +140,8 @@ pub(crate) fn source_content_kind(source: &str) -> Option<&'static str> {
     match source {
         SOURCE_PR_QUEUE => Some("pr_list"),
         SOURCE_CURRENT_PR => Some("text"),
+        SOURCE_PR_DIFF => Some("diff"),
+        SOURCE_FILE => Some("code"),
         _ => None,
     }
 }
@@ -127,6 +168,37 @@ fn schema_from_inline(args: &Value) -> Result<LayoutSchema, ApplyLayoutError> {
     Ok(schema)
 }
 
+/// Per-pane arguments a fetch runs with, beyond the source name itself.
+///
+/// A struct rather than three positional parameters because the set grew from
+/// one (`placeholder`) to three in W2 and will grow again: `params` is what
+/// makes a source say *which* file or *which* ticket, and `tag` is what a
+/// file read resolves its root against. Callers with nothing to say construct
+/// `FetchArgs::default()`, which is exactly the pre-W2 behaviour.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FetchArgs<'a> {
+    /// The focus this pane belongs to. `None` outside a focus context; a
+    /// source that needs a root (see [`SOURCE_FILE`]) falls back to the
+    /// process working directory.
+    pub tag: Option<&'a str>,
+    /// Text to show when the source has no data at all yet.
+    pub placeholder: Option<&'a str>,
+    /// The source's own argument object, passed through verbatim.
+    pub params: Option<&'a Value>,
+}
+
+impl<'a> FetchArgs<'a> {
+    /// The common case: a bound pane being repainted, with whatever params
+    /// its binding persisted.
+    pub fn bound(tag: &'a str, params: Option<&'a Value>) -> Self {
+        FetchArgs {
+            tag: Some(tag),
+            placeholder: None,
+            params,
+        }
+    }
+}
+
 /// Run a pane's bound `source` fetcher, purely server-side (no LLM turn).
 ///
 /// `perri.get_current_pr` renders a plain-text snapshot summary — no agent
@@ -135,10 +207,18 @@ fn schema_from_inline(args: &Value) -> Result<LayoutSchema, ApplyLayoutError> {
 /// `pub(crate)` — this is the single dispatch point both `apply_layout` and
 /// `refresh_pane::refresh_pane_content` call, which is what guarantees the two
 /// tools can never disagree about what a source produces.
+///
+/// **Synchronous by construction.** `PaneContentProvider::bound_pane_contents`
+/// is a sync trait method called from the IPC layer, so this cannot become
+/// `async` without splitting that path in two. [`SOURCE_FILE`]'s GitHub
+/// contents fallback therefore lives in [`fetch_async`], which every async tool
+/// handler calls instead; on the sync repaint paths a revision git doesn't have
+/// simply fails the fetch, and the existing "skip a binding whose fetch fails"
+/// rule leaves the pane's current content alone.
 pub(crate) fn fetch(
     source: &str,
     state: &McpSharedState,
-    placeholder: Option<&str>,
+    args: FetchArgs<'_>,
 ) -> Result<PaneContentWire, ApplyLayoutError> {
     match source {
         SOURCE_PR_QUEUE => {
@@ -150,15 +230,229 @@ pub(crate) fn fetch(
         SOURCE_CURRENT_PR => {
             let snapshot = crate::mcp::tools::perri::get_current_pr(state);
             if snapshot.is_null() {
-                let text = placeholder.unwrap_or("No PR loaded.").to_string();
-                return Ok(PaneContentWire::Text { text });
+                return Ok(no_pr_loaded(args.placeholder));
             }
             match render_pr_summary(&snapshot) {
                 Some(text) => Ok(PaneContentWire::Text { text }),
                 None => Err(ApplyLayoutError::FetchFailed),
             }
         }
+        SOURCE_PR_DIFF => {
+            let snapshot = state.perri_pr_rx.borrow().clone();
+            let Some(snap) = snapshot else {
+                return Ok(no_pr_loaded(args.placeholder));
+            };
+            // D4: the fetch-level large-diff gate blanks `diff` and sets
+            // `diff_too_large`. Say so explicitly, with the file count, rather
+            // than broadcasting an empty `files` list that renders as "this PR
+            // changes nothing".
+            let files = if snap.diff_too_large {
+                Vec::new()
+            } else {
+                crate::data::unified_diff::parse_unified_diff(&snap.diff)
+            };
+            Ok(PaneContentWire::Diff {
+                repo: snap.repo,
+                number: snap.pr_number,
+                files,
+                too_large: snap.diff_too_large,
+                changed_files: snap.changed_files,
+            })
+        }
+        SOURCE_FILE => {
+            let params = args.params.ok_or(FileSourceError::InvalidParams)?;
+            let request = FileRequest::from_params(params)?;
+            let root = file_root(state, args.tag);
+            let revision = file_source::resolve_revision(&request, &head_sha(state));
+            let text = read_file_sync(&root, &revision, &request)?;
+            file_source::validate_against(&text, &request)?;
+            Ok(PaneContentWire::Code {
+                path: request.path,
+                revision,
+                first_line: 1,
+                text,
+            })
+        }
         _ => Err(ApplyLayoutError::UnknownSource),
+    }
+}
+
+/// [`fetch`], plus the one resolution step that genuinely needs the network:
+/// [`SOURCE_FILE`]'s GitHub-contents fallback for a revision the local clone
+/// doesn't have — the common case for a PR head from a fork that was never
+/// fetched.
+///
+/// Every `async` tool handler calls this; the sync repaint paths call
+/// [`fetch`] directly. Both dispatch on the same source strings and produce the
+/// same variants, so the two can't disagree about what a source *is* — only
+/// about how hard they are willing to work to resolve one revision.
+pub(crate) async fn fetch_async(
+    source: &str,
+    state: &McpSharedState,
+    args: FetchArgs<'_>,
+) -> Result<PaneContentWire, ApplyLayoutError> {
+    if source != SOURCE_FILE {
+        return fetch(source, state, args);
+    }
+
+    let params = args.params.ok_or(FileSourceError::InvalidParams)?;
+    let request = FileRequest::from_params(params)?;
+    let root = file_root(state, args.tag);
+    let revision = file_source::resolve_revision(&request, &head_sha(state));
+
+    let text = match read_file_sync(&root, &revision, &request) {
+        Ok(text) => text,
+        Err(ApplyLayoutError::FileRefused(FileSourceError::UnresolvableRevision)) => {
+            fetch_file_from_github(state, &revision, &request.path).await?
+        }
+        Err(e) => return Err(e),
+    };
+    file_source::validate_against(&text, &request)?;
+    Ok(PaneContentWire::Code {
+        path: request.path,
+        revision,
+        first_line: 1,
+        text,
+    })
+}
+
+/// Read `request.path` at `revision` without touching the network.
+///
+/// `UnresolvableRevision` here means specifically "git couldn't produce this
+/// object", which is [`fetch_async`]'s signal to try the contents API — not a
+/// terminal answer.
+fn read_file_sync(
+    root: &std::path::Path,
+    revision: &str,
+    request: &FileRequest,
+) -> Result<String, ApplyLayoutError> {
+    if revision == file_source::WORKING_TREE {
+        return Ok(file_source::read_working_tree(root, &request.path)?);
+    }
+    match file_source::read_git_revision(root, revision, &request.path)? {
+        Some(text) => Ok(text),
+        None => Err(FileSourceError::UnresolvableRevision.into()),
+    }
+}
+
+/// Last-resort read via the GitHub contents API, against the repo of the PR
+/// currently under review.
+async fn fetch_file_from_github(
+    state: &McpSharedState,
+    revision: &str,
+    path: &str,
+) -> Result<String, ApplyLayoutError> {
+    let repo = state
+        .perri_pr_rx
+        .borrow()
+        .as_ref()
+        .map(|s| s.repo.clone())
+        .unwrap_or_default();
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(FileSourceError::UnresolvableRevision.into());
+    };
+    if owner.is_empty() || name.is_empty() {
+        return Err(FileSourceError::UnresolvableRevision.into());
+    }
+    let client = crate::data::github_client::GithubClient::new(None)
+        .map_err(|_| ApplyLayoutError::FileRefused(FileSourceError::UnresolvableRevision))?;
+    let base = std::env::var("NOSTROMO_GITHUB_API_BASE")
+        .unwrap_or_else(|_| crate::data::github_client::GITHUB_API_BASE.to_string());
+    match client.file_at_ref(&base, owner, name, path, revision).await {
+        Ok(Some(text)) => Ok(text),
+        // A 404 from the contents API is the API's way of saying "not at that
+        // ref" — which, having already failed locally, is unresolvable.
+        Ok(None) => Err(FileSourceError::UnknownPath.into()),
+        Err(_) => Err(FileSourceError::UnresolvableRevision.into()),
+    }
+}
+
+/// The directory a `nostromo.get_file` read is rooted at: the focus's session
+/// cwd, falling back to the daemon's own working directory when the focus has
+/// none (an unspawned tag, or a unit test).
+fn file_root(state: &McpSharedState, tag: Option<&str>) -> std::path::PathBuf {
+    let from_session = tag.and_then(|tag| {
+        state
+            .daemon
+            .as_ref()
+            .and_then(|d| d.session_mgr.lock().ok()?.cwd_for(tag))
+    });
+    from_session.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
+}
+
+/// The PR-under-review's head SHA, or `""` when no PR is loaded.
+fn head_sha(state: &McpSharedState) -> String {
+    state
+        .perri_pr_rx
+        .borrow()
+        .as_ref()
+        .map(|s| s.head_sha.clone())
+        .unwrap_or_default()
+}
+
+/// The "no PR loaded" placeholder both PR-backed sources render.
+fn no_pr_loaded(placeholder: Option<&str>) -> PaneContentWire {
+    PaneContentWire::Text {
+        text: placeholder.unwrap_or(NO_PR_LOADED_PLACEHOLDER).to_string(),
+    }
+}
+
+/// The [`PaneAddress`] a source's `params` imply, if any (W2 —
+/// curated-agent-views).
+///
+/// Kept beside [`fetch`] and dispatching on the same source strings, for the
+/// same reason [`freshness`] is: an address derived from params is part of what
+/// a source produces, and computing it somewhere else would let the two drift.
+/// Returns `None` — not an empty address — when there is nothing to point at,
+/// so the wire stays byte-identical to a pre-W1 push.
+pub(crate) fn address(source: &str, params: Option<&Value>) -> Option<PaneAddress> {
+    let params = params?;
+    let obj = params.as_object()?;
+    let reason = obj
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let addr = match source {
+        SOURCE_FILE => {
+            let request = FileRequest::from_params(params).ok()?;
+            PaneAddress {
+                // `path: None` — "the pane's one file", which is exactly what
+                // a `file` pane is.
+                anchor: request.anchor_line.map(|line| Anchor::Line { path: None, line }),
+                emphasis: request.emphasis_wire(),
+                reason,
+            }
+        }
+        SOURCE_PR_DIFF => PaneAddress {
+            anchor: obj
+                .get("anchor")
+                .and_then(|v| serde_json::from_value::<Anchor>(v.clone()).ok()),
+            emphasis: obj
+                .get("emphasis")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|i| serde_json::from_value(i.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            reason,
+        },
+        _ => PaneAddress {
+            anchor: None,
+            emphasis: Vec::new(),
+            reason,
+        },
+    };
+
+    if addr == PaneAddress::default() {
+        None
+    } else {
+        Some(addr)
     }
 }
 
@@ -301,11 +595,20 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
         // it, regardless of whether this fetch succeeds — binding records
         // intent, and the automatic broadcaster (or the next refresh) will
         // repaint it once the source recovers.
+        //
+        // A schema-declared pane carries no per-pane params (W2): the layout
+        // DSL describes shape, and "which file" is a runtime question only
+        // `refresh_pane_content` can answer.
         {
             let mut reg = daemon.pane_registry.lock().unwrap();
             reg.bind_source(&tag, pane_id, source);
         }
-        let (content, msg_freshness) = match fetch(source, state, spec.placeholder.as_deref()) {
+        let args = FetchArgs {
+            tag: Some(&tag),
+            placeholder: spec.placeholder.as_deref(),
+            params: None,
+        };
+        let (content, msg_freshness) = match fetch_async(source, state, args).await {
             Ok(c) => (c, Some(freshness(source, state))),
             Err(e) => {
                 warnings.push(json!({ "pane_id": pane_id, "error": e.code() }));

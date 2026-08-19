@@ -259,12 +259,13 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "nostromo.refresh_pane_content",
-            "description": "Refresh one pane's content from a registered server-side data source — the daemon fetches and shapes the data itself, so you never hand-build the payload. Use this to pull a known source (e.g. perri.list_pr_queue) into your own pane; use set_pane_content instead to push content you authored yourself (freeform text, an error, an explicit loading state). Content only: emits one PaneContent broadcast, never re-declares geometry, so an operator's dragged split ratios survive. Shows a transient Loading state then the fetched content in one call. Errors: unknown_source, fetch_failed, unidentified_caller, invalid_args, not_supported.",
+            "description": "Refresh one pane's content from a registered server-side data source — the daemon fetches and shapes the data itself, so you never hand-build the payload. Use this to pull a known source (e.g. perri.list_pr_queue) into your own pane; use set_pane_content instead to push content you authored yourself (freeform text, an error, an explicit loading state). Content only: emits one PaneContent broadcast, never re-declares geometry, so an operator's dragged split ratios survive. Shows a transient Loading state then the fetched content in one call. A refusal (a line past EOF, a path that does not exist, an unresolvable revision) leaves a pane that already has content untouched. Errors: unknown_source, fetch_failed, invalid_params, unknown_path, path_escapes_root, not_utf8, anchor_beyond_eof, invalid_emphasis_range, unresolvable_revision, unidentified_caller, invalid_args, not_supported.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "pane_id":     { "type": "string", "description": "Pane to refresh" },
-                    "source":      { "type": "string", "description": "Registered fetcher name from the same closed registry apply_layout uses (e.g. 'perri.list_pr_queue', 'perri.get_current_pr')" },
+                    "source":      { "type": "string", "description": "Registered fetcher name from the same closed registry apply_layout uses: 'perri.list_pr_queue', 'perri.get_current_pr', 'perri.get_pr_diff', 'nostromo.get_file'" },
+                    "params":      { "type": "object", "description": "Source-specific arguments, persisted with the binding so a daemon restart repaints the same thing. nostromo.get_file: { path (required, repo-relative), revision? ('working', a git rev, or omit for the PR-under-review head SHA), anchor_line?, emphasis?: [{start,end}], reason? }. perri.get_pr_diff: { anchor?: {kind:'line', path?, line}, emphasis?: [{kind:'line_range', path?, start, end}], reason? }. The other two sources take none." },
                     "placeholder": { "type": "string", "description": "Shown as text when the source yields empty/null data (e.g. no PR currently loaded)" },
                     "view_id":     { "type": "string", "description": "Focus/view id owning the pane; omit to target the caller's own focus" }
                 },

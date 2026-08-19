@@ -1013,6 +1013,16 @@ impl SessionManager {
     }
 
     /// Whether `tag` currently has a live (non-exited) session child.
+    /// The working directory `tag`'s session was spawned in, if it has one.
+    ///
+    /// This is the root every file read for that focus is resolved against
+    /// (W2 — curated-agent-views): a focus's session cwd is the only
+    /// definition of "the repo" the daemon has, and confining reads to it is
+    /// what makes `path_escapes_root` enforceable.
+    pub fn cwd_for(&self, tag: &str) -> Option<PathBuf> {
+        self.sessions.get(tag).and_then(|s| s.cwd.clone())
+    }
+
     pub fn has_live_session(&self, tag: &str) -> bool {
         self.sessions.get(tag).map(|s| s.alive()).unwrap_or(false)
     }

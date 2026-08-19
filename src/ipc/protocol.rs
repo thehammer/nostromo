@@ -323,6 +323,127 @@ pub enum PaneContentWire {
     Loading,
     /// The agent encountered an error fetching this pane's data.
     Error { message: String },
+    /// A file's contents at a revision, line-addressable (W2 —
+    /// curated-agent-views).
+    ///
+    /// Carries the text *plus* the line number the first line represents,
+    /// rather than an array of per-line objects: the client splits and numbers,
+    /// which keeps a whole-file payload the same size as the `Text` variant it
+    /// replaces. A `Diff` (below) genuinely needs structure because a line
+    /// number has to resolve to a row across hunk boundaries; a file does not.
+    Code {
+        /// Repo-relative path, exactly as requested.
+        path: String,
+        /// The revision this content was read at: a git SHA/ref, or
+        /// `"working"` for the on-disk working tree.
+        revision: String,
+        /// The line number `text`'s first line represents. `1` for a whole
+        /// file; a future windowed read can start higher without the client
+        /// needing to know why.
+        first_line: u32,
+        /// The file contents. Line separator is `\n`.
+        text: String,
+    },
+    /// A PR's change, structured per file/hunk/line so a line number can
+    /// resolve to exactly one row (W2 — curated-agent-views).
+    Diff {
+        /// Repository in `owner/name` form.
+        repo: String,
+        /// PR number, when this diff belongs to one.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        number: Option<u64>,
+        /// Per-file structure. Empty when `too_large` is set.
+        files: Vec<DiffFile>,
+        /// True when the underlying fetch hit its own large-diff gate and
+        /// blanked the raw diff. `files` is then empty and the client must say
+        /// so explicitly rather than render an apparently-complete empty diff
+        /// (D4 — a stated limit is not silent truncation).
+        #[serde(default)]
+        too_large: bool,
+        /// How many files the PR changes. The only thing a `too_large` diff
+        /// can still say about its own size, which is why it is carried
+        /// separately from `files.len()`.
+        #[serde(default)]
+        changed_files: u64,
+    },
+}
+
+// ── structured unified diff (W2 — curated-agent-views) ───────────────────────
+
+/// What happened to a file in a diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffStatus {
+    /// The file did not exist before.
+    Added,
+    /// The file does not exist after.
+    Removed,
+    /// The file existed before and after.
+    Modified,
+    /// The file moved; `DiffFile::old_path` carries where from.
+    Renamed,
+}
+
+/// What one line of a hunk is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffLineKind {
+    /// Unchanged — present on both sides.
+    Context,
+    /// Present only on the new side.
+    Added,
+    /// Present only on the old side.
+    Removed,
+    /// Not a content line at all — e.g. `\ No newline at end of file`.
+    /// Carried rather than dropped so the parser never loses a line.
+    Meta,
+}
+
+/// One line within a [`DiffHunk`].
+///
+/// `old_n`/`new_n` are the line's number on each side, absent where the line
+/// doesn't exist on that side. They are what makes a diff line-addressable:
+/// `Anchor::Line { path, line }` resolves against `new_n` first, falling back
+/// to the removal row carrying that `old_n`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub old_n: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub new_n: Option<u32>,
+    /// The line's content with the diff marker character stripped. A `Meta`
+    /// line carries its raw text (marker included) because the marker *is* the
+    /// content there.
+    pub text: String,
+}
+
+/// One `@@ ... @@` hunk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffHunk {
+    /// The verbatim `@@ -a,b +c,d @@ optional function context` line, so a
+    /// client can render exactly what git said without reconstructing it.
+    pub header: String,
+    /// First line number this hunk covers on the old side.
+    pub old_start: u32,
+    /// First line number this hunk covers on the new side.
+    pub new_start: u32,
+    pub lines: Vec<DiffLine>,
+}
+
+/// One file's change within a diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFile {
+    /// The file's path on the new side (or, for a removal, the only path it
+    /// has).
+    pub path: String,
+    /// Where a renamed file came from.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub old_path: Option<String>,
+    pub status: DiffStatus,
+    pub additions: u32,
+    pub deletions: u32,
+    pub hunks: Vec<DiffHunk>,
 }
 
 /// How trustworthy the data in a `PaneContent` push is. Computed daemon-side
@@ -1993,5 +2114,210 @@ mod tests {
             vec!["id", "label"],
             "an absent detail must not appear as a key when constructing a DecisionChoice standalone"
         );
+    }
+
+    // ── DiffStatus / DiffLineKind / DiffLine / DiffHunk / DiffFile (W2 — curated-agent-views)
+
+    #[test]
+    fn every_diff_status_variant_round_trips_snake_case() {
+        let cases = [
+            (DiffStatus::Added, "\"added\""),
+            (DiffStatus::Removed, "\"removed\""),
+            (DiffStatus::Modified, "\"modified\""),
+            (DiffStatus::Renamed, "\"renamed\""),
+        ];
+        for (variant, wire) in cases {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, wire, "DiffStatus::{variant:?} must serialize as {wire}");
+            let back: DiffStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn every_diff_line_kind_variant_round_trips_snake_case() {
+        let cases = [
+            (DiffLineKind::Context, "\"context\""),
+            (DiffLineKind::Added, "\"added\""),
+            (DiffLineKind::Removed, "\"removed\""),
+            (DiffLineKind::Meta, "\"meta\""),
+        ];
+        for (variant, wire) in cases {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, wire, "DiffLineKind::{variant:?} must serialize as {wire}");
+            let back: DiffLineKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn diff_file_with_hunks_rename_and_every_line_kind_round_trips_byte_for_byte() {
+        let file = DiffFile {
+            path: "src/new_name.rs".into(),
+            old_path: Some("src/old_name.rs".into()),
+            status: DiffStatus::Renamed,
+            additions: 2,
+            deletions: 1,
+            hunks: vec![DiffHunk {
+                header: "@@ -1,3 +1,4 @@ fn main".into(),
+                old_start: 1,
+                new_start: 1,
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Context,
+                        old_n: Some(1),
+                        new_n: Some(1),
+                        text: "fn main() {".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Removed,
+                        old_n: Some(2),
+                        new_n: None,
+                        text: "    old();".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        old_n: None,
+                        new_n: Some(2),
+                        text: "    new();".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        old_n: None,
+                        new_n: Some(3),
+                        text: "    also_new();".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Meta,
+                        old_n: None,
+                        new_n: None,
+                        text: "\\ No newline at end of file".into(),
+                    },
+                ],
+            }],
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let back: DiffFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(file, back, "DiffFile round trip mismatch: {json}");
+        let json2 = serde_json::to_string(&back).unwrap();
+        assert_eq!(json, json2, "byte-for-byte round trip mismatch");
+    }
+
+    #[test]
+    fn pane_content_wire_code_round_trips_and_carries_kind_code() {
+        let code = PaneContentWire::Code {
+            path: "src/main.rs".into(),
+            revision: "working".into(),
+            first_line: 1,
+            text: "fn main() {}\n".into(),
+        };
+        let json = serde_json::to_value(&code).unwrap();
+        assert_eq!(json["kind"], "code");
+        let back: PaneContentWire = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, code);
+        let json2 = serde_json::to_value(&back).unwrap();
+        assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn pane_content_wire_diff_round_trips_carries_kind_diff_and_omits_number_when_none() {
+        let diff_file = DiffFile {
+            path: "src/main.rs".into(),
+            old_path: None,
+            status: DiffStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            hunks: vec![],
+        };
+        let diff = PaneContentWire::Diff {
+            repo: "acme/web".into(),
+            number: None,
+            files: vec![diff_file.clone()],
+            too_large: false,
+            changed_files: 1,
+        };
+        let json = serde_json::to_value(&diff).unwrap();
+        assert_eq!(json["kind"], "diff");
+        assert!(
+            json.get("number").is_none(),
+            "number: None must be omitted from the wire entirely"
+        );
+        let back: PaneContentWire = serde_json::from_value(json).unwrap();
+        assert_eq!(back, diff);
+
+        // With Some(number), the key IS present, carrying the number.
+        let diff_with_number = PaneContentWire::Diff {
+            repo: "acme/web".into(),
+            number: Some(42),
+            files: vec![diff_file],
+            too_large: false,
+            changed_files: 1,
+        };
+        let json2 = serde_json::to_value(&diff_with_number).unwrap();
+        assert_eq!(json2["number"], 42);
+        let back2: PaneContentWire = serde_json::from_value(json2).unwrap();
+        assert_eq!(back2, diff_with_number);
+    }
+
+    #[test]
+    fn server_msg_pane_content_round_trips_with_code_and_diff_variants() {
+        round_trip_server(ServerMsg::PaneContent {
+            tag: "cody".into(),
+            pane_id: "file".into(),
+            content: PaneContentWire::Code {
+                path: "src/lib.rs".into(),
+                revision: "abc123".into(),
+                first_line: 1,
+                text: "pub fn f() {}".into(),
+            },
+            freshness: None,
+            address: None,
+        });
+
+        round_trip_server(ServerMsg::PaneContent {
+            tag: "perri".into(),
+            pane_id: "diff".into(),
+            content: PaneContentWire::Diff {
+                repo: "acme/web".into(),
+                number: Some(7),
+                files: vec![DiffFile {
+                    path: "a.rs".into(),
+                    old_path: None,
+                    status: DiffStatus::Added,
+                    additions: 5,
+                    deletions: 0,
+                    hunks: vec![DiffHunk {
+                        header: "@@ -0,0 +1,5 @@".into(),
+                        old_start: 0,
+                        new_start: 1,
+                        lines: vec![DiffLine {
+                            kind: DiffLineKind::Added,
+                            old_n: None,
+                            new_n: Some(1),
+                            text: "fn a() {}".into(),
+                        }],
+                    }],
+                }],
+                too_large: false,
+                changed_files: 1,
+            },
+            freshness: None,
+            address: None,
+        });
+
+        // The too_large gate: empty files, changed_files carried separately.
+        round_trip_server(ServerMsg::PaneContent {
+            tag: "perri".into(),
+            pane_id: "diff".into(),
+            content: PaneContentWire::Diff {
+                repo: "acme/web".into(),
+                number: Some(137),
+                files: vec![],
+                too_large: true,
+                changed_files: 137,
+            },
+            freshness: None,
+            address: None,
+        });
     }
 }

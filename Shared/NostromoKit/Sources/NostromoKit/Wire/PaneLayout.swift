@@ -168,6 +168,204 @@ public struct PrListItemModel: Decodable, Identifiable, Equatable {
     }
 }
 
+// MARK: - Structured diff model (W2 — curated-agent-views)
+
+/// One line within a [DiffHunkModel]. Mirrors `DiffLine` in
+/// `src/ipc/protocol.rs`.
+///
+/// `oldN`/`newN` are the line's number on each side, `nil` where the line
+/// doesn't exist on that side. They are what makes a diff line-addressable:
+/// resolving `Anchor.line(path:line:)` to a row is a lookup on `newN`, falling
+/// back to the removal row carrying that `oldN`.
+public struct DiffLineModel: Decodable, Equatable {
+    public enum Kind: String, Decodable, Equatable {
+        case context, added, removed, meta
+    }
+    public let kind:  Kind
+    public let oldN:  Int?
+    public let newN:  Int?
+    /// Content with the diff marker stripped. A `.meta` line keeps its raw
+    /// text, because there the marker *is* the content.
+    public let text:  String
+
+    enum CodingKeys: String, CodingKey {
+        case kind, text
+        case oldN = "old_n"
+        case newN = "new_n"
+    }
+
+    public init(kind: Kind, oldN: Int?, newN: Int?, text: String) {
+        self.kind = kind
+        self.oldN = oldN
+        self.newN = newN
+        self.text = text
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = (try? c.decode(Kind.self, forKey: .kind)) ?? .context
+        oldN = try c.decodeIfPresent(Int.self, forKey: .oldN)
+        newN = try c.decodeIfPresent(Int.self, forKey: .newN)
+        text = (try? c.decode(String.self, forKey: .text)) ?? ""
+    }
+}
+
+/// One `@@ ... @@` hunk. Mirrors `DiffHunk` in `src/ipc/protocol.rs`.
+public struct DiffHunkModel: Decodable, Equatable {
+    /// The verbatim `@@ -a,b +c,d @@ context` line, so the client renders what
+    /// git actually said rather than reconstructing it.
+    public let header:   String
+    public let oldStart: Int
+    public let newStart: Int
+    public let lines:    [DiffLineModel]
+
+    enum CodingKeys: String, CodingKey {
+        case header, lines
+        case oldStart = "old_start"
+        case newStart = "new_start"
+    }
+
+    public init(header: String, oldStart: Int, newStart: Int, lines: [DiffLineModel]) {
+        self.header   = header
+        self.oldStart = oldStart
+        self.newStart = newStart
+        self.lines    = lines
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        header   = (try? c.decode(String.self, forKey: .header)) ?? ""
+        oldStart = (try? c.decode(Int.self, forKey: .oldStart)) ?? 1
+        newStart = (try? c.decode(Int.self, forKey: .newStart)) ?? 1
+        lines    = (try? c.decode([DiffLineModel].self, forKey: .lines)) ?? []
+    }
+}
+
+/// One file's change within a diff. Mirrors `DiffFile` in
+/// `src/ipc/protocol.rs`.
+public struct DiffFileModel: Decodable, Equatable {
+    public enum Status: String, Decodable, Equatable {
+        case added, removed, modified, renamed
+    }
+    /// The path on the new side (or, for a removal, the only path it has).
+    public let path:      String
+    /// Where a renamed file came from.
+    public let oldPath:   String?
+    public let status:    Status
+    public let additions: Int
+    public let deletions: Int
+    public let hunks:     [DiffHunkModel]
+
+    enum CodingKeys: String, CodingKey {
+        case path, status, additions, deletions, hunks
+        case oldPath = "old_path"
+    }
+
+    public init(
+        path:      String,
+        oldPath:   String? = nil,
+        status:    Status,
+        additions: Int,
+        deletions: Int,
+        hunks:     [DiffHunkModel]
+    ) {
+        self.path      = path
+        self.oldPath   = oldPath
+        self.status    = status
+        self.additions = additions
+        self.deletions = deletions
+        self.hunks     = hunks
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path      = (try? c.decode(String.self, forKey: .path)) ?? ""
+        oldPath   = try c.decodeIfPresent(String.self, forKey: .oldPath)
+        status    = (try? c.decode(Status.self, forKey: .status)) ?? .modified
+        additions = (try? c.decode(Int.self, forKey: .additions)) ?? 0
+        deletions = (try? c.decode(Int.self, forKey: .deletions)) ?? 0
+        hunks     = (try? c.decode([DiffHunkModel].self, forKey: .hunks)) ?? []
+    }
+}
+
+/// The payload of `PaneContentWire.code`: a file's contents at a revision.
+///
+/// Carries text plus the line number its first line represents, rather than an
+/// array of per-line objects — the client splits and numbers, which keeps a
+/// whole-file payload the same size as the `.text` variant it replaces.
+public struct CodePayload: Decodable, Equatable {
+    public let path:      String
+    /// A git SHA/ref, or `"working"` for the on-disk working tree.
+    public let revision:  String
+    /// The line number `text`'s first line represents.
+    public let firstLine: Int
+    public let text:      String
+
+    enum CodingKeys: String, CodingKey {
+        case path, revision, text
+        case firstLine = "first_line"
+    }
+
+    public init(path: String, revision: String, firstLine: Int, text: String) {
+        self.path      = path
+        self.revision  = revision
+        self.firstLine = firstLine
+        self.text      = text
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path      = (try? c.decode(String.self, forKey: .path)) ?? ""
+        revision  = (try? c.decode(String.self, forKey: .revision)) ?? ""
+        firstLine = (try? c.decode(Int.self, forKey: .firstLine)) ?? 1
+        text      = (try? c.decode(String.self, forKey: .text)) ?? ""
+    }
+}
+
+/// The payload of `PaneContentWire.diff`: a PR's change, structured per file.
+public struct DiffPayload: Decodable, Equatable {
+    public let repo:   String
+    public let number: Int?
+    /// Per-file structure. Empty when `tooLarge` is set.
+    public let files:  [DiffFileModel]
+    /// True when the daemon's fetch hit its own large-diff gate. The view must
+    /// then say so explicitly and name `changedFiles`, rather than render an
+    /// empty `files` list as "this PR changes nothing".
+    public let tooLarge: Bool
+    /// How many files the PR changes — the only thing a `tooLarge` diff can
+    /// still say about its own size.
+    public let changedFiles: Int
+
+    enum CodingKeys: String, CodingKey {
+        case repo, number, files
+        case tooLarge     = "too_large"
+        case changedFiles = "changed_files"
+    }
+
+    public init(
+        repo:         String,
+        number:       Int?,
+        files:        [DiffFileModel],
+        tooLarge:     Bool = false,
+        changedFiles: Int  = 0
+    ) {
+        self.repo         = repo
+        self.number       = number
+        self.files        = files
+        self.tooLarge     = tooLarge
+        self.changedFiles = changedFiles
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        repo         = (try? c.decode(String.self, forKey: .repo)) ?? ""
+        number       = try c.decodeIfPresent(Int.self, forKey: .number)
+        files        = (try? c.decode([DiffFileModel].self, forKey: .files)) ?? []
+        tooLarge     = (try? c.decode(Bool.self, forKey: .tooLarge)) ?? false
+        changedFiles = (try? c.decode(Int.self, forKey: .changedFiles)) ?? 0
+    }
+}
+
 // MARK: - PaneContentWire
 
 /// Content pushed to a pane via `set_pane_content`. `Equatable` is implemented
@@ -182,6 +380,10 @@ public enum PaneContentWire {
     case loading
     /// Agent encountered an error fetching this pane's data.
     case error(String)
+    /// A file's contents at a revision, line-addressable (W2).
+    case code(CodePayload)
+    /// A PR's change, structured per file/hunk/line (W2).
+    case diff(DiffPayload)
     /// A future content kind not yet known to this client version.
     case unknown(Any)
 }
@@ -207,6 +409,12 @@ extension PaneContentWire: Decodable {
         case "error":
             let msg = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? "An error occurred"
             self = .error(msg)
+        case "code":
+            // Decoded from the decoder rather than the keyed container: the
+            // payload's fields are siblings of `kind`, not nested under it.
+            self = .code(try CodePayload(from: d))
+        case "diff":
+            self = .diff(try DiffPayload(from: d))
         default:
             let raw = try AnyDecodable(from: d)
             self = .unknown(raw.value)
@@ -229,6 +437,10 @@ extension PaneContentWire: Equatable {
         case (.error(let a), .error(let b)):
             return a == b
         case (.prList(let a), .prList(let b)):
+            return a == b
+        case (.code(let a), .code(let b)):
+            return a == b
+        case (.diff(let a), .diff(let b)):
             return a == b
         case (.jsonSnapshot, .jsonSnapshot):
             return false

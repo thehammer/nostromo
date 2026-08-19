@@ -58,7 +58,57 @@ impl GithubClient {
     pub fn token(&self) -> &str {
         &self.token
     }
+
+    /// Fetch one file's raw contents at `git_ref` via the contents API.
+    ///
+    /// Uses `Accept: application/vnd.github.raw` so the response body *is* the
+    /// file, with no base64 envelope to decode and no 1MB JSON-shape cliff to
+    /// fall off. `base_url` exists so tests can point this at a `wiremock`
+    /// server; production callers pass [`GITHUB_API_BASE`].
+    ///
+    /// `Ok(None)` means the API answered 404 — the ref or the path genuinely
+    /// isn't there, which is a refusal and not a transport failure. Any other
+    /// non-success status is an `Err`, because "GitHub is rate-limiting us" and
+    /// "that file doesn't exist" must not render as the same thing.
+    pub async fn file_at_ref(
+        &self,
+        base_url: &str,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        git_ref: &str,
+    ) -> Result<Option<String>> {
+        let url = format!("{base_url}/repos/{owner}/{repo}/contents/{path}");
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("ref", git_ref)])
+            .header(reqwest::header::ACCEPT, "application/vnd.github.raw")
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", self.token),
+            )
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .context("fetching file contents")?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("contents fetch {url} -> {status}: {body}");
+        }
+        resp.text().await.context("reading contents body").map(Some)
+    }
 }
+
+/// The production GitHub API base. A constant rather than a hard-coded literal
+/// inside [`GithubClient::file_at_ref`] so the same code path is exercised by
+/// tests pointed at a local mock server.
+pub const GITHUB_API_BASE: &str = "https://api.github.com";
 
 // ── Token resolution ──────────────────────────────────────────────────────────
 

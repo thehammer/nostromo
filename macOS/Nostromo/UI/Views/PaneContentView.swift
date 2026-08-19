@@ -76,6 +76,13 @@ struct PaneContentView: View {
                 loadingView
             case .error(let message):
                 errorView(message)
+            case .code, .diff:
+                // Rendered by `CodeContentView`, an AppKit sibling layered
+                // over this hosting view (W2 — curated-agent-views): a gutter,
+                // a scroll-to-line, and a marked range have no SwiftUI
+                // equivalent. Drawing anything here would show through
+                // whenever that view is mid-layout.
+                Color.clear
             case .unknown(let raw):
                 jsonView(raw)
             }
