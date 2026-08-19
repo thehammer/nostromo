@@ -30,7 +30,7 @@ use crate::mcp::tools::apply_layout::{source_content_kind, source_is_known, Appl
 
 /// The `content_kind` names a `PaneSpec` may declare — one per
 /// `PaneContentWire` variant.
-const VALID_CONTENT_KINDS: [&str; 7] = [
+const VALID_CONTENT_KINDS: [&str; 8] = [
     "text",
     "json_snapshot",
     "pr_list",
@@ -38,6 +38,7 @@ const VALID_CONTENT_KINDS: [&str; 7] = [
     "error",
     "code",
     "diff",
+    "pr_conversation",
 ];
 
 /// A named, declarative pane layout: a tree shape plus per-pane data bindings.
@@ -582,5 +583,50 @@ panes: {}
         let tmp = tempfile::TempDir::new().unwrap();
         let err = load_from_dir("does-not-exist", tmp.path()).unwrap_err();
         assert_eq!(err, ApplyLayoutError::UnknownLayout);
+    }
+
+    // ── pr_conversation content kind (W3 — curated-agent-views) ──────────────
+
+    #[test]
+    fn content_kind_is_valid_accepts_pr_conversation() {
+        assert!(content_kind_is_valid("pr_conversation"));
+    }
+
+    #[test]
+    fn a_schema_declaring_perri_get_pr_conversation_with_pr_conversation_content_kind_validates() {
+        let yaml = r#"
+name: ok
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: conversation
+    - pane: repl
+panes:
+  conversation:
+    source: perri.get_pr_conversation
+    content_kind: pr_conversation
+"#;
+        let schema = parse(yaml).expect("a pr_conversation source/content_kind pair must validate");
+        assert_eq!(schema.panes["conversation"].content_kind, "pr_conversation");
+    }
+
+    #[test]
+    fn perri_get_pr_conversation_with_a_mismatched_content_kind_is_rejected() {
+        let yaml = r#"
+name: bad
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: conversation
+    - pane: repl
+panes:
+  conversation:
+    source: perri.get_pr_conversation
+    content_kind: text
+"#;
+        let err = parse(yaml).unwrap_err();
+        assert_eq!(err, ApplyLayoutError::InvalidContentKind);
     }
 }

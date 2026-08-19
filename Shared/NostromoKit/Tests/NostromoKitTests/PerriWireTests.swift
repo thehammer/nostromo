@@ -283,4 +283,139 @@ final class PerriWireTests: XCTestCase {
         XCTAssertTrue(snap.ciChecks.isEmpty)
         XCTAssertEqual(snap.headSha, "")
     }
+
+    // MARK: - PrSnapshot body/threads/conversation_error (W3 — curated-agent-views)
+
+    /// The cache-compatibility guarantee: a `pr-cache/*.json` file written by
+    /// a binary built before this wedge has none of `body`/`threads`/
+    /// `conversation_error` on the wire at all. It must still decode, with
+    /// those three fields defaulting rather than the whole snapshot failing.
+    func testPrSnapshotDecodesWithBodyThreadsAndConversationErrorMissingEntirely() throws {
+        let json = """
+        {
+            "pr_number": 42,
+            "repo": "acme/web", "title": "feat: auth", "author": "alice",
+            "url": "https://github.com/acme/web/pull/42", "diff": "", "stale": false
+        }
+        """.data(using: .utf8)!
+
+        let snap = try JSONDecoder.nostromo.decode(PrSnapshot.self, from: json)
+
+        XCTAssertEqual(snap.body, "", "body must default to an empty string when absent from an older cache file")
+        XCTAssertEqual(snap.threads, [], "threads must default to empty when absent from an older cache file")
+        XCTAssertNil(snap.conversationError, "conversation_error must default to nil when absent from an older cache file")
+    }
+
+    func testPrSnapshotDecodesBodyAndThreadsWhenPresent() throws {
+        let json = """
+        {
+            "pr_number": 42,
+            "repo": "acme/web", "title": "feat: auth", "author": "alice",
+            "url": "https://github.com/acme/web/pull/42", "diff": "", "stale": false,
+            "body": "This PR adds auth.\\n\\n```rust\\nfn login() {}\\n```",
+            "threads": [
+                {
+                    "id": "thread-1",
+                    "kind": "inline",
+                    "path": "src/auth.rs",
+                    "line": 12,
+                    "diff_hunk": "@@ -1,2 +1,2 @@",
+                    "resolved": true,
+                    "comments": [
+                        {
+                            "id": "comment-1",
+                            "author": "bob",
+                            "created_at": "2026-05-30T09:30:56.510874Z",
+                            "body": "Looks good, one nit."
+                        }
+                    ]
+                }
+            ],
+            "conversation_error": null
+        }
+        """.data(using: .utf8)!
+
+        let snap = try JSONDecoder.nostromo.decode(PrSnapshot.self, from: json)
+
+        XCTAssertEqual(snap.body, "This PR adds auth.\n\n```rust\nfn login() {}\n```")
+        XCTAssertNil(snap.conversationError)
+        XCTAssertEqual(snap.threads.count, 1)
+
+        let thread = snap.threads[0]
+        XCTAssertEqual(thread.id, "thread-1")
+        XCTAssertEqual(thread.kind, .inline)
+        XCTAssertEqual(thread.path, "src/auth.rs")
+        XCTAssertEqual(thread.line, 12)
+        XCTAssertEqual(thread.diffHunk, "@@ -1,2 +1,2 @@")
+        XCTAssertTrue(thread.resolved)
+        XCTAssertEqual(thread.comments.count, 1)
+
+        let comment = thread.comments[0]
+        XCTAssertEqual(comment.id, "comment-1")
+        XCTAssertEqual(comment.author, "bob")
+        XCTAssertEqual(comment.body, "Looks good, one nit.")
+
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expected = try XCTUnwrap(fmt.date(from: "2026-05-30T09:30:56.510874Z"))
+        XCTAssertEqual(comment.createdAt, expected)
+    }
+
+    func testPrSnapshotSetsConversationErrorAlongsideWhateverThreadsWereRetrieved() throws {
+        // A conversation fetch failure alongside a successful PR fetch must
+        // preserve whatever threads were retrieved before the failure, not
+        // blank them out.
+        let json = """
+        {
+            "pr_number": 42,
+            "repo": "acme/web", "title": "feat: auth", "author": "alice",
+            "url": "https://github.com/acme/web/pull/42", "diff": "", "stale": false,
+            "threads": [
+                { "id": "thread-1", "kind": "issue", "resolved": false, "comments": [] }
+            ],
+            "conversation_error": "GitHub API rate limited"
+        }
+        """.data(using: .utf8)!
+
+        let snap = try JSONDecoder.nostromo.decode(PrSnapshot.self, from: json)
+
+        XCTAssertEqual(snap.conversationError, "GitHub API rate limited")
+        XCTAssertEqual(snap.threads.count, 1, "partial threads retrieved before the failure must be preserved, not discarded")
+    }
+
+    func testEveryPrThreadKindDecodesToTheRightCase() throws {
+        func decodeKind(_ raw: String) throws -> PrThreadKind {
+            let json = """
+            { "id": "t1", "kind": "\(raw)", "resolved": false, "comments": [] }
+            """.data(using: .utf8)!
+            return try JSONDecoder().decode(PrThread.self, from: json).kind
+        }
+
+        XCTAssertEqual(try decodeKind("issue"), .issue)
+        XCTAssertEqual(try decodeKind("review"), .review)
+        XCTAssertEqual(try decodeKind("inline"), .inline)
+    }
+
+    /// `PrThread`/`PrComment` round-trip through `Codable` (they're the raw-
+    /// markdown counterparts of `ConversationThreadModel`/
+    /// `ConversationCommentModel`, and travel on `PrSnapshot` rather than
+    /// `PaneContentWire`).
+    func testPrThreadAndPrCommentRoundTripThroughCodable() throws {
+        let original = PrThread(
+            id: "thread-1",
+            kind: .review,
+            path: "src/auth.rs",
+            line: 7,
+            diffHunk: "@@ -1,1 +1,1 @@",
+            resolved: false,
+            comments: [
+                PrComment(id: "c1", author: "alice", createdAt: Date(timeIntervalSince1970: 1_700_000_000), body: "raw **markdown** body"),
+            ]
+        )
+
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(PrThread.self, from: data)
+
+        XCTAssertEqual(decoded, original)
+    }
 }

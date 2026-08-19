@@ -651,4 +651,160 @@ mod tests {
         assert_eq!(binding.source, "nostromo.get_file");
         assert_eq!(binding.params, Some(params));
     }
+
+    // ── perri.get_pr_conversation (W3 — curated-agent-views) ──────────────────
+
+    fn seeded_conversation_state(state: McpSharedState) -> McpSharedState {
+        let (_ptx, pr_rx) = watch::channel(Some(
+            serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
+                "pr_number": 42, "repo": "acme/web", "title": "Add widget",
+                "author": "alice", "url": "https://example.com/42", "diff": "",
+                "stale": false, "error": null, "additions": 10, "deletions": 2,
+                "changed_files": 3, "head_sha": "abc123", "diff_too_large": false,
+                "body": "See below:\n\n```rust\nfn f() {}\n```\n",
+                "threads": [{
+                    "id": "inline-1",
+                    "kind": "inline",
+                    "path": "src/main.rs",
+                    "line": 10,
+                    "resolved": false,
+                    "comments": [{
+                        "id": "c1",
+                        "author": "bob",
+                        "created_at": "2024-01-01T00:00:00Z",
+                        "body": "a plain comment"
+                    }]
+                }],
+                "conversation_error": null
+            }))
+            .unwrap(),
+        ));
+        let mut state = state;
+        state.perri_pr_rx = pr_rx;
+        state
+    }
+
+    #[tokio::test]
+    async fn pr_conversation_source_broadcasts_loading_then_parsed_conversation_with_no_focus_layout()
+    {
+        let (state, mut bcast) = make_state();
+        let state = seeded_conversation_state(state);
+
+        let args = json!({
+            "view_id": "perri", "pane_id": "conversation", "source": "perri.get_pr_conversation"
+        });
+        let result = refresh_pane_content(&state, &args, None).await;
+        assert_eq!(result["ok"], true);
+
+        match bcast.recv().await.expect("loading broadcast") {
+            ServerMsg::PaneContent { content, .. } => {
+                assert!(matches!(content, PaneContentWire::Loading));
+            }
+            other => panic!("expected PaneContent(Loading), got {other:?}"),
+        }
+
+        match bcast.recv().await.expect("content broadcast") {
+            ServerMsg::PaneContent {
+                tag,
+                pane_id,
+                content,
+                ..
+            } => {
+                assert_eq!(tag, "perri");
+                assert_eq!(pane_id, "conversation");
+                match content {
+                    PaneContentWire::PrConversation {
+                        repo,
+                        number,
+                        title,
+                        author,
+                        body,
+                        threads,
+                        conversation_error,
+                        ..
+                    } => {
+                        assert_eq!(repo, "acme/web");
+                        assert_eq!(number, Some(42));
+                        assert_eq!(title, "Add widget");
+                        assert_eq!(author, "alice");
+                        assert!(
+                            body.iter().any(|b| matches!(
+                                b,
+                                crate::ipc::protocol::MdBlock::CodeBlock { .. }
+                            )),
+                            "the PR description's fenced code block must be present as a parsed \
+                             CodeBlock, got: {body:?}"
+                        );
+                        assert!(conversation_error.is_none());
+                        assert_eq!(threads.len(), 1);
+                        assert_eq!(threads[0].comments.len(), 1);
+                        assert_eq!(threads[0].comments[0].id, "c1");
+                    }
+                    other => panic!("expected PrConversation content, got {other:?}"),
+                }
+            }
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+
+        // No FocusLayout — content-only, ever.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), bcast.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_conversation_source_with_no_pr_loaded_broadcasts_placeholder_text_not_conversation() {
+        let (state, mut bcast) = make_state();
+        // perri_pr_rx left at its default (None) — no PR loaded.
+
+        let args = json!({
+            "view_id": "perri", "pane_id": "conversation", "source": "perri.get_pr_conversation"
+        });
+        let result = refresh_pane_content(&state, &args, None).await;
+        assert_eq!(result["ok"], true);
+
+        let _ = bcast.recv().await.expect("loading broadcast");
+        match bcast.recv().await.expect("content broadcast") {
+            ServerMsg::PaneContent { content, .. } => match content {
+                PaneContentWire::Text { text } => assert!(text.contains("No PR loaded")),
+                other => panic!("expected Text placeholder, not PrConversation, got {other:?}"),
+            },
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pr_conversation_source_refuses_an_unknown_comment_id_and_leaves_a_painted_pane_untouched()
+    {
+        let (state, mut bcast) = make_state();
+        let state = seeded_conversation_state(state);
+
+        // Paint the pane once first (a real comment id — succeeds).
+        let good_args = json!({
+            "view_id": "perri", "pane_id": "conversation", "source": "perri.get_pr_conversation"
+        });
+        let result = refresh_pane_content(&state, &good_args, None).await;
+        assert_eq!(result["ok"], true);
+        let _ = bcast.recv().await.expect("loading broadcast");
+        let _ = bcast.recv().await.expect("content broadcast");
+
+        // Now refuse: an anchor naming a comment id absent from the conversation.
+        let bad_args = json!({
+            "view_id": "perri", "pane_id": "conversation", "source": "perri.get_pr_conversation",
+            "params": { "anchor": { "kind": "comment", "id": "does-not-exist" } }
+        });
+        let result = refresh_pane_content(&state, &bad_args, None).await;
+        assert_eq!(result["error"], "unknown_comment_id");
+
+        // Per the refusal-preserves-content convention: a refusal on an
+        // already-painted pane must produce no further broadcast at all.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), bcast.recv())
+                .await
+                .is_err(),
+            "a refusal on an already-painted pane must not broadcast anything at all"
+        );
+    }
 }

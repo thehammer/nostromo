@@ -374,6 +374,7 @@ async fn perri_get_current_pr_returns_snapshot() {
         head_sha: String::new(),
         diff_too_large: false,
         generated_at: None,
+        ..Default::default()
     };
     let state = seeded_state(None, Some(snap), None, None, None, vec![], None, None, None);
 
@@ -406,6 +407,7 @@ async fn perri_get_state_composite() {
         head_sha: String::new(),
         diff_too_large: false,
         generated_at: None,
+        ..Default::default()
     };
     let state = seeded_state(
         Some(queue),

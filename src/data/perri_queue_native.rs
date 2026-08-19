@@ -1888,7 +1888,7 @@ async fn get_pr_head_sha(
 /// Bodies are stored as raw strings; callers deserialise with `serde_json::from_str`.
 ///
 /// The Mutex guards are never held across `.await` points.
-async fn etag_get(
+pub(crate) async fn etag_get(
     client: &GithubClient,
     url: &str,
     etags: &Arc<Mutex<HashMap<String, String>>>,

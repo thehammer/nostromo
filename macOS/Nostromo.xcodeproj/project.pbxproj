@@ -114,6 +114,10 @@
 		KK000000000000000000012 /* DecisionStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = KK000000000000000000010 /* DecisionStore.swift */; };
 		KK000000000000000000021 /* DecisionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK000000000000000000020 /* DecisionSheet.swift */; };
 		KK000000000000000000102 /* DecisionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK000000000000000000100 /* DecisionStoreTests.swift */; };
+		MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
+		MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
+		MM0000000000000000000102 /* ConversationContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000002 /* ConversationContentView.swift */; };
+		NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -199,6 +203,9 @@
 		KK000000000000000000010 /* DecisionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStore.swift; sourceTree = "<group>"; };
 		KK000000000000000000020 /* DecisionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheet.swift; sourceTree = "<group>"; };
 		KK000000000000000000100 /* DecisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStoreTests.swift; sourceTree = "<group>"; };
+		MM0000000000000000000001 /* MarkdownBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocument.swift; sourceTree = "<group>"; };
+		MM0000000000000000000002 /* ConversationContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationContentView.swift; sourceTree = "<group>"; };
+		NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocumentTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -301,6 +308,7 @@
 				LL0000000000000000000003 /* ScrollDecision.swift */,
 				LL0000000000000000000004 /* DiffAttributedString.swift */,
 				LL0000000000000000000010 /* RowOffsetIndex.swift */,
+				MM0000000000000000000001 /* MarkdownBlockDocument.swift */,
 				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
 				AA0000020000000000000021 /* Views */,
 			);
@@ -322,6 +330,7 @@
 				EE00000000000000000000E0 /* PaneContentView.swift */,
 				KK0000000000000000000002 /* TabRegionView.swift */,
 				LL0000000000000000000005 /* CodeContentView.swift */,
+				MM0000000000000000000002 /* ConversationContentView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -353,6 +362,7 @@
 				JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */,
 				KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */,
 				KK000000000000000000100 /* DecisionStoreTests.swift */,
+				NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -489,6 +499,8 @@
 				LL0000000000000000000104 /* DiffAttributedString.swift in Sources */,
 				LL0000000000000000000105 /* CodeContentView.swift in Sources */,
 				LL0000000000000000000106 /* RowOffsetIndex.swift in Sources */,
+				MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */,
+				MM0000000000000000000102 /* ConversationContentView.swift in Sources */,
 				FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */,
 				GG00000000000000000000A2 /* ProcessRunner.swift in Sources */,
 				II000000000000000000011 /* TurnInteractionStore.swift in Sources */,
@@ -531,6 +543,7 @@
 				LL0000000000000000000203 /* ScrollDecision.swift in TestSources */,
 				LL0000000000000000000204 /* DiffAttributedString.swift in TestSources */,
 				LL0000000000000000000205 /* RowOffsetIndex.swift in TestSources */,
+				MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */,
 				LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */,
 				LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */,
 				LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */,
@@ -558,6 +571,7 @@
 				KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */,
 				KK000000000000000000012 /* DecisionStore.swift in TestSources */,
 				KK000000000000000000102 /* DecisionStoreTests.swift in Sources */,
+				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

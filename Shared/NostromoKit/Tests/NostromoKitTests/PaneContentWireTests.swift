@@ -16,6 +16,12 @@
 //     omitted number, and the too_large/empty-files large-diff state; a
 //     pre-W2 client sibling proving code/diff fall through to .unknown for a
 //     kind string it doesn't recognise; and Equatable coverage for both.
+//   - pr_conversation (W3 — curated-agent-views): full field decode including
+//     nested MdBlock/MdSpan body content and a full ConversationThread/
+//     ConversationComment, conversation_error null/absent/present, every
+//     ConversationThreadKind raw value, a pr_conversation-shaped payload with
+//     an unrecognised kind string falling through to .unknown; and Equatable
+//     coverage including nested-content differences.
 
 import XCTest
 @testable import NostromoKit
@@ -130,15 +136,16 @@ final class PaneContentWireTests: XCTestCase {
     }
 
     /// Sibling of `testUnknownKindDecodesWithoutThrowing`: proves that this is
-    /// exactly the path a pre-W2 client takes for a `code`/`diff` frame it
-    /// doesn't yet know about — i.e. a future kind is not special-cased, it
-    /// falls through the same default arm as any other unrecognised kind.
-    /// Uses a plausible future kind name rather than "code"/"diff" themselves,
-    /// since this client DOES know those two.
+    /// exactly the path a pre-W2/W3 client takes for a `code`/`diff`/
+    /// `pr_conversation` frame it doesn't yet know about — i.e. a future kind
+    /// is not special-cased, it falls through the same default arm as any
+    /// other unrecognised kind. Uses a plausible future kind name rather than
+    /// "code"/"diff"/"pr_conversation" themselves, since this client DOES know
+    /// those three.
     func testAFutureContentKindNotYetKnownDecodesToUnknownJustLikeAnyOtherUnrecognisedKind() throws {
         let json = """
         {
-            "kind": "pr_conversation",
+            "kind": "some_future_kind_this_client_has_never_heard_of",
             "some_field": "some_value"
         }
         """
@@ -147,6 +154,33 @@ final class PaneContentWireTests: XCTestCase {
 
         guard case .unknown = wire else {
             XCTFail("Expected .unknown for a not-yet-known future kind, got \(wire)")
+            return
+        }
+    }
+
+    /// Sibling of the above, specific to `pr_conversation` (W3 —
+    /// curated-agent-views): an *unrecognised variant* of a kind this client
+    /// otherwise knows (e.g. a hypothetical future `pr_conversation_v2`, or
+    /// the frame simply mangled) must still degrade to `.unknown` rather than
+    /// throwing — the same forward-compatibility contract as any other kind.
+    func testAPrConversationShapedPayloadWithAnUnrecognisedKindStringDecodesToUnknown() throws {
+        let json = """
+        {
+            "kind": "pr_conversation_v2",
+            "repo": "acme/web",
+            "number": 42,
+            "title": "feat: add auth",
+            "author": "alice",
+            "url": "https://github.com/acme/web/pull/42",
+            "body": [],
+            "threads": []
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .unknown = wire else {
+            XCTFail("Expected .unknown for an unrecognised kind string, got \(wire)")
             return
         }
     }
@@ -341,6 +375,150 @@ final class PaneContentWireTests: XCTestCase {
             payload.changedFiles, 250,
             "changed_files must survive the wire even when the diff itself is too large to send"
         )
+    }
+
+    // MARK: - pr_conversation decodes correctly (W3 — curated-agent-views)
+
+    func testPrConversationDecodesEveryFieldFromWireFormatJSON() throws {
+        let json = """
+        {
+            "kind": "pr_conversation",
+            "repo": "acme/web",
+            "number": 42,
+            "title": "feat: add auth",
+            "author": "alice",
+            "url": "https://github.com/acme/web/pull/42",
+            "body": [
+                { "kind": "paragraph", "spans": [{ "kind": "text", "text": "This PR adds auth." }] },
+                { "kind": "code_block", "lang": "rust", "text": "fn login() {\\n    todo!()\\n}" }
+            ],
+            "threads": [
+                {
+                    "id": "thread-1",
+                    "kind": "review",
+                    "path": "src/auth.rs",
+                    "line": 12,
+                    "diff_hunk": "@@ -1,2 +1,2 @@",
+                    "resolved": false,
+                    "comments": [
+                        {
+                            "id": "comment-1",
+                            "author": "bob",
+                            "created_at": "2026-05-30T09:30:56.510874Z",
+                            "body": [{ "kind": "paragraph", "spans": [{ "kind": "text", "text": "Looks good." }] }]
+                        }
+                    ]
+                }
+            ],
+            "conversation_error": null
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .prConversation(let payload) = wire else {
+            XCTFail("Expected .prConversation, got \(wire)")
+            return
+        }
+
+        XCTAssertEqual(payload.repo, "acme/web")
+        XCTAssertEqual(payload.number, 42)
+        XCTAssertEqual(payload.title, "feat: add auth")
+        XCTAssertEqual(payload.author, "alice")
+        XCTAssertEqual(payload.url, "https://github.com/acme/web/pull/42")
+        XCTAssertEqual(payload.body.count, 2)
+        XCTAssertEqual(payload.body[0], .paragraph([.text("This PR adds auth.")]))
+        XCTAssertEqual(payload.body[1], .codeBlock(lang: "rust", text: "fn login() {\n    todo!()\n}"))
+
+        XCTAssertEqual(payload.threads.count, 1)
+        let thread = payload.threads[0]
+        XCTAssertEqual(thread.id, "thread-1")
+        XCTAssertEqual(thread.kind, .review)
+        XCTAssertEqual(thread.path, "src/auth.rs")
+        XCTAssertEqual(thread.line, 12)
+        XCTAssertEqual(thread.diffHunk, "@@ -1,2 +1,2 @@")
+        XCTAssertFalse(thread.resolved)
+        XCTAssertEqual(thread.comments.count, 1)
+
+        let comment = thread.comments[0]
+        XCTAssertEqual(comment.id, "comment-1")
+        XCTAssertEqual(comment.author, "bob")
+        XCTAssertEqual(comment.body, [.paragraph([.text("Looks good.")])])
+
+        XCTAssertNil(payload.conversationError, "conversation_error: null must decode to nil")
+    }
+
+    func testPrConversationDecodesWithConversationErrorAbsentEntirely() throws {
+        let json = """
+        {
+            "kind": "pr_conversation",
+            "repo": "acme/web",
+            "number": 42,
+            "title": "feat: add auth",
+            "author": "alice",
+            "url": "https://github.com/acme/web/pull/42",
+            "body": [],
+            "threads": []
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .prConversation(let payload) = wire else {
+            XCTFail("Expected .prConversation, got \(wire)")
+            return
+        }
+
+        XCTAssertNil(payload.conversationError, "conversation_error must default to nil when the key is absent entirely")
+        XCTAssertEqual(payload.body, [])
+        XCTAssertEqual(payload.threads, [])
+    }
+
+    func testPrConversationDecodesWithAConversationErrorPresent() throws {
+        let json = """
+        {
+            "kind": "pr_conversation",
+            "repo": "acme/web",
+            "number": 42,
+            "title": "feat: add auth",
+            "author": "alice",
+            "url": "https://github.com/acme/web/pull/42",
+            "body": [],
+            "threads": [],
+            "conversation_error": "GitHub API rate limited"
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .prConversation(let payload) = wire else {
+            XCTFail("Expected .prConversation, got \(wire)")
+            return
+        }
+
+        XCTAssertEqual(payload.conversationError, "GitHub API rate limited")
+    }
+
+    func testEveryConversationThreadKindDecodesToTheRightCase() throws {
+        func decodeKind(_ raw: String) throws -> ConversationThreadKind {
+            let json = """
+            {
+                "kind": "pr_conversation", "repo": "r", "number": 1, "title": "t", "author": "a",
+                "url": "u", "body": [], "threads": [
+                    { "id": "t1", "kind": "\(raw)", "resolved": false, "comments": [] }
+                ]
+            }
+            """
+            guard case .prConversation(let payload) = try decode(json) else {
+                XCTFail("Expected .prConversation")
+                return .issue
+            }
+            return payload.threads[0].kind
+        }
+
+        XCTAssertEqual(try decodeKind("issue"), .issue)
+        XCTAssertEqual(try decodeKind("review"), .review)
+        XCTAssertEqual(try decodeKind("inline"), .inline)
     }
 
     // MARK: - PrListItemModel.toRowModel()
@@ -660,6 +838,123 @@ final class PaneContentWireTests: XCTestCase {
             PaneContentWire.diff(makeDiffPayload(files: [differentOldPath])),
             "a different oldPath nested inside an identical file must be caught"
         )
+    }
+
+    // MARK: - PaneContentWire.Equatable — .prConversation (W3 — curated-agent-views)
+
+    private func makeConversationComment(
+        id: String = "c1",
+        author: String = "alice",
+        createdAt: Date = Date(timeIntervalSince1970: 0),
+        body: [MdBlock]? = nil
+    ) -> ConversationCommentModel {
+        ConversationCommentModel(
+            id: id, author: author, createdAt: createdAt,
+            body: body ?? [.paragraph([.text("looks good")])]
+        )
+    }
+
+    private func makeConversationThread(
+        id: String = "t1",
+        kind: ConversationThreadKind = .issue,
+        path: String? = nil,
+        line: Int? = nil,
+        diffHunk: String? = nil,
+        resolved: Bool = false,
+        comments: [ConversationCommentModel]? = nil
+    ) -> ConversationThreadModel {
+        ConversationThreadModel(
+            id: id, kind: kind, path: path, line: line, diffHunk: diffHunk,
+            resolved: resolved, comments: comments ?? [makeConversationComment()]
+        )
+    }
+
+    private func makeConversationPayload(
+        repo: String = "acme/web",
+        number: Int? = 42,
+        title: String = "feat: auth",
+        author: String = "alice",
+        url: String = "https://github.com/acme/web/pull/42",
+        body: [MdBlock]? = nil,
+        threads: [ConversationThreadModel]? = nil,
+        conversationError: String? = nil
+    ) -> PrConversationPayload {
+        PrConversationPayload(
+            repo: repo, number: number, title: title, author: author, url: url,
+            body: body ?? [.paragraph([.text("PR description")])],
+            threads: threads ?? [makeConversationThread()],
+            conversationError: conversationError
+        )
+    }
+
+    func testPrConversationCasesWithIdenticalPayloadsAreEqual() {
+        XCTAssertEqual(
+            PaneContentWire.prConversation(makeConversationPayload()),
+            PaneContentWire.prConversation(makeConversationPayload())
+        )
+    }
+
+    func testPrConversationCasesDifferingByRepoAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.prConversation(makeConversationPayload()),
+            PaneContentWire.prConversation(makeConversationPayload(repo: "acme/other"))
+        )
+    }
+
+    func testPrConversationCasesDifferingByConversationErrorAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.prConversation(makeConversationPayload()),
+            PaneContentWire.prConversation(makeConversationPayload(conversationError: "fetch failed"))
+        )
+    }
+
+    /// Proves the hand-written `PaneContentWire ==` actually dispatches to
+    /// `PrConversationPayload`'s own `Equatable` for this case rather than
+    /// falling through to a `default: return false` arm that would make every
+    /// `.prConversation` pair compare unequal regardless of content.
+    func testPrConversationCasesReachPayloadEquatableRatherThanFallingThroughToDefault() {
+        let a = PaneContentWire.prConversation(makeConversationPayload())
+        let b = PaneContentWire.prConversation(makeConversationPayload())
+        XCTAssertEqual(a, b, "identical .prConversation payloads must compare equal, not fall through to a conservative default")
+
+        let differentThread = makeConversationThread(comments: [makeConversationComment(body: [.paragraph([.text("different")])])])
+        let c = PaneContentWire.prConversation(makeConversationPayload(threads: [differentThread]))
+        XCTAssertNotEqual(a, c, "a nested comment-body difference must be caught, not masked by a coarse default")
+    }
+
+    /// Proves nested `MdBlock`/comment/thread equality reaches down through
+    /// `.prConversation`'s payload — not just the top-level string fields.
+    func testPrConversationCasesWithStructurallyDifferentBodyOrThreadsAreNotEqual() {
+        let differentBody = makeConversationPayload(body: [.codeBlock(lang: "rust", text: "fn main() {}")])
+        XCTAssertNotEqual(
+            PaneContentWire.prConversation(makeConversationPayload()),
+            PaneContentWire.prConversation(differentBody),
+            "a different rendered body block must be caught"
+        )
+
+        let differentThreadKind = makeConversationPayload(threads: [makeConversationThread(kind: .review)])
+        XCTAssertNotEqual(
+            PaneContentWire.prConversation(makeConversationPayload()),
+            PaneContentWire.prConversation(differentThreadKind),
+            "a different thread kind nested inside an otherwise-identical payload must be caught"
+        )
+
+        let differentCommentAuthor = makeConversationPayload(
+            threads: [makeConversationThread(comments: [makeConversationComment(author: "bob")])]
+        )
+        XCTAssertNotEqual(
+            PaneContentWire.prConversation(makeConversationPayload()),
+            PaneContentWire.prConversation(differentCommentAuthor),
+            "a different comment author nested two levels deep must be caught"
+        )
+    }
+
+    func testPrConversationCaseNeverEqualsCodeDiffTextOrLoading() {
+        let conversation = PaneContentWire.prConversation(makeConversationPayload())
+        XCTAssertNotEqual(conversation, PaneContentWire.code(makeCodePayload()))
+        XCTAssertNotEqual(conversation, PaneContentWire.diff(makeDiffPayload()))
+        XCTAssertNotEqual(conversation, PaneContentWire.text("PR description"))
+        XCTAssertNotEqual(conversation, PaneContentWire.loading)
     }
 
     // MARK: - PaneContentWire.Equatable — .jsonSnapshot / .unknown (conservative "always changed")

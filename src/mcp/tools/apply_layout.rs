@@ -17,9 +17,11 @@
 use serde_json::{json, Value};
 
 use crate::data::file_source::{self, FileRequest, FileSourceError};
+use crate::data::perri_pr::{PrComment, PrThread, PrThreadKind};
 use crate::ipc::pane_registry::REPL_PANE_ID;
 use crate::ipc::protocol::{
-    Anchor, PaneAddress, PaneContentWire, PaneFreshness, PrListItem, ServerMsg,
+    Anchor, ConversationComment, ConversationThread, ConversationThreadKind, Emphasis,
+    PaneAddress, PaneContentWire, PaneFreshness, PrListItem, ServerMsg,
 };
 use crate::mcp::layout_schema::{self, LayoutSchema};
 use crate::mcp::pane_sources::broadcast_pane_content;
@@ -49,6 +51,9 @@ pub enum ApplyLayoutError {
     ReplInTabs,
     /// A file/diff source's `params` object was absent or malformed (W2).
     FileRefused(FileSourceError),
+    /// A `pr_conversation` show named an anchor/emphasis comment id that
+    /// isn't present in the fetched conversation (W3 — curated-agent-views).
+    UnknownCommentId,
 }
 
 impl ApplyLayoutError {
@@ -62,6 +67,7 @@ impl ApplyLayoutError {
             ApplyLayoutError::FetchFailed => "fetch_failed",
             ApplyLayoutError::ReplInTabs => "repl_in_tabs",
             ApplyLayoutError::FileRefused(e) => e.code(),
+            ApplyLayoutError::UnknownCommentId => "unknown_comment_id",
         }
     }
 
@@ -76,7 +82,10 @@ impl ApplyLayoutError {
     /// A `FetchFailed` on a live source is a different thing — the pane's data
     /// really is gone — and stays loud.
     pub fn leaves_content_intact(self) -> bool {
-        matches!(self, ApplyLayoutError::FileRefused(_))
+        matches!(
+            self,
+            ApplyLayoutError::FileRefused(_) | ApplyLayoutError::UnknownCommentId
+        )
     }
 }
 
@@ -104,6 +113,12 @@ pub(crate) const SOURCE_PR_DIFF: &str = "perri.get_pr_diff";
 /// watch-driven: a `file` pane is a snapshot of a revision, and live-updating
 /// it under the operator would contradict the revision it says it is showing.
 pub(crate) const SOURCE_FILE: &str = "nostromo.get_file";
+/// The PR-conversation fetcher source name (W3 — curated-agent-views).
+/// Watch-driven off the same `perri_pr_rx` channel as [`SOURCE_CURRENT_PR`]
+/// and [`SOURCE_PR_DIFF`] — a pane bound to it refreshes itself with no tool
+/// call, and reuses the exact same fetched `PrSnapshot` those two sources
+/// already read.
+pub(crate) const SOURCE_PR_CONVERSATION: &str = "perri.get_pr_conversation";
 
 /// The closed set of `source` names a `PaneSpec` may bind to. Adding a new
 /// source is a deliberate code change: add a `match` arm in [`fetch`], a
@@ -114,6 +129,7 @@ const KNOWN_SOURCES: &[&str] = &[
     SOURCE_CURRENT_PR,
     SOURCE_PR_DIFF,
     SOURCE_FILE,
+    SOURCE_PR_CONVERSATION,
 ];
 
 /// True when `source` is in the closed fetcher registry.
@@ -142,6 +158,7 @@ pub(crate) fn source_content_kind(source: &str) -> Option<&'static str> {
         SOURCE_CURRENT_PR => Some("text"),
         SOURCE_PR_DIFF => Some("diff"),
         SOURCE_FILE => Some("code"),
+        SOURCE_PR_CONVERSATION => Some("pr_conversation"),
         _ => None,
     }
 }
@@ -265,8 +282,101 @@ pub(crate) fn fetch(
             file_source::validate_against(&text, &request)?;
             Ok(code_content(request, revision, text))
         }
+        SOURCE_PR_CONVERSATION => {
+            let snapshot = state.perri_pr_rx.borrow().clone();
+            let Some(snap) = snapshot else {
+                return Ok(no_pr_loaded(args.placeholder));
+            };
+            let threads = conversation_threads_wire(&snap.threads);
+            if let Some(params) = args.params {
+                validate_comment_ids(params, &threads)?;
+            }
+            Ok(PaneContentWire::PrConversation {
+                repo: snap.repo,
+                number: snap.pr_number,
+                title: snap.title,
+                author: snap.author,
+                url: snap.url,
+                body: crate::markdown_blocks::markdown_to_blocks(&snap.body),
+                threads,
+                conversation_error: snap.conversation_error,
+            })
+        }
         _ => Err(ApplyLayoutError::UnknownSource),
     }
+}
+
+/// Convert a fetched `PrSnapshot`'s raw-markdown [`PrThread`]s into the wire
+/// [`ConversationThread`]s a `pr_conversation` pane carries — the point where
+/// D2's "bodies stay raw markdown on `PrSnapshot`" becomes B5's "the client
+/// renders blocks and never parses markdown". Kept as its own function so
+/// [`validate_comment_ids`] can be run against the exact threads about to be
+/// broadcast, not a second, possibly-diverging computation of the same thing.
+fn conversation_threads_wire(threads: &[PrThread]) -> Vec<ConversationThread> {
+    threads
+        .iter()
+        .map(|t| ConversationThread {
+            id: t.id.clone(),
+            kind: match t.kind {
+                PrThreadKind::Issue => ConversationThreadKind::Issue,
+                PrThreadKind::Review => ConversationThreadKind::Review,
+                PrThreadKind::Inline => ConversationThreadKind::Inline,
+            },
+            path: t.path.clone(),
+            line: t.line,
+            diff_hunk: t.diff_hunk.clone(),
+            resolved: t.resolved,
+            comments: t.comments.iter().map(conversation_comment_wire).collect(),
+        })
+        .collect()
+}
+
+fn conversation_comment_wire(c: &PrComment) -> ConversationComment {
+    ConversationComment {
+        id: c.id.clone(),
+        author: c.author.clone(),
+        created_at: c.created_at,
+        body: crate::markdown_blocks::markdown_to_blocks(&c.body),
+    }
+}
+
+/// Refuse a `pr_conversation` show whose `params` names an anchor/emphasis
+/// comment id absent from `threads` (D5 — "an id that names no comment in the
+/// current payload is a refusal at the source's fetch… not a silent
+/// no-scroll"). Any other `anchor`/`emphasis` shape (a line, a section, a
+/// queue row — none of which apply to this view) is simply not this source's
+/// concern and passes through untouched; only a named `comment` id is ever
+/// validated here.
+fn validate_comment_ids(
+    params: &Value,
+    threads: &[ConversationThread],
+) -> Result<(), ApplyLayoutError> {
+    let Some(obj) = params.as_object() else {
+        return Ok(());
+    };
+    let known: std::collections::HashSet<&str> = threads
+        .iter()
+        .flat_map(|t| t.comments.iter().map(|c| c.id.as_str()))
+        .collect();
+
+    if let Some(anchor) = obj.get("anchor") {
+        if let Ok(Anchor::Comment { id }) = serde_json::from_value::<Anchor>(anchor.clone()) {
+            if !known.contains(id.as_str()) {
+                return Err(ApplyLayoutError::UnknownCommentId);
+            }
+        }
+    }
+    if let Some(items) = obj.get("emphasis").and_then(|v| v.as_array()) {
+        for item in items {
+            if let Ok(Emphasis::Comment { id }) = serde_json::from_value::<Emphasis>(item.clone())
+            {
+                if !known.contains(id.as_str()) {
+                    return Err(ApplyLayoutError::UnknownCommentId);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// [`fetch`], plus the one resolution step that genuinely needs the network:
@@ -389,7 +499,7 @@ pub(crate) fn address(source: &str, params: Option<&Value>) -> Option<PaneAddres
                 reason,
             }
         }
-        SOURCE_PR_DIFF => PaneAddress {
+        SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION => PaneAddress {
             anchor: obj
                 .get("anchor")
                 .and_then(|v| serde_json::from_value::<Anchor>(v.clone()).ok()),
@@ -432,10 +542,15 @@ pub(crate) fn freshness(source: &str, state: &McpSharedState) -> PaneFreshness {
             Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
             None => PaneFreshness::default(),
         },
-        // Both read the identical perri_pr_rx snapshot (SOURCE_PR_DIFF's
-        // fetch above does too) — they must share this arm, not just happen
-        // to agree, or the two panes' staleness could silently drift apart.
-        SOURCE_CURRENT_PR | SOURCE_PR_DIFF => match state.perri_pr_rx.borrow().as_ref() {
+        // All three read the identical perri_pr_rx snapshot (SOURCE_PR_DIFF's
+        // and SOURCE_PR_CONVERSATION's fetches above do too) — they must share
+        // this arm, not just happen to agree, or these panes' staleness could
+        // silently drift apart.
+        SOURCE_CURRENT_PR | SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION => match state
+            .perri_pr_rx
+            .borrow()
+            .as_ref()
+        {
             Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
             None => PaneFreshness::default(),
         },
@@ -872,5 +987,203 @@ mod tests {
         let result =
             apply_layout(&state, &json!({ "name": "perri-standard" }), Some("perri")).await;
         assert_eq!(result["error"], "not_supported");
+    }
+
+    // ── perri.get_pr_conversation (W3 — curated-agent-views) ─────────────────
+
+    /// Seed `perri_pr_rx` with a snapshot carrying a PR description with a
+    /// fenced code block, plus one inline thread with one comment — enough to
+    /// prove `fetch` actually converts raw markdown into blocks, not merely
+    /// that the field exists.
+    fn seeded_conversation_state(state: McpSharedState) -> McpSharedState {
+        let (_ptx, pr_rx) = watch::channel(Some(
+            serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
+                "pr_number": 42, "repo": "acme/web", "title": "Add widget",
+                "author": "alice", "url": "https://example.com/42", "diff": "",
+                "stale": false, "error": null, "additions": 10, "deletions": 2,
+                "changed_files": 3, "head_sha": "abc123", "diff_too_large": false,
+                "body": "See below:\n\n```rust\nfn f() {}\n```\n",
+                "threads": [{
+                    "id": "inline-1",
+                    "kind": "inline",
+                    "path": "src/main.rs",
+                    "line": 10,
+                    "resolved": false,
+                    "comments": [{
+                        "id": "c1",
+                        "author": "bob",
+                        "created_at": "2024-01-01T00:00:00Z",
+                        "body": "```python\nprint('hi')\n```\n"
+                    }]
+                }],
+                "conversation_error": null
+            }))
+            .unwrap(),
+        ));
+        let mut state = state;
+        state.perri_pr_rx = pr_rx;
+        state
+    }
+
+    #[test]
+    fn fetch_pr_conversation_with_no_pr_loaded_returns_placeholder_text() {
+        let (state, _bcast) = make_state();
+        // perri_pr_rx defaults to None.
+        let content = fetch(
+            SOURCE_PR_CONVERSATION,
+            &state,
+            FetchArgs {
+                tag: Some("perri"),
+                placeholder: None,
+                params: None,
+            },
+        )
+        .expect("no-PR-loaded must not be a fetch failure");
+        match content {
+            PaneContentWire::Text { text } => assert!(text.contains("No PR loaded")),
+            other => panic!("expected Text placeholder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_pr_conversation_converts_raw_markdown_body_and_comment_bodies_into_blocks() {
+        let (state, _bcast) = make_state();
+        let state = seeded_conversation_state(state);
+
+        let content = fetch(
+            SOURCE_PR_CONVERSATION,
+            &state,
+            FetchArgs {
+                tag: Some("perri"),
+                placeholder: None,
+                params: None,
+            },
+        )
+        .expect("fetch should succeed");
+
+        match content {
+            PaneContentWire::PrConversation {
+                repo,
+                number,
+                body,
+                threads,
+                conversation_error,
+                ..
+            } => {
+                assert_eq!(repo, "acme/web");
+                assert_eq!(number, Some(42));
+                assert!(
+                    body.iter().any(|b| matches!(b, crate::ipc::protocol::MdBlock::CodeBlock { .. })),
+                    "the PR description's fenced code block must survive markdown-to-block \
+                     conversion, got: {body:?}"
+                );
+                assert!(conversation_error.is_none());
+                assert_eq!(threads.len(), 1);
+                let comment = &threads[0].comments[0];
+                assert!(
+                    comment
+                        .body
+                        .iter()
+                        .any(|b| matches!(b, crate::ipc::protocol::MdBlock::CodeBlock { .. })),
+                    "a comment's raw-markdown body must also be converted to blocks in fetch, \
+                     got: {:?}",
+                    comment.body
+                );
+            }
+            other => panic!("expected PrConversation, got {other:?}"),
+        }
+    }
+
+    fn sample_threads_for_validation() -> Vec<ConversationThread> {
+        vec![ConversationThread {
+            id: "inline-1".into(),
+            kind: ConversationThreadKind::Inline,
+            path: Some("src/main.rs".into()),
+            line: Some(10),
+            diff_hunk: None,
+            resolved: false,
+            comments: vec![ConversationComment {
+                id: "known-id".into(),
+                author: "bob".into(),
+                created_at: chrono::Utc::now(),
+                body: vec![],
+            }],
+        }]
+    }
+
+    #[test]
+    fn validate_comment_ids_passes_when_anchor_names_a_known_comment_id() {
+        let threads = sample_threads_for_validation();
+        let params = json!({ "anchor": { "kind": "comment", "id": "known-id" } });
+        assert!(validate_comment_ids(&params, &threads).is_ok());
+    }
+
+    #[test]
+    fn validate_comment_ids_refuses_when_anchor_names_an_unknown_comment_id() {
+        let threads = sample_threads_for_validation();
+        let params = json!({ "anchor": { "kind": "comment", "id": "does-not-exist" } });
+        let err = validate_comment_ids(&params, &threads).unwrap_err();
+        assert_eq!(err, ApplyLayoutError::UnknownCommentId);
+    }
+
+    #[test]
+    fn validate_comment_ids_passes_when_emphasis_names_a_known_comment_id() {
+        let threads = sample_threads_for_validation();
+        let params = json!({ "emphasis": [{ "kind": "comment", "id": "known-id" }] });
+        assert!(validate_comment_ids(&params, &threads).is_ok());
+    }
+
+    #[test]
+    fn validate_comment_ids_refuses_when_an_emphasis_entry_names_an_unknown_comment_id() {
+        let threads = sample_threads_for_validation();
+        let params = json!({ "emphasis": [
+            { "kind": "comment", "id": "known-id" },
+            { "kind": "comment", "id": "does-not-exist" }
+        ] });
+        let err = validate_comment_ids(&params, &threads).unwrap_err();
+        assert_eq!(err, ApplyLayoutError::UnknownCommentId);
+    }
+
+    #[test]
+    fn validate_comment_ids_ignores_a_non_comment_anchor_or_emphasis_kind() {
+        let threads = sample_threads_for_validation();
+        // A line-range anchor/emphasis is not this source's concern at all —
+        // must never trigger the comment-id refusal, however malformed.
+        let anchor_params = json!({ "anchor": { "kind": "line", "line": 9000 } });
+        assert!(validate_comment_ids(&anchor_params, &threads).is_ok());
+
+        let emphasis_params = json!({ "emphasis": [{ "kind": "line_range", "start": 1, "end": 2 }] });
+        assert!(validate_comment_ids(&emphasis_params, &threads).is_ok());
+    }
+
+    #[test]
+    fn fetch_pr_conversation_refuses_an_unknown_anchor_comment_id_via_params() {
+        let (state, _bcast) = make_state();
+        let state = seeded_conversation_state(state);
+
+        let params = json!({ "anchor": { "kind": "comment", "id": "does-not-exist" } });
+        let err = fetch(
+            SOURCE_PR_CONVERSATION,
+            &state,
+            FetchArgs {
+                tag: Some("perri"),
+                placeholder: None,
+                params: Some(&params),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err, ApplyLayoutError::UnknownCommentId);
+    }
+
+    #[test]
+    fn apply_layout_error_unknown_comment_id_has_the_expected_code_and_leaves_content_intact() {
+        assert_eq!(ApplyLayoutError::UnknownCommentId.code(), "unknown_comment_id");
+        assert!(ApplyLayoutError::UnknownCommentId.leaves_content_intact());
+    }
+
+    #[test]
+    fn source_content_kind_and_source_is_known_include_perri_get_pr_conversation() {
+        assert!(source_is_known(SOURCE_PR_CONVERSATION));
+        assert_eq!(source_content_kind(SOURCE_PR_CONVERSATION), Some("pr_conversation"));
     }
 }
