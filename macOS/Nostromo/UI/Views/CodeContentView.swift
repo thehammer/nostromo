@@ -34,7 +34,7 @@ final class CodeContentView: NSView {
 
     /// UTF-16 offset each rendered row starts at, so the visible row range is a
     /// binary search rather than a rescan of the whole document.
-    private var rowStartOffsets: [Int] = []
+    private var rowOffsets = RowOffsetIndex()
     /// The parsed document, kept so an address-only push resolves against it
     /// instead of re-splitting a large file on every re-emphasis.
     private var codeDocument: CodeDocument?
@@ -139,8 +139,8 @@ final class CodeContentView: NSView {
         )
         setText(attributed)
         gutterLabels = (0..<document.lineCount).map { String(document.firstLine + $0) }
-        rowStartOffsets = CodeContentView.offsets(forRows: document.lines.map { $0.utf16.count })
-        ruler.reload(labels: gutterLabels, rowStartOffsets: rowStartOffsets)
+        rowOffsets = RowOffsetIndex(rowLengths: document.lines.map { $0.utf16.count })
+        ruler.reload(labels: gutterLabels, rowOffsets: rowOffsets)
     }
 
     private func apply(diff: DiffDocument) {
@@ -157,19 +157,8 @@ final class CodeContentView: NSView {
             if let n = row.oldN { return String(n) }
             return ""
         }
-        rowStartOffsets = CodeContentView.offsets(forRows: diff.rows.map { $0.text.utf16.count })
-        ruler.reload(labels: gutterLabels, rowStartOffsets: rowStartOffsets)
-    }
-
-    private static func offsets(forRows lengths: [Int]) -> [Int] {
-        var offsets: [Int] = []
-        offsets.reserveCapacity(lengths.count)
-        var running = 0
-        for length in lengths {
-            offsets.append(running)
-            running += length + 1   // +1 for the "\n" terminator
-        }
-        return offsets
+        rowOffsets = RowOffsetIndex(rowLengths: diff.rows.map { $0.text.utf16.count })
+        ruler.reload(labels: gutterLabels, rowOffsets: rowOffsets)
     }
 
     private func setText(_ attributed: NSAttributedString) {
@@ -253,7 +242,7 @@ final class CodeContentView: NSView {
     /// The inclusive row range currently on screen, or `nil` before layout has
     /// produced one (a first paint, which always honours its anchor).
     private func visibleRowRange() -> ClosedRange<Int>? {
-        guard !rowStartOffsets.isEmpty,
+        guard !rowOffsets.isEmpty,
               let layoutManager = textView.layoutManager,
               let container     = textView.textContainer
         else { return nil }
@@ -267,32 +256,21 @@ final class CodeContentView: NSView {
         guard glyphRange.length > 0 else { return nil }
 
         let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-        let first = row(containingOffset: charRange.location)
-        let last  = row(containingOffset: max(charRange.location, NSMaxRange(charRange) - 1))
+        let first = rowOffsets.row(containingOffset: charRange.location)
+        let last  = rowOffsets.row(containingOffset: max(charRange.location, NSMaxRange(charRange) - 1))
         return first...max(first, last)
     }
 
-    /// Binary search `rowStartOffsets` for the row containing a UTF-16 offset.
-    private func row(containingOffset offset: Int) -> Int {
-        var low = 0
-        var high = rowStartOffsets.count - 1
-        while low < high {
-            let mid = (low + high + 1) / 2
-            if rowStartOffsets[mid] <= offset { low = mid } else { high = mid - 1 }
-        }
-        return low
-    }
-
     private func scrollRowToCentre(_ row: Int) {
-        guard row >= 0, row < rowStartOffsets.count,
+        guard row >= 0, row < rowOffsets.count,
               let layoutManager = textView.layoutManager,
               let container     = textView.textContainer
         else { return }
 
-        let length = (row + 1 < rowStartOffsets.count
-                      ? rowStartOffsets[row + 1] - 1
-                      : (textView.string as NSString).length) - rowStartOffsets[row]
-        let charRange  = NSRange(location: rowStartOffsets[row], length: max(0, length))
+        let length = (row + 1 < rowOffsets.count
+                      ? rowOffsets[row + 1] - 1
+                      : (textView.string as NSString).length) - rowOffsets[row]
+        let charRange  = NSRange(location: rowOffsets[row], length: max(0, length))
         let glyphRange = layoutManager.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
         let rect       = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
 
@@ -318,11 +296,11 @@ final class LineNumberRulerView: NSRulerView {
 
     private weak var target: NSTextView?
     private var labels: [String] = []
-    /// UTF-16 offset each row starts at. Shared with the code view so finding
-    /// the first visible row is a binary search — counting newlines in a
-    /// substring of everything above the viewport is O(document) on every
-    /// single scroll frame, which is exactly the wrong cost for a large file.
-    private var rowStartOffsets: [Int] = []
+    /// Shared with the code view so finding the first visible row is a binary
+    /// search — counting newlines in a substring of everything above the
+    /// viewport is O(document) on every single scroll frame, which is exactly
+    /// the wrong cost for a large file.
+    private var rowOffsets = RowOffsetIndex()
     private var emphasised: Set<Int> = []
 
     init(textView: NSTextView) {
@@ -334,9 +312,9 @@ final class LineNumberRulerView: NSRulerView {
 
     required init(coder: NSCoder) { fatalError() }
 
-    func reload(labels: [String], rowStartOffsets: [Int]) {
+    func reload(labels: [String], rowOffsets: RowOffsetIndex) {
         self.labels = labels
-        self.rowStartOffsets = rowStartOffsets
+        self.rowOffsets = rowOffsets
         // Size the gutter to the widest label it will ever draw, so the text
         // doesn't shift horizontally as the operator scrolls into four-digit
         // territory.
@@ -348,18 +326,6 @@ final class LineNumberRulerView: NSRulerView {
     func setEmphasised(_ rows: Set<Int>) {
         emphasised = rows
         needsDisplay = true
-    }
-
-    /// Binary search `rowStartOffsets` for the row containing a UTF-16 offset.
-    private func row(containingOffset offset: Int) -> Int {
-        guard !rowStartOffsets.isEmpty else { return 0 }
-        var low = 0
-        var high = rowStartOffsets.count - 1
-        while low < high {
-            let mid = (low + high + 1) / 2
-            if rowStartOffsets[mid] <= offset { low = mid } else { high = mid - 1 }
-        }
-        return low
     }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
@@ -382,7 +348,7 @@ final class LineNumberRulerView: NSRulerView {
         let charRange  = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
 
         // Which row the first visible character belongs to.
-        var row = self.row(containingOffset: min(charRange.location, max(0, text.length - 1)))
+        var row = rowOffsets.row(containingOffset: min(charRange.location, max(0, text.length - 1)))
 
         let font = NSFont.monospacedDigitSystemFont(ofSize: Theme.monoFont.pointSize - 1, weight: .regular)
 

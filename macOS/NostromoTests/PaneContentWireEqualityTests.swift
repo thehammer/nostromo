@@ -110,11 +110,176 @@ final class PaneContentWireEqualityTests: XCTestCase {
         )
     }
 
+    // MARK: - .code (W2 — curated-agent-views)
+
+    private func makeCodePayload(
+        path:      String = "src/main.rs",
+        revision:  String = "a1b2c3d",
+        firstLine: Int    = 1,
+        text:      String = "let x = 1;"
+    ) -> CodePayload {
+        CodePayload(path: path, revision: revision, firstLine: firstLine, text: text)
+    }
+
+    func testCodeCasesWithIdenticalPayloadsAreEqual() {
+        XCTAssertEqual(PaneContentWire.code(makeCodePayload()), PaneContentWire.code(makeCodePayload()))
+    }
+
+    func testCodeCasesDifferingByPathAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.code(makeCodePayload()),
+            PaneContentWire.code(makeCodePayload(path: "src/other.rs"))
+        )
+    }
+
+    func testCodeCasesDifferingByRevisionAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.code(makeCodePayload()),
+            PaneContentWire.code(makeCodePayload(revision: "working"))
+        )
+    }
+
+    func testCodeCasesDifferingByFirstLineAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.code(makeCodePayload()),
+            PaneContentWire.code(makeCodePayload(firstLine: 42))
+        )
+    }
+
+    func testCodeCasesDifferingByTextAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.code(makeCodePayload()),
+            PaneContentWire.code(makeCodePayload(text: "let x = 2;"))
+        )
+    }
+
+    // MARK: - .diff (W2 — curated-agent-views)
+
+    private func makeDiffLine(
+        kind: DiffLineModel.Kind = .context,
+        oldN: Int? = 10,
+        newN: Int? = 10,
+        text: String = "let x = 1;"
+    ) -> DiffLineModel {
+        DiffLineModel(kind: kind, oldN: oldN, newN: newN, text: text)
+    }
+
+    private func makeDiffHunk(
+        header:   String = "@@ -10,3 +10,5 @@ fn main() {",
+        oldStart: Int = 10,
+        newStart: Int = 10,
+        lines:    [DiffLineModel]? = nil
+    ) -> DiffHunkModel {
+        DiffHunkModel(header: header, oldStart: oldStart, newStart: newStart, lines: lines ?? [makeDiffLine()])
+    }
+
+    private func makeDiffFile(
+        path:      String = "src/main.rs",
+        oldPath:   String? = nil,
+        status:    DiffFileModel.Status = .modified,
+        additions: Int = 3,
+        deletions: Int = 1,
+        hunks:     [DiffHunkModel]? = nil
+    ) -> DiffFileModel {
+        DiffFileModel(
+            path: path, oldPath: oldPath, status: status,
+            additions: additions, deletions: deletions, hunks: hunks ?? [makeDiffHunk()]
+        )
+    }
+
+    private func makeDiffPayload(
+        repo:         String = "acme/web",
+        number:       Int?   = 42,
+        files:        [DiffFileModel]? = nil,
+        tooLarge:     Bool = false,
+        changedFiles: Int  = 1
+    ) -> DiffPayload {
+        DiffPayload(
+            repo: repo, number: number, files: files ?? [makeDiffFile()],
+            tooLarge: tooLarge, changedFiles: changedFiles
+        )
+    }
+
+    func testDiffCasesWithIdenticalPayloadsAreEqual() {
+        XCTAssertEqual(PaneContentWire.diff(makeDiffPayload()), PaneContentWire.diff(makeDiffPayload()))
+    }
+
+    func testDiffCasesDifferingByRepoAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(repo: "acme/other"))
+        )
+    }
+
+    func testDiffCasesDifferingByNumberAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(number: 43))
+        )
+    }
+
+    func testDiffCasesDifferingByFilesAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(files: [makeDiffFile(path: "src/other.rs")]))
+        )
+    }
+
+    func testDiffCasesDifferingByTooLargeAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(tooLarge: true))
+        )
+    }
+
+    func testDiffCasesDifferingByChangedFilesAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(changedFiles: 5))
+        )
+    }
+
+    /// Proves nested `DiffFileModel`/`DiffHunkModel`/`DiffLineModel` equality
+    /// actually reaches down through `.diff`'s payload — not just the
+    /// top-level `DiffPayload` fields.
+    func testDiffCasesWithStructurallyDifferentFilesAreNotEqual() {
+        // A different hunk (header changes) inside an otherwise-identical file.
+        let differentHunk = makeDiffFile(hunks: [makeDiffHunk(header: "@@ -1,1 +1,1 @@ fn other() {")])
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload(files: [makeDiffFile()])),
+            PaneContentWire.diff(makeDiffPayload(files: [differentHunk])),
+            "a different hunk header nested inside an identical file must be caught"
+        )
+
+        // A different line kind inside an otherwise-identical hunk.
+        let differentLineKind = makeDiffFile(hunks: [makeDiffHunk(lines: [makeDiffLine(kind: .added)])])
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload(files: [makeDiffFile()])),
+            PaneContentWire.diff(makeDiffPayload(files: [differentLineKind])),
+            "a different line kind nested inside an identical hunk must be caught"
+        )
+
+        // A different oldPath (rename provenance) on an otherwise-identical file.
+        let differentOldPath = makeDiffFile(oldPath: "src/renamed_from.rs", status: .renamed)
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload(files: [makeDiffFile(status: .renamed)])),
+            PaneContentWire.diff(makeDiffPayload(files: [differentOldPath])),
+            "a different oldPath nested inside an identical file must be caught"
+        )
+    }
+
     // MARK: - Cross-case inequality
 
     func testDifferentCasesAreNeverEqual() {
         XCTAssertNotEqual(PaneContentWire.text("hello"), PaneContentWire.loading)
         XCTAssertNotEqual(PaneContentWire.error("boom"), PaneContentWire.text("boom"))
         XCTAssertNotEqual(PaneContentWire.prList([makeItem()]), PaneContentWire.loading)
+    }
+
+    func testCodeCaseNeverEqualsDiffTextOrLoading() {
+        let code = PaneContentWire.code(makeCodePayload())
+        XCTAssertNotEqual(code, PaneContentWire.diff(makeDiffPayload()))
+        XCTAssertNotEqual(code, PaneContentWire.text("let x = 1;"))
+        XCTAssertNotEqual(code, PaneContentWire.loading)
     }
 }

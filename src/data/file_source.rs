@@ -306,6 +306,53 @@ pub fn read_git_revision(
     }
 }
 
+/// Read `path` at `revision` without touching the network: the working tree
+/// when `revision` is [`WORKING_TREE`], else `git show <revision>:<path>`.
+///
+/// `UnresolvableRevision` here means specifically "git couldn't produce this
+/// object", which is the caller's signal to try [`read_from_github`] — not a
+/// terminal answer. Kept next to [`read_working_tree`]/[`read_git_revision`]
+/// since it is just their dispatch, with no daemon state involved.
+pub fn read_at_revision(root: &Path, revision: &str, path: &str) -> Result<String, FileSourceError> {
+    if revision == WORKING_TREE {
+        return read_working_tree(root, path);
+    }
+    match read_git_revision(root, revision, path)? {
+        Some(text) => Ok(text),
+        None => Err(FileSourceError::UnresolvableRevision),
+    }
+}
+
+/// Last-resort read via the GitHub contents API, against `repo` (`"owner/name"`,
+/// the repo of the PR currently under review). The common case, not the exotic
+/// one: a PR head from a fork was very likely never fetched locally, so
+/// [`read_at_revision`] fails with `UnresolvableRevision` and the caller comes
+/// here instead.
+pub async fn read_from_github(
+    repo: &str,
+    revision: &str,
+    path: &str,
+) -> Result<String, FileSourceError> {
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(FileSourceError::UnresolvableRevision);
+    };
+    if owner.is_empty() || name.is_empty() {
+        return Err(FileSourceError::UnresolvableRevision);
+    }
+    let client = crate::data::github_client::GithubClient::new(None)
+        .map_err(|_| FileSourceError::UnresolvableRevision)?;
+    let base = std::env::var("NOSTROMO_GITHUB_API_BASE")
+        .unwrap_or_else(|_| crate::data::github_client::GITHUB_API_BASE.to_string());
+    match client.file_at_ref(&base, owner, name, path, revision).await {
+        Ok(Some(text)) => Ok(text),
+        // A 404 from the contents API is the API's way of saying "not at that
+        // ref" — which, having already failed locally, is unresolvable.
+        Ok(None) => Err(FileSourceError::UnknownPath),
+        Err(_) => Err(FileSourceError::UnresolvableRevision),
+    }
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

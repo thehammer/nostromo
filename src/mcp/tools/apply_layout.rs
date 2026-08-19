@@ -260,18 +260,10 @@ pub(crate) fn fetch(
             })
         }
         SOURCE_FILE => {
-            let params = args.params.ok_or(FileSourceError::InvalidParams)?;
-            let request = FileRequest::from_params(params)?;
-            let root = file_root(state, args.tag);
-            let revision = file_source::resolve_revision(&request, &head_sha(state));
-            let text = read_file_sync(&root, &revision, &request)?;
+            let (request, root, revision) = file_request_context(state, args)?;
+            let text = file_source::read_at_revision(&root, &revision, &request.path)?;
             file_source::validate_against(&text, &request)?;
-            Ok(PaneContentWire::Code {
-                path: request.path,
-                revision,
-                first_line: 1,
-                text,
-            })
+            Ok(code_content(request, revision, text))
         }
         _ => Err(ApplyLayoutError::UnknownSource),
     }
@@ -295,76 +287,47 @@ pub(crate) async fn fetch_async(
         return fetch(source, state, args);
     }
 
+    let (request, root, revision) = file_request_context(state, args)?;
+    let text = match file_source::read_at_revision(&root, &revision, &request.path) {
+        Ok(text) => text,
+        Err(FileSourceError::UnresolvableRevision) => {
+            let repo = state
+                .perri_pr_rx
+                .borrow()
+                .as_ref()
+                .map(|s| s.repo.clone())
+                .unwrap_or_default();
+            file_source::read_from_github(&repo, &revision, &request.path).await?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    file_source::validate_against(&text, &request)?;
+    Ok(code_content(request, revision, text))
+}
+
+/// The `(request, root, revision)` a [`SOURCE_FILE`] fetch runs against,
+/// shared by [`fetch`] and [`fetch_async`] so the two can't resolve the same
+/// `params` to two different roots or revisions.
+fn file_request_context(
+    state: &McpSharedState,
+    args: FetchArgs<'_>,
+) -> Result<(FileRequest, std::path::PathBuf, String), ApplyLayoutError> {
     let params = args.params.ok_or(FileSourceError::InvalidParams)?;
     let request = FileRequest::from_params(params)?;
     let root = file_root(state, args.tag);
     let revision = file_source::resolve_revision(&request, &head_sha(state));
+    Ok((request, root, revision))
+}
 
-    let text = match read_file_sync(&root, &revision, &request) {
-        Ok(text) => text,
-        Err(ApplyLayoutError::FileRefused(FileSourceError::UnresolvableRevision)) => {
-            fetch_file_from_github(state, &revision, &request.path).await?
-        }
-        Err(e) => return Err(e),
-    };
-    file_source::validate_against(&text, &request)?;
-    Ok(PaneContentWire::Code {
+/// The `PaneContentWire::Code` a resolved file read produces — pulled out
+/// because [`fetch`] and [`fetch_async`] both build exactly this, differing
+/// only in how hard they worked to get `text`.
+fn code_content(request: FileRequest, revision: String, text: String) -> PaneContentWire {
+    PaneContentWire::Code {
         path: request.path,
         revision,
         first_line: 1,
         text,
-    })
-}
-
-/// Read `request.path` at `revision` without touching the network.
-///
-/// `UnresolvableRevision` here means specifically "git couldn't produce this
-/// object", which is [`fetch_async`]'s signal to try the contents API — not a
-/// terminal answer.
-fn read_file_sync(
-    root: &std::path::Path,
-    revision: &str,
-    request: &FileRequest,
-) -> Result<String, ApplyLayoutError> {
-    if revision == file_source::WORKING_TREE {
-        return Ok(file_source::read_working_tree(root, &request.path)?);
-    }
-    match file_source::read_git_revision(root, revision, &request.path)? {
-        Some(text) => Ok(text),
-        None => Err(FileSourceError::UnresolvableRevision.into()),
-    }
-}
-
-/// Last-resort read via the GitHub contents API, against the repo of the PR
-/// currently under review.
-async fn fetch_file_from_github(
-    state: &McpSharedState,
-    revision: &str,
-    path: &str,
-) -> Result<String, ApplyLayoutError> {
-    let repo = state
-        .perri_pr_rx
-        .borrow()
-        .as_ref()
-        .map(|s| s.repo.clone())
-        .unwrap_or_default();
-    let mut parts = repo.split('/');
-    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
-        return Err(FileSourceError::UnresolvableRevision.into());
-    };
-    if owner.is_empty() || name.is_empty() {
-        return Err(FileSourceError::UnresolvableRevision.into());
-    }
-    let client = crate::data::github_client::GithubClient::new(None)
-        .map_err(|_| ApplyLayoutError::FileRefused(FileSourceError::UnresolvableRevision))?;
-    let base = std::env::var("NOSTROMO_GITHUB_API_BASE")
-        .unwrap_or_else(|_| crate::data::github_client::GITHUB_API_BASE.to_string());
-    match client.file_at_ref(&base, owner, name, path, revision).await {
-        Ok(Some(text)) => Ok(text),
-        // A 404 from the contents API is the API's way of saying "not at that
-        // ref" — which, having already failed locally, is unresolvable.
-        Ok(None) => Err(FileSourceError::UnknownPath.into()),
-        Err(_) => Err(FileSourceError::UnresolvableRevision.into()),
     }
 }
 

@@ -108,6 +108,29 @@ pub(crate) fn broadcast_pane_content_with_address(
         .mark_painted(tag, pane_id);
 }
 
+/// Fetch a bound pane's current content and address, given its persisted
+/// `params` — the pair every automatic-repaint path below needs out of a
+/// fetch, computed together because both must derive from the exact same
+/// `params` value. Returns `None` when the fetch fails, mirroring the "skip a
+/// binding whose fetch fails" rule every caller already applies.
+///
+/// Freshness is deliberately not part of this trio: three of the four callers
+/// compute it independently right after (once, from `state`, not from the
+/// fetch), and `reevaluate_staleness` needs its freshness *before* deciding
+/// whether to fetch at all — folding it in here would either recompute it
+/// twice or contort this signature for one caller's early-exit.
+fn fetch_bound_content(
+    state: &McpSharedState,
+    tag: &str,
+    source: &str,
+    params: Option<&serde_json::Value>,
+) -> Option<(PaneContentWire, Option<PaneAddress>)> {
+    let args = FetchArgs::bound(tag, params);
+    let content = apply_layout::fetch(source, state, args).ok()?;
+    let address = apply_layout::address(source, params);
+    Some((content, address))
+}
+
 /// Broadcast `PaneContentWire::Loading` only if `(tag, pane_id)` has never
 /// been painted. Returns whether it actually sent. First-paint only — a
 /// spinner replacing content the operator is reading is wrong regardless of
@@ -147,10 +170,9 @@ pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
     bindings
         .into_iter()
         .filter_map(|(tag, pane_id, binding)| {
-            let args = FetchArgs::bound(&tag, binding.params.as_ref());
-            let content = apply_layout::fetch(&binding.source, state, args).ok()?;
+            let (content, address) =
+                fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())?;
             let fr = apply_layout::freshness(&binding.source, state);
-            let address = apply_layout::address(&binding.source, binding.params.as_ref());
             Some(ServerMsg::PaneContent {
                 tag,
                 pane_id,
@@ -175,12 +197,12 @@ pub fn repaint_bound_panes(state: &McpSharedState) {
     };
     let bindings = daemon.pane_registry.lock().unwrap().all_bindings();
     for (tag, pane_id, binding) in bindings {
-        let args = FetchArgs::bound(&tag, binding.params.as_ref());
-        let Ok(content) = apply_layout::fetch(&binding.source, state, args) else {
+        let Some((content, address)) =
+            fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())
+        else {
             continue;
         };
         let fr = apply_layout::freshness(&binding.source, state);
-        let address = apply_layout::address(&binding.source, binding.params.as_ref());
         broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }
 }
@@ -266,12 +288,11 @@ fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSen
         .collect();
 
     for (tag, pane_id, params) in targets {
-        let args = FetchArgs::bound(&tag, params.as_ref());
-        let Ok(content) = apply_layout::fetch(source, state, args) else {
+        let Some((content, address)) = fetch_bound_content(state, &tag, source, params.as_ref())
+        else {
             continue;
         };
         let fr = apply_layout::freshness(source, state);
-        let address = apply_layout::address(source, params.as_ref());
         let key = (tag.clone(), pane_id.clone());
         if last_sent.get(&key) == Some(&(content.clone(), fr.clone(), address.clone())) {
             continue;
@@ -303,11 +324,11 @@ fn reevaluate_staleness(state: &McpSharedState, last_sent: &mut LastSent) {
         if prev_fr.badly_stale == fr.badly_stale {
             continue;
         }
-        let args = FetchArgs::bound(&tag, binding.params.as_ref());
-        let Ok(content) = apply_layout::fetch(&source, state, args) else {
+        let Some((content, address)) =
+            fetch_bound_content(state, &tag, &source, binding.params.as_ref())
+        else {
             continue;
         };
-        let address = apply_layout::address(&source, binding.params.as_ref());
         last_sent.insert(key, (content.clone(), fr.clone(), address.clone()));
         broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }

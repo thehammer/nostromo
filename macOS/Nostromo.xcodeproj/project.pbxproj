@@ -57,6 +57,8 @@
 		LL0000000000000000000104 /* DiffAttributedString.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000004 /* DiffAttributedString.swift */; };
 		LL0000000000000000000204 /* DiffAttributedString.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000004 /* DiffAttributedString.swift */; };
 		LL0000000000000000000105 /* CodeContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000005 /* CodeContentView.swift */; };
+		LL0000000000000000000106 /* RowOffsetIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000010 /* RowOffsetIndex.swift */; };
+		LL0000000000000000000205 /* RowOffsetIndex.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000010 /* RowOffsetIndex.swift */; };
 		LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000006 /* CodeDocumentTests.swift */; };
 		LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000007 /* DiffDocumentTests.swift */; };
 		LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000008 /* ScrollDecisionTests.swift */; };
@@ -155,6 +157,7 @@
 		LL0000000000000000000003 /* ScrollDecision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDecision.swift; sourceTree = "<group>"; };
 		LL0000000000000000000004 /* DiffAttributedString.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffAttributedString.swift; sourceTree = "<group>"; };
 		LL0000000000000000000005 /* CodeContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeContentView.swift; sourceTree = "<group>"; };
+		LL0000000000000000000010 /* RowOffsetIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowOffsetIndex.swift; sourceTree = "<group>"; };
 		LL0000000000000000000006 /* CodeDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeDocumentTests.swift; sourceTree = "<group>"; };
 		LL0000000000000000000007 /* DiffDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffDocumentTests.swift; sourceTree = "<group>"; };
 		LL0000000000000000000008 /* ScrollDecisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDecisionTests.swift; sourceTree = "<group>"; };
@@ -295,6 +298,7 @@
 				LL0000000000000000000002 /* DiffDocument.swift */,
 				LL0000000000000000000003 /* ScrollDecision.swift */,
 				LL0000000000000000000004 /* DiffAttributedString.swift */,
+				LL0000000000000000000010 /* RowOffsetIndex.swift */,
 				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
 				AA0000020000000000000021 /* Views */,
 			);
@@ -481,6 +485,7 @@
 				LL0000000000000000000103 /* ScrollDecision.swift in Sources */,
 				LL0000000000000000000104 /* DiffAttributedString.swift in Sources */,
 				LL0000000000000000000105 /* CodeContentView.swift in Sources */,
+				LL0000000000000000000106 /* RowOffsetIndex.swift in Sources */,
 				FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */,
 				GG00000000000000000000A2 /* ProcessRunner.swift in Sources */,
 				II000000000000000000011 /* TurnInteractionStore.swift in Sources */,
@@ -522,6 +527,7 @@
 				LL0000000000000000000202 /* DiffDocument.swift in TestSources */,
 				LL0000000000000000000203 /* ScrollDecision.swift in TestSources */,
 				LL0000000000000000000204 /* DiffAttributedString.swift in TestSources */,
+				LL0000000000000000000205 /* RowOffsetIndex.swift in TestSources */,
 				LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */,
 				LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */,
 				LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */,
