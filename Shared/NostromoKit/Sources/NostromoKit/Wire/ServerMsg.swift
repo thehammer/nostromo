@@ -72,7 +72,23 @@ public enum ServerMsg {
     /// A new daemon-hosted focus was spawned via `create_focus`.
     case focusCreated(meta: FocusCreatedMeta)
 
+    /// A daemon-driven decision-modal request (W6). iOS decodes this so the
+    /// frame doesn't fall through to `.unknown`, but renders nothing for it —
+    /// decision modals are macOS-only in this wedge.
+    case decisionRequest(tag: String, requestId: String, prompt: String, detail: String?,
+                         choices: [DecisionChoice], contextPaneId: String?)
+
     case unknown
+}
+
+// MARK: - DecisionChoice
+
+/// One choice offered by a `decision_request` frame.
+/// Mirrors `DecisionChoice` in `src/ipc/protocol.rs`.
+public struct DecisionChoice: Decodable, Equatable {
+    public let id: String
+    public let label: String
+    public let detail: String?
 }
 
 // MARK: - SessionInfo
@@ -326,6 +342,14 @@ extension ServerMsg {
     private struct TeriStateWrapper:         Decodable { let todos: TeriTodosSnapshot }
     private struct FocusLayoutWrapper:       Decodable { let tag: String; let tree: PaneTree; let focused_pane: String? }
     private struct PaneContentWrapper:       Decodable { let tag: String; let pane_id: String; let content: PaneContentWire; let freshness: PaneFreshness?; let address: PaneAddress? }
+    private struct DecisionRequestWrapper:   Decodable {
+        let tag: String
+        let request_id: String
+        let prompt: String
+        let detail: String?
+        let choices: [DecisionChoice]
+        let context_pane_id: String?
+    }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -443,6 +467,13 @@ extension ServerMsg {
         case "focus_created":
             if let m = try? dec.decode(FocusCreatedMeta.self, from: data) {
                 return .focusCreated(meta: m)
+            }
+
+        case "decision_request":
+            if let m = try? dec.decode(DecisionRequestWrapper.self, from: data) {
+                return .decisionRequest(tag: m.tag, requestId: m.request_id, prompt: m.prompt,
+                                        detail: m.detail, choices: m.choices,
+                                        contextPaneId: m.context_pane_id)
             }
 
         default:

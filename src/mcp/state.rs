@@ -21,7 +21,7 @@ use crate::{
         teri_todos::TeriTodosSnapshot,
     },
     event::AppEvent,
-    ipc::{pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
+    ipc::{decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
     mcp::tool_stats::ToolStats,
     mother::{MotherJob, MotherStatus},
 };
@@ -112,6 +112,10 @@ pub struct DaemonMcpBackend {
     pub broadcast_tx: broadcast::Sender<ServerMsg>,
     /// Perri-specific daemon state (current-PR file writes, selected index).
     pub perri: PerriDaemonState,
+    /// Shared decision-modal registry (`nostromo.ask_decision`) — also handed
+    /// to `Server::bind` so the IPC layer can route `ClientMsg::DecisionAnswer`
+    /// and track `Topic::Decision` subscribers into the same registry.
+    pub decisions: Arc<Mutex<DecisionRegistry>>,
 }
 
 // ── shared state ───────────────────────────────────────────────────────────────

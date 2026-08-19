@@ -933,3 +933,16 @@ async fn dispatch_unknown_tool_returns_unknown_tool() {
         tools::ToolResult::Ok(_) => panic!("expected UnknownTool, got Ok"),
     }
 }
+
+// ── W6: decision modals tool surface ─────────────────────────────────────────
+
+#[test]
+fn nostromo_ask_decision_must_be_listed_in_tool_descriptors() {
+    let descriptors = tools::tool_descriptors();
+    assert!(
+        descriptors
+            .iter()
+            .any(|d| d["name"] == "nostromo.ask_decision"),
+        "nostromo.ask_decision must be listed in tool_descriptors()"
+    );
+}

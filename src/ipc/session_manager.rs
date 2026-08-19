@@ -48,6 +48,7 @@ use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 
+use super::decisions::DecisionRegistry;
 use super::pane_registry::{PaneContentProvider, PaneRegistry};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
 use super::stream_json::{load_scrollback, SessionState, SessionTranscript, Turn, TurnDelta};
@@ -247,6 +248,13 @@ pub struct SessionManager {
     /// daemon via [`SessionManager::configure_pane_content_provider`]; `None`
     /// in tests / non-daemon use.
     pane_content_provider: Option<Arc<dyn PaneContentProvider>>,
+    /// Shared decision-modal registry. Set by the daemon via
+    /// [`SessionManager::configure_decisions`]; `None` in tests / non-daemon
+    /// use. When a session goes permanently down (explicit stop or the
+    /// crash-loop guard tripping), its tag's pending decision requests are
+    /// cancelled here (D3/W6) — a decision nobody can answer must not block
+    /// its caller forever.
+    decisions: Option<Arc<Mutex<DecisionRegistry>>>,
 }
 
 impl SessionManager {
@@ -264,6 +272,7 @@ impl SessionManager {
             mcp_socket: None,
             mcp_config: None,
             pane_content_provider: None,
+            decisions: None,
         }
     }
 
@@ -293,6 +302,12 @@ impl SessionManager {
     /// newly (re)connected client (D8).
     pub fn configure_pane_content_provider(&mut self, provider: Arc<dyn PaneContentProvider>) {
         self.pane_content_provider = Some(provider);
+    }
+
+    /// Wire the shared decision-modal registry so a session going
+    /// permanently down cancels its tag's pending decisions (D3/W6).
+    pub fn configure_decisions(&mut self, registry: Arc<Mutex<DecisionRegistry>>) {
+        self.decisions = Some(registry);
     }
 
     /// Access the pane-content provider (if wired up).
@@ -699,6 +714,14 @@ impl SessionManager {
             }
             debug!(tag, "session stopped");
         }
+        // The session is going down (permanently, or about to be respawned by
+        // `restart`/`new_session`, both of which call this first) — either
+        // way, nobody can answer a decision addressed to this tag right now.
+        // A `restart` that lands moments later gets a *fresh* decision if the
+        // agent asks again; it never inherits the cancelled one.
+        if let Some(reg) = &self.decisions {
+            reg.lock().unwrap().cancel_tag(tag);
+        }
     }
 
     /// Stop then respawn with `--resume <session_id>`, preserving the set of
@@ -923,6 +946,12 @@ impl SessionManager {
                     s.shared.broadcast(SessionEvent::PermanentlyDown {
                         reason: StopReason::CrashLoopGuard,
                     });
+                }
+                // The session will not auto-restart — cancel any decision
+                // pending for this tag rather than leaving its caller blocked
+                // on a session that is never coming back on its own.
+                if let Some(reg) = &self.decisions {
+                    reg.lock().unwrap().cancel_tag(&tag);
                 }
             } else if wants_recovery {
                 // Exit-code-aware restart policy:

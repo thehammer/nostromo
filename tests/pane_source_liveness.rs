@@ -75,12 +75,14 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
         );
     }
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
+    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let server = Server::bind(
         &socket_path,
         Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
+        Arc::clone(&decisions),
     )
     .unwrap();
 
@@ -89,6 +91,7 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
         session_mgr: Arc::clone(&session_mgr),
         broadcast_tx: server.tx.clone(),
         perri: PerriDaemonState::default(),
+        decisions,
     };
     let state = McpSharedState::for_daemon(backend);
 
@@ -188,6 +191,7 @@ async fn fresh_registry_after_simulated_restart_has_bound_pane_content_ready_wit
         session_mgr,
         broadcast_tx,
         perri: PerriDaemonState::default(),
+        decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
     };
     let state = McpSharedState::for_daemon(backend);
 

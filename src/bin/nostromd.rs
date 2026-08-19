@@ -39,7 +39,10 @@ use nostromo::{
         perri_queue_native::PerriQueueNativeSource,
         teri_todos::TeriTodosNativeSource,
     },
-    ipc::{pane_registry::PaneRegistry, protocol::ServerMsg, PtyManager, Server, SessionManager},
+    ipc::{
+        decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, PtyManager,
+        Server, SessionManager,
+    },
     mcp::{daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState},
     mother::{self, statusline_cache_path, MotherStatus},
 };
@@ -81,10 +84,26 @@ async fn main() -> Result<()> {
     // an assembled layout survives a daemon restart.
     let pane_registry: Arc<Mutex<PaneRegistry>> = Arc::new(Mutex::new(PaneRegistry::new()));
 
+    // ── Decision registry (W6 decision modals) ─────────────────────────────────
+    // Shared between the IPC server (routes ClientMsg::DecisionAnswer, tracks
+    // Topic::Decision subscribers) and the daemon-hosted MCP backend
+    // (nostromo.ask_decision creates requests and blocks on their answer).
+    let decisions: Arc<Mutex<DecisionRegistry>> = Arc::new(Mutex::new(DecisionRegistry::new()));
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_decisions(Arc::clone(&decisions));
+    }
+
     // ── IPC server (Unix socket) ──────────────────────────────────────────────
     let socket_path = nostromo::ipc::default_socket_path();
-    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), config.perri_state_dir())
-        .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
+    let server = Server::bind(
+        &socket_path,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        config.perri_state_dir(),
+        Arc::clone(&decisions),
+    )
+    .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
 
     // ── IPC server (TCP — iOS / LAN clients) ──────────────────────────────────
     let tcp_addr = config.tcp_listen_addr();
@@ -107,7 +126,13 @@ async fn main() -> Result<()> {
         );
     }
 
-    server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), config.perri_state_dir());
+    server.bind_tcp(
+        tcp_listener,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        config.perri_state_dir(),
+        Arc::clone(&decisions),
+    );
 
     // ── mDNS / Bonjour advertising ────────────────────────────────────────────
     // Advertise nostromd on the LAN so iOS clients can discover it without a
@@ -180,6 +205,7 @@ async fn main() -> Result<()> {
                     queue_refresh_tx: Some(perri_queue_refresh_tx.clone()),
                     ..Default::default()
                 },
+                decisions: Arc::clone(&decisions),
             };
             let state = McpSharedState::for_daemon_with_sources(
                 backend,

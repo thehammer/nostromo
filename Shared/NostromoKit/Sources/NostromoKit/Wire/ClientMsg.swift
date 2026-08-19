@@ -188,3 +188,28 @@ public struct ClientPerriAction: Encodable {
         case repo
     }
 }
+
+// MARK: - DecisionAnswer
+
+/// Answer a `decision_request` (W6 decision modals).
+/// Mirrors `ClientMsg::DecisionAnswer` in `src/ipc/protocol.rs`.
+///
+/// `choiceId: nil` means dismissed without choosing — a distinct, meaningful
+/// outcome, not a default choice — so unlike most optional fields on this
+/// wire, `choice_id` is always present, as a string or as `null`.
+public struct ClientDecisionAnswer: Encodable {
+    let type_: String = "decision_answer"
+    public let requestId: String
+    public let choiceId: String?
+
+    public init(requestId: String, choiceId: String?) {
+        self.requestId = requestId
+        self.choiceId = choiceId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_     = "type"
+        case requestId = "request_id"
+        case choiceId  = "choice_id"
+    }
+}

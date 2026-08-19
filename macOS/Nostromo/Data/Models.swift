@@ -1135,6 +1135,19 @@ struct FocusLayoutModel {
     static let initial = FocusLayoutModel(tree: .replLeaf, focusedPane: nil)
 }
 
+// MARK: - Decision modal (W6)
+
+/// A daemon-driven decision request awaiting the operator's answer.
+/// Mirrors `ServerMsg::DecisionRequest` in `src/ipc/protocol.rs`.
+struct PendingDecision: Equatable {
+    let tag: String
+    let requestId: String
+    let prompt: String
+    let detail: String?
+    let choices: [DecisionChoiceWire]
+    let contextPaneId: String?
+}
+
 /// Minimal Decodable wrapper for an arbitrary JSON value.
 private struct AnyDecodable: Decodable {
     let value: Any
