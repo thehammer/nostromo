@@ -654,6 +654,21 @@ pub struct PaneAddress {
     pub reason: Option<String>,
 }
 
+// ── ambient activity (activity-path wedge) ───────────────────────────────────
+
+/// Wire projection of one `activity::store::ActivityStream` — a focus's main
+/// stream (`agent_id: None`) or one subagent's stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityStreamWire {
+    pub agent_id: Option<String>,
+    pub agent_type: Option<String>,
+    pub parent_agent_id: Option<String>,
+    pub events: Vec<ActivityEvent>,
+    /// `true` once this stream has received a `subagent_stop` event (always
+    /// `false` for the main stream).
+    pub finished: bool,
+}
+
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────
 
 pub(crate) mod base64_bytes {
@@ -843,6 +858,12 @@ pub enum ClientMsg {
         request_id: String,
         #[serde(default)]
         choice_id: Option<String>,
+    },
+
+    /// Request a full ambient-activity snapshot (all streams) for one focus.
+    /// The daemon replies with `ServerMsg::ActivitySnapshot`.
+    ActivitySnapshotRequest {
+        tag: String,
     },
 }
 
@@ -1093,6 +1114,29 @@ pub enum ServerMsg {
         /// A *reference* to a pane for context — never content itself (R7).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         context_pane_id: Option<String>,
+    },
+
+    // ── ambient activity (activity-path wedge) ───────────────────────────────
+    /// Full snapshot of one focus's activity streams — the main stream plus
+    /// every (running or finished) subagent stream. Sent in response to
+    /// `ClientMsg::ActivitySnapshotRequest`.
+    ActivitySnapshot {
+        tag: String,
+        streams: Vec<ActivityStreamWire>,
+    },
+
+    /// Ingestion health verdict for the ambient activity feed — is the
+    /// `activity.jsonl` tailer actually producing events, and is the hook
+    /// that feeds it installed.
+    ActivityHealth {
+        ingesting: bool,
+        /// Human-readable reason when `ingesting == false` (e.g. "hook not
+        /// installed", "tailer not started"). `None` when healthy.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        last_event_at: Option<chrono::DateTime<chrono::Utc>>,
+        hook_installed: bool,
     },
 
     /// TUI-internal pseudo-event — **never produced by the daemon**.
@@ -2078,6 +2122,101 @@ mod tests {
         .unwrap();
         assert_eq!(json["kind"], "pr_list");
     }
+
+    // ── ambient activity (activity-path wedge) ───────────────────────────────
+
+    fn sample_activity_event(summary: &str) -> ActivityEvent {
+        ActivityEvent {
+            ts: chrono::Utc::now(),
+            agent: "cody".into(),
+            kind: "tool_use".into(),
+            summary: summary.into(),
+            focus_tag: Some("cody-1".into()),
+            session_id: Some("sess-1".into()),
+            agent_id: None,
+            agent_type: None,
+            parent_agent_id: None,
+            tool_name: Some("Edit".into()),
+            tool_use_id: Some("tu-1".into()),
+            cwd: Some("/tmp".into()),
+            seq: Some(0),
+        }
+    }
+
+    #[test]
+    fn activity_snapshot_round_trips_with_main_and_subagent_streams() {
+        round_trip_server(ServerMsg::ActivitySnapshot {
+            tag: "cody-1".into(),
+            streams: vec![
+                ActivityStreamWire {
+                    agent_id: None,
+                    agent_type: None,
+                    parent_agent_id: None,
+                    events: vec![sample_activity_event("editing src/main.rs")],
+                    finished: false,
+                },
+                ActivityStreamWire {
+                    agent_id: Some("agent-1".into()),
+                    agent_type: Some("redd".into()),
+                    parent_agent_id: Some("agent-0".into()),
+                    events: vec![sample_activity_event("writing tests")],
+                    finished: true,
+                },
+            ],
+        });
+    }
+
+    #[test]
+    fn activity_health_round_trips_when_ingesting() {
+        round_trip_server(ServerMsg::ActivityHealth {
+            ingesting: true,
+            reason: None,
+            last_event_at: Some(chrono::Utc::now()),
+            hook_installed: true,
+        });
+    }
+
+    #[test]
+    fn activity_health_round_trips_when_not_ingesting() {
+        round_trip_server(ServerMsg::ActivityHealth {
+            ingesting: false,
+            reason: Some("hook not installed".into()),
+            last_event_at: None,
+            hook_installed: false,
+        });
+    }
+
+    #[test]
+    fn activity_snapshot_request_round_trips() {
+        round_trip_client(ClientMsg::ActivitySnapshotRequest { tag: "cody-1".into() });
+    }
+
+    /// An old daemon build (pre-schema-growth) emits the original 4-field
+    /// `Activity` shape with none of the new attribution fields present. A
+    /// hand-written JSON literal — not a serialize-then-deserialize round
+    /// trip — simulates that exact wire shape and must still parse.
+    #[test]
+    fn old_four_field_activity_message_still_deserializes() {
+        let raw = r#"{
+            "type": "activity",
+            "ts": "2026-08-19T00:00:00Z",
+            "agent": "perri",
+            "kind": "tool_use",
+            "summary": "reading a file"
+        }"#;
+        let msg: ServerMsg = serde_json::from_str(raw).expect("old 4-field Activity shape must still parse");
+        match msg {
+            ServerMsg::Activity(ev) => {
+                assert_eq!(ev.agent, "perri");
+                assert_eq!(ev.kind, "tool_use");
+                assert_eq!(ev.summary, "reading a file");
+                assert_eq!(ev.focus_tag, None);
+                assert_eq!(ev.seq, None);
+            }
+            other => panic!("expected Activity, got {other:?}"),
+        }
+    }
+
 
     // ── decision modals (W6) ──────────────────────────────────────────────────
 

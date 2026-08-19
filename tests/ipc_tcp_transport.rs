@@ -162,6 +162,16 @@ async fn tcp_and_unix_share_broadcast() {
     // Give the server a moment to register the subscriber.
     tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
+    // Subscribing to Topic::Activity triggers an immediate ActivityHealth
+    // replay (mirrors tests/activity.rs's own handshake) — drain it before
+    // looking for the broadcast below, or it's mistaken for the Pong.
+    let health_bytes = read_frame(&mut stream).await.unwrap();
+    let health: ServerMsg = serde_json::from_slice(&health_bytes).unwrap();
+    assert!(
+        matches!(health, ServerMsg::ActivityHealth { .. }),
+        "expected the subscribe-time ActivityHealth replay, got {health:?}"
+    );
+
     // Broadcast a Pong (matches any topic filter since it's not an Activity/Mother msg).
     server.broadcast(ServerMsg::Pong);
 

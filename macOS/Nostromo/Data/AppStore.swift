@@ -30,8 +30,14 @@ class AppStore: ObservableObject {
     @Published private(set) var rateLimits: RateLimits?     = nil
     @Published private(set) var posture:    PostureSnapshot? = nil
 
-    // Activity
-    @Published private(set) var recentActivity: [ActivityEvent] = []
+    // Activity — one assembled ActivityStreamModel per focus tag (keyed by
+    // ActivityEvent.focusTag, or "unattributed" for events the daemon
+    // couldn't resolve to a known focus — never dropped, never guessed at).
+    @Published private(set) var activityModels: [String: ActivityStreamModel] = [:]
+    /// Daemon-wide ambient-activity ingestion health. Defaults optimistic
+    /// (ingesting) until the first real `ActivityHealth` frame arrives on
+    /// connect, so a fresh launch doesn't flash a false "not receiving" state.
+    @Published private(set) var activityHealth = ActivityHealthState(ingesting: true, reason: nil, hookInstalled: true)
 
     // Teri todos
     @Published private(set) var teriTodos:            TeriTodosSnapshot? = nil
@@ -156,6 +162,19 @@ class AppStore: ObservableObject {
         if pendingDecision?.requestId == requestId {
             pendingDecision = nil
         }
+    }
+
+    // MARK: - Ambient activity (activity-path wedge)
+
+    /// Key `activityModels` is stored under for an event the daemon could not
+    /// attribute to a known focus — never dropped, never guessed onto an
+    /// arbitrary tab.
+    static let unattributedActivityKey = "__unattributed__"
+
+    /// The `ActivityStreamModel` for `tag`, or an empty (neutral "waiting")
+    /// model if nothing has arrived for it yet.
+    func activityModel(for tag: String) -> ActivityStreamModel {
+        activityModels[tag] ?? ActivityStreamModel()
     }
 
     /// Return the ChatSession for `tag` if one has already been created (lazy —
@@ -737,8 +756,29 @@ class AppStore: ObservableObject {
 
         case .activity(let ev):
             log.debug("activity: \(ev.agent, privacy: .public) — \(ev.summary, privacy: .public)")
-            recentActivity.append(ev)
-            if recentActivity.count > 64 { recentActivity.removeFirst() }
+            let tag = ev.focusTag ?? Self.unattributedActivityKey
+            var model = activityModels[tag] ?? ActivityStreamModel()
+            let gapDetected = model.ingest(ev)
+            activityModels[tag] = model
+            if gapDetected {
+                // A seq gap means this stream may already be presenting an
+                // incomplete record — re-sync from a full daemon snapshot
+                // rather than silently continue with a hole in the history.
+                log.debug("activity seq gap detected for \(tag, privacy: .public) — requesting a fresh snapshot")
+                client.requestActivitySnapshot(tag: tag)
+            }
+
+        case .activitySnapshot(let tag, let streams):
+            var model = ActivityStreamModel()
+            for stream in streams {
+                for event in stream.events {
+                    model.ingest(event)
+                }
+            }
+            activityModels[tag] = model
+
+        case .activityHealth(let ingesting, let reason, _, let hookInstalled):
+            activityHealth = ActivityHealthState(ingesting: ingesting, reason: reason, hookInstalled: hookInstalled)
 
         case .error(let msg):
             log.error("Daemon error: \(msg, privacy: .public)")
