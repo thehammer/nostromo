@@ -63,6 +63,7 @@
 		LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000007 /* DiffDocumentTests.swift */; };
 		LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000008 /* ScrollDecisionTests.swift */; };
 		LL0000000000000000000304 /* CodeContentViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000009 /* CodeContentViewTests.swift */; };
+		LL0000000000000000000305 /* RowOffsetIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000011 /* RowOffsetIndexTests.swift */; };
 		DD00000000000000000000A1 /* SessionHealthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD00000000000000000000A0 /* SessionHealthTests.swift */; };
 		DD00000000000000000000A2 /* NostromodClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002 /* NostromodClient.swift */; };
 		JJ0000000000000000000012 /* IPCLatencyStats.swift in TestSources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000001 /* IPCLatencyStats.swift */; };
@@ -162,6 +163,7 @@
 		LL0000000000000000000007 /* DiffDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffDocumentTests.swift; sourceTree = "<group>"; };
 		LL0000000000000000000008 /* ScrollDecisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDecisionTests.swift; sourceTree = "<group>"; };
 		LL0000000000000000000009 /* CodeContentViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeContentViewTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000011 /* RowOffsetIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowOffsetIndexTests.swift; sourceTree = "<group>"; };
 		DD00000000000000000000A0 /* SessionHealthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHealthTests.swift; sourceTree = "<group>"; };
 		FF00000000000000000000A1 /* SidenavGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGrouping.swift; sourceTree = "<group>"; };
 		FF00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
@@ -331,6 +333,7 @@
 				LL0000000000000000000007 /* DiffDocumentTests.swift */,
 				LL0000000000000000000008 /* ScrollDecisionTests.swift */,
 				LL0000000000000000000009 /* CodeContentViewTests.swift */,
+				LL0000000000000000000011 /* RowOffsetIndexTests.swift */,
 				HH000000000000000000100 /* TurnReconcilerTests.swift */,
 				HH000000000000000000110 /* TurnPayloadStoreTests.swift */,
 				HH000000000000000000120 /* TurnListVirtualizerTests.swift */,
@@ -532,6 +535,7 @@
 				LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */,
 				LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */,
 				LL0000000000000000000304 /* CodeContentViewTests.swift in Sources */,
+				LL0000000000000000000305 /* RowOffsetIndexTests.swift in Sources */,
 				DD00000000000000000000A1 /* SessionHealthTests.swift in Sources */,
 				DD00000000000000000000A2 /* NostromodClient.swift in TestSources */,
 				DD00000000000000000000A3 /* ChatModels.swift in TestSources */,

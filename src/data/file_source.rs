@@ -276,11 +276,19 @@ pub fn read_working_tree(root: &Path, path: &str) -> Result<String, FileSourceEr
 
 /// Read `path` at git revision `rev`, via `git show <rev>:<path>` in `root`.
 ///
-/// Returns `Ok(None)` — not an error — when git ran but doesn't have the
-/// object, which is the signal the caller uses to try the GitHub contents
-/// API. A genuinely bad path *inside* a revision git does have is
-/// indistinguishable from a missing object at this layer, so it also comes
-/// back as `Ok(None)` and is resolved (or refused) one level up.
+/// Returns `Ok(None)` — not an error — when the local clone doesn't have
+/// `rev` at all, which is the signal the caller uses to try the GitHub
+/// contents API. That case is genuinely common: a PR head from a fork was
+/// very likely never fetched.
+///
+/// A path that is missing *at a revision git does have* is a different answer
+/// entirely, and comes back as `Err(UnknownPath)` rather than `Ok(None)`.
+/// Both are `git show` exit-1, so they are told apart by asking git whether
+/// the revision resolves — not by matching on git's stderr wording, which
+/// varies by version and locale. Getting this distinction right is what stops
+/// "you typo'd the filename" from being reported to an agent as "that
+/// revision is unreachable", and saves a pointless network round trip on the
+/// way to saying so.
 pub fn read_git_revision(
     root: &Path,
     rev: &str,
@@ -289,21 +297,34 @@ pub fn read_git_revision(
     // Containment still applies: `git show` would happily read `../secrets`
     // out of a parent repo.
     resolve_within_root(root, path)?;
-    let spec = format!("{rev}:{path}");
-    let output = std::process::Command::new("git")
+    let output = git(root, &["show", &format!("{rev}:{path}")])?;
+    if output.status.success() {
+        return String::from_utf8(output.stdout)
+            .map(Some)
+            .map_err(|_| FileSourceError::NotUtf8);
+    }
+    if revision_exists(root, rev)? {
+        // git has the commit; the failure was about the path.
+        return Err(FileSourceError::UnknownPath);
+    }
+    Ok(None)
+}
+
+/// Whether the local clone can resolve `rev` to a commit.
+fn revision_exists(root: &Path, rev: &str) -> Result<bool, FileSourceError> {
+    let output = git(root, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")])?;
+    Ok(output.status.success())
+}
+
+/// Run `git -C <root> <args>`. A git that won't even launch is an
+/// unresolvable revision — there is no local answer to be had.
+fn git(root: &Path, args: &[&str]) -> Result<std::process::Output, FileSourceError> {
+    std::process::Command::new("git")
         .arg("-C")
         .arg(root)
-        .arg("show")
-        .arg(&spec)
+        .args(args)
         .output()
-        .map_err(|_| FileSourceError::UnresolvableRevision)?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    match String::from_utf8(output.stdout) {
-        Ok(text) => Ok(Some(text)),
-        Err(_) => Err(FileSourceError::NotUtf8),
-    }
+        .map_err(|_| FileSourceError::UnresolvableRevision)
 }
 
 /// Read `path` at `revision` without touching the network: the working tree
@@ -629,6 +650,225 @@ mod tests {
         assert_eq!(
             read_working_tree(tmp.path(), "binary.bin").unwrap_err(),
             FileSourceError::NotUtf8
+        );
+    }
+
+    // ── git test repo fixtures ─────────────────────────────────────────────────
+    //
+    // Real repos in a `TempDir`, never the ambient repo or the developer's git
+    // config: `user.name`/`user.email`/`commit.gpgsign` are passed explicitly on
+    // every commit so this suite behaves identically on a machine configured to
+    // sign commits (which would otherwise hang waiting on a passphrase prompt).
+
+    /// Run `git -C <dir> <args>`, panicking with git's stderr on failure. Only
+    /// for test setup — the module under test never uses this.
+    fn git_ok(dir: &Path, args: &[&str]) -> std::process::Output {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git should be on PATH");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    /// A fresh repo with a deterministic initial branch name (`main`), so
+    /// tests don't depend on the developer's `init.defaultBranch`.
+    fn init_repo() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        git_ok(tmp.path(), &["init", "-q", "-b", "main"]);
+        tmp
+    }
+
+    /// Write `path` with `contents`, commit it with explicit, ambient-config-
+    /// independent identity, and return the new commit's full SHA.
+    fn commit_file(root: &Path, path: &str, contents: &[u8]) -> String {
+        let full = root.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&full, contents).unwrap();
+        git_ok(root, &["add", path]);
+        git_ok(
+            root,
+            &[
+                "-c",
+                "user.email=redd@example.com",
+                "-c",
+                "user.name=Redd Test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "test commit",
+            ],
+        );
+        let output = git_ok(root, &["rev-parse", "HEAD"]);
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    // ── read_git_revision — a real commit returns the committed content ───────
+
+    #[test]
+    fn read_git_revision_at_a_real_sha_returns_committed_content_not_the_dirty_working_tree() {
+        let repo = init_repo();
+        let sha = commit_file(repo.path(), "src/lib.rs", b"committed version\n");
+
+        // Dirty the working tree after committing. If `read_git_revision` ever
+        // regressed into reading off disk instead of asking git for the blob
+        // at `sha`, this is the change that would leak through.
+        std::fs::write(repo.path().join("src/lib.rs"), b"dirty uncommitted edit\n").unwrap();
+
+        let text = read_git_revision(repo.path(), &sha, "src/lib.rs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "committed version\n");
+    }
+
+    // ── read_git_revision — a path git doesn't have at a revision it DOES have
+
+    #[test]
+    fn read_git_revision_missing_path_at_a_resolvable_revision_is_unknown_path_not_ok_none() {
+        let repo = init_repo();
+        let sha = commit_file(repo.path(), "src/lib.rs", b"hello\n");
+
+        assert_eq!(
+            read_git_revision(repo.path(), &sha, "src/does_not_exist.rs").unwrap_err(),
+            FileSourceError::UnknownPath,
+            "git resolves the revision fine; the path is what's missing — must not be reported as Ok(None)"
+        );
+    }
+
+    // ── read_git_revision — a revision the clone can't resolve at all ────────
+
+    #[test]
+    fn read_git_revision_unresolvable_revision_returns_ok_none_not_an_error() {
+        let repo = init_repo();
+        commit_file(repo.path(), "src/lib.rs", b"hello\n");
+
+        // A syntactically plausible but nonexistent SHA.
+        assert_eq!(
+            read_git_revision(
+                repo.path(),
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "src/lib.rs"
+            )
+            .unwrap(),
+            None,
+            "an unreachable revision is the caller's signal to fall back to the GitHub contents API, not an error"
+        );
+
+        // A nonsense ref name resolves the same way.
+        assert_eq!(
+            read_git_revision(repo.path(), "not-a-real-ref-or-branch", "src/lib.rs").unwrap(),
+            None
+        );
+    }
+
+    // ── read_git_revision — containment is still enforced, before git runs ───
+
+    #[test]
+    fn read_git_revision_refuses_a_path_escape_before_invoking_git() {
+        // Deliberately NOT a git repo: if containment were checked after (or
+        // never), `git show` would simply fail in a non-repo directory and
+        // `revision_exists` would report `false`, surfacing as `Ok(None)`
+        // instead of `Err(PathEscapesRoot)`. Getting `PathEscapesRoot` back
+        // here proves the escape is caught before git is ever invoked.
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            read_git_revision(tmp.path(), "HEAD", "../escape").unwrap_err(),
+            FileSourceError::PathEscapesRoot
+        );
+    }
+
+    // ── read_git_revision — non-UTF-8 committed content ───────────────────────
+
+    #[test]
+    fn read_git_revision_non_utf8_committed_content_returns_not_utf8() {
+        let repo = init_repo();
+        let sha = commit_file(repo.path(), "binary.bin", &[0xff, 0xfe, 0x00, 0xff]);
+
+        assert_eq!(
+            read_git_revision(repo.path(), &sha, "binary.bin").unwrap_err(),
+            FileSourceError::NotUtf8
+        );
+    }
+
+    // ── read_git_revision — a tag and a branch name both resolve ──────────────
+
+    #[test]
+    fn read_git_revision_resolves_a_tag_name() {
+        let repo = init_repo();
+        commit_file(repo.path(), "src/lib.rs", b"tagged content\n");
+        git_ok(repo.path(), &["tag", "v1"]);
+
+        let text = read_git_revision(repo.path(), "v1", "src/lib.rs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "tagged content\n");
+    }
+
+    #[test]
+    fn read_git_revision_resolves_a_branch_name() {
+        let repo = init_repo();
+        commit_file(repo.path(), "src/lib.rs", b"on a branch\n");
+        git_ok(repo.path(), &["branch", "feature-branch"]);
+
+        let text = read_git_revision(repo.path(), "feature-branch", "src/lib.rs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "on a branch\n");
+    }
+
+    // ── read_at_revision — dispatch between working tree and git revisions ────
+
+    #[test]
+    fn read_at_revision_working_reads_the_dirty_working_tree_contrasting_with_a_real_sha() {
+        let repo = init_repo();
+        let sha = commit_file(repo.path(), "src/lib.rs", b"committed version\n");
+        std::fs::write(repo.path().join("src/lib.rs"), b"dirty uncommitted edit\n").unwrap();
+
+        let working = read_at_revision(repo.path(), WORKING_TREE, "src/lib.rs").unwrap();
+        assert_eq!(working, "dirty uncommitted edit\n");
+
+        let committed = read_at_revision(repo.path(), &sha, "src/lib.rs").unwrap();
+        assert_eq!(committed, "committed version\n");
+    }
+
+    #[test]
+    fn read_at_revision_unresolvable_revision_returns_unresolvable_revision_error() {
+        let repo = init_repo();
+        commit_file(repo.path(), "src/lib.rs", b"hello\n");
+
+        assert_eq!(
+            read_at_revision(
+                repo.path(),
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "src/lib.rs"
+            )
+            .unwrap_err(),
+            FileSourceError::UnresolvableRevision
+        );
+    }
+
+    // ── read_at_revision — error precision: missing path != unresolvable rev ──
+
+    #[test]
+    fn read_at_revision_missing_path_at_a_resolvable_revision_propagates_unknown_path() {
+        let repo = init_repo();
+        let sha = commit_file(repo.path(), "src/lib.rs", b"hello\n");
+
+        assert_eq!(
+            read_at_revision(repo.path(), &sha, "src/does_not_exist.rs").unwrap_err(),
+            FileSourceError::UnknownPath,
+            "the revision resolved fine; only the path is missing, and that distinction must survive the read_at_revision dispatch"
         );
     }
 }
