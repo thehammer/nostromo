@@ -735,3 +735,246 @@ this feature's shape precedent, not its mechanism. Wiring the permission path
 means deciding a permission posture, which is a different feature.
 
 Source: `src/mcp/tools/ask_decision.rs`, `src/ipc/decisions.rs`
+
+---
+
+## Phase 5 — The curated view surface (curated-agent-views W5)
+
+`nostromo.show` is the deliberate, attention-directing surface: one tool, a
+closed vocabulary of five view types, and a deterministic placement engine
+(`src/mcp/views/`) that decides where each view lands with no LLM inference
+in the decision itself. This is where the PRD's central reversal lands:
+`set_pane_content`, `set_pane_layout`, `set_pane_focus`, `create_pane`,
+`reset_panes`, `apply_layout`, and `refresh_pane_content` become
+implementation details this layer uses internally, rather than tools an
+interactive agent reaches for directly. See `docs/mcp/panes.md`'s "Placement
+rules" section for the engine's rules (R1–R8) and `docs/mcp/agent-layout.md`
+for the curated flow this replaces.
+
+### `nostromo.show`
+
+**Input**:
+
+| field | type | required | notes |
+|---|---|---|---|
+| `type` | string enum | yes | one of `review_queue`, `pr_conversation`, `pr_diff`, `file`, `ticket`. `activity` is a real view in the PRD's vocabulary but is refused here with its own code — it is populated only by the ambient path (W7), and an agent cannot push into it. Anything else is `unknown_view_type`, and the refusal names every valid type. |
+| `target` | object | depends on `type` | omitted for `review_queue` (a stray one is tolerated, not refused); required and shape-checked for the other four — see the table below. |
+| `anchor` | object | no | where to scroll on arrival — one `Anchor` payload (see `docs/mcp/panes.md`'s `PaneAddress` section for the wire type). |
+| `emphasis` | array | no | zero or more `Emphasis` payloads to mark as significant. |
+| `reason` | string | no | one short phrase shown with the view. Blank/whitespace-only is dropped rather than shown as an empty caption. |
+| `view_id` | string | no | target focus tag; defaults to the caller's own focus (resolved from the `Hello` `pty_id`). A caller with no resolvable tag and no explicit `view_id` gets `unidentified_caller`. |
+
+Targets, and the anchor/emphasis kinds each type's own source acts on:
+
+| `type` | `target` | anchor kind | emphasis kind |
+|---|---|---|---|
+| `review_queue` | *(none)* | `{kind:"queue_row", repo, number}` | `{kind:"queue_row", repo, number}` |
+| `pr_conversation` | `{repo, number}` | `{kind:"comment", id}` | `{kind:"comment", id}` |
+| `pr_diff` | `{repo, number}` | `{kind:"line", path?, line}` | `{kind:"line_range", path?, start, end}` |
+| `file` | `{path, revision?}` | `{kind:"line", line}` | `{kind:"line_range", start, end}` |
+| `ticket` | `{provider, key}` | `{kind:"section", name}` (`name` may be `"comment:<n>"`) | `{kind:"section", name}` |
+
+`repo` must parse as `owner/name` — validated by the same slug check
+`perri.load_pr` uses, so there is one repo-slug validator, not two that could
+disagree. `revision` on `file` is part of the view's *identity*, not just its
+addressing: `{path: "a.rs"}` and `{path: "a.rs", revision: "abc"}` are two
+different tabs, and re-showing the bare form later never touches the pinned
+one.
+
+**Only `file` actually enforces that an anchor/emphasis is the right kind for
+the view.** Its adapter (`source_params` in `show.rs`) translates the uniform
+payload into `nostromo.get_file`'s own bare `anchor_line`/`{start, end}`
+dialect, and a `comment`/`section`/`queue_row` anchor or a non-`line_range`
+emphasis is refused as `invalid_anchor`/`invalid_emphasis` before anything is
+touched. For the other four types, `nostromo.show` forwards the anchor and
+emphasis objects to the underlying source **verbatim**, with no kind check at
+this layer — a `{kind:"line"}` anchor sent to a `ticket` show, for instance,
+is accepted by `show` and simply has no effect, because `ticket`'s renderer
+only ever pattern-matches `Anchor::Section` and silently ignores anything
+else (this is deliberately covered by
+`validate_comment_ids_ignores_a_non_comment_anchor_or_emphasis_kind` in
+`apply_layout.rs`, for the equivalent `pr_conversation` case). A payload of
+the *right* kind that names something that doesn't resolve is still refused,
+downstream, as its own fetch-level error (`unknown_comment_id`,
+`unknown_section`) — see below.
+
+**Output** (success):
+
+```json
+{
+  "ok": true,
+  "region": "detail",
+  "pane_id": "detail.2",
+  "label": "session_manager.rs",
+  "tab_index": 1,
+  "reused": false,
+  "frontmost": true,
+  "evicted": null,
+  "closed": []
+}
+```
+
+- `region` / `pane_id` — where the view landed, so the agent can refer to it
+  ("the File tab") in conversation rather than guessing.
+- `label` / `tab_index` — the tab's caption and its position among its
+  region's tabs, left to right.
+- `reused` — `true` when an already-open tab of the same `(type, identity)`
+  was re-anchored rather than a new tab being opened (R2).
+- `frontmost` — always `true`. A deliberate show takes focus unconditionally,
+  whether the tab is new or reused (R5 — see `docs/mcp/panes.md`).
+- `evicted` — the pane id R4's cap eviction closed to make room, or `null`.
+- `closed` — the pane ids R8 closed because this show named a PR other than
+  the one that was under review. Always `[]` outside that trigger, and
+  disjoint from `evicted` — the two are different reasons a tab goes away.
+
+**Errors**:
+
+| `error` | Meaning |
+|---|---|
+| `unknown_view_type` | `type` is missing or outside the closed vocabulary. `detail` names every valid type. |
+| `activity_not_pushable` | `type: "activity"` — a real view, populated only by the ambient path (W7); `detail` also names the valid types. |
+| `invalid_target` | `target` was absent or the wrong shape for this `type`, including a malformed `repo` slug. |
+| `invalid_anchor` | `anchor` was present but the wrong kind for this view (`file` only — see above), or failed to deserialize as an `Anchor` at all. |
+| `invalid_emphasis` | An `emphasis` entry was the wrong kind for this view, `emphasis` wasn't an array, or an entry failed to deserialize as an `Emphasis`. |
+| `unknown_region` | `views.yaml` (compiled-in or override) names no such region for this view's type — only reachable through a broken override. |
+| `region_not_tabbed` | The view's home region already holds a *different* view and isn't tabbed (the queue region, in the compiled-in rules — R1). |
+| `region_not_creatable` | The view's home region doesn't exist yet, and none of its `create` candidates in `views.yaml` names a pane currently live in this focus. |
+| `pane_id_taken` | Creating a non-tabbed region would need a pane id something else in this focus already holds. |
+| `invalid_views_config` | `views.yaml` (compiled-in or override) is malformed. |
+| `unknown_source` / `fetch_failed` | The view's underlying fetcher isn't in the closed registry, or ran but failed — the same codes `apply_layout`/`refresh_pane_content` surface. |
+| `invalid_params` / `unknown_path` / `path_escapes_root` / `not_utf8` / `anchor_beyond_eof` / `invalid_emphasis_range` / `unresolvable_revision` | `file`'s fetch-level refusals (`FileSourceError`) — see `docs/mcp/panes.md`'s `code`/`diff` section. |
+| `unknown_comment_id` | A `pr_conversation` anchor/emphasis named a comment id absent from the fetched conversation. |
+| `unsupported_provider` / `provider_unconfigured` / `unknown_ticket` / `unknown_section` | `ticket`'s fetch-level refusals — see `docs/mcp/panes.md`'s `ticket` section. |
+| `not_supported` | Called against a non-daemon-hosted MCP server. |
+| `unidentified_caller` | No `view_id` and no caller `pty_id` to target. |
+| `unknown_view` | The resolved focus was removed from the registry between placement and mutation — a race, not a normal path. |
+
+Every refusal from `unknown_view_type` through `invalid_views_config` happens
+**before** the fetch and leaves the focus's layout byte-identical, broadcasting
+nothing: validate → place → fetch → mutate → broadcast, in that order,
+specifically so a bad show can never destroy what the operator was reading. A
+fetch-level refusal follows the same discipline for every code that names
+something the *caller* got wrong (`invalid_params`, `unknown_path`, …,
+`unknown_comment_id`, and every `ticket` refusal except its own
+`fetch_failed`); a bare `fetch_failed` means the source itself is broken and
+stays loud.
+
+**Example** — three shows in one review, starting from `perri-curated`'s bare
+`queue` + `repl` tree:
+
+Show a PR's diff — no `detail` region exists yet, so this call also creates
+it (splitting `queue`, `[0.5, 0.5]`, per `views.yaml`'s first `create`
+candidate):
+```json
+{ "type": "pr_diff", "target": { "repo": "acme/web", "number": 42 } }
+```
+```json
+{ "ok": true, "region": "detail", "pane_id": "detail.0", "label": "Diff",
+  "tab_index": 0, "reused": false, "frontmost": true, "evicted": null, "closed": [] }
+```
+
+Point at a file, anchored and emphasised, with a reason:
+```json
+{
+  "type": "file",
+  "target": { "path": "src/ipc/session_manager.rs" },
+  "anchor": { "kind": "line", "line": 412 },
+  "emphasis": [ { "kind": "line_range", "start": 409, "end": 415 } ],
+  "reason": "the spawn path this PR touches"
+}
+```
+```json
+{ "ok": true, "region": "detail", "pane_id": "detail.1", "label": "session_manager.rs",
+  "tab_index": 1, "reused": false, "frontmost": true, "evicted": null, "closed": [] }
+```
+
+Point at the same file at a different line — one tab, re-anchored, not a
+second tab (R2):
+```json
+{
+  "type": "file",
+  "target": { "path": "src/ipc/session_manager.rs" },
+  "anchor": { "kind": "line", "line": 88 }
+}
+```
+```json
+{ "ok": true, "region": "detail", "pane_id": "detail.1", "label": "session_manager.rs",
+  "tab_index": 1, "reused": true, "frontmost": true, "evicted": null, "closed": [] }
+```
+
+Source: `src/mcp/tools/show.rs`, `src/mcp/views/`.
+
+---
+
+### Per-caller tool withdrawal
+
+The MCP tool surface is flat by default: `tools/list` returns the same list
+to every caller, and `tools/call` will run any of them for anyone.
+`~/.nostromo/tool-policy.yaml` narrows that per caller — an operator-written
+denylist, not a compiled-in restriction.
+
+**Keyed on the agent name, not the tag.** A caller's identity arrives as the
+`Hello` frame's `pty_id`, which in the daemon *is* the focus tag. The policy
+doesn't match the tag directly; it resolves the tag to an `agent_name`
+through the focus registry — the same lookup `nostromo.get_self` already
+does — so a policy that says `perri` covers a dispatched focus like
+`perri-a1b2c3d4`, with no prefix-matching hack.
+
+**Both `tools/list` and `tools/call` consult it.** Filtering `tools/list`
+alone is advisory — an agent can call a tool name it never saw in the list,
+and a drifting prompt will. `tools/call`'s gate, at the top of
+`dispatch_inner` (`src/mcp/tools/mod.rs`), is the half that actually holds;
+the list filter only stops the tool being *suggested* in the first place.
+
+**A denied `tools/call` gets its own JSON-RPC error code, `-32001`**
+(`TOOL_FORBIDDEN_CODE`, `src/mcp/server.rs`), deliberately not `-32601`
+("Method not found"): the two mean different things to the calling agent.
+`-32601` says "no such tool" — a fact an agent would reasonably read as a
+daemon bug and retry. `-32001` says "this tool exists and works, but the
+operator's policy withdraws it from you" — a fact the agent can act on (stop
+reaching for it) instead of retrying against.
+
+**Unresolved callers, and a policy that fails to load cleanly, both fail
+open.** An absent or malformed `tool-policy.yaml` parses as the empty policy
+(denies nothing) rather than an error. A caller with no `Hello` `pty_id`, or a
+tag the focus registry doesn't recognise, gets the unfiltered surface. The
+threat model here is a prompt drifting onto a withdrawn tool, not an
+adversary — the alternative, failing closed, would mean a daemon-registry
+hiccup silently disarming every agent's tool surface at once.
+
+**The shipped default is empty — every deployment starts unarmed.**
+`ToolPolicy::default()` denies nothing to anyone, and that is what ships
+until an operator writes `~/.nostromo/tool-policy.yaml`. This is deliberate:
+Perri's prompt (`~/.claude/agents/perri.md`, a different repository) still
+drives `apply_layout` and `refresh_pane_content` directly today, and
+withdrawing those tools in the same change that adds `nostromo.show` would
+break her review flow the moment this wedge merged, before her prompt was
+rewritten to use `show` instead. **W8 is what arms it** — it is expected to
+write the policy below to disk and rewrite the prompt in the same change, so
+the withdrawal and its replacement land together. Until then, this
+mechanism, its policy model, and its tests exist and are exercised by tests
+that inject a policy directly, not by anything on disk.
+
+The policy W8 is expected to install, `INTENDED_PERRI_POLICY`
+(`src/mcp/tool_policy.rs`) — documented in the mechanism's own module so the
+two can't drift apart:
+
+```yaml
+agents:
+  perri:
+    deny:
+      - nostromo.set_pane_content
+      - nostromo.set_pane_layout
+      - nostromo.set_pane_focus
+      - nostromo.create_pane
+      - nostromo.reset_panes
+      - nostromo.apply_layout
+      - nostromo.refresh_pane_content
+```
+
+Every other caller — Mother, Fred, Teri, Cody, and anyone else the policy
+doesn't name — sees a `tools/list` byte-for-byte identical to what it always
+returned, whether or not this policy is armed for Perri.
+
+Source: `src/mcp/tool_policy.rs`, `src/mcp/server.rs` (`TOOL_FORBIDDEN_CODE`),
+`src/mcp/tools/mod.rs` (`tool_descriptors_for`, the `dispatch_inner` gate).

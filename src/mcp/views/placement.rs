@@ -175,27 +175,26 @@ pub fn place(
 
     let mut evicted = None;
     let pane_id;
-    let insert_at;
 
-    match matched {
-        Some(index) => {
-            pane_id = tabs[index].pane_id.clone();
-            insert_at = index;
-        }
-        None => {
-            pane_id = new_pane_id(region_rule, state, &region_name)?;
-            // ── R3 — new identity, new tab, at its type's position ──────────
-            insert_at = insertion_index(cfg, &tabs, req);
-            // ── R4 — cap and eviction ───────────────────────────────────────
-            //
-            // Evaluated *before* the insert, against the tabs that were
-            // already there, so "the frontmost tab" means the one the operator
-            // was reading rather than the one about to steal focus.
-            if let (Some(cap), Some(policy)) = (region_rule.tab_cap, region_rule.evict) {
-                if tabs.len() + 1 > cap {
-                    evicted = pick_victim(&tabs, previously_active_pane.as_deref(), policy);
-                }
+    if let Some(matched_index) = matched {
+        pane_id = tabs[matched_index].pane_id.clone();
+    } else {
+        pane_id = new_pane_id(region_rule, state, &region_name)?;
+        // ── R4 — cap and eviction ───────────────────────────────────────────
+        //
+        // Evaluated *before* the insert, against the tabs that were already
+        // there, so "the frontmost tab" means the one the operator was reading
+        // rather than the one about to steal focus.
+        if let (Some(cap), Some(policy)) = (region_rule.tab_cap, region_rule.evict) {
+            if tabs.len() + 1 > cap {
+                evicted = pick_victim(&tabs, previously_active_pane.as_deref(), policy);
             }
+        }
+        // The victim leaves before the new tab's position is decided. Ordering
+        // against the pre-eviction list instead would land the new tab one
+        // place too far right whenever the evicted tab sat to its left.
+        if let Some(victim) = &evicted {
+            tabs.retain(|t| &t.pane_id != victim);
         }
     }
 
@@ -203,16 +202,14 @@ pub fn place(
         .iter()
         .map(|t| (t.pane_id.clone(), t.label()))
         .collect();
-    if let Some(victim) = &evicted {
-        order.retain(|(id, _)| id != victim);
-    }
     let final_index = if matched.is_some() {
         order
             .iter()
             .position(|(id, _)| id == &pane_id)
             .expect("a reused tab is still in the order")
     } else {
-        let at = insert_at.min(order.len());
+        // ── R3 — new identity, new tab, at its type's position ──────────────
+        let at = insertion_index(cfg, &tabs, req);
         order.insert(at, (pane_id.clone(), label.clone()));
         at
     };
@@ -774,6 +771,37 @@ mod tests {
         let p = place(&cfg(), &state, &show(ViewType::File, file("src/d.rs"))).unwrap();
         assert_eq!(p.evicted, None);
         assert_eq!(p.tab_order.len(), 7, "a cap must not turn a show into a failure");
+    }
+
+    #[test]
+    fn a_new_tab_lands_at_its_own_position_even_when_the_evicted_tab_was_left_of_it() {
+        // The victim leaves before the new tab's position is decided. Ordering
+        // against the pre-eviction list would put `m.rs` *after* `z.rs` here,
+        // which would make tab position depend on which tab happened to be
+        // evicted — exactly what R3 says it must not depend on.
+        let cfg = config::parse(
+            "regions:\n  detail: { tabbed: true, pane_prefix: detail, tab_cap: 2, evict: least_recently_focused_unpinned }\nviews:\n  file: { region: detail, order: 0 }\n",
+        )
+        .unwrap();
+        let mut state = curated_start();
+        state.regions.insert(
+            "detail".to_string(),
+            RegionState {
+                tabs: vec![
+                    tab("detail.0", ViewType::File, file("src/a.rs"), 1),
+                    tab("detail.1", ViewType::File, file("src/z.rs"), 5),
+                ],
+                active: Some(1),
+            },
+        );
+        state.taken_pane_ids.insert("detail.0".into());
+        state.taken_pane_ids.insert("detail.1".into());
+
+        let p = place(&cfg, &state, &show(ViewType::File, file("src/m.rs"))).unwrap();
+        assert_eq!(p.evicted.as_deref(), Some("detail.0"));
+        assert_eq!(p.tab_order, vec![p.pane_id.clone(), "detail.1".to_string()]);
+        assert_eq!(p.tab_index, 0, "m.rs sorts before z.rs");
+        assert_eq!(p.labels, vec!["m.rs", "z.rs"]);
     }
 
     #[test]

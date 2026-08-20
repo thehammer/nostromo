@@ -1097,7 +1097,223 @@ mod tests {
         }
     }
 
-    // ── 6. the descriptor ─────────────────────────────────────────────────────
+    // ── 6. region creation and removal (D5) ───────────────────────────────────
+
+    /// Both PR sources render "no PR loaded" rather than failing when nothing
+    /// is under review, so they exercise the whole place→apply→broadcast path
+    /// without a network or a fixture.
+    async fn show_ok(state: &McpSharedState, args: Value) -> Value {
+        let out = show(state, &args, Some("perri")).await;
+        assert_eq!(out["ok"], true, "expected a successful show, got {out}");
+        out
+    }
+
+    fn pr_target(number: u64) -> Value {
+        json!({ "repo": "thehammer/nostromo", "number": number })
+    }
+
+    #[tokio::test]
+    async fn a_bare_focus_bootstraps_both_regions_through_show_alone() {
+        // The criterion: every view type opens "without calling any of
+        // set_pane_content, set_pane_layout, set_pane_focus, create_pane,
+        // reset_panes, apply_layout, or refresh_pane_content". This test calls
+        // none of them — the focus starts as a bare repl leaf.
+        let (state, _rx) = make_state();
+        registry(&state).lock().unwrap().get_or_init("perri");
+        assert_eq!(tree_of(&state, "perri"), Some(PaneTree::repl_leaf()));
+
+        let queue = show_ok(&state, json!({ "type": "review_queue" })).await;
+        assert_eq!(queue["region"], "queue");
+        assert_eq!(queue["pane_id"], "queue");
+
+        let diff = show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
+        assert_eq!(diff["region"], "detail");
+
+        let tree = tree_of(&state, "perri").unwrap();
+        let ids = tree.pane_ids();
+        assert!(ids.contains(&"queue".to_string()));
+        assert!(ids.contains(&"repl".to_string()));
+        assert_eq!(
+            ids.iter().filter(|id| *id == "repl").count(),
+            1,
+            "exactly one repl survives both region creations"
+        );
+        assert!(view_tree::tabs_region(&tree, "detail").is_some());
+    }
+
+    #[tokio::test]
+    async fn the_detail_region_is_created_on_the_first_show_that_needs_one() {
+        let (state, _rx) = make_state();
+        seed_curated(&state, "perri");
+        assert!(view_tree::tabs_region(&tree_of(&state, "perri").unwrap(), "detail").is_none());
+
+        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        assert!(view_tree::tabs_region(&tree_of(&state, "perri").unwrap(), "detail").is_some());
+    }
+
+    #[tokio::test]
+    async fn the_detail_region_is_removed_when_its_last_tab_closes() {
+        let (state, _rx) = make_state();
+        seed_curated(&state, "perri");
+        let before = tree_of(&state, "perri").unwrap();
+
+        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_conversation", "target": pr_target(94) }),
+        )
+        .await;
+        assert!(view_tree::tabs_region(&tree_of(&state, "perri").unwrap(), "detail").is_some());
+
+        // Clearing the PR under review closes every review tab (R8), which
+        // takes the region's last tab with it.
+        let daemon = state.daemon.as_ref().unwrap();
+        reset_for_pr_change(daemon, "perri", None);
+
+        let after = tree_of(&state, "perri").unwrap();
+        assert!(view_tree::tabs_region(&after, "detail").is_none());
+        assert_eq!(after, before, "back to exactly the pre-show tree");
+        assert_eq!(after.pane_ids().iter().filter(|id| *id == "repl").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn changing_the_pr_under_review_closes_the_previous_prs_tabs() {
+        let (state, _rx) = make_state();
+        seed_curated(&state, "perri");
+        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_conversation", "target": pr_target(94) }),
+        )
+        .await;
+        let old_ids: Vec<String> = tree_of(&state, "perri").unwrap().pane_ids();
+
+        let daemon = state.daemon.as_ref().unwrap();
+        reset_for_pr_change(daemon, "perri", Some(("thehammer/nostromo", 95)));
+
+        let after = tree_of(&state, "perri").unwrap();
+        for gone in old_ids.iter().filter(|id| id.starts_with("detail.")) {
+            assert!(
+                !after.pane_ids().contains(gone),
+                "{gone} belonged to the previous review and must be closed"
+            );
+        }
+        // And their bindings went with them — otherwise a restart would
+        // repaint tabs that no longer exist.
+        let reg = registry(&state);
+        let reg = reg.lock().unwrap();
+        for gone in old_ids.iter().filter(|id| id.starts_with("detail.")) {
+            assert!(reg.binding_for("perri", gone).is_none(), "{gone} still bound");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pr_change_leaves_a_perri_standard_focus_completely_alone() {
+        // Non-regression: `perri-standard` has no curated regions, so R8 must
+        // be a no-op for it — no tree change and no broadcast.
+        let (state, mut rx) = make_state();
+        {
+            let reg = registry(&state);
+            let mut reg = reg.lock().unwrap();
+            reg.get_or_init("perri");
+            reg.set_layout(
+                "perri",
+                &json!({ "tree": PaneTree::Split {
+                    direction: SplitDirection::Vertical,
+                    children: vec![
+                        PaneTree::Split {
+                            direction: SplitDirection::Horizontal,
+                            children: vec![
+                                PaneTree::Leaf { pane_id: "queue".into() },
+                                PaneTree::Leaf { pane_id: "diff".into() },
+                            ],
+                            ratios: vec![0.5, 0.5],
+                        },
+                        PaneTree::Leaf { pane_id: "repl".into() },
+                    ],
+                    ratios: vec![0.6, 0.4],
+                }}),
+            )
+            .unwrap();
+            reg.bind_source("perri", "queue", SOURCE_PR_QUEUE);
+            reg.bind_source("perri", "diff", "perri.get_current_pr");
+        }
+        let before = tree_of(&state, "perri");
+
+        let daemon = state.daemon.as_ref().unwrap();
+        reset_for_pr_change(daemon, "perri", Some(("thehammer/nostromo", 95)));
+        reset_for_pr_change(daemon, "perri", None);
+
+        assert_eq!(tree_of(&state, "perri"), before);
+        {
+            let reg = registry(&state);
+            let reg = reg.lock().unwrap();
+            assert!(reg.binding_for("perri", "diff").is_some(), "the diff pane keeps its binding");
+            assert!(reg.binding_for("perri", "queue").is_some());
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "a no-op reset broadcasts nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn showing_the_same_view_twice_reuses_one_tab_and_re_addresses_it() {
+        let (state, _rx) = make_state();
+        seed_curated(&state, "perri");
+        let first = show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        let second = show_ok(
+            &state,
+            json!({
+                "type": "pr_diff",
+                "target": pr_target(94),
+                "anchor": { "kind": "line", "path": "a.rs", "line": 12 },
+                "reason": "second look"
+            }),
+        )
+        .await;
+        assert_eq!(second["pane_id"], first["pane_id"]);
+        assert_eq!(second["reused"], true);
+        assert_eq!(
+            tree_of(&state, "perri").unwrap().pane_ids().iter()
+                .filter(|id| id.starts_with("detail.")).count(),
+            1,
+            "one tab, not two"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reused_show_re_binds_the_pane_with_the_new_address_params() {
+        let (state, _rx) = make_state();
+        seed_curated(&state, "perri");
+        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        let out = show_ok(
+            &state,
+            json!({
+                "type": "pr_diff",
+                "target": pr_target(94),
+                "reason": "unbounded retry loop"
+            }),
+        )
+        .await;
+        let pane_id = out["pane_id"].as_str().unwrap().to_string();
+        let reg = registry(&state);
+        let reg = reg.lock().unwrap();
+        let binding = reg.binding_for("perri", &pane_id).unwrap();
+        assert_eq!(binding.source, SOURCE_PR_DIFF);
+        assert_eq!(
+            binding.params.as_ref().unwrap()["reason"],
+            "unbounded retry loop"
+        );
+    }
+
+    // ── 7. the descriptor ─────────────────────────────────────────────────────
 
     #[test]
     fn the_descriptor_enumerates_exactly_the_closed_vocabulary() {

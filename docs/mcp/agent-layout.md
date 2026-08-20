@@ -113,3 +113,39 @@ Every tool returns either a success object or
 malformed frame. The daemon-hosted tools mutate the registry under its mutex and
 broadcast synchronously, so they do not use the 5 s event-loop command timeout
 the TUI path uses.
+
+## The curated flow (curated-agent-views W5)
+
+The tools above are the imperative window-manager surface: an agent decides
+the pane shapes and pushes content into them itself, call by call. W5 adds a
+second, narrower surface over the same machinery for a caller that only wants
+to *point at things*, not manage geometry:
+
+```
+nostromo.apply_layout({ "name": "perri-curated" })   // once, at session start
+nostromo.show({ "type": "pr_diff", "target": { "repo": "acme/web", "number": 42 } })
+nostromo.show({ "type": "file", "target": { "path": "src/main.rs" },
+                "anchor": { "kind": "line", "line": 88 }, "reason": "..." })
+```
+
+`apply_layout name: perri-curated` assembles the starting tree — a queue and
+a REPL, nothing else (see `docs/mcp/panes.md`'s "The `perri-curated` layout"
+section). From there, every subsequent `nostromo.show` call is what used to
+be a `reset_panes`/`create_pane`/`set_pane_layout`/`set_pane_content` (or
+`refresh_pane_content`) sequence: `show` resolves where the requested view
+belongs, creates the `detail` region the first time one is needed, opens or
+reuses a tab, fetches the view's content server-side, and brings it to front
+— all in one call, with the placement decision made by a deterministic
+engine rather than by the calling agent. See `docs/mcp/tools.md`'s
+"`nostromo.show`" section for the full argument and error contract, and
+`docs/mcp/panes.md`'s "Placement rules" section for how a show is placed.
+
+**This does not remove the raw tools above.** `create_pane`, `reset_panes`,
+`set_pane_layout`, `set_pane_content`, `set_pane_focus`, `apply_layout`, and
+`refresh_pane_content` are unchanged, still callable, and still the only way
+to assemble a layout that isn't one of the five curated view types — this is
+exactly how Mother's, Fred's, and Teri's views work today, and how Perri's own
+review flow works until her prompt is rewritten to use `show` instead (see
+`docs/mcp/tools.md`'s "Per-caller tool withdrawal" section — the mechanism
+that will eventually narrow Perri specifically to the curated surface ships
+inert, and stays inert until that prompt change lands).
