@@ -168,6 +168,10 @@ impl Walker {
                 self.root_spans.push(Vec::new());
             }
             Tag::CodeBlock(kind) => {
+                // See the matching comment on `Tag::List` below — a fenced
+                // code block can nest inside a tight list item exactly the
+                // same way a nested list can.
+                self.flush_implicit_paragraph();
                 self.in_code_block = true;
                 self.code_lang = match kind {
                     CodeBlockKind::Fenced(info) => {
@@ -182,21 +186,49 @@ impl Walker {
                 };
                 self.code_buf.clear();
             }
-            Tag::List(start) => self.lists.push(ListFrame {
-                ordered: start.is_some(),
-                start,
-                items: Vec::new(),
-            }),
+            Tag::List(start) => {
+                // A tight list item accumulates its own text as an *implicit*
+                // paragraph in `root_spans` (no blank line ever closed it —
+                // see `flush_implicit_paragraph`'s doc comment). Without this
+                // flush, a list nested directly inside such an item with no
+                // blank line between ("- outer\n  - inner one\n") started its
+                // own inline text while the outer item's implicit paragraph
+                // was still the open `root_spans` level, so the outer text
+                // and the nested list's first item's text landed in the
+                // *same* accumulator — `flush_implicit_paragraph`'s previous
+                // call sites (the various `TagEnd::Item`/`List`/`BlockQuote`
+                // handlers below) only fire once a block *closes*, never when
+                // one *opens* nested inside a still-open implicit paragraph.
+                self.flush_implicit_paragraph();
+                self.lists.push(ListFrame {
+                    ordered: start.is_some(),
+                    start,
+                    items: Vec::new(),
+                });
+            }
             // A list item and a blockquote are both "open a new
             // block-accumulation frame" — same concept, same body; they only
-            // differ in what their matching `End` does with the frame.
-            Tag::Item | Tag::BlockQuote(_) => self.blocks.push(Vec::new()),
-            Tag::Table(_alignments) => self.tables.push(TableFrame {
-                header: Vec::new(),
-                rows: Vec::new(),
-                in_head: false,
-                current_row: Vec::new(),
-            }),
+            // differ in what their matching `End` does with the frame. Only
+            // `BlockQuote` needs the flush here: a nested blockquote has the
+            // exact same "opens inside a still-open implicit paragraph"
+            // hazard `Tag::List` above documents, but a nested `Item` doesn't
+            // — sibling items are already flushed at `TagEnd::Item`, and the
+            // *first* item's case is already covered by `Tag::List`'s own
+            // flush immediately above it.
+            Tag::BlockQuote(_) => {
+                self.flush_implicit_paragraph();
+                self.blocks.push(Vec::new());
+            }
+            Tag::Item => self.blocks.push(Vec::new()),
+            Tag::Table(_alignments) => {
+                self.flush_implicit_paragraph();
+                self.tables.push(TableFrame {
+                    header: Vec::new(),
+                    rows: Vec::new(),
+                    in_head: false,
+                    current_row: Vec::new(),
+                });
+            }
             Tag::TableHead => {
                 if let Some(t) = self.tables.last_mut() {
                     t.in_head = true;
@@ -314,7 +346,21 @@ impl Walker {
             // Whichever nested-inline-span level this closes, the pop/wrap/
             // re-attach logic is the same — `close_inline` reads the kind off
             // the stack itself.
-            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
+            //
+            // Guarded by `!self.in_image`, mirroring the matching `Start`
+            // arms: an Emphasis/Strong/Strikethrough/Link *inside* an image's
+            // alt text never pushed an `inline_stack` frame in the first
+            // place (the `Start` guard skips it — see that comment), so
+            // firing `close_inline()` here unconditionally would pop
+            // whatever frame actually *is* on top: the real, enclosing
+            // Strong/Emphasis/etc. that was legitimately opened before the
+            // image started. `"**bold ![*alt*](url) more**"` closed the
+            // outer `Strong` the instant the inner `Emphasis` inside the alt
+            // text ended, splitting "more" out of the bold run instead of
+            // keeping it inside.
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link
+                if !self.in_image =>
+            {
                 self.close_inline()
             }
             TagEnd::Image => {
@@ -598,6 +644,97 @@ mod tests {
                 }
             }
             other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tight_nested_list_with_no_blank_lines_keeps_the_outer_items_own_text() {
+        // The bug the test above deliberately sidesteps (see its own comment):
+        // no blank line between the outer item's text and the nested list, so
+        // the whole thing is "tight" and the outer item's text is an implicit
+        // paragraph in root_spans, not yet flushed when the nested List's
+        // Start tag fires. Before the fix, the outer item's "outer" text and
+        // the nested list's first item's "inner one" landed in the same
+        // still-open accumulator and came out merged onto the *inner* item,
+        // with the outer item left holding nothing.
+        let md = "- outer\n  - inner one\n  - inner two\n";
+        let blocks = markdown_to_blocks(md);
+        match &blocks[0] {
+            MdBlock::List { ordered, items, .. } => {
+                assert!(!ordered);
+                assert_eq!(items.len(), 1, "one outer item");
+                let outer_item = &items[0];
+                assert_eq!(
+                    outer_item.len(),
+                    2,
+                    "the outer item must hold its own paragraph *and* the nested list, \
+                     not just the nested list with the outer text merged into it: {outer_item:?}"
+                );
+                assert!(
+                    matches!(&outer_item[0], MdBlock::Paragraph { spans } if spans == &vec![MdSpan::Text { text: "outer".into() }]),
+                    "the outer item's own text must survive as its own paragraph, not be \
+                     merged into the nested list's first item: {:?}", outer_item[0]
+                );
+                match &outer_item[1] {
+                    MdBlock::List { ordered: inner_ordered, items: inner_items, .. } => {
+                        assert!(!inner_ordered);
+                        assert_eq!(inner_items.len(), 2, "two inner items");
+                        assert!(matches!(
+                            &inner_items[0][0],
+                            MdBlock::Paragraph { spans } if spans == &vec![MdSpan::Text { text: "inner one".into() }]
+                        ));
+                        assert!(matches!(
+                            &inner_items[1][0],
+                            MdBlock::Paragraph { spans } if spans == &vec![MdSpan::Text { text: "inner two".into() }]
+                        ));
+                    }
+                    other => panic!("expected nested List, got {other:?}"),
+                }
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strong_wrapping_an_image_with_emphasised_alt_text_does_not_close_early() {
+        // Regression test: the TagEnd arm for Emphasis/Strong/Strikethrough/
+        // Link used to fire unconditionally, even while `in_image` was true
+        // — i.e. even for a TagEnd whose matching Start was skipped by the
+        // `!self.in_image` guard because it opened *inside* an image's alt
+        // text. `close_inline()` then popped whatever frame actually was on
+        // top of `inline_stack`: the real, enclosing Strong that legitimately
+        // opened before the image did — closing it the instant the alt
+        // text's own inner Emphasis ended, stranding the trailing " more
+        // text" outside the bold run instead of inside it.
+        let md = "**bold text ![*alt*](http://x.com/i.png) more text**\n";
+        let blocks = markdown_to_blocks(md);
+        match &blocks[0] {
+            MdBlock::Paragraph { spans } => {
+                assert_eq!(
+                    spans.len(),
+                    1,
+                    "the whole line must be one Strong span, not split around the image: {spans:?}"
+                );
+                match &spans[0] {
+                    MdSpan::Strong { spans: inner } => {
+                        assert_eq!(
+                            inner.len(),
+                            3,
+                            "\"bold text \", the image, and \" more text\" must all be inside \
+                             the same Strong span: {inner:?}"
+                        );
+                        assert!(matches!(&inner[0], MdSpan::Text { text } if text == "bold text "));
+                        assert!(matches!(&inner[1], MdSpan::Image { alt, .. } if alt == "alt"));
+                        assert!(
+                            matches!(&inner[2], MdSpan::Text { text } if text == " more text"),
+                            "\" more text\" must still be inside the Strong span, not a \
+                             sibling of it: {inner:?}"
+                        );
+                    }
+                    other => panic!("expected the outer span to be Strong, got {other:?}"),
+                }
+            }
+            other => panic!("expected a single Paragraph, got {other:?}"),
         }
     }
 

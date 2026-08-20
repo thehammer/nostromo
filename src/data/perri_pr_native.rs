@@ -677,6 +677,13 @@ struct RawReview {
     submitted_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     body: Option<String>,
+    /// `"PENDING"`, `"APPROVED"`, `"CHANGES_REQUESTED"`, `"COMMENTED"`,
+    /// `"DISMISSED"`. This endpoint includes the *authenticated user's own*
+    /// unsubmitted draft review, whose `submitted_at` is `null` — that's the
+    /// signal `assemble_threads` uses to exclude it, since a draft has
+    /// nothing an operator can act on yet.
+    #[serde(default)]
+    state: String,
 }
 
 /// Conditional-GET one paginated conversation endpoint and deserialize its
@@ -769,7 +776,24 @@ fn assemble_threads(
     }
 
     for r in reviews {
+        // A PENDING review is the authenticated user's own unsubmitted
+        // draft — it has no submitted_at (GitHub returns null), and showing
+        // it as if it were a real, submitted review would be actively
+        // misleading: there's no submission to react to yet, and its
+        // presence/absence would toggle on every refetch since a draft can
+        // be edited or discarded at any time with no PR-level event. Skip it
+        // rather than fabricating a timestamp for it.
+        if r.state == "PENDING" {
+            continue;
+        }
         let Some(body) = r.body.filter(|b| !b.trim().is_empty()) else {
+            continue;
+        };
+        let Some(created_at) = r.submitted_at else {
+            // Not PENDING but still no submitted_at — an unexpected shape
+            // from GitHub, not the known draft case. Skip rather than
+            // synthesize a timestamp that would churn the cache/broadcast on
+            // every refetch even though nothing about the review changed.
             continue;
         };
         threads.push(PrThread {
@@ -782,7 +806,7 @@ fn assemble_threads(
             comments: vec![PrComment {
                 id: r.id.to_string(),
                 author: r.user.map(|u| u.login).unwrap_or_default(),
-                created_at: r.submitted_at.unwrap_or_else(chrono::Utc::now),
+                created_at,
                 body,
             }],
         });
@@ -1013,6 +1037,18 @@ mod tests {
             user: Some(RawGhUser { login: author.to_string() }),
             submitted_at: submitted_at.map(|s| s.parse().unwrap()),
             body: body.map(str::to_string),
+            state: "APPROVED".to_string(),
+        }
+    }
+
+    /// A PENDING (unsubmitted draft) review — no submitted_at, by construction.
+    fn pending_review(id: u64, author: &str, body: Option<&str>) -> RawReview {
+        RawReview {
+            id,
+            user: Some(RawGhUser { login: author.to_string() }),
+            submitted_at: None,
+            body: body.map(str::to_string),
+            state: "PENDING".to_string(),
         }
     }
 
@@ -1066,6 +1102,33 @@ mod tests {
         assert_eq!(threads[0].id, "review-1");
         assert_eq!(threads[0].kind, PrThreadKind::Review);
         assert_eq!(threads[0].comments[0].body, "looks good");
+    }
+
+    #[test]
+    fn a_pending_draft_review_produces_no_thread_and_no_fabricated_timestamp() {
+        // Regression test: `/pulls/{n}/reviews` includes the authenticated
+        // user's own PENDING (unsubmitted) draft review, whose submitted_at
+        // is null. This used to synthesize `chrono::Utc::now()` for it,
+        // producing a thread that looked submitted and whose timestamp
+        // changed on every single refetch even though nothing about the
+        // review itself had changed.
+        let threads = assemble_threads(
+            vec![],
+            vec![],
+            vec![
+                pending_review(1, "bob", Some("still drafting this")),
+                review(2, "alice", Some("2024-01-01T00:00:00Z"), Some("looks good")),
+            ],
+        );
+        assert_eq!(
+            threads.len(),
+            1,
+            "the pending draft must not produce a thread at all: {threads:?}"
+        );
+        assert_eq!(
+            threads[0].id, "review-2",
+            "only the real, submitted review should produce a thread"
+        );
     }
 
     #[test]

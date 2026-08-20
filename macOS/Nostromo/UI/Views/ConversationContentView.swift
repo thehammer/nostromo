@@ -29,6 +29,16 @@ final class ConversationContentView: NSView {
     private var lastRendered: PaneContentWire?
     private var lastAddress: PaneAddress?
 
+    /// The exact ranges `clearEmphasis()` must undo — never the whole
+    /// document. `.backgroundColor` is also how a fenced code block's tint
+    /// (`MarkdownBlockDocument`'s own rendering, baked into the attributed
+    /// string `update()` just installed) is represented. Clearing the whole
+    /// document's `.backgroundColor` on every single call — including the
+    /// one immediately following a content change, before this view has
+    /// painted a single frame with the new document — wiped every code
+    /// block's tint the instant it was set.
+    private var lastEmphasisRanges: [NSRange] = []
+
     // MARK: - Init
 
     override init(frame frameRect: NSRect) {
@@ -113,6 +123,7 @@ final class ConversationContentView: NSView {
                 range: range
             )
         }
+        lastEmphasisRanges = emphasisRanges
 
         var anchorStart: Int?
         if case .comment(let id)? = address.anchor, let range = document.range(ofComment: id) {
@@ -129,7 +140,18 @@ final class ConversationContentView: NSView {
 
     private func clearEmphasis() {
         guard let storage = textView.textStorage else { return }
-        storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
+        // Only the ranges *this view* tinted for emphasis — never the whole
+        // document. A blanket clear over the full length also strips
+        // MarkdownBlockDocument's own fenced-code-block background, which
+        // uses the same attribute and is otherwise indistinguishable from
+        // emphasis tinting once both are just ".backgroundColor" in the
+        // storage. On a fresh content render this ran with the *new*
+        // document's ranges out of range for the *old* lastEmphasisRanges
+        // anyway (see the guard below), so this is safe to call unconditionally.
+        for range in lastEmphasisRanges where range.location + range.length <= storage.length {
+            storage.removeAttribute(.backgroundColor, range: range)
+        }
+        lastEmphasisRanges = []
     }
 
     // MARK: - Viewport
