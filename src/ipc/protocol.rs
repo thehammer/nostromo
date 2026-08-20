@@ -244,6 +244,20 @@ pub enum PaneTree {
         labels: Vec<String>,
         /// Index into `children` of the frontmost tab.
         active: usize,
+        /// The placement-engine region this node *is* (W5 —
+        /// curated-agent-views). `views.yaml` names regions rather than pane
+        /// ids, so the engine needs a way to find "the detail region" in a
+        /// tree whose tab membership it is itself about to change; a name on
+        /// the node is that way, and it survives a daemon restart because the
+        /// tree is persisted.
+        ///
+        /// `None` — the default, and every tabs node written before W5 — means
+        /// "not a curated region": the placement engine ignores it entirely
+        /// and an agent's hand-built `apply_layout` tabs node keeps behaving
+        /// exactly as it does today. Skipped when absent, so the wire and the
+        /// on-disk store stay byte-identical for those.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        region: Option<String>,
     },
 }
 
@@ -1693,6 +1707,7 @@ mod tests {
             ],
             labels: vec!["Ticket".into(), "Activity".into()],
             active: 1,
+            region: None,
         };
         round_trip_pane_tree(&tree);
 
@@ -1721,6 +1736,7 @@ mod tests {
                     ],
                     labels: vec!["Ticket".into(), "Activity".into()],
                     active: 0,
+                    region: None,
                 },
             ],
             ratios: vec![0.6, 0.4],

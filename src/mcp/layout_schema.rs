@@ -121,6 +121,7 @@ impl SchemaNode {
                         .collect(),
                     labels: tabs.iter().map(|t| t.label.clone()).collect(),
                     active: active_index,
+                    region: None,
                 }
             }
         }
@@ -239,6 +240,9 @@ pub fn load(name: &str) -> Result<LayoutSchema, ApplyLayoutError> {
 fn compiled_in(name: &str) -> Result<LayoutSchema, ApplyLayoutError> {
     match name {
         "perri-standard" => parse(include_str!("layouts/perri-standard.yaml")),
+        // W5 — curated-agent-views. The queue and the REPL only; the detail
+        // region is the placement engine's to create and remove.
+        "perri-curated" => parse(include_str!("layouts/perri-curated.yaml")),
         _ => Err(ApplyLayoutError::UnknownLayout),
     }
 }
@@ -430,6 +434,7 @@ panes:
                         children: tab_children,
                         labels,
                         active,
+                        ..
                     } => {
                         assert!(
                             matches!(&tab_children[0], PaneTree::Leaf { pane_id } if pane_id == "ticket")

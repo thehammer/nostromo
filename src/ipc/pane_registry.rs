@@ -135,6 +135,18 @@ pub struct PaneRegistry {
     /// process started. NOT persisted — exists only to suppress a `Loading`
     /// broadcast over a pane that already has content (D5).
     painted: HashMap<String, HashSet<String>>,
+    /// tag → curated-view focus order, least-recently-focused first (W5 —
+    /// curated-agent-views). Read by the placement engine's eviction rule
+    /// (R4) and written by every `nostromo.show`.
+    ///
+    /// **Deliberately not persisted**, and living here for exactly the reason
+    /// `painted` does: it is process-lifetime state *about* panes rather than
+    /// part of what a pane *is*. The consequence is stated rather than hidden
+    /// — a restarted daemon evicts in left-to-right tab order rather than true
+    /// recency, because that is what the order re-seeds to. Persisting it
+    /// would be a third fact about every pane bought for a marginal
+    /// improvement to one rule.
+    view_focus_lru: HashMap<String, Vec<String>>,
     store_path: Option<PathBuf>,
 }
 
@@ -157,6 +169,7 @@ impl PaneRegistry {
             trees,
             bindings,
             painted: HashMap::new(),
+            view_focus_lru: HashMap::new(),
             store_path: Some(store_path),
         }
     }
@@ -168,6 +181,7 @@ impl PaneRegistry {
             trees: HashMap::new(),
             bindings: HashMap::new(),
             painted: HashMap::new(),
+            view_focus_lru: HashMap::new(),
             store_path: None,
         }
     }
@@ -308,6 +322,28 @@ impl PaneRegistry {
             .get(tag)
             .map(|s| s.contains(pane_id))
             .unwrap_or(false)
+    }
+
+    // ── curated-view focus order (W5) ───────────────────────────────────────────
+
+    /// `tag`'s curated-view focus order, least-recently-focused first, after
+    /// re-seeding it against `live` (see [`Self::view_focus_lru`]'s doc).
+    ///
+    /// Re-seeding on read rather than on write is what makes a daemon restart
+    /// mid-review degrade to tab order instead of to "nothing has ever been
+    /// focused": the first show after a restart finds an empty order and fills
+    /// it from the tabs that are actually there.
+    pub fn view_focus_order(&mut self, tag: &str, live: &[String]) -> Vec<String> {
+        let order = self.view_focus_lru.entry(tag.to_string()).or_default();
+        crate::mcp::views::derive::seed(order, live);
+        order.clone()
+    }
+
+    /// Record `pane_id` as `tag`'s most recently focused curated view,
+    /// dropping any pane no longer in `live`.
+    pub fn touch_view_focus(&mut self, tag: &str, live: &[String], pane_id: &str) {
+        let order = self.view_focus_lru.entry(tag.to_string()).or_default();
+        crate::mcp::views::derive::touch(order, live, pane_id);
     }
 
     // ── mutations ──────────────────────────────────────────────────────────────
@@ -583,6 +619,7 @@ fn validate_node(node: &PaneTree) -> Result<(), PaneError> {
             children,
             labels,
             active,
+            ..
         } => {
             if children.is_empty()
                 || labels.len() != children.len()
@@ -1240,6 +1277,7 @@ mod tests {
                     children: tab_children,
                     labels: labels.into_iter().map(String::from).collect(),
                     active,
+                    region: None,
                 },
             ],
             ratios: vec![0.5, 0.5],
@@ -1328,6 +1366,7 @@ mod tests {
             ],
             labels: vec!["Repl".into(), "Ticket".into()],
             active: 0,
+            region: None,
         };
         let payload = serde_json::to_value(&tree).unwrap();
         let err = reg.set_layout("mother", &payload).unwrap_err();
@@ -1363,6 +1402,7 @@ mod tests {
                     ],
                     labels: vec!["Nested".into(), "Ticket".into()],
                     active: 0,
+                    region: None,
                 },
             ],
             ratios: vec![0.5, 0.5],

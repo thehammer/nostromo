@@ -154,7 +154,14 @@ public struct PrListItemModel: Decodable, Identifiable, Equatable {
 
     /// Map to the shared `PerriPRRowModel` used by `PerriPRRow`.
     /// `id` is `"\(repo)#\(number)"` — matching `PrQueueItem.id`.
-    public func toRowModel() -> PerriPRRowModel {
+    ///
+    /// `marked` is whether an agent pointed at this row through
+    /// `nostromo.show` (W5 — curated-agent-views). A plain `Bool` rather than
+    /// the address itself, because the macOS app decodes its *own*
+    /// `PaneAddress` — see `PaneAddress.marks(repo:number:)`, which both
+    /// copies implement and which is what a caller passes the result of.
+    /// Defaulted, so every existing caller renders exactly what it did before.
+    public func toRowModel(marked: Bool = false) -> PerriPRRowModel {
         PerriPRRowModel(
             id:          "\(repo)#\(number)",
             number:      number,
@@ -163,7 +170,8 @@ public struct PrListItemModel: Decodable, Identifiable, Equatable {
             author:      author,
             bucket:      bucket,
             ciState:     ciState,
-            newActivity: newActivity
+            newActivity: newActivity,
+            marked:      marked
         )
     }
 }
@@ -961,6 +969,23 @@ public struct PaneAddress: Decodable, Equatable {
         anchor   = try? c.decodeIfPresent(Anchor.self, forKey: .anchor) ?? nil
         emphasis = (try? c.decode([Emphasis].self, forKey: .emphasis)) ?? []
         reason   = try c.decodeIfPresent(String.self, forKey: .reason)
+    }
+
+    /// Whether this address points at the queue row for `repo`#`number`
+    /// (W5 — curated-agent-views).
+    ///
+    /// Anchor and emphasis both count: an agent that anchored the queue on a
+    /// row and one that emphasised it both meant "this one", and a row that
+    /// scrolled into view unmarked would be the anchor doing half its job.
+    ///
+    /// Purely a rendering question — nothing here is selection. See
+    /// `PerriPRRowModel.marked`.
+    public func marks(repo: String, number: Int) -> Bool {
+        if case .queueRow(let r, let n) = anchor, r == repo, n == number { return true }
+        return emphasis.contains { e in
+            if case .queueRow(let r, let n) = e { return r == repo && n == number }
+            return false
+        }
     }
 }
 

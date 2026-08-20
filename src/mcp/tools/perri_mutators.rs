@@ -36,6 +36,7 @@ use crate::ipc::protocol::{PaneContentWire, PaneFreshness};
 use crate::mcp::pane_sources::{broadcast_loading_if_first_paint, broadcast_pane_content};
 use crate::mcp::state::DaemonMcpBackend;
 use crate::mcp::tools::apply_layout::{self, SOURCE_CURRENT_PR, SOURCE_PR_QUEUE};
+use crate::mcp::tools::show;
 use crate::mcp::{command::McpCommand, state::McpSharedState};
 
 const COMMAND_TIMEOUT_SECS: u64 = 5;
@@ -221,6 +222,17 @@ async fn load_pr_daemon(
     }
 
     let tag = apply_layout::target_tag(args, pty_id).map(|s| s.to_string());
+
+    // R8 (W5 — curated-agent-views): the PR under review just moved, so the
+    // previous review's `file`/`ticket` tabs and any other PR's
+    // conversation/diff close. Done before any content push below, so the
+    // operator never sees the new PR's content sitting beside the old PR's
+    // evidence. A no-op for a focus with no curated regions, which is every
+    // focus still driving `perri-standard` through the raw tools.
+    if let Some(t) = tag.as_deref() {
+        show::reset_for_pr_change(daemon, t, Some((repo, number)));
+    }
+
     let mut warnings = Vec::new();
     let mut pending = false;
 
@@ -369,6 +381,14 @@ async fn clear_current_pr_daemon(
     }
 
     let tag = apply_layout::target_tag(args, pty_id).map(|s| s.to_string());
+
+    // R8 (W5 — curated-agent-views): nothing is under review any more, so
+    // every curated review tab closes and the detail region goes with its last
+    // one. The queue is a singleton belonging to no PR and is never closed.
+    if let Some(t) = tag.as_deref() {
+        show::reset_for_pr_change(daemon, t, None);
+    }
+
     let mut warnings = Vec::new();
 
     // D4: both panes bind (not unbind) to their live sources — the diff

@@ -29,7 +29,12 @@ struct PaneContentHost: View {
     @ObservedObject var model: PaneContentModel
 
     var body: some View {
-        PaneContentView(content: model.content, onLoadPR: model.onLoadPR, onApprovePR: model.onApprovePR)
+        PaneContentView(
+            content:     model.content,
+            address:     model.address,
+            onLoadPR:    model.onLoadPR,
+            onApprovePR: model.onApprovePR
+        )
     }
 }
 
@@ -48,6 +53,10 @@ struct PaneContentHost: View {
 /// which is the normal initial state before an agent's first `set_pane_content` call.
 struct PaneContentView: View {
     let content: PaneContentWire?
+    /// Where to look inside this pane's content, and why (W1/W5 —
+    /// curated-agent-views). `pr_list` reads its `queue_row` anchor/emphasis
+    /// to mark a row; the other kinds rendered here have no addressing yet.
+    var address: PaneAddress? = nil
     /// Called when the user loads a PR from a `pr_list` row. `(repo, number)`
     var onLoadPR:   (String, Int) -> Void = { _, _ in }
     /// Called when the user approves a PR from a `pr_list` row. `(repo, number)`
@@ -121,7 +130,7 @@ struct PaneContentView: View {
                             sectionHeader(bucket.label, count: group.count)
                             ForEach(group) { item in
                                 NostromoKit.PerriPRRow(
-                                    model:  item.toRowModel(),
+                                    model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                     onLoad: { onLoadPR(item.repo, item.number) },
                                     onClear: {}
                                 )
@@ -139,7 +148,7 @@ struct PaneContentView: View {
                         sectionHeader("OTHER", count: overflow.count)
                         ForEach(overflow) { item in
                             NostromoKit.PerriPRRow(
-                                model:  item.toRowModel(),
+                                model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                 onLoad: { onLoadPR(item.repo, item.number) },
                                 onClear: {}
                             )

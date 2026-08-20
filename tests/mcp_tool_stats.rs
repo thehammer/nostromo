@@ -26,6 +26,7 @@ async fn dispatch_json(name: &str, state: &McpSharedState) -> Value {
             serde_json::from_str(text).expect("valid JSON body")
         }
         tools::ToolResult::UnknownTool(n) => panic!("unexpected UnknownTool({n})"),
+        tools::ToolResult::Forbidden(n) => panic!("unexpected Forbidden({n})"),
     }
 }
 
@@ -53,6 +54,7 @@ async fn unknown_tool_creates_no_stats_entry() {
     match result {
         tools::ToolResult::UnknownTool(name) => assert_eq!(name, "completely.unknown.tool"),
         tools::ToolResult::Ok(_) => panic!("expected UnknownTool"),
+        tools::ToolResult::Forbidden(_) => panic!("expected UnknownTool, got Forbidden"),
     }
 
     let diag = dispatch_json("nostromo.get_daemon_diagnostics", &state).await;
@@ -82,7 +84,7 @@ async fn descriptor_is_registered_and_dispatchable() {
     let state = test_state();
     match tools::dispatch("nostromo.get_daemon_diagnostics", None, &state, None).await {
         tools::ToolResult::Ok(_) => {}
-        tools::ToolResult::UnknownTool(_) => {
+        tools::ToolResult::UnknownTool(_) | tools::ToolResult::Forbidden(_) => {
             panic!("nostromo.get_daemon_diagnostics must be dispatchable")
         }
     }
