@@ -43,6 +43,17 @@ final class DynamicFocusView: NSView {
     /// pane id — used by `updateContent` to route captions/unread state.
     private var tabRegionForPaneId: [String: TabRegionView] = [:]
 
+    /// The `focused_pane` value last actually applied via
+    /// `applyFocusedPaneHint`. `handleLayoutUpdate` runs on *every*
+    /// `FocusLayoutModel` publish — including a pure content push that never
+    /// touched `focused_pane` at all, since content/freshness/address live on
+    /// the same model `AppStore` republishes as a whole. Without this,
+    /// re-applying the hint unconditionally on every branch (needed so a
+    /// `focused_pane`-only change with no tree change still takes effect)
+    /// also re-selects the same tab on every unrelated content update,
+    /// silently undoing whatever tab the operator just clicked into.
+    private var lastAppliedFocusedPane: String?
+
     /// Tokens for every `NSSplitView.didResizeSubviewsNotification` observer
     /// registered by `makeSplitView`, so a structural rebuild can remove them
     /// all instead of leaking one observer per split per rebuild (D7).
@@ -128,7 +139,15 @@ final class DynamicFocusView: NSView {
     /// When `paneId` names a pane currently hosted inside a `TabRegionView`,
     /// bring that tab to front. A no-op for `nil`, for a pane not (yet) in
     /// any tabs region, or for a pane already frontmost.
+    ///
+    /// Gated on an actual change from `lastAppliedFocusedPane` — this is
+    /// called on every `handleLayoutUpdate`, including pure content pushes
+    /// that never touched `focused_pane`, and re-selecting the same tab on
+    /// every one of those would silently undo an operator's manual tab
+    /// click the moment anything else in the focus updates.
     private func applyFocusedPaneHint(_ paneId: String?) {
+        guard paneId != lastAppliedFocusedPane else { return }
+        lastAppliedFocusedPane = paneId
         guard let paneId, let region = tabRegionForPaneId[paneId] else { return }
         region.selectTab(paneId)
     }

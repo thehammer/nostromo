@@ -374,7 +374,12 @@ public struct PaneAddress: Decodable, Equatable {
 
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
-        anchor   = try c.decodeIfPresent(Anchor.self, forKey: .anchor)
+        // `try?`, not `decodeIfPresent`: a future/unrecognized Anchor kind must
+        // drop only the anchor, not throw out of this initializer — which would
+        // propagate through ServerMsg.decode's own `try?` and silently discard
+        // the whole PaneContent message (content and freshness included), the
+        // same hazard class B12 exists to prevent for PaneTree node kinds.
+        anchor   = try? c.decodeIfPresent(Anchor.self, forKey: .anchor) ?? nil
         emphasis = (try? c.decode([Emphasis].self, forKey: .emphasis)) ?? []
         reason   = try c.decodeIfPresent(String.self, forKey: .reason)
     }

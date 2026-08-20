@@ -1108,7 +1108,10 @@ struct PaneAddress: Decodable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        anchor   = try c.decodeIfPresent(Anchor.self, forKey: .anchor)
+        // `try?`, not `decodeIfPresent`: see the matching NostromoKit
+        // PaneAddress decoder for why (a future/unrecognized Anchor kind must
+        // drop only the anchor, not the whole PaneContent message).
+        anchor   = try? c.decodeIfPresent(Anchor.self, forKey: .anchor) ?? nil
         emphasis = (try? c.decode([Emphasis].self, forKey: .emphasis)) ?? []
         reason   = try c.decodeIfPresent(String.self, forKey: .reason)
     }
