@@ -99,20 +99,26 @@ pub fn resolve_credentials(config: &Config) -> Option<JiraCredentials> {
     let file_vars = read_env_file(&path);
 
     let env_var = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+    // Same "blank is absent" rule as `env_var` above — a half-filled-in
+    // credentials file (a key present with an empty value, e.g.
+    // `ATLASSIAN_API_TOKEN=`) must resolve to "not configured" and surface
+    // the actionable `provider_unconfigured` message, not silently proceed
+    // with an empty token/site/email and fail as an opaque 401 instead.
+    let file_var = |k: &str| file_vars.get(k).cloned().filter(|s| !s.is_empty());
 
     let site = config
         .jira_site
         .clone()
         .filter(|s| !s.is_empty())
         .or_else(|| env_var(ENV_SITE))
-        .or_else(|| file_vars.get(ENV_SITE).cloned());
+        .or_else(|| file_var(ENV_SITE));
     let email = config
         .jira_email
         .clone()
         .filter(|s| !s.is_empty())
         .or_else(|| env_var(ENV_EMAIL))
-        .or_else(|| file_vars.get(ENV_EMAIL).cloned());
-    let token = env_var(ENV_TOKEN).or_else(|| file_vars.get(ENV_TOKEN).cloned());
+        .or_else(|| file_var(ENV_EMAIL));
+    let token = env_var(ENV_TOKEN).or_else(|| file_var(ENV_TOKEN));
 
     match (site, email, token) {
         (Some(site), Some(email), Some(token)) => Some(JiraCredentials { site, email, token }),
@@ -249,12 +255,31 @@ impl JiraProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                // Jira Cloud's REST API sends `created` as
+                // "2024-01-01T00:00:00.000+0000" — a numeric offset with NO
+                // colon, which `parse_from_rfc3339` rejects outright (RFC
+                // 3339 requires "+00:00"). Try RFC 3339 first anyway (covers
+                // wiremock fixtures and any future Jira response shape that
+                // does include the colon), then fall back to the format
+                // Jira actually sends. Only if *both* fail do we give up —
+                // and even then, fabricating "now" would present a comment
+                // as freshly written when its real age is simply unknown to
+                // us; falling back to the epoch (the same "honest unknown"
+                // convention the Swift-side decoder already uses for this
+                // exact field) makes that failure visible instead of
+                // plausible-looking.
                 let created_at = c
                     .get("created")
                     .and_then(|v| v.as_str())
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(s)
+                            .or_else(|_| chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%z"))
+                            .ok()
+                    })
                     .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(chrono::Utc::now);
+                    .unwrap_or_else(|| {
+                        chrono::DateTime::from_timestamp(0, 0).expect("epoch is always valid")
+                    });
                 let blocks = adf_to_blocks(c.get("body").unwrap_or(&Value::Null));
                 TicketComment { index: (i + 1) as u32, author, created_at, blocks }
             })
@@ -292,6 +317,30 @@ impl TicketProvider for JiraProvider {
         let creds = self.credentials.as_ref().ok_or_else(|| {
             super::TicketError::ProviderUnconfigured { message: self.unconfigured_message.clone() }
         })?;
+
+        // `key` is spliced unescaped into the request path below. A real
+        // Jira issue key is always `<PROJECT>-<number>` (letters/digits for
+        // the project prefix, a dash, then digits) — reject anything else
+        // before it can reach the request, rather than let a `/`, `?`, `#`,
+        // or `..` in an agent-supplied key redirect this authenticated
+        // request to a different path or query on the same Jira tenant.
+        // `UnknownTicket` (not a new error variant): a key that can never be
+        // a real issue key can never resolve to a real ticket either.
+        let valid_key = {
+            let mut parts = key.splitn(2, '-');
+            match (parts.next(), parts.next()) {
+                (Some(project), Some(number)) => {
+                    !project.is_empty()
+                        && !number.is_empty()
+                        && project.chars().all(|c| c.is_ascii_alphanumeric())
+                        && number.chars().all(|c| c.is_ascii_digit())
+                }
+                _ => false,
+            }
+        };
+        if !valid_key {
+            return Err(super::TicketError::UnknownTicket);
+        }
 
         let url = format!("{}/rest/api/3/issue/{key}", self.base_url);
         let resp = self
@@ -552,6 +601,32 @@ mod tests {
         assert_eq!(creds.site, "file.atlassian.net");
         assert_eq!(creds.email, "file@acme.com");
         assert_eq!(creds.token, "tok-from-file");
+    }
+
+    /// A credentials file with a key present but blank (a half-filled-in
+    /// template, e.g. `ATLASSIAN_API_TOKEN=`) must resolve the same as a
+    /// missing key — `provider_unconfigured`, not `Some("")` silently
+    /// carried through to a real HTTP call.
+    #[test]
+    fn a_blank_value_in_the_credentials_file_is_treated_as_absent_not_present() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env_vars();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".env");
+        std::fs::write(
+            &path,
+            "ATLASSIAN_SITE_NAME=file.atlassian.net\n\
+             ATLASSIAN_USER_EMAIL=file@acme.com\n\
+             ATLASSIAN_API_TOKEN=\n",
+        )
+        .unwrap();
+
+        let config = Config { jira_credentials_path: Some(path), ..Config::default() };
+        assert!(
+            resolve_credentials(&config).is_none(),
+            "a blank token value must resolve to unconfigured, not Some(\"\")"
+        );
     }
 
     // 3. Config::jira_site/jira_email override env/file for those two fields;
@@ -866,6 +941,49 @@ mod tests {
         assert_eq!(ticket.comments.len(), 1);
         assert_eq!(ticket.comments[0].author, "Bob");
         assert_eq!(ticket.comments[0].index, 1);
+        // Jira's actual wire format for `created` — a numeric offset with no
+        // colon ("+0000", not "+00:00") — is not valid RFC 3339 and must not
+        // silently fall through to "now": that would show every comment as
+        // freshly written regardless of its real age. Assert the exact
+        // parsed instant, not just "some non-default value".
+        assert_eq!(
+            ticket.comments[0].created_at,
+            chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        );
+    }
+
+    /// A `created` timestamp in neither Jira's real shape nor RFC 3339 (e.g.
+    /// a future API version, or a malformed response) must not be presented
+    /// as if the comment were written "now" — that reads as a genuine
+    /// timestamp when it is actually unknown. Falls back to the epoch, the
+    /// same "honest unknown" convention the Swift-side decoder already uses
+    /// for this exact field.
+    #[tokio::test]
+    async fn an_unparseable_comment_created_timestamp_falls_back_to_the_epoch_not_now() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "fields": {
+                    "summary": "S", "status": {"name": "Open"}, "assignee": null,
+                    "description": null,
+                    "comment": {"comments": [{
+                        "author": {"displayName": "Bob"},
+                        "created": "not-a-timestamp",
+                        "body": {"type": "doc", "content": []},
+                    }]},
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = JiraProvider::for_test(Some(jira_creds()), server.uri());
+        let ticket = provider.fetch("PROJ-1").await.expect("fetch must succeed despite the bad timestamp");
+        assert_eq!(
+            ticket.comments[0].created_at,
+            chrono::DateTime::from_timestamp(0, 0).unwrap()
+        );
     }
 
     // 10. 404 -> UnknownTicket.
@@ -881,6 +999,32 @@ mod tests {
         let provider = JiraProvider::for_test(Some(jira_creds()), server.uri());
         let err = provider.fetch("MISSING-1").await.unwrap_err();
         assert_eq!(err, TicketError::UnknownTicket);
+    }
+
+    /// `key` is spliced unescaped into the request path — a key shaped like
+    /// `../other-endpoint` or containing `?`/`#` must never reach the
+    /// request at all (it would redirect this authenticated call to a
+    /// different path/query on the same Jira tenant), and must not be
+    /// treated as "maybe a real ticket, let's ask Jira": rejected as
+    /// `UnknownTicket` before any HTTP call, same as a key Jira itself would
+    /// 404 on. No mock is registered for any path, so if the invalid key
+    /// *did* reach the network, `received_requests()` would show it.
+    #[tokio::test]
+    async fn a_key_with_a_path_separator_is_rejected_before_any_request_is_made() {
+        let server = MockServer::start().await;
+        let provider = JiraProvider::for_test(Some(jira_creds()), server.uri());
+
+        for bad_key in ["../secrets", "TEST-1/../other", "TEST-1?x=1", "TEST-1#frag", "not-a-key", ""]
+        {
+            let err = provider.fetch(bad_key).await.unwrap_err();
+            assert_eq!(err, TicketError::UnknownTicket, "key {bad_key:?} must be rejected");
+        }
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests.is_empty(),
+            "an invalid key must never reach the network, but got: {requests:?}"
+        );
     }
 
     // 11. 401 -> FetchFailed, not treated as unconfigured.
