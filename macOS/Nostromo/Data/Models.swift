@@ -1703,6 +1703,27 @@ struct PaneAddress: Decodable, Equatable {
         emphasis = (try? c.decode([Emphasis].self, forKey: .emphasis)) ?? []
         reason   = try c.decodeIfPresent(String.self, forKey: .reason)
     }
+
+    /// Whether this address points at the queue row for `repo`#`number`
+    /// (W5 — curated-agent-views).
+    ///
+    /// Anchor and emphasis both count: an agent that anchored the queue on a
+    /// row and one that emphasised it both meant "this one", and a row that
+    /// scrolled into view unmarked would be the anchor doing half its job.
+    ///
+    /// Purely a rendering question — nothing here is selection. It does not
+    /// change the daemon's selected index, the current-PR state, or what the
+    /// queue's load/approve affordances act on.
+    ///
+    /// Mirrors `NostromoKit.PaneAddress.marks(repo:number:)`; the two exist
+    /// because this app decodes its own copy of the pane wire types.
+    func marks(repo: String, number: Int) -> Bool {
+        if case .queueRow(let r, let n) = anchor, r == repo, n == number { return true }
+        return emphasis.contains { e in
+            if case .queueRow(let r, let n) = e { return r == repo && n == number }
+            return false
+        }
+    }
 }
 
 /// Live layout state for a single focus (stored in AppStore, keyed by tag).

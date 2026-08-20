@@ -651,7 +651,12 @@ pub(crate) fn address(source: &str, params: Option<&Value>) -> Option<PaneAddres
                 reason,
             }
         }
-        SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION | SOURCE_TICKET => PaneAddress {
+        // W5: `SOURCE_PR_QUEUE` joins this arm so an `Emphasis::QueueRow`
+        // reaches the wire. Before the curated surface existed nothing could
+        // address a queue row, so the queue fell through to the reason-only
+        // arm below; leaving it there would silently drop the "mark this row"
+        // half of a `review_queue` show.
+        SOURCE_PR_QUEUE | SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION | SOURCE_TICKET => PaneAddress {
             anchor: obj
                 .get("anchor")
                 .and_then(|v| serde_json::from_value::<Anchor>(v.clone()).ok()),

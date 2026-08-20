@@ -23,6 +23,7 @@ pub mod perri;
 pub mod perri_mutators;
 pub mod refresh_pane;
 pub mod set_pane;
+pub mod show;
 pub mod status_segment;
 pub mod switch_view;
 pub mod teri;
@@ -472,6 +473,8 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "required": ["prompt", "choices"]
             }
         }),
+        // ── the curated view surface (W5 — curated-agent-views) ──────────────
+        show::descriptor(),
         // ── diagnostics ──────────────────────────────────────────────────────
         json!({
             "name": "nostromo.get_daemon_diagnostics",
@@ -479,6 +482,22 @@ pub fn tool_descriptors() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
     ]
+}
+
+/// The tool surface a caller may see, after the operator's policy has been
+/// applied (W5 — curated-agent-views, B8/D7).
+///
+/// [`tool_descriptors`] stays unfiltered and is what tests and docs enumerate;
+/// this is what `tools/list` answers with. With no policy armed — the shipped
+/// default — the two are the same list, byte for byte, which is what keeps
+/// every agent's surface unchanged until an operator says otherwise.
+pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) -> Vec<Value> {
+    let policy = crate::mcp::tool_policy::load();
+    if policy.is_empty() {
+        return tool_descriptors();
+    }
+    let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id).await;
+    crate::mcp::tool_policy::filter_descriptors(tool_descriptors(), policy.denied_for(agent.as_deref()))
 }
 
 // ── tool dispatch ─────────────────────────────────────────────────────────────
@@ -489,6 +508,14 @@ pub enum ToolResult {
     Ok(Vec<Value>),
     /// Tool name not recognised.
     UnknownTool(String),
+    /// The tool exists, but the operator's policy withdraws it from this
+    /// caller (W5 — curated-agent-views, B8/D7).
+    ///
+    /// Deliberately distinct from [`ToolResult::UnknownTool`]: an agent that
+    /// gets "no such tool" for a tool that plainly exists will conclude the
+    /// daemon is broken and retry, where "not available to you" is a fact it
+    /// can act on. The PRD asks for exactly this distinction.
+    Forbidden(String),
 }
 
 /// Dispatch a `tools/call` request.
@@ -519,6 +546,24 @@ async fn dispatch_inner(
     state: &McpSharedState,
     pty_id: Option<&str>,
 ) -> ToolResult {
+    // ── per-caller withdrawal (W5 — curated-agent-views, B8/D7) ─────────────
+    //
+    // Checked here rather than only in `tools/list`, because filtering the
+    // list alone is advisory: an agent can call a name it never saw, and a
+    // drifting prompt will. This is the half of the criterion that actually
+    // holds. Skipped entirely when nothing is denied — the shipped default —
+    // so an unarmed deployment pays one failed file read per call and no
+    // agent-name resolution at all.
+    {
+        let policy = crate::mcp::tool_policy::load();
+        if !policy.is_empty() {
+            let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id).await;
+            if policy.denies(agent.as_deref(), name) {
+                return ToolResult::Forbidden(name.to_string());
+            }
+        }
+    }
+
     let content = match name {
         // ── Phase 1 ────────────────────────────────────────────────────────
         "nostromo.get_self" => get_self::handle(state, pty_id).await,
@@ -673,6 +718,12 @@ async fn dispatch_inner(
         "nostromo.ask_decision" => {
             let args = arguments.cloned().unwrap_or_default();
             ask_decision::handle(state, &args, pty_id).await
+        }
+
+        // ── the curated view surface (W5 — curated-agent-views) ──────────────
+        "nostromo.show" => {
+            let args = arguments.cloned().unwrap_or_default();
+            show::show(state, &args, pty_id).await
         }
 
         // ── diagnostics ──────────────────────────────────────────────────────

@@ -56,8 +56,10 @@ pub mod pane_sources;
 pub mod server;
 pub mod socket;
 pub mod state;
+pub mod tool_policy;
 pub mod tool_stats;
 pub mod tools;
+pub mod views;
 
 pub use command::{McpCommand, PaneContent};
 pub use server::McpServer;

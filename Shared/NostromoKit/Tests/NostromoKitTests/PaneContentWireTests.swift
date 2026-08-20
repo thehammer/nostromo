@@ -546,6 +546,76 @@ final class PaneContentWireTests: XCTestCase {
         XCTAssertEqual(rowModel.bucket,      "requested")
         XCTAssertEqual(rowModel.ciState,     .success)
         XCTAssertTrue(rowModel.newActivity)
+        XCTAssertFalse(rowModel.marked, "a row nothing points at is unmarked")
+    }
+
+    // MARK: - Queue-row marking (W5 — curated-agent-views)
+
+    private func prItem(repo: String = "acme/web", number: Int = 42) -> PrListItemModel {
+        PrListItemModel(
+            repo:        repo,
+            number:      number,
+            title:       "feat: auth",
+            author:      "alice",
+            bucket:      "requested",
+            ciState:     .success,
+            newActivity: false,
+            url:         "",
+            headSha:     ""
+        )
+    }
+
+    func testRowIsMarkedWhenTheAddressAnchorsThatQueueRow() {
+        let address = PaneAddress(
+            anchor:   .queueRow(repo: "acme/web", number: 42),
+            emphasis: [],
+            reason:   nil
+        )
+        XCTAssertTrue(prItem().toRowModel(marked: address.marks(repo: "acme/web", number: 42)).marked)
+    }
+
+    func testRowIsMarkedWhenTheAddressEmphasisesThatQueueRow() {
+        let address = PaneAddress(
+            anchor:   nil,
+            emphasis: [.queueRow(repo: "acme/web", number: 42)],
+            reason:   "this one next"
+        )
+        XCTAssertTrue(prItem().toRowModel(marked: address.marks(repo: "acme/web", number: 42)).marked)
+    }
+
+    func testOnlyTheAddressedRowIsMarked() {
+        let address = PaneAddress(
+            anchor:   .queueRow(repo: "acme/web", number: 42),
+            emphasis: [],
+            reason:   nil
+        )
+        XCTAssertTrue(prItem(number: 42).toRowModel(marked: address.marks(repo: "acme/web", number: 42)).marked)
+        XCTAssertFalse(prItem(number: 43).toRowModel(marked: address.marks(repo: "acme/web", number: 43)).marked)
+        XCTAssertFalse(prItem(repo: "acme/api").toRowModel(marked: address.marks(repo: "acme/api", number: 42)).marked)
+    }
+
+    func testARowIsUnmarkedByAnAddressThatPointsAtSomethingElse() {
+        // A `reason`-only address, and an address carrying a non-queue anchor,
+        // must both leave every row alone rather than marking the first one.
+        let reasonOnly = PaneAddress(anchor: nil, emphasis: [], reason: "why")
+        XCTAssertFalse(prItem().toRowModel(marked: reasonOnly.marks(repo: "acme/web", number: 42)).marked)
+
+        let lineAnchor = PaneAddress(
+            anchor:   .line(path: "a.rs", line: 412),
+            emphasis: [.lineRange(path: nil, start: 1, end: 2)],
+            reason:   nil
+        )
+        XCTAssertFalse(prItem().toRowModel(marked: lineAnchor.marks(repo: "acme/web", number: 42)).marked)
+    }
+
+    func testAnAbsentAddressLeavesEveryRowUnmarked() {
+        let absent: PaneAddress? = nil
+        XCTAssertFalse(
+            prItem().toRowModel(
+                marked: absent?.marks(repo: "acme/web", number: 42) ?? false
+            ).marked
+        )
+        XCTAssertFalse(prItem().toRowModel().marked)
     }
 
     // MARK: - Existing kinds still decode (regression)

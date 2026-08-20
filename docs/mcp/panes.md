@@ -497,6 +497,143 @@ most one HTTP request per window, not one per repaint.
 
 ---
 
+## Placement rules (`views.yaml`) — curated-agent-views W5
+
+`nostromo.show` (see `docs/mcp/tools.md`) is backed by a deterministic
+placement engine (`src/mcp/views/`) that decides where a view lands from data
+alone — no LLM inference, no hidden state beyond what's derived from the
+pane registry. This section documents the rules-as-data (`views.yaml`) and
+where the engine enforces each of the PRD's eight placement rules, R1–R8.
+
+### The `region` name on a `PaneTree::Tabs` node
+
+A `Tabs` node gained an optional `region` field (`src/ipc/protocol.rs`):
+`None` for every tabs node written before W5, and for any tabs node an agent
+builds by hand through `apply_layout`/`set_pane_layout` — **the layout schema
+DSL has no `region:` keyword.** `SchemaNode::to_pane_tree`
+(`src/mcp/layout_schema.rs`) always emits `region: None`; a named region is
+exclusively an artifact of the placement engine itself, set only by
+`views::tree::build_tabs` when the engine creates or rebuilds the `detail`
+region for a curated show. The name is how `nostromo.show` finds "the detail
+region" again in a tree it is itself about to mutate, and it survives a
+daemon restart because the pane tree is persisted. A tabs node with `region:
+None` is invisible to the placement engine: an agent's own
+`apply_layout`-built tabs region behaves exactly as it did before W5, and the
+engine will never adopt, reuse, or evict any of its tabs.
+
+### `views.yaml` schema
+
+The engine's entire input, besides the derived view state and the request.
+Compiled-in default at `src/mcp/views.yaml`; shadowed **wholesale** (not
+merged) by `~/.nostromo/views.yaml` if present, re-read fresh on every
+`nostromo.show` call — the same no-caching, override-wins discipline
+`~/.nostromo/layouts/<name>.yaml` follows for named layouts. A present-but-
+malformed override is `invalid_views_config`, not a silent fallback to the
+compiled-in rules — an operator who edited the file wants to know the edit is
+broken, not have it look like it had no effect.
+
+```yaml
+regions:
+  <region-name>:
+    tabbed: true | false            # required
+    pane: <pane-id>                 # required when tabbed: false — the one pane this region is
+    pane_prefix: <string>           # required when tabbed: true — new tab ids are "<prefix>.<n>"
+    tab_cap: <int>?                 # optional; omitted means unbounded
+    evict: least_recently_focused_unpinned?  # optional; omitted means never evict (a cap is simply exceeded)
+    create:                         # ordered candidates for bringing the region into existence (D5)
+      - relative_to: <pane-id>      # the pane id to split; first whose pane is live wins
+        position: split_left | split_right | split_above | split_below
+        ratios: [<f32>, <f32>]      # exactly two
+
+views:
+  <view-type-name>:
+    region: <region-name>           # R1: this type's one home region
+    order: <u32>                    # R3: sort key among the region's tabs, ties break on identity
+```
+
+Validated at load: every `views.*.region` must name a declared region; an
+untabbed region needs `pane`; a tabbed region needs `pane_prefix`; every
+`create` rule needs exactly two ratios and a recognised `position`. The
+compiled-in default (`src/mcp/views.yaml`):
+
+```yaml
+regions:
+  queue:
+    tabbed: false
+    pane: queue
+    create:
+      - { relative_to: repl, position: split_above, ratios: [0.6, 0.4] }
+  detail:
+    tabbed: true
+    tab_cap: 6
+    evict: least_recently_focused_unpinned
+    pane_prefix: detail
+    create:
+      - { relative_to: queue, position: split_right, ratios: [0.5, 0.5] }
+      - { relative_to: repl, position: split_above, ratios: [0.6, 0.4] }
+
+views:
+  review_queue: { region: queue, order: 0 }
+  pr_conversation: { region: detail, order: 1 }
+  pr_diff: { region: detail, order: 2 }
+  ticket: { region: detail, order: 3 }
+  file: { region: detail, order: 4 }
+```
+
+### R1–R8, and where each is enforced
+
+| Rule | Enforced |
+|---|---|
+| **R1** home region | `views.yaml`'s `views.<type>.region`, resolved in `placement::place`. A request whose home region doesn't exist yet gets a `create_region` intent (see below); a non-tabbed region already holding a *different* view refuses the show (`region_not_tabbed`) — this is what keeps the queue region single-purpose. |
+| **R2** identity reuse | `placement::place` — a live tab whose `(view_type, identity)` matches the request is reused: re-anchored, re-labelled, brought to front. Anchor/emphasis/reason are not part of `ViewIdentity`, so "the same file at a different line" is the same view by construction, not by a special case. |
+| **R3** new identity, new tab | `placement::place`'s `insertion_index` — a new tab is inserted at the position `(views.<type>.order, identity.key())` dictates, so where a tab lands is a function of what it holds, never of arrival order. |
+| **R4** cap and eviction | `placement::place`'s `pick_victim`, run only when adding a *new* tab would push the region over `tab_cap`: the least-recently-focused tab that is neither frontmost nor pinned, ties breaking leftmost. A region every tab of which is pinned or frontmost simply runs one over the cap rather than refusing the show. |
+| **R5** focus asymmetry | `placement::place` unconditionally makes the target tab frontmost, new or reused, by construction of `tab_index`; `tools::show` sends `FocusLayout` with `focused_pane` set to it unconditionally. There is no configuration knob for this — a deliberate, settled PRD decision. |
+| **R6** no pointless motion | **Enforced on the client, not here.** The daemon has no way to know what the operator's viewport is currently showing, so `nostromo.show` always sends the anchor and lets W2's client-side `ScrollDecision` decide whether that means actually scrolling. This is the one rule with no representation anywhere in `src/mcp/views/`. |
+| **R7** modals are not a content channel | **Enforced by omission.** `ViewType` has no modal variant and `nostromo.show`'s schema has no free-text content field (see `docs/mcp/tools.md`) — there is no plumbing through which a decision could be routed as a "view." W6 owns the decision surface. |
+| **R8** PR change resets | `placement::place`, when a `pr_conversation`/`pr_diff` show names a `(repo, number)` other than the one currently live in the detail region; and `placement::reset_for_pr_change`, called from `tools::show::reset_for_pr_change`, which `perri.load_pr`/`perri.clear_current_pr` invoke when the PR under review itself changes. Both close every `file`/`ticket` tab and the previous PR's conversation/diff tabs, keeping only the new PR's. |
+
+### The `perri-curated` layout
+
+`src/mcp/layouts/perri-curated.yaml` is a second compiled-in named layout,
+registered alongside `perri-standard`. Its starting tree is just a queue and
+a REPL — `split(vertical, [leaf queue, leaf repl], [0.6, 0.4])` — with `queue`
+bound to `perri.list_pr_queue`/`pr_list`, matching the PRD's walking scenario:
+"the top region shows only the review queue … nothing else has anything to
+say yet." There is no `diff` pane and no `detail` region in the layout
+itself; the detail region comes into existence only when the placement engine
+splits it off on the first `nostromo.show` of a `pr_conversation`, `pr_diff`,
+`file`, or `ticket` view, and it is removed again when its last tab closes.
+
+This differs from `perri-standard`, which declares a fixed three-pane
+`queue`/`diff`/`repl` tree up front, with `diff` bound to
+`perri.get_current_pr`. **`perri-standard` is unchanged and stays
+byte-identical** to its pre-W5 content — it is the fallback path for a caller
+still driving the raw pane tools (`create_pane`, `set_pane_content`,
+`apply_layout`, `refresh_pane_content`, …) directly rather than
+`nostromo.show`, and its non-regression (including live refresh, restart
+repaint, and `badly_stale` marking) is a stated acceptance criterion of this
+wedge.
+
+### Creating and removing the detail region
+
+The `detail` region does not exist in `perri-curated`'s tree until the first
+`nostromo.show` that needs one. At that point the engine picks the first
+`create` candidate from `views.yaml` whose `relative_to` pane is actually
+live in the focus — `queue` (split right, `[0.5, 0.5]`) if the queue pane
+exists, else `repl` (split above, `[0.6, 0.4]`) as a fallback for a bare
+focus with no queue at all — and the applier (`tools::show::apply_to_tree`)
+builds the tabs node via `views::tree::insert_beside`. This is the same
+tree-mutation path R4's eviction and R8's reset both use, so a region's
+creation and its removal are not separate machinery: `views::tree::
+remove_tabs_region` collapses the split back out when a region's last tab is
+closed, whether that closure came from R4 evicting down to nothing (never
+happens in the compiled-in rules, since eviction only fires when adding a
+tab, which always leaves at least one) or, in practice, from R8's reset
+leaving zero survivors in the region.
+
+---
+
 ## Views and panes
 
 ### `perri` — PR review view

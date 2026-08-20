@@ -1,0 +1,19 @@
+name: perri-curated
+description: >-
+  Perri's curated review workspace (W5 — curated-agent-views). The queue and
+  the REPL, and nothing else: the detail region that holds a PR's conversation,
+  its diff, files and tickets is created by the placement engine on the first
+  `nostromo.show` that needs one, and removed again when its last tab closes.
+  Contrast `perri-standard`, which declares a fixed `diff` pane up front —
+  that layout is the fallback for an agent still driving the raw pane tools,
+  and stays byte-identical to what it has always been.
+tree:
+  direction: vertical
+  ratios: [0.6, 0.4]
+  children:
+    - pane: queue
+    - pane: repl
+panes:
+  queue:
+    source: perri.list_pr_queue
+    content_kind: pr_list
