@@ -435,6 +435,12 @@ where
 
 /// `conn_key` is the server-minted UUID for this connection (not the
 /// client-supplied `client_id` from the Hello frame).
+///
+/// Eight shared-state handles, one per subsystem this dispatch touches —
+/// matches the existing precedent on `McpSharedState::new` (ten arguments,
+/// same allowance) rather than introducing a bundling struct for a single
+/// internal dispatch function.
+#[allow(clippy::too_many_arguments)]
 fn handle_client_msg(
     msg: ClientMsg,
     conn_key: &str,
@@ -688,7 +694,7 @@ fn handle_client_msg(
             match outcome {
                 AnswerOutcome::Answered { promoted } => {
                     if let Some(msg) = promoted {
-                        let _ = broadcast_tx.send(msg);
+                        let _ = broadcast_tx.send(*msg);
                     }
                 }
                 AnswerOutcome::AlreadyAnswered => {

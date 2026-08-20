@@ -51,7 +51,7 @@ pub enum DecisionOutcome {
 pub enum AnswerOutcome {
     /// The active request was resolved. `promoted` is the next queued
     /// request for the same tag, if any — the caller must broadcast it.
-    Answered { promoted: Option<ServerMsg> },
+    Answered { promoted: Option<Box<ServerMsg>> },
     /// `request_id` was issued by this registry but has already been
     /// resolved (answered, dismissed, timed out, or cancelled). The original
     /// resolution stands; this second attempt is not forwarded to anyone.
@@ -64,7 +64,7 @@ pub enum AnswerOutcome {
 /// every termination route (`answer`, `timeout_request`, `cancel_tag`) funnels
 /// through.
 enum ResolveResult {
-    Resolved { promoted: Option<ServerMsg> },
+    Resolved { promoted: Option<Box<ServerMsg>> },
     AlreadyAnswered,
     UnknownRequest,
 }
@@ -183,7 +183,7 @@ impl DecisionRegistry {
     /// arrived in the small window between the timeout firing and this call.
     pub fn timeout_request(&mut self, request_id: &str) -> Option<ServerMsg> {
         match self.resolve_active(request_id, DecisionOutcome::TimedOut) {
-            ResolveResult::Resolved { promoted } => promoted,
+            ResolveResult::Resolved { promoted } => promoted.map(|b| *b),
             ResolveResult::AlreadyAnswered | ResolveResult::UnknownRequest => None,
         }
     }
@@ -226,7 +226,7 @@ impl DecisionRegistry {
         let _ = entry.reply.send(outcome);
 
         let promoted = self.promote_next(&entry.tag);
-        ResolveResult::Resolved { promoted }
+        ResolveResult::Resolved { promoted: promoted.map(Box::new) }
     }
 
     /// Pop the next queued request for `tag` (if any), install it as the new
@@ -343,7 +343,7 @@ mod tests {
     /// outcome, panicking (with `context`) on every other shape.
     fn expect_promoted(outcome: AnswerOutcome, context: &str) -> ServerMsg {
         match outcome {
-            AnswerOutcome::Answered { promoted: Some(msg) } => msg,
+            AnswerOutcome::Answered { promoted: Some(msg) } => *msg,
             AnswerOutcome::Answered { promoted: None } => {
                 panic!("{context}: expected a promoted request, got Answered {{ promoted: None }}")
             }
