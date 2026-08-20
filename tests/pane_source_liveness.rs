@@ -199,12 +199,14 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
         );
     }
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
+    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let server = Server::bind(
         &socket_path,
         Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
+        Arc::clone(&decisions),
     )
     .unwrap();
 
@@ -213,6 +215,7 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
         session_mgr: Arc::clone(&session_mgr),
         broadcast_tx: server.tx.clone(),
         perri: PerriDaemonState::default(),
+        decisions,
     };
     let state = McpSharedState::for_daemon(backend);
 
