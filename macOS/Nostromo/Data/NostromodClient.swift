@@ -140,7 +140,19 @@ enum ServerMsg {
     case paneContent(tag: String, paneId: String, content: PaneContentWire, freshness: PaneFreshness?, address: PaneAddress?)
     /// An agent-spawned focus was created; every client should add the new tab.
     case focusCreated(meta: FocusCreatedMeta)
+    /// A daemon-driven decision modal request — an agent posed a question with
+    /// a fixed set of choices and is blocked awaiting the operator's answer.
+    case decisionRequest(tag: String, requestId: String, prompt: String, detail: String?,
+                         choices: [DecisionChoiceWire], contextPaneId: String?)
     case unknown
+}
+
+/// One choice offered by a `decision_request` frame.
+/// Mirrors `DecisionChoice` in `src/ipc/protocol.rs`.
+struct DecisionChoiceWire: Decodable, Equatable {
+    let id: String
+    let label: String
+    let detail: String?
 }
 
 // MARK: - Session wire types (mirror src/ipc/stream_json.rs; snake_case/tagged)
@@ -331,6 +343,15 @@ private struct SessionControlMsg: Encodable {
     enum CodingKeys: String, CodingKey { case type_ = "type", tag, action }
 }
 
+private struct DecisionAnswerMsg: Encodable {
+    let type_ = "decision_answer"
+    let requestId: String
+    let choiceId: String?
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", requestId = "request_id", choiceId = "choice_id"
+    }
+}
+
 // MARK: - NostromodClient
 
 /// Unix-socket IPC client for nostromd.
@@ -462,7 +483,10 @@ class NostromodClient {
         // MIN_CLIENT_VERSION at 2, so the shipped GUI keeps working against older daemons.
         send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4), type: "hello")
         // "layout" subscribes to FocusLayout / PaneContent / FocusCreated broadcasts.
-        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout"]), type: "subscribe")
+        // "decision" subscribes to daemon-driven DecisionRequest broadcasts — being
+        // subscribed is also what tells the daemon a client (an operator) exists at
+        // all, so `nostromo.ask_decision` can fail fast with `no_operator` otherwise.
+        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]), type: "subscribe")
     }
 
     /// Clean, unambiguous round-trip probe: no side effects, no fan-out
@@ -501,6 +525,18 @@ class NostromodClient {
     /// Lifecycle control: "stop" | "restart" | "new_session".
     func sessionControl(tag: String, action: String) {
         send(SessionControlMsg(tag: tag, action: action), type: "session_control", tag: tag)
+    }
+
+    // MARK: - Decision modal commands
+
+    /// Answer a `decision_request` by `requestId`. `choiceId: nil` means
+    /// dismissed without choosing — a distinct outcome, not a default choice.
+    /// This is the first client→daemon message carrying a request id that the
+    /// daemon actually consumes (unlike `SessionAnswerPermission`, which is a
+    /// deliberate no-op) — see `ClientMsg::DecisionAnswer` in
+    /// `src/ipc/protocol.rs`.
+    func decisionAnswer(requestId: String, choiceId: String?) {
+        send(DecisionAnswerMsg(requestId: requestId, choiceId: choiceId), type: "decision_answer")
     }
 
     // MARK: - Focus registry commands (Phase 1)
@@ -740,6 +776,13 @@ class NostromodClient {
                 return .focusCreated(meta: m.meta)
             }
 
+        case "decision_request":
+            if let m = try? decoder.decode(DecisionRequestResp.self, from: raw) {
+                return .decisionRequest(tag: m.tag, requestId: m.request_id, prompt: m.prompt,
+                                        detail: m.detail, choices: m.choices,
+                                        contextPaneId: m.context_pane_id)
+            }
+
         default:
             break
         }
@@ -766,6 +809,15 @@ private struct PaneContentResp: Decodable {
 
 private struct FocusCreatedResp: Decodable {
     let meta: FocusCreatedMeta
+}
+
+private struct DecisionRequestResp: Decodable {
+    let tag: String
+    let request_id: String
+    let prompt: String
+    let detail: String?
+    let choices: [DecisionChoiceWire]
+    let context_pane_id: String?
 }
 
 // MARK: - Inbound session response wrappers (decoded from the raw frame)

@@ -7,6 +7,7 @@
 //!           `nostromo.clear_status_segment`.
 
 pub mod apply_layout;
+pub mod ask_decision;
 pub mod create_focus;
 pub mod create_pane;
 pub mod daemon_diagnostics;
@@ -441,6 +442,35 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "required": ["view_id", "segment_id"]
             }
         }),
+        // ── decision modals (W6) ────────────────────────────────────────────
+        json!({
+            "name": "nostromo.ask_decision",
+            "description": "Pose a decision as a modal over the window and block until the operator answers, dismisses it, or the call times out. Not a content channel: there is no free-form content field — only a bounded prompt, an optional bounded detail string, and 2+ labelled choices. Returns { ok: true, choice_id } when the operator picks an option, or { ok: true, outcome: \"dismissed\" } when the modal is dismissed without choosing (a distinct outcome, not a default choice). Errors: invalid_args (fewer than two choices, duplicate choice ids, an empty/over-long prompt, detail, or label), no_operator (no client is subscribed to receive it — returned immediately rather than blocking), timeout (nobody answered within timeout_secs), cancelled (the asking session died while this call was outstanding), not_supported (TUI-hosted only — there is no window to attach a sheet to).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "The question, shown at the top of the modal (max 2000 chars)" },
+                    "detail": { "type": "string", "description": "Optional short supporting text shown below the prompt (max 2000 chars)" },
+                    "choices": {
+                        "type": "array",
+                        "description": "2 or more labelled choices",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id":     { "type": "string", "description": "Stable id returned as choice_id when this option is picked" },
+                                "label":  { "type": "string", "description": "Button label (max 200 chars)" },
+                                "detail": { "type": "string", "description": "Optional short supporting text for this option (max 2000 chars)" }
+                            },
+                            "required": ["id", "label"]
+                        }
+                    },
+                    "context_pane_id": { "type": "string", "description": "Optional reference to a pane already showing relevant context — never content itself" },
+                    "view_id": { "type": "string", "description": "Focus/view id to attach the modal to; omit to target the caller's own focus" },
+                    "timeout_secs": { "type": "integer", "description": "Seconds to wait for an answer before returning timeout (default 300, capped at 3600)" }
+                },
+                "required": ["prompt", "choices"]
+            }
+        }),
         // ── diagnostics ──────────────────────────────────────────────────────
         json!({
             "name": "nostromo.get_daemon_diagnostics",
@@ -636,6 +666,12 @@ async fn dispatch_inner(
         "nostromo.clear_status_segment" => {
             let args = arguments.cloned().unwrap_or_default();
             status_segment::clear(state, &args).await
+        }
+
+        // ── decision modals (W6) ───────────────────────────────────────────
+        "nostromo.ask_decision" => {
+            let args = arguments.cloned().unwrap_or_default();
+            ask_decision::handle(state, &args, pty_id).await
         }
 
         // ── diagnostics ──────────────────────────────────────────────────────

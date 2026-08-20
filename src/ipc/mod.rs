@@ -11,9 +11,11 @@
 //! - [`session_manager`] — daemon-side persistent stream-json session lifecycle
 //! - [`server`]          — daemon-side accept loop and fan-out broadcaster
 //! - [`client`]          — TUI-side connection and subscription
+//! - [`decisions`]       — daemon-side decision-modal request registry (W6)
 
 pub mod client;
 pub mod codec;
+pub mod decisions;
 pub mod pane_registry;
 pub mod protocol;
 pub mod pty_manager;

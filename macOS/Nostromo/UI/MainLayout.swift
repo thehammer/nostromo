@@ -32,6 +32,20 @@ class MainLayout: NSView {
     private var cancellables = Set<AnyCancellable>()
     private var presentedSheet: CreateFocusSheet?  // retained for sheet lifetime
 
+    // MARK: - Decision modal (W6)
+
+    /// Every decision sheet this window currently has a strong reference to,
+    /// keyed by request id — not a single slot. The daemon explicitly allows
+    /// two *different* tags to each have an active decision at once, and a
+    /// single `DecisionSheet?`/`String?` pair would let a second tag's
+    /// decision overwrite the first's sole retaining reference while its
+    /// sheet is still on screen and unanswered — `NSControl.target` is weak,
+    /// so that silently turned the first sheet's buttons into no-ops with no
+    /// operator-visible sign anything was wrong. `NSWindow.beginSheet` already
+    /// queues additional sheets on the same window natively; this only needs
+    /// to keep every one of them alive until its own completion handler fires.
+    private var presentedDecisionSheets: [String: DecisionSheet] = [:]
+
     // MARK: - Init
 
     init(windowIndex: Int) {
@@ -125,6 +139,13 @@ class MainLayout: NSView {
             self?.toastView.showToast(message: message, severity: severity)
         }
 
+        // Daemon-driven decision modals (W6).
+        AppStore.shared.$pendingDecision
+            .receive(on: DispatchQueue.main)
+            .compactMap { $0 }
+            .sink { [weak self] decision in self?.presentDecision(decision) }
+            .store(in: &cancellables)
+
         // Publish the initial active focus so StatusBarView has a tag from the start.
         AppStore.shared.setActiveFocusAgentTag(activeFocus.agentTag)
 
@@ -211,6 +232,44 @@ class MainLayout: NSView {
         presentedSheet = sheet  // retain for the sheet's lifetime
         window.beginSheet(sheet.window!) { [weak self] _ in
             self?.presentedSheet = nil
+        }
+    }
+
+    // MARK: - Decision modal presentation (W6)
+
+    /// Present a daemon-driven decision as a sheet on this window, switching
+    /// focus to the asking session first — a decision the operator can't see
+    /// is worse than useless (the PRD's Axis 2 settles that directing
+    /// attention wins over not interrupting).
+    private func presentDecision(_ decision: PendingDecision) {
+        guard let window else { return }
+        // Already presenting this exact request — a duplicate emission of the
+        // same `pendingDecision` value must not stack a second sheet on top.
+        guard presentedDecisionSheets[decision.requestId] == nil else { return }
+        // Already resolved (e.g. answered from another window) — nothing to show.
+        guard !DecisionStore.shared.isResolved(requestId: decision.requestId) else { return }
+
+        if let focus = FocusStore.shared.focuses.first(where: { $0.sessionTag == decision.tag }) {
+            switchFocus(focus)
+        }
+
+        let choices = decision.choices.map { DecisionSheet.Choice(id: $0.id, label: $0.label, detail: $0.detail) }
+        let requestId = decision.requestId
+        let sheet = DecisionSheet(
+            requestId: requestId,
+            prompt: decision.prompt,
+            detail: decision.detail,
+            choices: choices,
+            store: DecisionStore.shared,
+            answeredChoiceId: DecisionStore.shared.answeredChoiceId(for: requestId),
+            onAnswer: { choiceId in
+                AppStore.shared.answerDecision(requestId: requestId, choiceId: choiceId)
+            }
+        )
+        presentedDecisionSheets[requestId] = sheet  // retain for the sheet's lifetime
+        window.beginSheet(sheet.window!) { [weak self] _ in
+            self?.presentedDecisionSheets.removeValue(forKey: requestId)
+            DecisionStore.shared.forget(requestId: requestId)
         }
     }
 }

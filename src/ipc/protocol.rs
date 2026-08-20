@@ -71,6 +71,11 @@ pub enum Topic {
     /// Agent-authored pane layout + content broadcasts (`FocusLayout`,
     /// `PaneContent`, `FocusCreated`).
     Layout,
+    /// Daemon-driven decision-modal requests (`DecisionRequest`). Being
+    /// subscribed to this topic is also how the daemon knows an operator
+    /// exists at all — `nostromo.ask_decision` refuses with `no_operator`
+    /// when nobody is.
+    Decision,
 }
 
 /// Metadata about a daemon-owned PTY.
@@ -118,6 +123,23 @@ pub enum MotherActionKind {
 pub enum PermissionDecision {
     Allow,
     Deny,
+}
+
+/// One choice offered by a `ServerMsg::DecisionRequest` (W6 decision modals).
+///
+/// Deliberately just `id`/`label`/`detail` — there is no free-form content
+/// field anywhere in this type or its parent message, which is what makes a
+/// decision modal structurally incapable of being used as a content channel
+/// (the PRD's R7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionChoice {
+    /// Stable id returned as `choice_id` when this option is picked.
+    pub id: String,
+    /// Button label the operator reads.
+    pub label: String,
+    /// Optional short supporting text for this option.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub detail: Option<String>,
 }
 
 /// Metadata about a daemon-hosted persistent session.
@@ -569,6 +591,18 @@ pub enum ClientMsg {
         /// `owner/name` repo slug for `load_pr` and `approve`; `None` for `clear`.
         repo: Option<String>,
     },
+
+    /// Answer a `ServerMsg::DecisionRequest` (W6 decision modals).
+    ///
+    /// `choice_id: None` means dismissed without choosing — a distinct,
+    /// meaningful outcome, not a default choice — so unlike most optional
+    /// fields in this protocol, this one is **not** `skip_serializing_if`:
+    /// it is always present on the wire, as a string or as `null`.
+    DecisionAnswer {
+        request_id: String,
+        #[serde(default)]
+        choice_id: Option<String>,
+    },
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -802,6 +836,22 @@ pub enum ServerMsg {
     /// connected client can add the new tab.
     FocusCreated {
         meta: FocusMeta,
+    },
+
+    /// A daemon-driven decision modal request (W6). An agent called
+    /// `nostromo.ask_decision` and is blocked awaiting the operator's answer.
+    /// `detail`/`context_pane_id` are omitted from the wire entirely when
+    /// absent (unlike `DecisionAnswer::choice_id`, which is always present).
+    DecisionRequest {
+        tag: String,
+        request_id: String,
+        prompt: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        detail: Option<String>,
+        choices: Vec<DecisionChoice>,
+        /// A *reference* to a pane for context — never content itself (R7).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        context_pane_id: Option<String>,
     },
 
     /// TUI-internal pseudo-event — **never produced by the daemon**.
@@ -1785,5 +1835,163 @@ mod tests {
         )
         .unwrap();
         assert_eq!(json["kind"], "pr_list");
+    }
+
+    // ── decision modals (W6) ──────────────────────────────────────────────────
+
+    #[test]
+    fn topic_decision_serializes_to_decision() {
+        assert_eq!(
+            serde_json::to_string(&Topic::Decision).unwrap(),
+            "\"decision\""
+        );
+        let decoded: Topic = serde_json::from_str("\"decision\"").unwrap();
+        assert_eq!(decoded, Topic::Decision);
+    }
+
+    fn sample_decision_choices() -> Vec<DecisionChoice> {
+        vec![
+            DecisionChoice {
+                id: "approve".into(),
+                label: "Approve".into(),
+                detail: Some("Merge and deploy".into()),
+            },
+            DecisionChoice {
+                id: "reject".into(),
+                label: "Reject".into(),
+                detail: Some("Block the merge".into()),
+            },
+        ]
+    }
+
+    #[test]
+    fn decision_answer_with_a_choice_round_trips_and_uses_the_decision_answer_type_tag() {
+        round_trip_client(ClientMsg::DecisionAnswer {
+            request_id: "req-1".into(),
+            choice_id: Some("approve".into()),
+        });
+
+        let v = serde_json::to_value(ClientMsg::DecisionAnswer {
+            request_id: "req-1".into(),
+            choice_id: Some("approve".into()),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "decision_answer");
+        assert_eq!(v["request_id"], "req-1");
+        assert_eq!(v["choice_id"], "approve");
+    }
+
+    /// `choice_id: None` (dismissed) is a required, meaningful field — it must
+    /// serialize as an explicit JSON `null`, not be skipped/absent, since an
+    /// absent key here would be ambiguous with "field not understood by an old
+    /// peer" rather than "operator dismissed without choosing".
+    #[test]
+    fn decision_answer_with_no_choice_round_trips_with_choice_id_present_as_null() {
+        round_trip_client(ClientMsg::DecisionAnswer {
+            request_id: "req-2".into(),
+            choice_id: None,
+        });
+
+        let v = serde_json::to_value(ClientMsg::DecisionAnswer {
+            request_id: "req-2".into(),
+            choice_id: None,
+        })
+        .unwrap();
+        assert!(
+            v.as_object().unwrap().contains_key("choice_id"),
+            "choice_id must be present on the wire even when dismissed"
+        );
+        assert!(v["choice_id"].is_null(), "a dismissed answer must serialize choice_id as null");
+    }
+
+    #[test]
+    fn decision_request_round_trips_with_all_fields_populated() {
+        round_trip_server(ServerMsg::DecisionRequest {
+            tag: "mother".into(),
+            request_id: "req-3".into(),
+            prompt: "Ship it?".into(),
+            detail: Some("This touches the production migration.".into()),
+            choices: sample_decision_choices(),
+            context_pane_id: Some("diff".into()),
+        });
+    }
+
+    #[test]
+    fn decision_request_with_absent_optionals_omits_their_keys_entirely() {
+        let v = serde_json::to_value(ServerMsg::DecisionRequest {
+            tag: "mother".into(),
+            request_id: "req-4".into(),
+            prompt: "Ship it?".into(),
+            detail: None,
+            choices: sample_decision_choices(),
+            context_pane_id: None,
+        })
+        .unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("detail"),
+            "an absent detail must not appear as a key at all, not even null"
+        );
+        assert!(
+            !obj.contains_key("context_pane_id"),
+            "an absent context_pane_id must not appear as a key at all, not even null"
+        );
+
+        // And it still round-trips back to None for both.
+        round_trip_server(ServerMsg::DecisionRequest {
+            tag: "mother".into(),
+            request_id: "req-4".into(),
+            prompt: "Ship it?".into(),
+            detail: None,
+            choices: sample_decision_choices(),
+            context_pane_id: None,
+        });
+    }
+
+    #[test]
+    fn decision_request_type_tag_is_decision_request() {
+        let v = serde_json::to_value(ServerMsg::DecisionRequest {
+            tag: "mother".into(),
+            request_id: "req-5".into(),
+            prompt: "Ship it?".into(),
+            detail: None,
+            choices: sample_decision_choices(),
+            context_pane_id: None,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "decision_request");
+    }
+
+    #[test]
+    fn decision_choice_round_trips_standalone_with_and_without_detail() {
+        let with_detail = DecisionChoice {
+            id: "approve".into(),
+            label: "Approve".into(),
+            detail: Some("Merge and deploy".into()),
+        };
+        let json = serde_json::to_string(&with_detail).unwrap();
+        let back: DecisionChoice = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_detail, back);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["detail", "id", "label"]);
+
+        let without_detail = DecisionChoice {
+            id: "reject".into(),
+            label: "Reject".into(),
+            detail: None,
+        };
+        let json = serde_json::to_string(&without_detail).unwrap();
+        let back: DecisionChoice = serde_json::from_str(&json).unwrap();
+        assert_eq!(without_detail, back);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["id", "label"],
+            "an absent detail must not appear as a key when constructing a DecisionChoice standalone"
+        );
     }
 }

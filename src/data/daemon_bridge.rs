@@ -93,7 +93,10 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         // Agent-authored pane layout messages are consumed by the Swift thin-client.
         | ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }
-        | ServerMsg::FocusCreated { .. } => {}
+        | ServerMsg::FocusCreated { .. }
+        // Decision-modal requests (W6) are consumed by the macOS thin-client;
+        // the Rust TUI has no window to attach a sheet to.
+        | ServerMsg::DecisionRequest { .. } => {}
         // DaemonReconnected is handled by individual DaemonPtyClient subscribers.
         ServerMsg::DaemonReconnected => {}
         // Control messages — no action needed.

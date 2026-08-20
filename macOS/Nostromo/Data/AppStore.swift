@@ -63,6 +63,15 @@ class AppStore: ObservableObject {
     // focus view being visible. `.healthy` entries are omitted (implicitly healthy).
     @Published private(set) var sessionHealth: [String: SessionHealth] = [:]
 
+    // Daemon-driven decision modal (W6). A single flat slot rather than a
+    // per-tag map: only one sheet is ever shown at a time (out of scope: a
+    // decision-queue UI), and the daemon enforces at most one outstanding
+    // request per *focus tag* on the wire — this slot just tracks whichever
+    // one most recently arrived. Overwritten (not queued) on every new
+    // `decision_request` frame; `MainLayout` presents it and clears it once
+    // answered or dismissed.
+    @Published private(set) var pendingDecision: PendingDecision?
+
     // MARK: - Internals
 
     /// Exposed so `TranscriptLoadHarness` can inject synthetic daemon traffic
@@ -134,6 +143,20 @@ class AppStore: ObservableObject {
     // MARK: - Active focus
 
     func setActiveFocusAgentTag(_ tag: String?) { activeFocusAgentTag = tag }
+
+    // MARK: - Decision modal (W6)
+
+    /// Send the operator's answer to the daemon and clear `pendingDecision` if
+    /// it's still the one being answered — a later `decision_request` may
+    /// already have overwritten it (see `pendingDecision`'s doc comment).
+    /// Recording the answer into `DecisionStore` is `DecisionSheet`'s job, not
+    /// this one — this method only forwards the answer over the wire.
+    func answerDecision(requestId: String, choiceId: String?) {
+        client.decisionAnswer(requestId: requestId, choiceId: choiceId)
+        if pendingDecision?.requestId == requestId {
+            pendingDecision = nil
+        }
+    }
 
     /// Return the ChatSession for `tag` if one has already been created (lazy —
     /// does not create a new session). Used by health UI that needs to call
@@ -792,6 +815,14 @@ class AppStore: ObservableObject {
             model.paneFreshness[paneId] = freshness
             model.paneAddress[paneId] = address
             focusLayouts[tag] = model
+
+        case .decisionRequest(let tag, let requestId, let prompt, let detail, let choices, let contextPaneId):
+            // Overwrites any prior pending decision — see the property's doc
+            // comment for why a single flat slot is correct here. `MainLayout`
+            // observes this and presents the sheet; nothing here decides
+            // presentation or touches `DecisionStore`.
+            pendingDecision = PendingDecision(tag: tag, requestId: requestId, prompt: prompt,
+                                              detail: detail, choices: choices, contextPaneId: contextPaneId)
 
         case .focusCreated(let meta):
             // An agent-spawned focus was created — add it to FocusStore so the

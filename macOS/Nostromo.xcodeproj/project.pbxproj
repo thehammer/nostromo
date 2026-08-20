@@ -94,6 +94,10 @@
 		II000000000000000000102 /* TurnInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000100 /* TurnInteractionTests.swift */; };
 		II000000000000000000112 /* ChatSessionCompactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000110 /* ChatSessionCompactionTests.swift */; };
 		II000000000000000000122 /* LoadHarnessTargetingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000120 /* LoadHarnessTargetingTests.swift */; };
+		KK000000000000000000011 /* DecisionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK000000000000000000010 /* DecisionStore.swift */; };
+		KK000000000000000000012 /* DecisionStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = KK000000000000000000010 /* DecisionStore.swift */; };
+		KK000000000000000000021 /* DecisionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK000000000000000000020 /* DecisionSheet.swift */; };
+		KK000000000000000000102 /* DecisionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK000000000000000000100 /* DecisionStoreTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -165,6 +169,9 @@
 		II000000000000000000100 /* TurnInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionTests.swift; sourceTree = "<group>"; };
 		II000000000000000000110 /* ChatSessionCompactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionCompactionTests.swift; sourceTree = "<group>"; };
 		II000000000000000000120 /* LoadHarnessTargetingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadHarnessTargetingTests.swift; sourceTree = "<group>"; };
+		KK000000000000000000010 /* DecisionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStore.swift; sourceTree = "<group>"; };
+		KK000000000000000000020 /* DecisionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheet.swift; sourceTree = "<group>"; };
+		KK000000000000000000100 /* DecisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStoreTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -258,6 +265,8 @@
 				AA0000020000000000000040 /* ToastBannerView.swift */,
 				AA0000020000000000000041 /* SessionHealthStatusView.swift */,
 				AA0000020000000000000024 /* CreateFocusSheet.swift */,
+				KK000000000000000000010 /* DecisionStore.swift */,
+				KK000000000000000000020 /* DecisionSheet.swift */,
 				FF00000000000000000000A1 /* SidenavGrouping.swift */,
 				CC00000000000000000000B0 /* DiffColoring.swift */,
 				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
@@ -305,6 +314,7 @@
 				HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */,
 				JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */,
 				KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */,
+				KK000000000000000000100 /* DecisionStoreTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -445,6 +455,8 @@
 				JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */,
 				KK0000000000000000000011 /* LayoutChangeClassifier.swift in Sources */,
 				KK0000000000000000000021 /* TabRegionView.swift in Sources */,
+				KK000000000000000000011 /* DecisionStore.swift in Sources */,
+				KK000000000000000000021 /* DecisionSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -490,6 +502,8 @@
 				JJ0000000000000000000014 /* IPCLatencyStatsTests.swift in Sources */,
 				KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */,
 				KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */,
+				KK000000000000000000012 /* DecisionStore.swift in TestSources */,
+				KK000000000000000000102 /* DecisionStoreTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

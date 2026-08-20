@@ -608,3 +608,78 @@ Remove a named status-bar segment.
 **Output**: `{ "ok": true }`
 
 Source: `src/mcp/tools/status_segment.rs`
+
+---
+
+## Decision modals (W6)
+
+### `nostromo.ask_decision`
+
+Pose a decision as a modal over the window and **block** until the operator
+answers, dismisses it, or the call times out. This is **not a content
+channel**: there is no free-form content field anywhere in the input — only a
+bounded `prompt`, an optional bounded `detail` string, and 2 or more labelled
+choices. An agent that wants to show something has the raw pane tools (or a
+future curated `nostromo.show`); this tool can only ask.
+
+Daemon-hosted only — the standalone TUI MCP server has no window to attach a
+sheet to.
+
+**Input**:
+```json
+{
+  "prompt":  "Ship it?",
+  "detail":  "This touches the production migration.",
+  "choices": [
+    { "id": "approve", "label": "Approve" },
+    { "id": "reject",  "label": "Reject",  "detail": "Block the merge" }
+  ],
+  "context_pane_id": "diff",
+  "view_id":         "perri",
+  "timeout_secs":    300
+}
+```
+
+- `choices`: 2 or more; each `id` must be non-empty and unique within the
+  call, each `label` non-empty and ≤ 200 chars. `prompt`/`detail`/choice
+  `detail` are each capped at 2000 chars.
+- `context_pane_id`: optional *reference* to a pane already showing relevant
+  context — never content itself.
+- `view_id`: optional; omit to target the caller's own focus.
+- `timeout_secs`: optional, default 300, capped at 3600.
+
+**Output**:
+- `{ "ok": true, "choice_id": "approve" }` — the operator picked an option.
+- `{ "ok": true, "outcome": "dismissed" }` — dismissed without choosing. A
+  distinct outcome, not a default choice and not a hang.
+- `{ "error": "invalid_args" }` — fewer than two choices, duplicate choice
+  ids, or an empty/over-long prompt, detail, or label.
+- `{ "error": "no_operator" }` — no client is subscribed to receive it.
+  Returned **immediately** rather than blocking for the full timeout — an
+  agent blocking on a closed GUI for minutes is a worse failure than a fast
+  refusal.
+- `{ "error": "timeout" }` — nobody answered within `timeout_secs`.
+- `{ "error": "cancelled" }` — the asking session died while this call was
+  outstanding.
+- `{ "error": "not_supported" }` — TUI-hosted only.
+
+**Queueing.** At most one outstanding request per focus tag is ever on the
+wire at a time. A second `ask_decision` call for the same tag while the first
+is still outstanding queues FIFO behind it and is broadcast only once the
+first resolves — both calls are eventually answered, neither is dropped or
+stacked.
+
+**Answer-once.** A decision can be answered exactly once, enforced daemon-side
+by `DecisionRegistry` (a second answer for an already-resolved `request_id` is
+logged and never forwarded to the waiting caller) *and* client-side by
+`DecisionStore`, which holds resolved state outside the sheet so a
+reconstructed sheet for the same request can never re-arm and send twice —
+the same class of bug `TurnInteractionStore` exists to prevent for
+`AskQuestionView`.
+
+**Not wired to `ServerMsg::SessionPermissionRequest`.** That transport stays
+unhandled and `ClientMsg::SessionAnswerPermission` stays a no-op — they were
+this feature's shape precedent, not its mechanism. Wiring the permission path
+means deciding a permission posture, which is a different feature.
+
+Source: `src/mcp/tools/ask_decision.rs`, `src/ipc/decisions.rs`

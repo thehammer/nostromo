@@ -59,6 +59,7 @@ fn make_daemon_state() -> Harness {
             // fetch happens) resolves quickly instead of waiting 12s.
             settle_timeout: Duration::from_millis(100),
         },
+        decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),

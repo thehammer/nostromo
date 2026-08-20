@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use super::{
     codec::{read_frame, write_frame},
+    decisions::{AnswerOutcome, DecisionRegistry},
     protocol::{ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
     pty_manager::PtyManager,
     session_manager::SessionManager,
@@ -48,11 +49,17 @@ impl Server {
     /// `perri_state_dir` is forwarded to the `PerriAction` handler so the
     /// `"approve"` arm can write the Phase 1 approval signal (approvals.jsonl +
     /// queue.dirty) for instant queue suppression.
+    ///
+    /// `decisions` is the shared decision-modal registry (W6) — also handed to
+    /// `DaemonMcpBackend` so `nostromo.ask_decision` and this IPC layer share
+    /// one source of truth for outstanding requests and `Topic::Decision`
+    /// subscribers.
     pub fn bind(
         socket_path: &Path,
         pty_mgr: Arc<Mutex<PtyManager>>,
         session_mgr: Arc<Mutex<SessionManager>>,
         perri_state_dir: PathBuf,
+        decisions: Arc<Mutex<DecisionRegistry>>,
     ) -> Result<Self> {
         // Remove stale socket file so bind doesn't fail.
         let _ = std::fs::remove_file(socket_path);
@@ -74,7 +81,7 @@ impl Server {
         let path = socket_path.to_path_buf();
 
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr, perri_state_dir).await {
+            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr, perri_state_dir, decisions).await {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -98,17 +105,19 @@ impl Server {
     /// Both transports run the identical `handle_client` handshake loop, so iOS
     /// (and any other TCP peer) behaves exactly like the macOS TUI client.
     ///
-    /// `perri_state_dir` is forwarded identically to [`Server::bind`].
+    /// `perri_state_dir` and `decisions` are forwarded identically to
+    /// [`Server::bind`].
     pub fn bind_tcp(
         &self,
         listener: TcpListener,
         pty_mgr: Arc<Mutex<PtyManager>>,
         session_mgr: Arc<Mutex<SessionManager>>,
         perri_state_dir: PathBuf,
+        decisions: Arc<Mutex<DecisionRegistry>>,
     ) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr, perri_state_dir).await {
+            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr, perri_state_dir, decisions).await {
                 warn!("TCP IPC accept loop exited: {e:#}");
             }
         });
@@ -129,6 +138,7 @@ async fn accept_loop(
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
+    decisions: Arc<Mutex<DecisionRegistry>>,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -138,8 +148,9 @@ async fn accept_loop(
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
+                let decisions = Arc::clone(&decisions);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd).await {
+                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions).await {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -157,6 +168,7 @@ async fn accept_loop_tcp(
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
+    decisions: Arc<Mutex<DecisionRegistry>>,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -167,8 +179,9 @@ async fn accept_loop_tcp(
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
+                let decisions = Arc::clone(&decisions);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd).await {
+                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions).await {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -195,6 +208,7 @@ async fn handle_client<S>(
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
+    decisions: Arc<Mutex<DecisionRegistry>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite,
@@ -261,6 +275,16 @@ where
     };
 
     info!(claimed_id, conn_key, ?topics, "client subscribed");
+
+    // ── Decision-modal subscriber accounting (W6) ─────────────────────────────
+    // An empty `topics` list means "everything" (see `message_matches_topics`),
+    // so it counts as subscribed to `Topic::Decision` too. Being subscribed is
+    // also how `nostromo.ask_decision` knows an operator exists at all — this
+    // is the only place that fact is recorded.
+    let is_decision_subscriber = topics.is_empty() || topics.contains(&Topic::Decision);
+    if is_decision_subscriber {
+        decisions.lock().unwrap().add_subscriber(&conn_key);
+    }
 
     // ── Register per-client targeted channel ──────────────────────────────────
     // Use `conn_key` (server-minted UUID) as the registry key — not the
@@ -374,7 +398,7 @@ where
                                 continue;
                             }
                         };
-                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir);
+                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -400,6 +424,9 @@ where
         let mut mgr = session_mgr.lock().unwrap();
         mgr.on_client_disconnect(&conn_key);
     }
+    if is_decision_subscriber {
+        decisions.lock().unwrap().remove_subscriber(&conn_key);
+    }
 
     result
 }
@@ -408,6 +435,12 @@ where
 
 /// `conn_key` is the server-minted UUID for this connection (not the
 /// client-supplied `client_id` from the Hello frame).
+///
+/// Eight shared-state handles, one per subsystem this dispatch touches —
+/// matches the existing precedent on `McpSharedState::new` (ten arguments,
+/// same allowance) rather than introducing a bundling struct for a single
+/// internal dispatch function.
+#[allow(clippy::too_many_arguments)]
 fn handle_client_msg(
     msg: ClientMsg,
     conn_key: &str,
@@ -416,6 +449,7 @@ fn handle_client_msg(
     targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
     broadcast_tx: &broadcast::Sender<ServerMsg>,
     perri_state_dir: &Path,
+    decisions: &Arc<Mutex<DecisionRegistry>>,
 ) {
     match msg {
         ClientMsg::Ping => {
@@ -655,6 +689,23 @@ fn handle_client_msg(
             });
         }
 
+        ClientMsg::DecisionAnswer { request_id, choice_id } => {
+            let outcome = decisions.lock().unwrap().answer(&request_id, choice_id);
+            match outcome {
+                AnswerOutcome::Answered { promoted } => {
+                    if let Some(msg) = promoted {
+                        let _ = broadcast_tx.send(*msg);
+                    }
+                }
+                AnswerOutcome::AlreadyAnswered => {
+                    warn!(conn_key, %request_id, "DecisionAnswer for an already-answered request");
+                }
+                AnswerOutcome::UnknownRequest => {
+                    warn!(conn_key, %request_id, "DecisionAnswer for an unknown request_id");
+                }
+            }
+        }
+
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
     }
@@ -680,10 +731,60 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }
         | ServerMsg::FocusCreated { .. } => topics.contains(&Topic::Layout),
+        ServerMsg::DecisionRequest { .. } => topics.contains(&Topic::Decision),
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,
         // PTY + control messages are always forwarded (handled via targeted channel).
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_matches_topics;
+    use crate::ipc::protocol::{DecisionChoice, ServerMsg, Topic};
+
+    fn sample_decision_request() -> ServerMsg {
+        ServerMsg::DecisionRequest {
+            tag: "mother".into(),
+            request_id: "req-1".into(),
+            prompt: "Ship it?".into(),
+            detail: None,
+            choices: vec![
+                DecisionChoice {
+                    id: "approve".into(),
+                    label: "Approve".into(),
+                    detail: None,
+                },
+                DecisionChoice {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    detail: None,
+                },
+            ],
+            context_pane_id: None,
+        }
+    }
+
+    #[test]
+    fn decision_request_matches_when_subscribed_to_the_decision_topic() {
+        assert!(message_matches_topics(
+            &sample_decision_request(),
+            &[Topic::Decision]
+        ));
+    }
+
+    #[test]
+    fn decision_request_does_not_match_a_subscription_to_some_other_topic() {
+        assert!(!message_matches_topics(
+            &sample_decision_request(),
+            &[Topic::Activity]
+        ));
+    }
+
+    #[test]
+    fn decision_request_matches_an_empty_topic_list_meaning_everything() {
+        assert!(message_matches_topics(&sample_decision_request(), &[]));
     }
 }

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use nostromo::ipc::{
     codec::{read_frame, write_frame},
+    decisions::DecisionRegistry,
     protocol::{ClientMsg, ServerMsg, Topic, PROTOCOL_VERSION},
     server::Server,
     PtyManager, SessionManager,
@@ -27,8 +28,16 @@ async fn spawn_server() -> (Server, u16, TempDir) {
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let session_mgr = Arc::new(Mutex::new(SessionManager::new()));
 
-    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), tmp.path().join("perri-state"))
-        .expect("bind unix socket");
+    let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
+
+    let server = Server::bind(
+        &socket_path,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        tmp.path().join("perri-state"),
+        Arc::clone(&decisions),
+    )
+    .expect("bind unix socket");
 
     // Bind on an ephemeral port so tests don't collide.
     let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -39,7 +48,13 @@ async fn spawn_server() -> (Server, u16, TempDir) {
         .expect("local addr")
         .port();
 
-    server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), tmp.path().join("perri-state"));
+    server.bind_tcp(
+        tcp_listener,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        tmp.path().join("perri-state"),
+        decisions,
+    );
 
     (server, port, tmp)
 }
