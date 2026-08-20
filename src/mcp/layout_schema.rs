@@ -30,7 +30,15 @@ use crate::mcp::tools::apply_layout::{source_content_kind, source_is_known, Appl
 
 /// The `content_kind` names a `PaneSpec` may declare — one per
 /// `PaneContentWire` variant.
-const VALID_CONTENT_KINDS: [&str; 5] = ["text", "json_snapshot", "pr_list", "loading", "error"];
+const VALID_CONTENT_KINDS: [&str; 7] = [
+    "text",
+    "json_snapshot",
+    "pr_list",
+    "loading",
+    "error",
+    "code",
+    "diff",
+];
 
 /// A named, declarative pane layout: a tree shape plus per-pane data bindings.
 #[derive(Debug, Clone, Deserialize)]

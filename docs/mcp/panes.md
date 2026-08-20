@@ -25,23 +25,35 @@ payloads each pane accepts or rejects.
 Every pane the daemon (`nostromd`) hosts can optionally be **bound** to a
 server-side `source` — one of the closed set of fetchers in
 `src/mcp/tools/apply_layout.rs::known_sources()` (currently
-`perri.list_pr_queue` and `perri.get_current_pr`). A binding is structural
-metadata stored on `PaneRegistry` — `(tag, pane_id) -> source` — never
-content. It answers one question: "does this pane refresh itself?"
+`perri.list_pr_queue`, `perri.get_current_pr`, `perri.get_pr_diff`, and
+`nostromo.get_file`). A binding is structural metadata stored on
+`PaneRegistry` — `(tag, pane_id) -> (source, params)` — never content. It
+answers one question: "does this pane refresh itself?"
 
 ### Lifecycle
 
 - **One source per pane.** Binding a pane that's already bound replaces the
-  old source; it never accumulates.
+  old source (and its params); it never accumulates.
+- **A binding can carry `params`** (curated-agent-views W2). `params` is the
+  source's own argument object, passed through verbatim — it is what makes a
+  source say *which* thing: `nostromo.get_file` is one source, but a pane
+  bound to it also records which file it shows, or a daemon restart would
+  repaint it as some other file. `PaneRegistry` knows nothing about the
+  shape; only the fetcher validates it. A binding with no params behaves
+  exactly as it did before the field existed.
 - **`repl` can never be bound**, and a pane not currently a leaf of the
   focus's tree is silently refused (logged at `debug!`, not an error).
 - **A binding dies with its pane.** `reset_panes` drops every binding for
   that tag; `set_pane_layout` with a tree that omits a previously-bound pane
   drops just that pane's binding.
 - **A binding survives a daemon restart.** It's persisted alongside the pane
-  tree in `~/.nostromo/daemon-panes.json`. On restart, a binding whose source
-  has been retired (no longer in `known_sources()`) is dropped, and the
-  daemon repaints every reloaded binding immediately — no tool call needed.
+  tree in `~/.nostromo/daemon-panes.json`, params included. On restart, a
+  binding whose source has been retired (no longer in `known_sources()`) is
+  dropped, and the daemon repaints every reloaded binding immediately — no
+  tool call needed. The store is versioned: `version: 3` carries
+  `{source, params}` bindings, `version: 2` carries bare source-name strings
+  (loaded as `params: null`), and an unversioned bare tree map is the
+  original V1 format. All three still load.
 - **Who binds, who unbinds** — see the table in `docs/mcp/tools.md`'s "Live
   pane-source bindings" section. The short version: a push that came from
   fetching `source` binds the pane; a push of content an agent wrote by hand
@@ -218,15 +230,126 @@ point at.
 - `reason` (optional) — one short human-readable phrase explaining why this
   was shown.
 
-**This wedge (W1) transports every variant but renders only `reason`** — as a
-tab's caption, dimmed and truncated, sourced from that tab's own last-pushed
-content. `anchor`/`emphasis` decode, round-trip, and are otherwise inert;
-scrolling to a line or highlighting a range is W2 onward. The dedup logic in
+W1 transported every variant but rendered only `reason` — as a tab's caption,
+dimmed and truncated, sourced from that tab's own last-pushed content. **W2
+renders `anchor` and `emphasis` for the `code` and `diff` content kinds**
+(see below); the remaining variants (`comment`, `section`, `queue_row`) still
+decode, round-trip, and are otherwise inert. The dedup logic in
 `pane_sources::run_pane_source_broadcaster` treats `address` as part of the
 change-detection key, so an address-only push (identical content and
 freshness) is still broadcast rather than silently dropped as a duplicate —
-though no source in this wedge's closed fetcher registry produces one yet;
-every existing daemon-side call site passes `address: None`.
+which is what makes "re-emphasise this same file without re-fetching it"
+cheap. The two W2 sources derive an address from their `params`; every other
+daemon-side call site passes `address: None`.
+
+---
+
+## Line-addressable code (`code` / `diff`) — curated-agent-views W2
+
+Two content kinds render with a line-number gutter, scroll-to-line, and marked
+ranges. Both are produced daemon-side; the client renders.
+
+### `code` — a file at a revision
+
+```json
+{
+  "kind": "code",
+  "path": "src/ipc/session_manager.rs",
+  "revision": "a1b2c3d",
+  "first_line": 1,
+  "text": "use std::..."
+}
+```
+
+Text plus the line number its first line represents, rather than an array of
+per-line objects: the client splits and numbers, which keeps a whole-file
+payload the same size as the `text` variant it replaces.
+
+Produced by **`nostromo.get_file`**, whose `params` are:
+
+| field | meaning |
+| --- | --- |
+| `path` (required) | repo-relative, resolved against the focus's session cwd |
+| `revision` | `"working"` (the on-disk tree), any git revision, or **omit** for the PR-under-review's head SHA when a PR is loaded, else the working tree |
+| `anchor_line` | 1-based line to scroll to; becomes `address.anchor` |
+| `emphasis` | `[{start, end}]` (or `[[start, end]]`) inclusive 1-based ranges; becomes `address.emphasis` |
+| `reason` | one short phrase, rendered as the tab's caption |
+
+A non-`working` revision is read via `git show <rev>:<path>` in the session
+cwd, falling back to the GitHub contents API when the local clone doesn't have
+the object — which is the common case for a PR head from a fork that was never
+fetched. That fallback needs the network, so it only runs on the tool path;
+the daemon's synchronous restart-repaint skips a pane it can't resolve locally
+rather than replacing its content with an error.
+
+**`nostromo.get_file` is deliberately not watch-driven.** A `file` pane is a
+snapshot of a revision; live-updating it would contradict the revision it says
+it is showing. It is also not re-fetched by the background broadcaster.
+
+**Refusals.** Every one of these fails *before* anything is broadcast, so a
+pane that already has content keeps it — a bad show never destroys what the
+operator was reading. Each is a distinct code: `invalid_params`,
+`unknown_path`, `path_escapes_root`, `not_utf8`, `anchor_beyond_eof`,
+`invalid_emphasis_range`, `unresolvable_revision`. The one exception is a pane
+this same call just put into `Loading` — there is nothing to preserve, and an
+error beats a spinner that never resolves.
+
+### `diff` — a PR's change, per file
+
+```json
+{
+  "kind": "diff",
+  "repo": "acme/web",
+  "number": 42,
+  "files": [
+    {
+      "path": "src/main.rs",
+      "old_path": null,
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1,
+      "hunks": [
+        {
+          "header": "@@ -10,3 +10,5 @@ fn main() {",
+          "old_start": 10,
+          "new_start": 10,
+          "lines": [
+            { "kind": "context", "old_n": 10, "new_n": 10, "text": "let x = 1;" },
+            { "kind": "removed", "old_n": 11, "text": "let y = 2;" },
+            { "kind": "added",   "new_n": 11, "text": "let y = 3;" }
+          ]
+        }
+      ]
+    }
+  ],
+  "too_large": false,
+  "changed_files": 1
+}
+```
+
+`status` is one of `added` / `removed` / `modified` / `renamed`; a line's
+`kind` is one of `context` / `added` / `removed` / `meta`. A `meta` line is a
+line the format carries but gives no content meaning to — notably
+`\ No newline at end of file` — kept rather than dropped so the parser never
+loses a line.
+
+A diff needs this structure (where `code` does not) because
+`anchor: {kind: "line", path, line}` must resolve to exactly one row, and only
+something that has parsed the hunk headers knows which side of a hunk a given
+line number lives on. **New-side numbering wins**; a line present only on the
+old side resolves to its removal row.
+
+Produced by **`perri.get_pr_diff`**, which is watch-driven off the same
+current-PR channel as `perri.get_current_pr`, so a bound pane refreshes itself
+with no tool call. Its optional `params` are `{anchor, emphasis, reason}`,
+carrying wire-shaped `Anchor`/`Emphasis` values through to `address`.
+
+**There is no display budget.** The whole diff is sent and the whole diff is
+rendered. The fetch-level large-diff gate in `perri_pr_native.rs` is a
+different thing — a protection against pulling a megabyte over the wire — and
+when it trips, `too_large` is `true`, `files` is empty, and the client says so
+explicitly and names `changed_files`. A stated limit is not silent truncation;
+the old client-side 150-line cap was, and it is gone.
 
 ---
 

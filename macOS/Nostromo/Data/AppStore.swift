@@ -667,24 +667,28 @@ class AppStore: ObservableObject {
         }
 
         // ── Diff ──────────────────────────────────────────────────────────────
-        lines.append(divider)
-        if detail.diffTooLarge {
-            lines.append("⚠  Diff too large — open in GitHub to view.")
-        } else if detail.diff.isEmpty {
-            lines.append("No diff available.")
-        } else {
-            // Cap at ~150 lines — enough for most PRs, avoids flooding the pane
-            let diffLines = detail.diff.components(separatedBy: "\n")
-            let cap = 150
-            lines += diffLines.prefix(cap)
-            if diffLines.count > cap {
-                lines.append("… \(diffLines.count - cap) more lines — open GitHub for the full diff.")
-            }
-        }
+        // Deliberately absent (W2 — curated-agent-views). This used to append
+        // the first 150 diff lines and a "… N more lines" apology. The diff
+        // now has a real renderer — the daemon's `perri.get_pr_diff` source
+        // parses it per file/hunk/line and `CodeContentView` draws it with a
+        // gutter — so this function's job shrinks to the header/links/stats/CI
+        // summary it was actually good at. A client-side line budget was the
+        // silent truncation the PRD set out to remove.
 
         var model = focusLayouts["perri"] ?? FocusLayoutModel.initial
-        model.paneContent["diff"] = .text(lines.joined(separator: "\n"))
-        focusLayouts["perri"] = model
+        // Never overwrite a pane the daemon is driving with structured content
+        // (W2). This writes `focusLayouts` directly, bypassing the
+        // `.paneContent` handler entirely, so without this guard a `Diff` or
+        // `Code` push would be clobbered within milliseconds of arriving and
+        // the pane would flicker back to a text summary on every PR load.
+        // `nil` and `.text` are the states this function has always owned.
+        switch model.paneContent["diff"] {
+        case nil, .text:
+            model.paneContent["diff"] = .text(lines.joined(separator: "\n"))
+            focusLayouts["perri"] = model
+        default:
+            break
+        }
     }
 
     private func prDetailCacheKey(_ item: PRQueueItem) -> String {

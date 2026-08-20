@@ -283,14 +283,17 @@ unbinds it.**
 | Tool | Effect on bindings |
 |------|--------------------|
 | `nostromo.apply_layout` | Binds every pane whose schema entry declares a `source`. Never binds `repl`. |
-| `nostromo.refresh_pane_content` | Binds `pane_id` to `source` (same as `apply_layout`) — a pane not yet in the tree is silently not bound. |
+| `nostromo.refresh_pane_content` | Binds `pane_id` to `source` **and its `params`** (same as `apply_layout`, which binds with no params) — a pane not yet in the tree is silently not bound. |
 | `nostromo.set_pane_content` | **Unbinds** the pane — agent-authored content is authoritative from here on, or the next automatic push would silently overwrite it. |
 | `perri.load_pr` **with** `highlights` | Unbinds `diff` — highlights are final content. |
 | `perri.load_pr` **without** `highlights` | Binds `diff` to `perri.get_current_pr`. |
 | `perri.clear_current_pr` | Binds both `diff` (to `perri.get_current_pr` — its own empty state) and `queue` (to `perri.list_pr_queue`). |
 
-Bindings persist across a daemon restart; a restarted daemon repaints every
-bound pane immediately, with no tool call.
+Bindings persist across a daemon restart, `params` included; a restarted
+daemon repaints every bound pane immediately, with no tool call. The one
+exception is `nostromo.get_file` at a revision the local clone doesn't have:
+resolving that needs the GitHub contents API, which the synchronous restart
+path can't reach, so the pane is skipped rather than repainted with an error.
 
 ---
 
@@ -334,7 +337,46 @@ never hand-constructs the content shape.
 }
 ```
 
-**Output**: `{ "ok": true }` or `{ "error": "unknown_source | fetch_failed | invalid_args | unidentified_caller | not_supported" }`
+**`params`** (optional, curated-agent-views W2) carries the source's own
+arguments and is persisted with the binding, so a daemon restart repaints the
+same thing rather than a default:
+
+```json
+{
+  "view_id": "cody-core-1234",
+  "pane_id": "file",
+  "source": "nostromo.get_file",
+  "params": {
+    "path": "src/ipc/session_manager.rs",
+    "anchor_line": 412,
+    "emphasis": [{ "start": 409, "end": 415 }],
+    "reason": "the spawn path CORE-1234 is about"
+  }
+}
+```
+
+Registered sources and their params:
+
+| source | `content_kind` | params |
+|--------|----------------|--------|
+| `perri.list_pr_queue` | `pr_list` | none |
+| `perri.get_current_pr` | `text` | none |
+| `perri.get_pr_diff` | `diff` | `{ anchor?, emphasis?, reason? }` — wire-shaped `Anchor`/`Emphasis` |
+| `nostromo.get_file` | `code` | `{ path, revision?, anchor_line?, emphasis?, reason? }` |
+
+See `docs/mcp/panes.md` for the full `code`/`diff` payload shapes, revision
+resolution, and the refusal set.
+
+**Output**: `{ "ok": true }` or `{ "error": "..." }`, where the error is one of
+`unknown_source`, `fetch_failed`, `invalid_args`, `unidentified_caller`,
+`not_supported`, or — for the file/diff sources — one of the refusals
+`invalid_params`, `unknown_path`, `path_escapes_root`, `not_utf8`,
+`anchor_beyond_eof`, `invalid_emphasis_range`, `unresolvable_revision`.
+
+**A refusal never destroys existing pane content.** If the pane already had
+content, nothing is broadcast at all; the agent gets the error and the
+operator keeps reading. (The exception: a pane this same call just put into
+`Loading` does get an `Error`, so it can't stick on a spinner forever.)
 
 Source: `src/mcp/tools/refresh_pane.rs`
 

@@ -7,6 +7,7 @@
 pub mod break_glass;
 pub mod daemon_bridge;
 pub mod dirty_file;
+pub mod file_source;
 pub mod fred_calendar;
 pub mod fred_calendar_native;
 pub mod fred_mailbox;
@@ -28,6 +29,7 @@ pub mod rate_limits;
 pub mod rate_limits_watcher;
 pub mod right_panel_source;
 pub mod teri_todos;
+pub mod unified_diff;
 
 use std::time::Duration;
 

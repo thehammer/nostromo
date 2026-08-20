@@ -48,6 +48,22 @@
 		CC00000000000000000000A3 /* Theme.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000005 /* Theme.swift */; };
 		CC00000000000000000000A4 /* DiffColoring.swift in TestSources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000B0 /* DiffColoring.swift */; };
 		CC00000000000000000000A5 /* DiffColoring.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000B0 /* DiffColoring.swift */; };
+		LL0000000000000000000101 /* CodeDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000001 /* CodeDocument.swift */; };
+		LL0000000000000000000201 /* CodeDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000001 /* CodeDocument.swift */; };
+		LL0000000000000000000102 /* DiffDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000002 /* DiffDocument.swift */; };
+		LL0000000000000000000202 /* DiffDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000002 /* DiffDocument.swift */; };
+		LL0000000000000000000103 /* ScrollDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000003 /* ScrollDecision.swift */; };
+		LL0000000000000000000203 /* ScrollDecision.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000003 /* ScrollDecision.swift */; };
+		LL0000000000000000000104 /* DiffAttributedString.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000004 /* DiffAttributedString.swift */; };
+		LL0000000000000000000204 /* DiffAttributedString.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000004 /* DiffAttributedString.swift */; };
+		LL0000000000000000000105 /* CodeContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000005 /* CodeContentView.swift */; };
+		LL0000000000000000000106 /* RowOffsetIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000010 /* RowOffsetIndex.swift */; };
+		LL0000000000000000000205 /* RowOffsetIndex.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000010 /* RowOffsetIndex.swift */; };
+		LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000006 /* CodeDocumentTests.swift */; };
+		LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000007 /* DiffDocumentTests.swift */; };
+		LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000008 /* ScrollDecisionTests.swift */; };
+		LL0000000000000000000304 /* CodeContentViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000009 /* CodeContentViewTests.swift */; };
+		LL0000000000000000000305 /* RowOffsetIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000011 /* RowOffsetIndexTests.swift */; };
 		DD00000000000000000000A1 /* SessionHealthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD00000000000000000000A0 /* SessionHealthTests.swift */; };
 		DD00000000000000000000A2 /* NostromodClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002 /* NostromodClient.swift */; };
 		JJ0000000000000000000012 /* IPCLatencyStats.swift in TestSources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000001 /* IPCLatencyStats.swift */; };
@@ -137,6 +153,17 @@
 		BB00000000000000000000C2 /* PhaseRibbonTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhaseRibbonTests.swift; sourceTree = "<group>"; };
 		CC00000000000000000000A0 /* PerriModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriModelTests.swift; sourceTree = "<group>"; };
 		CC00000000000000000000B0 /* DiffColoring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffColoring.swift; sourceTree = "<group>"; };
+		LL0000000000000000000001 /* CodeDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeDocument.swift; sourceTree = "<group>"; };
+		LL0000000000000000000002 /* DiffDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffDocument.swift; sourceTree = "<group>"; };
+		LL0000000000000000000003 /* ScrollDecision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDecision.swift; sourceTree = "<group>"; };
+		LL0000000000000000000004 /* DiffAttributedString.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffAttributedString.swift; sourceTree = "<group>"; };
+		LL0000000000000000000005 /* CodeContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeContentView.swift; sourceTree = "<group>"; };
+		LL0000000000000000000010 /* RowOffsetIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowOffsetIndex.swift; sourceTree = "<group>"; };
+		LL0000000000000000000006 /* CodeDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeDocumentTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000007 /* DiffDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffDocumentTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000008 /* ScrollDecisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDecisionTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000009 /* CodeContentViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeContentViewTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000011 /* RowOffsetIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowOffsetIndexTests.swift; sourceTree = "<group>"; };
 		DD00000000000000000000A0 /* SessionHealthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHealthTests.swift; sourceTree = "<group>"; };
 		FF00000000000000000000A1 /* SidenavGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGrouping.swift; sourceTree = "<group>"; };
 		FF00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
@@ -269,6 +296,11 @@
 				KK000000000000000000020 /* DecisionSheet.swift */,
 				FF00000000000000000000A1 /* SidenavGrouping.swift */,
 				CC00000000000000000000B0 /* DiffColoring.swift */,
+				LL0000000000000000000001 /* CodeDocument.swift */,
+				LL0000000000000000000002 /* DiffDocument.swift */,
+				LL0000000000000000000003 /* ScrollDecision.swift */,
+				LL0000000000000000000004 /* DiffAttributedString.swift */,
+				LL0000000000000000000010 /* RowOffsetIndex.swift */,
 				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
 				AA0000020000000000000021 /* Views */,
 			);
@@ -289,6 +321,7 @@
 				EE00000000000000000000D0 /* DynamicFocusView.swift */,
 				EE00000000000000000000E0 /* PaneContentView.swift */,
 				KK0000000000000000000002 /* TabRegionView.swift */,
+				LL0000000000000000000005 /* CodeContentView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -296,6 +329,11 @@
 		BB00000000000000000000C1 /* NostromoTests */ = {
 			isa = PBXGroup;
 			children = (
+				LL0000000000000000000006 /* CodeDocumentTests.swift */,
+				LL0000000000000000000007 /* DiffDocumentTests.swift */,
+				LL0000000000000000000008 /* ScrollDecisionTests.swift */,
+				LL0000000000000000000009 /* CodeContentViewTests.swift */,
+				LL0000000000000000000011 /* RowOffsetIndexTests.swift */,
 				HH000000000000000000100 /* TurnReconcilerTests.swift */,
 				HH000000000000000000110 /* TurnPayloadStoreTests.swift */,
 				HH000000000000000000120 /* TurnListVirtualizerTests.swift */,
@@ -445,6 +483,12 @@
 				AA0000020000000000000124 /* CreateFocusSheet.swift in Sources */,
 				BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */,
 				CC00000000000000000000A5 /* DiffColoring.swift in Sources */,
+				LL0000000000000000000101 /* CodeDocument.swift in Sources */,
+				LL0000000000000000000102 /* DiffDocument.swift in Sources */,
+				LL0000000000000000000103 /* ScrollDecision.swift in Sources */,
+				LL0000000000000000000104 /* DiffAttributedString.swift in Sources */,
+				LL0000000000000000000105 /* CodeContentView.swift in Sources */,
+				LL0000000000000000000106 /* RowOffsetIndex.swift in Sources */,
 				FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */,
 				GG00000000000000000000A2 /* ProcessRunner.swift in Sources */,
 				II000000000000000000011 /* TurnInteractionStore.swift in Sources */,
@@ -482,6 +526,16 @@
 				CC00000000000000000000A1 /* PerriModelTests.swift in Sources */,
 				CC00000000000000000000A3 /* Theme.swift in TestSources */,
 				CC00000000000000000000A4 /* DiffColoring.swift in TestSources */,
+				LL0000000000000000000201 /* CodeDocument.swift in TestSources */,
+				LL0000000000000000000202 /* DiffDocument.swift in TestSources */,
+				LL0000000000000000000203 /* ScrollDecision.swift in TestSources */,
+				LL0000000000000000000204 /* DiffAttributedString.swift in TestSources */,
+				LL0000000000000000000205 /* RowOffsetIndex.swift in TestSources */,
+				LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */,
+				LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */,
+				LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */,
+				LL0000000000000000000304 /* CodeContentViewTests.swift in Sources */,
+				LL0000000000000000000305 /* RowOffsetIndexTests.swift in Sources */,
 				DD00000000000000000000A1 /* SessionHealthTests.swift in Sources */,
 				DD00000000000000000000A2 /* NostromodClient.swift in TestSources */,
 				DD00000000000000000000A3 /* ChatModels.swift in TestSources */,

@@ -38,7 +38,9 @@ use crate::data::perri_queue::PrQueueSnapshot;
 use crate::ipc::pane_registry::PaneContentProvider;
 use crate::ipc::protocol::{PaneAddress, PaneContentWire, PaneFreshness, ServerMsg};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
-use crate::mcp::tools::apply_layout::{self, SOURCE_CURRENT_PR, SOURCE_PR_QUEUE};
+use crate::mcp::tools::apply_layout::{
+    self, FetchArgs, SOURCE_CURRENT_PR, SOURCE_PR_DIFF, SOURCE_PR_QUEUE,
+};
 
 /// How long a source can go without producing good data before a pane
 /// carrying its content is marked `badly_stale` (D6). Derived from the
@@ -106,6 +108,29 @@ pub(crate) fn broadcast_pane_content_with_address(
         .mark_painted(tag, pane_id);
 }
 
+/// Fetch a bound pane's current content and address, given its persisted
+/// `params` — the pair every automatic-repaint path below needs out of a
+/// fetch, computed together because both must derive from the exact same
+/// `params` value. Returns `None` when the fetch fails, mirroring the "skip a
+/// binding whose fetch fails" rule every caller already applies.
+///
+/// Freshness is deliberately not part of this trio: three of the four callers
+/// compute it independently right after (once, from `state`, not from the
+/// fetch), and `reevaluate_staleness` needs its freshness *before* deciding
+/// whether to fetch at all — folding it in here would either recompute it
+/// twice or contort this signature for one caller's early-exit.
+fn fetch_bound_content(
+    state: &McpSharedState,
+    tag: &str,
+    source: &str,
+    params: Option<&serde_json::Value>,
+) -> Option<(PaneContentWire, Option<PaneAddress>)> {
+    let args = FetchArgs::bound(tag, params);
+    let content = apply_layout::fetch(source, state, args).ok()?;
+    let address = apply_layout::address(source, params);
+    Some((content, address))
+}
+
 /// Broadcast `PaneContentWire::Loading` only if `(tag, pane_id)` has never
 /// been painted. Returns whether it actually sent. First-paint only — a
 /// spinner replacing content the operator is reading is wrong regardless of
@@ -144,15 +169,16 @@ pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
     let bindings = daemon.pane_registry.lock().unwrap().all_bindings();
     bindings
         .into_iter()
-        .filter_map(|(tag, pane_id, source)| {
-            let content = apply_layout::fetch(&source, state, None).ok()?;
-            let fr = apply_layout::freshness(&source, state);
+        .filter_map(|(tag, pane_id, binding)| {
+            let (content, address) =
+                fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())?;
+            let fr = apply_layout::freshness(&binding.source, state);
             Some(ServerMsg::PaneContent {
                 tag,
                 pane_id,
                 content,
                 freshness: Some(fr),
-                address: None,
+                address,
             })
         })
         .collect()
@@ -170,12 +196,14 @@ pub fn repaint_bound_panes(state: &McpSharedState) {
         return;
     };
     let bindings = daemon.pane_registry.lock().unwrap().all_bindings();
-    for (tag, pane_id, source) in bindings {
-        let Ok(content) = apply_layout::fetch(&source, state, None) else {
+    for (tag, pane_id, binding) in bindings {
+        let Some((content, address)) =
+            fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())
+        else {
             continue;
         };
-        let fr = apply_layout::freshness(&source, state);
-        broadcast_pane_content(daemon, &tag, &pane_id, content, Some(fr));
+        let fr = apply_layout::freshness(&binding.source, state);
+        broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }
 }
 
@@ -226,6 +254,11 @@ pub async fn run_pane_source_broadcaster(
             result = pr_rx.changed() => {
                 if result.is_err() { break; }
                 push_for_source(&state, SOURCE_CURRENT_PR, &mut last_sent);
+                // Both PR-backed sources read the same snapshot, so one watch
+                // change feeds both. `nostromo.get_file` is deliberately absent
+                // here: a file pane is a snapshot of a revision, and there is no
+                // channel that could tell it otherwise (W2 — D2).
+                push_for_source(&state, SOURCE_PR_DIFF, &mut last_sent);
             }
             _ = ticker.tick() => {
                 reevaluate_staleness(&state, &mut last_sent);
@@ -244,27 +277,28 @@ fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSen
     let Some(daemon) = &state.daemon else {
         return;
     };
-    let targets: Vec<(String, String)> = daemon
+    let targets: Vec<(String, String, Option<serde_json::Value>)> = daemon
         .pane_registry
         .lock()
         .unwrap()
         .all_bindings()
         .into_iter()
-        .filter(|(_, _, s)| s == source)
-        .map(|(tag, pane_id, _)| (tag, pane_id))
+        .filter(|(_, _, b)| b.source == source)
+        .map(|(tag, pane_id, b)| (tag, pane_id, b.params))
         .collect();
 
-    for (tag, pane_id) in targets {
-        let Ok(content) = apply_layout::fetch(source, state, None) else {
+    for (tag, pane_id, params) in targets {
+        let Some((content, address)) = fetch_bound_content(state, &tag, source, params.as_ref())
+        else {
             continue;
         };
         let fr = apply_layout::freshness(source, state);
         let key = (tag.clone(), pane_id.clone());
-        if last_sent.get(&key) == Some(&(content.clone(), fr.clone(), None)) {
+        if last_sent.get(&key) == Some(&(content.clone(), fr.clone(), address.clone())) {
             continue;
         }
-        last_sent.insert(key, (content.clone(), fr.clone(), None));
-        broadcast_pane_content(daemon, &tag, &pane_id, content, Some(fr));
+        last_sent.insert(key, (content.clone(), fr.clone(), address.clone()));
+        broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }
 }
 
@@ -280,20 +314,23 @@ fn reevaluate_staleness(state: &McpSharedState, last_sent: &mut LastSent) {
     };
     let bindings = daemon.pane_registry.lock().unwrap().all_bindings();
 
-    for (tag, pane_id, source) in bindings {
+    for (tag, pane_id, binding) in bindings {
         let key = (tag.clone(), pane_id.clone());
         let Some((_, prev_fr, _)) = last_sent.get(&key) else {
             continue;
         };
+        let source = binding.source;
         let fr = apply_layout::freshness(&source, state);
         if prev_fr.badly_stale == fr.badly_stale {
             continue;
         }
-        let Ok(content) = apply_layout::fetch(&source, state, None) else {
+        let Some((content, address)) =
+            fetch_bound_content(state, &tag, &source, binding.params.as_ref())
+        else {
             continue;
         };
-        last_sent.insert(key, (content.clone(), fr.clone(), None));
-        broadcast_pane_content(daemon, &tag, &pane_id, content, Some(fr));
+        last_sent.insert(key, (content.clone(), fr.clone(), address.clone()));
+        broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }
 }
 
@@ -1085,6 +1122,52 @@ mod tests {
             }
         }
         assert!(checked_any, "expected at least one push during this run");
+
+        handle.abort();
+    }
+
+    // ── nostromo.get_file is deliberately not watch-driven (W2 — D2) ─────────
+
+    #[tokio::test]
+    async fn pane_bound_to_get_file_source_is_never_repainted_by_the_pr_watch_channel() {
+        let (state, mut bcast, _qtx, pr_tx) = make_state();
+        // Binding "file" to nostromo.get_file with no params is fine here: the
+        // broadcaster's on-change handlers never dispatch this source at all,
+        // so there is nothing to fetch and nothing to fail.
+        bind_pane(&state, "cody", "file", "nostromo.get_file");
+        // A control pane on a genuinely watch-driven source, so this test also
+        // proves the broadcaster is alive and reacting to this exact change —
+        // silence alone wouldn't distinguish "correctly excluded" from "the
+        // broadcaster never ran".
+        bind_pane(&state, "cody", "diff", "perri.get_current_pr");
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        pr_tx
+            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .unwrap();
+
+        // The control pane gets its push...
+        let msg = tokio::time::timeout(Duration::from_millis(200), bcast.recv())
+            .await
+            .expect("a push within 200ms")
+            .unwrap();
+        match msg {
+            ServerMsg::PaneContent { pane_id, .. } => assert_eq!(pane_id, "diff"),
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+
+        // ...and nothing else follows — in particular, nothing for "file".
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), bcast.recv())
+                .await
+                .is_err(),
+            "a pane bound to nostromo.get_file must never be repainted by the PR watch channel"
+        );
 
         handle.abort();
     }

@@ -11,6 +11,11 @@
 //     deliberately-conservative "always changed" rule for .jsonSnapshot/.unknown.
 //   - PaneFreshness decodes as_of/stale/badly_stale, and the pane_content
 //     ServerMsg decodes whether or not a "freshness" key is present on the wire.
+//   - code/diff (W2 — curated-agent-views): full field decode including
+//     nested DiffFileModel/DiffHunkModel/DiffLineModel, renamed-file old_path,
+//     omitted number, and the too_large/empty-files large-diff state; a
+//     pre-W2 client sibling proving code/diff fall through to .unknown for a
+//     kind string it doesn't recognise; and Equatable coverage for both.
 
 import XCTest
 @testable import NostromoKit
@@ -122,6 +127,220 @@ final class PaneContentWireTests: XCTestCase {
                 return
             }
         }
+    }
+
+    /// Sibling of `testUnknownKindDecodesWithoutThrowing`: proves that this is
+    /// exactly the path a pre-W2 client takes for a `code`/`diff` frame it
+    /// doesn't yet know about — i.e. a future kind is not special-cased, it
+    /// falls through the same default arm as any other unrecognised kind.
+    /// Uses a plausible future kind name rather than "code"/"diff" themselves,
+    /// since this client DOES know those two.
+    func testAFutureContentKindNotYetKnownDecodesToUnknownJustLikeAnyOtherUnrecognisedKind() throws {
+        let json = """
+        {
+            "kind": "pr_conversation",
+            "some_field": "some_value"
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .unknown = wire else {
+            XCTFail("Expected .unknown for a not-yet-known future kind, got \(wire)")
+            return
+        }
+    }
+
+    // MARK: - code decodes correctly (W2 — curated-agent-views)
+
+    func testCodeDecodesCorrectly() throws {
+        let json = """
+        {
+            "kind": "code",
+            "path": "src/ipc/session_manager.rs",
+            "revision": "a1b2c3d",
+            "first_line": 1,
+            "text": "use std::..."
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .code(let payload) = wire else {
+            XCTFail("Expected .code, got \(wire)")
+            return
+        }
+
+        XCTAssertEqual(payload.path,      "src/ipc/session_manager.rs")
+        XCTAssertEqual(payload.revision,  "a1b2c3d")
+        XCTAssertEqual(payload.firstLine, 1, "first_line must map to firstLine")
+        XCTAssertEqual(payload.text,      "use std::...")
+    }
+
+    // MARK: - diff decodes correctly (W2 — curated-agent-views)
+
+    func testDiffDecodesCorrectlyWithTwoFilesIncludingARenameAndAllLineKinds() throws {
+        let json = """
+        {
+            "kind": "diff",
+            "repo": "acme/web",
+            "number": 42,
+            "files": [
+                {
+                    "path": "src/main.rs",
+                    "old_path": null,
+                    "status": "modified",
+                    "additions": 3,
+                    "deletions": 1,
+                    "hunks": [
+                        {
+                            "header": "@@ -10,3 +10,5 @@ fn main() {",
+                            "old_start": 10,
+                            "new_start": 10,
+                            "lines": [
+                                { "kind": "context", "old_n": 10, "new_n": 10, "text": "let x = 1;" },
+                                { "kind": "removed", "old_n": 11, "text": "let y = 2;" },
+                                { "kind": "added",   "new_n": 11, "text": "let y = 3;" },
+                                { "kind": "meta", "text": "\\\\ No newline at end of file" }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "path": "src/new_name.rs",
+                    "old_path": "src/old_name.rs",
+                    "status": "renamed",
+                    "additions": 0,
+                    "deletions": 0,
+                    "hunks": [
+                        {
+                            "header": "@@ -1,2 +1,2 @@",
+                            "old_start": 1,
+                            "new_start": 1,
+                            "lines": [
+                                { "kind": "context", "old_n": 1, "new_n": 1, "text": "unchanged" }
+                            ]
+                        },
+                        {
+                            "header": "@@ -20,1 +20,1 @@",
+                            "old_start": 20,
+                            "new_start": 20,
+                            "lines": [
+                                { "kind": "context", "old_n": 20, "new_n": 20, "text": "also unchanged" }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "too_large": false,
+            "changed_files": 2
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .diff(let payload) = wire else {
+            XCTFail("Expected .diff, got \(wire)")
+            return
+        }
+
+        XCTAssertEqual(payload.repo,         "acme/web")
+        XCTAssertEqual(payload.number,       42)
+        XCTAssertFalse(payload.tooLarge)
+        XCTAssertEqual(payload.changedFiles, 2)
+        XCTAssertEqual(payload.files.count,  2)
+
+        let modifiedFile = payload.files[0]
+        XCTAssertEqual(modifiedFile.path,      "src/main.rs")
+        XCTAssertNil(modifiedFile.oldPath)
+        XCTAssertEqual(modifiedFile.status,    .modified)
+        XCTAssertEqual(modifiedFile.additions, 3)
+        XCTAssertEqual(modifiedFile.deletions, 1)
+        XCTAssertEqual(modifiedFile.hunks.count, 1)
+
+        let hunk = modifiedFile.hunks[0]
+        XCTAssertEqual(hunk.header,   "@@ -10,3 +10,5 @@ fn main() {")
+        XCTAssertEqual(hunk.oldStart, 10)
+        XCTAssertEqual(hunk.newStart, 10)
+        XCTAssertEqual(hunk.lines.count, 4)
+
+        XCTAssertEqual(hunk.lines[0].kind, .context)
+        XCTAssertEqual(hunk.lines[0].oldN, 10)
+        XCTAssertEqual(hunk.lines[0].newN, 10)
+        XCTAssertEqual(hunk.lines[0].text, "let x = 1;")
+
+        XCTAssertEqual(hunk.lines[1].kind, .removed)
+        XCTAssertEqual(hunk.lines[1].oldN, 11)
+        XCTAssertNil(hunk.lines[1].newN, "a removed line has no new-side line number")
+        XCTAssertEqual(hunk.lines[1].text, "let y = 2;")
+
+        XCTAssertEqual(hunk.lines[2].kind, .added)
+        XCTAssertNil(hunk.lines[2].oldN, "an added line has no old-side line number")
+        XCTAssertEqual(hunk.lines[2].newN, 11)
+        XCTAssertEqual(hunk.lines[2].text, "let y = 3;")
+
+        XCTAssertEqual(hunk.lines[3].kind, .meta)
+        XCTAssertNil(hunk.lines[3].oldN)
+        XCTAssertNil(hunk.lines[3].newN)
+        XCTAssertEqual(hunk.lines[3].text, "\\ No newline at end of file")
+
+        let renamedFile = payload.files[1]
+        XCTAssertEqual(renamedFile.path,    "src/new_name.rs")
+        XCTAssertEqual(renamedFile.oldPath, "src/old_name.rs")
+        XCTAssertEqual(renamedFile.status,  .renamed)
+        XCTAssertEqual(renamedFile.hunks.count, 2, "a renamed file can still carry multiple hunks")
+        XCTAssertEqual(renamedFile.hunks[0].header, "@@ -1,2 +1,2 @@")
+        XCTAssertEqual(renamedFile.hunks[1].header, "@@ -20,1 +20,1 @@")
+    }
+
+    func testDiffWithOmittedNumberDecodesWithNilNumber() throws {
+        // The daemon omits `number` via skip_serializing_if when there's no
+        // PR context to attach it to.
+        let json = """
+        {
+            "kind": "diff",
+            "repo": "acme/web",
+            "files": [],
+            "too_large": false,
+            "changed_files": 0
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .diff(let payload) = wire else {
+            XCTFail("Expected .diff, got \(wire)")
+            return
+        }
+
+        XCTAssertNil(payload.number, "number must be nil, not 0 or a decode failure, when omitted from the wire")
+    }
+
+    func testDiffWithTooLargeTrueAndEmptyFilesRetainsChangedFilesCount() throws {
+        let json = """
+        {
+            "kind": "diff",
+            "repo": "acme/web",
+            "number": 7,
+            "files": [],
+            "too_large": true,
+            "changed_files": 250
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .diff(let payload) = wire else {
+            XCTFail("Expected .diff, got \(wire)")
+            return
+        }
+
+        XCTAssertTrue(payload.tooLarge)
+        XCTAssertEqual(payload.files, [], "files must be empty when too_large, not a stale/partial list")
+        XCTAssertEqual(
+            payload.changedFiles, 250,
+            "changed_files must survive the wire even when the diff itself is too large to send"
+        )
     }
 
     // MARK: - PrListItemModel.toRowModel()
@@ -285,6 +504,164 @@ final class PaneContentWireTests: XCTestCase {
         XCTAssertNotEqual(lhs, rhs)
     }
 
+    // MARK: - PaneContentWire.Equatable — .code (W2 — curated-agent-views)
+
+    private func makeCodePayload(
+        path:      String = "src/main.rs",
+        revision:  String = "a1b2c3d",
+        firstLine: Int    = 1,
+        text:      String = "let x = 1;"
+    ) -> CodePayload {
+        CodePayload(path: path, revision: revision, firstLine: firstLine, text: text)
+    }
+
+    func testCodeCasesWithIdenticalPayloadsAreEqual() {
+        XCTAssertEqual(PaneContentWire.code(makeCodePayload()), PaneContentWire.code(makeCodePayload()))
+    }
+
+    func testCodeCasesDifferingByPathAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.code(makeCodePayload()),
+            PaneContentWire.code(makeCodePayload(path: "src/other.rs"))
+        )
+    }
+
+    func testCodeCasesDifferingByRevisionAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.code(makeCodePayload()),
+            PaneContentWire.code(makeCodePayload(revision: "working"))
+        )
+    }
+
+    func testCodeCasesDifferingByFirstLineAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.code(makeCodePayload()),
+            PaneContentWire.code(makeCodePayload(firstLine: 42))
+        )
+    }
+
+    func testCodeCasesDifferingByTextAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.code(makeCodePayload()),
+            PaneContentWire.code(makeCodePayload(text: "let x = 2;"))
+        )
+    }
+
+    // MARK: - PaneContentWire.Equatable — .diff (W2 — curated-agent-views)
+
+    private func makeDiffLine(
+        kind: DiffLineModel.Kind = .context,
+        oldN: Int? = 10,
+        newN: Int? = 10,
+        text: String = "let x = 1;"
+    ) -> DiffLineModel {
+        DiffLineModel(kind: kind, oldN: oldN, newN: newN, text: text)
+    }
+
+    private func makeDiffHunk(
+        header:   String = "@@ -10,3 +10,5 @@ fn main() {",
+        oldStart: Int = 10,
+        newStart: Int = 10,
+        lines:    [DiffLineModel]? = nil
+    ) -> DiffHunkModel {
+        DiffHunkModel(header: header, oldStart: oldStart, newStart: newStart, lines: lines ?? [makeDiffLine()])
+    }
+
+    private func makeDiffFile(
+        path:      String = "src/main.rs",
+        oldPath:   String? = nil,
+        status:    DiffFileModel.Status = .modified,
+        additions: Int = 3,
+        deletions: Int = 1,
+        hunks:     [DiffHunkModel]? = nil
+    ) -> DiffFileModel {
+        DiffFileModel(
+            path: path, oldPath: oldPath, status: status,
+            additions: additions, deletions: deletions, hunks: hunks ?? [makeDiffHunk()]
+        )
+    }
+
+    private func makeDiffPayload(
+        repo:         String = "acme/web",
+        number:       Int?   = 42,
+        files:        [DiffFileModel]? = nil,
+        tooLarge:     Bool = false,
+        changedFiles: Int  = 1
+    ) -> DiffPayload {
+        DiffPayload(
+            repo: repo, number: number, files: files ?? [makeDiffFile()],
+            tooLarge: tooLarge, changedFiles: changedFiles
+        )
+    }
+
+    func testDiffCasesWithIdenticalPayloadsAreEqual() {
+        XCTAssertEqual(PaneContentWire.diff(makeDiffPayload()), PaneContentWire.diff(makeDiffPayload()))
+    }
+
+    func testDiffCasesDifferingByRepoAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(repo: "acme/other"))
+        )
+    }
+
+    func testDiffCasesDifferingByNumberAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(number: 43))
+        )
+    }
+
+    func testDiffCasesDifferingByFilesAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(files: [makeDiffFile(path: "src/other.rs")]))
+        )
+    }
+
+    func testDiffCasesDifferingByTooLargeAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(tooLarge: true))
+        )
+    }
+
+    func testDiffCasesDifferingByChangedFilesAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload()),
+            PaneContentWire.diff(makeDiffPayload(changedFiles: 5))
+        )
+    }
+
+    /// Proves nested `DiffFileModel`/`DiffHunkModel`/`DiffLineModel` equality
+    /// actually reaches down through `.diff`'s payload — not just the
+    /// top-level `DiffPayload` fields.
+    func testDiffCasesWithStructurallyDifferentFilesAreNotEqual() {
+        // A different hunk (header changes) inside an otherwise-identical file.
+        let differentHunk = makeDiffFile(hunks: [makeDiffHunk(header: "@@ -1,1 +1,1 @@ fn other() {")])
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload(files: [makeDiffFile()])),
+            PaneContentWire.diff(makeDiffPayload(files: [differentHunk])),
+            "a different hunk header nested inside an identical file must be caught"
+        )
+
+        // A different line kind inside an otherwise-identical hunk.
+        let differentLineKind = makeDiffFile(hunks: [makeDiffHunk(lines: [makeDiffLine(kind: .added)])])
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload(files: [makeDiffFile()])),
+            PaneContentWire.diff(makeDiffPayload(files: [differentLineKind])),
+            "a different line kind nested inside an identical hunk must be caught"
+        )
+
+        // A different oldPath (rename provenance) on an otherwise-identical file.
+        let differentOldPath = makeDiffFile(oldPath: "src/renamed_from.rs", status: .renamed)
+        XCTAssertNotEqual(
+            PaneContentWire.diff(makeDiffPayload(files: [makeDiffFile(status: .renamed)])),
+            PaneContentWire.diff(makeDiffPayload(files: [differentOldPath])),
+            "a different oldPath nested inside an identical file must be caught"
+        )
+    }
+
     // MARK: - PaneContentWire.Equatable — .jsonSnapshot / .unknown (conservative "always changed")
 
     func testJsonSnapshotCasesWithIdenticalPayloadsAreNeverEqual() throws {
@@ -319,6 +696,13 @@ final class PaneContentWireTests: XCTestCase {
         XCTAssertNotEqual(PaneContentWire.text("hello"), PaneContentWire.loading)
         XCTAssertNotEqual(PaneContentWire.error("boom"), PaneContentWire.text("boom"))
         XCTAssertNotEqual(PaneContentWire.prList([makeItem()]), PaneContentWire.loading)
+    }
+
+    func testCodeCaseNeverEqualsDiffTextOrLoading() {
+        let code = PaneContentWire.code(makeCodePayload())
+        XCTAssertNotEqual(code, PaneContentWire.diff(makeDiffPayload()))
+        XCTAssertNotEqual(code, PaneContentWire.text("let x = 1;"))
+        XCTAssertNotEqual(code, PaneContentWire.loading)
     }
 
     // MARK: - PaneFreshness decoding
