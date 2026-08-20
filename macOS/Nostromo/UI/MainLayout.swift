@@ -34,11 +34,17 @@ class MainLayout: NSView {
 
     // MARK: - Decision modal (W6)
 
-    private var presentedDecisionSheet: DecisionSheet?  // retained for sheet lifetime
-    /// The request id currently presented (if any), so a duplicate
-    /// `pendingDecision` emission for the same request doesn't open a second
-    /// sheet on top of the first.
-    private var presentedDecisionRequestId: String?
+    /// Every decision sheet this window currently has a strong reference to,
+    /// keyed by request id — not a single slot. The daemon explicitly allows
+    /// two *different* tags to each have an active decision at once, and a
+    /// single `DecisionSheet?`/`String?` pair would let a second tag's
+    /// decision overwrite the first's sole retaining reference while its
+    /// sheet is still on screen and unanswered — `NSControl.target` is weak,
+    /// so that silently turned the first sheet's buttons into no-ops with no
+    /// operator-visible sign anything was wrong. `NSWindow.beginSheet` already
+    /// queues additional sheets on the same window natively; this only needs
+    /// to keep every one of them alive until its own completion handler fires.
+    private var presentedDecisionSheets: [String: DecisionSheet] = [:]
 
     // MARK: - Init
 
@@ -239,7 +245,7 @@ class MainLayout: NSView {
         guard let window else { return }
         // Already presenting this exact request — a duplicate emission of the
         // same `pendingDecision` value must not stack a second sheet on top.
-        guard decision.requestId != presentedDecisionRequestId else { return }
+        guard presentedDecisionSheets[decision.requestId] == nil else { return }
         // Already resolved (e.g. answered from another window) — nothing to show.
         guard !DecisionStore.shared.isResolved(requestId: decision.requestId) else { return }
 
@@ -260,11 +266,10 @@ class MainLayout: NSView {
                 AppStore.shared.answerDecision(requestId: requestId, choiceId: choiceId)
             }
         )
-        presentedDecisionRequestId = requestId
-        presentedDecisionSheet = sheet  // retain for the sheet's lifetime
+        presentedDecisionSheets[requestId] = sheet  // retain for the sheet's lifetime
         window.beginSheet(sheet.window!) { [weak self] _ in
-            self?.presentedDecisionSheet = nil
-            self?.presentedDecisionRequestId = nil
+            self?.presentedDecisionSheets.removeValue(forKey: requestId)
+            DecisionStore.shared.forget(requestId: requestId)
         }
     }
 }
