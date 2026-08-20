@@ -117,6 +117,9 @@
 		MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
 		MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
 		MM0000000000000000000102 /* ConversationContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000002 /* ConversationContentView.swift */; };
+		OO0000000000000000000101 /* TicketBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000001 /* TicketBlockDocument.swift */; };
+		OO0000000000000000000201 /* TicketBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000001 /* TicketBlockDocument.swift */; };
+		OO0000000000000000000102 /* TicketContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000002 /* TicketContentView.swift */; };
 		NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */; };
 		PP000000000000000000002 /* ActivityStreamModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000001 /* ActivityStreamModel.swift */; };
 		PP000000000000000000003 /* ActivityStreamModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000001 /* ActivityStreamModel.swift */; };
@@ -125,6 +128,8 @@
 		PP000000000000000000009 /* ActivityStreamModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000008 /* ActivityStreamModelTests.swift */; };
 		PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000010 /* ActivityTickerWiringTests.swift */; };
 		PP000000000000000000013 /* StatusBarActivityRemovalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */; };
+		PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP0000000000000000000001 /* TicketBlockDocumentTests.swift */; };
+
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -182,6 +187,7 @@
 		KK0000000000000000000001 /* LayoutChangeClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifier.swift; sourceTree = "<group>"; };
 		KK0000000000000000000002 /* TabRegionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRegionView.swift; sourceTree = "<group>"; };
 		KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifierTests.swift; sourceTree = "<group>"; };
+		PP0000000000000000000001 /* TicketBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocumentTests.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000001 /* IPCLatencyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStats.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000002 /* DaemonDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiagnostics.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStatsTests.swift; sourceTree = "<group>"; };
@@ -219,6 +225,9 @@
 		PP000000000000000000008 /* ActivityStreamModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamModelTests.swift; sourceTree = "<group>"; };
 		PP000000000000000000010 /* ActivityTickerWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityTickerWiringTests.swift; sourceTree = "<group>"; };
 		PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarActivityRemovalTests.swift; sourceTree = "<group>"; };
+		OO0000000000000000000001 /* TicketBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocument.swift; sourceTree = "<group>"; };
+		OO0000000000000000000002 /* TicketContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketContentView.swift; sourceTree = "<group>"; };
+
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -322,6 +331,7 @@
 				LL0000000000000000000004 /* DiffAttributedString.swift */,
 				LL0000000000000000000010 /* RowOffsetIndex.swift */,
 				MM0000000000000000000001 /* MarkdownBlockDocument.swift */,
+				OO0000000000000000000001 /* TicketBlockDocument.swift */,
 				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
 				PP000000000000000000001 /* ActivityStreamModel.swift */,
 				PP000000000000000000004 /* ActivityTickerView.swift */,
@@ -346,6 +356,7 @@
 				KK0000000000000000000002 /* TabRegionView.swift */,
 				LL0000000000000000000005 /* CodeContentView.swift */,
 				MM0000000000000000000002 /* ConversationContentView.swift */,
+				OO0000000000000000000002 /* TicketContentView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -382,6 +393,8 @@
 				PP000000000000000000008 /* ActivityStreamModelTests.swift */,
 				PP000000000000000000010 /* ActivityTickerWiringTests.swift */,
 				PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */,
+				PP0000000000000000000001 /* TicketBlockDocumentTests.swift */,
+
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -520,6 +533,8 @@
 				LL0000000000000000000106 /* RowOffsetIndex.swift in Sources */,
 				MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */,
 				MM0000000000000000000102 /* ConversationContentView.swift in Sources */,
+				OO0000000000000000000101 /* TicketBlockDocument.swift in Sources */,
+				OO0000000000000000000102 /* TicketContentView.swift in Sources */,
 				FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */,
 				GG00000000000000000000A2 /* ProcessRunner.swift in Sources */,
 				II000000000000000000011 /* TurnInteractionStore.swift in Sources */,
@@ -565,6 +580,7 @@
 				LL0000000000000000000204 /* DiffAttributedString.swift in TestSources */,
 				LL0000000000000000000205 /* RowOffsetIndex.swift in TestSources */,
 				MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */,
+				OO0000000000000000000201 /* TicketBlockDocument.swift in TestSources */,
 				LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */,
 				LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */,
 				LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */,
@@ -598,6 +614,8 @@
 				PP000000000000000000009 /* ActivityStreamModelTests.swift in Sources */,
 				PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */,
 				PP000000000000000000013 /* StatusBarActivityRemovalTests.swift in Sources */,
+				PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */,
+
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

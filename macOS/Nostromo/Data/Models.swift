@@ -1380,6 +1380,109 @@ struct PrConversationPayload: Decodable, Equatable {
     }
 }
 
+/// One section of a `ticket` view's description. Mirrors `TicketSection` in
+/// `src/ipc/protocol.rs` (macOS-local copy).
+struct TicketSectionModel: Decodable, Equatable {
+    let name: String
+    let heading: [MdSpan]?
+    let blocks: [MdBlock]
+
+    private enum CodingKeys: String, CodingKey { case name, heading, blocks }
+
+    init(name: String, heading: [MdSpan]?, blocks: [MdBlock]) {
+        self.name = name
+        self.heading = heading
+        self.blocks = blocks
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name    = (try? c.decode(String.self, forKey: .name)) ?? ""
+        heading = try? c.decodeIfPresent([MdSpan].self, forKey: .heading)
+        blocks  = (try? c.decode([MdBlock].self, forKey: .blocks)) ?? []
+    }
+}
+
+/// One comment on a ticket, 1-indexed. Mirrors `TicketComment` in
+/// `src/ipc/protocol.rs` (macOS-local copy).
+struct TicketCommentModel: Decodable, Equatable, Identifiable {
+    var id: Int { index }
+    let index: Int
+    let author: String
+    let createdAt: Date
+    let blocks: [MdBlock]
+
+    private enum CodingKeys: String, CodingKey {
+        case index, author, blocks
+        case createdAt = "created_at"
+    }
+
+    init(index: Int, author: String, createdAt: Date, blocks: [MdBlock]) {
+        self.index = index
+        self.author = author
+        self.createdAt = createdAt
+        self.blocks = blocks
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        index     = (try? c.decode(Int.self, forKey: .index)) ?? 0
+        author    = (try? c.decode(String.self, forKey: .author)) ?? ""
+        createdAt = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date(timeIntervalSince1970: 0)
+        blocks    = (try? c.decode([MdBlock].self, forKey: .blocks)) ?? []
+    }
+}
+
+/// The payload of `PaneContentWire.ticket`: an issue-tracker ticket (W4).
+/// Mirrors the `Ticket` variant of `PaneContentWire` in `src/ipc/protocol.rs`
+/// (macOS-local copy).
+struct TicketPayload: Decodable, Equatable {
+    let provider: String
+    let key: String
+    let summary: String
+    let status: String
+    let assignee: String?
+    let url: String
+    let sections: [TicketSectionModel]
+    let comments: [TicketCommentModel]
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, key, summary, status, assignee, url, sections, comments
+    }
+
+    init(
+        provider: String,
+        key: String,
+        summary: String,
+        status: String,
+        assignee: String?,
+        url: String,
+        sections: [TicketSectionModel],
+        comments: [TicketCommentModel]
+    ) {
+        self.provider = provider
+        self.key = key
+        self.summary = summary
+        self.status = status
+        self.assignee = assignee
+        self.url = url
+        self.sections = sections
+        self.comments = comments
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = (try? c.decode(String.self, forKey: .provider)) ?? ""
+        key      = (try? c.decode(String.self, forKey: .key)) ?? ""
+        summary  = (try? c.decode(String.self, forKey: .summary)) ?? ""
+        status   = (try? c.decode(String.self, forKey: .status)) ?? ""
+        assignee = try? c.decodeIfPresent(String.self, forKey: .assignee)
+        url      = (try? c.decode(String.self, forKey: .url)) ?? ""
+        sections = (try? c.decode([TicketSectionModel].self, forKey: .sections)) ?? []
+        comments = (try? c.decode([TicketCommentModel].self, forKey: .comments)) ?? []
+    }
+}
+
 /// Content payload pushed to a single pane, decoupled from layout geometry.
 enum PaneContentWire {
     case text(String)
@@ -1396,6 +1499,8 @@ enum PaneContentWire {
     case diff(DiffPayload)
     /// A PR's description and comment/review threads, markdown-parsed (W3).
     case prConversation(PrConversationPayload)
+    /// An issue-tracker ticket (W4).
+    case ticket(TicketPayload)
     /// A future content kind not yet recognised by this client version.
     case unknown(Any)
 }
@@ -1431,6 +1536,8 @@ extension PaneContentWire: Decodable {
             self = .diff(try DiffPayload(from: decoder))
         case "pr_conversation":
             self = .prConversation(try PrConversationPayload(from: decoder))
+        case "ticket":
+            self = .ticket(try TicketPayload(from: decoder))
         default:
             let raw = (try? AnyDecodable(from: decoder))?.value ?? [:]
             self = .unknown(raw)
@@ -1458,6 +1565,8 @@ extension PaneContentWire: Equatable {
         case (.diff(let a), .diff(let b)):
             return a == b
         case (.prConversation(let a), .prConversation(let b)):
+            return a == b
+        case (.ticket(let a), .ticket(let b)):
             return a == b
         case (.jsonSnapshot, .jsonSnapshot):
             return false

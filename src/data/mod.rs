@@ -29,6 +29,7 @@ pub mod rate_limits;
 pub mod rate_limits_watcher;
 pub mod right_panel_source;
 pub mod teri_todos;
+pub mod tickets;
 pub mod unified_diff;
 
 use std::time::Duration;

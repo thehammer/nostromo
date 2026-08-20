@@ -562,6 +562,9 @@ final class PaneContentNSView: NSView {
     /// The `pr_conversation` renderer (W3 — curated-agent-views). Same
     /// persistent-sibling discipline as `codeView`.
     private let conversationView = ConversationContentView()
+    /// The `ticket` renderer (W4 — curated-agent-views). Same
+    /// persistent-sibling discipline as `codeView`/`conversationView`.
+    private let ticketView = TicketContentView()
 
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is loaded.
     var onLoadPR: (String, Int) -> Void = { _, _ in } {
@@ -621,6 +624,18 @@ final class PaneContentNSView: NSView {
             conversationView.leadingAnchor.constraint(equalTo: leadingAnchor),
             conversationView.trailingAnchor.constraint(equalTo: trailingAnchor),
             conversationView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        // Same shape again: added after `hosting`, hidden by default, shown
+        // only for the `ticket` kind (W4 — curated-agent-views).
+        ticketView.translatesAutoresizingMaskIntoConstraints = false
+        ticketView.isHidden = true
+        addSubview(ticketView)
+        NSLayoutConstraint.activate([
+            ticketView.topAnchor.constraint(equalTo: topAnchor),
+            ticketView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            ticketView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ticketView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
         // Force dark appearance explicitly rather than relying on inheritance —
@@ -698,6 +713,12 @@ final class PaneContentNSView: NSView {
             conversationView.update(content: content, address: address)
         } else {
             conversationView.isHidden = true
+        }
+        if TicketContentView.handles(content) {
+            ticketView.isHidden = false
+            ticketView.update(content: content, address: address)
+        } else {
+            ticketView.isHidden = true
         }
         // Freshness and address are cheap to always re-assign — neither ever
         // rebuilds anything; freshness toggles the footnote below, and

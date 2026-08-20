@@ -38,6 +38,7 @@ use nostromo::{
         perri_queue::PrQueueSnapshot,
         perri_queue_native::PerriQueueNativeSource,
         teri_todos::TeriTodosNativeSource,
+        tickets::TicketProvider,
     },
     ipc::{
         decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, PtyManager,
@@ -200,6 +201,22 @@ async fn main() -> Result<()> {
                     mcp_config,
                 );
             }
+            // ── ticket provider registry (W4 — curated-agent-views) ─────────────
+            // `jira` is always registered; whether it's actually *configured*
+            // (credentials resolved) is logged once so a deployment missing
+            // ATLASSIAN_* can tell why `ticket` shows are refused, without
+            // ever logging the token itself.
+            let jira_provider = Arc::new(nostromo::data::tickets::jira::JiraProvider::new(&config));
+            info!(configured = jira_provider.is_configured(), "jira ticket provider");
+            let mut ticket_registry = nostromo::data::tickets::TicketRegistry::new();
+            ticket_registry.register(jira_provider);
+            let tickets = nostromo::mcp::TicketRegistryState {
+                registry: Arc::new(ticket_registry),
+                cache: Arc::new(nostromo::data::tickets::TicketCache::new(
+                    std::time::Duration::from_secs(60),
+                )),
+            };
+
             let backend = DaemonMcpBackend {
                 pane_registry: Arc::clone(&pane_registry),
                 session_mgr: Arc::clone(&session_mgr),
@@ -211,6 +228,7 @@ async fn main() -> Result<()> {
                     ..Default::default()
                 },
                 decisions: Arc::clone(&decisions),
+                tickets,
             };
             let state = McpSharedState::for_daemon_with_sources(
                 backend,

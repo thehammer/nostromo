@@ -70,7 +70,7 @@ struct MarkdownBlockDocument: Equatable {
 
     // MARK: - Comment framing
 
-    private static func commentHeader(author: String, date: Date) -> NSAttributedString {
+    static func commentHeader(author: String, date: Date) -> NSAttributedString {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
@@ -81,20 +81,20 @@ struct MarkdownBlockDocument: Equatable {
         ])
     }
 
-    private static func blockBreak() -> NSAttributedString {
+    static func blockBreak() -> NSAttributedString {
         NSAttributedString(string: "\n", attributes: textAttrs())
     }
 
     /// The blank line after a paragraph/heading/code block — the separator
     /// every top-level block that isn't itself a list/quote/table/rule ends
     /// with.
-    private static func paragraphBreak() -> NSAttributedString {
+    static func paragraphBreak() -> NSAttributedString {
         NSAttributedString(string: "\n\n", attributes: textAttrs())
     }
 
     // MARK: - Block rendering
 
-    private static func render(blocks: [MdBlock], indent: Int) -> NSAttributedString {
+    static func render(blocks: [MdBlock], indent: Int) -> NSAttributedString {
         let out = NSMutableAttributedString()
         for block in blocks {
             out.append(render(block: block, indent: indent))
@@ -102,7 +102,7 @@ struct MarkdownBlockDocument: Equatable {
         return out
     }
 
-    private static func render(block: MdBlock, indent: Int) -> NSAttributedString {
+    static func render(block: MdBlock, indent: Int) -> NSAttributedString {
         let out = NSMutableAttributedString()
         let prefix = String(repeating: "  ", count: indent)
         switch block {
@@ -142,7 +142,7 @@ struct MarkdownBlockDocument: Equatable {
         return out
     }
 
-    private static func tableRowRun(_ cells: [[MdSpan]]) -> NSAttributedString {
+    static func tableRowRun(_ cells: [[MdSpan]]) -> NSAttributedString {
         let out = NSMutableAttributedString()
         out.append(NSAttributedString(string: "| ", attributes: mutedAttrs()))
         for (i, cell) in cells.enumerated() {
@@ -157,7 +157,7 @@ struct MarkdownBlockDocument: Equatable {
 
     // MARK: - Inline span rendering
 
-    private static func render(spans: [MdSpan]) -> NSAttributedString {
+    static func render(spans: [MdSpan]) -> NSAttributedString {
         let out = NSMutableAttributedString()
         for span in spans {
             out.append(render(span: span))
@@ -165,7 +165,7 @@ struct MarkdownBlockDocument: Equatable {
         return out
     }
 
-    private static func render(span: MdSpan) -> NSAttributedString {
+    static func render(span: MdSpan) -> NSAttributedString {
         switch span {
         case .text(let text):
             return NSAttributedString(string: text, attributes: textAttrs())
@@ -200,7 +200,7 @@ struct MarkdownBlockDocument: Equatable {
         }
     }
 
-    private static func styled(_ spans: [MdSpan], italic: Bool, bold: Bool) -> NSAttributedString {
+    static func styled(_ spans: [MdSpan], italic: Bool, bold: Bool) -> NSAttributedString {
         let inner = NSMutableAttributedString(attributedString: render(spans: spans))
         var traits: NSFontTraitMask = []
         if italic { traits.insert(.italicFontMask) }
@@ -210,7 +210,7 @@ struct MarkdownBlockDocument: Equatable {
         return inner
     }
 
-    private static func headingRun(_ text: String, level: Int) -> NSAttributedString {
+    static func headingRun(_ text: String, level: Int) -> NSAttributedString {
         let size: CGFloat = max(13, 20 - CGFloat(level - 1) * 2)
         return NSAttributedString(string: text, attributes: [
             .font: NSFont.systemFont(ofSize: size, weight: .semibold),
@@ -223,7 +223,7 @@ struct MarkdownBlockDocument: Equatable {
     /// byte-for-byte (including its original indentation); only a trailing
     /// newline is dropped so it doesn't compound with the block separator
     /// this function's caller appends.
-    private static func codeBlockRun(_ text: String, lang: String?, indent: Int) -> NSAttributedString {
+    static func codeBlockRun(_ text: String, lang: String?, indent: Int) -> NSAttributedString {
         let body = text.hasSuffix("\n") ? String(text.dropLast()) : text
         let prefix = String(repeating: "  ", count: indent)
         let indented = body
@@ -238,11 +238,11 @@ struct MarkdownBlockDocument: Equatable {
         ])
     }
 
-    private static func plainText(_ spans: [MdSpan]) -> String {
+    static func plainText(_ spans: [MdSpan]) -> String {
         spans.map(plainText).joined()
     }
 
-    private static func plainText(_ span: MdSpan) -> String {
+    static func plainText(_ span: MdSpan) -> String {
         switch span {
         case .text(let t), .code(let t):
             return t
@@ -255,15 +255,15 @@ struct MarkdownBlockDocument: Equatable {
         }
     }
 
-    private static func textAttrs() -> [NSAttributedString.Key: Any] {
+    static func textAttrs() -> [NSAttributedString.Key: Any] {
         [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: Theme.fg]
     }
 
-    private static func mutedAttrs() -> [NSAttributedString.Key: Any] {
+    static func mutedAttrs() -> [NSAttributedString.Key: Any] {
         [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: Theme.fgMuted]
     }
 
-    private static func inlineCodeAttrs() -> [NSAttributedString.Key: Any] {
+    static func inlineCodeAttrs() -> [NSAttributedString.Key: Any] {
         [
             .font: Theme.firaCode(size: 12),
             .foregroundColor: Theme.fg,

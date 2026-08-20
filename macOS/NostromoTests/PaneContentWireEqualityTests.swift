@@ -569,6 +569,178 @@ final class PaneContentWireEqualityTests: XCTestCase {
         XCTAssertThrowsError(try decode(json), "a frame with no kind discriminator at all must not silently decode as any known case")
     }
 
+    // MARK: - .ticket (W4 — curated-agent-views)
+
+    private func makeTicketSection(
+        name: String = "description",
+        heading: [MdSpan]? = nil,
+        blocks: [MdBlock]? = nil
+    ) -> TicketSectionModel {
+        TicketSectionModel(name: name, heading: heading, blocks: blocks ?? [.paragraph([.text("section body")])])
+    }
+
+    private func makeTicketComment(
+        index: Int = 1,
+        author: String = "alice",
+        createdAt: Date = Date(timeIntervalSince1970: 0),
+        blocks: [MdBlock]? = nil
+    ) -> TicketCommentModel {
+        TicketCommentModel(index: index, author: author, createdAt: createdAt, blocks: blocks ?? [.paragraph([.text("comment body")])])
+    }
+
+    private func makeTicketPayload(
+        provider: String = "jira",
+        key: String = "PROJ-42",
+        summary: String = "Fix the login bug",
+        status: String = "In Progress",
+        assignee: String? = "alice",
+        url: String = "https://example.atlassian.net/browse/PROJ-42",
+        sections: [TicketSectionModel]? = nil,
+        comments: [TicketCommentModel]? = nil
+    ) -> TicketPayload {
+        TicketPayload(
+            provider: provider, key: key, summary: summary, status: status, assignee: assignee, url: url,
+            sections: sections ?? [makeTicketSection()], comments: comments ?? [makeTicketComment()]
+        )
+    }
+
+    func testTicketCasesWithIdenticalPayloadsAreEqual() {
+        XCTAssertEqual(
+            PaneContentWire.ticket(makeTicketPayload()),
+            PaneContentWire.ticket(makeTicketPayload())
+        )
+    }
+
+    func testTicketCasesDifferingByKeyAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.ticket(makeTicketPayload()),
+            PaneContentWire.ticket(makeTicketPayload(key: "PROJ-43"))
+        )
+    }
+
+    func testTicketCasesDifferingBySummaryAreNotEqual() {
+        XCTAssertNotEqual(
+            PaneContentWire.ticket(makeTicketPayload()),
+            PaneContentWire.ticket(makeTicketPayload(summary: "A different summary entirely"))
+        )
+    }
+
+    /// Proves nested `TicketSectionModel`/`TicketCommentModel` equality reaches
+    /// down through `.ticket`'s payload — not just the top-level string fields.
+    func testTicketCasesWithStructurallyDifferentSectionsOrCommentsAreNotEqual() {
+        let differentSectionHeading = makeTicketPayload(sections: [
+            makeTicketSection(name: "acceptance_criteria", heading: [.text("Acceptance Criteria")]),
+        ])
+        XCTAssertNotEqual(
+            PaneContentWire.ticket(makeTicketPayload()),
+            PaneContentWire.ticket(differentSectionHeading),
+            "a different section heading nested inside an otherwise-identical payload must be caught"
+        )
+
+        let differentCommentAuthor = makeTicketPayload(comments: [makeTicketComment(author: "bob")])
+        XCTAssertNotEqual(
+            PaneContentWire.ticket(makeTicketPayload()),
+            PaneContentWire.ticket(differentCommentAuthor),
+            "a different comment author nested inside an otherwise-identical payload must be caught"
+        )
+    }
+
+    // MARK: - .ticket decoding (W4 — curated-agent-views)
+
+    func testTicketDecodesEveryFieldFromWireFormatJSON() throws {
+        let json = """
+        {
+            "kind": "ticket",
+            "provider": "jira",
+            "key": "PROJ-42",
+            "summary": "Fix the login bug",
+            "status": "In Progress",
+            "assignee": "alice",
+            "url": "https://example.atlassian.net/browse/PROJ-42",
+            "sections": [
+                {
+                    "name": "description",
+                    "blocks": [
+                        { "kind": "paragraph", "spans": [{ "kind": "text", "text": "This is the description." }] }
+                    ]
+                },
+                {
+                    "name": "acceptance_criteria",
+                    "heading": [{ "kind": "text", "text": "Acceptance Criteria" }],
+                    "blocks": [
+                        {
+                            "kind": "list", "ordered": false,
+                            "items": [[{ "kind": "paragraph", "spans": [{ "kind": "text", "text": "Criterion one" }] }]]
+                        }
+                    ]
+                }
+            ],
+            "comments": [
+                {
+                    "index": 1,
+                    "author": "bob",
+                    "created_at": "2026-05-30T09:30:56.510874Z",
+                    "blocks": [{ "kind": "paragraph", "spans": [{ "kind": "text", "text": "Looks fine." }] }]
+                }
+            ]
+        }
+        """
+
+        let wire = try decode(json)
+
+        guard case .ticket(let payload) = wire else {
+            XCTFail("Expected .ticket, got \(wire)")
+            return
+        }
+
+        XCTAssertEqual(payload.provider, "jira")
+        XCTAssertEqual(payload.key, "PROJ-42")
+        XCTAssertEqual(payload.summary, "Fix the login bug")
+        XCTAssertEqual(payload.status, "In Progress")
+        XCTAssertEqual(payload.assignee, "alice")
+        XCTAssertEqual(payload.url, "https://example.atlassian.net/browse/PROJ-42")
+
+        XCTAssertEqual(payload.sections.count, 2)
+        XCTAssertEqual(payload.sections[0].name, "description")
+        XCTAssertNil(payload.sections[0].heading)
+        XCTAssertEqual(payload.sections[0].blocks, [.paragraph([.text("This is the description.")])])
+
+        XCTAssertEqual(payload.sections[1].name, "acceptance_criteria")
+        XCTAssertEqual(payload.sections[1].heading, [.text("Acceptance Criteria")])
+        XCTAssertEqual(
+            payload.sections[1].blocks,
+            [.list(ordered: false, start: nil, items: [[.paragraph([.text("Criterion one")])]])]
+        )
+
+        XCTAssertEqual(payload.comments.count, 1)
+        XCTAssertEqual(payload.comments[0].index, 1)
+        XCTAssertEqual(payload.comments[0].author, "bob")
+        XCTAssertEqual(payload.comments[0].blocks, [.paragraph([.text("Looks fine.")])])
+
+        // Equal to the value constructed directly, not just field-by-field.
+        let expected = TicketPayload(
+            provider: "jira", key: "PROJ-42", summary: "Fix the login bug", status: "In Progress",
+            assignee: "alice", url: "https://example.atlassian.net/browse/PROJ-42",
+            sections: [
+                TicketSectionModel(
+                    name: "description", heading: nil,
+                    blocks: [.paragraph([.text("This is the description.")])]
+                ),
+                TicketSectionModel(
+                    name: "acceptance_criteria", heading: [.text("Acceptance Criteria")],
+                    blocks: [.list(ordered: false, start: nil, items: [[.paragraph([.text("Criterion one")])]])]
+                ),
+            ],
+            comments: [
+                TicketCommentModel(
+                    index: 1, author: "bob", createdAt: payload.comments[0].createdAt,
+                    blocks: [.paragraph([.text("Looks fine.")])]
+                ),
+            ]
+        )
+        XCTAssertEqual(wire, PaneContentWire.ticket(expected))
+    }
+
     // MARK: - Cross-case inequality
 
     func testDifferentCasesAreNeverEqual() {
@@ -590,5 +762,13 @@ final class PaneContentWireEqualityTests: XCTestCase {
         XCTAssertNotEqual(conversation, PaneContentWire.diff(makeDiffPayload()))
         XCTAssertNotEqual(conversation, PaneContentWire.text("PR description"))
         XCTAssertNotEqual(conversation, PaneContentWire.loading)
+    }
+
+    func testTicketCaseNeverEqualsCodeOrPrConversationOrLoading() {
+        let ticket = PaneContentWire.ticket(makeTicketPayload())
+        XCTAssertNotEqual(ticket, PaneContentWire.code(makeCodePayload()))
+        XCTAssertNotEqual(ticket, PaneContentWire.prConversation(makeConversationPayload()))
+        XCTAssertNotEqual(ticket, PaneContentWire.text("Fix the login bug"))
+        XCTAssertNotEqual(ticket, PaneContentWire.loading)
     }
 }

@@ -364,17 +364,24 @@ Registered sources and their params:
 | `perri.get_pr_diff` | `diff` | `{ anchor?, emphasis?, reason? }` — wire-shaped `Anchor`/`Emphasis` |
 | `nostromo.get_file` | `code` | `{ path, revision?, anchor_line?, emphasis?, reason? }` |
 | `perri.get_pr_conversation` | `pr_conversation` | `{ anchor?, emphasis?, reason? }` — same generic passthrough as `perri.get_pr_diff`; the variant that applies here is `{"kind": "comment", "id": "..."}` |
+| `nostromo.get_ticket` | `ticket` | `{ provider, key, anchor?, emphasis?, reason? }` — the variant that applies here is `{"kind": "section", "name": "acceptance_criteria"}` (or `"comment:<n>"`) |
 
-See `docs/mcp/panes.md` for the full `code`/`diff`/`pr_conversation` payload
-shapes, revision resolution, and the refusal set.
+See `docs/mcp/panes.md` for the full `code`/`diff`/`pr_conversation`/`ticket`
+payload shapes, revision resolution, and the refusal set. See
+`docs/jira-provider.md` for how `nostromo.get_ticket`'s `jira` provider
+resolves credentials.
 
-**Output**: `{ "ok": true }` or `{ "error": "..." }`, where the error is one of
+**Output**: `{ "ok": true }` or `{ "error": "...", "detail": "..." }`, where
+`detail` is present only for a `ticket` refusal and `error` is one of
 `unknown_source`, `fetch_failed`, `invalid_args`, `unidentified_caller`,
-`not_supported`, or — for the file/diff/conversation sources — one of the
-refusals `invalid_params`, `unknown_path`, `path_escapes_root`, `not_utf8`,
-`anchor_beyond_eof`, `invalid_emphasis_range`, `unresolvable_revision`, or
-`unknown_comment_id` (a `pr_conversation` anchor/emphasis naming a comment id
-not present in the fetched conversation).
+`not_supported`, or — for the file/diff/conversation/ticket sources — one of
+the refusals `invalid_params`, `unknown_path`, `path_escapes_root`,
+`not_utf8`, `anchor_beyond_eof`, `invalid_emphasis_range`,
+`unresolvable_revision`, `unknown_comment_id` (a `pr_conversation`
+anchor/emphasis naming a comment id not present in the fetched conversation),
+`unsupported_provider`, `provider_unconfigured`, `unknown_ticket`, or
+`unknown_section` (see `docs/mcp/panes.md`'s `ticket` section for what each
+means and what `detail` carries for it).
 
 **A refusal never destroys existing pane content.** If the pane already had
 content, nothing is broadcast at all; the agent gets the error and the

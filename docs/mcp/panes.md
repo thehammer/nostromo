@@ -373,8 +373,8 @@ indented block), `list` (`ordered`, optional `start`, `items: [[MdBlock]]`),
 `rule`. An `MdSpan` — inline content inside a block — is one of `text`,
 `code`, `emph`/`strong`/`strike` (each wrapping nested `spans`), `link`
 (`spans`, `url`), and `image` (`alt`, `url`). Both are defined once in
-`src/ipc/protocol.rs` and reused by `ticket` (a later wedge) — this is not a
-`pr_conversation`-specific format.
+`src/ipc/protocol.rs` and reused by `ticket` (curated-agent-views W4, below)
+— this is not a `pr_conversation`-specific format.
 
 ### `pr_conversation` — a PR's description and comment/review threads
 
@@ -429,6 +429,71 @@ apply to a bad line.
 but one or more of those three fails, `conversation_error` names which, and
 `threads` carries whatever the other calls returned — never blanked, and never
 presented as a complete conversation it isn't.
+
+---
+
+## `ticket` — an issue-tracker ticket — curated-agent-views W4
+
+```json
+{
+  "kind": "ticket",
+  "provider": "jira",
+  "key": "CORE-2841",
+  "summary": "Referral status doesn't sync to the portal",
+  "status": "In Progress",
+  "assignee": "Alice Smith",
+  "url": "https://carefeed.atlassian.net/browse/CORE-2841",
+  "sections": [
+    { "name": "description", "heading": null,
+      "blocks": [ { "kind": "paragraph", "spans": [{ "kind": "text", "text": "..." }] } ] },
+    { "name": "acceptance_criteria",
+      "heading": [{ "kind": "text", "text": "Acceptance Criteria" }],
+      "blocks": [ { "kind": "list", "ordered": false, "start": null, "items": [ ["..."] ] } ] }
+  ],
+  "comments": [
+    { "index": 1, "author": "bob", "created_at": "2024-01-01T00:00:00Z",
+      "body": [ { "kind": "paragraph", "spans": [{ "kind": "text", "text": "..." }] } ] }
+  ]
+}
+```
+
+`provider` names which registered issue-tracker backend produced this ticket
+— a request field, not a view type, so Linear or GitHub Issues can register a
+second provider later without a new `PaneContentWire` variant. v1 registers
+exactly one provider, `jira`.
+
+`sections` splits the ticket's description on its own headings: every block
+before the first heading is the `"description"` section (`heading: null`);
+each subsequent heading starts a new section whose `name` is that heading's
+text, lowercased/normalized, then resolved against an aliasable table (see
+below) — so `## Acceptance Criteria`, `## AC`, and `## Definition of Done` all
+resolve to the same canonical `"acceptance_criteria"` name. `comments` is
+chronological and 1-indexed; a comment is addressable the same way a section
+is, via the reserved name `"comment:<index>"`.
+
+Produced by **`nostromo.get_ticket`**, params `{ provider, key, anchor?,
+emphasis?, reason? }` — the same generic `Anchor`/`Emphasis`/`reason`
+passthrough `perri.get_pr_diff`/`perri.get_pr_conversation` use; the variant
+that applies here is `{"kind": "section", "name": "acceptance_criteria"}` (or
+`"comment:3"`) for both `anchor` and `emphasis`. Unlike every other source,
+`ticket` is **not watch-driven** — a ticket is a one-shot fetch, not a live
+subscription — and it is the first source that talks to a service outside
+GitHub.
+
+**Refusals are specific, and never render as raw text or blank the pane:**
+
+| `error` | Meaning |
+|---|---|
+| `unsupported_provider` | `provider` isn't registered. The daemon's log/response names every provider it *does* support. |
+| `provider_unconfigured` | `provider` is registered (`jira` always is) but has no resolved credentials — see `docs/jira-provider.md`. The message names the credentials file and all three variable names. |
+| `unknown_ticket` | The provider's backend has no such ticket (Jira returned 404). |
+| `unknown_section` | `anchor`/`emphasis` named a section (or `comment:<n>`) that doesn't exist on *this* ticket — the message lists every section that does. |
+| `fetch_failed` | The provider ran but failed for some other reason (network error, non-2xx status, malformed response) — this one does **not** leave the pane's content untouched, the same way a `code`/`file` fetch failure on a live source stays loud. |
+
+**A short in-memory TTL cache** (60 seconds, keyed `(provider, key)`, never
+persisted across a daemon restart) means repeatedly showing the same ticket —
+including the daemon's own startup repaint of a bound `ticket` pane — costs at
+most one HTTP request per window, not one per repaint.
 
 ---
 

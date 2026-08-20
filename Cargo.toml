@@ -51,6 +51,7 @@ pulldown-cmark = { version = "0.12", default-features = false }
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal", "io-util", "net", "fs"] }
 futures = "0.3"
+async-trait = "0.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
