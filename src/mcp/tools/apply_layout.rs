@@ -432,7 +432,10 @@ pub(crate) fn freshness(source: &str, state: &McpSharedState) -> PaneFreshness {
             Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
             None => PaneFreshness::default(),
         },
-        SOURCE_CURRENT_PR => match state.perri_pr_rx.borrow().as_ref() {
+        // Both read the identical perri_pr_rx snapshot (SOURCE_PR_DIFF's
+        // fetch above does too) — they must share this arm, not just happen
+        // to agree, or the two panes' staleness could silently drift apart.
+        SOURCE_CURRENT_PR | SOURCE_PR_DIFF => match state.perri_pr_rx.borrow().as_ref() {
             Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
             None => PaneFreshness::default(),
         },

@@ -164,6 +164,127 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
     drop(server);
 }
 
+/// Regression test: a pane bound to `nostromo.get_file` must not deadlock a
+/// (re)connecting client's attach-replay.
+///
+/// `server.rs`'s connect handler used to hold `session_mgr`'s lock for the
+/// entire `bound_pane_contents()` call. `SOURCE_FILE`'s fetch path
+/// (`file_request_context` -> `file_root`) locks that exact same
+/// `Arc<Mutex<SessionManager>>` again to resolve the focus's cwd —
+/// `std::sync::Mutex` is not reentrant, so every reconnect (and every
+/// daemon-restart replay) hung forever the moment any pane was bound to this
+/// source. The existing `reconnecting_client_...` test above never exercised
+/// this because `perri-standard`'s panes bind to sources that don't touch
+/// `session_mgr` at fetch time — the bug needed a `get_file`-bound pane
+/// specifically, which this test adds. Every `recv()` here is wrapped in a
+/// short timeout so a deadlock shows up as a clean assertion failure instead
+/// of a hung test process.
+#[tokio::test]
+async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("nostromd.sock");
+
+    let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
+        tmp.path().join("panes.json"),
+    )));
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        tmp.path().join("sessions.json"),
+    )));
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_mcp_bridge(
+            Arc::clone(&pane_registry),
+            tmp.path().join("mcp.sock"),
+            tmp.path().join("mcp-config.json"),
+        );
+    }
+    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
+
+    let server = Server::bind(
+        &socket_path,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        tmp.path().join("perri-state"),
+    )
+    .unwrap();
+
+    let backend = DaemonMcpBackend {
+        pane_registry: Arc::clone(&pane_registry),
+        session_mgr: Arc::clone(&session_mgr),
+        broadcast_tx: server.tx.clone(),
+        perri: PerriDaemonState::default(),
+    };
+    let state = McpSharedState::for_daemon(backend);
+
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_pane_content_provider(Arc::new(McpPaneContentProvider(state.clone())));
+    }
+
+    let result = apply_layout(&state, &json!({ "name": "perri-standard" }), Some("perri")).await;
+    assert_eq!(result["ok"], true);
+
+    // Bind the diff pane to a real file this test process can read.
+    // `file_root()` falls back to the test process's own cwd when no live
+    // session exists for the tag (as here), and its containment check is
+    // lexical against that root — so the path must resolve *inside* it, not
+    // just be readable. A file already tracked in this repo (present in
+    // every checkout, unlike a path under the OS tmpdir) satisfies that.
+    let refresh_result = nostromo::mcp::tools::refresh_pane::refresh_pane_content(
+        &state,
+        &json!({
+            "pane_id": "diff",
+            "source": "nostromo.get_file",
+            "params": { "path": "Cargo.toml" },
+        }),
+        Some("perri"),
+    )
+    .await;
+    assert_eq!(refresh_result["ok"], true, "binding the diff pane to get_file must succeed: {refresh_result:?}");
+
+    // A client connecting after that binding exists is exactly the path that
+    // used to deadlock: attach-replay calls bound_pane_contents() while
+    // holding session_mgr's lock, which get_file's fetch path re-locks.
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    handshake(&mut stream, vec![Topic::Layout]).await;
+
+    let mut saw_layout = false;
+    let mut saw_code_content = false;
+    for _ in 0..8 {
+        if saw_layout && saw_code_content {
+            break;
+        }
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
+        {
+            Ok(m) => m,
+            Err(_) => break, // a deadlocked server never writes another frame
+        };
+        match msg {
+            ServerMsg::FocusLayout { tag, .. } if tag == "perri" => saw_layout = true,
+            ServerMsg::PaneContent { tag, pane_id, content, .. }
+                if tag == "perri" && pane_id == "diff" =>
+            {
+                assert!(matches!(content, PaneContentWire::Code { .. }));
+                saw_code_content = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_layout,
+        "a client connecting after a get_file binding must still get FocusLayout replayed \
+         (a deadlocked connect handler would never send anything at all)"
+    );
+    assert!(
+        saw_code_content,
+        "a client connecting after a get_file binding must get that pane's live content \
+         replayed, not hang forever inside bound_pane_contents()"
+    );
+
+    drop(server);
+}
+
 #[tokio::test]
 async fn fresh_registry_after_simulated_restart_has_bound_pane_content_ready_with_no_tool_call() {
     let tmp = TempDir::new().unwrap();

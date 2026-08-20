@@ -135,6 +135,27 @@ private struct PaneTab: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .unknown(let raw):
                 ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            // `.code`/`.diff` are out of scope for iOS rendering in this wedge
+            // (the PRD is explicit: no tabs, code views, or modals on iOS in
+            // v1) — these exist only so this switch stays exhaustive against
+            // the shared wire type. `.code` at least has a plain `text` field
+            // worth showing as-is; `.diff`'s structured per-file model has no
+            // simple text equivalent, so it gets a placeholder instead of a
+            // half-built rendering nobody asked for.
+            case .code(let payload):
+                ScrollView { textView(payload.text) }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .diff:
+                ScrollView {
+                    VStack(spacing: 8) {
+                        Spacer(minLength: 60)
+                        Text("Diff view isn't available on iOS yet.")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 16)
+                        Spacer()
+                    }.frame(maxWidth: .infinity)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         // D11: a quiet as-of footnote when this pane's data hasn't refreshed in

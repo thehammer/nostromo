@@ -335,8 +335,16 @@ where
         // Appended after the FocusLayout replay so structure always precedes
         // content on the wire, matching every other broadcast in this protocol.
         {
-            let mgr = session_mgr.lock().unwrap();
-            if let Some(provider) = mgr.pane_content_provider() {
+            // Clone the provider handle and drop the lock before calling into
+            // it — `bound_pane_contents()` can reach a `get_file`-bound pane's
+            // `file_root()`, which locks this exact `Arc<Mutex<SessionManager>>`
+            // again to resolve the focus's cwd. `std::sync::Mutex` is not
+            // reentrant, so holding the guard across that call self-deadlocks
+            // the connection handler the moment any pane is bound to
+            // `nostromo.get_file` — on every reconnect and every daemon-restart
+            // replay, not as a rare corner case.
+            let provider = session_mgr.lock().unwrap().pane_content_provider();
+            if let Some(provider) = provider {
                 snapshots.extend(provider.bound_pane_contents());
             }
         }

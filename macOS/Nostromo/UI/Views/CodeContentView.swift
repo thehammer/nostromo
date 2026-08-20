@@ -349,6 +349,20 @@ final class LineNumberRulerView: NSRulerView {
 
         // Which row the first visible character belongs to.
         var row = rowOffsets.row(containingOffset: min(charRange.location, max(0, text.length - 1)))
+        // Whether we've processed the first enumerated fragment yet. `row` is
+        // already correct for that first fragment regardless of whether it
+        // happens to start a paragraph or continue one — `rowOffsets.row`
+        // already accounts for that. Every *subsequent* paragraph-starting
+        // fragment means we've moved to a new row and must increment before
+        // reading `row`, not after: incrementing only in a `defer` (i.e.
+        // after use) meant that once the viewport's top landed mid-wrapped
+        // line — ordinary scrolling of any long line, not an edge case — the
+        // first fragment correctly drew nothing (it's a continuation), but
+        // the *next* fragment (the real start of the next row) still read
+        // the stale, not-yet-incremented `row` and drew the previous row's
+        // number. Every label for the rest of the visible viewport was then
+        // off by one.
+        var isFirstFragment = true
 
         let font = NSFont.monospacedDigitSystemFont(ofSize: Theme.monoFont.pointSize - 1, weight: .regular)
 
@@ -361,7 +375,10 @@ final class LineNumberRulerView: NSRulerView {
             // editor does it.
             let isParagraphStart = fragmentCharRange.location == 0
                 || text.character(at: fragmentCharRange.location - 1) == 10  // "\n"
-            defer { if isParagraphStart { row += 1 } }
+            if !isFirstFragment && isParagraphStart {
+                row += 1
+            }
+            isFirstFragment = false
             guard isParagraphStart, row >= 0, row < self.labels.count else { return }
 
             let label = self.labels[row]
