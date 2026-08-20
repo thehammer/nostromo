@@ -1888,7 +1888,7 @@ async fn get_pr_head_sha(
 /// Bodies are stored as raw strings; callers deserialise with `serde_json::from_str`.
 ///
 /// The Mutex guards are never held across `.await` points.
-async fn etag_get(
+pub(crate) async fn etag_get(
     client: &GithubClient,
     url: &str,
     etags: &Arc<Mutex<HashMap<String, String>>>,
@@ -1921,7 +1921,14 @@ async fn etag_get(
     }
 
     if !resp.status().is_success() {
-        return None;
+        // A transient failure (a 500, a secondary rate limit, ...) must not
+        // blank an endpoint that has a perfectly good cached body sitting
+        // right there from the last successful fetch — that would drop
+        // whatever this endpoint contributed (e.g. a PR's inline review
+        // threads) for this cycle even though nothing about the data itself
+        // changed. Fall back to the cache; `None` only when this URL has
+        // never been fetched successfully at all.
+        return body_cache.lock().unwrap().get(url).cloned();
     }
 
     let body = resp.text().await.ok()?;
@@ -2877,5 +2884,87 @@ mod tests {
             published.stale,
             "a failed poll must mark the republished snapshot stale"
         );
+    }
+
+    // ── etag_get cache fallback on transient failure ─────────────────────────
+
+    /// Build a `GithubClient` from a temp hosts.yml so this test doesn't
+    /// require a real `GITHUB_TOKEN`. Mirrors `tests/etag_caching.rs`'s
+    /// `make_client` and `perri_pr_native.rs`'s `make_test_client`.
+    fn etag_test_client() -> GithubClient {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_path = dir.path().join("hosts.yml");
+        std::fs::write(
+            &hosts_path,
+            "github.com:\n  oauth_token: test-token\n  user: tester\n  git_protocol: https\n",
+        )
+        .unwrap();
+        std::env::remove_var("GITHUB_TOKEN");
+        let client =
+            GithubClient::new(Some(&hosts_path)).expect("client should build from hosts.yml fixture");
+        std::mem::forget(dir);
+        client
+    }
+
+    #[tokio::test]
+    async fn etag_get_falls_back_to_the_cached_body_on_a_transient_server_failure() {
+        // Regression test: a 500/secondary-rate-limit response used to return
+        // None outright, discarding whatever a prior successful fetch had
+        // already cached — blanking a healthy endpoint's data for one bad
+        // poll instead of quietly reusing what's already known good.
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let url = format!("{}/some/endpoint", server.uri());
+        let client = etag_test_client();
+        let etags: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let body_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // First call: a genuine 200, populating the body cache.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("healthy cached body"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let first = etag_get(&client, &url, &etags, &body_cache).await;
+        assert_eq!(first, Some("healthy cached body".to_string()));
+
+        // Second call: a transient 500. Must fall back to the cached body,
+        // not return None and blank an endpoint that was working a moment ago.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let second = etag_get(&client, &url, &etags, &body_cache).await;
+        assert_eq!(
+            second,
+            Some("healthy cached body".to_string()),
+            "a transient failure must fall back to the last known-good cached body, not None"
+        );
+    }
+
+    #[tokio::test]
+    async fn etag_get_returns_none_on_failure_with_no_prior_successful_fetch() {
+        // The other half of the same fix: a URL that has *never* succeeded
+        // has nothing to fall back to, and must still report failure rather
+        // than fabricating an empty success.
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let url = format!("{}/some/endpoint", server.uri());
+        let client = etag_test_client();
+        let etags: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let body_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let result = etag_get(&client, &url, &etags, &body_cache).await;
+        assert_eq!(result, None);
     }
 }

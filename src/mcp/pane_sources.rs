@@ -39,7 +39,7 @@ use crate::ipc::pane_registry::PaneContentProvider;
 use crate::ipc::protocol::{PaneAddress, PaneContentWire, PaneFreshness, ServerMsg};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
 use crate::mcp::tools::apply_layout::{
-    self, FetchArgs, SOURCE_CURRENT_PR, SOURCE_PR_DIFF, SOURCE_PR_QUEUE,
+    self, FetchArgs, SOURCE_CURRENT_PR, SOURCE_PR_CONVERSATION, SOURCE_PR_DIFF, SOURCE_PR_QUEUE,
 };
 
 /// How long a source can go without producing good data before a pane
@@ -254,11 +254,13 @@ pub async fn run_pane_source_broadcaster(
             result = pr_rx.changed() => {
                 if result.is_err() { break; }
                 push_for_source(&state, SOURCE_CURRENT_PR, &mut last_sent);
-                // Both PR-backed sources read the same snapshot, so one watch
-                // change feeds both. `nostromo.get_file` is deliberately absent
-                // here: a file pane is a snapshot of a revision, and there is no
-                // channel that could tell it otherwise (W2 — D2).
+                // All three PR-backed sources read the same snapshot, so one
+                // watch change feeds all of them. `nostromo.get_file` is
+                // deliberately absent here: a file pane is a snapshot of a
+                // revision, and there is no channel that could tell it
+                // otherwise (W2 — D2).
                 push_for_source(&state, SOURCE_PR_DIFF, &mut last_sent);
+                push_for_source(&state, SOURCE_PR_CONVERSATION, &mut last_sent);
             }
             _ = ticker.tick() => {
                 reevaluate_staleness(&state, &mut last_sent);
@@ -1122,6 +1124,93 @@ mod tests {
             }
         }
         assert!(checked_any, "expected at least one push during this run");
+
+        handle.abort();
+    }
+
+    // ── perri.get_pr_conversation (W3 — curated-agent-views) ─────────────────
+
+    #[tokio::test]
+    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation() {
+        let (state, mut bcast, _qtx, pr_tx) = make_state();
+        bind_pane(&state, "perri", "conversation", SOURCE_PR_CONVERSATION);
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        pr_tx
+            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_millis(200), bcast.recv())
+            .await
+            .expect("a push within 200ms")
+            .unwrap();
+        match msg {
+            ServerMsg::PaneContent {
+                tag,
+                pane_id,
+                content,
+                ..
+            } => {
+                assert_eq!(tag, "perri");
+                assert_eq!(pane_id, "conversation");
+                assert!(matches!(content, PaneContentWire::PrConversation { .. }));
+            }
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound() {
+        let (state, mut bcast, _qtx, pr_tx) = make_state();
+        bind_pane(&state, "perri", "diff_text", SOURCE_CURRENT_PR);
+        bind_pane(&state, "perri", "diff_structured", SOURCE_PR_DIFF);
+        bind_pane(&state, "perri", "conversation", SOURCE_PR_CONVERSATION);
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        pr_tx
+            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .unwrap();
+
+        let mut seen_panes = std::collections::HashSet::new();
+        for _ in 0..3 {
+            match tokio::time::timeout(Duration::from_millis(200), bcast.recv())
+                .await
+                .expect("a push within 200ms")
+                .unwrap()
+            {
+                ServerMsg::PaneContent { tag, pane_id, .. } => {
+                    assert_eq!(tag, "perri");
+                    seen_panes.insert(pane_id);
+                }
+                other => panic!("expected PaneContent, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            seen_panes,
+            ["diff_text".to_string(), "diff_structured".to_string(), "conversation".to_string()]
+                .into_iter()
+                .collect(),
+            "one PR-watch change must push all three PR-backed sources, each exactly once"
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), bcast.recv())
+                .await
+                .is_err(),
+            "no fourth push"
+        );
 
         handle.abort();
     }

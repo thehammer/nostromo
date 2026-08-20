@@ -363,15 +363,18 @@ Registered sources and their params:
 | `perri.get_current_pr` | `text` | none |
 | `perri.get_pr_diff` | `diff` | `{ anchor?, emphasis?, reason? }` — wire-shaped `Anchor`/`Emphasis` |
 | `nostromo.get_file` | `code` | `{ path, revision?, anchor_line?, emphasis?, reason? }` |
+| `perri.get_pr_conversation` | `pr_conversation` | `{ anchor?, emphasis?, reason? }` — same generic passthrough as `perri.get_pr_diff`; the variant that applies here is `{"kind": "comment", "id": "..."}` |
 
-See `docs/mcp/panes.md` for the full `code`/`diff` payload shapes, revision
-resolution, and the refusal set.
+See `docs/mcp/panes.md` for the full `code`/`diff`/`pr_conversation` payload
+shapes, revision resolution, and the refusal set.
 
 **Output**: `{ "ok": true }` or `{ "error": "..." }`, where the error is one of
 `unknown_source`, `fetch_failed`, `invalid_args`, `unidentified_caller`,
-`not_supported`, or — for the file/diff sources — one of the refusals
-`invalid_params`, `unknown_path`, `path_escapes_root`, `not_utf8`,
-`anchor_beyond_eof`, `invalid_emphasis_range`, `unresolvable_revision`.
+`not_supported`, or — for the file/diff/conversation sources — one of the
+refusals `invalid_params`, `unknown_path`, `path_escapes_root`, `not_utf8`,
+`anchor_beyond_eof`, `invalid_emphasis_range`, `unresolvable_revision`, or
+`unknown_comment_id` (a `pr_conversation` anchor/emphasis naming a comment id
+not present in the fetched conversation).
 
 **A refusal never destroys existing pane content.** If the pane already had
 content, nothing is broadcast at all; the agent gets the error and the

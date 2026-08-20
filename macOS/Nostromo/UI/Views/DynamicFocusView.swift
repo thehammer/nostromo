@@ -559,6 +559,9 @@ final class PaneContentNSView: NSView {
     /// a pane that flips kinds and flips back keeps its scroll position, the
     /// same D9 discipline the hosting view itself follows.
     private let codeView = CodeContentView()
+    /// The `pr_conversation` renderer (W3 — curated-agent-views). Same
+    /// persistent-sibling discipline as `codeView`.
+    private let conversationView = ConversationContentView()
 
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is loaded.
     var onLoadPR: (String, Int) -> Void = { _, _ in } {
@@ -606,6 +609,18 @@ final class PaneContentNSView: NSView {
             codeView.leadingAnchor.constraint(equalTo: leadingAnchor),
             codeView.trailingAnchor.constraint(equalTo: trailingAnchor),
             codeView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        // Same shape as `codeView` above: added after `hosting`, hidden by
+        // default, shown only for the `pr_conversation` kind.
+        conversationView.translatesAutoresizingMaskIntoConstraints = false
+        conversationView.isHidden = true
+        addSubview(conversationView)
+        NSLayoutConstraint.activate([
+            conversationView.topAnchor.constraint(equalTo: topAnchor),
+            conversationView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            conversationView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            conversationView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
         // Force dark appearance explicitly rather than relying on inheritance —
@@ -667,16 +682,22 @@ final class PaneContentNSView: NSView {
             model.content = content
             currentContent = content
         }
-        // W2: `code`/`diff` render in AppKit, not SwiftUI — there is no
-        // gutter, no scroll-to-offset, and no range highlighting available in
-        // a SwiftUI `Text`. The model write above still happens so the two
-        // views never disagree about what the pane holds; only visibility
-        // decides which one the operator sees.
+        // W2/W3: `code`/`diff`/`pr_conversation` each render in AppKit, not
+        // SwiftUI — there is no gutter, no scroll-to-offset, and no range
+        // highlighting available in a SwiftUI `Text`. The model write above
+        // still happens so all views never disagree about what the pane
+        // holds; only visibility decides which one the operator sees.
         if CodeContentView.handles(content) {
             codeView.isHidden = false
             codeView.update(content: content, address: address)
         } else {
             codeView.isHidden = true
+        }
+        if ConversationContentView.handles(content) {
+            conversationView.isHidden = false
+            conversationView.update(content: content, address: address)
+        } else {
+            conversationView.isHidden = true
         }
         // Freshness and address are cheap to always re-assign — neither ever
         // rebuilds anything; freshness toggles the footnote below, and

@@ -156,6 +156,22 @@ private struct PaneTab: View {
                         Spacer()
                     }.frame(maxWidth: .infinity)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            // `.prConversation` (W3) is likewise out of scope for iOS
+            // rendering in v1 — its server-parsed markdown blocks have no
+            // simple text equivalent, so it gets the same placeholder
+            // treatment as `.diff` rather than a half-built rendering.
+            case .prConversation:
+                ScrollView {
+                    VStack(spacing: 8) {
+                        Spacer(minLength: 60)
+                        Text("PR conversation isn't available on iOS yet.")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 16)
+                        Spacer()
+                    }.frame(maxWidth: .infinity)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         // D11: a quiet as-of footnote when this pane's data hasn't refreshed in

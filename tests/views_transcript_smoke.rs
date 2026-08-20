@@ -127,6 +127,7 @@ async fn perri_view_ctrl_t_toggles_transcript() {
         head_sha: String::new(),
         diff_too_large: false,
         generated_at: None,
+        ..Default::default()
     }));
     drop(q_tx);
     drop(pr_tx);

@@ -366,6 +366,126 @@ pub enum PaneContentWire {
         #[serde(default)]
         changed_files: u64,
     },
+    /// A PR's description and comment/review threads, rendered as markdown
+    /// blocks (W3 — curated-agent-views). `body`/each comment's `body` are
+    /// already converted to [`MdBlock`] server-side (B5) — the client never
+    /// parses markdown.
+    PrConversation {
+        /// Repository in `owner/name` form.
+        repo: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        number: Option<u64>,
+        title: String,
+        author: String,
+        url: String,
+        /// The PR description, parsed.
+        body: Vec<MdBlock>,
+        threads: Vec<ConversationThread>,
+        /// Set when the PR fetch itself succeeded but fetching the
+        /// conversation (issue comments / review comments / reviews) failed —
+        /// `threads` then carries whatever was retrieved before the failure,
+        /// never presented as if it were the complete conversation.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        conversation_error: Option<String>,
+    },
+}
+
+// ── markdown block model (W3 — curated-agent-views, bet B5) ─────────────────
+
+/// A block-level markdown element, produced server-side from raw markdown via
+/// [`crate::markdown_blocks::markdown_to_blocks`] — the daemon owns CommonMark
+/// parsing so no client writes its own parser. Shared by `pr_conversation`
+/// (this wedge) and `ticket` (W4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MdBlock {
+    Paragraph {
+        spans: Vec<MdSpan>,
+    },
+    Heading {
+        level: u8,
+        spans: Vec<MdSpan>,
+    },
+    /// A fenced or indented code block. `lang` is the fence's info-string
+    /// language token (`None` for an unlabelled fence or an indented block).
+    /// `text` is the block's content, byte-for-byte apart from the fence
+    /// lines themselves.
+    CodeBlock {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        lang: Option<String>,
+        text: String,
+    },
+    List {
+        ordered: bool,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        start: Option<u64>,
+        items: Vec<Vec<MdBlock>>,
+    },
+    Quote {
+        blocks: Vec<MdBlock>,
+    },
+    Table {
+        header: Vec<Vec<MdSpan>>,
+        rows: Vec<Vec<Vec<MdSpan>>>,
+    },
+    Rule,
+}
+
+/// Inline markdown content within an [`MdBlock`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MdSpan {
+    Text { text: String },
+    Code { text: String },
+    Emph { spans: Vec<MdSpan> },
+    Strong { spans: Vec<MdSpan> },
+    Strike { spans: Vec<MdSpan> },
+    Link { spans: Vec<MdSpan>, url: String },
+    Image { alt: String, url: String },
+}
+
+// ── PR conversation threads (W3 — curated-agent-views) ───────────────────────
+
+/// What kind of GitHub thread a [`ConversationThread`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationThreadKind {
+    /// A top-level issue comment on the PR's "Conversation" tab.
+    Issue,
+    /// A whole-PR review (approve/request-changes/comment) with a body.
+    Review,
+    /// An inline review comment thread anchored to a file/line.
+    Inline,
+}
+
+/// One comment within a [`ConversationThread`], already markdown-parsed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationComment {
+    pub id: String,
+    pub author: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub body: Vec<MdBlock>,
+}
+
+/// One comment thread within a `pr_conversation` view — a single issue
+/// comment, a whole-PR review, or an inline review-comment thread assembled
+/// by walking `in_reply_to_id` to its root.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationThread {
+    pub id: String,
+    pub kind: ConversationThreadKind,
+    /// Inline threads only.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub path: Option<String>,
+    /// Inline threads only, new-side line number.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub diff_hunk: Option<String>,
+    #[serde(default)]
+    pub resolved: bool,
+    /// Chronological.
+    pub comments: Vec<ConversationComment>,
 }
 
 // ── structured unified diff (W2 — curated-agent-views) ───────────────────────
@@ -1830,6 +1950,7 @@ mod tests {
             head_sha: "abc123".into(),
             diff_too_large: false,
             generated_at: None,
+            ..Default::default()
         };
 
         round_trip_server(ServerMsg::PerriState {
@@ -2319,5 +2440,292 @@ mod tests {
             freshness: None,
             address: None,
         });
+    }
+
+    // ── MdBlock / MdSpan (W3 — curated-agent-views) ─────────────────────────────
+
+    #[test]
+    fn every_md_block_variant_round_trips() {
+        let cases = vec![
+            MdBlock::Paragraph {
+                spans: vec![MdSpan::Text { text: "hi".into() }],
+            },
+            MdBlock::Heading {
+                level: 2,
+                spans: vec![MdSpan::Text { text: "title".into() }],
+            },
+            MdBlock::CodeBlock {
+                lang: Some("rust".into()),
+                text: "fn f() {}\n".into(),
+            },
+            MdBlock::CodeBlock {
+                lang: None,
+                text: "plain\n".into(),
+            },
+            MdBlock::List {
+                ordered: false,
+                start: None,
+                items: vec![vec![MdBlock::Paragraph {
+                    spans: vec![MdSpan::Text { text: "item".into() }],
+                }]],
+            },
+            MdBlock::List {
+                ordered: true,
+                start: Some(3),
+                items: vec![
+                    vec![MdBlock::Paragraph {
+                        spans: vec![MdSpan::Text { text: "foo".into() }],
+                    }],
+                    vec![MdBlock::Paragraph {
+                        spans: vec![MdSpan::Text { text: "bar".into() }],
+                    }],
+                ],
+            },
+            MdBlock::Quote {
+                blocks: vec![MdBlock::Paragraph {
+                    spans: vec![MdSpan::Text { text: "quoted".into() }],
+                }],
+            },
+            MdBlock::Table {
+                header: vec![vec![MdSpan::Text { text: "a".into() }]],
+                rows: vec![vec![vec![MdSpan::Text { text: "1".into() }]]],
+            },
+            MdBlock::Rule,
+        ];
+        for block in cases {
+            let json = serde_json::to_string(&block).unwrap();
+            let back: MdBlock = serde_json::from_str(&json).unwrap();
+            assert_eq!(block, back, "MdBlock round trip mismatch: {json}");
+            let json2 = serde_json::to_string(&back).unwrap();
+            assert_eq!(json, json2, "byte-for-byte round trip mismatch: {json}");
+        }
+    }
+
+    #[test]
+    fn code_block_omits_lang_key_when_none_and_carries_it_when_some() {
+        let none_json = serde_json::to_value(&MdBlock::CodeBlock {
+            lang: None,
+            text: "x".into(),
+        })
+        .unwrap();
+        assert!(
+            none_json.get("lang").is_none(),
+            "lang: None must be omitted entirely, got: {none_json}"
+        );
+
+        let some_json = serde_json::to_value(&MdBlock::CodeBlock {
+            lang: Some("go".into()),
+            text: "x".into(),
+        })
+        .unwrap();
+        assert_eq!(some_json["lang"], "go");
+    }
+
+    #[test]
+    fn every_md_span_variant_round_trips() {
+        let cases = vec![
+            MdSpan::Text { text: "hi".into() },
+            MdSpan::Code { text: "x = 1".into() },
+            MdSpan::Emph {
+                spans: vec![MdSpan::Text { text: "em".into() }],
+            },
+            MdSpan::Strong {
+                spans: vec![MdSpan::Text { text: "strong".into() }],
+            },
+            MdSpan::Strike {
+                spans: vec![MdSpan::Text { text: "struck".into() }],
+            },
+            MdSpan::Link {
+                spans: vec![MdSpan::Text { text: "text".into() }],
+                url: "http://example.com".into(),
+            },
+            MdSpan::Image {
+                alt: "alt".into(),
+                url: "http://example.com/img.png".into(),
+            },
+        ];
+        for span in cases {
+            let json = serde_json::to_string(&span).unwrap();
+            let back: MdSpan = serde_json::from_str(&json).unwrap();
+            assert_eq!(span, back, "MdSpan round trip mismatch: {json}");
+            let json2 = serde_json::to_string(&back).unwrap();
+            assert_eq!(json, json2, "byte-for-byte round trip mismatch: {json}");
+        }
+    }
+
+    // ── ConversationThreadKind / ConversationComment / ConversationThread
+    //    (W3 — curated-agent-views) ──────────────────────────────────────────
+
+    #[test]
+    fn every_conversation_thread_kind_variant_round_trips_snake_case() {
+        let cases = [
+            (ConversationThreadKind::Issue, "\"issue\""),
+            (ConversationThreadKind::Review, "\"review\""),
+            (ConversationThreadKind::Inline, "\"inline\""),
+        ];
+        for (variant, wire) in cases {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(
+                json, wire,
+                "ConversationThreadKind::{variant:?} must serialize as {wire}"
+            );
+            let back: ConversationThreadKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn conversation_comment_round_trips() {
+        let comment = ConversationComment {
+            id: "123".into(),
+            author: "alice".into(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            body: vec![MdBlock::Paragraph {
+                spans: vec![MdSpan::Text { text: "hi".into() }],
+            }],
+        };
+        let json = serde_json::to_string(&comment).unwrap();
+        let back: ConversationComment = serde_json::from_str(&json).unwrap();
+        assert_eq!(comment, back, "ConversationComment round trip mismatch: {json}");
+    }
+
+    #[test]
+    fn conversation_thread_with_no_inline_fields_round_trips_and_omits_them() {
+        // An issue/review thread: path/line/diff_hunk all None.
+        let thread = ConversationThread {
+            id: "issue-1".into(),
+            kind: ConversationThreadKind::Issue,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            resolved: false,
+            comments: vec![ConversationComment {
+                id: "1".into(),
+                author: "alice".into(),
+                created_at: chrono::Utc::now(),
+                body: vec![MdBlock::Paragraph {
+                    spans: vec![MdSpan::Text { text: "hi".into() }],
+                }],
+            }],
+        };
+        let json = serde_json::to_value(&thread).unwrap();
+        assert!(json.get("path").is_none());
+        assert!(json.get("line").is_none());
+        assert!(json.get("diff_hunk").is_none());
+        let back: ConversationThread = serde_json::from_value(json).unwrap();
+        assert_eq!(thread, back);
+    }
+
+    #[test]
+    fn conversation_thread_with_all_inline_fields_round_trips_and_carries_them() {
+        // An inline thread: path/line/diff_hunk all Some.
+        let thread = ConversationThread {
+            id: "inline-1".into(),
+            kind: ConversationThreadKind::Inline,
+            path: Some("src/main.rs".into()),
+            line: Some(42),
+            diff_hunk: Some("@@ -1,3 +1,3 @@".into()),
+            resolved: false,
+            comments: vec![ConversationComment {
+                id: "1".into(),
+                author: "alice".into(),
+                created_at: chrono::Utc::now(),
+                body: vec![MdBlock::Paragraph {
+                    spans: vec![MdSpan::Text { text: "hi".into() }],
+                }],
+            }],
+        };
+        let json = serde_json::to_value(&thread).unwrap();
+        assert_eq!(json["path"], "src/main.rs");
+        assert_eq!(json["line"], 42);
+        assert_eq!(json["diff_hunk"], "@@ -1,3 +1,3 @@");
+        let back: ConversationThread = serde_json::from_value(json).unwrap();
+        assert_eq!(thread, back);
+    }
+
+    // ── PaneContentWire::PrConversation (W3 — curated-agent-views) ──────────────
+
+    fn sample_conversation_thread() -> ConversationThread {
+        ConversationThread {
+            id: "issue-1".into(),
+            kind: ConversationThreadKind::Issue,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            resolved: false,
+            comments: vec![ConversationComment {
+                id: "1".into(),
+                author: "alice".into(),
+                created_at: chrono::Utc::now(),
+                body: vec![MdBlock::Paragraph {
+                    spans: vec![MdSpan::Text { text: "hi".into() }],
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn pane_content_wire_pr_conversation_round_trips_and_carries_kind_pr_conversation() {
+        let content = PaneContentWire::PrConversation {
+            repo: "acme/web".into(),
+            number: Some(42),
+            title: "Add widget".into(),
+            author: "alice".into(),
+            url: "https://github.com/acme/web/pull/42".into(),
+            body: vec![MdBlock::CodeBlock {
+                lang: Some("rust".into()),
+                text: "fn f() {}\n".into(),
+            }],
+            threads: vec![sample_conversation_thread()],
+            conversation_error: None,
+        };
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json["kind"], "pr_conversation");
+        let back: PaneContentWire = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, content);
+        let json2 = serde_json::to_value(&back).unwrap();
+        assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn pane_content_wire_pr_conversation_omits_conversation_error_key_when_none() {
+        let content = PaneContentWire::PrConversation {
+            repo: "acme/web".into(),
+            number: None,
+            title: "Add widget".into(),
+            author: "alice".into(),
+            url: "https://github.com/acme/web/pull/42".into(),
+            body: vec![],
+            threads: vec![],
+            conversation_error: None,
+        };
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(
+            json.get("conversation_error").is_none(),
+            "conversation_error: None must be omitted from the wire entirely, matching the \
+             Diff.number precedent, got: {json}"
+        );
+        let back: PaneContentWire = serde_json::from_value(json).unwrap();
+        assert_eq!(back, content);
+    }
+
+    #[test]
+    fn pane_content_wire_pr_conversation_carries_conversation_error_when_some() {
+        let content = PaneContentWire::PrConversation {
+            repo: "acme/web".into(),
+            number: Some(42),
+            title: "Add widget".into(),
+            author: "alice".into(),
+            url: "https://github.com/acme/web/pull/42".into(),
+            body: vec![],
+            threads: vec![],
+            conversation_error: Some("conversation fetch partially failed: reviews".into()),
+        };
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json["conversation_error"], "conversation fetch partially failed: reviews");
+        let back: PaneContentWire = serde_json::from_value(json).unwrap();
+        assert_eq!(back, content);
     }
 }

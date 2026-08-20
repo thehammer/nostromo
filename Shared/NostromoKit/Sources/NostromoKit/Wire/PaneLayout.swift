@@ -366,6 +366,255 @@ public struct DiffPayload: Decodable, Equatable {
     }
 }
 
+// MARK: - Markdown block model (W3 — curated-agent-views, bet B5)
+
+/// Inline markdown content within an `MdBlock`. Mirrors `MdSpan` in
+/// `src/ipc/protocol.rs`. Parsed entirely server-side (B5) — this client
+/// never runs a CommonMark parser, only renders this structure.
+public indirect enum MdSpan: Equatable {
+    case text(String)
+    case code(String)
+    case emph([MdSpan])
+    case strong([MdSpan])
+    case strike([MdSpan])
+    case link(spans: [MdSpan], url: String)
+    case image(alt: String, url: String)
+}
+
+extension MdSpan: Decodable {
+    private enum K: String, CodingKey { case kind, text, spans, url, alt }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "text":
+            self = .text((try? c.decode(String.self, forKey: .text)) ?? "")
+        case "code":
+            self = .code((try? c.decode(String.self, forKey: .text)) ?? "")
+        case "emph":
+            self = .emph((try? c.decode([MdSpan].self, forKey: .spans)) ?? [])
+        case "strong":
+            self = .strong((try? c.decode([MdSpan].self, forKey: .spans)) ?? [])
+        case "strike":
+            self = .strike((try? c.decode([MdSpan].self, forKey: .spans)) ?? [])
+        case "link":
+            self = .link(
+                spans: (try? c.decode([MdSpan].self, forKey: .spans)) ?? [],
+                url: (try? c.decode(String.self, forKey: .url)) ?? ""
+            )
+        case "image":
+            self = .image(
+                alt: (try? c.decode(String.self, forKey: .alt)) ?? "",
+                url: (try? c.decode(String.self, forKey: .url)) ?? ""
+            )
+        default:
+            // A future span kind this client version doesn't know about yet —
+            // degrade to empty text rather than throw, so one unrecognised
+            // span doesn't undecode the whole conversation.
+            self = .text("")
+        }
+    }
+}
+
+/// A block-level markdown element, produced server-side from raw markdown.
+/// Mirrors `MdBlock` in `src/ipc/protocol.rs`. Shared by `pr_conversation`
+/// (this wedge) and `ticket` (a later wedge).
+public indirect enum MdBlock: Equatable {
+    case paragraph([MdSpan])
+    case heading(level: Int, spans: [MdSpan])
+    /// A fenced or indented code block. `lang` is the fence's info-string
+    /// language token (`nil` for an unlabelled fence or an indented block).
+    case codeBlock(lang: String?, text: String)
+    case list(ordered: Bool, start: Int?, items: [[MdBlock]])
+    case quote([MdBlock])
+    case table(header: [[MdSpan]], rows: [[[MdSpan]]])
+    case rule
+}
+
+extension MdBlock: Decodable {
+    private enum K: String, CodingKey {
+        case kind, spans, level, lang, text, ordered, start, items, blocks, header, rows
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "paragraph":
+            self = .paragraph((try? c.decode([MdSpan].self, forKey: .spans)) ?? [])
+        case "heading":
+            self = .heading(
+                level: (try? c.decode(Int.self, forKey: .level)) ?? 1,
+                spans: (try? c.decode([MdSpan].self, forKey: .spans)) ?? []
+            )
+        case "code_block":
+            self = .codeBlock(
+                lang: try? c.decodeIfPresent(String.self, forKey: .lang),
+                text: (try? c.decode(String.self, forKey: .text)) ?? ""
+            )
+        case "list":
+            self = .list(
+                ordered: (try? c.decode(Bool.self, forKey: .ordered)) ?? false,
+                start: try? c.decodeIfPresent(Int.self, forKey: .start),
+                items: (try? c.decode([[MdBlock]].self, forKey: .items)) ?? []
+            )
+        case "quote":
+            self = .quote((try? c.decode([MdBlock].self, forKey: .blocks)) ?? [])
+        case "table":
+            self = .table(
+                header: (try? c.decode([[MdSpan]].self, forKey: .header)) ?? [],
+                rows: (try? c.decode([[[MdSpan]]].self, forKey: .rows)) ?? []
+            )
+        case "rule":
+            self = .rule
+        default:
+            // A future block kind — degrade to an empty paragraph rather than
+            // throw, for the same reason `MdSpan`'s default case does.
+            self = .paragraph([])
+        }
+    }
+}
+
+// MARK: - PR conversation threads (W3 — curated-agent-views)
+
+/// What kind of GitHub thread a `ConversationThreadModel` came from. Mirrors
+/// `ConversationThreadKind` in `src/ipc/protocol.rs`.
+public enum ConversationThreadKind: String, Decodable, Equatable {
+    case issue, review, inline
+}
+
+/// One comment within a `ConversationThreadModel`, already markdown-parsed.
+/// Mirrors `ConversationComment` in `src/ipc/protocol.rs`.
+public struct ConversationCommentModel: Decodable, Equatable, Identifiable {
+    public let id: String
+    public let author: String
+    public let createdAt: Date
+    public let body: [MdBlock]
+
+    private enum CodingKeys: String, CodingKey {
+        case id, author, body
+        case createdAt = "created_at"
+    }
+
+    public init(id: String, author: String, createdAt: Date, body: [MdBlock]) {
+        self.id = id
+        self.author = author
+        self.createdAt = createdAt
+        self.body = body
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id        = (try? c.decode(String.self, forKey: .id)) ?? ""
+        author    = (try? c.decode(String.self, forKey: .author)) ?? ""
+        createdAt = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date(timeIntervalSince1970: 0)
+        body      = (try? c.decode([MdBlock].self, forKey: .body)) ?? []
+    }
+}
+
+/// One comment thread within a `pr_conversation` view. Mirrors
+/// `ConversationThread` in `src/ipc/protocol.rs`.
+public struct ConversationThreadModel: Decodable, Equatable, Identifiable {
+    public let id: String
+    public let kind: ConversationThreadKind
+    /// Inline threads only.
+    public let path: String?
+    /// Inline threads only, new-side line number.
+    public let line: Int?
+    public let diffHunk: String?
+    public let resolved: Bool
+    /// Chronological.
+    public let comments: [ConversationCommentModel]
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, path, line, resolved, comments
+        case diffHunk = "diff_hunk"
+    }
+
+    public init(
+        id: String,
+        kind: ConversationThreadKind,
+        path: String?,
+        line: Int?,
+        diffHunk: String?,
+        resolved: Bool,
+        comments: [ConversationCommentModel]
+    ) {
+        self.id = id
+        self.kind = kind
+        self.path = path
+        self.line = line
+        self.diffHunk = diffHunk
+        self.resolved = resolved
+        self.comments = comments
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id       = (try? c.decode(String.self, forKey: .id)) ?? ""
+        kind     = (try? c.decode(ConversationThreadKind.self, forKey: .kind)) ?? .issue
+        path     = try? c.decodeIfPresent(String.self, forKey: .path)
+        line     = try? c.decodeIfPresent(Int.self, forKey: .line)
+        diffHunk = try? c.decodeIfPresent(String.self, forKey: .diffHunk)
+        resolved = (try? c.decode(Bool.self, forKey: .resolved)) ?? false
+        comments = (try? c.decode([ConversationCommentModel].self, forKey: .comments)) ?? []
+    }
+}
+
+/// The payload of `PaneContentWire.prConversation`: a PR's description and
+/// its comment/review threads, both already markdown-parsed server-side.
+/// Mirrors the `PrConversation` variant of `PaneContentWire` in
+/// `src/ipc/protocol.rs`.
+public struct PrConversationPayload: Decodable, Equatable {
+    public let repo: String
+    public let number: Int?
+    public let title: String
+    public let author: String
+    public let url: String
+    public let body: [MdBlock]
+    public let threads: [ConversationThreadModel]
+    /// Set when the PR fetch itself succeeded but fetching the conversation
+    /// failed — `threads` then carries whatever was retrieved, never
+    /// presented as if it were a complete conversation.
+    public let conversationError: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case repo, number, title, author, url, body, threads
+        case conversationError = "conversation_error"
+    }
+
+    public init(
+        repo: String,
+        number: Int?,
+        title: String,
+        author: String,
+        url: String,
+        body: [MdBlock],
+        threads: [ConversationThreadModel],
+        conversationError: String?
+    ) {
+        self.repo = repo
+        self.number = number
+        self.title = title
+        self.author = author
+        self.url = url
+        self.body = body
+        self.threads = threads
+        self.conversationError = conversationError
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        repo              = (try? c.decode(String.self, forKey: .repo)) ?? ""
+        number            = try? c.decodeIfPresent(Int.self, forKey: .number)
+        title             = (try? c.decode(String.self, forKey: .title)) ?? ""
+        author            = (try? c.decode(String.self, forKey: .author)) ?? ""
+        url               = (try? c.decode(String.self, forKey: .url)) ?? ""
+        body              = (try? c.decode([MdBlock].self, forKey: .body)) ?? []
+        threads           = (try? c.decode([ConversationThreadModel].self, forKey: .threads)) ?? []
+        conversationError = try? c.decodeIfPresent(String.self, forKey: .conversationError)
+    }
+}
+
 // MARK: - PaneContentWire
 
 /// Content pushed to a pane via `set_pane_content`. `Equatable` is implemented
@@ -384,6 +633,8 @@ public enum PaneContentWire {
     case code(CodePayload)
     /// A PR's change, structured per file/hunk/line (W2).
     case diff(DiffPayload)
+    /// A PR's description and comment/review threads, markdown-parsed (W3).
+    case prConversation(PrConversationPayload)
     /// A future content kind not yet known to this client version.
     case unknown(Any)
 }
@@ -415,6 +666,8 @@ extension PaneContentWire: Decodable {
             self = .code(try CodePayload(from: d))
         case "diff":
             self = .diff(try DiffPayload(from: d))
+        case "pr_conversation":
+            self = .prConversation(try PrConversationPayload(from: d))
         default:
             let raw = try AnyDecodable(from: d)
             self = .unknown(raw.value)
@@ -441,6 +694,8 @@ extension PaneContentWire: Equatable {
         case (.code(let a), .code(let b)):
             return a == b
         case (.diff(let a), .diff(let b)):
+            return a == b
+        case (.prConversation(let a), .prConversation(let b)):
             return a == b
         case (.jsonSnapshot, .jsonSnapshot):
             return false

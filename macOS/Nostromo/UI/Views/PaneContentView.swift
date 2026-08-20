@@ -83,6 +83,12 @@ struct PaneContentView: View {
                 // equivalent. Drawing anything here would show through
                 // whenever that view is mid-layout.
                 Color.clear
+            case .prConversation:
+                // Rendered by `ConversationContentView`, an AppKit sibling
+                // layered over this hosting view (W3 — curated-agent-views):
+                // markdown blocks and comment anchoring have no SwiftUI
+                // equivalent here either. Same rationale as `.code`/`.diff`.
+                Color.clear
             case .unknown(let raw):
                 jsonView(raw)
             }

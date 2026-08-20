@@ -183,11 +183,11 @@ final class CodeContentView: NSView {
 
         // The criterion this whole indirection exists for: an anchor already on
         // screen must not move the viewport.
-        switch ScrollDecision.decide(anchorLine: rows.anchorRow, visibleLines: visibleRowRange()) {
+        switch ScrollDecision.decide(anchor: rows.anchorRow, visibleRange: visibleRowRange()) {
         case .none:
             break
-        case .scrollTo(let row):
-            scrollRowToCentre(row)
+        case .scrollTo(let target):
+            scrollRowToCentre(target)
         }
         ruler.needsDisplay = true
     }

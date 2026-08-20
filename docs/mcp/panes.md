@@ -353,6 +353,85 @@ the old client-side 150-line cap was, and it is gone.
 
 ---
 
+## Markdown blocks and `pr_conversation` — curated-agent-views W3
+
+Markdown (a PR description, a review comment) is parsed **server-side** with
+`pulldown-cmark` into a block model, and travels on the wire as structured
+data — never as a markdown string the client re-parses. This is what makes a
+fenced code block in a PR description or review comment render as an actual
+code block, monospaced with its indentation intact, instead of literal
+backticks and flattened prose.
+
+```json
+{ "kind": "code_block", "lang": "rust", "text": "fn main() {\n    todo!()\n}" }
+```
+
+An `MdBlock` is one of `paragraph`, `heading` (`level` 1–6), `code_block`
+(`lang` is the fence's language token, `null` for an unlabelled fence or an
+indented block), `list` (`ordered`, optional `start`, `items: [[MdBlock]]`),
+`quote` (`blocks: [MdBlock]`), `table` (`header`/`rows` of `[[MdSpan]]`), and
+`rule`. An `MdSpan` — inline content inside a block — is one of `text`,
+`code`, `emph`/`strong`/`strike` (each wrapping nested `spans`), `link`
+(`spans`, `url`), and `image` (`alt`, `url`). Both are defined once in
+`src/ipc/protocol.rs` and reused by `ticket` (a later wedge) — this is not a
+`pr_conversation`-specific format.
+
+### `pr_conversation` — a PR's description and comment/review threads
+
+```json
+{
+  "kind": "pr_conversation",
+  "repo": "acme/web",
+  "number": 42,
+  "title": "feat: add user authentication",
+  "author": "alice",
+  "url": "https://github.com/acme/web/pull/42",
+  "body": [ { "kind": "paragraph", "spans": [{ "kind": "text", "text": "..." }] } ],
+  "threads": [
+    {
+      "id": "inline-9001",
+      "kind": "inline",
+      "path": "src/main.rs",
+      "line": 42,
+      "diff_hunk": "@@ -40,3 +40,3 @@ ...",
+      "resolved": false,
+      "comments": [
+        { "id": "9001", "author": "bob", "created_at": "2024-01-01T00:00:00Z",
+          "body": [ { "kind": "code_block", "lang": null, "text": "..." } ] }
+      ]
+    }
+  ],
+  "conversation_error": null
+}
+```
+
+`kind` on a thread is `issue` (a top-level PR conversation comment), `review`
+(a whole-PR review with a written body), or `inline` (a review-comment thread
+anchored to a file/line). Inline threads are assembled by walking each
+comment's `in_reply_to_id` up to its root; a reply whose stated root isn't in
+the fetched page becomes a root of its own rather than being dropped.
+`resolved` is always `false` today — GitHub's REST API doesn't expose
+inline-thread resolution, only its GraphQL API does.
+
+Produced by **`perri.get_pr_conversation`**, watch-driven off the same
+current-PR channel as `perri.get_current_pr` and `perri.get_pr_diff` — a bound
+pane refreshes itself with no tool call. Its optional `params` are
+`{anchor, emphasis, reason}`, the same generic `Anchor`/`Emphasis` passthrough
+`perri.get_pr_diff` uses; the variant that applies here is
+`{"kind": "comment", "id": "..."}` for both. **A `params.anchor`/`params.emphasis`
+naming a comment id absent from the fetched conversation is refused —
+`unknown_comment_id` — leaving the pane's existing content untouched,** the
+same "a bad show never destroys what you were reading" discipline `code`/`diff`
+apply to a bad line.
+
+**Partial failure is explicit.** The daemon makes three REST calls per fetch
+(issue comments, review comments, reviews); if the PR fetch itself succeeds
+but one or more of those three fails, `conversation_error` names which, and
+`threads` carries whatever the other calls returned — never blanked, and never
+presented as a complete conversation it isn't.
+
+---
+
 ## Views and panes
 
 ### `perri` — PR review view
