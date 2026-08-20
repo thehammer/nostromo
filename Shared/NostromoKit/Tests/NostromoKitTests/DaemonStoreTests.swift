@@ -46,7 +46,7 @@ final class DaemonStoreTests: XCTestCase {
 
         // First paint: a real pr_list.
         await deliver(
-            .paneContent(tag: "focus1", paneId: "pane1", content: .prList(items), freshness: nil),
+            .paneContent(tag: "focus1", paneId: "pane1", content: .prList(items), freshness: nil, address: nil),
             via: client
         )
         let storedBefore = await store.focusLayouts["focus1"]?.paneContent["pane1"]
@@ -54,7 +54,7 @@ final class DaemonStoreTests: XCTestCase {
 
         // A subsequent .loading update for the same pane must be dropped entirely.
         await deliver(
-            .paneContent(tag: "focus1", paneId: "pane1", content: .loading, freshness: nil),
+            .paneContent(tag: "focus1", paneId: "pane1", content: .loading, freshness: nil, address: nil),
             via: client
         )
         let storedAfter = await store.focusLayouts["focus1"]?.paneContent["pane1"]
@@ -71,7 +71,7 @@ final class DaemonStoreTests: XCTestCase {
         let store  = await DaemonStore(client: client)
 
         await deliver(
-            .paneContent(tag: "focus1", paneId: "pane1", content: .loading, freshness: nil),
+            .paneContent(tag: "focus1", paneId: "pane1", content: .loading, freshness: nil, address: nil),
             via: client
         )
 
@@ -89,11 +89,11 @@ final class DaemonStoreTests: XCTestCase {
         let store  = await DaemonStore(client: client)
 
         await deliver(
-            .paneContent(tag: "focus1", paneId: "pane1", content: .loading, freshness: nil),
+            .paneContent(tag: "focus1", paneId: "pane1", content: .loading, freshness: nil, address: nil),
             via: client
         )
         await deliver(
-            .paneContent(tag: "focus1", paneId: "pane1", content: .loading, freshness: nil),
+            .paneContent(tag: "focus1", paneId: "pane1", content: .loading, freshness: nil, address: nil),
             via: client
         )
 
@@ -112,13 +112,13 @@ final class DaemonStoreTests: XCTestCase {
         let items  = makeItems()
 
         await deliver(
-            .paneContent(tag: "focus1", paneId: "pane1", content: .prList(items), freshness: nil),
+            .paneContent(tag: "focus1", paneId: "pane1", content: .prList(items), freshness: nil, address: nil),
             via: client
         )
         // A .loading update for a *different* pane on the same focus is a first
         // paint for that pane and must be stored, without disturbing pane1.
         await deliver(
-            .paneContent(tag: "focus1", paneId: "pane2", content: .loading, freshness: nil),
+            .paneContent(tag: "focus1", paneId: "pane2", content: .loading, freshness: nil, address: nil),
             via: client
         )
 

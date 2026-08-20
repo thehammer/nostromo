@@ -11,6 +11,12 @@ import NostromoKit
 final class PaneContentModel: ObservableObject {
     @Published var content:   PaneContentWire?
     @Published var freshness: PaneFreshness?
+    /// Where to look inside this pane's content, and why (W1 —
+    /// curated-agent-views). Nothing in this wedge renders `anchor` or
+    /// `emphasis`; `reason` reaches `TabRegionView` via
+    /// `DynamicFocusView.updateContent` reading this same value, not by
+    /// rendering it here.
+    @Published var address:   PaneAddress?
     var onLoadPR:    (String, Int) -> Void = { _, _ in }
     var onApprovePR: (String, Int) -> Void = { _, _ in }
 }

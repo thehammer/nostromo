@@ -64,8 +64,10 @@ public enum ServerMsg {
     /// Content update for a single pane (set_pane_content — does not touch geometry).
     /// `freshness` is `nil` for content with no staleness concept (e.g.
     /// agent-authored content) and for frames from a daemon that predates
-    /// this field — always decodes successfully either way.
-    case paneContent(tag: String, paneId: String, content: PaneContentWire, freshness: PaneFreshness?)
+    /// this field — always decodes successfully either way. `address` (W1 —
+    /// curated-agent-views) is likewise `nil` for any push with nothing to
+    /// point at, and for frames from a daemon that predates the field.
+    case paneContent(tag: String, paneId: String, content: PaneContentWire, freshness: PaneFreshness?, address: PaneAddress?)
 
     /// A new daemon-hosted focus was spawned via `create_focus`.
     case focusCreated(meta: FocusCreatedMeta)
@@ -323,7 +325,7 @@ extension ServerMsg {
     private struct FredStateWrapper:         Decodable { let mailbox: MailboxSnapshot; let calendar: CalendarSnapshot }
     private struct TeriStateWrapper:         Decodable { let todos: TeriTodosSnapshot }
     private struct FocusLayoutWrapper:       Decodable { let tag: String; let tree: PaneTree; let focused_pane: String? }
-    private struct PaneContentWrapper:       Decodable { let tag: String; let pane_id: String; let content: PaneContentWire; let freshness: PaneFreshness? }
+    private struct PaneContentWrapper:       Decodable { let tag: String; let pane_id: String; let content: PaneContentWire; let freshness: PaneFreshness?; let address: PaneAddress? }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -435,7 +437,7 @@ extension ServerMsg {
 
         case "pane_content":
             if let m = try? dec.decode(PaneContentWrapper.self, from: data) {
-                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content, freshness: m.freshness)
+                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content, freshness: m.freshness, address: m.address)
             }
 
         case "focus_created":

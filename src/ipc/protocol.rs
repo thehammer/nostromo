@@ -207,6 +207,22 @@ pub enum PaneTree {
         children: Vec<PaneTree>,
         ratios: Vec<f32>,
     },
+    /// A region that hosts several panes with exactly one frontmost (W1 —
+    /// curated-agent-views). Every tab is a real pane with a real `pane_id`;
+    /// content still arrives via the ordinary `ServerMsg::PaneContent`
+    /// broadcast for that pane id. `labels` is parallel to `children`,
+    /// mirroring `Split`'s `children`/`ratios` shape rather than introducing
+    /// a wrapper struct the rest of the tree doesn't use. `active` is the
+    /// daemon's authoritative frontmost index; `FocusLayout.focused_pane`, when
+    /// it names a child of this node, overrides it for "bring to front now."
+    Tabs {
+        /// Ordered tabs, left to right. In v1 every child is a `Leaf`.
+        children: Vec<PaneTree>,
+        /// Per-tab display labels, parallel to `children`.
+        labels: Vec<String>,
+        /// Index into `children` of the frontmost tab.
+        active: usize,
+    },
 }
 
 impl PaneTree {
@@ -227,7 +243,7 @@ impl PaneTree {
     fn collect_pane_ids(&self, out: &mut Vec<String>) {
         match self {
             PaneTree::Leaf { pane_id } => out.push(pane_id.clone()),
-            PaneTree::Split { children, .. } => {
+            PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. } => {
                 for c in children {
                     c.collect_pane_ids(out);
                 }
@@ -304,6 +320,75 @@ pub struct PaneFreshness {
     /// The daemon's badly-stale verdict. The only flag a client renders.
     #[serde(default)]
     pub badly_stale: bool,
+}
+
+// ── pane addressing (W1 — curated-agent-views) ──────────────────────────────
+
+/// A point of interest inside a pane's content — the thing a `show` (future
+/// wedges) or an agent-authored push wants to draw the operator's eye to.
+///
+/// `Anchor` is "the one place to land" (e.g. scroll-to); `Emphasis` (below) is
+/// "the range(s) to highlight" — a pane can have zero or more of the latter
+/// alongside at most one of the former.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Anchor {
+    /// A single line, optionally scoped to one file within a multi-file view
+    /// (e.g. `pr_diff`). `path: None` means "the pane's one file."
+    Line {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        path: Option<String>,
+        line: u32,
+    },
+    /// A specific PR-review comment thread.
+    Comment { id: String },
+    /// A named section within the pane (e.g. a heading in a rendered doc).
+    Section { name: String },
+    /// A row in a queue-shaped pane (e.g. `pr_list`), identified the same way
+    /// a PR is identified elsewhere on the wire.
+    QueueRow { repo: String, number: u64 },
+}
+
+/// A range to highlight within a pane's content. See [`Anchor`] for the
+/// single-point counterpart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Emphasis {
+    /// A contiguous line range, optionally scoped to one file.
+    LineRange {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        path: Option<String>,
+        start: u32,
+        end: u32,
+    },
+    /// A specific PR-review comment thread.
+    Comment { id: String },
+    /// A named section within the pane.
+    Section { name: String },
+    /// A raw character offset range within plain-text content.
+    TextRange { start: usize, end: usize },
+    /// A row in a queue-shaped pane.
+    QueueRow { repo: String, number: u64 },
+}
+
+/// Where to look inside a pane's content, and why. Optional and additive —
+/// carried as a sibling of [`PaneFreshness`] on `ServerMsg::PaneContent`
+/// rather than folded into [`PaneContentWire`], so it can be re-sent cheaply
+/// (e.g. "re-anchor this same content") without re-sending the content itself.
+///
+/// `None` on the wire means "no addressing concept for this pane" — every
+/// push before this field existed, and every push from a caller with nothing
+/// to point at. W1 renders only `reason` (as a tab caption); rendering
+/// `anchor`/`emphasis` is deliberately deferred to later wedges.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PaneAddress {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub anchor: Option<Anchor>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub emphasis: Vec<Emphasis>,
+    /// One short human-readable phrase explaining why this was shown.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reason: Option<String>,
 }
 
 // ── base64 byte-array helpers (for compact JSON encoding) ────────────────────
@@ -706,6 +791,11 @@ pub enum ServerMsg {
         /// frames from an older daemon that predates this field.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         freshness: Option<PaneFreshness>,
+        /// Where to look inside this pane's content, and why (W1). `None` for
+        /// every push before this field existed and every caller with nothing
+        /// to point at.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        address: Option<PaneAddress>,
     },
 
     /// The daemon announces an agent-spawned focus (via `create_focus`) so every
@@ -1099,6 +1189,7 @@ mod tests {
                 text: "hello".into(),
             },
             freshness: None,
+            address: None,
         });
         round_trip_server(ServerMsg::PaneContent {
             tag: "mother".into(),
@@ -1107,6 +1198,7 @@ mod tests {
                 value: serde_json::json!({ "jobs": [1, 2, 3] }),
             },
             freshness: None,
+            address: None,
         });
         round_trip_server(ServerMsg::FocusCreated {
             meta: FocusMeta {
@@ -1139,6 +1231,7 @@ mod tests {
                 stale: true,
                 badly_stale: true,
             }),
+            address: None,
         });
     }
 
@@ -1149,6 +1242,7 @@ mod tests {
             pane_id: "queue".into(),
             content: PaneContentWire::Text { text: "fresh".into() },
             freshness: None,
+            address: None,
         });
     }
 
@@ -1171,11 +1265,13 @@ mod tests {
                 pane_id,
                 content,
                 freshness,
+                address,
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
                 assert!(matches!(content, PaneContentWire::Text { text } if text == "from an old daemon"));
                 assert_eq!(freshness, None, "an absent \"freshness\" key must deserialize to None");
+                assert_eq!(address, None, "an absent \"address\" key must deserialize to None");
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -1197,6 +1293,224 @@ mod tests {
         };
         assert_eq!(tree.pane_ids(), vec!["repl", "jobs"]);
         assert_eq!(PaneTree::repl_leaf().pane_ids(), vec!["repl"]);
+    }
+
+    // ── PaneTree::Tabs (W1 — curated-agent-views) ────────────────────────────
+
+    #[test]
+    fn pane_tree_tabs_node_round_trips_and_carries_kind_tabs() {
+        let tree = PaneTree::Tabs {
+            children: vec![
+                PaneTree::Leaf {
+                    pane_id: "ticket".into(),
+                },
+                PaneTree::Leaf {
+                    pane_id: "activity".into(),
+                },
+            ],
+            labels: vec!["Ticket".into(), "Activity".into()],
+            active: 1,
+        };
+        round_trip_pane_tree(&tree);
+
+        let json = serde_json::to_value(&tree).unwrap();
+        assert_eq!(json["kind"], "tabs");
+        assert_eq!(json["labels"], serde_json::json!(["Ticket", "Activity"]));
+        assert_eq!(json["active"], 1);
+    }
+
+    #[test]
+    fn pane_tree_tabs_node_collects_every_child_pane_id_in_tree_order() {
+        let tree = PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Leaf {
+                    pane_id: "repl".into(),
+                },
+                PaneTree::Tabs {
+                    children: vec![
+                        PaneTree::Leaf {
+                            pane_id: "ticket".into(),
+                        },
+                        PaneTree::Leaf {
+                            pane_id: "activity".into(),
+                        },
+                    ],
+                    labels: vec!["Ticket".into(), "Activity".into()],
+                    active: 0,
+                },
+            ],
+            ratios: vec![0.6, 0.4],
+        };
+        assert_eq!(tree.pane_ids(), vec!["repl", "ticket", "activity"]);
+    }
+
+    /// Round-trip a bare `PaneTree` (not wrapped in a `ServerMsg`) through JSON.
+    fn round_trip_pane_tree(tree: &PaneTree) {
+        let json = serde_json::to_string(tree).unwrap();
+        let back: PaneTree = serde_json::from_str(&json).unwrap();
+        assert_eq!(tree, &back, "pane tree round trip mismatch: {json}");
+    }
+
+    // ── PaneAddress / Anchor / Emphasis (W1 — curated-agent-views) ───────────
+
+    fn round_trip_pane_address(addr: &PaneAddress) {
+        let json = serde_json::to_string(addr).unwrap();
+        let back: PaneAddress = serde_json::from_str(&json).unwrap();
+        assert_eq!(addr, &back, "PaneAddress round trip mismatch: {json}");
+    }
+
+    #[test]
+    fn anchor_line_round_trips_with_and_without_path() {
+        round_trip_pane_address(&PaneAddress {
+            anchor: Some(Anchor::Line {
+                path: Some("src/main.rs".into()),
+                line: 42,
+            }),
+            emphasis: vec![],
+            reason: None,
+        });
+        round_trip_pane_address(&PaneAddress {
+            anchor: Some(Anchor::Line {
+                path: None,
+                line: 7,
+            }),
+            emphasis: vec![],
+            reason: None,
+        });
+    }
+
+    #[test]
+    fn anchor_comment_section_and_queue_row_round_trip() {
+        round_trip_pane_address(&PaneAddress {
+            anchor: Some(Anchor::Comment { id: "c-1".into() }),
+            emphasis: vec![],
+            reason: None,
+        });
+        round_trip_pane_address(&PaneAddress {
+            anchor: Some(Anchor::Section {
+                name: "Overview".into(),
+            }),
+            emphasis: vec![],
+            reason: None,
+        });
+        round_trip_pane_address(&PaneAddress {
+            anchor: Some(Anchor::QueueRow {
+                repo: "acme/web".into(),
+                number: 42,
+            }),
+            emphasis: vec![],
+            reason: None,
+        });
+    }
+
+    #[test]
+    fn every_emphasis_variant_round_trips() {
+        round_trip_pane_address(&PaneAddress {
+            anchor: None,
+            emphasis: vec![Emphasis::LineRange {
+                path: Some("src/main.rs".into()),
+                start: 10,
+                end: 20,
+            }],
+            reason: None,
+        });
+        round_trip_pane_address(&PaneAddress {
+            anchor: None,
+            emphasis: vec![Emphasis::LineRange {
+                path: None,
+                start: 1,
+                end: 2,
+            }],
+            reason: None,
+        });
+        round_trip_pane_address(&PaneAddress {
+            anchor: None,
+            emphasis: vec![Emphasis::Comment { id: "c-2".into() }],
+            reason: None,
+        });
+        round_trip_pane_address(&PaneAddress {
+            anchor: None,
+            emphasis: vec![Emphasis::Section {
+                name: "Risks".into(),
+            }],
+            reason: None,
+        });
+        round_trip_pane_address(&PaneAddress {
+            anchor: None,
+            emphasis: vec![Emphasis::TextRange { start: 0, end: 12 }],
+            reason: None,
+        });
+        round_trip_pane_address(&PaneAddress {
+            anchor: None,
+            emphasis: vec![Emphasis::QueueRow {
+                repo: "acme/web".into(),
+                number: 7,
+            }],
+            reason: None,
+        });
+    }
+
+    #[test]
+    fn pane_address_with_multiple_emphasis_entries_round_trips() {
+        round_trip_pane_address(&PaneAddress {
+            anchor: Some(Anchor::Line {
+                path: None,
+                line: 5,
+            }),
+            emphasis: vec![
+                Emphasis::TextRange { start: 0, end: 4 },
+                Emphasis::TextRange { start: 10, end: 14 },
+            ],
+            reason: Some("flagged by CI".into()),
+        });
+    }
+
+    #[test]
+    fn pane_address_empty_omits_every_key_and_still_decodes() {
+        let addr = PaneAddress::default();
+        let json = serde_json::to_value(&addr).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({}),
+            "an all-default PaneAddress must serialize with no keys at all"
+        );
+        let back: PaneAddress = serde_json::from_value(json).unwrap();
+        assert_eq!(addr, back);
+    }
+
+    #[test]
+    fn pane_content_with_address_round_trips_and_carries_it_on_the_wire() {
+        round_trip_server(ServerMsg::PaneContent {
+            tag: "ticket".into(),
+            pane_id: "ticket".into(),
+            content: PaneContentWire::Text {
+                text: "CORE-1234".into(),
+            },
+            freshness: None,
+            address: Some(PaneAddress {
+                anchor: None,
+                emphasis: vec![],
+                reason: Some("opened from the queue".into()),
+            }),
+        });
+    }
+
+    #[test]
+    fn pane_content_without_address_key_deserializes_with_address_none() {
+        let raw = r#"{
+            "type": "pane_content",
+            "tag": "perri",
+            "pane_id": "queue",
+            "content": { "kind": "text", "text": "from a daemon that predates PaneAddress" }
+        }"#;
+        let msg: ServerMsg = serde_json::from_str(raw).expect("old-shaped frame must still parse");
+        match msg {
+            ServerMsg::PaneContent { address, .. } => {
+                assert_eq!(address, None, "an absent \"address\" key must deserialize to None");
+            }
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1460,6 +1774,7 @@ mod tests {
                 }],
             },
             freshness: None,
+            address: None,
         });
     }
 

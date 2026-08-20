@@ -766,7 +766,7 @@ class AppStore: ObservableObject {
             model.focusedPane = focusedPane
             focusLayouts[tag] = model
 
-        case .paneContent(let tag, let paneId, let content, let freshness):
+        case .paneContent(let tag, let paneId, let content, let freshness, let address):
             // Content update — update the leaf without touching tree geometry so
             // operator drag-resizes survive.
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
@@ -778,14 +778,19 @@ class AppStore: ObservableObject {
             if content == .loading, let existingContent, existingContent != .loading {
                 return
             }
-            // No-op write guard (D9): an idempotent push (identical content
-            // and freshness) causes zero @Published churn downstream — no
-            // flicker, no scroll reset, no spinner.
-            if existingContent == content && model.paneFreshness[paneId] == freshness {
+            // No-op write guard (D9): an idempotent push (identical content,
+            // freshness, and address) causes zero @Published churn downstream
+            // — no flicker, no scroll reset, no spinner. An address-only
+            // change (W1) must NOT be swallowed here, which is why it's part
+            // of this comparison.
+            if existingContent == content
+                && model.paneFreshness[paneId] == freshness
+                && model.paneAddress[paneId] == address {
                 return
             }
             model.paneContent[paneId] = content
             model.paneFreshness[paneId] = freshness
+            model.paneAddress[paneId] = address
             focusLayouts[tag] = model
 
         case .focusCreated(let meta):

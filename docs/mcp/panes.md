@@ -95,6 +95,141 @@ content, as a second line of defense against an older daemon or a race.
 
 ---
 
+## Tabbed regions (`PaneTree::Tabs`) — curated-agent-views W1
+
+A third `PaneTree` node kind, alongside `Leaf` and `Split`: a region that hosts
+several panes with exactly one frontmost.
+
+```json
+{
+  "kind": "tabs",
+  "children": [ { "kind": "leaf", "pane_id": "ticket" }, { "kind": "leaf", "pane_id": "activity" } ],
+  "labels": ["Ticket", "Activity"],
+  "active": 0
+}
+```
+
+- `children` — ordered tabs, left to right. In v1 every child is a `Leaf` —
+  every tab is a real pane with a real `pane_id`, and its content still
+  arrives via the ordinary `ServerMsg::PaneContent` broadcast for that pane
+  id. Tabs are a presentation grouping, not a new content-delivery mechanism.
+- `labels` — per-tab display labels, parallel to `children` (same shape as
+  `Split`'s `children`/`ratios` pairing).
+- `active` — index into `children` of the frontmost tab. Authoritative unless
+  overridden by `FocusLayout.focused_pane` naming one of this node's children
+  (see below).
+
+**Invariants** (enforced by `PaneRegistry::validate_node`, the same choke
+point as `Split`'s shape checks): `children.len() >= 1`, `labels.len() ==
+children.len()`, `active < children.len()`, and — recursively through the
+whole tabs subtree — **no `repl` leaf**. Hiding the REPL behind a tab is
+never valid: the REPL is where the operator's hands are. A tree violating any
+of these is refused as `PaneError::InvalidLayout` (or, from the
+`apply_layout` DSL below, `ApplyLayoutError::ReplInTabs` specifically for the
+repl case) and the registry's stored tree is left unchanged.
+
+**Reachable today only through `set_pane_layout` (a full tree) or the
+`apply_layout` DSL below** — there is no dedicated tab-mutation tool in this
+wedge. `focused_pane`, `create_pane`/`reset_panes`, and every other existing
+tool are unaffected; a tabs child is an ordinary leaf pane once installed, so
+it can be split further with `create_pane` or bound to a live source with
+`bind_source`/`refresh_pane_content` exactly like any other leaf.
+
+### DSL form
+
+```yaml
+tree:
+  direction: horizontal
+  ratios: [0.7, 0.3]
+  children:
+    - pane: repl
+    - tabs:
+        - pane: ticket
+          label: Ticket
+        - pane: activity
+          label: Activity
+      active: ticket
+panes:
+  ticket:
+    content_kind: text
+  activity:
+    content_kind: text
+```
+
+A `tabs:` node lists `{ pane, label }` pairs; `active` names the frontmost
+pane **by id**, not index (matching the DSL's pane-id-centric vocabulary
+elsewhere — it can't silently drift if `tabs:` is reordered). A schema
+declaring `repl` among a `tabs:` list's panes is refused at validation time
+with `repl_in_tabs`, distinct from the `invalid_schema` code used when `repl`
+is bound in the top-level `panes` map.
+
+### Client rendering (macOS, W1)
+
+A tabs node renders as a tab strip over a stack of **resident** child views —
+every tab's view is built once and kept alive for the container's whole
+lifetime; switching tabs is a visibility toggle, not a rebuild, which is what
+lets scroll position and view state survive a switch with no bookkeeping.
+Opening, closing, reordering, relabeling, or switching a tab is classified by
+`LayoutChangeClassifier` as `.tabMembership`/`.activeTabOnly` rather than a
+full structural rebuild, so it never clears the operator's dragged split
+ratios for the *surrounding* regions the way an actual split-topology change
+does. Unread state (a content push for a tab that isn't currently frontmost)
+is derived entirely client-side — the daemon has no business knowing which
+tab the operator is looking at.
+
+iOS gets decoder correctness only in this wedge: a tabs node's children
+flatten into the existing per-pane `TabView` alongside every other non-repl
+pane, with no dedicated tabs UI.
+
+---
+
+## `PaneAddress` — anchor, emphasis, and reason (curated-agent-views W1)
+
+`ServerMsg::PaneContent` carries an optional sibling of `freshness`:
+
+```json
+{
+  "type": "pane_content",
+  "tag": "cody-core-1234",
+  "pane_id": "ticket",
+  "content": { "kind": "text", "text": "CORE-1234: ..." },
+  "address": {
+    "anchor": { "kind": "line", "path": "src/main.rs", "line": 42 },
+    "emphasis": [ { "kind": "text_range", "start": 0, "end": 40 } ],
+    "reason": "flagged by CI"
+  }
+}
+```
+
+`address` says where to look inside a pane's content, and why. It's a
+sibling of `freshness` rather than a field on `PaneContentWire` deliberately:
+that placement is what lets a caller cheaply re-anchor/re-emphasise a pane
+("a show matching a live tab re-anchors it") without re-sending the content
+itself. `None`/absent means "no addressing concept for this pane" — every
+push before this field existed, and every push from a caller with nothing to
+point at.
+
+- `anchor` (optional) — the one place to land: `line` (a line, optionally
+  scoped to one file — the `path` is how a multi-file view like `pr_diff`
+  addresses a line within it), `comment` (a PR-review comment thread id),
+  `section` (a named heading), or `queue_row` (a `repo`/`number` pair).
+- `emphasis` (zero or more) — ranges to highlight: `line_range`, `comment`,
+  `section`, `text_range` (a raw character offset range), or `queue_row`.
+- `reason` (optional) — one short human-readable phrase explaining why this
+  was shown.
+
+**This wedge (W1) transports every variant but renders only `reason`** — as a
+tab's caption, dimmed and truncated, sourced from that tab's own last-pushed
+content. `anchor`/`emphasis` decode, round-trip, and are otherwise inert;
+scrolling to a line or highlighting a range is W2 onward. The dedup logic in
+`pane_sources::run_pane_source_broadcaster` treats `address` as part of the
+change-detection key, so an address-only push (identical content and
+freshness) is still broadcast rather than silently dropped as a duplicate —
+though no source in this wedge's closed fetcher registry produces one yet;
+every existing daemon-side call site passes `address: None`.
+
+---
+
 ## Views and panes
 
 ### `perri` — PR review view
@@ -314,7 +449,8 @@ true, "warnings": [...] }`, listing the failed panes.
 | `unknown_layout` | Named layout has no on-disk override and no compiled-in default |
 | `unknown_source` | A pane's `source` isn't in the closed fetcher registry |
 | `invalid_content_kind` | A pane's `content_kind` isn't a recognised `PaneContentWire` variant |
-| `invalid_schema` | The schema document is malformed, or `repl` is bound as a pane |
+| `invalid_schema` | The schema document is malformed, or `repl` is bound as a pane in the top-level `panes` map |
+| `repl_in_tabs` | A `tabs:` region named `repl` among its tab panes — distinct from `invalid_schema` above |
 | `fetch_failed` | A fetcher ran but failed to produce content (reported via `warnings`, not a hard error) |
 | `invalid_args` | Neither `name` nor `tree` was provided, or both were |
 | `unidentified_caller` | No `view_id` and no caller `pty_id` to target |
