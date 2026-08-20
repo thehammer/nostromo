@@ -848,6 +848,7 @@ downstream, as its own fetch-level error (`unknown_comment_id`,
 | `not_supported` | Called against a non-daemon-hosted MCP server. |
 | `unidentified_caller` | No `view_id` and no caller `pty_id` to target. |
 | `unknown_view` | The resolved focus was removed from the registry between placement and mutation — a race, not a normal path. |
+| `concurrent_modification` | The view's layout changed (a concurrent `nostromo.show`, `perri.load_pr`, or `perri.clear_current_pr` targeting the same focus) between this call's placement decision and its mutation — a race, not a normal path. The layout is left exactly as that other call left it; retry. |
 
 Every refusal from `unknown_view_type` through `invalid_views_config` happens
 **before** the fetch and leaves the focus's layout byte-identical, broadcasting

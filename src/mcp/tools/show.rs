@@ -96,14 +96,28 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
 
     // ── decide ──────────────────────────────────────────────────────────────
     let request = ShowRequest::new(view_type, identity.clone());
-    let placement = {
+    // Captured under the same lock acquisition `placement` is decided under,
+    // so the mutate step below can tell whether the tree it's about to write
+    // into is still the one `place()` actually reasoned about. Between here
+    // and the re-lock after `fetch_async().await`, this handler holds no
+    // lock at all (a `std::sync::Mutex` can't be held across an `.await`),
+    // so a second `nostromo.show`/`perri.load_pr`/`perri.clear_current_pr`
+    // targeting the same tag from a different connection can mutate the
+    // registry in between. Without this check, the mutate step below would
+    // silently transcribe a stale decision onto whatever the tree looks like
+    // *now* — reintroducing panes a concurrent R8 reset just closed (with no
+    // binding, since that reset already pruned it), or clobbering a
+    // concurrent show's own new tab — instead of refusing cleanly.
+    let (placement, tree_at_decide) = {
         let mut reg = daemon.pane_registry.lock().unwrap();
         reg.get_or_init(&tag);
         let view_state = current_view_state(daemon, state, &mut reg, &cfg, &tag);
-        match placement::place(&cfg, &view_state, &request) {
+        let placement = match placement::place(&cfg, &view_state, &request) {
             Ok(p) => p,
             Err(e) => return refusal(&e),
-        }
+        };
+        let tree_at_decide = reg.get(&tag).cloned();
+        (placement, tree_at_decide)
     };
 
     // ── fetch, still before any mutation ────────────────────────────────────
@@ -135,6 +149,22 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
         let Some(mut tree) = reg.get(&tag).cloned() else {
             return json!({ "error": "unknown_view" });
         };
+        // `placement` was decided against `tree_at_decide`, under a lock this
+        // handler released before the `fetch_async().await` above — a
+        // concurrent `nostromo.show`/`perri.load_pr`/`perri.clear_current_pr`
+        // targeting the same tag could have mutated the registry in that
+        // window. Applying `placement` to a tree it was never actually
+        // computed against would transcribe a stale decision: silently
+        // resurrecting a pane a concurrent R8 reset just closed (and already
+        // unbound), or clobbering that other call's own new tab. Refuse
+        // instead — the caller can simply retry, exactly as any other
+        // refusal here leaves the layout untouched.
+        if tree_changed_since_decide(Some(&tree), &tree_at_decide) {
+            return json!({
+                "error": "concurrent_modification",
+                "detail": "the view's layout changed while this show was in flight; retry",
+            });
+        }
         if let Err(e) = apply_to_tree(&mut tree, &placement) {
             return refusal(&e);
         }
@@ -493,6 +523,25 @@ fn emphasis_kind(e: &Emphasis) -> &'static str {
         Emphasis::TextRange { .. } => "text_range",
         Emphasis::QueueRow { .. } => "queue_row",
     }
+}
+
+// ── the decide/fetch/mutate race guard ──────────────────────────────────────
+
+/// Whether the registry's tree for this tag has moved since `placement` was
+/// decided against `tree_at_decide` — the only signal `show()` has that a
+/// concurrent call (another `nostromo.show`, or `perri.load_pr`/
+/// `perri.clear_current_pr`'s own `reset_for_pr_change`) landed in the window
+/// between releasing the decide-time lock and re-acquiring it to mutate,
+/// since a `std::sync::Mutex` can't be held across the `fetch_async().await`
+/// in between. `PaneTree`'s derived `PartialEq` makes this an exact
+/// structural comparison — any difference at all, not just an overlapping
+/// pane id, counts as drift, because `apply_to_tree` transcribes the whole
+/// region's tab order unconditionally rather than merging.
+fn tree_changed_since_decide(
+    current: Option<&crate::ipc::protocol::PaneTree>,
+    tree_at_decide: &Option<crate::ipc::protocol::PaneTree>,
+) -> bool {
+    current != tree_at_decide.as_ref()
 }
 
 // ── applying a placement ─────────────────────────────────────────────────────
@@ -1311,6 +1360,77 @@ mod tests {
             binding.params.as_ref().unwrap()["reason"],
             "unbounded retry loop"
         );
+    }
+
+    // ── 6b. the decide/mutate race guard ──────────────────────────────────────
+    //
+    // `show()` cannot hold the registry's lock across its `fetch_async().await`
+    // (a `std::sync::Mutex` guard isn't `Send` across that boundary), so the
+    // placement it decides under one lock acquisition and the tree it mutates
+    // under a second, later one can only ever be proven consistent by an
+    // explicit check — `tree_changed_since_decide` — not by construction. None
+    // of `nostromo.show`'s existing fetch sources (`perri.list_pr_queue`,
+    // `perri.get_current_pr`, `perri.get_pr_diff`) ever actually suspend at
+    // that `.await` (they're synchronous reads dressed as `async fn`), so
+    // driving a *genuine* concurrent registry mutation into that exact window
+    // isn't reachable from a test without adding a seam solely for that
+    // purpose. What's tested instead: the guard's own logic, directly and
+    // exhaustively (including the exact "additive scenario" from the review
+    // that motivated it — a concurrent close shrinking the tree between decide
+    // and mutate), plus every passing test above already proving the guard
+    // introduces no false positive on the ordinary, non-racing path (every one
+    // of them calls `show()` start-to-finish with nothing else touching the
+    // registry in between, and none of them has ever hit `concurrent_modification`).
+
+    #[test]
+    fn tree_changed_since_decide_is_false_for_two_equal_trees_including_none_and_none() {
+        assert!(!tree_changed_since_decide(None, &None));
+        let t = PaneTree::Leaf { pane_id: "repl".into() };
+        assert!(!tree_changed_since_decide(Some(&t), &Some(t.clone())));
+    }
+
+    #[test]
+    fn tree_changed_since_decide_is_true_when_a_tab_closed_underneath_the_decision() {
+        // Exactly the failure mode the review named: `place()` decided against
+        // a tree with three detail tabs; a concurrent R8 reset closed one of
+        // them before this call's mutate step re-locked. Applying the stale
+        // three-tab `tab_order` on top of the now-two-tab tree would splice
+        // the closed (and already-unbound) pane id straight back into the
+        // layout with no rebind and no fetch behind it — a silent orphan.
+        let three_tabs = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![PaneTree::Tabs {
+                children: vec![
+                    PaneTree::Leaf { pane_id: "detail.0".into() },
+                    PaneTree::Leaf { pane_id: "detail.1".into() },
+                    PaneTree::Leaf { pane_id: "detail.2".into() },
+                ],
+                labels: vec!["A".into(), "B".into(), "C".into()],
+                active: 0,
+                region: Some("detail".into()),
+            }],
+            ratios: vec![1.0],
+        };
+        let two_tabs = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![PaneTree::Tabs {
+                children: vec![
+                    PaneTree::Leaf { pane_id: "detail.0".into() },
+                    PaneTree::Leaf { pane_id: "detail.2".into() },
+                ],
+                labels: vec!["A".into(), "C".into()],
+                active: 0,
+                region: Some("detail".into()),
+            }],
+            ratios: vec![1.0],
+        };
+        assert!(tree_changed_since_decide(Some(&two_tabs), &Some(three_tabs)));
+    }
+
+    #[test]
+    fn tree_changed_since_decide_is_true_when_the_tag_was_removed_entirely() {
+        let t = PaneTree::repl_leaf();
+        assert!(tree_changed_since_decide(None, &Some(t)));
     }
 
     // ── 7. the descriptor ─────────────────────────────────────────────────────
