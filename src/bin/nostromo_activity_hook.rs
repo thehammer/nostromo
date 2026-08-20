@@ -46,9 +46,16 @@ fn build_post_tool_use_fields(obj: &serde_json::Map<String, serde_json::Value>) 
         agent: tool_name.clone(),
         tool_name: Some(tool_name),
         tool_use_id: str_field("tool_use_id"),
-        agent_id: None,
-        agent_type: None,
-        parent_agent_id: None,
+        // Present exactly when this `PostToolUse` fired inside a subagent —
+        // absent for the main agent's own tool calls, which is the
+        // discriminator `resolve_attribution` keys on. Previously hardcoded
+        // to `None` unconditionally, so a subagent's own tool calls were
+        // always misattributed to the main stream; only its
+        // `SubagentStart`/`SubagentStop` bookends (built separately, below)
+        // ever reached its own stream.
+        agent_id: str_field("agent_id"),
+        agent_type: str_field("agent_type"),
+        parent_agent_id: str_field("parent_agent_id"),
         summary,
     })
 }
@@ -199,6 +206,52 @@ mod tests {
         });
         let ev = build_event(&payload).expect("well-formed PostToolUse must produce an event");
         assert_eq!(ev.tool_use_id, None);
+    }
+
+    #[test]
+    fn post_tool_use_payload_inside_a_subagent_carries_agent_id_and_type() {
+        // The case B7/resolve_attribution actually depends on: a subagent's
+        // own tool call fires PostToolUse with agent_id/agent_type/
+        // parent_agent_id present, which is the only signal that
+        // distinguishes it from the main agent's own tool calls. Without
+        // this, every subagent's real work is misattributed to the main
+        // stream and only its SubagentStart/SubagentStop bookends land in
+        // its own stream.
+        let payload = json!({
+            "session_id": "sess-123",
+            "cwd": "/tmp",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Grep",
+            "tool_use_id": "tu-7",
+            "agent_id": "agent-42",
+            "agent_type": "code-reviewer",
+            "parent_agent_id": "agent-1",
+            "tool_input": {"pattern": "TODO"},
+            "tool_response": {}
+        });
+        let ev = build_event(&payload).expect("well-formed PostToolUse must produce an event");
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-42"));
+        assert_eq!(ev.agent_type.as_deref(), Some("code-reviewer"));
+        assert_eq!(ev.parent_agent_id.as_deref(), Some("agent-1"));
+    }
+
+    #[test]
+    fn post_tool_use_payload_for_the_main_agent_has_no_agent_id() {
+        // The negative case: absence of agent_id is what marks a tool_use
+        // event as belonging to the main agent's own stream, not a missing
+        // field to backfill.
+        let payload = json!({
+            "session_id": "sess-123",
+            "cwd": "/tmp",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": {}
+        });
+        let ev = build_event(&payload).expect("well-formed PostToolUse must produce an event");
+        assert_eq!(ev.agent_id, None);
+        assert_eq!(ev.agent_type, None);
+        assert_eq!(ev.parent_agent_id, None);
     }
 
     #[test]

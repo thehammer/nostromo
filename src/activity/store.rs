@@ -87,18 +87,25 @@ pub struct ActivityStore {
     /// focus tag -> (subagent id, or `None` for the main stream) -> stream.
     streams: HashMap<String, HashMap<Option<String>, ActivityStream>>,
     unattributed: VecDeque<ActivityEvent>,
-    /// Lifetime count of `ingest()` calls — a monotonic *pressure* counter,
-    /// deliberately never decremented on eviction, so it is **not** a
-    /// "currently retained events" gauge. A live gauge would be structurally
-    /// incapable of ever crossing [`MAX_TOTAL_EVENTS`]: the per-stream cap
+    /// Ingest volume since the last successful reclaim — **not** a lifetime
+    /// counter and **not** a "currently retained events" gauge. A live
+    /// retained-events gauge would be structurally incapable of ever
+    /// crossing [`MAX_TOTAL_EVENTS`]: the per-stream cap
     /// ([`MAX_EVENTS_PER_STREAM`]) already bounds any *single* stream, so the
     /// real unbounded-growth risk isn't how many events are retained at once
     /// — it's how many *finished* subagent streams accumulate over a long
     /// daemon uptime, each holding on to its (small, capped) history. This
-    /// counter stands in for "how much ingest volume has passed through the
-    /// store lifetime" as the trigger for reclaiming that history; crossing
-    /// [`MAX_TOTAL_EVENTS`] triggers reclaiming the oldest finished stream(s)
-    /// — see [`Self::evict_if_over_budget`].
+    /// counter stands in for "how much ingest volume has passed through
+    /// since we last reclaimed" as the trigger for reclaiming more history;
+    /// crossing [`MAX_TOTAL_EVENTS`] triggers reclaiming the oldest finished
+    /// stream(s) — see [`Self::evict_if_over_budget`], which reduces this by
+    /// exactly the number of events each reclaim actually frees. Earlier this
+    /// was never decremented at all, which meant the first crossing made the
+    /// loop condition permanently true: every subsequent `ingest()` drained
+    /// one more entry off `finished_eviction_order` on the spot, so a
+    /// subagent's history was gone within one tool call of it finishing,
+    /// defeating the "≥200 retained events" guarantee for exactly the stream
+    /// an operator would actually want to inspect.
     ingest_pressure: u64,
     last_event_at: Option<DateTime<Utc>>,
     /// `(tag, agent_id)` of finished subagent streams, oldest-finished-first.
@@ -233,12 +240,21 @@ impl ActivityStore {
         event
     }
 
-    /// While lifetime ingest volume exceeds [`MAX_TOTAL_EVENTS`], reclaim the
-    /// oldest finished subagent stream's events. Never touches the main
-    /// stream or a still-running subagent stream. A no-op once there are no
-    /// more finished streams to reclaim from (memory is bounded per-stream
-    /// regardless; this only controls how long a finished stream's history
-    /// lingers).
+    /// While accumulated ingest pressure exceeds [`MAX_TOTAL_EVENTS`],
+    /// reclaim the oldest finished subagent stream's events, one stream at a
+    /// time, reducing `ingest_pressure` by exactly what each reclaim frees.
+    /// Never touches the main stream or a still-running subagent stream. A
+    /// no-op once there are no more finished streams to reclaim from — pressure
+    /// can stay over budget in that case, which is fine: memory is bounded
+    /// per-stream regardless, and this only controls how long a finished
+    /// stream's history lingers, not a hard ceiling.
+    ///
+    /// The subtraction is what keeps this from re-triggering on every single
+    /// future `ingest()` once crossed once: without it, `ingest_pressure`
+    /// only grows, so the loop condition would go permanently true the first
+    /// time it's satisfied, draining `finished_eviction_order` to empty on
+    /// the spot and then clearing any newly-finished stream again the moment
+    /// it's pushed.
     fn evict_if_over_budget(&mut self) {
         while self.ingest_pressure > MAX_TOTAL_EVENTS as u64 {
             let Some((tag, agent_id)) = self.finished_eviction_order.pop_front() else {
@@ -246,7 +262,9 @@ impl ActivityStore {
             };
             if let Some(by_agent) = self.streams.get_mut(&tag) {
                 if let Some(stream) = by_agent.get_mut(&Some(agent_id)) {
+                    let reclaimed = stream.events.len() as u64;
                     stream.events.clear();
+                    self.ingest_pressure = self.ingest_pressure.saturating_sub(reclaimed);
                 }
             }
         }
@@ -476,6 +494,83 @@ mod tests {
         assert!(
             !new.events.is_empty(),
             "the still-running subagent stream must survive eviction pressure"
+        );
+    }
+
+    #[test]
+    fn crossing_the_budget_once_does_not_permanently_wipe_every_later_finished_stream() {
+        // Regression test for the bug where ingest_pressure was never
+        // decremented on eviction: the loop condition in
+        // evict_if_over_budget stayed permanently true after the first
+        // crossing, so every subsequently-finished subagent's history was
+        // cleared on the very same ingest() call that recorded its
+        // subagent_stop — before anyone had a chance to look at it.
+        let mut store = ActivityStore::new();
+
+        // A finished subagent stream, filled to exactly its per-stream cap —
+        // the most a single reclaim can free — sitting in
+        // finished_eviction_order ahead of anything else.
+        store.ingest(
+            raw_event("claude", "subagent_start", "agent-old started"),
+            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-old".into() },
+        );
+        for i in 0..(MAX_EVENTS_PER_STREAM - 2) {
+            store.ingest(
+                raw_event("claude", "tool_use", &format!("agent-old event {i}")),
+                Attribution::Subagent { tag: "fred".into(), agent_id: "agent-old".into() },
+            );
+        }
+        store.ingest(
+            raw_event("claude", "subagent_stop", "agent-old finished"),
+            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-old".into() },
+        );
+
+        // Push pressure just barely past the budget. Reclaiming agent-old's
+        // full stream (MAX_EVENTS_PER_STREAM events) should land comfortably
+        // back under it, not merely closer to it.
+        let ingested_so_far = MAX_EVENTS_PER_STREAM as u64; // start + (cap-2) tool_use + stop
+        let to_cross = MAX_TOTAL_EVENTS as u64 + 1 - ingested_so_far;
+        for i in 0..to_cross {
+            store.ingest(
+                raw_event("claude", "tool_use", &format!("main event {i}")),
+                Attribution::Focus { tag: "fred".into() },
+            );
+        }
+
+        // Sanity check on the setup: agent-old should already be reclaimed —
+        // otherwise the rest of this test isn't exercising what it claims to.
+        let streams = store.streams_for_focus("fred");
+        let old = streams.iter().find(|s| s.agent_id.as_deref() == Some("agent-old"));
+        assert!(
+            old.is_none() || old.unwrap().events.is_empty(),
+            "setup error: agent-old should already be reclaimed once pressure crossed the budget"
+        );
+
+        // Now, well after that crossing and reclaim, a brand-new subagent
+        // starts, does a little work, and finishes.
+        store.ingest(
+            raw_event("claude", "subagent_start", "agent-fresh started"),
+            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-fresh".into() },
+        );
+        store.ingest(
+            raw_event("claude", "tool_use", "agent-fresh did something"),
+            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-fresh".into() },
+        );
+        store.ingest(
+            raw_event("claude", "subagent_stop", "agent-fresh finished"),
+            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-fresh".into() },
+        );
+
+        let streams = store.streams_for_focus("fred");
+        let fresh = streams
+            .iter()
+            .find(|s| s.agent_id.as_deref() == Some("agent-fresh"))
+            .expect("agent-fresh's stream must exist");
+
+        assert!(
+            !fresh.events.is_empty(),
+            "a subagent that just finished must not have its history wiped purely because \
+             ingest pressure crossed the budget at some earlier point in the session"
         );
     }
 
