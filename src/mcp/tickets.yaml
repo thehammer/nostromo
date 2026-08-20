@@ -1,0 +1,16 @@
+# Compiled-in default alias table for ticket section-heading resolution
+# (W4 — curated-agent-views, D4). Overridable, without a rebuild, at
+# ~/.nostromo/tickets.yaml — the loader re-reads that path on every call and
+# uses it in place of this file if present.
+#
+# Each canonical name maps to every raw heading-text variant that should
+# resolve to it. Variants are matched case/punctuation-insensitively (the
+# same normalization `derive_sections` applies to a ticket's own headings),
+# so "AC", "Acceptance Criteria", and "Acceptance-Criteria" are equivalent
+# here.
+aliases:
+  acceptance_criteria:
+    - "Acceptance Criteria"
+    - "Acceptance criterion"
+    - "AC"
+    - "Definition of Done"

@@ -388,6 +388,54 @@ pub enum PaneContentWire {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         conversation_error: Option<String>,
     },
+    /// An issue-tracker ticket (W4 — curated-agent-views). `provider` is a
+    /// request field, not a view type — the same view serves any provider
+    /// registered with `crate::data::tickets::TicketRegistry`; v1 registers
+    /// only `jira`. `sections`/comment `blocks` are already converted to
+    /// [`MdBlock`] server-side, same as `PrConversation`.
+    Ticket {
+        provider: String,
+        key: String,
+        summary: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        assignee: Option<String>,
+        url: String,
+        /// Blocks before the ticket's first heading form a `"description"`
+        /// section; each subsequent heading starts a new, alias-resolved
+        /// section (see `crate::data::tickets::derive_sections`).
+        sections: Vec<TicketSection>,
+        /// Chronological, 1-indexed — each addressable as `Anchor::Section {
+        /// name: "comment:<index>" }`.
+        comments: Vec<TicketComment>,
+    },
+}
+
+// ── ticket sections/comments (W4 — curated-agent-views) ──────────────────────
+
+/// One section of a `ticket` view's description. Mirrors
+/// `crate::data::tickets::TicketSection`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TicketSection {
+    /// Canonical, alias-resolved name (e.g. `"description"`,
+    /// `"acceptance_criteria"`) — addressable via `Anchor::Section` /
+    /// `Emphasis::Section`.
+    pub name: String,
+    /// The heading's own rendered spans. `None` for the leading
+    /// `"description"` section, which has no heading of its own.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub heading: Option<Vec<MdSpan>>,
+    pub blocks: Vec<MdBlock>,
+}
+
+/// One comment on a ticket. Mirrors `crate::data::tickets::TicketComment`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TicketComment {
+    /// 1-based; addressable as `Anchor::Section { name: "comment:<index>" }`.
+    pub index: u32,
+    pub author: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub blocks: Vec<MdBlock>,
 }
 
 // ── markdown block model (W3 — curated-agent-views, bet B5) ─────────────────
@@ -2864,6 +2912,136 @@ mod tests {
         };
         let json = serde_json::to_value(&content).unwrap();
         assert_eq!(json["conversation_error"], "conversation fetch partially failed: reviews");
+        let back: PaneContentWire = serde_json::from_value(json).unwrap();
+        assert_eq!(back, content);
+    }
+
+    // ── TicketSection / TicketComment (W4 — curated-agent-views) ─────────────
+
+    #[test]
+    fn ticket_section_round_trips_and_omits_heading_key_when_none() {
+        let section = TicketSection {
+            name: "description".into(),
+            heading: None,
+            blocks: vec![MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "hi".into() }] }],
+        };
+        let json = serde_json::to_value(&section).unwrap();
+        assert!(
+            json.get("heading").is_none(),
+            "heading: None must be omitted entirely, got: {json}"
+        );
+        let back: TicketSection = serde_json::from_value(json).unwrap();
+        assert_eq!(back, section);
+    }
+
+    #[test]
+    fn ticket_section_round_trips_and_carries_heading_when_some() {
+        let section = TicketSection {
+            name: "acceptance_criteria".into(),
+            heading: Some(vec![MdSpan::Text { text: "AC".into() }]),
+            blocks: vec![],
+        };
+        let json = serde_json::to_value(&section).unwrap();
+        assert_eq!(json["heading"], serde_json::json!([{ "kind": "text", "text": "AC" }]));
+        let back: TicketSection = serde_json::from_value(json).unwrap();
+        assert_eq!(back, section);
+    }
+
+    #[test]
+    fn ticket_comment_round_trips() {
+        let comment = TicketComment {
+            index: 1,
+            author: "alice".into(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            blocks: vec![MdBlock::Paragraph {
+                spans: vec![MdSpan::Text { text: "a comment".into() }],
+            }],
+        };
+        let json = serde_json::to_string(&comment).unwrap();
+        let back: TicketComment = serde_json::from_str(&json).unwrap();
+        assert_eq!(comment, back, "TicketComment round trip mismatch: {json}");
+    }
+
+    // ── PaneContentWire::Ticket (W4 — curated-agent-views) ───────────────────
+
+    fn sample_ticket_section() -> TicketSection {
+        TicketSection {
+            name: "acceptance_criteria".into(),
+            heading: Some(vec![MdSpan::Text { text: "AC".into() }]),
+            blocks: vec![MdBlock::Paragraph {
+                spans: vec![MdSpan::Text { text: "Must work.".into() }],
+            }],
+        }
+    }
+
+    fn sample_ticket_comment() -> TicketComment {
+        TicketComment {
+            index: 1,
+            author: "bob".into(),
+            created_at: chrono::Utc::now(),
+            blocks: vec![MdBlock::Paragraph {
+                spans: vec![MdSpan::Text { text: "a comment".into() }],
+            }],
+        }
+    }
+
+    #[test]
+    fn pane_content_wire_ticket_round_trips_and_carries_kind_ticket() {
+        let content = PaneContentWire::Ticket {
+            provider: "jira".into(),
+            key: "PROJ-1".into(),
+            summary: "Fix the thing".into(),
+            status: "In Progress".into(),
+            assignee: Some("Alice".into()),
+            url: "https://acme.atlassian.net/browse/PROJ-1".into(),
+            sections: vec![sample_ticket_section()],
+            comments: vec![sample_ticket_comment()],
+        };
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json["kind"], "ticket");
+        let back: PaneContentWire = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, content);
+        let json2 = serde_json::to_value(&back).unwrap();
+        assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn pane_content_wire_ticket_omits_assignee_key_when_none() {
+        let content = PaneContentWire::Ticket {
+            provider: "jira".into(),
+            key: "PROJ-1".into(),
+            summary: "Fix the thing".into(),
+            status: "Open".into(),
+            assignee: None,
+            url: "https://acme.atlassian.net/browse/PROJ-1".into(),
+            sections: vec![],
+            comments: vec![],
+        };
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(
+            json.get("assignee").is_none(),
+            "assignee: None must be omitted from the wire entirely, got: {json}"
+        );
+        let back: PaneContentWire = serde_json::from_value(json).unwrap();
+        assert_eq!(back, content);
+    }
+
+    #[test]
+    fn pane_content_wire_ticket_carries_assignee_when_some() {
+        let content = PaneContentWire::Ticket {
+            provider: "jira".into(),
+            key: "PROJ-1".into(),
+            summary: "Fix the thing".into(),
+            status: "Open".into(),
+            assignee: Some("Alice".into()),
+            url: "https://acme.atlassian.net/browse/PROJ-1".into(),
+            sections: vec![],
+            comments: vec![],
+        };
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json["assignee"], "Alice");
         let back: PaneContentWire = serde_json::from_value(json).unwrap();
         assert_eq!(back, content);
     }

@@ -116,8 +116,13 @@ pub async fn refresh_pane_content(
             // there, and leaving it spinning forever would be worse than an
             // error. Every other failure stays loud, as before.
             if !e.leaves_content_intact() || sent_loading {
-                let message =
-                    format!("refresh_pane_content: {source} fetch failed ({})", e.code());
+                let message = match e.detail() {
+                    Some(detail) => format!(
+                        "refresh_pane_content: {source} fetch failed ({}): {detail}",
+                        e.code()
+                    ),
+                    None => format!("refresh_pane_content: {source} fetch failed ({})", e.code()),
+                };
                 broadcast_pane_content(
                     daemon,
                     &tag,
@@ -126,7 +131,7 @@ pub async fn refresh_pane_content(
                     None,
                 );
             }
-            json!({ "error": e.code() })
+            json!({ "error": e.code(), "detail": e.detail() })
         }
     }
 }
@@ -159,6 +164,7 @@ mod tests {
             broadcast_tx,
             perri: crate::mcp::PerriDaemonState::default(),
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            tickets: Default::default(),
         };
         (McpSharedState::for_daemon(backend), rx)
     }

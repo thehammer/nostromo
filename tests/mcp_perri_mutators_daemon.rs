@@ -60,6 +60,7 @@ fn make_daemon_state() -> Harness {
             settle_timeout: Duration::from_millis(100),
         },
         decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+        tickets: Default::default(),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),

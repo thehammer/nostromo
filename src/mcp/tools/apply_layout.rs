@@ -18,10 +18,12 @@ use serde_json::{json, Value};
 
 use crate::data::file_source::{self, FileRequest, FileSourceError};
 use crate::data::perri_pr::{PrComment, PrThread, PrThreadKind};
+use crate::data::tickets::{self, Ticket, TicketError};
 use crate::ipc::pane_registry::REPL_PANE_ID;
 use crate::ipc::protocol::{
     Anchor, ConversationComment, ConversationThread, ConversationThreadKind, Emphasis,
-    PaneAddress, PaneContentWire, PaneFreshness, PrListItem, ServerMsg,
+    PaneAddress, PaneContentWire, PaneFreshness, PrListItem, ServerMsg, TicketComment as WireTicketComment,
+    TicketSection as WireTicketSection,
 };
 use crate::mcp::layout_schema::{self, LayoutSchema};
 use crate::mcp::pane_sources::broadcast_pane_content;
@@ -30,7 +32,7 @@ use crate::mcp::state::McpSharedState;
 /// Stable, machine-readable failure modes for `apply_layout` and the layout
 /// schema it resolves. Mirrors `PaneError::code()`'s style: the tool layer
 /// surfaces these as `{ "error": "<code>" }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyLayoutError {
     /// A named layout has no on-disk override and no compiled-in default.
     UnknownLayout,
@@ -54,11 +56,15 @@ pub enum ApplyLayoutError {
     /// A `pr_conversation` show named an anchor/emphasis comment id that
     /// isn't present in the fetched conversation (W3 — curated-agent-views).
     UnknownCommentId,
+    /// A `ticket` show's provider/key/section-anchor was refused by the
+    /// provider registry or the fetched ticket itself (W4 —
+    /// curated-agent-views). See `TicketError` for the specific reasons.
+    Ticket(TicketError),
 }
 
 impl ApplyLayoutError {
     /// The stable snake_case code for the wire.
-    pub fn code(self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             ApplyLayoutError::UnknownLayout => "unknown_layout",
             ApplyLayoutError::UnknownSource => "unknown_source",
@@ -68,6 +74,19 @@ impl ApplyLayoutError {
             ApplyLayoutError::ReplInTabs => "repl_in_tabs",
             ApplyLayoutError::FileRefused(e) => e.code(),
             ApplyLayoutError::UnknownCommentId => "unknown_comment_id",
+            ApplyLayoutError::Ticket(e) => e.code(),
+        }
+    }
+
+    /// A human-readable, actionable detail beyond `code()` — currently only
+    /// populated for `Ticket`, whose refusals must name the deployment's
+    /// supported providers / the ticket's actual section names to be
+    /// actionable for the calling agent. `None` for every other variant,
+    /// which is exactly today's behaviour (a bare code, no detail).
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            ApplyLayoutError::Ticket(e) => Some(e.detail_message()),
+            _ => None,
         }
     }
 
@@ -80,12 +99,16 @@ impl ApplyLayoutError {
     /// line 9000 of a 200-line file made a mistake, and the right answer is to
     /// tell it so while the operator keeps reading whatever was already there.
     /// A `FetchFailed` on a live source is a different thing — the pane's data
-    /// really is gone — and stays loud.
-    pub fn leaves_content_intact(self) -> bool {
-        matches!(
-            self,
-            ApplyLayoutError::FileRefused(_) | ApplyLayoutError::UnknownCommentId
-        )
+    /// really is gone — and stays loud. A `Ticket` refusal follows the same
+    /// rule: every `TicketError` is the agent naming something that doesn't
+    /// resolve (a provider, a key, a section) *except* `FetchFailed`, which
+    /// means the provider's backend itself failed.
+    pub fn leaves_content_intact(&self) -> bool {
+        match self {
+            ApplyLayoutError::FileRefused(_) | ApplyLayoutError::UnknownCommentId => true,
+            ApplyLayoutError::Ticket(e) => !matches!(e, TicketError::FetchFailed(_)),
+            _ => false,
+        }
     }
 }
 
@@ -119,6 +142,14 @@ pub(crate) const SOURCE_FILE: &str = "nostromo.get_file";
 /// call, and reuses the exact same fetched `PrSnapshot` those two sources
 /// already read.
 pub(crate) const SOURCE_PR_CONVERSATION: &str = "perri.get_pr_conversation";
+/// The ticket fetcher source name (W4 — curated-agent-views). Deliberately
+/// NOT watch-driven — a ticket is a one-shot fetch, not a live subscription
+/// — and network-only, so (like [`SOURCE_FILE`]'s GitHub-contents fallback)
+/// it only ever resolves on the async path ([`fetch_async`]); the sync
+/// [`fetch`] path serves a cached ticket if the TTL cache (D5) has one and
+/// fails otherwise, same "skip a binding whose fetch fails" rule as every
+/// other sync-path caller already applies.
+pub(crate) const SOURCE_TICKET: &str = "nostromo.get_ticket";
 
 /// The closed set of `source` names a `PaneSpec` may bind to. Adding a new
 /// source is a deliberate code change: add a `match` arm in [`fetch`], a
@@ -130,6 +161,7 @@ const KNOWN_SOURCES: &[&str] = &[
     SOURCE_PR_DIFF,
     SOURCE_FILE,
     SOURCE_PR_CONVERSATION,
+    SOURCE_TICKET,
 ];
 
 /// True when `source` is in the closed fetcher registry.
@@ -159,6 +191,7 @@ pub(crate) fn source_content_kind(source: &str) -> Option<&'static str> {
         SOURCE_PR_DIFF => Some("diff"),
         SOURCE_FILE => Some("code"),
         SOURCE_PR_CONVERSATION => Some("pr_conversation"),
+        SOURCE_TICKET => Some("ticket"),
         _ => None,
     }
 }
@@ -302,7 +335,85 @@ pub(crate) fn fetch(
                 conversation_error: snap.conversation_error,
             })
         }
+        SOURCE_TICKET => {
+            // Network-only (D5/D2 of the W4 plan) — this sync path never
+            // calls out to a provider. It serves a still-fresh TTL-cached
+            // ticket if one exists (so `repaint_bound_panes` on daemon
+            // restart doesn't need the network either) and otherwise fails,
+            // mirroring `SOURCE_FILE`'s GitHub-contents-fallback precedent:
+            // the real fetch only ever happens on `fetch_async`.
+            let daemon = state.daemon.as_ref().ok_or(ApplyLayoutError::FetchFailed)?;
+            let params = args.params.ok_or(ApplyLayoutError::FetchFailed)?;
+            let (provider, key) = ticket_request(params).ok_or(ApplyLayoutError::FetchFailed)?;
+            let ticket = daemon
+                .tickets
+                .cache
+                .get(provider, key)
+                .ok_or(ApplyLayoutError::FetchFailed)?;
+            ticket_content(&ticket, params)
+        }
         _ => Err(ApplyLayoutError::UnknownSource),
+    }
+}
+
+/// Pull `params.provider`/`params.key` out of a `nostromo.get_ticket` call —
+/// shared by the sync cache-only path above and [`fetch_ticket_async`] so the
+/// two can't disagree about where those two fields live.
+fn ticket_request(params: &Value) -> Option<(&str, &str)> {
+    let provider = params.get("provider")?.as_str()?;
+    let key = params.get("key")?.as_str()?;
+    Some((provider, key))
+}
+
+/// Build the `PaneContentWire::Ticket` a fetched [`Ticket`] produces,
+/// refusing with `unknown_section` if `params` names an anchor/emphasis
+/// section that doesn't resolve against *this* ticket (D4 — the honesty
+/// requirement: never silently render the top of the ticket while claiming
+/// to be at a section that doesn't exist).
+fn ticket_content(ticket: &Ticket, params: &Value) -> Result<PaneContentWire, ApplyLayoutError> {
+    let aliases = tickets::config::load();
+    if let Some(obj) = params.as_object() {
+        if let Some(anchor) = obj.get("anchor") {
+            if let Ok(Anchor::Section { name }) = serde_json::from_value::<Anchor>(anchor.clone())
+            {
+                tickets::resolve_section(&ticket.sections, &ticket.comments, &name, &aliases)
+                    .map_err(ApplyLayoutError::Ticket)?;
+            }
+        }
+        if let Some(items) = obj.get("emphasis").and_then(|v| v.as_array()) {
+            for item in items {
+                if let Ok(Emphasis::Section { name }) =
+                    serde_json::from_value::<Emphasis>(item.clone())
+                {
+                    tickets::resolve_section(&ticket.sections, &ticket.comments, &name, &aliases)
+                        .map_err(ApplyLayoutError::Ticket)?;
+                }
+            }
+        }
+    }
+
+    Ok(PaneContentWire::Ticket {
+        provider: ticket.provider.clone(),
+        key: ticket.key.clone(),
+        summary: ticket.summary.clone(),
+        status: ticket.status.clone(),
+        assignee: ticket.assignee.clone(),
+        url: ticket.url.clone(),
+        sections: ticket.sections.iter().map(ticket_section_wire).collect(),
+        comments: ticket.comments.iter().map(ticket_comment_wire).collect(),
+    })
+}
+
+fn ticket_section_wire(s: &crate::data::tickets::TicketSection) -> WireTicketSection {
+    WireTicketSection { name: s.name.clone(), heading: s.heading.clone(), blocks: s.blocks.clone() }
+}
+
+fn ticket_comment_wire(c: &crate::data::tickets::TicketComment) -> WireTicketComment {
+    WireTicketComment {
+        index: c.index,
+        author: c.author.clone(),
+        created_at: c.created_at,
+        blocks: c.blocks.clone(),
     }
 }
 
@@ -393,6 +504,9 @@ pub(crate) async fn fetch_async(
     state: &McpSharedState,
     args: FetchArgs<'_>,
 ) -> Result<PaneContentWire, ApplyLayoutError> {
+    if source == SOURCE_TICKET {
+        return fetch_ticket_async(state, args).await;
+    }
     if source != SOURCE_FILE {
         return fetch(source, state, args);
     }
@@ -413,6 +527,44 @@ pub(crate) async fn fetch_async(
     };
     file_source::validate_against(&text, &request)?;
     Ok(code_content(request, revision, text))
+}
+
+/// [`SOURCE_TICKET`]'s real fetch path (D5): serve a still-fresh TTL-cached
+/// ticket with no network at all, else resolve the named provider from the
+/// registry (`unsupported_provider`/`provider_unconfigured` on refusal),
+/// fetch it, cache the result, and build the pane content — refusing with
+/// `unknown_section` if `params` names a section the fetched ticket doesn't
+/// have.
+async fn fetch_ticket_async(
+    state: &McpSharedState,
+    args: FetchArgs<'_>,
+) -> Result<PaneContentWire, ApplyLayoutError> {
+    let daemon = state.daemon.as_ref().ok_or(ApplyLayoutError::FetchFailed)?;
+    let params = args.params.ok_or_else(|| {
+        ApplyLayoutError::Ticket(TicketError::FetchFailed(
+            "nostromo.get_ticket requires params.provider and params.key".to_string(),
+        ))
+    })?;
+    let (provider_name, key) = ticket_request(params).ok_or_else(|| {
+        ApplyLayoutError::Ticket(TicketError::FetchFailed(
+            "nostromo.get_ticket requires params.provider and params.key".to_string(),
+        ))
+    })?;
+
+    let ticket = match daemon.tickets.cache.get(provider_name, key) {
+        Some(cached) => cached,
+        None => {
+            let provider = daemon
+                .tickets
+                .registry
+                .get(provider_name)
+                .map_err(ApplyLayoutError::Ticket)?;
+            let fetched = provider.fetch(key).await.map_err(ApplyLayoutError::Ticket)?;
+            daemon.tickets.cache.put(provider_name, key, fetched.clone());
+            fetched
+        }
+    };
+    ticket_content(&ticket, params)
 }
 
 /// The `(request, root, revision)` a [`SOURCE_FILE`] fetch runs against,
@@ -499,7 +651,7 @@ pub(crate) fn address(source: &str, params: Option<&Value>) -> Option<PaneAddres
                 reason,
             }
         }
-        SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION => PaneAddress {
+        SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION | SOURCE_TICKET => PaneAddress {
             anchor: obj
                 .get("anchor")
                 .and_then(|v| serde_json::from_value::<Anchor>(v.clone()).ok()),
@@ -692,13 +844,14 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
         let (content, msg_freshness) = match fetch_async(source, state, args).await {
             Ok(c) => (c, Some(freshness(source, state))),
             Err(e) => {
-                warnings.push(json!({ "pane_id": pane_id, "error": e.code() }));
-                (
-                    PaneContentWire::Error {
-                        message: format!("apply_layout: {} fetch failed ({})", source, e.code()),
-                    },
-                    None,
-                )
+                warnings.push(json!({ "pane_id": pane_id, "error": e.code(), "detail": e.detail() }));
+                let message = match e.detail() {
+                    Some(detail) => {
+                        format!("apply_layout: {source} fetch failed ({}): {detail}", e.code())
+                    }
+                    None => format!("apply_layout: {source} fetch failed ({})", e.code()),
+                };
+                (PaneContentWire::Error { message }, None)
             }
         };
         broadcast_pane_content(daemon, &tag, pane_id, content, msg_freshness);
@@ -716,13 +869,24 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::tickets::jira::{JiraCredentials, JiraProvider};
+    use crate::data::tickets::{TicketCache, TicketRegistry};
     use crate::ipc::pane_registry::PaneRegistry;
     use crate::ipc::SessionManager;
-    use crate::mcp::DaemonMcpBackend;
+    use crate::mcp::{DaemonMcpBackend, TicketRegistryState};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tokio::sync::{broadcast, watch};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_state() -> (McpSharedState, broadcast::Receiver<ServerMsg>) {
+        make_state_with_tickets(TicketRegistryState::default())
+    }
+
+    fn make_state_with_tickets(
+        tickets: TicketRegistryState,
+    ) -> (McpSharedState, broadcast::Receiver<ServerMsg>) {
         let tmp = tempfile::TempDir::new().unwrap();
         let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
             tmp.path().join("panes.json"),
@@ -740,8 +904,47 @@ mod tests {
             broadcast_tx,
             perri: crate::mcp::PerriDaemonState::default(),
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            tickets,
         };
         (McpSharedState::for_daemon(backend), rx)
+    }
+
+    /// A `TicketRegistryState` with `jira` registered but unconfigured (no
+    /// credentials) — for the `provider_unconfigured` refusal path.
+    fn unconfigured_jira_tickets_state() -> TicketRegistryState {
+        let mut registry = TicketRegistry::new();
+        registry.register(Arc::new(JiraProvider::for_test(None, String::new())));
+        TicketRegistryState {
+            registry: Arc::new(registry),
+            cache: Arc::new(TicketCache::new(Duration::from_secs(60))),
+        }
+    }
+
+    /// A `TicketRegistryState` with `jira` registered, configured, and
+    /// pointed at a `wiremock` server instead of real Atlassian.
+    fn jira_tickets_state(base_url: String, ttl: Duration) -> TicketRegistryState {
+        let mut registry = TicketRegistry::new();
+        let creds = JiraCredentials::for_test("acme.atlassian.net", "hammer@acme.com", "tok");
+        registry.register(Arc::new(JiraProvider::for_test(Some(creds), base_url)));
+        TicketRegistryState { registry: Arc::new(registry), cache: Arc::new(TicketCache::new(ttl)) }
+    }
+
+    /// A minimal happy-path Jira issue-fetch response body.
+    fn jira_issue_body(summary: &str) -> serde_json::Value {
+        json!({
+            "fields": {
+                "summary": summary,
+                "status": { "name": "Open" },
+                "assignee": serde_json::Value::Null,
+                "description": {
+                    "type": "doc",
+                    "content": [
+                        { "type": "paragraph", "content": [{ "type": "text", "text": "Body." }] }
+                    ]
+                },
+                "comment": { "comments": [] }
+            }
+        })
     }
 
     #[test]
@@ -1185,5 +1388,217 @@ mod tests {
     fn source_content_kind_and_source_is_known_include_perri_get_pr_conversation() {
         assert!(source_is_known(SOURCE_PR_CONVERSATION));
         assert_eq!(source_content_kind(SOURCE_PR_CONVERSATION), Some("pr_conversation"));
+    }
+
+    // ── nostromo.get_ticket (W4 — curated-agent-views) ────────────────────────
+
+    #[test]
+    fn source_content_kind_and_source_is_known_include_nostromo_get_ticket() {
+        assert!(source_is_known(SOURCE_TICKET));
+        assert_eq!(source_content_kind(SOURCE_TICKET), Some("ticket"));
+    }
+
+    #[tokio::test]
+    async fn fetch_ticket_with_an_unregistered_provider_is_unsupported_provider_naming_jira() {
+        // A deployment with `jira` registered (production shape) — "linear"
+        // was never registered, but "jira" was, so the refusal must name it.
+        let (state, _bcast) = make_state_with_tickets(unconfigured_jira_tickets_state());
+        let params = json!({ "provider": "linear", "key": "X-1" });
+        let err = fetch_async(
+            SOURCE_TICKET,
+            &state,
+            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), "unsupported_provider");
+        assert!(
+            err.detail().unwrap().contains("jira"),
+            "the refusal must name the deployment's actual supported providers"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_ticket_with_an_unconfigured_jira_provider_is_provider_unconfigured() {
+        let (state, _bcast) = make_state_with_tickets(unconfigured_jira_tickets_state());
+        let params = json!({ "provider": "jira", "key": "X-1" });
+        let err = fetch_async(
+            SOURCE_TICKET,
+            &state,
+            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), "provider_unconfigured");
+    }
+
+    #[tokio::test]
+    async fn fetch_ticket_wiremock_404_is_unknown_ticket() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/MISSING-1"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let (state, _bcast) =
+            make_state_with_tickets(jira_tickets_state(server.uri(), Duration::from_secs(60)));
+        let params = json!({ "provider": "jira", "key": "MISSING-1" });
+        let err = fetch_async(
+            SOURCE_TICKET,
+            &state,
+            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), "unknown_ticket");
+    }
+
+    #[tokio::test]
+    async fn fetch_ticket_happy_path_then_a_bad_anchor_is_unknown_section_and_leaves_content_intact()
+    {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jira_issue_body("Fix the thing")))
+            .mount(&server)
+            .await;
+
+        let (state, _bcast) =
+            make_state_with_tickets(jira_tickets_state(server.uri(), Duration::from_secs(60)));
+
+        // First call establishes content: no anchor, must succeed.
+        let good_params = json!({ "provider": "jira", "key": "PROJ-1" });
+        let content = fetch_async(
+            SOURCE_TICKET,
+            &state,
+            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&good_params) },
+        )
+        .await
+        .expect("the happy path must succeed");
+        match content {
+            PaneContentWire::Ticket { summary, .. } => assert_eq!(summary, "Fix the thing"),
+            other => panic!("expected Ticket content, got {other:?}"),
+        }
+
+        // Second call: an anchor naming a section that doesn't exist on the
+        // fetched ticket must refuse with unknown_section, and that refusal
+        // must be one that leaves the pane's prior content untouched.
+        let bad_params = json!({
+            "provider": "jira", "key": "PROJ-1",
+            "anchor": { "kind": "section", "name": "does-not-exist" }
+        });
+        let err = fetch_async(
+            SOURCE_TICKET,
+            &state,
+            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&bad_params) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), "unknown_section");
+        assert!(
+            err.leaves_content_intact(),
+            "an unknown_section refusal must leave a pane's existing content untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_ticket_two_calls_within_the_ttl_window_hit_the_provider_exactly_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jira_issue_body("Fix the thing")))
+            .mount(&server)
+            .await;
+
+        let (state, _bcast) =
+            make_state_with_tickets(jira_tickets_state(server.uri(), Duration::from_secs(60)));
+        let params = json!({ "provider": "jira", "key": "PROJ-1" });
+
+        for _ in 0..2 {
+            fetch_async(
+                SOURCE_TICKET,
+                &state,
+                FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+            )
+            .await
+            .expect("both calls within the TTL window must succeed");
+        }
+
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "two shows of the same ticket inside the TTL window must issue exactly one HTTP request"
+        );
+    }
+
+    #[test]
+    fn fetch_sync_ticket_cache_miss_returns_fetch_failed_with_no_network_call() {
+        // No wiremock server at all — the sync `fetch` path must never touch
+        // the network regardless of whether a provider is registered.
+        let (state, _bcast) = make_state();
+        let params = json!({ "provider": "jira", "key": "PROJ-1" });
+        let err = fetch(
+            SOURCE_TICKET,
+            &state,
+            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+        )
+        .unwrap_err();
+        assert_eq!(err, ApplyLayoutError::FetchFailed);
+    }
+
+    #[test]
+    fn fetch_sync_ticket_cache_hit_returns_ticket_content_with_no_provider_involved() {
+        let (state, _bcast) = make_state();
+        let daemon = state.daemon.as_ref().unwrap();
+        let ticket = Ticket {
+            provider: "jira".into(),
+            key: "PROJ-1".into(),
+            summary: "Cached summary".into(),
+            status: "Open".into(),
+            assignee: None,
+            url: "".into(),
+            sections: vec![],
+            comments: vec![],
+        };
+        daemon.tickets.cache.put("jira", "PROJ-1", ticket);
+
+        let params = json!({ "provider": "jira", "key": "PROJ-1" });
+        let content = fetch(
+            SOURCE_TICKET,
+            &state,
+            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+        )
+        .expect("a cache hit must succeed with no registry/provider involved at all");
+        match content {
+            PaneContentWire::Ticket { summary, .. } => assert_eq!(summary, "Cached summary"),
+            other => panic!("expected Ticket content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_layout_error_ticket_fetch_failed_stays_loud_but_every_other_ticket_error_leaves_content_intact()
+    {
+        assert!(
+            !ApplyLayoutError::Ticket(TicketError::FetchFailed("x".into())).leaves_content_intact(),
+            "a live provider failure must stay loud, mirroring FetchFailed on every other source"
+        );
+        assert!(ApplyLayoutError::Ticket(TicketError::UnsupportedProvider { supported: vec![] })
+            .leaves_content_intact());
+        assert!(ApplyLayoutError::Ticket(TicketError::ProviderUnconfigured {
+            message: "x".into()
+        })
+        .leaves_content_intact());
+        assert!(ApplyLayoutError::Ticket(TicketError::UnknownTicket).leaves_content_intact());
+        assert!(ApplyLayoutError::Ticket(TicketError::UnknownSection { available: vec![] })
+            .leaves_content_intact());
+    }
+
+    #[test]
+    fn apply_layout_error_ticket_code_and_detail_delegate_to_the_wrapped_ticket_error() {
+        let err =
+            ApplyLayoutError::Ticket(TicketError::UnsupportedProvider { supported: vec!["jira".into()] });
+        assert_eq!(err.code(), "unsupported_provider");
+        assert!(err.detail().unwrap().contains("jira"));
     }
 }

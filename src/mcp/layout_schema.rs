@@ -30,7 +30,7 @@ use crate::mcp::tools::apply_layout::{source_content_kind, source_is_known, Appl
 
 /// The `content_kind` names a `PaneSpec` may declare — one per
 /// `PaneContentWire` variant.
-const VALID_CONTENT_KINDS: [&str; 8] = [
+const VALID_CONTENT_KINDS: [&str; 9] = [
     "text",
     "json_snapshot",
     "pr_list",
@@ -39,6 +39,7 @@ const VALID_CONTENT_KINDS: [&str; 8] = [
     "code",
     "diff",
     "pr_conversation",
+    "ticket",
 ];
 
 /// A named, declarative pane layout: a tree shape plus per-pane data bindings.
@@ -624,6 +625,61 @@ tree:
 panes:
   conversation:
     source: perri.get_pr_conversation
+    content_kind: text
+"#;
+        let err = parse(yaml).unwrap_err();
+        assert_eq!(err, ApplyLayoutError::InvalidContentKind);
+    }
+
+    // ── ticket content kind (W4 — curated-agent-views) ───────────────────────
+
+    #[test]
+    fn content_kind_is_valid_accepts_ticket() {
+        assert!(content_kind_is_valid("ticket"));
+    }
+
+    #[test]
+    fn valid_content_kinds_has_exactly_nine_entries_including_ticket() {
+        assert_eq!(
+            VALID_CONTENT_KINDS.len(),
+            9,
+            "adding/removing a content kind must be a deliberate, counted change"
+        );
+        assert!(VALID_CONTENT_KINDS.contains(&"ticket"));
+    }
+
+    #[test]
+    fn a_schema_declaring_nostromo_get_ticket_with_ticket_content_kind_validates() {
+        let yaml = r#"
+name: ok
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: ticket
+    - pane: repl
+panes:
+  ticket:
+    source: nostromo.get_ticket
+    content_kind: ticket
+"#;
+        let schema = parse(yaml).expect("a ticket source/content_kind pair must validate");
+        assert_eq!(schema.panes["ticket"].content_kind, "ticket");
+    }
+
+    #[test]
+    fn nostromo_get_ticket_with_a_mismatched_content_kind_is_rejected() {
+        let yaml = r#"
+name: bad
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: ticket
+    - pane: repl
+panes:
+  ticket:
+    source: nostromo.get_ticket
     content_kind: text
 "#;
         let err = parse(yaml).unwrap_err();

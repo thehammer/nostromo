@@ -53,6 +53,7 @@ fn make_daemon_state() -> Harness {
         broadcast_tx,
         perri: nostromo::mcp::PerriDaemonState::default(),
         decisions: decisions.clone(),
+        tickets: Default::default(),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),

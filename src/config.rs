@@ -91,6 +91,21 @@ pub struct Config {
     /// VIP sender addresses (lowercase); emails from these addresses are
     /// highlighted in the mailbox panel.
     pub vip_senders: Vec<String>,
+
+    // ── W4 curated-agent-views: Jira ticket provider ────────────────────────
+    /// Overrides the resolved Atlassian site (e.g. `carefeed.atlassian.net`)
+    /// ahead of the environment or the credentials file. See
+    /// `crate::data::tickets::jira` for the full resolution order.
+    pub jira_site: Option<String>,
+    /// Overrides the resolved Atlassian account email ahead of the
+    /// environment or the credentials file.
+    pub jira_email: Option<String>,
+    /// Path to a `.env`-style file carrying `ATLASSIAN_SITE_NAME` /
+    /// `ATLASSIAN_USER_EMAIL` / `ATLASSIAN_API_TOKEN`. Default:
+    /// `~/.claude/credentials/.env`. The token itself is never read into
+    /// this struct — only this path is — so `Config`'s unredacted `Debug`
+    /// derive never carries a secret.
+    pub jira_credentials_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -113,6 +128,9 @@ impl Default for Config {
             relay_token: None,
             perri_targeted_relay: true,
             vip_senders: Vec::new(),
+            jira_site: None,
+            jira_email: None,
+            jira_credentials_path: None,
         }
     }
 }

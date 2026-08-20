@@ -569,6 +569,7 @@ mod tests {
                 settle_timeout: Duration::from_millis(50),
             },
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            tickets: Default::default(),
         };
         let state = McpSharedState::for_daemon(backend);
 
@@ -779,6 +780,7 @@ mod tests {
             broadcast_tx,
             perri: PerriDaemonState::default(),
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            tickets: Default::default(),
         };
         let mut state = McpSharedState::for_daemon(backend);
         state.event_tx = event_tx;
@@ -1026,6 +1028,7 @@ mod tests {
             broadcast_tx,
             perri: PerriDaemonState::default(),
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            tickets: Default::default(),
         };
         let state = McpSharedState::for_daemon(backend);
 

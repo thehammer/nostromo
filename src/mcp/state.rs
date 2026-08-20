@@ -19,6 +19,7 @@ use crate::{
         perri_queue::PrQueueSnapshot,
         rate_limits::{BudgetPosture, RateLimits},
         teri_todos::TeriTodosSnapshot,
+        tickets::{TicketCache, TicketRegistry},
     },
     event::AppEvent,
     ipc::{decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
@@ -92,6 +93,21 @@ impl Default for PerriDaemonState {
     }
 }
 
+/// The `ticket` view's provider registry and its short-TTL fetch cache (W4 —
+/// curated-agent-views, D5). Held on `DaemonMcpBackend` next to
+/// `PerriDaemonState`, for the same reason: this is per-daemon state a
+/// tool handler needs regardless of which focus/pane called it.
+///
+/// `Default` builds an *empty* registry (no providers registered) — correct
+/// for every test that doesn't itself exercise a ticket source. Production
+/// startup (`src/bin/nostromd.rs`) builds its own with the real `jira`
+/// provider registered instead.
+#[derive(Clone, Default)]
+pub struct TicketRegistryState {
+    pub registry: Arc<TicketRegistry>,
+    pub cache: Arc<TicketCache>,
+}
+
 /// Backend for an MCP server hosted **inside `nostromd`** (rather than the TUI).
 ///
 /// The TUI routes pane mutations through `event_tx` → `AppEvent::McpCommand` →
@@ -116,6 +132,9 @@ pub struct DaemonMcpBackend {
     /// to `Server::bind` so the IPC layer can route `ClientMsg::DecisionAnswer`
     /// and track `Topic::Decision` subscribers into the same registry.
     pub decisions: Arc<Mutex<DecisionRegistry>>,
+    /// The `ticket` view's provider registry + TTL cache (W4 —
+    /// curated-agent-views).
+    pub tickets: TicketRegistryState,
 }
 
 // ── shared state ───────────────────────────────────────────────────────────────
