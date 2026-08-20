@@ -1079,10 +1079,8 @@ mod tests {
         let cfg = cfg();
         let mut state = curated_start();
         let mut frontmost = String::new();
-        let mut lru: u64 = 100;
-        for (t, id) in sequence {
+        for (lru, (t, id)) in (101_u64..).zip(sequence.iter()) {
             let p = place(&cfg, &state, &show(*t, id.clone())).unwrap();
-            lru += 1;
 
             let mut by_id: BTreeMap<String, LiveView> = state
                 .region("detail")

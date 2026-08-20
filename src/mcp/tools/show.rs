@@ -540,14 +540,14 @@ fn apply_to_tree(
                 return Err(PlacementError::RegionNotCreatable(placement.region.clone()));
             }
         }
-        None if placement.tabbed => {
-            if !view_tree::replace_tabs_region(
+        None if placement.tabbed
+            && !view_tree::replace_tabs_region(
                 tree,
                 &placement.region,
                 view_tree::build_tabs(&placement.region, &tabs, placement.tab_index),
-            ) {
-                return Err(PlacementError::RegionNotCreatable(placement.region.clone()));
-            }
+            ) =>
+        {
+            return Err(PlacementError::RegionNotCreatable(placement.region.clone()));
         }
         // A non-tabbed region that already exists is one leaf holding one
         // view: the tree needs no change at all, only the rebinding the caller
