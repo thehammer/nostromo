@@ -78,6 +78,11 @@ async fn main() -> Result<()> {
 
     // ── Session manager (persistent stream-json sessions) ──────────────────────
     let session_mgr: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
+    // Seed the session-id reverse index from the on-disk store so activity
+    // events from sessions spawned by a *previous* daemon process (this one
+    // predates a fresh process's in-memory index) still attribute correctly
+    // from the first event, not just after this process spawns/restarts them.
+    session_mgr.lock().unwrap().seed_reverse_index();
 
     // ── Pane registry (agent-authored layout) ──────────────────────────────────
     // Single source of truth for every focus's pane tree. Persisted to disk so
@@ -261,9 +266,18 @@ async fn main() -> Result<()> {
         .join("activity.jsonl");
 
     let btx_activity = broadcast_tx.clone();
+    let session_mgr_for_activity = Arc::clone(&session_mgr);
     tokio::spawn(async move {
         let on_event = move |ev: ActivityEvent| {
-            let _ = btx_activity.send(ServerMsg::Activity(ev));
+            // Resolve attribution, assign `seq`, and defensively re-scrub —
+            // all inside `SessionManager::ingest_activity_event` — before
+            // broadcasting, so every subscriber sees the same finalized event
+            // the daemon's own snapshot/health responses are built from.
+            let finalized = session_mgr_for_activity
+                .lock()
+                .unwrap()
+                .ingest_activity_event(ev);
+            let _ = btx_activity.send(ServerMsg::Activity(finalized));
         };
         if let Err(e) = tail_activity_jsonl(activity_path, on_event).await {
             tracing::warn!("activity tailer exited: {e:#}");

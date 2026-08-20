@@ -29,7 +29,10 @@ use uuid::Uuid;
 use super::{
     codec::{read_frame, write_frame},
     decisions::{AnswerOutcome, DecisionRegistry},
-    protocol::{ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
+    protocol::{
+        ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
+        MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+    },
     pty_manager::PtyManager,
     session_manager::SessionManager,
 };
@@ -348,12 +351,50 @@ where
                 snapshots.extend(provider.bound_pane_contents());
             }
         }
-        for msg in snapshots {
-            let bytes = serde_json::to_vec(&msg).unwrap_or_default();
-            if !bytes.is_empty() {
-                let _ = write_frame(&mut writer, &bytes).await;
-            }
-        }
+        replay_messages(&mut writer, snapshots).await;
+    }
+
+    // ── Activity replay — snapshot + health on (re)connect ────────────────────
+    // A reconnecting client must never be left presenting a stale last-known
+    // event as if it were current, and it must be able to tell a genuinely
+    // quiet focus apart from a broken ingestion path — so both a snapshot per
+    // known focus and one health verdict are pushed immediately on attach,
+    // mirroring the Layout replay above (D4).
+    if topics.contains(&Topic::Activity) {
+        let (snapshots, health_msg): (Vec<ServerMsg>, ServerMsg) = {
+            let mgr = session_mgr.lock().unwrap();
+            let snapshots = mgr
+                .known_focus_tags()
+                .into_iter()
+                .map(|tag| {
+                    let streams = activity_streams_wire(&mgr, &tag);
+                    ServerMsg::ActivitySnapshot { tag, streams }
+                })
+                .collect();
+
+            let hook_installed = crate::activity::hook_status::hook_installed(
+                &crate::activity::hook_status::default_settings_path(),
+            );
+            let health = mgr.activity_health();
+            let reason = if health.ingesting {
+                None
+            } else if hook_installed {
+                Some("activity hook installed but no event has arrived yet".to_string())
+            } else {
+                Some(
+                    "activity hook not installed — run `nostromo doctor --fix` to install it"
+                        .to_string(),
+                )
+            };
+            let health_msg = ServerMsg::ActivityHealth {
+                ingesting: health.ingesting,
+                reason,
+                last_event_at: health.last_event_at,
+                hook_installed,
+            };
+            (snapshots, health_msg)
+        };
+        replay_messages(&mut writer, snapshots.into_iter().chain(std::iter::once(health_msg))).await;
     }
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
@@ -437,6 +478,25 @@ where
     }
 
     result
+}
+
+/// Serialize and write each message in order, best-effort: a message that
+/// fails to serialize (or serializes to nothing) is skipped rather than
+/// aborting the rest of the replay, and a write failure is swallowed — the
+/// client will find out on its next read once the socket is actually down.
+/// Shared by the Layout and Activity replay blocks in `handle_client`, which
+/// both push an ordered batch of `ServerMsg`s to a freshly (re)connected
+/// client before entering the main loop.
+async fn replay_messages<W>(writer: &mut W, messages: impl IntoIterator<Item = ServerMsg>)
+where
+    W: AsyncWrite + Unpin,
+{
+    for msg in messages {
+        let bytes = serde_json::to_vec(&msg).unwrap_or_default();
+        if !bytes.is_empty() {
+            let _ = write_frame(writer, &bytes).await;
+        }
+    }
 }
 
 // ── PTY command dispatch ──────────────────────────────────────────────────────
@@ -714,9 +774,31 @@ fn handle_client_msg(
             }
         }
 
+        ClientMsg::ActivitySnapshotRequest { tag } => {
+            let streams = {
+                let mgr = session_mgr.lock().unwrap();
+                activity_streams_wire(&mgr, &tag)
+            };
+            let _ = targeted_tx.send(ServerMsg::ActivitySnapshot { tag, streams });
+        }
+
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
     }
+}
+
+/// Snapshot one focus's activity streams into their wire form.
+fn activity_streams_wire(mgr: &SessionManager, tag: &str) -> Vec<ActivityStreamWire> {
+    mgr.activity_streams_for_focus(tag)
+        .into_iter()
+        .map(|s| ActivityStreamWire {
+            agent_id: s.agent_id,
+            agent_type: s.agent_type,
+            parent_agent_id: s.parent_agent_id,
+            events: s.events,
+            finished: s.finished,
+        })
+        .collect()
 }
 
 // ── topic filter ──────────────────────────────────────────────────────────────
@@ -726,7 +808,9 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         return true;
     }
     match msg {
-        ServerMsg::Activity(_) => topics.contains(&Topic::Activity),
+        ServerMsg::Activity(_)
+        | ServerMsg::ActivitySnapshot { .. }
+        | ServerMsg::ActivityHealth { .. } => topics.contains(&Topic::Activity),
         ServerMsg::MotherJobs { .. } => topics.contains(&Topic::MotherJobs),
         ServerMsg::MotherStatusline(_) => topics.contains(&Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => topics.contains(&Topic::MotherJobs),
@@ -750,8 +834,8 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::message_matches_topics;
-    use crate::ipc::protocol::{DecisionChoice, ServerMsg, Topic};
+    use super::*;
+    use crate::ipc::protocol::DecisionChoice;
 
     fn sample_decision_request() -> ServerMsg {
         ServerMsg::DecisionRequest {
@@ -794,5 +878,30 @@ mod tests {
     #[test]
     fn decision_request_matches_an_empty_topic_list_meaning_everything() {
         assert!(message_matches_topics(&sample_decision_request(), &[]));
+    }
+
+    // ── ambient activity routes under Topic::Activity ─────────────────────────
+
+    #[test]
+    fn activity_snapshot_and_health_route_under_topic_activity() {
+        let snapshot = ServerMsg::ActivitySnapshot {
+            tag: "cody-1".into(),
+            streams: Vec::<ActivityStreamWire>::new(),
+        };
+        let health = ServerMsg::ActivityHealth {
+            ingesting: true,
+            reason: None,
+            last_event_at: None,
+            hook_installed: true,
+        };
+
+        assert!(message_matches_topics(&snapshot, &[Topic::Activity]));
+        assert!(message_matches_topics(&health, &[Topic::Activity]));
+
+        // A subscription to an unrelated topic must not see either message
+        // (empty `topics` is the "no filter" wildcard, so use a concrete,
+        // different topic here).
+        assert!(!message_matches_topics(&snapshot, &[Topic::Fred]));
+        assert!(!message_matches_topics(&health, &[Topic::Fred]));
     }
 }

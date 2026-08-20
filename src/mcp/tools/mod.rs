@@ -694,3 +694,32 @@ fn parse_args<T: serde::de::DeserializeOwned>(arguments: Option<&Value>) -> Resu
     serde_json::from_value(v)
         .map_err(|e| json!({ "error": "invalid_args", "detail": e.to_string() }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── activity-path wedge: no agent-callable control over the stream ───────
+
+    /// The PRD names this the constraint most likely to get quietly violated
+    /// by a well-meaning convenience: no MCP tool may write to, filter, tag,
+    /// or suppress an ambient activity stream. Asserted here by enumerating
+    /// the actual registered tool surface, not by inspection — this fails
+    /// the moment anyone adds a `nostromo.*activity*` tool, wherever in this
+    /// module it's registered.
+    #[test]
+    fn no_registered_tool_name_mentions_activity() {
+        let names: Vec<String> = tool_descriptors()
+            .iter()
+            .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        assert!(!names.is_empty(), "sanity: the tool registry must not be empty");
+        for name in &names {
+            assert!(
+                !name.to_lowercase().contains("activity"),
+                "found an activity-related MCP tool ({name}) — no agent-callable \
+                 control over the ambient activity stream is permitted"
+            );
+        }
+    }
+}

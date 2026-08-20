@@ -213,3 +213,19 @@ public struct ClientDecisionAnswer: Encodable {
         case choiceId  = "choice_id"
     }
 }
+
+// MARK: - ActivitySnapshotRequest
+
+/// Request a full ambient-activity snapshot (all streams) for one focus.
+/// The daemon replies with a `ServerMsg.activitySnapshot`.
+/// Mirrors `ClientMsg::ActivitySnapshotRequest` in `src/ipc/protocol.rs`.
+public struct ClientActivitySnapshotRequest: Encodable {
+    let type_: String = "activity_snapshot_request"
+    public let tag: String
+
+    public init(tag: String) {
+        self.tag = tag
+    }
+
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+}

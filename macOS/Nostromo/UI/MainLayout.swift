@@ -16,6 +16,9 @@ class MainLayout: NSView {
     private let statusBar = StatusBarView()
     /// Toast overlay — renders above all content, passes through non-toast clicks.
     private let toastView = ToastBannerView()
+    /// Ambient-activity ticker overlay — always visible, pinned to the bottom
+    /// edge of the content area; passes through non-ticker clicks (D6).
+    private let activityTicker = ActivityTickerView()
 
     // MARK: - Content
 
@@ -107,6 +110,20 @@ class MainLayout: NSView {
             toastView.leadingAnchor.constraint(equalTo: tabBar.trailingAnchor),
             toastView.trailingAnchor.constraint(equalTo: trailingAnchor),
             toastView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+        ])
+
+        // Ambient-activity ticker overlay — same content-area span as the
+        // toast overlay (so it draws over content without shrinking it), and
+        // added after it so it's always on top. hitTest passthrough means
+        // clicks reach views below everywhere except the ticker's own line
+        // (and its expanded panel when open).
+        activityTicker.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(activityTicker)   // added last → draws on top of the toast overlay too
+        NSLayoutConstraint.activate([
+            activityTicker.topAnchor.constraint(equalTo: topAnchor),
+            activityTicker.leadingAnchor.constraint(equalTo: tabBar.trailingAnchor),
+            activityTicker.trailingAnchor.constraint(equalTo: trailingAnchor),
+            activityTicker.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
         ])
 
         contentContainer.wantsLayer = true

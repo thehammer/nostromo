@@ -96,7 +96,12 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::FocusCreated { .. }
         // Decision-modal requests (W6) are consumed by the macOS thin-client;
         // the Rust TUI has no window to attach a sheet to.
-        | ServerMsg::DecisionRequest { .. } => {}
+        | ServerMsg::DecisionRequest { .. }
+        // Ambient activity snapshot/health are consumed by the Swift ticker;
+        // the TUI keeps its existing `AgentBus`-fed status-bar rendering via
+        // `ServerMsg::Activity` above and is otherwise unchanged (D9).
+        | ServerMsg::ActivitySnapshot { .. }
+        | ServerMsg::ActivityHealth { .. } => {}
         // DaemonReconnected is handled by individual DaemonPtyClient subscribers.
         ServerMsg::DaemonReconnected => {}
         // Control messages — no action needed.

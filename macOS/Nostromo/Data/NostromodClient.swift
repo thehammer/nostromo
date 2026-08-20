@@ -144,6 +144,14 @@ enum ServerMsg {
     /// a fixed set of choices and is blocked awaiting the operator's answer.
     case decisionRequest(tag: String, requestId: String, prompt: String, detail: String?,
                          choices: [DecisionChoiceWire], contextPaneId: String?)
+
+    // ── ambient activity (activity-path wedge) ───────────────────────────────
+    /// Full snapshot of one focus's activity streams — replayed on attach and
+    /// sent in response to `requestActivitySnapshot(tag:)`.
+    case activitySnapshot(tag: String, streams: [ActivityStreamWire])
+    /// Ingestion health verdict for the ambient activity feed.
+    case activityHealth(ingesting: Bool, reason: String?, lastEventAt: Date?, hookInstalled: Bool)
+
     case unknown
 }
 
@@ -153,6 +161,23 @@ struct DecisionChoiceWire: Decodable, Equatable {
     let id: String
     let label: String
     let detail: String?
+}
+
+/// Mirrors `ipc::protocol::ActivityStreamWire` — one focus's main stream
+/// (`agentId == nil`) or one subagent's stream.
+struct ActivityStreamWire: Decodable {
+    let agentId:       String?
+    let agentType:     String?
+    let parentAgentId: String?
+    let events:        [ActivityEvent]
+    let finished:      Bool
+
+    enum CodingKeys: String, CodingKey {
+        case agentId       = "agent_id"
+        case agentType     = "agent_type"
+        case parentAgentId = "parent_agent_id"
+        case events, finished
+    }
 }
 
 // MARK: - Session wire types (mirror src/ipc/stream_json.rs; snake_case/tagged)
@@ -562,6 +587,22 @@ class NostromodClient {
         send(FocusRegistryPushMsg(focuses: focuses), type: "focus_registry_push")
     }
 
+    // MARK: - Ambient activity (activity-path wedge)
+
+    private struct ActivitySnapshotRequestMsg: Encodable {
+        let type_ = "activity_snapshot_request"
+        let tag: String
+        enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+    }
+
+    /// Request a full activity-stream snapshot for `tag`. The daemon replies
+    /// with `ServerMsg.activitySnapshot` — used both for the gap-recovery
+    /// path (a `seq` gap was observed) and for an on-demand refresh (e.g. the
+    /// ticker's expanded panel opening for a focus with no cached snapshot yet).
+    func requestActivitySnapshot(tag: String) {
+        send(ActivitySnapshotRequestMsg(tag: tag), type: "activity_snapshot_request", tag: tag)
+    }
+
     /// Encode and send `msg`. `type`/`tag` identify the frame for
     /// `IPCLatencyStats` correlation — they must match the wire `type` field
     /// (and, where present, the `tag` field) the `Encodable` struct itself
@@ -783,12 +824,38 @@ class NostromodClient {
                                         contextPaneId: m.context_pane_id)
             }
 
+        // ── ambient activity (activity-path wedge) ───────────────────────────
+        case "activity_snapshot":
+            if let m = try? decoder.decode(ActivitySnapshotResp.self, from: raw) {
+                return .activitySnapshot(tag: m.tag, streams: m.streams)
+            }
+
+        case "activity_health":
+            if let m = try? decoder.decode(ActivityHealthResp.self, from: raw) {
+                return .activityHealth(
+                    ingesting: m.ingesting,
+                    reason: m.reason,
+                    lastEventAt: m.last_event_at,
+                    hookInstalled: m.hook_installed
+                )
+            }
+
         default:
             break
         }
 
         return .unknown
     }
+}
+
+// MARK: - Ambient activity response wrappers (activity-path wedge)
+
+private struct ActivitySnapshotResp: Decodable { let tag: String; let streams: [ActivityStreamWire] }
+private struct ActivityHealthResp: Decodable {
+    let ingesting: Bool
+    let reason: String?
+    let last_event_at: Date?
+    let hook_installed: Bool
 }
 
 // MARK: - Agent-authored pane layout response wrappers (Phase 1)

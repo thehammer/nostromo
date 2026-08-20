@@ -22,6 +22,10 @@ path = "src/bin/nostromd.rs"
 name = "nostromo-mcp-bridge"
 path = "src/bin/nostromo_mcp_bridge.rs"
 
+[[bin]]
+name = "nostromo-activity-hook"
+path = "src/bin/nostromo_activity_hook.rs"
+
 [dependencies]
 # TUI
 ratatui = "0.30"
@@ -74,6 +78,7 @@ notify = "6"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
+regex = "1"
 
 # SQLite (Teri todos)
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -485,11 +485,42 @@ struct TeriTodosSnapshot: Decodable {
 
 // MARK: - Activity
 
+/// One entry in an agent's ambient activity stream, as broadcast by the
+/// daemon (`"type":"activity"` messages) — see `NostromodClient.decode(type_:json:raw:)`.
+///
+/// `agentId`/`agentType`/`parentAgentId` describe subagent attribution:
+/// `agentId == nil` means the event belongs to the focus's main agent;
+/// otherwise it belongs to the named subagent, and `parentAgentId` names
+/// whichever agent spawned it. `seq` is a per-stream, daemon-assigned
+/// monotonic counter used to detect gaps in delivery (see
+/// `ActivityStreamModel.ingest(_:)`).
 struct ActivityEvent: Decodable {
-    let ts:      Date
-    let agent:   String
-    let kind:    String
-    let summary: String
+    let ts:             Date
+    let agent:          String
+    let kind:           String     // "tool_use" | "subagent_start" | "subagent_stop" | "session_start"
+    let summary:        String
+    let focusTag:       String?
+    let sessionId:      String?
+    let agentId:        String?    // nil ⇒ the main agent, not a subagent
+    let agentType:      String?    // the subagent's name, when agentId is set
+    let parentAgentId:  String?
+    let toolName:       String?
+    let toolUseId:      String?
+    let cwd:            String?
+    let seq:            UInt64?    // daemon-assigned per-stream sequence number
+
+    enum CodingKeys: String, CodingKey {
+        case ts, agent, kind, summary
+        case focusTag      = "focus_tag"
+        case sessionId     = "session_id"
+        case agentId       = "agent_id"
+        case agentType     = "agent_type"
+        case parentAgentId = "parent_agent_id"
+        case toolName      = "tool_name"
+        case toolUseId     = "tool_use_id"
+        case cwd
+        case seq
+    }
 }
 
 // MARK: - Rate limits

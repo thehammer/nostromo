@@ -78,6 +78,19 @@ public enum ServerMsg {
     case decisionRequest(tag: String, requestId: String, prompt: String, detail: String?,
                          choices: [DecisionChoice], contextPaneId: String?)
 
+    // ── ambient activity (activity-path wedge) ───────────────────────────────
+    // iOS decodes these without throwing but renders nothing — no iOS UI in
+    // this wedge (see the plan's "Out of scope"). Mirrors the Rust
+    // `ServerMsg::Activity`/`ActivitySnapshot`/`ActivityHealth` variants.
+
+    /// One ambient activity event, broadcast live.
+    case activity(ActivityEvent)
+    /// Full snapshot of one focus's activity streams (response to
+    /// `activity_snapshot_request`, and replayed on attach).
+    case activitySnapshot(tag: String, streams: [ActivityStreamWire])
+    /// Ingestion health verdict for the ambient activity feed.
+    case activityHealth(ingesting: Bool, reason: String?, lastEventAt: Date?, hookInstalled: Bool)
+
     case unknown
 }
 
@@ -89,6 +102,57 @@ public struct DecisionChoice: Decodable, Equatable {
     public let id: String
     public let label: String
     public let detail: String?
+}
+
+// MARK: - ActivityEvent / ActivityStreamWire
+
+/// Mirrors the Rust `agent_bus::ActivityEvent`. Every field beyond the
+/// original four is optional and `#[serde(default)]` on the Rust side, so an
+/// old 4-field line still decodes here too.
+public struct ActivityEvent: Decodable {
+    public let ts:            Date
+    public let agent:         String
+    public let kind:          String
+    public let summary:       String
+    public let focusTag:      String?
+    public let sessionId:     String?
+    public let agentId:       String?
+    public let agentType:     String?
+    public let parentAgentId: String?
+    public let toolName:      String?
+    public let toolUseId:     String?
+    public let cwd:           String?
+    public let seq:           UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case ts, agent, kind, summary
+        case focusTag      = "focus_tag"
+        case sessionId     = "session_id"
+        case agentId       = "agent_id"
+        case agentType     = "agent_type"
+        case parentAgentId = "parent_agent_id"
+        case toolName      = "tool_name"
+        case toolUseId     = "tool_use_id"
+        case cwd
+        case seq
+    }
+}
+
+/// Mirrors the Rust `ipc::protocol::ActivityStreamWire` — one focus's main
+/// stream (`agentId == nil`) or one subagent's stream.
+public struct ActivityStreamWire: Decodable {
+    public let agentId:       String?
+    public let agentType:     String?
+    public let parentAgentId: String?
+    public let events:        [ActivityEvent]
+    public let finished:      Bool
+
+    enum CodingKeys: String, CodingKey {
+        case agentId       = "agent_id"
+        case agentType     = "agent_type"
+        case parentAgentId = "parent_agent_id"
+        case events, finished
+    }
 }
 
 // MARK: - SessionInfo
@@ -350,6 +414,13 @@ extension ServerMsg {
         let choices: [DecisionChoice]
         let context_pane_id: String?
     }
+    private struct ActivitySnapshotWrapper:  Decodable { let tag: String; let streams: [ActivityStreamWire] }
+    private struct ActivityHealthWrapper:    Decodable {
+        let ingesting: Bool
+        let reason: String?
+        let last_event_at: Date?
+        let hook_installed: Bool
+    }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -474,6 +545,26 @@ extension ServerMsg {
                 return .decisionRequest(tag: m.tag, requestId: m.request_id, prompt: m.prompt,
                                         detail: m.detail, choices: m.choices,
                                         contextPaneId: m.context_pane_id)
+            }
+
+        case "activity":
+            if let ev = try? dec.decode(ActivityEvent.self, from: data) {
+                return .activity(ev)
+            }
+
+        case "activity_snapshot":
+            if let m = try? dec.decode(ActivitySnapshotWrapper.self, from: data) {
+                return .activitySnapshot(tag: m.tag, streams: m.streams)
+            }
+
+        case "activity_health":
+            if let m = try? dec.decode(ActivityHealthWrapper.self, from: data) {
+                return .activityHealth(
+                    ingesting: m.ingesting,
+                    reason: m.reason,
+                    lastEventAt: m.last_event_at,
+                    hookInstalled: m.hook_installed
+                )
             }
 
         default:
