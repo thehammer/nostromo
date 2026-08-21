@@ -25,10 +25,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
-use crate::ipc::protocol::{DecisionChoice, ServerMsg};
+use crate::ipc::protocol::{DecisionChoice, DecisionResolution, ServerMsg};
 
 // ── outcomes ──────────────────────────────────────────────────────────────────
 
@@ -111,11 +111,27 @@ pub struct DecisionRegistry {
     resolved: HashSet<String>,
     /// Connection keys currently subscribed to `Topic::Decision`.
     subscribers: HashSet<String>,
+    /// Wired by [`DecisionRegistry::configure_broadcast`] so every resolution
+    /// path can announce a [`ServerMsg::DecisionResolved`] notice — the fix
+    /// for the multi-window decision-sheet bug: every presenting window (not
+    /// just the one the operator actually used) needs to learn a request is
+    /// done. `None` in tests / any context that never wires a sender; every
+    /// notification method below treats that as a pure no-op, never a panic.
+    broadcast: Option<broadcast::Sender<ServerMsg>>,
 }
 
 impl DecisionRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Wire the broadcast sender every resolution path announces
+    /// `ServerMsg::DecisionResolved` through. Mirrors the existing
+    /// `SessionManager::configure_decisions` pattern — a plain setter called
+    /// once, right after the sender exists (`Server::bind` has to run
+    /// first), not a constructor argument.
+    pub fn configure_broadcast(&mut self, tx: broadcast::Sender<ServerMsg>) {
+        self.broadcast = Some(tx);
     }
 
     // ── submission ────────────────────────────────────────────────────────────
@@ -195,7 +211,8 @@ impl DecisionRegistry {
     pub fn cancel_tag(&mut self, tag: &str) {
         if let Some(request_id) = self.active_by_tag.remove(tag) {
             if let Some(entry) = self.active.remove(&request_id) {
-                self.resolved.insert(request_id);
+                self.resolved.insert(request_id.clone());
+                self.notify_resolved(tag, &request_id, &DecisionOutcome::Cancelled);
                 let _ = entry.reply.send(DecisionOutcome::Cancelled);
             }
         }
@@ -203,6 +220,7 @@ impl DecisionRegistry {
             for queued in queue {
                 if let ServerMsg::DecisionRequest { request_id, .. } = &queued.msg {
                     self.resolved.insert(request_id.clone());
+                    self.notify_resolved(tag, request_id, &DecisionOutcome::Cancelled);
                 }
                 let _ = queued.reply.send(DecisionOutcome::Cancelled);
             }
@@ -223,10 +241,34 @@ impl DecisionRegistry {
         };
         self.active_by_tag.remove(&entry.tag);
         self.resolved.insert(request_id.to_string());
+        self.notify_resolved(&entry.tag, request_id, &outcome);
         let _ = entry.reply.send(outcome);
 
         let promoted = self.promote_next(&entry.tag);
         ResolveResult::Resolved { promoted: promoted.map(Box::new) }
+    }
+
+    /// Broadcast a `ServerMsg::DecisionResolved` for `request_id`, if a
+    /// sender has been wired via [`Self::configure_broadcast`]. A no-op
+    /// (never a panic) when unconfigured — every existing caller in this
+    /// module's test suite that never calls `configure_broadcast` must keep
+    /// working exactly as before. `choice_id` is populated only for
+    /// `DecisionOutcome::Answered`, matching `DecisionResolved`'s wire
+    /// convention.
+    fn notify_resolved(&self, tag: &str, request_id: &str, outcome: &DecisionOutcome) {
+        let Some(tx) = &self.broadcast else { return };
+        let (resolution, choice_id) = match outcome {
+            DecisionOutcome::Answered(id) => (DecisionResolution::Answered, Some(id.clone())),
+            DecisionOutcome::Dismissed => (DecisionResolution::Dismissed, None),
+            DecisionOutcome::TimedOut => (DecisionResolution::Timeout, None),
+            DecisionOutcome::Cancelled => (DecisionResolution::Cancelled, None),
+        };
+        let _ = tx.send(ServerMsg::DecisionResolved {
+            tag: tag.to_string(),
+            request_id: request_id.to_string(),
+            resolution,
+            choice_id,
+        });
     }
 
     /// Pop the next queued request for `tag` (if any), install it as the new
@@ -286,9 +328,9 @@ impl DecisionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::protocol::{DecisionChoice, ServerMsg};
+    use crate::ipc::protocol::{DecisionChoice, DecisionResolution, ServerMsg};
     use std::time::Duration;
-    use tokio::sync::oneshot;
+    use tokio::sync::{broadcast, oneshot};
 
     // ── test helpers ──────────────────────────────────────────────────────────
 
@@ -726,5 +768,277 @@ mod tests {
         assert_eq!(prompt, "D?", "C's promotion must be D — the last-queued request, in order");
 
         assert_eq!(registry.queued_count("mother"), 0);
+    }
+
+    // ── 7. DecisionResolved notices ──────────────────────────────────────────────
+    //
+    // These pin the behavior half of the multi-window decision-sheet fix: every
+    // path that resolves a request must broadcast exactly one
+    // `ServerMsg::DecisionResolved` — so every window's sheet (not just the one
+    // the operator actually used) learns the request is done — and paths that
+    // do NOT resolve anything (`AlreadyAnswered`/`UnknownRequest`) must
+    // broadcast nothing, since a spurious notice from a system-initiated close
+    // would read to the agent as an operator dismissal it never made.
+
+    /// Extract a `DecisionResolved`'s `(request_id, resolution, choice_id)`,
+    /// panicking (with `context`) on every other variant — mirrors
+    /// `as_decision_request`'s role for the request side of the wire.
+    fn as_decision_resolved<'a>(
+        msg: &'a ServerMsg,
+        context: &str,
+    ) -> (&'a str, &'a DecisionResolution, Option<&'a str>) {
+        match msg {
+            ServerMsg::DecisionResolved {
+                request_id,
+                resolution,
+                choice_id,
+                ..
+            } => (request_id.as_str(), resolution, choice_id.as_deref()),
+            other => panic!("{context}: expected ServerMsg::DecisionResolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn answering_with_a_choice_broadcasts_exactly_one_answered_resolved_notice_with_that_choice_id() {
+        let mut registry = DecisionRegistry::new();
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
+        registry.configure_broadcast(tx);
+        let (id, _rx_outcome, _bcast) = submit_simple(&mut registry, "mother", "Ship it?");
+
+        registry.answer(&id, Some("approve".into()));
+
+        let notice = rx.try_recv().expect("answer() must broadcast a DecisionResolved notice");
+        let (wire_id, resolution, choice_id) = as_decision_resolved(&notice, "answered notice");
+        assert_eq!(wire_id, id);
+        assert_eq!(resolution, &DecisionResolution::Answered);
+        assert_eq!(choice_id, Some("approve"));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one notice must be broadcast for an answer, not more"
+        );
+    }
+
+    #[test]
+    fn answering_with_no_choice_broadcasts_exactly_one_dismissed_resolved_notice_with_no_choice_id() {
+        let mut registry = DecisionRegistry::new();
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
+        registry.configure_broadcast(tx);
+        let (id, _rx_outcome, _bcast) = submit_simple(&mut registry, "mother", "Ship it?");
+
+        registry.answer(&id, None);
+
+        let notice = rx.try_recv().expect("answer(None) must broadcast a DecisionResolved notice");
+        let (wire_id, resolution, choice_id) = as_decision_resolved(&notice, "dismissed notice");
+        assert_eq!(wire_id, id);
+        assert_eq!(resolution, &DecisionResolution::Dismissed);
+        assert_eq!(choice_id, None, "a dismissal must broadcast no choice_id");
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn timeout_request_broadcasts_exactly_one_timeout_resolved_notice_with_no_choice_id() {
+        let mut registry = DecisionRegistry::new();
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
+        registry.configure_broadcast(tx);
+        let (id, _rx_outcome, _bcast) = submit_simple(&mut registry, "mother", "Ship it?");
+
+        registry.timeout_request(&id);
+
+        let notice = rx.try_recv().expect("timeout_request() must broadcast a DecisionResolved notice");
+        let (wire_id, resolution, choice_id) = as_decision_resolved(&notice, "timeout notice");
+        assert_eq!(wire_id, id);
+        assert_eq!(resolution, &DecisionResolution::Timeout);
+        assert_eq!(choice_id, None);
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancel_tag_broadcasts_one_cancelled_resolved_notice_per_resolved_request_and_none_for_an_unrelated_tag() {
+        let mut registry = DecisionRegistry::new();
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
+        registry.configure_broadcast(tx);
+
+        let (a_id, _rx_a, bcast_a) = submit_simple(&mut registry, "mother", "A?");
+        assert!(bcast_a.is_some());
+        let (b_id, _rx_b, bcast_b) = submit_simple(&mut registry, "mother", "B?");
+        assert!(bcast_b.is_none());
+        let (c_id, _rx_c, bcast_c) = submit_simple(&mut registry, "mother", "C?");
+        assert!(bcast_c.is_none());
+        assert_eq!(registry.queued_count("mother"), 2);
+
+        // submit() itself never resolves anything, so nothing should be on
+        // the channel yet regardless of how many requests (active or queued)
+        // exist so far.
+        assert!(
+            rx.try_recv().is_err(),
+            "submit() alone must never produce a DecisionResolved notice"
+        );
+
+        // A wholly different tag's active request must be untouched by
+        // cancelling "mother".
+        let (teri_id, mut rx_teri, teri_bcast) = submit_simple(&mut registry, "teri", "D?");
+        assert!(teri_bcast.is_some());
+
+        registry.cancel_tag("mother");
+
+        let mut resolved_ids = Vec::new();
+        for _ in 0..3 {
+            let notice = rx
+                .try_recv()
+                .expect("cancel_tag must broadcast one notice per resolved request (active + queued)");
+            let (wire_id, resolution, _choice_id) = as_decision_resolved(&notice, "cancelled notice");
+            assert_eq!(resolution, &DecisionResolution::Cancelled);
+            resolved_ids.push(wire_id.to_string());
+        }
+        resolved_ids.sort();
+        let mut expected = vec![a_id, b_id, c_id];
+        expected.sort();
+        assert_eq!(
+            resolved_ids, expected,
+            "cancel_tag must broadcast a Cancelled notice for the active request AND every queued one"
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly 3 notices for mother's cancellation — no more, no folded/duplicate notices"
+        );
+
+        // teri's own, unrelated, still-active request must not have resolved
+        // or broadcast anything as a side effect of cancelling "mother".
+        assert!(
+            rx_teri.try_recv().is_err(),
+            "teri's request must still be outstanding after mother's tag is cancelled"
+        );
+        assert_eq!(registry.active_request_id("teri"), Some(teri_id));
+    }
+
+    #[test]
+    fn a_second_answer_for_an_already_answered_request_broadcasts_nothing() {
+        let mut registry = DecisionRegistry::new();
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
+        registry.configure_broadcast(tx);
+        let (id, _rx_outcome, _bcast) = submit_simple(&mut registry, "mother", "Ship it?");
+
+        registry.answer(&id, Some("approve".into()));
+        rx.try_recv().expect("the first, legitimate answer must broadcast its own notice");
+
+        let second = registry.answer(&id, Some("reject".into()));
+        match second {
+            AnswerOutcome::AlreadyAnswered => {}
+            other => panic!("expected AlreadyAnswered for a second answer, got {other:?}"),
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a rejected second answer must not broadcast a second, contradictory notice"
+        );
+    }
+
+    #[test]
+    fn answering_a_never_issued_request_id_broadcasts_nothing() {
+        let mut registry = DecisionRegistry::new();
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
+        registry.configure_broadcast(tx);
+        let (_id, _rx_outcome, _bcast) = submit_simple(&mut registry, "mother", "Ship it?");
+
+        let outcome = registry.answer("not-a-real-request-id", Some("approve".into()));
+        match outcome {
+            AnswerOutcome::UnknownRequest => {}
+            other => panic!("expected UnknownRequest, got {other:?}"),
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "an unissued request_id must not broadcast anything"
+        );
+    }
+
+    #[test]
+    fn timeout_request_racing_an_already_answered_request_broadcasts_nothing_beyond_the_original_answer_notice(
+    ) {
+        let mut registry = DecisionRegistry::new();
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
+        registry.configure_broadcast(tx);
+        let (id, _rx_outcome, _bcast) = submit_simple(&mut registry, "mother", "Ship it?");
+
+        registry.answer(&id, Some("approve".into()));
+        let notice = rx.try_recv().expect("the answer must broadcast its own notice");
+        let (_, resolution, _) = as_decision_resolved(&notice, "the original answer notice");
+        assert_eq!(resolution, &DecisionResolution::Answered);
+
+        let promoted = registry.timeout_request(&id);
+        assert!(
+            promoted.is_none(),
+            "a timeout racing an already-answered request must be a no-op"
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "the losing timeout race must not produce a second notice on top of the original answer's"
+        );
+    }
+
+    #[test]
+    fn answering_while_another_is_queued_produces_both_a_resolved_notice_and_a_distinct_promoted_request() {
+        let mut registry = DecisionRegistry::new();
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
+        registry.configure_broadcast(tx);
+        let (a_id, _rx_a, bcast_a) = submit_simple(&mut registry, "mother", "A?");
+        assert!(bcast_a.is_some());
+        let (b_id, _rx_b, bcast_b) = submit_simple(&mut registry, "mother", "B?");
+        assert!(bcast_b.is_none());
+
+        let outcome = registry.answer(&a_id, Some("approve".into()));
+        let promoted = expect_promoted(outcome, "answering A while B is queued");
+
+        // The promoted payload handed back to the caller is B's own
+        // DecisionRequest — a distinct message, not the resolved notice.
+        let (_, promoted_wire_id, _) = as_decision_request(&promoted, "promoted request");
+        assert_eq!(promoted_wire_id, b_id);
+
+        // Exactly one DecisionResolved notice was broadcast on the channel —
+        // for A's answer — and it is not folded together with B's promotion.
+        let notice = rx.try_recv().expect("answering A must broadcast its own DecisionResolved notice");
+        let (wire_id, resolution, choice_id) = as_decision_resolved(&notice, "A's resolved notice");
+        assert_eq!(wire_id, a_id);
+        assert_eq!(resolution, &DecisionResolution::Answered);
+        assert_eq!(choice_id, Some("approve"));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "no second broadcast message (e.g. a folded-in promotion) must appear on the channel"
+        );
+    }
+
+    #[test]
+    fn a_registry_that_never_configures_a_broadcast_sender_still_resolves_requests_normally_with_no_panic()
+    {
+        let mut registry = DecisionRegistry::new();
+        let (a_id, mut rx_a, bcast_a) = submit_simple(&mut registry, "mother", "A?");
+        assert!(bcast_a.is_some());
+        let (_b_id, mut rx_b, bcast_b) = submit_simple(&mut registry, "mother", "B?");
+        assert!(bcast_b.is_none());
+
+        // answer() with no broadcast sender configured: must not panic, and
+        // must still resolve/promote exactly as it does when configured.
+        let outcome = registry.answer(&a_id, Some("approve".into()));
+        let promoted = expect_promoted(outcome, "answering with no broadcast sender configured");
+        let (_, b_wire_id, _) = as_decision_request(&promoted, "promotion with no sender configured");
+        assert_eq!(rx_a.try_recv(), Ok(DecisionOutcome::Answered("approve".into())));
+
+        // timeout_request() with no sender configured: same — no panic, normal
+        // resolution.
+        let b_id = b_wire_id.to_string();
+        let promoted = registry.timeout_request(&b_id);
+        assert!(promoted.is_none(), "nothing else was queued behind B");
+        assert_eq!(rx_b.try_recv(), Ok(DecisionOutcome::TimedOut));
+
+        // cancel_tag() with no sender configured: same.
+        let (_c_id, mut rx_c, _bcast_c) = submit_simple(&mut registry, "teri", "C?");
+        registry.cancel_tag("teri");
+        assert_eq!(rx_c.try_recv(), Ok(DecisionOutcome::Cancelled));
     }
 }

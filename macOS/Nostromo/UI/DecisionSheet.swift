@@ -1,10 +1,31 @@
 import AppKit
 
+/// Why a `DecisionSheet` closed. Only the first two ever put anything on the
+/// wire; the other two exist precisely so a system-initiated close (this
+/// request was resolved elsewhere, or this sheet is being re-targeted to a
+/// surviving window) can NEVER be mistaken for an operator dismissal — a
+/// spurious `decision_answer` from a close nobody actually chose would read
+/// to the calling agent as an explicit Skip, and could cancel something the
+/// operator actually approved on another window.
+enum DecisionCloseReason {
+    /// The operator tapped a choice button.
+    case operatorChose(String)
+    /// The operator dismissed the modal (Dismiss button or titlebar close).
+    case operatorDismissed
+    /// This request was already resolved elsewhere (answered on another
+    /// window, or the daemon announced it's done) — close silently.
+    case supersededElsewhere
+    /// The presenting window is going away; the presenter is re-showing this
+    /// sheet's request on a surviving window (or, if none survives, leaving
+    /// it for the daemon's own timeout to resolve) — close silently either way.
+    case retargeting
+}
+
 /// A daemon-driven decision modal: an agent poses a question with a fixed set
 /// of choices, and this sheet returns the operator's pick (or an explicit
 /// dismissal) back to the caller.
 ///
-/// Presented via `window.beginSheet(_:)` from `MainLayout`, never via
+/// Presented via `window.beginSheet(_:)` from `DecisionPresenter`, never via
 /// `alert.runModal()` / `NSApp.runModal(for:)`. A free-floating modal has no
 /// window association, so it can end up stranded on another Space/display
 /// with no visible way to dismiss it — which blocks the whole app's main
@@ -27,23 +48,31 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
     private let store: DecisionStore
     private let onAnswer: (_ choiceId: String?) -> Void
 
-    /// Guards every resolution path (a choice tap, the dismiss button, and the
-    /// titlebar close box all fire through `resolve(choiceId:)`) so exactly one
-    /// of them can ever call `onAnswer`, no matter which one the operator uses
-    /// or how many times AppKit re-delivers a close notification.
-    private var answered = false
+    /// Guards every path that can close this sheet — a choice tap, the
+    /// dismiss button, the titlebar close box, and a system-initiated
+    /// `closeWithoutAnswering` — so exactly one of them ever runs to
+    /// completion, no matter which one fires first or how many times AppKit
+    /// re-delivers a close notification. Critically, `closeWithoutAnswering`
+    /// sets this to `true` **before** calling `endSheet`, so the
+    /// `windowWillClose` → `resolve(choiceId: nil)` callback that firing
+    /// `endSheet` triggers sees `resolved == true` and becomes a no-op — a
+    /// system-initiated close can never fall through into sending an answer.
+    private var resolved = false
 
     private var choiceButtons: [(id: String, button: NSButton)] = []
 
     /// - Parameters:
-    ///   - answeredChoiceId: the choice already recorded for `requestId` in
-    ///     `store`, if any. Non-nil means this sheet renders the chosen state
-    ///     and is inert: it never calls `onAnswer`. Deliberately has no
-    ///     default value, so the compiler is the wiring check for every
-    ///     construction site — the same trick `AskQuestionView.init` uses for
-    ///     exactly the bug class this guards against.
+    ///   - resolution: the resolution already recorded for `requestId` in
+    ///     `store`, if any. Non-nil means this sheet renders the resolved
+    ///     state and is inert: it never calls `onAnswer`. Distinguishes a
+    ///     chosen option (`.choice`) from a dismissal (`.dismissed`) so a
+    ///     request resolved by dismissal reconstructs inert too, not armed.
+    ///     Deliberately has no default value, so the compiler is the wiring
+    ///     check for every construction site — the same trick
+    ///     `AskQuestionView.init` uses for exactly the bug class this guards
+    ///     against.
     init(requestId: String, prompt: String, detail: String?, choices: [Choice],
-         store: DecisionStore, answeredChoiceId: String?,
+         store: DecisionStore, resolution: DecisionAnswerRecord?,
          onAnswer: @escaping (_ choiceId: String?) -> Void) {
         self.requestId = requestId
         self.store = store
@@ -63,12 +92,16 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
         win.delegate = self
         buildContent(prompt: prompt, detail: detail, choices: choices)
 
-        if let answeredChoiceId {
+        if let resolution {
             // Rebuilt for an already-resolved request (e.g. a stray duplicate
-            // broadcast). Render the recorded choice and go inert — never arm
-            // the buttons for a request that is already done.
-            answered = true
-            applyAnswered(choiceId: answeredChoiceId)
+            // broadcast). Render the recorded resolution and go inert — never
+            // arm the buttons for a request that is already done, whether it
+            // was resolved with a choice or by dismissal.
+            resolved = true
+            switch resolution {
+            case .choice(let choiceId): applyAnswered(choiceId: choiceId)
+            case .dismissed: disableAllButtons()
+            }
         }
     }
 
@@ -154,28 +187,52 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
         resolve(choiceId: nil)
     }
 
-    /// Closed via the titlebar close box without picking an option. Routes
-    /// through the same single resolution path as a choice tap or the Dismiss
-    /// button, so whichever one the operator actually used, `onAnswer` fires
-    /// at most once.
+    /// Closed via the titlebar close box without picking an option, OR
+    /// closed as a side effect of `closeWithoutAnswering` calling `endSheet`
+    /// below. `resolved` (already `true` in the latter case, set by
+    /// `closeWithoutAnswering` before it ever calls `endSheet`) is what tells
+    /// these two cases apart — only the former must actually answer.
     func windowWillClose(_ notification: Notification) {
         resolve(choiceId: nil)
     }
 
-    /// The one path every dismissal/choice routes through. Records the answer
-    /// in `store` **before** calling `onAnswer` — mirroring `ReplView`'s
-    /// "record before sending" rule at `ReplView.swift:1362-1370`: if the send
-    /// path is ever torn down mid-flight, the fact that this request is done
-    /// is already outside this view.
+    /// The one path every operator dismissal/choice routes through. Claims
+    /// the answer in `store` **before** calling `onAnswer` — mirroring
+    /// `ReplView`'s "record before sending" rule at
+    /// `ReplView.swift:1362-1370`: if the send path is ever torn down
+    /// mid-flight, the fact that this request is done is already outside
+    /// this view. `claimAnswer` is the atomic answer-once gate: if it returns
+    /// `false` (another window's sheet, or a `DecisionResolved` notice, won
+    /// the race first), this call goes inert and NEVER calls `onAnswer` — so
+    /// a second, contradictory answer can never reach the wire from this
+    /// sheet.
     private func resolve(choiceId: String?) {
-        guard !answered else { return }
-        answered = true
+        guard !resolved else { return }
+        resolved = true
 
         let record: DecisionAnswerRecord = choiceId.map { .choice($0) } ?? .dismissed
-        store.recordAnswer(requestId: requestId, record: record)
-        onAnswer(choiceId)
-
+        let won = store.claimAnswer(requestId: requestId, record: record)
         disableAllButtons()
+        endSheetIfPresented()
+        guard won else { return }
+        onAnswer(choiceId)
+    }
+
+    /// A system-initiated close: this request was resolved elsewhere, or
+    /// this sheet is being re-targeted to a surviving window. Sets `resolved`
+    /// to `true` **before** calling `endSheet` — the entire safety property
+    /// this type exists to uphold. `endSheet` triggers AppKit's own
+    /// `windowWillClose` → `resolve(choiceId: nil)` callback; because
+    /// `resolved` is already `true` by then, that call is a guaranteed no-op,
+    /// so this path can NEVER put a `decision_answer` frame on the wire.
+    func closeWithoutAnswering(reason: DecisionCloseReason) {
+        guard !resolved else { return }
+        resolved = true
+        disableAllButtons()
+        endSheetIfPresented()
+    }
+
+    private func endSheetIfPresented() {
         if let window, let sheetParent = window.sheetParent {
             sheetParent.endSheet(window)
         }

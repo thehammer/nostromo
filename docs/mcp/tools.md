@@ -729,12 +729,52 @@ reconstructed sheet for the same request can never re-arm and send twice —
 the same class of bug `TurnInteractionStore` exists to prevent for
 `AskQuestionView`.
 
+**Presented once, app-wide; resolves everywhere.** Nostromo can open one
+window per attached display, but a decision is never presented more than
+once: `DecisionPresenter` is the sole app-wide subscriber to
+`decision_request` broadcasts and shows the sheet on exactly one window (the
+operator's key window, falling back to the main window, then the first
+visible one). Answering or dismissing it on that window closes it everywhere
+else too — no second sheet is left behind on any other window, and no
+operator action is required anywhere but the one window they used. This does
+not change the `dismissed` / `timeout` outcome mapping above, or the
+`timeout_secs` default/cap; it only fixes where and how many times the modal
+appears and disappears.
+
+`ServerMsg::DecisionResolved` is the wire notice behind this:
+
+```json
+{
+  "type":       "decision_resolved",
+  "tag":        "mother",
+  "request_id": "...",
+  "resolution": "answered",
+  "choice_id":  "approve"
+}
+```
+
+- `resolution` is one of `"answered"`, `"dismissed"`, `"timeout"`, or
+  `"cancelled"` (the last for a session cancelled while the request was
+  outstanding). `choice_id` is present only when `resolution == "answered"`;
+  omitted from the wire entirely otherwise (never sent as `null`).
+- Broadcast exactly once per resolved `request_id`, gated on `Topic::Decision`
+  like `decision_request`, from whichever of `answer` / `timeout_request` /
+  `cancel_tag` actually resolved it. A second answer attempt
+  (`AlreadyAnswered`) or an answer for an unknown id (`UnknownRequest`)
+  broadcasts nothing.
+- A client that receives it for a sheet it still has on screen closes that
+  sheet **without** sending any `decision_answer` frame — a system-initiated
+  close (superseded by an answer elsewhere, or by this notice) must never be
+  mistaken for an operator dismissal.
+
 **Not wired to `ServerMsg::SessionPermissionRequest`.** That transport stays
 unhandled and `ClientMsg::SessionAnswerPermission` stays a no-op — they were
 this feature's shape precedent, not its mechanism. Wiring the permission path
 means deciding a permission posture, which is a different feature.
 
-Source: `src/mcp/tools/ask_decision.rs`, `src/ipc/decisions.rs`
+Source: `src/mcp/tools/ask_decision.rs`, `src/ipc/decisions.rs`, `src/ipc/protocol.rs`
+(`ServerMsg::DecisionResolved`), `macOS/Nostromo/UI/DecisionPresenter.swift`,
+`macOS/Nostromo/UI/DecisionStore.swift`
 
 ---
 

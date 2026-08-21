@@ -823,7 +823,9 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }
         | ServerMsg::FocusCreated { .. } => topics.contains(&Topic::Layout),
-        ServerMsg::DecisionRequest { .. } => topics.contains(&Topic::Decision),
+        ServerMsg::DecisionRequest { .. } | ServerMsg::DecisionResolved { .. } => {
+            topics.contains(&Topic::Decision)
+        }
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,
@@ -878,6 +880,42 @@ mod tests {
     #[test]
     fn decision_request_matches_an_empty_topic_list_meaning_everything() {
         assert!(message_matches_topics(&sample_decision_request(), &[]));
+    }
+
+    // ── DecisionResolved routes under Topic::Decision too (multi-window fix) ──
+    //
+    // Every window's sheet needs to learn a request resolved, not just the
+    // window whose sheet the operator actually used — that propagation rides
+    // the same Topic::Decision gate as the original DecisionRequest.
+
+    fn sample_decision_resolved() -> ServerMsg {
+        ServerMsg::DecisionResolved {
+            tag: "mother".into(),
+            request_id: "req-1".into(),
+            resolution: crate::ipc::protocol::DecisionResolution::Answered,
+            choice_id: Some("approve".into()),
+        }
+    }
+
+    #[test]
+    fn decision_resolved_matches_when_subscribed_to_the_decision_topic() {
+        assert!(message_matches_topics(
+            &sample_decision_resolved(),
+            &[Topic::Decision]
+        ));
+    }
+
+    #[test]
+    fn decision_resolved_does_not_match_a_subscription_to_some_other_topic() {
+        assert!(!message_matches_topics(
+            &sample_decision_resolved(),
+            &[Topic::Activity]
+        ));
+    }
+
+    #[test]
+    fn decision_resolved_matches_an_empty_topic_list_meaning_everything() {
+        assert!(message_matches_topics(&sample_decision_resolved(), &[]));
     }
 
     // ── ambient activity routes under Topic::Activity ─────────────────────────

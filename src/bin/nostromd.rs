@@ -171,6 +171,12 @@ async fn main() -> Result<()> {
     }
 
     let broadcast_tx = server.tx.clone();
+    // Every DecisionRegistry resolution path (answer/timeout/cancel_tag) can
+    // now announce a ServerMsg::DecisionResolved so every presenting window —
+    // not just the one the operator actually used — learns a request is done
+    // (multi-window decision-sheet fix). Must happen here, after `server.tx`
+    // exists, not in the registry-construction block above.
+    decisions.lock().unwrap().configure_broadcast(broadcast_tx.clone());
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
