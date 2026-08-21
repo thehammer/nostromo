@@ -94,9 +94,11 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }
         | ServerMsg::FocusCreated { .. }
-        // Decision-modal requests (W6) are consumed by the macOS thin-client;
-        // the Rust TUI has no window to attach a sheet to.
+        // Decision-modal requests/resolutions (W6; the resolution notice is
+        // the multi-window decision-sheet fix) are consumed by the macOS
+        // thin-client; the Rust TUI has no window to attach a sheet to.
         | ServerMsg::DecisionRequest { .. }
+        | ServerMsg::DecisionResolved { .. }
         // Ambient activity snapshot/health are consumed by the Swift ticker;
         // the TUI keeps its existing `AgentBus`-fed status-bar rendering via
         // `ServerMsg::Activity` above and is otherwise unchanged (D9).

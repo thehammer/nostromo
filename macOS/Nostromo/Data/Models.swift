@@ -1757,6 +1757,19 @@ struct PendingDecision: Equatable {
     let contextPaneId: String?
 }
 
+/// How a daemon-driven decision request was ultimately resolved — the
+/// multi-window decision-sheet fix's backstop notice. Mirrors
+/// `ServerMsg::DecisionResolved` / `DecisionResolution` in
+/// `src/ipc/protocol.rs`. `resolution` is one of `"answered"`, `"dismissed"`,
+/// `"timeout"`, or `"cancelled"`; `choiceId` is non-nil only when
+/// `resolution == "answered"`.
+struct ResolvedDecision: Equatable {
+    let tag: String
+    let requestId: String
+    let resolution: String
+    let choiceId: String?
+}
+
 /// Minimal Decodable wrapper for an arbitrary JSON value.
 private struct AnyDecodable: Decodable {
     let value: Any

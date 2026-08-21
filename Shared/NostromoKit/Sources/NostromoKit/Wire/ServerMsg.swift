@@ -78,6 +78,13 @@ public enum ServerMsg {
     case decisionRequest(tag: String, requestId: String, prompt: String, detail: String?,
                          choices: [DecisionChoice], contextPaneId: String?)
 
+    /// A decision request was resolved — answered, dismissed, timed out, or
+    /// its owning session went away (multi-window decision-sheet fix). Like
+    /// `decisionRequest`, iOS decodes this so the frame doesn't fall through
+    /// to `.unknown`, but renders nothing for it — decision modals are
+    /// macOS-only in this wedge.
+    case decisionResolved(tag: String, requestId: String, resolution: String, choiceId: String?)
+
     // ── ambient activity (activity-path wedge) ───────────────────────────────
     // iOS decodes these without throwing but renders nothing — no iOS UI in
     // this wedge (see the plan's "Out of scope"). Mirrors the Rust
@@ -414,6 +421,12 @@ extension ServerMsg {
         let choices: [DecisionChoice]
         let context_pane_id: String?
     }
+    private struct DecisionResolvedWrapper:  Decodable {
+        let tag: String
+        let request_id: String
+        let resolution: String
+        let choice_id: String?
+    }
     private struct ActivitySnapshotWrapper:  Decodable { let tag: String; let streams: [ActivityStreamWire] }
     private struct ActivityHealthWrapper:    Decodable {
         let ingesting: Bool
@@ -545,6 +558,12 @@ extension ServerMsg {
                 return .decisionRequest(tag: m.tag, requestId: m.request_id, prompt: m.prompt,
                                         detail: m.detail, choices: m.choices,
                                         contextPaneId: m.context_pane_id)
+            }
+
+        case "decision_resolved":
+            if let m = try? dec.decode(DecisionResolvedWrapper.self, from: data) {
+                return .decisionResolved(tag: m.tag, requestId: m.request_id,
+                                         resolution: m.resolution, choiceId: m.choice_id)
             }
 
         case "activity":
