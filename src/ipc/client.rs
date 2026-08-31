@@ -225,6 +225,10 @@ async fn do_connect(path: &Path) -> Result<(SplitReader, SplitWriter, u32)> {
 
     let subscribe = ClientMsg::Subscribe {
         topics: vec![Topic::Activity, Topic::MotherJobs, Topic::MotherStatusline],
+        // The TUI has no window to attach a decision-modal sheet to — it
+        // omits Topic::Decision above and must not claim operator status here
+        // either.
+        renders_decisions: false,
     };
     write_frame(&mut writer, &serde_json::to_vec(&subscribe)?).await?;
     debug!(client_id, "sent Subscribe");

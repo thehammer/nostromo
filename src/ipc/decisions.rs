@@ -4,7 +4,7 @@
 //! `DecisionRegistry` is the single shared source of truth for
 //! `nostromo.ask_decision` (which creates requests and blocks on their
 //! answer) and the IPC server (which routes `ClientMsg::DecisionAnswer` and
-//! tracks `Topic::Decision` subscribers). Every method here is a pure,
+//! tracks which connected clients count as operators). Every method here is a pure,
 //! synchronous state transition — no socket, no `.await` — which is what
 //! makes the FIFO/answer-once/timeout/cancel behaviour unit-testable without
 //! a running daemon.
@@ -109,8 +109,11 @@ pub struct DecisionRegistry {
     /// does not grow the way an unbounded log of a high-frequency stream
     /// would.
     resolved: HashSet<String>,
-    /// Connection keys currently subscribed to `Topic::Decision`.
-    subscribers: HashSet<String>,
+    /// Connection keys that have declared themselves operators — either by
+    /// naming `Topic::Decision` explicitly in their `Subscribe` topics, or by
+    /// setting `renders_decisions: true` on that frame. See
+    /// [`Self::has_operator`].
+    operators: HashSet<String>,
     /// Wired by [`DecisionRegistry::configure_broadcast`] so every resolution
     /// path can announce a [`ServerMsg::DecisionResolved`] notice — the fix
     /// for the multi-window decision-sheet bug: every presenting window (not
@@ -296,20 +299,20 @@ impl DecisionRegistry {
 
     // ── operator subscription ──────────────────────────────────────────────
 
-    /// True iff at least one client is currently subscribed to
-    /// `Topic::Decision`. `nostromo.ask_decision` checks this before
-    /// submitting anything — an agent blocking on a closed GUI is a worse
-    /// failure than an immediate refusal.
+    /// True iff at least one connected client has declared that it renders
+    /// decisions (see [`Self::operators`]). `nostromo.ask_decision` checks
+    /// this before submitting anything — an agent blocking on a closed GUI is
+    /// a worse failure than an immediate refusal.
     pub fn has_operator(&self) -> bool {
-        !self.subscribers.is_empty()
+        !self.operators.is_empty()
     }
 
-    pub fn add_subscriber(&mut self, conn_key: &str) {
-        self.subscribers.insert(conn_key.to_string());
+    pub fn add_operator(&mut self, conn_key: &str) {
+        self.operators.insert(conn_key.to_string());
     }
 
-    pub fn remove_subscriber(&mut self, conn_key: &str) {
-        self.subscribers.remove(conn_key);
+    pub fn remove_operator(&mut self, conn_key: &str) {
+        self.operators.remove(conn_key);
     }
 
     // ── test/diagnostic visibility ────────────────────────────────────────────
@@ -707,30 +710,30 @@ mod tests {
     // ── 5. operator subscription ─────────────────────────────────────────────────
 
     #[test]
-    fn has_operator_reflects_subscriber_add_and_remove() {
+    fn has_operator_reflects_operator_add_and_remove() {
         let mut registry = DecisionRegistry::new();
         assert!(!registry.has_operator(), "a fresh registry has no operator");
 
-        registry.add_subscriber("conn-1");
+        registry.add_operator("conn-1");
         assert!(registry.has_operator());
 
-        registry.remove_subscriber("conn-1");
+        registry.remove_operator("conn-1");
         assert!(!registry.has_operator());
     }
 
     #[test]
-    fn removing_a_never_added_subscriber_is_a_noop_and_does_not_affect_a_different_subscriber() {
+    fn removing_a_never_added_operator_is_a_noop_and_does_not_affect_a_different_operator() {
         let mut registry = DecisionRegistry::new();
-        registry.add_subscriber("conn-real");
+        registry.add_operator("conn-real");
 
-        // Must not panic, and must not disturb the real subscriber.
-        registry.remove_subscriber("conn-never-added");
+        // Must not panic, and must not disturb the real operator.
+        registry.remove_operator("conn-never-added");
         assert!(
             registry.has_operator(),
-            "removing an unknown conn_key must not affect an existing subscriber"
+            "removing an unknown conn_key must not affect an existing operator"
         );
 
-        registry.remove_subscriber("conn-real");
+        registry.remove_operator("conn-real");
         assert!(!registry.has_operator());
     }
 

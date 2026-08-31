@@ -266,27 +266,32 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let topics: Vec<Topic> = match sub {
-        ClientMsg::Subscribe { topics } => topics,
+    let (topics, renders_decisions): (Vec<Topic>, bool) = match sub {
+        ClientMsg::Subscribe { topics, renders_decisions } => (topics, renders_decisions),
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
-            vec![]
+            (vec![], false)
         }
         other => {
             anyhow::bail!("expected Subscribe, got {other:?}");
         }
     };
 
-    info!(claimed_id, conn_key, ?topics, "client subscribed");
+    info!(claimed_id, conn_key, ?topics, renders_decisions, "client subscribed");
 
-    // ── Decision-modal subscriber accounting (W6) ─────────────────────────────
-    // An empty `topics` list means "everything" (see `message_matches_topics`),
-    // so it counts as subscribed to `Topic::Decision` too. Being subscribed is
-    // also how `nostromo.ask_decision` knows an operator exists at all — this
-    // is the only place that fact is recorded.
-    let is_decision_subscriber = topics.is_empty() || topics.contains(&Topic::Decision);
-    if is_decision_subscriber {
-        decisions.lock().unwrap().add_subscriber(&conn_key);
+    // ── Decision-modal operator accounting (W6) ───────────────────────────────
+    // An empty `topics` list still means "deliver everything" for routing (see
+    // `message_matches_topics`) — that is unchanged. But it no longer ALSO
+    // means "I am an operator": a client that can't render a decision (e.g.
+    // iOS, which subscribes with `topics: []` to get every broadcast) must not
+    // be counted, or `nostromo.ask_decision`'s `no_operator` fail-fast gate is
+    // defeated by a client that can never answer. A connection counts as an
+    // operator iff it named `Topic::Decision` explicitly, or set
+    // `renders_decisions: true` — the only way to make that claim without a
+    // full topic enumeration when subscribing to everything.
+    let is_operator = topics.contains(&Topic::Decision) || renders_decisions;
+    if is_operator {
+        decisions.lock().unwrap().add_operator(&conn_key);
     }
 
     // ── Register per-client targeted channel ──────────────────────────────────
@@ -473,8 +478,8 @@ where
         let mut mgr = session_mgr.lock().unwrap();
         mgr.on_client_disconnect(&conn_key);
     }
-    if is_decision_subscriber {
-        decisions.lock().unwrap().remove_subscriber(&conn_key);
+    if is_operator {
+        decisions.lock().unwrap().remove_operator(&conn_key);
     }
 
     result

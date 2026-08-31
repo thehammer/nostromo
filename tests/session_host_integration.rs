@@ -71,7 +71,7 @@ async fn session_round_trip_drives_real_claude() {
     )
     .await;
     assert!(matches!(recv(&mut stream).await, ServerMsg::Welcome { .. }));
-    send(&mut stream, &ClientMsg::Subscribe { topics: vec![] }).await;
+    send(&mut stream, &ClientMsg::Subscribe { topics: vec![], renders_decisions: false }).await;
 
     // Spawn a fresh session (no remote control, fresh session id).
     send(

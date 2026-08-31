@@ -706,9 +706,16 @@ sheet to.
   distinct outcome, not a default choice and not a hang.
 - `{ "error": "invalid_args" }` — fewer than two choices, duplicate choice
   ids, or an empty/over-long prompt, detail, or label.
-- `{ "error": "no_operator" }` — no client is subscribed to receive it.
-  Returned **immediately** rather than blocking for the full timeout — an
-  agent blocking on a closed GUI for minutes is a worse failure than a fast
+- `{ "error": "no_operator" }` — no connected client counts as an operator.
+  A client counts as an operator iff it named `"decision"` explicitly in its
+  subscribed topics, or set `renders_decisions: true` on its `Subscribe`
+  frame — either is a claim that it can actually present the request to a
+  human and answer it. A client that merely subscribed to everything
+  (`topics: []`, e.g. the connected-but-still-headless iOS app) does **not**
+  count until it declares `renders_decisions: true`, even though it still
+  receives `decision_request` broadcasts like any other subscriber. Returned
+  **immediately** rather than blocking for the full timeout — an agent
+  blocking on a closed GUI for minutes is a worse failure than a fast
   refusal.
 - `{ "error": "timeout" }` — nobody answered within `timeout_secs`.
 - `{ "error": "cancelled" }` — the asking session died while this call was
