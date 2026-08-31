@@ -146,13 +146,50 @@ view in the placement vocabulary.
 
 The Rust TUI is unchanged — it keeps its existing `AgentBus`-fed status-bar
 rendering (`src/ui/chrome.rs`), reading straight from the same tailed
-`activity.jsonl`. iOS decodes the new `ServerMsg` cases without throwing but
-renders nothing — no iOS UI in this wedge.
+`activity.jsonl`.
+
+iOS (`ios-curated-view-parity` W4) renders the same three broadcasts as a
+real surface, not just a decode target: `ActivityTickerBar` is a
+fixed-height, single-line bar composed above `TranscriptView`'s input bar
+(and as a plain bottom inset on non-repl surfaces, which have no input bar
+of their own), and tapping it presents `ActivityStreamsSheet` — one row per
+agent stream, labelled by `agentType`, running vs finished distinguished.
+Both live in `iOS/Nostromo/Views/Activity/`, reading `ActivityStreamModel`
+from the shared `NostromoKit` package
+(`Shared/NostromoKit/Sources/NostromoKit/Store/ActivityStreamModel.swift`),
+which is a straight verbatim port of macOS's model plus the retention
+bounds below. As on macOS, iOS's ticker never changes scroll position, tab
+selection, or keyboard focus when an event arrives, and shows only
+`summary`/`agent`/`agentType`/`kind` — never `tool_input`, `cwd`, or
+`tool_use_id`.
+
+### Client-side retention diverges from macOS
+
+macOS's `ActivityStreamModel` (`macOS/Nostromo/UI/ActivityStreamModel.swift`)
+is **unbounded** — `ingest` only ever appends, with no cap, no trim, and no
+eviction anywhere in the file. On a Mac with plenty of memory this is a slow
+leak; on a phone streaming tool-call events over cellular for an evening it
+is a defect the parent PRD's own criterion rules out. iOS's copy of the
+model adds what macOS's lacks: a per-stream cap
+(`ActivityStreamModel.maxEventsPerStream = 200`) and a store-wide budget
+(`ActivityStreamModel.maxTotalEvents = 2000`), both mirroring the daemon's
+own `activity::store::MAX_EVENTS_PER_STREAM` / `MAX_TOTAL_EVENTS`
+(`src/activity/store.rs`) — matching rather than inventing new numbers,
+since the daemon's snapshot is what a reconnect replays and a client cap
+below the daemon's would silently truncate a snapshot the daemon still
+considers current. On overflow, iOS reclaims the oldest events of
+*finished* subagent streams first, then *running* subagent streams, and
+only then the main stream (the main stream is what the ticker reads, so
+it's reclaimed last) — a stricter, more thorough policy than the daemon's
+own (which only ever reclaims whole finished streams, and never touches a
+running stream or the main stream at all). Deduplicating the two
+`ActivityStreamModel` copies across macOS and iOS is deferred; bounding
+macOS's own copy to close this divergence is tracked as a known defect but
+is explicitly out of scope for the wedge that added iOS's bounds.
 
 ## Out of scope (Phase 1)
 
 No transcript-side grouping/collapsing of tool calls, no panes/tabs/content
 kinds for activity, no agent-callable control over the stream (no tool to
-write, tag, filter, or suppress it), no persistence across a daemon restart,
-and no iOS/TUI rendering beyond decode correctness. See the wedge plan for
-the full deferred-Phase-2 list.
+write, tag, filter, or suppress it), and no persistence across a daemon
+restart. See the wedge plan for the full deferred-Phase-2 list.

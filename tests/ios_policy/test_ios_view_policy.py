@@ -124,6 +124,22 @@ def _spans_after(source, needle_pattern):
     return spans
 
 
+def _strip_line_comments(source):
+    """Remove `//`-style line comments from `source`.
+
+    Naive — doesn't understand string literals that happen to contain `//`,
+    the same documented limitation as `_balanced_span` above. Exists so a
+    check for a banned identifier isn't fooled by a comment that *names* the
+    identifier only to explain why it's forbidden — e.g. a doc-comment
+    saying "never read `cwd`" would otherwise trip a substring check for
+    `cwd` even though no code anywhere reads it. Same self-reference trap
+    `SuiteNeverSkipsTests` guards against for this file's own source, one
+    level down: a check that can't tell "banned word in code" from "banned
+    word in the comment banning it" is not a check anyone should trust.
+    """
+    return re.sub(r"//.*", "", source)
+
+
 def _balanced_call_args(source, call_open_pattern):
     """For each regex match of `call_open_pattern` (which must end at the
     literal `(` of a call), return the text of the balanced parenthesised
@@ -238,6 +254,162 @@ def check_stub_strings_come_from_PaneSurfaceStub(files):
     return violations
 
 
+def _is_activity_path(path):
+    """`True` when `path`'s normalized form contains `/Views/Activity/` —
+    the directory this wedge (W4, ios-curated-view-parity) introduces for
+    the ambient-activity ticker and its expanded sheet.
+    """
+    return "/Views/Activity/" in path.replace(os.sep, "/")
+
+
+def check_ticker_bar_has_fixed_single_line_height(files):
+    """`ActivityTickerBar.swift` must render at a fixed, single-line height
+    that an arriving activity event can never change.
+
+    This is the mechanism (wedge Decision D4) by which an arriving activity
+    event cannot resize the space it occupies and shift the transcript's
+    scroll offset underneath the operator: a `safeAreaInset` whose height
+    changes shifts the enclosing scroll view's content inset with no scroll
+    call ever being made, so the fix has to be "this view's height never
+    changes," not "this view never calls scrollTo." A missing file counts as
+    a violation too — an absent ticker can't be pinned to a fixed height
+    either.
+    """
+    violations = []
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "ActivityTickerBar.swift"), None)
+    path, source = match if match else ("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", "")
+
+    if "lineLimit(1)" not in source:
+        violations.append((path, "ActivityTickerBar.swift must call lineLimit(1)"))
+    if ".frame(height:" not in source:
+        violations.append((path, "ActivityTickerBar.swift must pin an explicit .frame(height:)"))
+    if "lineLimit(nil)" in source:
+        violations.append((path, "ActivityTickerBar.swift must never allow unbounded lineLimit(nil)"))
+    if "fixedSize(horizontal: false, vertical: true)" in source:
+        violations.append((path, "ActivityTickerBar.swift must never allow vertical growth via fixedSize"))
+    return violations
+
+
+def check_activity_path_never_scrolls_or_steals_focus(files):
+    """No file under `Views/Activity/` scrolls the transcript, steals first
+    responder/focus, or auto-dismisses.
+
+    Ported from macOS's `ActivityTickerWiringTests.swift` (which greps a
+    single named file as raw text) to this suite's `(path, source)`-list
+    shape. `DispatchQueue.main.asyncAfter` is the auto-dismiss idiom's
+    fingerprint (macOS's `ToastBannerView`) — the ticker is explicitly not a
+    toast; it stays up permanently.
+    """
+    banned = ("scrollTo(", "@FocusState", "becomeFirstResponder", "DispatchQueue.main.asyncAfter")
+    violations = []
+    for path, source in files:
+        if not _is_activity_path(path):
+            continue
+        stripped = _strip_line_comments(source)
+        for needle in banned:
+            if needle in stripped:
+                violations.append((path, "`%s` found in an activity-path view" % needle))
+    return violations
+
+
+def check_transcriptview_autoscroll_still_keys_on_turns_count(files):
+    """`TranscriptView.swift`'s autoscroll must still be keyed on
+    `store.turns.count`, and no `onChange(of:...)` call in that file may
+    reference anything activity-related.
+
+    Guards the non-regression requirement that adding the ticker's bottom-
+    accessory slot must not touch the existing count-keyed autoscroll
+    trigger — an activity event arriving is not a new turn and must never
+    itself move the transcript.
+    """
+    by_name = {os.path.basename(p): (p, s) for p, s in files}
+    entry = by_name.get("TranscriptView.swift")
+    path, source = entry if entry else ("iOS/Nostromo/Views/TranscriptView.swift", "")
+
+    calls = _balanced_call_args(source, r"\bonChange\(")
+    violations = []
+    if not calls:
+        violations.append((path, "no onChange(of:...) call found in TranscriptView.swift"))
+        return violations
+
+    if not any(re.search(r"of:\s*store\.turns\.count\b", c) for c in calls):
+        violations.append((path, "no onChange(of:...) call is keyed on store.turns.count"))
+
+    for c in calls:
+        if re.search(r"of:[^,)]*activity", c, re.IGNORECASE):
+            violations.append((path, "an onChange(of:...) call references activity: %s" % c))
+
+    return violations
+
+
+def check_no_secrets_in_activity_views(files):
+    """No file under `Views/Activity/` references `toolInput`, `tool_input`,
+    `cwd`, or `toolUseId`.
+
+    The always-on ambient surface must only ever read `summary`/`agent`/
+    `agentType`/`kind`/`ts` — never a tool's raw input or working directory
+    (D6). Comments are stripped before matching: a doc-comment naming one of
+    these identifiers only to explain that it must never be read (exactly
+    what `ActivityTickerBar.swift`/`ActivityStreamsSheet.swift` do) must not
+    itself trip this check.
+    """
+    banned = ("toolInput", "tool_input", "cwd", "toolUseId")
+    violations = []
+    for path, source in files:
+        if not _is_activity_path(path):
+            continue
+        stripped = _strip_line_comments(source)
+        for needle in banned:
+            if needle in stripped:
+                violations.append((path, "activity view references `%s`" % needle))
+    return violations
+
+
+def check_no_suppression_affordance_in_activity_views(files):
+    """No file under `Views/Activity/` references `UserDefaults`,
+    `@AppStorage`, or `Toggle`.
+
+    The PRD requires no user-facing enable/disable control and no
+    agent-callable suppression of the ambient surface (D7).
+    """
+    banned = ("UserDefaults", "@AppStorage", "Toggle")
+    violations = []
+    for path, source in files:
+        if not _is_activity_path(path):
+            continue
+        for needle in banned:
+            if needle in source:
+                violations.append((path, "activity view references `%s`" % needle))
+    return violations
+
+
+def check_streams_sheet_presented_from_focus_view(files):
+    """`DynamicFocusView.swift` presents `ActivityStreamsSheet` via a
+    `.sheet(...)`; neither `TranscriptView.swift` nor
+    `PaneSurfaceView.swift` construct it at all.
+
+    The sheet must be owned by the focus view, not the transcript or the
+    pane surface, so it survives whatever those are doing (rotation, tab
+    switches) without disappearing underneath the operator.
+    """
+    by_name = {os.path.basename(p): (p, s) for p, s in files}
+    violations = []
+
+    focus_entry = by_name.get("DynamicFocusView.swift")
+    focus_path, focus_source = focus_entry if focus_entry else ("iOS/Nostromo/Views/DynamicFocusView.swift", "")
+    sheet_spans = _spans_after(focus_source, r"\.sheet\(")
+    if not any("ActivityStreamsSheet(" in span for span in sheet_spans):
+        violations.append((focus_path, "DynamicFocusView.swift has no .sheet {...} presenting ActivityStreamsSheet(...)"))
+
+    for name in ("TranscriptView.swift", "PaneSurfaceView.swift"):
+        entry = by_name.get(name)
+        path, source = entry if entry else (name, "")
+        if "ActivityStreamsSheet(" in source:
+            violations.append((path, "%s constructs ActivityStreamsSheet(...) — must be owned by DynamicFocusView" % name))
+
+    return violations
+
+
 CHECKS = (
     check_no_default_in_panecontentwire_switch,
     check_every_toRowModel_call_passes_marked,
@@ -245,6 +417,12 @@ CHECKS = (
     check_address_plumbed_into_pane_surface,
     check_swipe_actions_do_not_reference_address,
     check_stub_strings_come_from_PaneSurfaceStub,
+    check_ticker_bar_has_fixed_single_line_height,
+    check_activity_path_never_scrolls_or_steals_focus,
+    check_transcriptview_autoscroll_still_keys_on_turns_count,
+    check_no_secrets_in_activity_views,
+    check_no_suppression_affordance_in_activity_views,
+    check_streams_sheet_presented_from_focus_view,
 )
 
 
@@ -427,6 +605,215 @@ class StubStringOriginTests(unittest.TestCase):
         self.assertEqual(check_stub_strings_come_from_PaneSurfaceStub([("Synthetic.swift", source)]), [])
 
 
+class StripLineCommentsTests(unittest.TestCase):
+    def test_removes_a_trailing_line_comment(self):
+        self.assertEqual(_strip_line_comments("let x = 1 // comment"), "let x = 1 ")
+
+    def test_removes_a_whole_comment_line(self):
+        self.assertEqual(_strip_line_comments("// cwd must never be read\nlet x = 1"), "\nlet x = 1")
+
+    def test_leaves_code_with_no_comments_untouched(self):
+        self.assertEqual(_strip_line_comments("let x = 1"), "let x = 1")
+
+
+class TickerBarFixedHeightTests(unittest.TestCase):
+    def test_bites_when_lineLimit_1_is_missing(self):
+        source = 'Text(text).frame(height: 28)'
+        violations = check_ticker_bar_has_fixed_single_line_height([("ActivityTickerBar.swift", source)])
+        self.assertTrue(any("lineLimit(1)" in msg for _, msg in violations))
+
+    def test_bites_when_frame_height_is_missing(self):
+        source = 'Text(text).lineLimit(1)'
+        violations = check_ticker_bar_has_fixed_single_line_height([("ActivityTickerBar.swift", source)])
+        self.assertTrue(any("frame(height:" in msg for _, msg in violations))
+
+    def test_bites_when_lineLimit_nil_is_present(self):
+        source = 'Text(text).lineLimit(nil).frame(height: 28)'
+        violations = check_ticker_bar_has_fixed_single_line_height([("ActivityTickerBar.swift", source)])
+        self.assertTrue(any("lineLimit(nil)" in msg for _, msg in violations))
+
+    def test_bites_when_vertical_fixedSize_growth_is_present(self):
+        source = 'Text(text).lineLimit(1).frame(height: 28).fixedSize(horizontal: false, vertical: true)'
+        violations = check_ticker_bar_has_fixed_single_line_height([("ActivityTickerBar.swift", source)])
+        self.assertTrue(any("fixedSize" in msg for _, msg in violations))
+
+    def test_bites_when_the_file_does_not_exist(self):
+        violations = check_ticker_bar_has_fixed_single_line_height([("SomeOtherFile.swift", "irrelevant")])
+        self.assertTrue(len(violations) > 0)
+
+    def test_passes_on_a_fixed_single_line_bar(self):
+        source = 'Text(text).lineLimit(1).truncationMode(.tail).frame(height: 28)'
+        self.assertEqual(check_ticker_bar_has_fixed_single_line_height([("ActivityTickerBar.swift", source)]), [])
+
+
+class ActivityPathNeverScrollsOrStealsFocusTests(unittest.TestCase):
+    def test_bites_on_scrollTo(self):
+        source = "proxy.scrollTo(id, anchor: .bottom)"
+        violations = check_activity_path_never_scrolls_or_steals_focus(
+            [("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_FocusState(self):
+        source = "@FocusState private var isFocused: Bool"
+        violations = check_activity_path_never_scrolls_or_steals_focus(
+            [("iOS/Nostromo/Views/Activity/ActivityStreamsSheet.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_becomeFirstResponder(self):
+        source = "textField.becomeFirstResponder()"
+        violations = check_activity_path_never_scrolls_or_steals_focus(
+            [("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_dispatch_async_after_the_toast_auto_dismiss_idiom(self):
+        source = "DispatchQueue.main.asyncAfter(deadline: .now() + 3) { dismiss() }"
+        violations = check_activity_path_never_scrolls_or_steals_focus(
+            [("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_ignores_files_outside_the_activity_directory(self):
+        source = "proxy.scrollTo(id, anchor: .bottom)"
+        violations = check_activity_path_never_scrolls_or_steals_focus(
+            [("iOS/Nostromo/Views/TranscriptView.swift", source)])
+        self.assertEqual(violations, [])
+
+    def test_passes_on_clean_activity_source(self):
+        source = "Text(text).lineLimit(1).frame(height: 28)"
+        violations = check_activity_path_never_scrolls_or_steals_focus(
+            [("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", source)])
+        self.assertEqual(violations, [])
+
+
+class TranscriptAutoscrollKeysOnTurnsCountTests(unittest.TestCase):
+    def test_bites_when_no_onChange_call_exists_at_all(self):
+        source = "struct TranscriptView: View { var body: some View { Text(\"hi\") } }"
+        violations = check_transcriptview_autoscroll_still_keys_on_turns_count([("TranscriptView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_no_onChange_call_is_keyed_on_turns_count(self):
+        source = ".onChange(of: someOtherThing) { _, _ in doStuff() }"
+        violations = check_transcriptview_autoscroll_still_keys_on_turns_count([("TranscriptView.swift", source)])
+        self.assertTrue(any("turns.count" in msg for _, msg in violations))
+
+    def test_bites_when_an_onChange_call_references_activity(self):
+        source = (
+            ".onChange(of: store.turns.count) { _, _ in scroll() }\n"
+            ".onChange(of: activityModel.tickerSummary) { _, _ in doStuff() }\n"
+        )
+        violations = check_transcriptview_autoscroll_still_keys_on_turns_count([("TranscriptView.swift", source)])
+        self.assertTrue(any("activity" in msg.lower() for _, msg in violations))
+
+    def test_passes_when_only_turns_count_is_keyed(self):
+        source = ".onChange(of: store.turns.count) { _, _ in scroll() }"
+        self.assertEqual(check_transcriptview_autoscroll_still_keys_on_turns_count([("TranscriptView.swift", source)]), [])
+
+
+class NoSecretsInActivityViewsTests(unittest.TestCase):
+    def test_bites_on_an_actual_toolInput_reference(self):
+        source = "Text(event.toolInput ?? \"\")"
+        violations = check_no_secrets_in_activity_views([("iOS/Nostromo/Views/Activity/ActivityStreamsSheet.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_an_actual_cwd_reference(self):
+        source = "Text(event.cwd ?? \"\")"
+        violations = check_no_secrets_in_activity_views([("iOS/Nostromo/Views/Activity/ActivityStreamsSheet.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_an_actual_toolUseId_reference(self):
+        source = "Text(event.toolUseId ?? \"\")"
+        violations = check_no_secrets_in_activity_views([("iOS/Nostromo/Views/Activity/ActivityStreamsSheet.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_does_not_false_positive_on_a_comment_explaining_the_ban(self):
+        # This is the exact shape ActivityTickerBar.swift/ActivityStreamsSheet.swift
+        # use to document D6 — must not itself trip the check.
+        source = "// D6: reads only summary/agent/agentType/kind — never toolInput, cwd, or toolUseId.\nText(event.summary)"
+        self.assertEqual(check_no_secrets_in_activity_views([("iOS/Nostromo/Views/Activity/ActivityStreamsSheet.swift", source)]), [])
+
+    def test_ignores_files_outside_the_activity_directory(self):
+        source = "Text(event.cwd ?? \"\")"
+        violations = check_no_secrets_in_activity_views([("iOS/Nostromo/Views/Panes/PaneSurfaceView.swift", source)])
+        self.assertEqual(violations, [])
+
+
+class NoSuppressionAffordanceInActivityViewsTests(unittest.TestCase):
+    def test_bites_on_UserDefaults(self):
+        source = "UserDefaults.standard.set(true, forKey: \"activityEnabled\")"
+        violations = check_no_suppression_affordance_in_activity_views(
+            [("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_AppStorage(self):
+        source = "@AppStorage(\"activityEnabled\") private var activityEnabled = true"
+        violations = check_no_suppression_affordance_in_activity_views(
+            [("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_Toggle(self):
+        source = 'Toggle("Show activity", isOn: $activityEnabled)'
+        violations = check_no_suppression_affordance_in_activity_views(
+            [("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_ignores_files_outside_the_activity_directory(self):
+        source = 'Toggle("Remote control", isOn: $remoteControl)'
+        violations = check_no_suppression_affordance_in_activity_views(
+            [("iOS/Nostromo/Views/Panes/PaneSurfaceView.swift", source)])
+        self.assertEqual(violations, [])
+
+    def test_passes_on_clean_activity_source(self):
+        source = "Text(text).lineLimit(1).frame(height: 28)"
+        violations = check_no_suppression_affordance_in_activity_views(
+            [("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", source)])
+        self.assertEqual(violations, [])
+
+
+class StreamsSheetPresentedFromFocusViewTests(unittest.TestCase):
+    def test_bites_when_DynamicFocusView_has_a_sheet_but_not_for_ActivityStreamsSheet(self):
+        files = [
+            ("DynamicFocusView.swift", ".sheet(isPresented: $x) { SomeOtherSheet() }"),
+            ("TranscriptView.swift", "struct TranscriptView: View {}"),
+            ("PaneSurfaceView.swift", "struct PaneSurfaceView: View {}"),
+        ]
+        violations = check_streams_sheet_presented_from_focus_view(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_DynamicFocusView_has_no_sheet_at_all(self):
+        files = [
+            ("DynamicFocusView.swift", "struct DynamicFocusView: View {}"),
+            ("TranscriptView.swift", "struct TranscriptView: View {}"),
+            ("PaneSurfaceView.swift", "struct PaneSurfaceView: View {}"),
+        ]
+        violations = check_streams_sheet_presented_from_focus_view(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_TranscriptView_constructs_the_sheet_itself(self):
+        files = [
+            ("DynamicFocusView.swift", ".sheet(isPresented: $x) { ActivityStreamsSheet(model: m) }"),
+            ("TranscriptView.swift", "ActivityStreamsSheet(model: m)"),
+            ("PaneSurfaceView.swift", "struct PaneSurfaceView: View {}"),
+        ]
+        violations = check_streams_sheet_presented_from_focus_view(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_PaneSurfaceView_constructs_the_sheet_itself(self):
+        files = [
+            ("DynamicFocusView.swift", ".sheet(isPresented: $x) { ActivityStreamsSheet(model: m) }"),
+            ("TranscriptView.swift", "struct TranscriptView: View {}"),
+            ("PaneSurfaceView.swift", "ActivityStreamsSheet(model: m)"),
+        ]
+        violations = check_streams_sheet_presented_from_focus_view(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_the_correct_ownership_shape(self):
+        files = [
+            ("DynamicFocusView.swift", ".sheet(isPresented: $x) { ActivityStreamsSheet(model: m) }"),
+            ("TranscriptView.swift", "struct TranscriptView: View {}"),
+            ("PaneSurfaceView.swift", "struct PaneSurfaceView: View {}"),
+        ]
+        self.assertEqual(check_streams_sheet_presented_from_focus_view(files), [])
+
+
 # --------------------------------------------------------------------------
 # The real gate: every check against the actual iOS/Nostromo tree.
 # --------------------------------------------------------------------------
@@ -470,6 +857,30 @@ class RealIOSTreeTests(unittest.TestCase):
 
     def test_stub_strings_come_from_PaneSurfaceStub_everywhere(self):
         violations = check_stub_strings_come_from_PaneSurfaceStub(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_ticker_bar_has_a_fixed_single_line_height(self):
+        violations = check_ticker_bar_has_fixed_single_line_height(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_activity_path_never_scrolls_or_steals_focus(self):
+        violations = check_activity_path_never_scrolls_or_steals_focus(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_transcriptview_autoscroll_still_keys_on_turns_count(self):
+        violations = check_transcriptview_autoscroll_still_keys_on_turns_count(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_secrets_in_activity_views(self):
+        violations = check_no_secrets_in_activity_views(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_suppression_affordance_in_activity_views(self):
+        violations = check_no_suppression_affordance_in_activity_views(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_streams_sheet_presented_from_focus_view(self):
+        violations = check_streams_sheet_presented_from_focus_view(self.files)
         self.assertEqual(violations, [], violations)
 
 
