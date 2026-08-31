@@ -193,6 +193,43 @@ iOS gets decoder correctness only in this wedge: a tabs node's children
 flatten into the existing per-pane `TabView` alongside every other non-repl
 pane, with no dedicated tabs UI.
 
+### Client rendering (iOS)
+
+iOS renders a non-repl pane's content in
+`iOS/Nostromo/Views/Panes/PaneSurfaceView.swift`, keyed by the same
+`PaneContentWire` switch macOS's `PaneContentView.swift` uses, but with no
+AppKit siblings layered over it — SwiftUI only, all the way down. `text`,
+`json_snapshot`, `loading`, `error`, and `unknown` render generically;
+`pr_list` renders bucket-grouped `PerriPRRow`s at parity with macOS,
+including the queue-row marking below and the swipe-to-approve confirmation
+gate.
+
+`code`, `diff`, `pr_conversation`, and `ticket` are **not rendered** — each
+shows an honest stub instead (`PaneSurfaceStub` in NostromoKit is the single
+source of the stub copy). This is deliberate, not a gap nobody got to: the
+PRD's organizing rule is that "a surface may be absent, and a surface may be
+simplified. A surface may never look complete when it isn't." Before
+ios-curated-view-parity W2, `code` rendered its raw file text in a
+monospaced view — no gutter, no scroll-to-anchor, no emphasis, discarding
+`path`/`revision`/`first_line` entirely. That looked like a working file
+view and wasn't one; the operator had no way to tell that the line an agent
+pointed at wasn't the line she was reading. W2 deleted that rendering rather
+than keep a half-built one, and each stub names the specific addressing it
+can't show (a line, a comment, a section) rather than saying only "isn't
+available." W7 (`code`), W8 (`diff`), and W9 (`pr_conversation`/`ticket`)
+replace these stubs with real renderers; each later wedge updates this
+section when it does, so this stays the one place a reader learns the two
+clients aren't rendering the same thing.
+
+`PaneAddress` (below) reaches iOS the same way it reaches macOS —
+`DynamicFocusView` passes `layout.paneAddress[paneId]` into
+`PaneSurfaceView` — and iOS's only present use of it is `pr_list` queue-row
+marking; the stub kinds above have no addressing to render yet, matching
+what they show.
+
+See `docs/ios-verification.md` for how this rendering is verified given
+`iOS/Nostromo.xcodeproj` has no test target.
+
 ---
 
 ## `PaneAddress` — anchor, emphasis, and reason (curated-agent-views W1)

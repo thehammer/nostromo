@@ -212,6 +212,12 @@ struct PerriView: View {
 
     // MARK: - Row model helper
 
+    // Deliberately no `marked:` here (unlike PaneSurfaceView's `pr_list`
+    // rows — W2, ios-curated-view-parity). This tab's queue is not a pane:
+    // it has no `PaneAddress` to mark *from*. Giving it one would mean
+    // inventing a second addressing path for the same queue, which is the
+    // disagreeing-renderers problem this PRD family exists to end.
+    // Reconciling iOS's three PR renderings is out of scope for this wedge.
     private func rowModel(for item: PrQueueItem) -> PerriPRRowModel {
         PerriPRRowModel(
             id:          item.id,
