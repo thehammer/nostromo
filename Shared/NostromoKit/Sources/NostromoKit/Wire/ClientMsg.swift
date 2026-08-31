@@ -24,13 +24,32 @@ struct ClientHello: Encodable {
 // MARK: - Subscribe
 
 /// Subscribe to one or more broadcast topic streams.
+///
+/// `rendersDecisions` declares that this client can actually present a
+/// decision-modal request to a human and answer it — the fact
+/// `nostromo.ask_decision` needs before it will submit a request rather than
+/// fail fast with `no_operator`. Naming `"decision"` in `topics` makes the
+/// same claim; either is sufficient. Mirrors `ClientMsg::Subscribe` in
+/// `src/ipc/protocol.rs`.
+///
+/// `init` gives `rendersDecisions` no default value deliberately — every
+/// construction site must state it explicitly, so a future flip to `true`
+/// (once a client can actually render a decision) is a visible, one-word diff
+/// rather than an easy-to-miss omission.
 struct ClientSubscribe: Encodable {
-    let type_  = "subscribe"
-    let topics: [String]
+    let type_:            String = "subscribe"
+    let topics:            [String]
+    let rendersDecisions:  Bool
+
+    init(topics: [String], rendersDecisions: Bool) {
+        self.topics = topics
+        self.rendersDecisions = rendersDecisions
+    }
 
     enum CodingKeys: String, CodingKey {
-        case type_  = "type"
+        case type_            = "type"
         case topics
+        case rendersDecisions = "renders_decisions"
     }
 }
 

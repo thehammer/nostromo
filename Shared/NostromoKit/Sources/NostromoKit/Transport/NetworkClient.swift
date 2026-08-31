@@ -231,7 +231,12 @@ public final class NetworkClient: ObservableObject {
     private func sendHello() {
         send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
         // Phase 0: subscribe to all topics (empty list = "everything").
-        send(ClientSubscribe(topics: []))
+        // rendersDecisions: false — iOS has no code path to present or answer
+        // a decision-modal request yet, so it must not be counted as an
+        // operator (`nostromo.ask_decision`'s `no_operator` fail-fast gate
+        // would otherwise be defeated by a client that can never answer). W3
+        // is the wedge that adds that surface and flips this to `true`.
+        send(ClientSubscribe(topics: [], rendersDecisions: false))
     }
 
     // MARK: - Send

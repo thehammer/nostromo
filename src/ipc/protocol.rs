@@ -71,10 +71,16 @@ pub enum Topic {
     /// Agent-authored pane layout + content broadcasts (`FocusLayout`,
     /// `PaneContent`, `FocusCreated`).
     Layout,
-    /// Daemon-driven decision-modal requests (`DecisionRequest`). Being
-    /// subscribed to this topic is also how the daemon knows an operator
-    /// exists at all — `nostromo.ask_decision` refuses with `no_operator`
-    /// when nobody is.
+    /// Daemon-driven decision-modal requests (`DecisionRequest`). Naming this
+    /// topic explicitly is one of two ways a client claims operator status —
+    /// the other is `ClientMsg::Subscribe`'s `renders_decisions: true` flag,
+    /// for a client that subscribes to everything (`topics: []`) without
+    /// enumerating individual topics. `nostromo.ask_decision` refuses with
+    /// `no_operator` when neither is true for any connected client — a
+    /// wildcard subscriber that does neither (e.g. a client with no code path
+    /// to render a decision) is deliberately NOT counted as an operator, even
+    /// though it still receives `DecisionRequest` broadcasts like any other
+    /// message.
     Decision,
 }
 
@@ -777,6 +783,16 @@ pub enum ClientMsg {
     },
     Subscribe {
         topics: Vec<Topic>,
+        /// Declares that this client can actually present a decision-modal
+        /// request to a human and answer it — the fact `nostromo.ask_decision`
+        /// needs before it will submit a request rather than fail fast with
+        /// `no_operator`. Naming `Topic::Decision` in `topics` makes the same
+        /// claim; either is sufficient (see the `Decision` variant's doc
+        /// comment above). `#[serde(default)]` so a client that predates this
+        /// field (or simply omits it) decodes as `false` — never silently
+        /// promoted to an operator by an absent key.
+        #[serde(default)]
+        renders_decisions: bool,
     },
     Ping,
 
@@ -1371,6 +1387,103 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v.get("type").unwrap(), "session_send");
+    }
+
+    // ── ClientMsg::Subscribe / renders_decisions (decision-operator-gate fix) ──
+    //
+    // `renders_decisions` distinguishes "this client can actually render and
+    // answer a decision modal" from merely "this client subscribed to
+    // everything" (`topics: []`, today's iOS behavior). The operator-gate fix
+    // in `server.rs::handle_client` reads this field directly off the wire, so
+    // its default-on-absence and exact JSON shape are load-bearing.
+
+    /// A `Subscribe` frame from a peer that predates this field (or a client
+    /// that simply omits it) must still decode — and must decode to `false`,
+    /// never silently to `true` — since defaulting the other way would let an
+    /// old/unaware client be miscounted as an operator.
+    #[test]
+    fn subscribe_without_a_renders_decisions_key_decodes_as_false() {
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":[]}"#).unwrap();
+        match msg {
+            ClientMsg::Subscribe { topics, renders_decisions } => {
+                assert_eq!(topics, vec![]);
+                assert!(
+                    !renders_decisions,
+                    "an absent renders_decisions key must decode to false, not true"
+                );
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// Same as above, but with a non-empty `topics` list alongside the missing
+    /// key — proves `#[serde(default)]` is doing the work here, not some
+    /// coincidence of an empty-vec/empty-object special case.
+    #[test]
+    fn subscribe_with_topics_and_no_renders_decisions_key_still_decodes_successfully() {
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":["decision","layout"]}"#)
+                .unwrap();
+        match msg {
+            ClientMsg::Subscribe { topics, renders_decisions } => {
+                assert_eq!(topics, vec![Topic::Decision, Topic::Layout]);
+                assert!(!renders_decisions);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscribe_with_renders_decisions_true_decodes_true() {
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"subscribe","topics":[],"renders_decisions":true}"#,
+        )
+        .unwrap();
+        match msg {
+            ClientMsg::Subscribe { renders_decisions, .. } => assert!(renders_decisions),
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscribe_with_renders_decisions_false_decodes_false() {
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"subscribe","topics":[],"renders_decisions":false}"#,
+        )
+        .unwrap();
+        match msg {
+            ClientMsg::Subscribe { renders_decisions, .. } => assert!(!renders_decisions),
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// Round-trip plus an exact-shape assertion on the encoded JSON — the same
+    /// convention this file already uses for `choice_id` presence on
+    /// `DecisionAnswer`/`DecisionResolved` — so the wire key name
+    /// (`renders_decisions`, snake_case) and its presence are pinned down, not
+    /// just "some boolean survives a round trip."
+    #[test]
+    fn encoding_subscribe_includes_an_explicit_renders_decisions_false_key() {
+        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: false });
+
+        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: false })
+            .unwrap();
+        assert_eq!(v["type"], "subscribe");
+        assert_eq!(v["topics"], serde_json::json!([]));
+        assert_eq!(
+            v["renders_decisions"], false,
+            "renders_decisions must be present and false on the wire, not omitted"
+        );
+    }
+
+    #[test]
+    fn encoding_subscribe_includes_an_explicit_renders_decisions_true_key() {
+        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: true });
+
+        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: true })
+            .unwrap();
+        assert_eq!(v["renders_decisions"], true);
     }
 
     #[test]

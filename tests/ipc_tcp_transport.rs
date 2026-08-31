@@ -82,7 +82,7 @@ async fn do_handshake(mut stream: &mut TcpStream) {
     }
 
     // → Subscribe (no topics — we only care about targeted responses)
-    let sub = ClientMsg::Subscribe { topics: vec![] };
+    let sub = ClientMsg::Subscribe { topics: vec![], renders_decisions: false };
     write_frame(&mut stream, &serde_json::to_vec(&sub).unwrap())
         .await
         .unwrap();
@@ -154,6 +154,7 @@ async fn tcp_and_unix_share_broadcast() {
 
     let sub = ClientMsg::Subscribe {
         topics: vec![Topic::Activity],
+        renders_decisions: false,
     };
     write_frame(&mut stream, &serde_json::to_vec(&sub).unwrap())
         .await
