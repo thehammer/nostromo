@@ -16,13 +16,15 @@ test:
 	cargo test
 
 ## Run the Python tooling test suites (load-test report script, doctor, shell
-## driver checks). One command so CI and a local run cannot drift apart — these
-## suites otherwise ran nowhere but a developer's shell, which for the
-## report-script suite in particular is the same defect the suite is about: a
-## check nobody executes is a check that always passes.
+## driver checks, iOS source-scanning policy checks). One command so CI and a
+## local run cannot drift apart — these suites otherwise ran nowhere but a
+## developer's shell, which for the report-script suite in particular is the
+## same defect the suite is about: a check nobody executes is a check that
+## always passes.
 python-test:
 	python3 -m unittest discover -s tests/transcript_load -v
 	python3 -m unittest discover -s tests/doctor -v
+	python3 -m unittest discover -s tests/ios_policy -v
 
 clean:
 	cargo clean
@@ -75,7 +77,7 @@ IOS_DEVICE_ID   ?= 195907F5-56CB-5334-B012-6F71CFA5EB21# Hammer's iPhone Pro
 IPAD_DEVICE_ID  ?= BA38C738-E848-5694-B1C4-7D5DB4C631EE# Hammer's iPad Pro
 IOS_APP_RELEASE  = iOS/build/Build/Products/Release-iphoneos/Nostromo.app
 
-.PHONY: mac mac-test mac-load-test mac-run mac-kill mac-icon mac-release mac-install ios-build ios-install ios-install-ipad ios-install-all
+.PHONY: mac mac-test mac-load-test mac-run mac-kill mac-icon mac-release mac-install kit-test ios-build ios-install ios-install-ipad ios-install-all
 
 # Release build uses an explicit derived-data path so the product location is
 # predictable (no DerivedData hash dependency). Ad-hoc signed so the arm64
@@ -144,10 +146,25 @@ mac-release:
 	  2>&1 | grep -E "error:|warning:|BUILD" || true
 	@test -d "$(APP_RELEASE)" && echo "built → $(APP_RELEASE)" || { echo "release build failed"; exit 1; }
 
+## Run the shared NostromoKit logic test suite (SwiftPM, headless). This is
+## the L1 layer of iOS's three-layer verification model
+## (docs/ios-verification.md): the suite that runs with no paired iOS device
+## and no simulator, because it's a plain `swift test` over pure value types,
+## not an app target.
+kit-test:
+	swift test --package-path Shared/NostromoKit
+
 ## Build the iOS app for a paired device (release, device code signing).
 ## Override the target device with: make ios-install IOS_DEVICE_ID=<uuid>
+## `set -o pipefail` — same rationale as `mac`/`mac-test` above: without it
+## the recipe's exit status is grep's, so a build that failed for a reason
+## grep's pattern doesn't happen to print (or a build that hung and was
+## killed) can still exit 0. The `@test -d` product check below catches a
+## missing product but not a failed build that left a stale product in
+## iOS/build from a previous successful run — pipefail is what makes the
+## recipe itself trustworthy rather than relying on that check alone.
 ios-build:
-	cd iOS && xcodebuild \
+	set -o pipefail; cd iOS && xcodebuild \
 	  -project Nostromo.xcodeproj \
 	  -scheme Nostromo \
 	  -configuration Release \
