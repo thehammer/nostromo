@@ -171,6 +171,44 @@ property holds. The same is true of the long-fan-out memory plateau — L1
 proves the cap arithmetic is right, but only Xcode's memory gauge over a
 real extended session shows the cap actually holding operationally.
 
+## Worked example: the compact tab strip (W5)
+
+`ios-curated-view-parity` W5 (honoured focus, real labels, `reason`
+captions, unread marks) is the layer split at its most load-bearing, because
+the single most important property it adds — a content-only layout republish
+must never fight the operator's own tab choice — is exactly the kind of
+thing a compile check can't see and a screenshot can't prove either:
+
+- **L1** (`LayoutChangeClassifierTests.swift`, `TabPlanTests.swift`,
+  `FocusRegionStateTests.swift`, `DaemonStoreTests.swift`): the full D4
+  transition table (`.contentOnly`/`.identical` never move the frontmost
+  pane even when the tree's own `active` disagrees; `.activeTabOnly`/
+  `.tabMembership`/`.splitTopology` do; `focused_pane` always wins on top),
+  the flattening order (`repl` first, two `tabs` nodes staying contiguous,
+  no leaf dropped or duplicated), the label-fallback rule never producing a
+  pane id, unread derivation including the suppressed-`.loading` and
+  frontmost-push cases, and that a `focus_layout` arrival actually
+  classifies against the previously-stored tree and applies the transition.
+- **L2** (`tests/ios_policy/test_ios_view_policy.py`): that no pane id is
+  ever user-visible via `.capitalized`, that no second bottom tab bar exists
+  outside `NostromoApp.swift`, that no view assigns to the root tab
+  selection or mutates a navigation path, that the frontmost pane comes from
+  `FocusRegionState` rather than view `@State`, that no local
+  placement/ratio persistence exists, that the unread glyph is
+  opacity-toggled rather than conditionally inserted, and that the W4
+  ticker still survives the rewrite.
+- **L3** (`make ios-build`): that `TabStripView.swift` compiles and is wired
+  into the app target's build phase, and that the rewritten
+  `DynamicFocusView.swift` still builds with no new warnings.
+
+What's left over — genuinely **UI-observable only** — is everything about
+*seeing* the strip do the right thing on a real device: that a shown tab is
+actually frontmost on arrival, that switching tabs preserves scroll
+position, that the unread dot doesn't reflow the strip when it appears, and
+that a show arriving while the operator is in an unrelated root tab (Fred)
+leaves them there. L1's transition-table tests prove the *decision* is
+correct in isolation; only a device shows the decision landing on screen.
+
 ## Why no simulator, anywhere
 
 It would be easy to ask: why not add an `xcodebuild test -destination
