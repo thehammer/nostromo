@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use nostromo::ipc::decisions::DecisionRegistry;
 use nostromo::ipc::pane_registry::PaneRegistry;
-use nostromo::ipc::protocol::ServerMsg;
-use nostromo::ipc::SessionManager;
+use nostromo::ipc::protocol::{ClientMsg, DecisionChoice, DecisionResolution, ServerMsg, Topic};
+use nostromo::ipc::{PtyManager, Server, SessionManager};
 use nostromo::mcp::{DaemonMcpBackend, McpServer, McpSharedState};
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -427,4 +427,256 @@ async fn ask_decision_that_times_out_returns_a_timeout_error() {
     .expect("the tool call itself must return once its own timeout_secs elapses");
 
     assert_eq!(result["error"], "timeout");
+}
+
+// ── raw-IPC DecisionResolved propagation (multi-window decision-sheet fix) ──
+//
+// The tests above drive `nostromo.ask_decision` purely through the MCP layer
+// (`McpServer`/`DaemonMcpBackend`), whose harness never touches a raw
+// `ServerMsg` broadcast — `McpServer` only speaks newline-delimited JSON-RPC
+// over its own socket. `ServerMsg::DecisionResolved` is broadcast over the
+// OTHER wire protocol: the length-prefixed `nostromo::ipc::Server` frames
+// that `MainLayout`/the GUI actually subscribe to. So these tests stand up
+// that raw `Server` instead (mirroring `tests/activity.rs`'s harness), wire
+// `DecisionRegistry::configure_broadcast` to it exactly as `nostromod.rs`
+// does, and drive the registry directly — there is no MCP tool call in any
+// of these tests.
+//
+// Note on naming: this file already defines module-level `write_frame`/
+// `read_frame` helpers (above) for the MCP layer's own JSONL framing. Rather
+// than import `nostromo::ipc::codec::{read_frame, write_frame}` under those
+// same names (which Rust won't allow — a `use` can't shadow a local item of
+// the same name in one scope), the raw-IPC helpers below are named
+// `raw_send`/`raw_recv`/... and call the codec functions via their full path.
+
+struct RawHarness {
+    _dir: TempDir,
+    server: Server,
+    decisions: Arc<Mutex<DecisionRegistry>>,
+    socket_path: std::path::PathBuf,
+}
+
+/// Stand up a raw `nostromo::ipc::Server` (NOT the MCP layer) with a fresh
+/// `DecisionRegistry`, and wire the registry's broadcast sender to the
+/// server's own `tx` — mirroring exactly what `src/bin/nostromd.rs` does
+/// right after `Server::bind` (`decisions.lock().unwrap().configure_broadcast(broadcast_tx.clone())`).
+fn make_raw_daemon_state() -> RawHarness {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("nostromod.sock");
+    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        dir.path().join("sessions.json"),
+    )));
+    let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
+
+    let server = Server::bind(
+        &socket_path,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        dir.path().join("perri-state"),
+        Arc::clone(&decisions),
+    )
+    .expect("raw server should bind");
+    decisions.lock().unwrap().configure_broadcast(server.tx.clone());
+
+    RawHarness {
+        _dir: dir,
+        server,
+        decisions,
+        socket_path,
+    }
+}
+
+/// Submit a request for `tag`/`prompt` with a standard two-choice set,
+/// broadcasting it exactly as `ask_decision.rs` does — `submit()` then, if it
+/// became the tag's active (broadcast-now) request, `server.tx.send(msg)` —
+/// and return the fresh `request_id`.
+fn submit_and_broadcast(harness: &RawHarness, tag: &str, prompt: &str) -> String {
+    let (request_id, _rx, broadcast_msg) = harness.decisions.lock().unwrap().submit(
+        tag.to_string(),
+        prompt.to_string(),
+        None,
+        vec![
+            DecisionChoice { id: "approve".into(), label: "Approve".into(), detail: None },
+            DecisionChoice { id: "reject".into(), label: "Reject".into(), detail: None },
+        ],
+        None,
+    );
+    if let Some(msg) = broadcast_msg {
+        let _ = harness.server.tx.send(msg);
+    }
+    request_id
+}
+
+async fn raw_send(stream: &mut UnixStream, msg: &ClientMsg) {
+    let bytes = serde_json::to_vec(msg).unwrap();
+    nostromo::ipc::codec::write_frame(stream, &bytes).await.unwrap();
+}
+
+async fn raw_recv(stream: &mut UnixStream) -> ServerMsg {
+    let bytes = tokio::time::timeout(Duration::from_secs(5), nostromo::ipc::codec::read_frame(stream))
+        .await
+        .expect("timed out waiting for a server frame")
+        .expect("read frame");
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Assert that no frame arrives on `stream` within `within` — used to prove a
+/// rejected second answer produces NO further wire traffic on any connection
+/// (a spurious notice here would read to the agent as a second, contradictory
+/// resolution nobody actually made).
+async fn raw_recv_none_within(stream: &mut UnixStream, within: Duration) {
+    if let Ok(frame_result) = tokio::time::timeout(within, nostromo::ipc::codec::read_frame(stream)).await {
+        let bytes = frame_result.expect("read frame");
+        let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap();
+        panic!("expected no frame to arrive, but got: {msg:?}");
+    }
+}
+
+/// Connect, Hello/Welcome, then Subscribe to `topics`. Mirrors
+/// `tests/activity.rs`'s `handshake()`. A short real sleep afterward gives
+/// the server a moment to finish registering this connection's subscription
+/// before the test starts driving the registry directly — the same kind of
+/// real-sleep synchronization this file already uses elsewhere
+/// (`wait_for_active_request`) for socket-level races a unit test wouldn't have.
+async fn raw_handshake(stream: &mut UnixStream, client_id: &str, topics: Vec<Topic>) {
+    raw_send(
+        stream,
+        &ClientMsg::Hello { client_id: client_id.into(), protocol_version: 4 },
+    )
+    .await;
+    assert!(matches!(raw_recv(stream).await, ServerMsg::Welcome { .. }));
+    raw_send(stream, &ClientMsg::Subscribe { topics }).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+/// A subscribed client sees the request, then — once answered directly on
+/// the registry — the matching `DecisionResolved { resolution: Answered, .. }`
+/// notice for that same request_id.
+#[tokio::test]
+async fn a_subscribed_client_receives_the_request_then_an_answered_resolved_notice_for_the_same_id() {
+    let harness = make_raw_daemon_state();
+    let mut stream = UnixStream::connect(&harness.socket_path).await.unwrap();
+    raw_handshake(&mut stream, "decision-it-answered", vec![Topic::Decision]).await;
+
+    let request_id = submit_and_broadcast(&harness, "mother", "Ship it?");
+
+    match raw_recv(&mut stream).await {
+        ServerMsg::DecisionRequest { request_id: wire_id, .. } => assert_eq!(wire_id, request_id),
+        other => panic!("expected DecisionRequest, got {other:?}"),
+    }
+
+    harness.decisions.lock().unwrap().answer(&request_id, Some("approve".into()));
+
+    match raw_recv(&mut stream).await {
+        ServerMsg::DecisionResolved { request_id: wire_id, resolution, choice_id, .. } => {
+            assert_eq!(wire_id, request_id);
+            assert_eq!(resolution, DecisionResolution::Answered);
+            assert_eq!(choice_id, Some("approve".into()));
+        }
+        other => panic!("expected DecisionResolved, got {other:?}"),
+    }
+}
+
+/// Same shape, but resolved via `timeout_request()`.
+#[tokio::test]
+async fn a_subscribed_client_receives_the_request_then_a_timeout_resolved_notice_for_the_same_id() {
+    let harness = make_raw_daemon_state();
+    let mut stream = UnixStream::connect(&harness.socket_path).await.unwrap();
+    raw_handshake(&mut stream, "decision-it-timeout", vec![Topic::Decision]).await;
+
+    let request_id = submit_and_broadcast(&harness, "mother", "Ship it?");
+    match raw_recv(&mut stream).await {
+        ServerMsg::DecisionRequest { .. } => {}
+        other => panic!("expected DecisionRequest, got {other:?}"),
+    }
+
+    harness.decisions.lock().unwrap().timeout_request(&request_id);
+
+    match raw_recv(&mut stream).await {
+        ServerMsg::DecisionResolved { request_id: wire_id, resolution, choice_id, .. } => {
+            assert_eq!(wire_id, request_id);
+            assert_eq!(resolution, DecisionResolution::Timeout);
+            assert_eq!(choice_id, None);
+        }
+        other => panic!("expected DecisionResolved, got {other:?}"),
+    }
+}
+
+/// Same shape, but resolved via `cancel_tag()`.
+#[tokio::test]
+async fn a_subscribed_client_receives_the_request_then_a_cancelled_resolved_notice_for_the_same_id() {
+    let harness = make_raw_daemon_state();
+    let mut stream = UnixStream::connect(&harness.socket_path).await.unwrap();
+    raw_handshake(&mut stream, "decision-it-cancelled", vec![Topic::Decision]).await;
+
+    let request_id = submit_and_broadcast(&harness, "mother", "Ship it?");
+    match raw_recv(&mut stream).await {
+        ServerMsg::DecisionRequest { .. } => {}
+        other => panic!("expected DecisionRequest, got {other:?}"),
+    }
+
+    harness.decisions.lock().unwrap().cancel_tag("mother");
+
+    match raw_recv(&mut stream).await {
+        ServerMsg::DecisionResolved { request_id: wire_id, resolution, .. } => {
+            assert_eq!(wire_id, request_id);
+            assert_eq!(resolution, DecisionResolution::Cancelled);
+        }
+        other => panic!("expected DecisionResolved, got {other:?}"),
+    }
+}
+
+/// The scenario that matters most for this fix: TWO windows (two IPC
+/// connections), both subscribed to `Topic::Decision`, both see the same
+/// request and its single resolution — and a second, contradictory answer
+/// (simulating the old bug: answering it twice from two different windows)
+/// is rejected outright and produces NO further frame on EITHER connection.
+#[tokio::test]
+async fn both_of_two_subscribed_clients_receive_the_request_and_its_resolution_and_a_second_contradictory_answer_reaches_neither(
+) {
+    let harness = make_raw_daemon_state();
+    let mut stream_a = UnixStream::connect(&harness.socket_path).await.unwrap();
+    raw_handshake(&mut stream_a, "decision-it-multi-a", vec![Topic::Decision]).await;
+    let mut stream_b = UnixStream::connect(&harness.socket_path).await.unwrap();
+    raw_handshake(&mut stream_b, "decision-it-multi-b", vec![Topic::Decision]).await;
+
+    let request_id = submit_and_broadcast(&harness, "mother", "Ship it?");
+
+    for stream in [&mut stream_a, &mut stream_b] {
+        match raw_recv(stream).await {
+            ServerMsg::DecisionRequest { request_id: wire_id, .. } => assert_eq!(wire_id, request_id),
+            other => panic!("expected DecisionRequest, got {other:?}"),
+        }
+    }
+
+    let first = harness.decisions.lock().unwrap().answer(&request_id, Some("approve".into()));
+    match first {
+        nostromo::ipc::decisions::AnswerOutcome::Answered { .. } => {}
+        other => panic!("the first, legitimate answer must succeed, got {other:?}"),
+    }
+
+    for stream in [&mut stream_a, &mut stream_b] {
+        match raw_recv(stream).await {
+            ServerMsg::DecisionResolved { request_id: wire_id, resolution, choice_id, .. } => {
+                assert_eq!(wire_id, request_id);
+                assert_eq!(resolution, DecisionResolution::Answered);
+                assert_eq!(choice_id, Some("approve".into()));
+            }
+            other => panic!("expected DecisionResolved, got {other:?}"),
+        }
+    }
+
+    // A second, contradictory answer arriving as if from the OTHER window
+    // after the fact — this is the exact bug being fixed: today the daemon
+    // guard swallows it, but nothing tells the other window's stale sheet to
+    // close, and nothing here must broadcast a second/conflicting notice.
+    let second = harness.decisions.lock().unwrap().answer(&request_id, Some("reject".into()));
+    match second {
+        nostromo::ipc::decisions::AnswerOutcome::AlreadyAnswered => {}
+        other => panic!("a second answer to an already-resolved request must be AlreadyAnswered, got {other:?}"),
+    }
+
+    raw_recv_none_within(&mut stream_a, Duration::from_millis(200)).await;
+    raw_recv_none_within(&mut stream_b, Duration::from_millis(200)).await;
 }

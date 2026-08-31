@@ -142,6 +142,24 @@ pub struct DecisionChoice {
     pub detail: Option<String>,
 }
 
+/// How a `ServerMsg::DecisionRequest` was ultimately resolved, carried on
+/// `ServerMsg::DecisionResolved` so every presenting window — not just the
+/// one the operator actually used — learns a request is done and can close
+/// its own sheet without answering (multi-window decision-sheet fix).
+/// Mirrors [`crate::ipc::decisions::DecisionOutcome`] on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionResolution {
+    /// The operator picked a choice (see the sibling `choice_id`).
+    Answered,
+    /// The operator dismissed the modal without choosing.
+    Dismissed,
+    /// Nobody answered within the caller's timeout.
+    Timeout,
+    /// The owning session went away while the request was outstanding.
+    Cancelled,
+}
+
 /// Metadata about a daemon-hosted persistent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -1176,6 +1194,22 @@ pub enum ServerMsg {
         /// A *reference* to a pane for context — never content itself (R7).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         context_pane_id: Option<String>,
+    },
+
+    /// A `DecisionRequest` has been resolved — answered, dismissed, timed
+    /// out, or cancelled (multi-window decision-sheet fix). Broadcast so
+    /// EVERY presenting window (not just the one the operator actually used)
+    /// can close its own sheet without itself sending an answer — a
+    /// system-initiated close must never look like an operator dismissal on
+    /// the wire. `choice_id` is present only when `resolution == Answered`;
+    /// absent from the wire entirely (not even `null`) otherwise, matching
+    /// `DecisionRequest.detail`'s convention.
+    DecisionResolved {
+        tag: String,
+        request_id: String,
+        resolution: DecisionResolution,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        choice_id: Option<String>,
     },
 
     // ── ambient activity (activity-path wedge) ───────────────────────────────
@@ -2438,6 +2472,105 @@ mod tests {
             vec!["id", "label"],
             "an absent detail must not appear as a key when constructing a DecisionChoice standalone"
         );
+    }
+
+    // ── DecisionResolution / ServerMsg::DecisionResolved (multi-window decision-sheet fix) ──
+    //
+    // Presenting a decision sheet on every open window (instead of once,
+    // app-wide) is the bug this whole job fixes. `DecisionResolved` is the
+    // notice that lets every window's sheet — not just the one the operator
+    // actually answered in — learn a request is done and close itself,
+    // WITHOUT that close itself looking like a fresh "dismissed" answer on
+    // the wire (a system-initiated close must never masquerade as an
+    // operator action). These tests pin the wire shape only; `DecisionRegistry`
+    // firing this notice from every resolution path lives in
+    // `src/ipc/decisions.rs`'s tests.
+
+    #[test]
+    fn every_decision_resolution_variant_round_trips_and_serializes_to_its_exact_wire_string() {
+        let cases = [
+            (DecisionResolution::Answered, "\"answered\""),
+            (DecisionResolution::Dismissed, "\"dismissed\""),
+            (DecisionResolution::Timeout, "\"timeout\""),
+            (DecisionResolution::Cancelled, "\"cancelled\""),
+        ];
+        for (variant, wire) in cases {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, wire, "DecisionResolution::{variant:?} must serialize as {wire}");
+            let back: DecisionResolution = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn decision_resolved_round_trips_with_a_choice_id() {
+        round_trip_server(ServerMsg::DecisionResolved {
+            tag: "mother".into(),
+            request_id: "req-6".into(),
+            resolution: DecisionResolution::Answered,
+            choice_id: Some("approve".into()),
+        });
+    }
+
+    #[test]
+    fn decision_resolved_round_trips_with_no_choice_id() {
+        round_trip_server(ServerMsg::DecisionResolved {
+            tag: "mother".into(),
+            request_id: "req-7".into(),
+            resolution: DecisionResolution::Dismissed,
+            choice_id: None,
+        });
+    }
+
+    /// `choice_id: None` must be indistinguishable on the wire from a message
+    /// that never had the field at all — same convention as
+    /// `decision_request_with_absent_optionals_omits_their_keys_entirely`.
+    #[test]
+    fn decision_resolved_with_no_choice_id_omits_the_choice_id_key_entirely() {
+        let v = serde_json::to_value(ServerMsg::DecisionResolved {
+            tag: "mother".into(),
+            request_id: "req-8".into(),
+            resolution: DecisionResolution::Timeout,
+            choice_id: None,
+        })
+        .unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("choice_id"),
+            "an absent choice_id must not appear as a key at all, not even null"
+        );
+
+        // And it still round-trips back to None.
+        round_trip_server(ServerMsg::DecisionResolved {
+            tag: "mother".into(),
+            request_id: "req-8".into(),
+            resolution: DecisionResolution::Timeout,
+            choice_id: None,
+        });
+    }
+
+    #[test]
+    fn decision_resolved_with_a_choice_id_present_includes_the_choice_id_key() {
+        let v = serde_json::to_value(ServerMsg::DecisionResolved {
+            tag: "mother".into(),
+            request_id: "req-8b".into(),
+            resolution: DecisionResolution::Answered,
+            choice_id: Some("approve".into()),
+        })
+        .unwrap();
+        assert_eq!(v["choice_id"], "approve");
+    }
+
+    #[test]
+    fn decision_resolved_type_tag_is_decision_resolved() {
+        let v = serde_json::to_value(ServerMsg::DecisionResolved {
+            tag: "mother".into(),
+            request_id: "req-9".into(),
+            resolution: DecisionResolution::Cancelled,
+            choice_id: None,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "decision_resolved");
     }
 
     // ── DiffStatus / DiffLineKind / DiffLine / DiffHunk / DiffFile (W2 — curated-agent-views)

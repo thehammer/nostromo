@@ -27,6 +27,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenu()
         AppStore.shared.start()
         AppStore.shared.startMemoryWatchdog()
+        // The single app-wide owner of decision-modal presentation — started
+        // once, here, so it's the ONLY subscriber to decision-request
+        // broadcasts no matter how many windows this launch ends up opening
+        // (see DecisionPresenter's header comment for why that matters).
+        DecisionPresenter.shared.start()
         TranscriptDiagnostics.startStreamingIfRequested()
         appLog.info("Opening windows for \(NSScreen.screens.count, privacy: .public) screen(s)")
         for (index, screen) in NSScreen.screens.enumerated() {

@@ -69,14 +69,23 @@ class AppStore: ObservableObject {
     // focus view being visible. `.healthy` entries are omitted (implicitly healthy).
     @Published private(set) var sessionHealth: [String: SessionHealth] = [:]
 
-    // Daemon-driven decision modal (W6). A single flat slot rather than a
-    // per-tag map: only one sheet is ever shown at a time (out of scope: a
-    // decision-queue UI), and the daemon enforces at most one outstanding
-    // request per *focus tag* on the wire — this slot just tracks whichever
-    // one most recently arrived. Overwritten (not queued) on every new
-    // `decision_request` frame; `MainLayout` presents it and clears it once
-    // answered or dismissed.
-    @Published private(set) var pendingDecision: PendingDecision?
+    // Daemon-driven decision modal (multi-window decision-sheet fix). Plain
+    // `PassthroughSubject`s, NOT `@Published` — deliberately. `@Published`
+    // replays its CURRENT value to every new subscriber, which is exactly
+    // how a window opened mid-decision (a display attached while a request
+    // is outstanding) would acquire a duplicate sheet the instant it
+    // subscribes. A subject has no replay: a late subscriber sees nothing
+    // until the next event, so presentation stays keyed to a single
+    // subscriber (`DecisionPresenter`) rather than to "whoever's listening
+    // right now". Same precedent as `FileWatchers.shared.thresholdEvents`.
+    //
+    // `decisionRequests` fires once per `decision_request` frame;
+    // `decisionResolutions` fires once per `decision_resolved` frame (the
+    // backstop that lets `DecisionPresenter` close a live sheet for reasons
+    // the app itself couldn't otherwise know about: a timeout, a cancelled
+    // session, or a second connected client).
+    let decisionRequests = PassthroughSubject<PendingDecision, Never>()
+    let decisionResolutions = PassthroughSubject<ResolvedDecision, Never>()
 
     // MARK: - Internals
 
@@ -150,18 +159,15 @@ class AppStore: ObservableObject {
 
     func setActiveFocusAgentTag(_ tag: String?) { activeFocusAgentTag = tag }
 
-    // MARK: - Decision modal (W6)
+    // MARK: - Decision modal (multi-window decision-sheet fix)
 
-    /// Send the operator's answer to the daemon and clear `pendingDecision` if
-    /// it's still the one being answered — a later `decision_request` may
-    /// already have overwritten it (see `pendingDecision`'s doc comment).
-    /// Recording the answer into `DecisionStore` is `DecisionSheet`'s job, not
-    /// this one — this method only forwards the answer over the wire.
+    /// Forward the operator's answer to the daemon. Claiming the answer into
+    /// `DecisionStore` is `DecisionSheet`'s job, not this one (it happens
+    /// before this is even called) — this method only puts the frame on the
+    /// wire. There is no local state here to clear: liveness/presentation
+    /// tracking lives entirely in `DecisionStore`/`DecisionPresenter` now.
     func answerDecision(requestId: String, choiceId: String?) {
         client.decisionAnswer(requestId: requestId, choiceId: choiceId)
-        if pendingDecision?.requestId == requestId {
-            pendingDecision = nil
-        }
     }
 
     // MARK: - Ambient activity (activity-path wedge)
@@ -861,12 +867,15 @@ class AppStore: ObservableObject {
             focusLayouts[tag] = model
 
         case .decisionRequest(let tag, let requestId, let prompt, let detail, let choices, let contextPaneId):
-            // Overwrites any prior pending decision — see the property's doc
-            // comment for why a single flat slot is correct here. `MainLayout`
-            // observes this and presents the sheet; nothing here decides
-            // presentation or touches `DecisionStore`.
-            pendingDecision = PendingDecision(tag: tag, requestId: requestId, prompt: prompt,
-                                              detail: detail, choices: choices, contextPaneId: contextPaneId)
+            // Published once, to whichever single subscriber is listening
+            // (`DecisionPresenter`) — nothing here decides presentation or
+            // touches `DecisionStore`.
+            decisionRequests.send(PendingDecision(tag: tag, requestId: requestId, prompt: prompt,
+                                                  detail: detail, choices: choices, contextPaneId: contextPaneId))
+
+        case .decisionResolved(let tag, let requestId, let resolution, let choiceId):
+            decisionResolutions.send(ResolvedDecision(tag: tag, requestId: requestId,
+                                                       resolution: resolution, choiceId: choiceId))
 
         case .focusCreated(let meta):
             // An agent-spawned focus was created — add it to FocusStore so the

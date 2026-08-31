@@ -144,6 +144,11 @@ enum ServerMsg {
     /// a fixed set of choices and is blocked awaiting the operator's answer.
     case decisionRequest(tag: String, requestId: String, prompt: String, detail: String?,
                          choices: [DecisionChoiceWire], contextPaneId: String?)
+    /// A decision request was resolved — answered, dismissed, timed out, or
+    /// its owning session went away (multi-window decision-sheet fix). Lets
+    /// every window's sheet for the same request learn it's done and close
+    /// itself without itself sending an answer.
+    case decisionResolved(tag: String, requestId: String, resolution: String, choiceId: String?)
 
     // ── ambient activity (activity-path wedge) ───────────────────────────────
     /// Full snapshot of one focus's activity streams — replayed on attach and
@@ -824,6 +829,12 @@ class NostromodClient {
                                         contextPaneId: m.context_pane_id)
             }
 
+        case "decision_resolved":
+            if let m = try? decoder.decode(DecisionResolvedResp.self, from: raw) {
+                return .decisionResolved(tag: m.tag, requestId: m.request_id,
+                                         resolution: m.resolution, choiceId: m.choice_id)
+            }
+
         // ── ambient activity (activity-path wedge) ───────────────────────────
         case "activity_snapshot":
             if let m = try? decoder.decode(ActivitySnapshotResp.self, from: raw) {
@@ -885,6 +896,13 @@ private struct DecisionRequestResp: Decodable {
     let detail: String?
     let choices: [DecisionChoiceWire]
     let context_pane_id: String?
+}
+
+private struct DecisionResolvedResp: Decodable {
+    let tag: String
+    let request_id: String
+    let resolution: String
+    let choice_id: String?
 }
 
 // MARK: - Inbound session response wrappers (decoded from the raw frame)
