@@ -71,59 +71,23 @@ struct PaneSurfaceView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .unknown(let raw):
                 ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            // `.code`/`.diff` are out of scope for iOS rendering in this wedge
-            // (the PRD is explicit: no tabs, code views, or modals on iOS in
-            // v1) — these exist only so this switch stays exhaustive against
-            // the shared wire type. `.code` at least has a plain `text` field
-            // worth showing as-is; `.diff`'s structured per-file model has no
-            // simple text equivalent, so it gets a placeholder instead of a
-            // half-built rendering nobody asked for.
-            case .code(let payload):
-                ScrollView { textView(payload.text) }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .diff:
-                ScrollView {
-                    VStack(spacing: 8) {
-                        Spacer(minLength: 60)
-                        Text("Diff view isn't available on iOS yet.")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 16)
-                        Spacer()
-                    }.frame(maxWidth: .infinity)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            // `.prConversation` (W3) is likewise out of scope for iOS
-            // rendering in v1 — its server-parsed markdown blocks have no
-            // simple text equivalent, so it gets the same placeholder
-            // treatment as `.diff` rather than a half-built rendering.
-            case .prConversation:
-                ScrollView {
-                    VStack(spacing: 8) {
-                        Spacer(minLength: 60)
-                        Text("PR conversation isn't available on iOS yet.")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 16)
-                        Spacer()
-                    }.frame(maxWidth: .infinity)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            // `.ticket` (W4) is likewise out of scope for iOS rendering in
-            // v1 — its server-parsed markdown sections have no simple text
-            // equivalent, so it gets the same placeholder treatment as
-            // `.diff`/`.prConversation`.
-            case .ticket:
-                ScrollView {
-                    VStack(spacing: 8) {
-                        Spacer(minLength: 60)
-                        Text("Ticket view isn't available on iOS yet.")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 16)
-                        Spacer()
-                    }.frame(maxWidth: .infinity)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            // `.code`/`.diff`/`.prConversation`/`.ticket` are honest deferrals,
+            // not half-built renderings — the PRD's organizing rule is that a
+            // surface may be absent or simplified but must never look
+            // complete when it isn't. `.code` used to dump its raw file
+            // contents into a monospaced Text here: no gutter, no
+            // scroll-to-anchor, no emphasis, discarding the path/revision/
+            // first-line fields entirely — exactly the half-rendering that
+            // rule forbids, and it is deleted rather than kept (W7 replaces
+            // it with a real renderer). Each stub below names the specific
+            // addressing it cannot show, not just that something is missing;
+            // `PaneSurfaceStub` (NostromoKit) is the single source of that
+            // wording so W7/W8/W9 delete a table entry instead of hunting a
+            // string in a view.
+            case .code, .diff, .prConversation, .ticket:
+                if let content, let message = PaneSurfaceStub.message(for: content) {
+                    stubView(headline: message.headline, detail: message.detail)
+                }
             }
         }
         // D11: a quiet as-of footnote when this pane's data hasn't refreshed in
@@ -237,6 +201,31 @@ struct PaneSurfaceView: View {
         formatter.dateStyle = .none
         formatter.timeStyle = .short
         return "stale · as of \(formatter.string(from: asOf))"
+    }
+
+    // MARK: - Stub renderer (deferred content kinds)
+
+    /// Honest-deferral rendering for a content kind iOS doesn't have a real
+    /// renderer for yet. `detail` is required, not optional — a stub that
+    /// says only "isn't available" is an absence; naming the missing
+    /// addressing is what makes the deferral legible (see `PaneSurfaceStub`).
+    private func stubView(headline: String, detail: String) -> some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                Spacer(minLength: 60)
+                Text(headline)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                Text(detail)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                Spacer()
+            }.frame(maxWidth: .infinity)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Text / JSON renderers
