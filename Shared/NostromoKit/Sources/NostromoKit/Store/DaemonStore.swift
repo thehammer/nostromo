@@ -64,6 +64,35 @@ public final class DaemonStore: ObservableObject {
     /// Whether the daemon connection is currently alive.
     @Published public private(set) var connected: Bool = false
 
+    // MARK: - Ambient activity (ios-curated-view-parity W4)
+
+    /// One assembled `ActivityStreamModel` per focus tag, keyed by
+    /// `ActivityEvent.focusTag` (or `unattributedActivityKey` for events the
+    /// daemon couldn't resolve to a known focus — never dropped, never
+    /// guessed onto an arbitrary tab).
+    @Published public private(set) var activityModels: [String: ActivityStreamModel] = [:]
+
+    /// Daemon-wide ambient-activity ingestion health (not per-focus — the
+    /// daemon's `ActivityHealth` broadcast describes its own ingest, not one
+    /// focus's). Defaults optimistic until the first real frame arrives.
+    @Published public private(set) var activityHealth = ActivityHealthState(
+        ingesting: true, reason: nil, lastEventAt: nil, hookInstalled: true)
+
+    /// Key `activityModels` is stored under for an event the daemon could
+    /// not attribute to a known focus.
+    public static let unattributedActivityKey = "__unattributed__"
+
+    /// Tags with an outstanding `ClientActivitySnapshotRequest` — set on a
+    /// detected gap, cleared once that tag's `activitySnapshot` arrives.
+    /// Exposed so the one-outstanding-request-per-tag rate limit (D8) is
+    /// directly testable without inspecting the socket (`NetworkClient.send`
+    /// no-ops silently with no live connection in tests).
+    @Published public private(set) var pendingActivitySnapshotRequests: Set<String> = []
+
+    /// Count of `ClientActivitySnapshotRequest` frames actually sent, per
+    /// tag — the test-observable stand-in for "was the wire message sent."
+    @Published public private(set) var activitySnapshotRequestCount: [String: Int] = [:]
+
     // MARK: - Dependencies
 
     public let client: NetworkClient
@@ -98,6 +127,19 @@ public final class DaemonStore: ObservableObject {
     /// Request a fresh `FocusListResp` from the daemon.
     public func refreshFocuses() {
         client.send(ClientFocusList())
+    }
+
+    /// Request a full ambient-activity snapshot for `tag` (D8). Rate-limited
+    /// to one outstanding request per tag so a burst of gaps on a cellular
+    /// link cannot produce a request storm — a constraint macOS's `AppStore`
+    /// doesn't need because a Mac's link isn't the bottleneck. The pending
+    /// marker is cleared when that tag's `activitySnapshot` arrives
+    /// (`handle(_:)`), so a later gap can request again.
+    public func requestActivitySnapshot(tag: String) {
+        guard !pendingActivitySnapshotRequests.contains(tag) else { return }
+        pendingActivitySnapshotRequests.insert(tag)
+        activitySnapshotRequestCount[tag, default: 0] += 1
+        client.send(ClientActivitySnapshotRequest(tag: tag))
     }
 
     /// Send a Mother job action to the daemon.
@@ -143,6 +185,14 @@ public final class DaemonStore: ObservableObject {
                     self?.fredMailbox    = nil
                     self?.fredCalendar   = nil
                     self?.teriTodos      = nil
+                    // A reconnect starts fresh and says so — never
+                    // resurrects pre-drop events (D8's client half of the
+                    // PRD's "no persistence across a drop" requirement).
+                    self?.activityModels = [:]
+                    self?.activityHealth = ActivityHealthState(
+                        ingesting: false, reason: "disconnected", lastEventAt: nil,
+                        hookInstalled: self?.activityHealth.hookInstalled ?? true)
+                    self?.pendingActivitySnapshotRequests = []
                 }
             }
             .store(in: &cancellables)
@@ -275,6 +325,34 @@ public final class DaemonStore: ObservableObject {
             if focusLayouts[meta.tag] == nil {
                 focusLayouts[meta.tag] = FocusLayoutModel.initial
             }
+
+        case .activity(let ev):
+            let tag = ev.focusTag ?? Self.unattributedActivityKey
+            var model = activityModels[tag] ?? ActivityStreamModel()
+            let gapDetected = model.ingest(ev)
+            activityModels[tag] = model
+            if gapDetected {
+                // A seq gap means this stream may already be presenting an
+                // incomplete record — re-sync from a full daemon snapshot
+                // rather than silently continue with a hole in the history.
+                requestActivitySnapshot(tag: tag)
+            }
+
+        case .activitySnapshot(let tag, let streams):
+            var model = ActivityStreamModel()
+            for stream in streams {
+                for event in stream.events {
+                    model.ingest(event)
+                }
+            }
+            activityModels[tag] = model
+            // The snapshot this gap asked for has arrived — a later gap for
+            // this tag is free to request another.
+            pendingActivitySnapshotRequests.remove(tag)
+
+        case .activityHealth(let ingesting, let reason, let lastEventAt, let hookInstalled):
+            activityHealth = ActivityHealthState(
+                ingesting: ingesting, reason: reason, lastEventAt: lastEventAt, hookInstalled: hookInstalled)
 
         default:
             break

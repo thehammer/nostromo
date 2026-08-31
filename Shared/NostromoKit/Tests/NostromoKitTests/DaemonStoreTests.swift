@@ -128,3 +128,219 @@ final class DaemonStoreTests: XCTestCase {
         XCTAssertEqual(pane2, .loading, "pane2 has no prior content, so .loading is stored as first paint")
     }
 }
+
+// MARK: - DaemonStoreActivityTests
+
+/// Verifies `DaemonStore`'s handling of the three ambient-activity broadcasts
+/// (`.activity` / `.activitySnapshot` / `.activityHealth`) — per-focus
+/// attribution (including the unattributed bucket, never dropped), snapshot
+/// replacement scoped to one tag, the D8 rate-limited gap-triggered
+/// resnapshot request, and daemon-wide health storage. Same construction
+/// technique as `DaemonStoreTests` above: a real `NetworkClient` that never
+/// calls `start()` (so no socket ever opens), messages pushed directly
+/// through its public `messages` subject, and a short sleep after each send
+/// to let `DaemonStore`'s `.receive(on: RunLoop.main)` pipeline flush.
+final class DaemonStoreActivityTests: XCTestCase {
+
+    private func deliver(_ msg: ServerMsg, via client: NetworkClient) async {
+        await client.messages.send(msg)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+    }
+
+    /// `ActivityEvent` has no hand-written initializer — this uses the
+    /// compiler-synthesized memberwise init, matching the real field list:
+    /// ts, agent, kind, summary, focusTag, sessionId, agentId, agentType,
+    /// parentAgentId, toolName, toolUseId, cwd, seq.
+    private func makeEvent(
+        agent: String = "perri",
+        kind: String = "tool_use",
+        summary: String = "reading a file",
+        focusTag: String? = "perri",
+        agentId: String? = nil,
+        seq: UInt64? = nil
+    ) -> ActivityEvent {
+        ActivityEvent(
+            ts: Date(), agent: agent, kind: kind, summary: summary,
+            focusTag: focusTag, sessionId: nil,
+            agentId: agentId, agentType: nil, parentAgentId: nil,
+            toolName: nil, toolUseId: nil, cwd: nil, seq: seq)
+    }
+
+    // MARK: - Per-focus attribution
+
+    func testActivityEventWithAFocusTagLandsUnderThatTagsActivityModelOnly() async throws {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(.activity(makeEvent(summary: "perri's event", focusTag: "perri")), via: client)
+
+        let perriMain = await store.activityModels["perri"]?.mainStream
+        XCTAssertEqual(perriMain?.events.map(\.summary), ["perri's event"])
+
+        let fredModel = await store.activityModels["fred"]
+        XCTAssertTrue(
+            fredModel == nil || (fredModel?.mainStream?.events.contains { $0.summary == "perri's event" } != true),
+            "an event tagged for 'perri' must never appear under a different focus's model"
+        )
+    }
+
+    // MARK: - Cross-focus isolation
+
+    func testActivityEventWithADifferentFocusTagNeverAppearsUnderAnUnrelatedTag() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(.activity(makeEvent(summary: "fred's event", focusTag: "fred")), via: client)
+
+        let perriMain = await store.activityModels["perri"]?.mainStream
+        XCTAssertFalse(
+            perriMain?.events.contains { $0.summary == "fred's event" } ?? false,
+            "an event tagged for 'fred' must never appear under 'perri'"
+        )
+    }
+
+    // MARK: - Unattributed events are reachable, not dropped
+
+    func testActivityEventWithNoFocusTagLandsUnderTheUnattributedKey() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(.activity(makeEvent(summary: "mystery event", focusTag: nil)), via: client)
+
+        let unattributed = await store.activityModels[DaemonStore.unattributedActivityKey]?.mainStream
+        XCTAssertEqual(unattributed?.events.map(\.summary), ["mystery event"],
+                        "an event the daemon could not attribute must still be reachable, not silently dropped")
+    }
+
+    // MARK: - Snapshot replaces one tag wholesale, leaves others untouched
+
+    func testActivitySnapshotReplacesOnlyItsOwnTagsModelLeavingOtherTagsUntouched() async throws {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        // Live event for tag "a".
+        await deliver(.activity(makeEvent(summary: "a's live event", focusTag: "a")), via: client)
+        // Separately-populated tag "b".
+        await deliver(.activity(makeEvent(summary: "b's event", focusTag: "b")), via: client)
+
+        // A snapshot for "a" with entirely different content.
+        let snapshotEvent = makeEvent(summary: "a's snapshot event", focusTag: "a")
+        let snapshotStream = ActivityStreamWireFixture.make(events: [snapshotEvent], finished: false)
+        await deliver(.activitySnapshot(tag: "a", streams: [snapshotStream]), via: client)
+
+        let aMain = await store.activityModels["a"]?.mainStream
+        XCTAssertEqual(aMain?.events.map(\.summary), ["a's snapshot event"],
+                        "a's model must reflect the snapshot's content, not the earlier live event")
+
+        let bMain = await store.activityModels["b"]?.mainStream
+        XCTAssertEqual(bMain?.events.map(\.summary), ["b's event"],
+                        "tag 'b' must be untouched by a snapshot delivered for tag 'a'")
+    }
+
+    // MARK: - Gap-triggered resnapshot request, rate-limited to one outstanding per tag (D8)
+
+    func testAGapTriggersExactlyOneOutstandingSnapshotRequestPerTagUntilTheSnapshotArrives() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "gapper"
+
+        // seq 1 then seq 5 — a gap (2,3,4 skipped) on tag "gapper"'s main stream.
+        await deliver(.activity(makeEvent(focusTag: tag, seq: 1)), via: client)
+        await deliver(.activity(makeEvent(focusTag: tag, seq: 5)), via: client)
+
+        var pending = await store.pendingActivitySnapshotRequests
+        var counts  = await store.activitySnapshotRequestCount
+        XCTAssertTrue(pending.contains(tag), "a detected gap must mark the tag as having an outstanding snapshot request")
+        XCTAssertEqual(counts[tag], 1, "exactly one snapshot request must be issued for the first gap")
+
+        // A second gap on the same tag while the request is still outstanding
+        // must NOT trigger a second send (D8 rate limit).
+        await deliver(.activity(makeEvent(focusTag: tag, seq: 10)), via: client)
+
+        counts = await store.activitySnapshotRequestCount
+        XCTAssertEqual(counts[tag], 1, "a second gap while a request is already outstanding must not issue another")
+
+        // The snapshot arrives, clearing the outstanding-request marker for this tag.
+        await deliver(.activitySnapshot(tag: tag, streams: []), via: client)
+
+        pending = await store.pendingActivitySnapshotRequests
+        XCTAssertFalse(pending.contains(tag), "an arriving snapshot must clear the tag's outstanding-request marker")
+
+        // A fresh baseline, then a fresh gap after the snapshot must be free to
+        // trigger a second request.
+        await deliver(.activity(makeEvent(focusTag: tag, seq: 1)), via: client)
+        await deliver(.activity(makeEvent(focusTag: tag, seq: 5)), via: client)
+
+        counts = await store.activitySnapshotRequestCount
+        XCTAssertEqual(counts[tag], 2, "a new gap after the outstanding request cleared must issue a second request")
+    }
+
+    // MARK: - Health is stored once, daemon-wide, with lastEventAt retained
+
+    func testActivityHealthIsStoredDaemonWideIncludingLastEventAt() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let lastEventAt = Date(timeIntervalSince1970: 1_800_000_000)
+
+        await deliver(
+            .activityHealth(ingesting: false, reason: "socket closed", lastEventAt: lastEventAt, hookInstalled: true),
+            via: client
+        )
+
+        let health = await store.activityHealth
+        XCTAssertEqual(health.ingesting, false)
+        XCTAssertEqual(health.reason, "socket closed")
+        XCTAssertEqual(health.hookInstalled, true)
+        XCTAssertEqual(health.lastEventAt, lastEventAt,
+                        "lastEventAt must be retained (D2) — unlike macOS's AppStore, this wedge keeps it")
+    }
+
+    // MARK: - Disconnect clears activity state
+
+    /// `NetworkClient.connected` is `@Published public private(set)`, so test
+    /// code outside `NetworkClient.swift` cannot assign `client.connected =
+    /// false` directly, and calling `client.start()` would open a real
+    /// socket — not acceptable in this suite. The only public, non-socket-
+    /// opening seam that re-drives `DaemonStore`'s "not connected" handling
+    /// is `client.stop()`: it unconditionally sets `connected = false`, and
+    /// `@Published` republishes on every assignment regardless of whether
+    /// the value actually changed, so this exercises the exact
+    /// `$connected`-driven clearing branch in `DaemonStore.bind()` — just not
+    /// a genuine "was connected, then disconnected" transition, since we
+    /// never called `start()` to begin with. This is the strongest test the
+    /// current `NetworkClient` API surface allows; if `connected` ever grows
+    /// a test-only setter, this test should be upgraded to drive a real
+    /// true-to-false transition.
+    func testStoppingTheClientClearsActivityState() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(.activity(makeEvent(summary: "will be cleared", focusTag: "perri")), via: client)
+        let beforeStop = await store.activityModels["perri"]?.mainStream?.events.count
+        XCTAssertEqual(beforeStop, 1, "sanity check: the event must be stored before we stop the client")
+
+        await client.stop()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        let afterStop = await store.activityModels
+        XCTAssertTrue(afterStop.isEmpty || afterStop["perri"]?.mainStream == nil,
+                       "activity state must be cleared on disconnect, same as sessions/focuses/mother jobs")
+    }
+}
+
+/// Tiny helper for constructing `ActivityStreamWire` fixtures in tests.
+/// `ActivityStreamWire` has no hand-written initializer either, so this uses
+/// its compiler-synthesized memberwise init directly.
+private enum ActivityStreamWireFixture {
+    static func make(
+        agentId: String? = nil,
+        agentType: String? = nil,
+        parentAgentId: String? = nil,
+        events: [ActivityEvent],
+        finished: Bool
+    ) -> ActivityStreamWire {
+        ActivityStreamWire(
+            agentId: agentId, agentType: agentType, parentAgentId: parentAgentId,
+            events: events, finished: finished)
+    }
+}

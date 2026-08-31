@@ -230,6 +230,16 @@ what they show.
 See `docs/ios-verification.md` for how this rendering is verified given
 `iOS/Nostromo.xcodeproj` has no test target.
 
+Ambient activity (`ios-curated-view-parity` W4) is a related but separate
+surface, deliberately not a pane or a tab: the `activity` view type never
+reaches the pane tree on either platform (R1), so it doesn't appear in
+`PaneSurfaceView`'s switch above. It's the always-present
+`ActivityTickerBar`/`ActivityStreamsSheet` pair in
+`iOS/Nostromo/Views/Activity/`, composed by `DynamicFocusView` above
+`TranscriptView`'s input bar (or as a plain bottom inset on a non-repl
+surface). See `docs/activity.md` for the full ambient-activity picture,
+including where iOS's client-side retention bounds diverge from macOS's.
+
 ---
 
 ## `PaneAddress` — anchor, emphasis, and reason (curated-agent-views W1)

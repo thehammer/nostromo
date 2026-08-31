@@ -129,6 +129,48 @@ simulator, anywhere, ever (see below), so the only way to get L3's
 signal — "does this actually compile for the real target" — is against
 real hardware, which CI doesn't have.
 
+## Worked example: ambient activity (W4)
+
+`ios-curated-view-parity` W4 (the always-present activity ticker) is a
+useful worked example of how the three layers divide a single feature's
+criteria, because most of what makes the ticker trustworthy is provable
+without a device at all:
+
+- **L1** (`ActivityStreamModelTests.swift`, `ActivityWireTests.swift`,
+  `DaemonStoreTests.swift`): stream assembly and subagent nesting, the
+  ticker's three-state text (waiting / event / N-agents-active), both
+  not-ingesting health messages and `displayText`'s health-wins rule,
+  `seq`-gap detection and per-stream isolation, wire decode correctness for
+  all three `ServerMsg` activity cases, per-focus attribution and the
+  reserved unattributed key, gap→snapshot-request with its one-outstanding-
+  per-tag rate limit, and — the part macOS's own model doesn't have to
+  prove — bounded retention: the per-stream and store-wide caps, the
+  finished-before-running-before-main reclaim order, and that the ticker
+  still has something to show after a reclaim.
+- **L2** (`tests/ios_policy/test_ios_view_policy.py`): the ticker's
+  fixed-height single-line shape (the mechanism that keeps an arriving
+  event from resizing the transcript's bottom inset and shifting its scroll
+  offset), that no file under `Views/Activity/` ever scrolls, steals first
+  responder, or hides behind `UserDefaults`/`@AppStorage`/a `Toggle`, that
+  `TranscriptView`'s autoscroll is still keyed only on `store.turns.count`,
+  that no raw `tool_input`/`cwd`/`tool_use_id` is ever read, and that the
+  expanded sheet is presented from the focus view rather than from
+  `TranscriptView` or `PaneSurfaceView`.
+- **L3** (`make ios-build`): that the two new files compile and are
+  actually wired into the app target's build phase.
+
+What's left over — genuinely **UI-observable only**, provable at neither L1
+nor L2 nor L3 — is exactly the property that motivated the feature in the
+first place: that watching the ticker update, on a real device, while
+holding the transcript scrolled to a fixed position, produces no visible
+motion at all. No text-scan or compile check can observe a pixel not
+moving; the manual verification steps in the wedge's plan (scroll, hold,
+watch several events arrive) are the only check that exists for it, and a
+build that passes L1–L3 is a necessary but not sufficient signal that this
+property holds. The same is true of the long-fan-out memory plateau — L1
+proves the cap arithmetic is right, but only Xcode's memory gauge over a
+real extended session shows the cap actually holding operationally.
+
 ## Why no simulator, anywhere
 
 It would be easy to ask: why not add an `xcodebuild test -destination

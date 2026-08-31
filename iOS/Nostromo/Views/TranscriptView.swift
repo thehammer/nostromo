@@ -13,12 +13,18 @@
 import SwiftUI
 import NostromoKit
 
-struct TranscriptView: View {
+struct TranscriptView<Accessory: View>: View {
     let tag:         String
     let displayName: String
     let agentName:   String
     let viewName:    String
     let client:      NetworkClient
+    /// The ambient-activity ticker (ios-curated-view-parity W4), composed
+    /// above the input bar inside this view's own bottom safe-area inset —
+    /// NOT a second `safeAreaInset` (that would land below the input bar
+    /// instead of above it). Owned and injected by `DynamicFocusView`; this
+    /// view knows nothing about `ActivityStreamModel`/`DaemonStore`.
+    let bottomAccessory: () -> Accessory
 
     @StateObject private var store: TranscriptStore
     @State private var draft = ""
@@ -27,12 +33,16 @@ struct TranscriptView: View {
     @State private var showRestartConfirm     = false
     @State private var showNewSessionConfirm  = false
 
-    init(tag: String, displayName: String, agentName: String, viewName: String, client: NetworkClient) {
+    init(
+        tag: String, displayName: String, agentName: String, viewName: String, client: NetworkClient,
+        @ViewBuilder bottomAccessory: @escaping () -> Accessory
+    ) {
         self.tag = tag
         self.displayName = displayName
         self.agentName = agentName
         self.viewName = viewName
         self.client = client
+        self.bottomAccessory = bottomAccessory
         _store = StateObject(wrappedValue: TranscriptStore(client: client))
     }
 
@@ -53,9 +63,12 @@ struct TranscriptView: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
-            InputBar(draft: $draft) {
-                store.send(draft)
-                draft = ""
+            VStack(spacing: 0) {
+                bottomAccessory()
+                InputBar(draft: $draft) {
+                    store.send(draft)
+                    draft = ""
+                }
             }
         }
         .navigationTitle(displayName)
