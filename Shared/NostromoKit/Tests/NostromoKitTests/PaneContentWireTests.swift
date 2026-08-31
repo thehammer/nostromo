@@ -618,6 +618,41 @@ final class PaneContentWireTests: XCTestCase {
         XCTAssertFalse(prItem().toRowModel().marked)
     }
 
+    /// D6 (ios-curated-view-parity W2): marking is visual only. An address
+    /// pointing at row A must mark row A's model and leave row B's model
+    /// unmarked, and — the part a bare `marked == true/false` assertion
+    /// doesn't cover — must not perturb any *other* field of either row.
+    /// `PerriPRRowModel.marked`'s own doc comment states the invariant this
+    /// pins: marking never touches selection, current-PR state, or what a
+    /// swipe-to-approve acts on. Comparing the whole model against what
+    /// `toRowModel(marked: false)` would have produced, field by field via
+    /// `==`, is what catches a future change that starts threading `marked`
+    /// into some other field's computation.
+    func testMarkingOneRowLeavesEveryOtherFieldOfBothRowModelsUnchanged() {
+        let address = PaneAddress(
+            anchor:   .queueRow(repo: "acme/web", number: 42),
+            emphasis: [],
+            reason:   nil
+        )
+        let rowA = prItem(number: 42)
+        let rowB = prItem(number: 43)
+
+        let markedA   = rowA.toRowModel(marked: address.marks(repo: "acme/web", number: 42))
+        let unmarkedA = rowA.toRowModel(marked: false)
+        XCTAssertTrue(markedA.marked)
+        XCTAssertEqual(markedA.id, unmarkedA.id)
+        XCTAssertEqual(markedA.number, unmarkedA.number)
+        XCTAssertEqual(markedA.title, unmarkedA.title)
+        XCTAssertEqual(markedA.repo, unmarkedA.repo)
+        XCTAssertEqual(markedA.author, unmarkedA.author)
+        XCTAssertEqual(markedA.bucket, unmarkedA.bucket)
+        XCTAssertEqual(markedA.ciState, unmarkedA.ciState)
+        XCTAssertEqual(markedA.newActivity, unmarkedA.newActivity)
+
+        let rowBModel = rowB.toRowModel(marked: address.marks(repo: "acme/web", number: 43))
+        XCTAssertEqual(rowBModel, rowB.toRowModel(marked: false), "row B is untouched by an address that points at row A")
+    }
+
     // MARK: - Existing kinds still decode (regression)
 
     func testTextKindStillDecodes() throws {
