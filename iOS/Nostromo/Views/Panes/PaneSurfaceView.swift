@@ -184,7 +184,7 @@ struct PaneSurfaceView: View {
                         Section(bucket.label) {
                             ForEach(group) { item in
                                 NostromoKit.PerriPRRow(
-                                    model:  item.toRowModel(),
+                                    model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                     onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
                                     onClear: {}
                                 )
@@ -209,7 +209,7 @@ struct PaneSurfaceView: View {
                     Section("Other") {
                         ForEach(overflow) { item in
                             NostromoKit.PerriPRRow(
-                                model:  item.toRowModel(),
+                                model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                 onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
                                 onClear: {}
                             )
