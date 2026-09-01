@@ -93,6 +93,27 @@ final class TicketContentView: NSView {
         applyAddress(address)
     }
 
+    /// Drop everything this view is holding — called by
+    /// `PaneContentNSView.update` the moment a pane stops rendering the
+    /// `ticket` kind, so a later re-show can never resurface a previous
+    /// ticket's text/emphasis, and `lastRendered` can never suppress a
+    /// repaint the pane actually needs.
+    ///
+    /// Trade-off, stated on purpose (mirrors `CodeContentView.clearContent()`):
+    /// this gives up preserving scroll position across a kind flip-and-back,
+    /// in exchange for never resurfacing stale content as though it were
+    /// current — the right trade for a code-review tool.
+    ///
+    /// Must NOT touch `scrollView`/`textView`'s identity or remove either
+    /// from the hierarchy — this view is still built once and never torn
+    /// down, it just stops showing stale content while hidden.
+    func clearContent() {
+        lastRendered = nil
+        lastAddress = nil
+        document = nil
+        textView.textStorage?.setAttributedString(NSAttributedString())
+    }
+
     // MARK: - Addressing
 
     private func applyAddress(_ address: PaneAddress?) {
