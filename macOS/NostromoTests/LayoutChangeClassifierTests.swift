@@ -188,6 +188,82 @@ final class LayoutChangeClassifierTests: XCTestCase {
         )
         XCTAssertEqual(LayoutChangeClassifier.classify(old: old, new: new), .activeTabOnly(paths: ["root.1.0"]))
     }
+
+    // MARK: - Path-scheme agreement with PaneRenderPlan
+
+    // LayoutChangeClassifier.swift:52-57 asserts, in a comment, that this
+    // classifier's dotted path scheme agrees with the other implementations
+    // that independently walk the same tree with the same convention:
+    // DynamicFocusView.buildView and PaneRenderPlan.build. These tests turn
+    // that comment into an executable invariant for the PaneRenderPlan half
+    // — every path this classifier reports inside an
+    // .activeTabOnly/.tabMembership case must resolve to an actual tabs node
+    // at that same path in PaneRenderPlan.build(from: new).tabsNodes. If the
+    // two implementations ever drift apart, DynamicFocusView.applyActiveTabOnly/
+    // applyTabMembership would be handed a path that either doesn't exist in
+    // the plan or points at the wrong node — the exact "bookkeeping disagrees
+    // with what's on screen" failure mode this branch fixes.
+
+    func testActiveTabOnlyPathsAgreeWithPaneRenderPlansTabsNodePaths() {
+        let old = split(.horizontal, [leaf("repl"), tabs([leaf("ticket"), leaf("activity")], ["Ticket", "Activity"], active: 0)], [0.5, 0.5])
+        let new = split(.horizontal, [leaf("repl"), tabs([leaf("ticket"), leaf("activity")], ["Ticket", "Activity"], active: 1)], [0.5, 0.5])
+
+        guard case .activeTabOnly(let paths) = LayoutChangeClassifier.classify(old: old, new: new) else {
+            XCTFail("expected .activeTabOnly")
+            return
+        }
+        let planPaths = Set(PaneRenderPlan.build(from: new).tabsNodes.map(\.path))
+        for path in paths {
+            XCTAssertTrue(planPaths.contains(path), """
+                classifier reported \(path) as .activeTabOnly, but PaneRenderPlan has no tabs node at that path — \
+                the two path schemes have drifted apart
+                """)
+        }
+    }
+
+    func testTabMembershipPathsAgreeWithPaneRenderPlansTabsNodePaths() {
+        let old = split(.horizontal, [leaf("repl"), tabs([leaf("ticket")], ["Ticket"], active: 0)], [0.5, 0.5])
+        let new = split(.horizontal, [leaf("repl"), tabs([leaf("ticket"), leaf("activity")], ["Ticket", "Activity"], active: 0)], [0.5, 0.5])
+
+        guard case .tabMembership(let paths) = LayoutChangeClassifier.classify(old: old, new: new) else {
+            XCTFail("expected .tabMembership")
+            return
+        }
+        let planPaths = Set(PaneRenderPlan.build(from: new).tabsNodes.map(\.path))
+        for path in paths {
+            XCTAssertTrue(planPaths.contains(path), """
+                classifier reported \(path) as .tabMembership, but PaneRenderPlan has no tabs node at that path — \
+                the two path schemes have drifted apart
+                """)
+        }
+    }
+
+    func testDeeplyNestedActiveTabOnlyPathAgreesWithPaneRenderPlan() {
+        let old = split(
+            .horizontal,
+            [leaf("repl"),
+             split(.vertical, [tabs([leaf("a"), leaf("b")], ["A", "B"], active: 0), leaf("footer")], [0.7, 0.3])],
+            [0.5, 0.5]
+        )
+        let new = split(
+            .horizontal,
+            [leaf("repl"),
+             split(.vertical, [tabs([leaf("a"), leaf("b")], ["A", "B"], active: 1), leaf("footer")], [0.7, 0.3])],
+            [0.5, 0.5]
+        )
+
+        guard case .activeTabOnly(let paths) = LayoutChangeClassifier.classify(old: old, new: new) else {
+            XCTFail("expected .activeTabOnly")
+            return
+        }
+        let planPaths = Set(PaneRenderPlan.build(from: new).tabsNodes.map(\.path))
+        for path in paths {
+            XCTAssertTrue(planPaths.contains(path), """
+                classifier reported \(path) as .activeTabOnly, but PaneRenderPlan has no tabs node at that path — \
+                the two path schemes have drifted apart
+                """)
+        }
+    }
 }
 
 // MARK: - DynamicFocusViewClearRatiosWiringTests

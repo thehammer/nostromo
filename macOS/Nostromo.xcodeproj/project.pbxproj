@@ -78,6 +78,13 @@
 		KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000001 /* LayoutChangeClassifier.swift */; };
 		KK0000000000000000000021 /* TabRegionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000002 /* TabRegionView.swift */; };
 		KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */; };
+		QQ0000000000000000000101 /* PaneRenderPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000001 /* PaneRenderPlan.swift */; };
+		QQ0000000000000000000102 /* PaneRenderPlan.swift in TestSources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000001 /* PaneRenderPlan.swift */; };
+		QQ0000000000000000000201 /* RatioSolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000002 /* RatioSolver.swift */; };
+		QQ0000000000000000000202 /* RatioSolver.swift in TestSources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000002 /* RatioSolver.swift */; };
+		QQ0000000000000000000301 /* PaneRenderPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000003 /* PaneRenderPlanTests.swift */; };
+		QQ0000000000000000000401 /* RatioSolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000004 /* RatioSolverTests.swift */; };
+		QQ0000000000000000000501 /* DynamicFocusViewWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */; };
 		CC00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		GG00000000000000000000C1 /* NostromoKit in Frameworks (NostromoTests) */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		HH000000000000000000011 /* TurnReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000010 /* TurnReconciler.swift */; };
@@ -188,6 +195,11 @@
 		KK0000000000000000000001 /* LayoutChangeClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifier.swift; sourceTree = "<group>"; };
 		KK0000000000000000000002 /* TabRegionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRegionView.swift; sourceTree = "<group>"; };
 		KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifierTests.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000001 /* PaneRenderPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneRenderPlan.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000002 /* RatioSolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioSolver.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000003 /* PaneRenderPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneRenderPlanTests.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000004 /* RatioSolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioSolverTests.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicFocusViewWiringTests.swift; sourceTree = "<group>"; };
 		PP0000000000000000000001 /* TicketBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocumentTests.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000001 /* IPCLatencyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStats.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000002 /* DaemonDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiagnostics.swift; sourceTree = "<group>"; };
@@ -336,6 +348,8 @@
 				MM0000000000000000000001 /* MarkdownBlockDocument.swift */,
 				OO0000000000000000000001 /* TicketBlockDocument.swift */,
 				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
+				QQ0000000000000000000001 /* PaneRenderPlan.swift */,
+				QQ0000000000000000000002 /* RatioSolver.swift */,
 				PP000000000000000000001 /* ActivityStreamModel.swift */,
 				PP000000000000000000004 /* ActivityTickerView.swift */,
 				AA0000020000000000000021 /* Views */,
@@ -390,6 +404,9 @@
 				HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */,
 				JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */,
 				KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */,
+				QQ0000000000000000000003 /* PaneRenderPlanTests.swift */,
+				QQ0000000000000000000004 /* RatioSolverTests.swift */,
+				QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */,
 				OO000000000000000000100 /* DecisionStoreTests.swift */,
 				NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */,
 				PP000000000000000000006 /* ActivityEventDecodeTests.swift */,
@@ -548,6 +565,8 @@
 				JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */,
 				KK0000000000000000000011 /* LayoutChangeClassifier.swift in Sources */,
 				KK0000000000000000000021 /* TabRegionView.swift in Sources */,
+				QQ0000000000000000000101 /* PaneRenderPlan.swift in Sources */,
+				QQ0000000000000000000201 /* RatioSolver.swift in Sources */,
 				OO000000000000000000011 /* DecisionStore.swift in Sources */,
 				OO000000000000000000021 /* DecisionSheet.swift in Sources */,
 				OO000000000000000000031 /* DecisionPresenter.swift in Sources */,
@@ -610,6 +629,11 @@
 				JJ0000000000000000000014 /* IPCLatencyStatsTests.swift in Sources */,
 				KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */,
 				KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */,
+				QQ0000000000000000000102 /* PaneRenderPlan.swift in TestSources */,
+				QQ0000000000000000000202 /* RatioSolver.swift in TestSources */,
+				QQ0000000000000000000301 /* PaneRenderPlanTests.swift in Sources */,
+				QQ0000000000000000000401 /* RatioSolverTests.swift in Sources */,
+				QQ0000000000000000000501 /* DynamicFocusViewWiringTests.swift in Sources */,
 				OO000000000000000000012 /* DecisionStore.swift in TestSources */,
 				KK000000000000000000102 /* DecisionStoreTests.swift in Sources */,
 				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,

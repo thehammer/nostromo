@@ -121,6 +121,16 @@ final class CodeContentView: NSView {
             case .diff(let payload):
                 apply(diff: DiffDocument(payload: payload))
             default:
+                // Unreachable in practice: `PaneContentNSView.update` — the
+                // only caller of this method — gates the call behind
+                // `CodeContentView.handles(content)`, which switches on
+                // exactly these same two cases (see `handles(_:)` above).
+                // Kept as an exhaustiveness fallback, not a load-bearing
+                // branch — if you're here investigating a rendering bug,
+                // the bug is not in this `default`; it's almost certainly a
+                // divergence between what the view hierarchy holds and what
+                // the daemon's tree says it should (see
+                // `DynamicFocusView.reconcile`).
                 return
             }
             lastRendered = content
@@ -163,6 +173,35 @@ final class CodeContentView: NSView {
 
     private func setText(_ attributed: NSAttributedString) {
         textView.textStorage?.setAttributedString(attributed)
+    }
+
+    /// Drop everything this view is holding — called by
+    /// `PaneContentNSView.update` the moment a pane stops rendering the
+    /// `code`/`diff` kinds, so a later re-show can never resurface a
+    /// previous document's gutter over new (or empty) text, and
+    /// `lastRendered` can never suppress a repaint the pane actually needs.
+    ///
+    /// Trade-off, stated on purpose: a pane that flips kinds and flips back
+    /// used to keep its scroll position across the round trip (the comment
+    /// this replaces claimed exactly that). Clearing on hide gives that up —
+    /// deliberately: the preserved state was exactly the state that could
+    /// resurface as another view's gutter, and a lost scroll offset is a
+    /// nuisance where a mis-rendered diff is a correctness failure in a
+    /// code-review tool.
+    ///
+    /// Must NOT touch `scrollView`/`textView`'s identity or remove either
+    /// from the hierarchy — `testCodeContentViewNeverTearsDownItsScrollOrTextViewOnUpdate`
+    /// forbids that, correctly: this view is still built once and never torn
+    /// down (D7), it just stops showing stale content while hidden.
+    func clearContent() {
+        lastRendered = nil
+        lastAddress = nil
+        codeDocument = nil
+        diffDocument = nil
+        gutterLabels = []
+        rowOffsets = RowOffsetIndex()
+        setText(NSAttributedString())
+        ruler.reload(labels: [], rowOffsets: RowOffsetIndex())
     }
 
     // MARK: - Addressing

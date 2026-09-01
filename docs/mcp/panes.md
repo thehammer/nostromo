@@ -740,6 +740,51 @@ leaving zero survivors in the region.
 
 ---
 
+## Pane ids are recycled — client state must be too
+
+`new_pane_id` (`src/mcp/views/placement.rs`) allocates the lowest free
+`<prefix>.<n>` id for a tabbed region (e.g. `detail.0`) — it does not mint a
+fresh, ever-increasing id. The same id is reissued the moment its previous
+occupant's tab closes: R8's PR-change reset tears down every
+`pr_conversation`/`pr_diff`/`file`/`ticket` tab in the detail region, and the
+very next `nostromo.show` can hand `detail.0` right back out for a
+**completely different view**.
+
+This makes a pane id a **slot**, not an identity. A client that keys any
+per-pane cache — a rendered document, a scroll offset, a "last rendered this
+content, skip the repaint" check, whatever a given content-kind renderer
+holds onto between pushes — by pane id alone, and never clears that cache
+when the pane's occupant changes, will go on rendering a new PR's diff with
+the previous PR's document still cached underneath it: a gutter, a cached
+line count, or an idempotent-push guard built on top of that stale cache is
+now describing a document nobody asked for.
+
+Two things a client must do to stay correct under recycling:
+
+- **Prune per-pane content/freshness/address state down to the pane ids
+  named by the *current* tree, on every structural layout broadcast** — not
+  only when a later content push happens to touch that pane. A structural
+  broadcast and the content push(es) that follow it are separate messages;
+  there is a real (short) window between them where a recycled pane id has
+  no content yet. Show a plain "waiting for content…" placeholder in that
+  window — that's the correct, honest intermediate state — rather than
+  carrying the previous occupant's content forward into it.
+- **Clear a content-kind renderer's own cached state the moment that pane
+  stops being rendered as that kind** — not just on a content *change*
+  within the same kind, but on the transition away from the kind
+  altogether. Otherwise a renderer that's hidden and later reshown
+  resurfaces holding whatever document it last had, independently of what
+  the pane actually contains now — e.g. a line-number gutter left over from
+  a file that isn't on screen anymore, drawn over whatever text a different
+  kind is now showing in the same space.
+
+(Nostromo's macOS client implements both of these — see
+`AppStore.swift`'s `.focusLayout` handling for the prune, and
+`DynamicFocusView.swift`'s `PaneContentNSView.update` /
+`CodeContentView.clearContent()` and its siblings for the per-kind clear.)
+
+---
+
 ## Views and panes
 
 ### `perri` — PR review view

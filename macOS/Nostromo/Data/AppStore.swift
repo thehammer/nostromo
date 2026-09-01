@@ -833,10 +833,27 @@ class AppStore: ObservableObject {
         // ── agent-authored pane layout (Phase 1) ─────────────────────────────
         case .focusLayout(let tag, let tree, let focusedPane):
             // Structural update — rebuild the tree for this focus. Content is
-            // preserved (content pushes are decoupled from layout geometry).
+            // preserved (content pushes are decoupled from layout geometry)
+            // for every pane id that's still IN the new tree.
+            //
+            // A pane id that left the tree gets its content/freshness/address
+            // dropped here rather than carried forward. The daemon reuses
+            // pane ids (`new_pane_id` allocates the lowest free `detail.<n>`,
+            // and a PR change tears down and re-issues a curated region's
+            // tabs wholesale) — without this prune, a recycled pane id would
+            // render from its *previous* occupant's content the instant
+            // `DynamicFocusView.renderLayout`'s closing `updateContent` call
+            // ran, until the `PaneContent` frame that always follows a
+            // structural `FocusLayout` broadcast caught up. Dropping it here
+            // means a recycled pane starts from "waiting for content…" — a
+            // brief, honest placeholder — instead of someone else's PR.
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
             model.tree        = tree
             model.focusedPane = focusedPane
+            let livePaneIds = Set(tree.paneIds)
+            model.paneContent   = Self.pruned(model.paneContent,   keeping: livePaneIds)
+            model.paneFreshness = Self.pruned(model.paneFreshness, keeping: livePaneIds)
+            model.paneAddress   = Self.pruned(model.paneAddress,   keeping: livePaneIds)
             focusLayouts[tag] = model
 
         case .paneContent(let tag, let paneId, let content, let freshness, let address):
@@ -899,5 +916,16 @@ class AppStore: ObservableObject {
         } else {
             sessionHealth[tag] = health
         }
+    }
+
+    /// Drop every entry of `dict` whose key isn't in `ids` — shared by the
+    /// `.focusLayout` handler's three parallel prunes (`paneContent`,
+    /// `paneFreshness`, `paneAddress`) down to the pane ids the incoming tree
+    /// actually names. One named helper instead of three copies of the same
+    /// filter closure keeps it visually obvious all three follow identical
+    /// pruning rules (see `docs/mcp/panes.md`'s "Pane ids are recycled" section
+    /// for why this prune exists at all).
+    private static func pruned<Value>(_ dict: [String: Value], keeping ids: Set<String>) -> [String: Value] {
+        dict.filter { ids.contains($0.key) }
     }
 }
