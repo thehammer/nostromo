@@ -240,6 +240,14 @@ reaches the pane tree on either platform (R1), so it doesn't appear in
 surface). See `docs/activity.md` for the full ambient-activity picture,
 including where iOS's client-side retention bounds diverge from macOS's.
 
+Decision modals (`ios-curated-view-parity` W3) are likewise not a pane or a
+tab: a `decision_request` never reaches the pane tree, so it doesn't appear
+in `PaneSurfaceView`'s switch either. It's a `.sheet` presented from
+`iOS/Nostromo/NostromoApp.swift`, above the root `TabView` rather than from
+any region or focus view — a decision arriving while the operator is on a
+given tab leaves them on that tab once they've answered. See
+`docs/mcp/tools.md`'s "Decision modals" section for the full behavior.
+
 ---
 
 ## `PaneAddress` — anchor, emphasis, and reason (curated-agent-views W1)

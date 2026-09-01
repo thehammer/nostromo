@@ -23,6 +23,7 @@
 		AA0000010000000000000029 /* PaneSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000002E /* PaneSurfaceView.swift */; };
 		AA0000010000000000000031 /* ActivityTickerBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000030 /* ActivityTickerBar.swift */; };
 		AA0000010000000000000033 /* ActivityStreamsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000032 /* ActivityStreamsSheet.swift */; };
+		AA0000010000000000000035 /* DecisionSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000036 /* DecisionSheetView.swift */; };
 		AA00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000100000000000000AA /* NostromoKit */; };
 /* End PBXBuildFile section */
 
@@ -44,6 +45,7 @@
 		AA000001000000000000002E /* PaneSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneSurfaceView.swift; sourceTree = "<group>"; };
 		AA0000010000000000000030 /* ActivityTickerBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityTickerBar.swift; sourceTree = "<group>"; };
 		AA0000010000000000000032 /* ActivityStreamsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamsSheet.swift; sourceTree = "<group>"; };
+		AA0000010000000000000036 /* DecisionSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheetView.swift; sourceTree = "<group>"; };
 		AA00000100000000000000A0 /* Nostromo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nostromo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -92,6 +94,7 @@
 				AA0000010000000000000023 /* FredView.swift */,
 				AA0000010000000000000025 /* DaemonDiscoveryView.swift */,
 				AA0000010000000000000028 /* DynamicFocusView.swift */,
+				AA0000010000000000000036 /* DecisionSheetView.swift */,
 				AA000001000000000000002F /* Panes */,
 				AA0000010000000000000034 /* Activity */,
 			);
@@ -213,6 +216,7 @@
 				AA0000010000000000000029 /* PaneSurfaceView.swift in Sources */,
 				AA0000010000000000000031 /* ActivityTickerBar.swift in Sources */,
 				AA0000010000000000000033 /* ActivityStreamsSheet.swift in Sources */,
+				AA0000010000000000000035 /* DecisionSheetView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

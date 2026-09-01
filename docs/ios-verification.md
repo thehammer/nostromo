@@ -171,6 +171,50 @@ property holds. The same is true of the long-fan-out memory plateau — L1
 proves the cap arithmetic is right, but only Xcode's memory gauge over a
 real extended session shows the cap actually holding operationally.
 
+## Worked example: `ask_decision` end to end (W3)
+
+`ios-curated-view-parity` W3 (wiring `nostromo.ask_decision` on iOS) is
+notable because its riskiest property — a second, contradictory answer
+reaching a blocked agent, or a system-initiated close reading as an
+operator's explicit Skip — is exactly the kind of thing this three-layer
+split exists to make provable without a device:
+
+- **L1** (`DecisionStoreTests.swift`, `DecisionWireTests.swift`,
+  `DaemonStoreTests.swift`): the answer-once claim gate and its bounded
+  FIFO, `decision_request`/`decision_resolved` decode correctness (never
+  tested before this wedge), `ClientDecisionAnswer`'s `choice_id: null`
+  vs. omitted-key distinction, the pending-decision queue's dedup/drop/
+  arrival-order rules, and the mapping from a `decision_resolved` frame to
+  `.choice`/`.dismissed`/`.resolvedElsewhere`. One fact needed a Swift
+  source-scan rather than a behavioral assertion, for a scope reason, not a
+  laziness one: "does `renders_decisions: true` still have a
+  `.decisionRequest` handler behind it" spans two files
+  (`NetworkClient.swift`, `DaemonStore.swift`) both under
+  `Shared/NostromoKit`, outside `tests/ios_policy`'s remit (scoped to
+  `iOS/Nostromo`) — so that specific pairing is asserted as an L1 XCTest
+  reading `DaemonStore.swift`'s own source text, the same technique
+  `ClientMsgTests.swift` already uses to pin `sendHello()`'s literal
+  `rendersDecisions` argument.
+- **L2** (`tests/ios_policy/test_ios_view_policy.py`): no `@State` in a
+  `Decision`-named file holds answered/resolved-shaped state,
+  `DecisionSheetView` is constructed from exactly one place
+  (`NostromoApp.swift`) and never with a hard-coded `resolution: nil`,
+  there is exactly one `answerDecision(` call site and `claimAnswer`
+  precedes it in file order, every `case .supersededByDaemon` body sends
+  nothing, and the one-tap/always-gated asymmetry between the decision
+  surface and `perriApprove`'s `confirmationDialog` holds in both
+  directions.
+- **L3** (`make ios-build`): that the new file compiles and is wired into
+  the app target's build phase.
+
+What's left over — genuinely **UI-observable only** — are the two
+properties no text-scan or compile check can see: that the sheet actually
+*renders* on a real device with the prompt, detail, focus name, and each
+choice's own detail legible, and that two clients (Mac + phone) racing to
+answer the same request resolve to exactly one winning answer with the
+loser's screen updating to the resolved state rather than an error. Both
+are covered only by the wedge's plan's manual verification steps.
+
 ## Why no simulator, anywhere
 
 It would be easy to ask: why not add an `xcodebuild test -destination

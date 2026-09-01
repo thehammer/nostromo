@@ -93,6 +93,22 @@ public final class DaemonStore: ObservableObject {
     /// tag — the test-observable stand-in for "was the wire message sent."
     @Published public private(set) var activitySnapshotRequestCount: [String: Int] = [:]
 
+    // MARK: - Decisions (ios-curated-view-parity W3)
+
+    /// The atomic answer-once gate for decision requests. `public` so the
+    /// one presentation site (`NostromoApp.swift`) can claim an answer
+    /// before sending it — see `answerDecision(requestId:choiceId:)`'s doc
+    /// comment for the full claim-then-send contract.
+    public let decisionStore = DecisionStore()
+
+    /// Outstanding decision requests, oldest first. A queue, not a slot: the
+    /// daemon allows one active request per FOCUS TAG, so two different
+    /// focuses can each have a decision outstanding at once, and both must
+    /// eventually be presented. The view presents `pendingDecisions.first`
+    /// and the next entry becomes current once the head is answered,
+    /// dismissed, or resolved elsewhere.
+    @Published public private(set) var pendingDecisions: [PendingDecision] = []
+
     // MARK: - Dependencies
 
     public let client: NetworkClient
@@ -193,6 +209,13 @@ public final class DaemonStore: ObservableObject {
                         ingesting: false, reason: "disconnected", lastEventAt: nil,
                         hookInstalled: self?.activityHealth.hookInstalled ?? true)
                     self?.pendingActivitySnapshotRequests = []
+                    // A request whose daemon connection is gone cannot be
+                    // answered — leaving an armed sheet up after a reconnect
+                    // would answer a request the daemon has already
+                    // cancelled. `decisionStore`'s claimed resolutions are
+                    // NOT cleared here; they're a record of what's already
+                    // answered, not a liveness signal.
+                    self?.pendingDecisions = []
                 }
             }
             .store(in: &cancellables)
@@ -354,9 +377,45 @@ public final class DaemonStore: ObservableObject {
             activityHealth = ActivityHealthState(
                 ingesting: ingesting, reason: reason, lastEventAt: lastEventAt, hookInstalled: hookInstalled)
 
+        case .decisionRequest(let tag, let requestId, let prompt, let detail, let choices, let contextPaneId):
+            // Drop a request whose id this client already has a resolution
+            // for — a late `decision_request` replay following a
+            // `decision_resolved` for the same id must never reconstruct an
+            // armed prompt.
+            guard decisionStore.resolution(for: requestId) == nil else { return }
+            // Deduplicate by request id so a re-broadcast can't enqueue twice.
+            guard !pendingDecisions.contains(where: { $0.requestId == requestId }) else { return }
+            pendingDecisions.append(PendingDecision(
+                tag: tag, requestId: requestId, prompt: prompt, detail: detail,
+                choices: choices, contextPaneId: contextPaneId))
+
+        case .decisionResolved(_, let requestId, let resolution, let choiceId):
+            _ = decisionStore.claimAnswer(
+                requestId: requestId,
+                record: Self.decisionResolutionRecord(resolution: resolution, choiceId: choiceId)
+            )
+            pendingDecisions.removeAll { $0.requestId == requestId }
+
         default:
             break
         }
+    }
+
+    /// Maps a `decision_resolved` frame's raw `resolution`/`choice_id`
+    /// strings to a `DecisionResolutionRecord`. `"answered"` with a
+    /// `choiceId` is the only path to `.choice` — every other combination
+    /// (including the defensive case of `"answered"` with no `choiceId`,
+    /// which the daemon never actually sends) collapses to either
+    /// `.dismissed` or `.resolvedElsewhere`, both of which reconstruct
+    /// inert rather than armed.
+    private static func decisionResolutionRecord(resolution: String, choiceId: String?) -> DecisionResolutionRecord {
+        if resolution == "answered", let choiceId {
+            return .choice(choiceId)
+        }
+        if resolution == "dismissed" {
+            return .dismissed
+        }
+        return .resolvedElsewhere(resolution)
     }
 
     // MARK: - Perri actions
@@ -388,6 +447,24 @@ public final class DaemonStore: ObservableObject {
     /// explicitly confirm before anything is posted to GitHub.
     public func perriApprove(number: Int, repo: String) {
         client.send(ClientPerriAction(action: "approve", prNumber: number, repo: repo))
+    }
+
+    // MARK: - Decision actions
+
+    /// Answer a decision request. The caller (the one presentation site,
+    /// `NostromoApp.swift`) must call `decisionStore.claimAnswer(requestId:
+    /// record:)` first and only invoke this method if that claim succeeds —
+    /// that ordering is what makes a second, contradictory answer for the
+    /// same request structurally impossible on this client, not merely
+    /// caught downstream by the daemon's own `AlreadyAnswered` guard.
+    ///
+    /// Removes the request from `pendingDecisions` (unconditionally safe —
+    /// a no-op if it's already gone) and sends `ClientDecisionAnswer` —
+    /// `choiceId: nil` means dismissed without choosing, a distinct,
+    /// meaningful outcome, not a default choice.
+    public func answerDecision(requestId: String, choiceId: String?) {
+        pendingDecisions.removeAll { $0.requestId == requestId }
+        client.send(ClientDecisionAnswer(requestId: requestId, choiceId: choiceId))
     }
 }
 
