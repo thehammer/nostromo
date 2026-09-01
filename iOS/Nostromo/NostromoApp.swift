@@ -53,6 +53,18 @@ struct ContentView: View {
 
     enum Tab: Hashable { case sessions, queue, perri, fred, teri }
     @State private var selection: Tab = .sessions
+    /// The `requestId` of the decision actually on screen right now, captured
+    /// at presentation time (see `.onAppear` below) — never re-derived from
+    /// the live queue head. `pendingDecisions.first` can change out from
+    /// under a presented sheet (e.g. a `decision_resolved` broadcast for
+    /// request A arrives and removes it while A's sheet is still mid-dismiss
+    /// on screen, promoting B to the head). If the swipe-to-dismiss setter
+    /// below re-read the live head instead of this captured id, an operator
+    /// swipe on A's sheet could fire `closeDecision` for B — a spurious
+    /// Dismissed on a decision the operator never even looked at. Capturing
+    /// identity at presentation time makes that race structurally
+    /// impossible.
+    @State private var presentedDecisionRequestId: String?
 
     var body: some View {
         TabView(selection: $selection) {
@@ -99,8 +111,15 @@ struct ContentView: View {
                 // wire traffic from here. That asymmetry is what makes a
                 // system-initiated close send nothing (D5): only a genuine
                 // operator swipe ever reaches this closure.
-                if newValue == nil, let request = store.pendingDecisions.first {
-                    closeDecision(.operatorDismissed, for: request.requestId)
+                //
+                // Deliberately targets `presentedDecisionRequestId`, NOT
+                // `store.pendingDecisions.first` read fresh here — the live
+                // queue head can have already moved on to a different
+                // request by the time this fires (see the property's doc
+                // comment), and answering the wrong request is exactly the
+                // failure this surface exists to prevent.
+                if newValue == nil, let requestId = presentedDecisionRequestId {
+                    closeDecision(.operatorDismissed, for: requestId)
                 }
             }
         )) { request in
@@ -122,6 +141,12 @@ struct ContentView: View {
                     }
                 }
             )
+            // Captures which request is actually on screen, at the moment
+            // it's presented — see `presentedDecisionRequestId`'s doc
+            // comment. `request` here is the value SwiftUI already
+            // committed to presenting, not a live re-read, so this is safe
+            // even if `pendingDecisions` mutates immediately afterward.
+            .onAppear { presentedDecisionRequestId = request.requestId }
         }
     }
 
