@@ -127,6 +127,148 @@ final class DaemonStoreTests: XCTestCase {
         XCTAssertEqual(pane1, .prList(items), "pane1 must be untouched by pane2's update")
         XCTAssertEqual(pane2, .loading, "pane2 has no prior content, so .loading is stored as first paint")
     }
+
+    // MARK: - paneContentVersion (W5 — ios-curated-view-parity, D7)
+    //
+    // `FocusLayoutModel.paneContentVersion` is a per-pane counter that must
+    // increment only when a `pane_content` push is actually *applied* —
+    // i.e. after the `.loading`-suppression early-return above, never before
+    // it. It is what `FocusRegionState.isUnread` (D7) is compared against.
+
+    func testPaneContentVersionIncrementsOnlyForAppliedPushes() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(
+            .paneContent(tag: "focus1", paneId: "pane1", content: .text("v1"), freshness: nil, address: nil),
+            via: client
+        )
+        await deliver(
+            .paneContent(tag: "focus1", paneId: "pane1", content: .text("v2"), freshness: nil, address: nil),
+            via: client
+        )
+
+        let versionAfterTwoRealPushes = await store.focusLayouts["focus1"]?.paneContentVersion["pane1"]
+        XCTAssertEqual(versionAfterTwoRealPushes, 2, "two applied pushes to the same pane must bump the version twice")
+
+        // A `.loading` push the existing suppression guard drops must not
+        // bump the version — it never reaches the "applied" line.
+        await deliver(
+            .paneContent(tag: "focus1", paneId: "pane1", content: .loading, freshness: nil, address: nil),
+            via: client
+        )
+        let versionAfterSuppressedLoading = await store.focusLayouts["focus1"]?.paneContentVersion["pane1"]
+        XCTAssertEqual(
+            versionAfterSuppressedLoading, 2,
+            "a .loading push suppressed by the existing guard must not bump paneContentVersion"
+        )
+    }
+
+    // MARK: - focusRegionStates (W5 — ios-curated-view-parity, D4)
+    //
+    // A `.focusLayout` arrival must classify the incoming tree against the
+    // previously-stored one and apply the resulting `LayoutChange` into
+    // `focusRegionStates[tag]`, resolving `treeActivePaneId` from the new
+    // tree's own `resolvedActivePaneId`.
+
+    func testFocusLayoutArrivalAppliesAnActiveTabOnlyTransitionIntoFocusRegionState() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+
+        let treeActive0 = PaneTree.split(direction: .horizontal, children: [
+            .leaf(paneId: "repl"),
+            .tabs(children: [.leaf(paneId: "a"), .leaf(paneId: "b")], labels: ["A", "B"], active: 0)
+        ], ratios: [0.5, 0.5])
+        let treeActive1 = PaneTree.split(direction: .horizontal, children: [
+            .leaf(paneId: "repl"),
+            .tabs(children: [.leaf(paneId: "a"), .leaf(paneId: "b")], labels: ["A", "B"], active: 1)
+        ], ratios: [0.5, 0.5])
+
+        await deliver(.focusLayout(tag: tag, tree: treeActive0, focusedPane: nil), via: client)
+        await deliver(.focusLayout(tag: tag, tree: treeActive1, focusedPane: nil), via: client)
+
+        let frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: FocusRegionState.compactRegion, available: ["repl", "a", "b"], fallback: "repl"
+        )
+        XCTAssertEqual(
+            frontmost, "b",
+            "a pure activeTabOnly transition must move the compact region's frontmost pane to the new active pane"
+        )
+    }
+
+    func testTwoIdenticalFocusLayoutFramesInARowLeaveFocusRegionStateUnchanged() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = PaneTree.tabs(children: [.leaf(paneId: "a"), .leaf(paneId: "b")], labels: ["A", "B"], active: 0)
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        let before = await store.focusRegionStates[tag]
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        let after = await store.focusRegionStates[tag]
+
+        XCTAssertEqual(before, after, "an .identical focus_layout frame must not change focusRegionStates")
+    }
+
+    /// Same seam `DaemonStoreActivityTests.testStoppingTheClientClearsActivityState`
+    /// uses: `client.stop()` unconditionally sets `connected = false`, driving
+    /// the exact `$connected`-driven clearing branch in `DaemonStore.bind()`.
+    func testStoppingTheClientClearsFocusRegionStatesAlongsideFocusLayouts() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = PaneTree.tabs(children: [.leaf(paneId: "a"), .leaf(paneId: "b")], labels: ["A", "B"], active: 0)
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        let before = await store.focusRegionStates[tag]
+        XCTAssertNotNil(before, "sanity check: focusRegionStates must be populated before we stop the client")
+
+        await client.stop()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        let after = await store.focusRegionStates
+        XCTAssertTrue(after.isEmpty, "focusRegionStates must be cleared on disconnect, same as focusLayouts")
+    }
+
+    // MARK: - selectPane (the operator-tap entry point)
+
+    func testSelectPaneUpdatesFrontmostAndClearsTheUnreadMarkForThatPane() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let region = FocusRegionState.compactRegion
+
+        let tree = PaneTree.split(direction: .horizontal, children: [
+            .leaf(paneId: "repl"),
+            .tabs(children: [.leaf(paneId: "a"), .leaf(paneId: "b")], labels: ["A", "B"], active: 0)
+        ], ratios: [0.5, 0.5])
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+
+        // "a" is frontmost (active: 0). A content push to "b" — not
+        // frontmost — must register as unread.
+        await deliver(
+            .paneContent(tag: tag, paneId: "b", content: .text("hello"), freshness: nil, address: nil),
+            via: client
+        )
+
+        var versionForB = await store.focusLayouts[tag]?.paneContentVersion["b"] ?? 0
+        var unreadBeforeSelect = await store.focusRegionStates[tag]?.isUnread(
+            paneId: "b", regionPath: region, contentVersion: versionForB)
+        XCTAssertEqual(unreadBeforeSelect, true, "sanity check: b must be unread before it is selected")
+
+        await store.selectPane(tag: tag, regionPath: region, paneId: "b")
+
+        let frontmostAfterSelect = await store.focusRegionStates[tag]?.frontmostPane(
+            for: region, available: ["repl", "a", "b"], fallback: "repl")
+        XCTAssertEqual(frontmostAfterSelect, "b", "selectPane must make the tapped pane frontmost")
+
+        versionForB = await store.focusLayouts[tag]?.paneContentVersion["b"] ?? 0
+        unreadBeforeSelect = await store.focusRegionStates[tag]?.isUnread(
+            paneId: "b", regionPath: region, contentVersion: versionForB)
+        XCTAssertEqual(unreadBeforeSelect, false, "selectPane must clear the pane's unread mark")
+    }
 }
 
 // MARK: - DaemonStoreActivityTests
