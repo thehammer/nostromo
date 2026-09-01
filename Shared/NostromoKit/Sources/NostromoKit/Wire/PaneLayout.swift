@@ -1003,6 +1003,13 @@ public struct FocusLayoutModel {
     /// Per-pane address, keyed by `pane_id` (W1 — curated-agent-views).
     /// Absent entry == no addressing concept pushed for that pane yet.
     public var paneAddress: [String: PaneAddress]
+    /// Per-pane content version, keyed by `pane_id` (W5 —
+    /// ios-curated-view-parity, D7). Incremented once for every
+    /// `pane_content` push actually applied (never for one the existing
+    /// `.loading`-suppression guard drops) — the derivation source for
+    /// `FocusRegionState`'s unread marks, so unread state can never be
+    /// forgotten at a new push site or left stale after a rebuild.
+    public var paneContentVersion: [String: Int]
 
     /// Initial state for a focus whose layout hasn't arrived yet.
     public static let initial = FocusLayoutModel(
@@ -1010,7 +1017,8 @@ public struct FocusLayoutModel {
         focusedPane: nil,
         paneContent: [:],
         paneFreshness: [:],
-        paneAddress: [:]
+        paneAddress: [:],
+        paneContentVersion: [:]
     )
 
     public init(
@@ -1018,13 +1026,15 @@ public struct FocusLayoutModel {
         focusedPane: String?,
         paneContent: [String: PaneContentWire],
         paneFreshness: [String: PaneFreshness] = [:],
-        paneAddress: [String: PaneAddress] = [:]
+        paneAddress: [String: PaneAddress] = [:],
+        paneContentVersion: [String: Int] = [:]
     ) {
         self.tree          = tree
         self.focusedPane   = focusedPane
         self.paneContent   = paneContent
         self.paneFreshness = paneFreshness
         self.paneAddress   = paneAddress
+        self.paneContentVersion = paneContentVersion
     }
 }
 

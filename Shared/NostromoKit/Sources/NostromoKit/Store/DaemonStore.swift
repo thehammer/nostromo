@@ -58,6 +58,14 @@ public final class DaemonStore: ObservableObject {
     /// Updated by `focus_layout` (structural) and `pane_content` (content-only) broadcasts.
     @Published public private(set) var focusLayouts: [String: FocusLayoutModel] = [:]
 
+    /// Per-focus region UI state (W5 — ios-curated-view-parity, D6): which
+    /// pane is frontmost per region path, unread marks, scroll-restore keys.
+    /// Updated on `focus_layout` arrival (classified against the previously
+    /// stored tree — see `handle(_:)`) and on `pane_content` arrival (a
+    /// content-version bump, and a frontmost-pane refresh so a push to the
+    /// visible tab is never marked unread).
+    @Published public private(set) var focusRegionStates: [String: FocusRegionState] = [:]
+
     /// Focuses grouped + ordered for list rendering.
     public var focusRows: [FocusRow] { buildFocusRows(Array(focuses.values)) }
 
@@ -145,6 +153,18 @@ public final class DaemonStore: ObservableObject {
         client.send(ClientFocusList())
     }
 
+    /// The operator tapping a tab in `TabStripView` (W5 — ios-curated-view-
+    /// parity, D1/D6). Local client state only — no daemon round trip: a tab
+    /// switch is operator input, not something the daemon needs to know
+    /// about. Makes `paneId` frontmost for `regionPath` within `tag`'s focus
+    /// and clears its unread mark.
+    public func selectPane(tag: String, regionPath: String, paneId: String) {
+        var region = focusRegionStates[tag] ?? FocusRegionState()
+        let version = focusLayouts[tag]?.paneContentVersion[paneId] ?? 0
+        region.select(paneId: paneId, regionPath: regionPath, contentVersion: version)
+        focusRegionStates[tag] = region
+    }
+
     /// Request a full ambient-activity snapshot for `tag` (D8). Rate-limited
     /// to one outstanding request per tag so a burst of gaps on a cellular
     /// link cannot produce a request storm — a constraint macOS's `AppStore`
@@ -194,6 +214,7 @@ public final class DaemonStore: ObservableObject {
                     self?.sessions       = [:]
                     self?.focuses        = [:]
                     self?.focusLayouts   = [:]
+                    self?.focusRegionStates = [:]
                     self?.motherJobs     = []
                     self?.motherPeeks    = [:]
                     self?.perriQueue     = []
@@ -323,9 +344,28 @@ public final class DaemonStore: ObservableObject {
 
         case .focusLayout(let tag, let tree, let focusedPane):
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
+            let oldTree = model.tree
             model.tree        = tree
             model.focusedPane = focusedPane
             focusLayouts[tag] = model
+
+            // W5 (ios-curated-view-parity, D4): classify the change against
+            // the previously-stored tree and apply the transition into this
+            // focus's region state — the mechanism by which a deliberate
+            // show's `active`/`focused_pane` is honoured without an
+            // unrelated content-only republish fighting the operator's own
+            // tab choice.
+            let change = LayoutChangeClassifier.classify(old: oldTree, new: tree)
+            let plan = TabPlan.build(tree: tree, content: model.paneContent)
+            var region = focusRegionStates[tag] ?? FocusRegionState()
+            region.apply(
+                change: change,
+                regionPath: FocusRegionState.compactRegion,
+                treeActivePaneId: tree.resolvedActivePaneId,
+                focusedPane: focusedPane,
+                available: plan.map(\.paneId)
+            )
+            focusRegionStates[tag] = region
 
         case .paneContent(let tag, let paneId, let content, let freshness, let address):
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
@@ -339,7 +379,22 @@ public final class DaemonStore: ObservableObject {
             model.paneContent[paneId] = content
             model.paneFreshness[paneId] = freshness
             model.paneAddress[paneId] = address
+            // W5, D7: the content-version bump lives here, after the
+            // suppression guard above — a suppressed `.loading` push must
+            // never mark a pane unread, so it must never bump the version.
+            model.paneContentVersion[paneId, default: 0] += 1
             focusLayouts[tag] = model
+
+            // A push to the pane that's already frontmost is immediately
+            // seen — refresh its last-seen version so it's never marked
+            // unread (D7).
+            var region = focusRegionStates[tag] ?? FocusRegionState()
+            region.noteContentVersion(
+                paneId: paneId,
+                regionPath: FocusRegionState.compactRegion,
+                contentVersion: model.paneContentVersion[paneId] ?? 0
+            )
+            focusRegionStates[tag] = region
 
         case .focusCreated(let meta):
             // Register the new focus in the focus registry.

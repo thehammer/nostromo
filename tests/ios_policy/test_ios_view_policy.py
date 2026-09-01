@@ -604,6 +604,181 @@ def check_one_tap_decision_asymmetry(files):
     return violations
 
 
+def check_no_pane_id_visible_via_capitalized(files):
+    """No pane id ever reaches the operator's eyes via `.capitalized`.
+
+    This is W5's core defect: today's `DynamicFocusView` derives every
+    non-repl tab label from `paneId.capitalized` (e.g. a pane id of
+    `"detail-1"` renders the literal label "Detail-1"). The fix is
+    `TabPlan.fallbackLabel`/tab metadata — a curated label, never a
+    reformatted wire identifier.
+
+    Heuristic (textual, not a type-flow proof, per this suite's documented
+    philosophy): a `.capitalized` call whose receiver expression contains
+    `paneId`/`selectedTab` (case-insensitive substring match), or a
+    `Text(`/`Label(` call whose balanced argument text interpolates a bare
+    `\\(paneId)` or `\\(paneId.capitalized)`.
+    """
+    violations = []
+    for path, source in files:
+        stripped = _strip_line_comments(source)
+        for m in re.finditer(r"([A-Za-z0-9_.?!]+)\.capitalized\b", stripped):
+            receiver = m.group(1)
+            if "paneid" in receiver.lower() or "selectedtab" in receiver.lower():
+                violations.append((
+                    path,
+                    "`.capitalized` called on a paneId/selectedTab-shaped expression: %s" % m.group(0)
+                ))
+        for call in _balanced_call_args(stripped, r"\bText\(") + _balanced_call_args(stripped, r"\bLabel\("):
+            if r"\(paneId)" in call or r"\(paneId.capitalized)" in call:
+                violations.append((path, "Text(...)/Label(...) interpolates a bare paneId: %s" % call))
+    return violations
+
+
+def check_no_second_bottom_tab_bar(files):
+    """`TabView` and `.tabItem` appear only in `NostromoApp.swift` — the
+    app's real root 5-tab bar. No file under `Views/` may nest a second
+    bottom tab bar inside it (today's `DynamicFocusView`'s per-focus
+    `TabView`, the thing this wedge removes).
+    """
+    violations = []
+    for path, source in files:
+        normalized = path.replace(os.sep, "/")
+        if normalized.endswith("NostromoApp.swift"):
+            continue
+        if "/Views/" not in normalized:
+            continue
+        # Comments are stripped first: a doc-comment merely *mentioning*
+        # TabView (e.g. explaining what a sibling file does) must not itself
+        # trip this check — same self-reference trap `_strip_line_comments`
+        # exists to avoid elsewhere in this suite.
+        stripped = _strip_line_comments(source)
+        if "TabView" in stripped:
+            violations.append((path, "TabView found outside NostromoApp.swift"))
+        if ".tabItem" in stripped:
+            violations.append((path, ".tabItem found outside NostromoApp.swift"))
+    return violations
+
+
+def check_no_root_tab_hijack(files):
+    """No file under `Views/` mutates the root tab selection or the
+    NavigationStack's path programmatically.
+
+    Heuristic, deliberately simple: ban the literal patterns
+    `navigationPath.append(`, `navigationPath.removeLast(`, and
+    `self.selection = ` anywhere under `Views/` — no current file does
+    programmatic NavigationStack path mutation or root-tab reassignment at
+    all, so these are unambiguous fingerprints for a regression, not a
+    general parse of assignment/call expressions.
+    """
+    banned = ("navigationPath.append(", "navigationPath.removeLast(", "self.selection = ")
+    violations = []
+    for path, source in files:
+        normalized = path.replace(os.sep, "/")
+        if "/Views/" not in normalized:
+            continue
+        stripped = _strip_line_comments(source)
+        for needle in banned:
+            if needle in stripped:
+                violations.append((path, "`%s` found under Views/" % needle))
+    return violations
+
+
+def check_no_frontmost_tab_state_in_view(files):
+    """No `@State` declaration anywhere under `iOS/Nostromo/` names a
+    frontmost-pane variable locally.
+
+    The frontmost pane must come from `FocusRegionState`, not view-local
+    `@State` — the exact shape of today's defect,
+    `DynamicFocusView.swift`'s `@State private var selectedTab: String`.
+    """
+    pattern = re.compile(r"@State\s+(private\s+)?var\s+\w*(selectedTab|activeTab|frontmost)\w*", re.IGNORECASE)
+    violations = []
+    for path, source in files:
+        stripped = _strip_line_comments(source)
+        if pattern.search(stripped):
+            violations.append((path, "@State declares frontmost-pane-shaped local state"))
+    return violations
+
+
+def check_no_local_placement_or_ratio_persistence(files):
+    """iOS must resolve no placement and persist no geometry, ever.
+
+    No file under `iOS/Nostromo/` references `UserDefaults`/`@AppStorage`
+    with a key matching `ratio|dynlayout` (case-insensitive substring on the
+    string literal argument), and no identifier anywhere under
+    `iOS/Nostromo/` matches `evict|tabCap|placement|typeOrder`
+    (case-insensitive) — those are macOS's curated-placement-engine
+    vocabulary (see `nostromo.show`'s deterministic placement engine),
+    which iOS deliberately has no equivalent of.
+
+    `placement` alone would also match SwiftUI's own
+    `ToolbarItem(placement:)`/`.toolbar(placement:)` keyword argument, used
+    throughout this tree for entirely unrelated toolbar layout and never a
+    signal of persisted-geometry logic — those two call shapes are stripped
+    out before matching, the same "known-benign shape" carve-out
+    `_strip_line_comments` makes for explanatory comments.
+    """
+    key_call_pattern = re.compile(r"(UserDefaults[^\n]*|@AppStorage\([^)]*\))", re.IGNORECASE)
+    key_needle = re.compile(r"ratio|dynlayout", re.IGNORECASE)
+    ident_pattern = re.compile(r"evict|tabCap|placement|typeOrder", re.IGNORECASE)
+    benign_placement_call = re.compile(r"(ToolbarItem|\.toolbar)\(\s*placement\s*:", re.IGNORECASE)
+    violations = []
+    for path, source in files:
+        stripped = _strip_line_comments(source)
+        for m in key_call_pattern.finditer(stripped):
+            if key_needle.search(m.group(0)):
+                violations.append((
+                    path, "UserDefaults/@AppStorage key matching ratio|dynlayout: %s" % m.group(0)
+                ))
+        ident_source = benign_placement_call.sub("", stripped)
+        for m in ident_pattern.finditer(ident_source):
+            violations.append((
+                path, "identifier matching evict|tabCap|placement|typeOrder: %s" % m.group(0)
+            ))
+    return violations
+
+
+def check_unread_glyph_uses_opacity_not_conditional_insertion(files):
+    """`Views/Panes/TabStripView.swift` must render its unread indicator via
+    a `.opacity(` modifier rather than an `if unread { ... }`/
+    `if isUnread { ... }`-conditional view insertion.
+
+    An inserted/removed view retriggers layout of the strip; a fixed view
+    whose opacity toggles never does. A missing file counts as a violation
+    too — the same `check_ticker_bar_has_fixed_single_line_height` pattern
+    for `ActivityTickerBar.swift` when absent: this file doesn't exist yet
+    (W5 creates it), so the default empty source naturally fails the
+    `.opacity(` check below.
+    """
+    violations = []
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "TabStripView.swift"), None)
+    path, source = match if match else ("iOS/Nostromo/Views/Panes/TabStripView.swift", "")
+
+    if ".opacity(" not in source:
+        violations.append((path, "TabStripView.swift must render its unread indicator via .opacity("))
+    if re.search(r"if\s+(unread|isUnread)\s*\{", source):
+        violations.append((
+            path, "TabStripView.swift must not use `if unread`/`if isUnread` conditional view insertion"
+        ))
+    return violations
+
+
+def check_ticker_survives_the_rewrite(files):
+    """`DynamicFocusView.swift` still references `ActivityTickerBar`.
+
+    A guard against the W5 rewrite accidentally dropping the ambient-
+    activity ticker wired up in W4 — this passes against today's tree
+    already; its job is to keep passing through the rewrite.
+    """
+    violations = []
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "DynamicFocusView.swift"), None)
+    path, source = match if match else ("iOS/Nostromo/Views/DynamicFocusView.swift", "")
+    if "ActivityTickerBar" not in source:
+        violations.append((path, "DynamicFocusView.swift no longer references ActivityTickerBar"))
+    return violations
+
+
 CHECKS = (
     check_no_default_in_panecontentwire_switch,
     check_every_toRowModel_call_passes_marked,
@@ -623,6 +798,13 @@ CHECKS = (
     check_claim_answer_precedes_answer_decision,
     check_superseded_close_sends_nothing,
     check_one_tap_decision_asymmetry,
+    check_no_pane_id_visible_via_capitalized,
+    check_no_second_bottom_tab_bar,
+    check_no_root_tab_hijack,
+    check_no_frontmost_tab_state_in_view,
+    check_no_local_placement_or_ratio_persistence,
+    check_unread_glyph_uses_opacity_not_conditional_insertion,
+    check_ticker_survives_the_rewrite,
 )
 
 
@@ -1160,6 +1342,212 @@ class StreamsSheetPresentedFromFocusViewTests(unittest.TestCase):
         self.assertEqual(check_streams_sheet_presented_from_focus_view(files), [])
 
 
+class NoPaneIdVisibleViaCapitalizedTests(unittest.TestCase):
+    def test_bites_on_capitalized_called_directly_on_paneid(self):
+        source = ".tabItem { Label(paneId.capitalized, systemImage: \"rectangle.split.2x1\") }"
+        violations = check_no_pane_id_visible_via_capitalized([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_capitalized_called_on_selectedtab(self):
+        source = ".navigationTitle(selectedTab == \"repl\" ? displayName : selectedTab.capitalized)"
+        violations = check_no_pane_id_visible_via_capitalized([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_text_interpolating_a_bare_paneid(self):
+        source = 'Text("\\(paneId)")'
+        violations = check_no_pane_id_visible_via_capitalized([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_label_interpolating_paneid_capitalized(self):
+        # This source also happens to trip the `.capitalized`-on-paneId rule
+        # (both are real, independent violations of the same policy) — assert
+        # at least one violation, and that the interpolation-specific message
+        # is among them, rather than pin an exact count coupled to overlap
+        # between the two heuristics.
+        source = 'Label("\\(paneId.capitalized)", systemImage: "doc")'
+        violations = check_no_pane_id_visible_via_capitalized([("Synthetic.swift", source)])
+        self.assertTrue(len(violations) >= 1)
+        self.assertTrue(any("interpolates a bare paneId" in msg for _, msg in violations))
+
+    def test_passes_when_the_label_comes_from_tab_plan_metadata(self):
+        source = '.tabItem { Label(entry.label, systemImage: "rectangle.split.2x1") }'
+        self.assertEqual(check_no_pane_id_visible_via_capitalized([("Synthetic.swift", source)]), [])
+
+    def test_ignores_unrelated_capitalized_calls(self):
+        source = 'Text(displayName.capitalized)'
+        self.assertEqual(check_no_pane_id_visible_via_capitalized([("Synthetic.swift", source)]), [])
+
+
+class NoSecondBottomTabBarTests(unittest.TestCase):
+    def test_bites_on_tabview_under_views(self):
+        source = "TabView(selection: $selectedTab) { EmptyView() }"
+        violations = check_no_second_bottom_tab_bar([("iOS/Nostromo/Views/DynamicFocusView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_tabitem_under_views(self):
+        source = '.tabItem { Label("Repl", systemImage: "terminal") }'
+        violations = check_no_second_bottom_tab_bar([("iOS/Nostromo/Views/Panes/TabStripView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_ignores_tabview_in_nostromoapp(self):
+        source = "TabView(selection: $selection) { EmptyView() }"
+        violations = check_no_second_bottom_tab_bar([("iOS/Nostromo/NostromoApp.swift", source)])
+        self.assertEqual(violations, [])
+
+    def test_ignores_files_outside_views(self):
+        source = "TabView(selection: $selectedTab) { EmptyView() }"
+        violations = check_no_second_bottom_tab_bar([("iOS/Nostromo/SomeHelper.swift", source)])
+        self.assertEqual(violations, [])
+
+    def test_passes_on_a_clean_views_file(self):
+        source = "struct DynamicFocusView: View { var body: some View { EmptyView() } }"
+        self.assertEqual(
+            check_no_second_bottom_tab_bar([("iOS/Nostromo/Views/DynamicFocusView.swift", source)]), []
+        )
+
+
+class NoRootTabHijackTests(unittest.TestCase):
+    def test_bites_on_navigation_path_append(self):
+        source = "navigationPath.append(PaneRoute.detail)"
+        violations = check_no_root_tab_hijack([("iOS/Nostromo/Views/DynamicFocusView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_navigation_path_removelast(self):
+        source = "navigationPath.removeLast()"
+        violations = check_no_root_tab_hijack([("iOS/Nostromo/Views/DynamicFocusView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_self_selection_assignment(self):
+        source = "self.selection = .queue"
+        violations = check_no_root_tab_hijack([("iOS/Nostromo/Views/DynamicFocusView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_ignores_files_outside_views(self):
+        source = "self.selection = .queue"
+        violations = check_no_root_tab_hijack([("iOS/Nostromo/NostromoApp.swift", source)])
+        self.assertEqual(violations, [])
+
+    def test_passes_on_clean_source(self):
+        source = "store.selectPane(tag: tag, regionPath: region, paneId: entry.paneId)"
+        self.assertEqual(
+            check_no_root_tab_hijack([("iOS/Nostromo/Views/DynamicFocusView.swift", source)]), []
+        )
+
+
+class NoFrontmostTabStateInViewTests(unittest.TestCase):
+    def test_bites_on_selectedtab_state(self):
+        source = '@State private var selectedTab: String = "repl"'
+        violations = check_no_frontmost_tab_state_in_view([("iOS/Nostromo/Views/DynamicFocusView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_activetab_state(self):
+        source = "@State var activeTabId: String = \"repl\""
+        violations = check_no_frontmost_tab_state_in_view([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_frontmost_state(self):
+        source = "@State private var frontmostPaneId: String? = nil"
+        violations = check_no_frontmost_tab_state_in_view([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_frontmost_comes_from_the_store(self):
+        source = "let frontmost = store.focusRegionStates[tag]?.frontmostPane(for: region, available: ids, fallback: \"repl\")"
+        self.assertEqual(check_no_frontmost_tab_state_in_view([("Synthetic.swift", source)]), [])
+
+    def test_ignores_unrelated_state(self):
+        source = "@State private var showActivitySheet = false"
+        self.assertEqual(check_no_frontmost_tab_state_in_view([("Synthetic.swift", source)]), [])
+
+
+class NoLocalPlacementOrRatioPersistenceTests(unittest.TestCase):
+    def test_bites_on_userdefaults_ratio_key(self):
+        source = 'UserDefaults.standard.set(0.5, forKey: "splitRatio.root.0")'
+        violations = check_no_local_placement_or_ratio_persistence([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_appstorage_dynlayout_key(self):
+        source = '@AppStorage("dynlayout.tabOrder") private var savedOrder = ""'
+        violations = check_no_local_placement_or_ratio_persistence([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_evict_identifier(self):
+        source = "func evictOldestPane() { }"
+        violations = check_no_local_placement_or_ratio_persistence([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_tabcap_identifier(self):
+        source = "let tabCap = 5"
+        violations = check_no_local_placement_or_ratio_persistence([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_placement_identifier(self):
+        source = "func resolvePlacement(for pane: String) -> Int { 0 }"
+        violations = check_no_local_placement_or_ratio_persistence([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_typeorder_identifier(self):
+        source = "let typeOrder: [String] = []"
+        violations = check_no_local_placement_or_ratio_persistence([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_unrelated_userdefaults_usage(self):
+        source = 'UserDefaults.standard.set(host, forKey: "daemonHost")'
+        self.assertEqual(check_no_local_placement_or_ratio_persistence([("Synthetic.swift", source)]), [])
+
+    def test_passes_on_clean_source(self):
+        source = "let entries = TabPlan.build(tree: tree, content: content)"
+        self.assertEqual(check_no_local_placement_or_ratio_persistence([("Synthetic.swift", source)]), [])
+
+    def test_ignores_swiftuis_own_toolbaritem_placement_keyword_argument(self):
+        # SwiftUI's standard ToolbarItem(placement:)/.toolbar(placement:) is
+        # unrelated to macOS's curated-placement-engine vocabulary this check
+        # exists to ban — must not false-positive on ordinary toolbar layout.
+        source = 'ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } }'
+        self.assertEqual(check_no_local_placement_or_ratio_persistence([("Synthetic.swift", source)]), [])
+
+
+class UnreadGlyphUsesOpacityNotConditionalInsertionTests(unittest.TestCase):
+    def test_bites_when_the_file_does_not_exist(self):
+        violations = check_unread_glyph_uses_opacity_not_conditional_insertion([("SomeOtherFile.swift", "irrelevant")])
+        self.assertTrue(len(violations) > 0)
+
+    def test_bites_when_opacity_is_missing(self):
+        source = "Circle().fill(.blue).frame(width: 6, height: 6)"
+        violations = check_unread_glyph_uses_opacity_not_conditional_insertion([("TabStripView.swift", source)])
+        self.assertTrue(any("opacity" in msg for _, msg in violations))
+
+    def test_bites_on_if_unread_conditional_insertion(self):
+        source = "VStack { if unread { Circle().opacity(1) } }"
+        violations = check_unread_glyph_uses_opacity_not_conditional_insertion([("TabStripView.swift", source)])
+        self.assertTrue(any("if unread" in msg or "if isUnread" in msg for _, msg in violations))
+
+    def test_bites_on_if_isunread_conditional_insertion(self):
+        source = "VStack { if isUnread { Circle().opacity(1) } }"
+        violations = check_unread_glyph_uses_opacity_not_conditional_insertion([("TabStripView.swift", source)])
+        self.assertTrue(any("if unread" in msg or "if isUnread" in msg for _, msg in violations))
+
+    def test_passes_on_a_fixed_glyph_with_toggled_opacity(self):
+        source = "Circle().fill(.blue).frame(width: 6, height: 6).opacity(entry.unread ? 1 : 0)"
+        self.assertEqual(
+            check_unread_glyph_uses_opacity_not_conditional_insertion([("TabStripView.swift", source)]), []
+        )
+
+
+class TickerSurvivesTheRewriteTests(unittest.TestCase):
+    def test_bites_when_the_file_does_not_reference_activitytickerbar(self):
+        source = "struct DynamicFocusView: View { var body: some View { EmptyView() } }"
+        violations = check_ticker_survives_the_rewrite([("DynamicFocusView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_the_file_is_missing_entirely(self):
+        violations = check_ticker_survives_the_rewrite([("SomeOtherFile.swift", "irrelevant")])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_activitytickerbar_is_still_referenced(self):
+        source = "private var activityTicker: some View { ActivityTickerBar(text: t, onTap: {}) }"
+        self.assertEqual(check_ticker_survives_the_rewrite([("DynamicFocusView.swift", source)]), [])
+
+
 # --------------------------------------------------------------------------
 # The real gate: every check against the actual iOS/Nostromo tree.
 # --------------------------------------------------------------------------
@@ -1251,6 +1639,44 @@ class RealIOSTreeTests(unittest.TestCase):
 
     def test_one_tap_decision_asymmetry(self):
         violations = check_one_tap_decision_asymmetry(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_pane_id_visible_via_capitalized(self):
+        # Expected to FAIL against today's tree, pre-W5: DynamicFocusView.swift
+        # derives tab labels/titles from `paneId.capitalized`/`selectedTab.capitalized`
+        # — exactly the defect this wedge exists to fix. This assertion is
+        # written to be true once W5 lands; until then it documents the gap.
+        violations = check_no_pane_id_visible_via_capitalized(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_second_bottom_tab_bar(self):
+        # Expected to FAIL against today's tree, pre-W5: DynamicFocusView.swift
+        # nests its own per-focus TabView/.tabItem inside the app's root tab bar.
+        violations = check_no_second_bottom_tab_bar(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_root_tab_hijack(self):
+        violations = check_no_root_tab_hijack(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_frontmost_tab_state_in_view(self):
+        # Expected to FAIL against today's tree, pre-W5:
+        # DynamicFocusView.swift declares `@State private var selectedTab`.
+        violations = check_no_frontmost_tab_state_in_view(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_local_placement_or_ratio_persistence(self):
+        violations = check_no_local_placement_or_ratio_persistence(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_unread_glyph_uses_opacity_not_conditional_insertion(self):
+        # Expected to FAIL against today's tree, pre-W5: TabStripView.swift
+        # doesn't exist yet.
+        violations = check_unread_glyph_uses_opacity_not_conditional_insertion(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_ticker_survives_the_rewrite(self):
+        violations = check_ticker_survives_the_rewrite(self.files)
         self.assertEqual(violations, [], violations)
 
 

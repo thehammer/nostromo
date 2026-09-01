@@ -177,6 +177,13 @@ is bound in the top-level `panes` map.
 
 ### Client rendering (macOS, W1)
 
+As of `ios-curated-view-parity` W5 (below), this section and "Client
+rendering (iOS)" describe two presentations of the *same* tree — macOS
+renders every `Split` branch simultaneously with a tab strip per `Tabs`
+region; iOS flattens the whole tree into one compact strip. Both key off the
+same `LayoutChangeClassifier` semantics for when to honour `active` without
+fighting the operator.
+
 A tabs node renders as a tab strip over a stack of **resident** child views —
 every tab's view is built once and kept alive for the container's whole
 lifetime; switching tabs is a visibility toggle, not a rebuild, which is what
@@ -189,9 +196,11 @@ does. Unread state (a content push for a tab that isn't currently frontmost)
 is derived entirely client-side — the daemon has no business knowing which
 tab the operator is looking at.
 
-iOS gets decoder correctness only in this wedge: a tabs node's children
-flatten into the existing per-pane `TabView` alongside every other non-repl
-pane, with no dedicated tabs UI.
+iOS got decoder correctness only in W1: a tabs node's children flattened into
+the existing per-pane `TabView` alongside every other non-repl pane, with no
+dedicated tabs UI, no `active`/`focused_pane` honouring, and tabs labelled
+from the pane id rather than `labels`. `ios-curated-view-parity` W5 replaced
+that with a real compact tab strip — see below.
 
 ### Client rendering (iOS)
 
@@ -223,9 +232,59 @@ clients aren't rendering the same thing.
 
 `PaneAddress` (below) reaches iOS the same way it reaches macOS —
 `DynamicFocusView` passes `layout.paneAddress[paneId]` into
-`PaneSurfaceView` — and iOS's only present use of it is `pr_list` queue-row
-marking; the stub kinds above have no addressing to render yet, matching
-what they show.
+`PaneSurfaceView` — and iOS's only present use of `anchor`/`emphasis` is
+`pr_list` queue-row marking; the stub kinds above have no addressing to
+render yet, matching what they show. `reason` is used more broadly — see the
+tab strip below.
+
+### Tabs and layout on iOS: the compact strip (`ios-curated-view-parity` W5)
+
+Real split views are impractical on a phone-width screen, so iOS never
+renders `Split`/`Tabs` as simultaneously-visible regions the way macOS does.
+Instead, `NostromoKit`'s `TabPlan.build(tree:content:)` flattens the whole
+`PaneTree` — depth-first, `Split` and `Tabs` children alike — into a single
+ordered list of tab-strip entries, rendered by
+`iOS/Nostromo/Views/Panes/TabStripView.swift` as one horizontal strip at the
+top of the focus, with no chrome at all when the tree is a single `repl`
+leaf. Two `Tabs` nodes in one tree stay as two contiguous runs in that
+flattened order rather than interleaving — the strip reflects the tree's
+shape, not a bare pane-id walk.
+
+**Labels never come from a pane id.** A `tabs` node's `labels` are used
+positionally against `children`; a leaf reached any other way (a `Split`
+child, or a `tabs` entry whose label is missing or the array is too short)
+falls back to a name derived from that pane's *content kind* —
+`"Repl"`/`"Queue"`/`"Diff"`/`"File"`/`"Conversation"`/`"Ticket"`, or the
+neutral `"View"` — never `paneId.capitalized`. This is `TabPlan.fallbackLabel`
+in `Shared/NostromoKit/Sources/NostromoKit/Layout/TabPlan.swift`.
+
+**`active`/`focused_pane` are honoured, but never fight the operator.**
+`NostromoKit`'s `LayoutChangeClassifier` (a port of macOS's own — see above)
+classifies each incoming tree against the previous one; `FocusRegionState`
+(`Shared/NostromoKit/Sources/NostromoKit/Layout/FocusRegionState.swift`)
+then moves the compact strip's frontmost pane only on a
+`.activeTabOnly`/`.tabMembership`/`.splitTopology` change, never on
+`.identical`/`.contentOnly` — a content-only republish (by far the most
+frequent broadcast) must never yank the operator back to a tab they've since
+navigated away from. `focused_pane`, when it names a pane still present,
+always wins on top of that — this is what makes a deliberate `nostromo.show`
+actually bring its tab to front on iOS, which it did not before W5.
+
+**Unread is derived, not remembered.** `DaemonStore` tracks a
+`paneContentVersion` per pane, incremented once for every `pane_content` push
+it actually applies (never for one its `.loading`-suppression guard drops).
+A pane is unread iff it isn't the strip's current frontmost pane and its
+version has advanced past what `FocusRegionState` last recorded for it;
+tapping a tab clears its mark immediately. The frontmost tab's
+`PaneAddress.reason`, when present, renders as a dimmed caption beneath the
+strip — the same "why am I looking at this" line macOS renders as a tab
+caption (`TabRegionView.setCaption(_:for:)`).
+
+**iOS resolves no placement.** The compact strip renders whatever tree the
+daemon sends; there is no identity-reuse rule, no type ordering, no tab cap,
+and no eviction policy on the client, and no split ratio is persisted
+locally — every layout decision remains the daemon-side placement engine's
+alone (see `nostromo.show` above).
 
 See `docs/ios-verification.md` for how this rendering is verified given
 `iOS/Nostromo.xcodeproj` has no test target.
