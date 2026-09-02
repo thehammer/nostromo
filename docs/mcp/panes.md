@@ -216,6 +216,36 @@ dedicated tabs UI, no `active`/`focused_pane` honouring, and tabs labelled
 from the pane id rather than `labels`. `ios-curated-view-parity` W5 replaced
 that with a real compact tab strip — see below.
 
+### Split ratio persistence (macOS)
+
+A `Split` node's `ratios` are the daemon's *default*, not the last word.
+`DynamicFocusView` treats a split's on-disk ratios as client-side operator
+state: once an operator drags a divider, that ratio is saved to
+`UserDefaults` under `nostromo.dynlayout.<tag>.<path>` (`tag` is the focus's
+session tag, `path` is the tree path — `"root"`, `"root.0"`, `"root.tab1"`,
+…) and wins over whatever the daemon broadcasts next, so the workspace looks
+the same across a content refresh, a tab switch, or a relaunch. Only a
+genuine agent-authored structural change (`LayoutChangeClassifier`'s
+`.splitTopology`) clears it, and the operator can always clear it manually
+via a focus's "Reset Layout" quick action.
+
+Two things guard that state so it can't strand the operator:
+
+- **Not every resize is an operator drag.** Programmatic ratio application
+  (`RatioSplitView` applying `desiredRatios`) and other non-operator resize
+  churn (window resize, fullscreen, display reconfiguration) never get
+  written back to disk — only `RatioPersistencePolicy.shouldPersist` returning
+  true does that, and it requires the resize not be our own doing.
+- **A ratio that would collapse a pane is refused, not written.** Any share
+  below `RatioPersistencePolicy.minimumShare` (5%) leaves a pane with no
+  grabbable divider edge and no visible content — effectively un-recoverable
+  from the UI — so it's never persisted, and a value already on disk that
+  fails this check (or whose element count no longer matches the split's
+  child count) is discarded the next time that split is built rather than
+  applied. If a focus's detail region ever renders at implausible width, look
+  at `defaults read com.hammer.nostromo` for a `nostromo.dynlayout.*` key
+  before suspecting the daemon's tree.
+
 ### Client rendering (iOS)
 
 iOS renders a non-repl pane's content in
