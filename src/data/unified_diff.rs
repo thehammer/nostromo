@@ -728,4 +728,75 @@ index 1111111..2222222 100644
             }
         );
     }
+
+    // ── 12. Gutter numbers legitimately go backwards when new_n runs ahead ───
+
+    /// Locks in E1 from the diagnostics plan: a gutter that reads
+    /// `new_n.or(old_n)` (the same precedence `CodeContentView.swift` uses to
+    /// pick which side's number to show) can legitimately produce a sequence
+    /// that isn't monotonically increasing. When a hunk's new side has
+    /// drifted ahead of the old side — here, three additions land with no
+    /// matching removals before a later run of removed lines — the removed
+    /// lines that follow carry `old_n: Some(_), new_n: None`, and `old_n` is
+    /// numerically smaller than the `new_n` values that were just shown
+    /// immediately above them. That "the numbers went backwards" reads as
+    /// scrambled data if you don't know the parser is doing exactly what a
+    /// unified diff says to do — two different people have looked at this
+    /// exact gutter sequence and concluded the renderer was corrupting line
+    /// numbers. It isn't: `DiffLine.old_n`/`new_n` are behaving precisely as
+    /// designed. This test exists so nobody "fixes" it later.
+    #[test]
+    fn removed_lines_carry_old_side_numbers_so_the_gutter_is_legitimately_non_monotonic() {
+        let diff = r#"diff --git a/src/drift.rs b/src/drift.rs
+index 1111111..2222222 100644
+--- a/src/drift.rs
++++ b/src/drift.rs
+@@ -1,4 +1,5 @@
+ line1
+ line2
++added1
++added2
++added3
+-line3
+-line4
+"#;
+        let files = parse_unified_diff(diff);
+        let hunk = &files[0].hunks[0];
+        assert_eq!(hunk.lines.len(), 7);
+
+        // The trailing removed lines carry old-side numbers only, increasing,
+        // with no new-side number at all — the new side never advances for a
+        // line that no longer exists on it.
+        let removed: Vec<&DiffLine> = hunk
+            .lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Removed)
+            .collect();
+        assert_eq!(removed.len(), 2);
+        assert_eq!(removed[0].old_n, Some(3));
+        assert_eq!(removed[0].new_n, None);
+        assert_eq!(removed[1].old_n, Some(4));
+        assert_eq!(removed[1].new_n, None);
+        assert!(
+            removed[0].old_n < removed[1].old_n,
+            "old_n must increase across the run of removed lines"
+        );
+
+        // Compute the same "which number does the gutter show" precedence
+        // CodeContentView.swift uses — prefer the new side, fall back to the
+        // old side — across every content-bearing line in the hunk, and
+        // prove the resulting sequence is NOT monotonically non-decreasing.
+        let seq: Vec<u32> = hunk
+            .lines
+            .iter()
+            .filter(|l| l.kind != DiffLineKind::Meta)
+            .map(|l| l.new_n.or(l.old_n).expect("every non-meta line has a number on some side"))
+            .collect();
+        assert_eq!(seq, vec![1, 2, 3, 4, 5, 3, 4], "sanity: the exact gutter sequence git would show");
+        assert!(
+            !seq.windows(2).all(|w| w[0] <= w[1]),
+            "the gutter sequence must contain a decrease (5 -> 3) — that decrease is correct behaviour, \
+            not corruption, and this assertion is the proof, not an eyeballed comment"
+        );
+    }
 }

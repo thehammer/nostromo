@@ -1,4 +1,7 @@
 import AppKit
+import os
+
+private let codePaneLog = Logger(subsystem: "com.hammer.nostromo", category: "codepane")
 
 /// The line-addressable code renderer: a gutter, scroll-to-line, and marked
 /// ranges, shared by the `code` and `diff` content kinds (W2 —
@@ -49,6 +52,16 @@ final class CodeContentView: NSView {
     private var lastRendered: PaneContentWire?
     private var lastAddress:  PaneAddress?
 
+    /// The most recent draw pass's measurements, kept so Debug ▸ Copy
+    /// code-pane diagnostics can sample them without forcing an extra draw.
+    private var lastMeasurements = CodePaneRenderAudit.Measurements.empty
+    /// The last `.blankBody` summary logged, so a pane redrawing at scroll
+    /// rate logs once per distinct verdict rather than once per frame.
+    private var lastLoggedSummary: String?
+    /// The last `.blankBody` summary the mitigation ran for, so a recovery
+    /// that doesn't work can never become a redraw loop.
+    private var lastMitigatedSummary: String?
+
     // MARK: - Init
 
     override init(frame frameRect: NSRect) {
@@ -91,6 +104,12 @@ final class CodeContentView: NSView {
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
+
+        ruler.onDraw = { [weak self] measurements in
+            self?.auditAfterDraw(measurements)
+        }
+
+        AppStore.shared.registerCodePane(self)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -202,6 +221,84 @@ final class CodeContentView: NSView {
         rowOffsets = RowOffsetIndex()
         setText(NSAttributedString())
         ruler.reload(labels: [], rowOffsets: RowOffsetIndex())
+        // A cleared pane is, by definition, the "no evidence either way"
+        // case CodePaneRenderAudit already treats as healthy — but the held
+        // verdict/mitigation dedup keys must not survive into whatever gets
+        // shown next, or a genuine recurrence right after a clear could be
+        // mistaken for the same already-logged/already-mitigated instance.
+        lastLoggedSummary = nil
+        lastMitigatedSummary = nil
+    }
+
+    // MARK: - Render diagnostics
+
+    /// What the last `drawHashMarksAndLabels` pass measured, for Debug ▸ Copy
+    /// code-pane diagnostics — sampled on demand rather than forcing a draw.
+    func currentMeasurements() -> CodePaneRenderAudit.Measurements { lastMeasurements }
+
+    /// `"code"`, `"diff"`, or `"none"` — whichever document is currently
+    /// loaded. Debug-report only.
+    var loadedKindDescription: String {
+        if codeDocument != nil { return "code" }
+        if diffDocument != nil { return "diff" }
+        return "none"
+    }
+
+    /// The first `count` rows' text, each truncated to `limit` characters —
+    /// enough for a diagnostics report to tell "the model is empty" from
+    /// "the model is fine and the paint is not" without a debugger.
+    func firstRowsPreview(count: Int = 3, limit: Int = 60) -> [String] {
+        let rows: [String]
+        if let codeDocument {
+            rows = codeDocument.lines
+        } else if let diffDocument {
+            rows = diffDocument.rows.map(\.text)
+        } else {
+            rows = []
+        }
+        return rows.prefix(count).map { $0.count > limit ? String($0.prefix(limit)) + "…" : $0 }
+    }
+
+    /// Judge one draw pass and react to a `.blankBody` verdict. Diagnostics
+    /// job: `.claude/plans/instrument-code-pane-render-diagnostics.md`.
+    private func auditAfterDraw(_ measurements: CodePaneRenderAudit.Measurements) {
+        lastMeasurements = measurements
+        guard case .blankBody = CodePaneRenderAudit.verdict(measurements) else { return }
+
+        let summary = CodePaneRenderAudit.summary(of: measurements)
+        if summary != lastLoggedSummary {
+            lastLoggedSummary = summary
+            codePaneLog.error("blank-body render detected: \(summary, privacy: .public)")
+        }
+
+        // Mitigation for an unconfirmed cause (H1/H3 — see the plan's D4).
+        // This is NOT a root-cause fix: it exists only so whether the pane
+        // recovers is itself evidence — recovery points at H1/H3, no
+        // recovery points at H2. Runs at most once per distinct verdict, and
+        // only after the report above has already been emitted, so a
+        // recovery that doesn't work can never become a redraw loop and can
+        // never suppress the evidence a real fix would need.
+        guard summary != lastMitigatedSummary else { return }
+        lastMitigatedSummary = summary
+        attemptRenderRecovery()
+        codePaneLog.info("blank-body mitigation attempted: \(summary, privacy: .public)")
+    }
+
+    /// See `auditAfterDraw(_:)` — a best-effort recovery attempt for an
+    /// unconfirmed cause, not a fix. Re-asserts the container's size from the
+    /// clip view's current width (addresses H1: a collapsed text container),
+    /// forces layout, and asks for a redisplay (addresses H3: a missed
+    /// invalidation). Does nothing for H2 (a TextKit 1 downgrade) by design —
+    /// there is no known corrective action for that hypothesis yet.
+    private func attemptRenderRecovery() {
+        let width = scrollView.contentView.bounds.width
+        if width > 0 {
+            textView.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+        }
+        if let layoutManager = textView.layoutManager, let container = textView.textContainer {
+            layoutManager.ensureLayout(for: container)
+        }
+        textView.needsDisplay = true
     }
 
     // MARK: - Addressing
@@ -342,6 +439,13 @@ final class LineNumberRulerView: NSRulerView {
     private var rowOffsets = RowOffsetIndex()
     private var emphasised: Set<Int> = []
 
+    /// Fired once per completed `drawHashMarksAndLabels` pass with what that
+    /// pass measured, so `CodeContentView` can judge whether the text view
+    /// was capable of painting what the ruler just proved was there (see
+    /// `CodePaneRenderAudit`). Observation only — never changes what or how
+    /// this view draws.
+    var onDraw: ((CodePaneRenderAudit.Measurements) -> Void)?
+
     init(textView: NSTextView) {
         self.target = textView
         super.init(scrollView: nil, orientation: .verticalRuler)
@@ -405,6 +509,11 @@ final class LineNumberRulerView: NSRulerView {
 
         let font = NSFont.monospacedDigitSystemFont(ofSize: Theme.monoFont.pointSize - 1, weight: .regular)
 
+        // How many non-empty labels this pass actually paints — fed into
+        // `CodePaneRenderAudit` below. Observation only: never read back into
+        // the drawing decisions above.
+        var painted = 0
+
         layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { _, usedRect, _, fragmentRange, _ in
             let fragmentCharRange = layoutManager.characterRange(
                 forGlyphRange: fragmentRange, actualGlyphRange: nil
@@ -431,6 +540,25 @@ final class LineNumberRulerView: NSRulerView {
                 at: NSPoint(x: self.ruleThickness - size.width - 8, y: y),
                 withAttributes: attrs
             )
+            painted += 1
         }
+
+        // Hand off what this pass measured — never what it drew — to
+        // whoever wants to judge whether the text view was capable of
+        // painting what this ruler just proved was there (see
+        // `CodePaneRenderAudit`). Pure observation: nothing below this line
+        // can change what was already drawn above.
+        let measurements = CodePaneRenderAudit.Measurements(
+            labelsPainted: painted,
+            labelCount: labels.count,
+            textStorageLength: textView.textStorage?.length ?? 0,
+            rowCount: rowOffsets.count,
+            documentViewWidth: Double(textView.frame.width),
+            clipViewWidth: Double(scrollView.contentView.bounds.width),
+            containerUsedWidth: Double(layoutManager.usedRect(for: container).width),
+            ruleThickness: Double(ruleThickness),
+            textKitDowngraded: textView.textLayoutManager == nil
+        )
+        onDraw?(measurements)
     }
 }

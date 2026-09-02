@@ -119,6 +119,38 @@ class AppStore: ObservableObject {
         transcriptPanes.add(pane)
     }
 
+    /// Live code/diff panes, weakly held — mirrors `transcriptPanes` exactly,
+    /// but for Debug ▸ Copy code-pane diagnostics rather than the memory
+    /// watchdog (diagnostics job:
+    /// `.claude/plans/instrument-code-pane-render-diagnostics.md`).
+    private let codePanes = NSHashTable<CodeContentView>.weakObjects()
+
+    func registerCodePane(_ pane: CodeContentView) {
+        codePanes.add(pane)
+    }
+
+    /// One block per live code/diff pane: its render-audit report, which
+    /// document kind it has loaded, row/label counts, and a truncated
+    /// preview of its first few rows — enough to tell "the model is empty"
+    /// from "the model is fine and the paint is not" without a debugger.
+    func codePaneDiagnosticsReport() -> String {
+        let panes = codePanes.allObjects
+        guard !panes.isEmpty else { return "no live code/diff panes" }
+        return panes.map { pane in
+            let measurements = pane.currentMeasurements()
+            let preview = pane.firstRowsPreview()
+                .enumerated()
+                .map { "  [\($0.offset)] \($0.element)" }
+                .joined(separator: "\n")
+            return """
+                kind: \(pane.loadedKindDescription)
+                \(CodePaneRenderAudit.report(of: measurements))
+                first rows:
+                \(preview.isEmpty ? "  (none)" : preview)
+                """
+        }.joined(separator: "\n---\n")
+    }
+
     /// Start watching the app's own footprint. Called once, from `AppDelegate`.
     func startMemoryWatchdog() {
         // `done` is called once every pane has finished compacting, so the

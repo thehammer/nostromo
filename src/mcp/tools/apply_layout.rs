@@ -301,6 +301,29 @@ pub(crate) fn fetch(
             } else {
                 crate::data::unified_diff::parse_unified_diff(&snap.diff)
             };
+            // Diagnostics job (instrument-code-pane-render-diagnostics): E4
+            // shows the daemon can't produce "numbers without text", but
+            // "the daemon says it sent N rows / M bytes and the client says
+            // it received exactly that" is the assertion that turns that
+            // exoneration into proof. Counts and lengths only — never diff
+            // content.
+            let hunk_count: usize = files.iter().map(|f| f.hunks.len()).sum();
+            let line_count: usize = files
+                .iter()
+                .flat_map(|f| f.hunks.iter())
+                .map(|h| h.lines.len())
+                .sum();
+            tracing::info!(
+                repo = %snap.repo,
+                pr_number = ?snap.pr_number,
+                too_large = snap.diff_too_large,
+                changed_files = snap.changed_files,
+                file_count = files.len(),
+                hunk_count,
+                line_count,
+                diff_bytes = snap.diff.len(),
+                "apply_layout: built Diff pane content"
+            );
             Ok(PaneContentWire::Diff {
                 repo: snap.repo,
                 number: snap.pr_number,
@@ -585,6 +608,16 @@ fn file_request_context(
 /// because [`fetch`] and [`fetch_async`] both build exactly this, differing
 /// only in how hard they worked to get `text`.
 fn code_content(request: FileRequest, revision: String, text: String) -> PaneContentWire {
+    // Diagnostics job (instrument-code-pane-render-diagnostics): see the
+    // matching log in the `SOURCE_PR_DIFF` arm of `fetch` above for why this
+    // costs nothing and closes E4 empirically. Counts and lengths only.
+    tracing::info!(
+        path = %request.path,
+        revision = %revision,
+        text_len = text.len(),
+        line_count = text.lines().count(),
+        "apply_layout: built Code pane content"
+    );
     PaneContentWire::Code {
         path: request.path,
         revision,
