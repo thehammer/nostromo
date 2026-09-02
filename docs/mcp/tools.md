@@ -711,11 +711,14 @@ sheet to.
   subscribed topics, or set `renders_decisions: true` on its `Subscribe`
   frame — either is a claim that it can actually present the request to a
   human and answer it. A client that merely subscribed to everything
-  (`topics: []`, e.g. the connected-but-still-headless iOS app) does **not**
-  count until it declares `renders_decisions: true`, even though it still
-  receives `decision_request` broadcasts like any other subscriber. Returned
-  **immediately** rather than blocking for the full timeout — an agent
-  blocking on a closed GUI for minutes is a worse failure than a fast
+  (`topics: []`) does **not** count until it declares
+  `renders_decisions: true`, even though it still receives `decision_request`
+  broadcasts like any other subscriber. As of `ios-curated-view-parity` W3,
+  iOS presents and answers decisions and subscribes with
+  `renders_decisions: true` — a phone-only setup (no Mac connected) is now a
+  valid operator and `ask_decision` no longer fails fast or times out on it.
+  Returned **immediately** rather than blocking for the full timeout — an
+  agent blocking on a closed GUI for minutes is a worse failure than a fast
   refusal.
 - `{ "error": "timeout" }` — nobody answered within `timeout_secs`.
 - `{ "error": "cancelled" }` — the asking session died while this call was
@@ -730,11 +733,29 @@ stacked.
 
 **Answer-once.** A decision can be answered exactly once, enforced daemon-side
 by `DecisionRegistry` (a second answer for an already-resolved `request_id` is
-logged and never forwarded to the waiting caller) *and* client-side by
-`DecisionStore`, which holds resolved state outside the sheet so a
-reconstructed sheet for the same request can never re-arm and send twice —
-the same class of bug `TurnInteractionStore` exists to prevent for
-`AskQuestionView`.
+logged and never forwarded to the waiting caller) *and* client-side by each
+client's own `DecisionStore` (macOS: `macOS/Nostromo/UI/DecisionStore.swift`;
+iOS/shared: `Shared/NostromoKit/Sources/NostromoKit/Store/DecisionStore.swift`),
+which holds resolved state outside the presenting view so a reconstructed
+sheet for the same request can never re-arm and send twice — the same class
+of bug `TurnInteractionStore` exists to prevent for `AskQuestionView`.
+
+**iOS (`ios-curated-view-parity` W3).** iOS presents a modal sheet above its
+root tab view — never from a region or focus view, so answering a decision
+never changes which tab the operator is on — naming the prompt, the optional
+detail, the display name of the focus that asked (falling back to the raw
+tag if unknown), and one control per choice showing that choice's own
+optional `detail`. Answering takes exactly one tap: unlike the queue's
+swipe-to-approve, there is no confirmation dialog, because the modal itself
+already interrupted the operator with the full context of what they're
+choosing. `DaemonStore.pendingDecisions` is a queue, not a slot — the daemon
+allows one active request per focus tag, so two different focuses can each
+have a decision outstanding at once, and both are eventually presented and
+answered, oldest first. A request this client has already answered, or that
+the daemon reports resolved elsewhere (`decision_resolved`), renders as
+already-answered rather than as a live prompt with inert controls, and a
+system-initiated close (superseded by an answer elsewhere, or by that
+notice) sends no `decision_answer` frame at all.
 
 **Presented once, app-wide; resolves everywhere.** Nostromo can open one
 window per attached display, but a decision is never presented more than
@@ -781,7 +802,9 @@ means deciding a permission posture, which is a different feature.
 
 Source: `src/mcp/tools/ask_decision.rs`, `src/ipc/decisions.rs`, `src/ipc/protocol.rs`
 (`ServerMsg::DecisionResolved`), `macOS/Nostromo/UI/DecisionPresenter.swift`,
-`macOS/Nostromo/UI/DecisionStore.swift`
+`macOS/Nostromo/UI/DecisionStore.swift`, `Shared/NostromoKit/Sources/NostromoKit/Store/DecisionStore.swift`,
+`Shared/NostromoKit/Sources/NostromoKit/Store/DaemonStore.swift`,
+`iOS/Nostromo/Views/DecisionSheetView.swift`, `iOS/Nostromo/NostromoApp.swift`
 
 ---
 

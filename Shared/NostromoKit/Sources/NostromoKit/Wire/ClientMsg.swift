@@ -216,6 +216,14 @@ public struct ClientPerriAction: Encodable {
 /// `choiceId: nil` means dismissed without choosing — a distinct, meaningful
 /// outcome, not a default choice — so unlike most optional fields on this
 /// wire, `choice_id` is always present, as a string or as `null`.
+///
+/// This is why `encode(to:)` is hand-written rather than synthesized:
+/// Swift's compiler-generated `Encodable` conformance encodes an `Optional`
+/// property with `encodeIfPresent`, which **omits** the key entirely when
+/// `nil` — exactly the ambiguous-with-"an old peer that didn't understand
+/// this field" shape this type's own doc comment (and
+/// `src/ipc/protocol.rs`'s `ClientMsg::DecisionAnswer`) says `choice_id`
+/// must never have.
 public struct ClientDecisionAnswer: Encodable {
     let type_: String = "decision_answer"
     public let requestId: String
@@ -230,6 +238,15 @@ public struct ClientDecisionAnswer: Encodable {
         case type_     = "type"
         case requestId = "request_id"
         case choiceId  = "choice_id"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type_, forKey: .type_)
+        try container.encode(requestId, forKey: .requestId)
+        // `encode`, not `encodeIfPresent` — a nil choiceId must serialize as
+        // an explicit JSON `null`, never as an absent key.
+        try container.encode(choiceId, forKey: .choiceId)
     }
 }
 
