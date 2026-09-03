@@ -85,6 +85,9 @@
 		QQ0000000000000000000301 /* PaneRenderPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000003 /* PaneRenderPlanTests.swift */; };
 		QQ0000000000000000000401 /* RatioSolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000004 /* RatioSolverTests.swift */; };
 		QQ0000000000000000000501 /* DynamicFocusViewWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */; };
+		RR0000000000000000000101 /* PRDetailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000001 /* PRDetailCache.swift */; };
+		RR0000000000000000000102 /* PRDetailCache.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000001 /* PRDetailCache.swift */; };
+		RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000003 /* PRDetailCacheTests.swift */; };
 		CC00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		GG00000000000000000000C1 /* NostromoKit in Frameworks (NostromoTests) */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		HH000000000000000000011 /* TurnReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000010 /* TurnReconciler.swift */; };
@@ -200,6 +203,8 @@
 		QQ0000000000000000000003 /* PaneRenderPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneRenderPlanTests.swift; sourceTree = "<group>"; };
 		QQ0000000000000000000004 /* RatioSolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioSolverTests.swift; sourceTree = "<group>"; };
 		QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicFocusViewWiringTests.swift; sourceTree = "<group>"; };
+		RR0000000000000000000001 /* PRDetailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRDetailCache.swift; sourceTree = "<group>"; };
+		RR0000000000000000000003 /* PRDetailCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRDetailCacheTests.swift; sourceTree = "<group>"; };
 		PP0000000000000000000001 /* TicketBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocumentTests.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000001 /* IPCLatencyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStats.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000002 /* DaemonDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiagnostics.swift; sourceTree = "<group>"; };
@@ -310,6 +315,7 @@
 				AA0000020000000000000002 /* NostromodClient.swift */,
 				AA0000020000000000000003 /* FileWatchers.swift */,
 				AA0000020000000000000004 /* AppStore.swift */,
+				RR0000000000000000000001 /* PRDetailCache.swift */,
 				BB00000000000000000000A1 /* MotherBrokerClient.swift */,
 				GG00000000000000000000A1 /* ProcessRunner.swift */,
 				AA0000020000000000000030 /* ChatModels.swift */,
@@ -414,6 +420,7 @@
 				PP000000000000000000010 /* ActivityTickerWiringTests.swift */,
 				PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */,
 				PP0000000000000000000001 /* TicketBlockDocumentTests.swift */,
+				RR0000000000000000000003 /* PRDetailCacheTests.swift */,
 
 			);
 			path = NostromoTests;
@@ -572,6 +579,7 @@
 				OO000000000000000000031 /* DecisionPresenter.swift in Sources */,
 				PP000000000000000000002 /* ActivityStreamModel.swift in Sources */,
 				PP000000000000000000005 /* ActivityTickerView.swift in Sources */,
+				RR0000000000000000000101 /* PRDetailCache.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -643,6 +651,8 @@
 				PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */,
 				PP000000000000000000013 /* StatusBarActivityRemovalTests.swift in Sources */,
 				PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */,
+				RR0000000000000000000102 /* PRDetailCache.swift in TestSources */,
+				RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */,
 
 			);
 			runOnlyForDeploymentPostprocessing = 0;

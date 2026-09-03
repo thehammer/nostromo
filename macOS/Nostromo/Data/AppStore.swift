@@ -94,8 +94,12 @@ class AppStore: ObservableObject {
     let client = NostromodClient()
     private let broker  = MotherBrokerClient()
     private var cancellables     = Set<AnyCancellable>()
-    /// Per-PR detail cache keyed by "{repo-with-dashes}-{number}".
-    private var prDetailCache: [String: PRDetail] = [:]
+    /// Per-PR detail cache keyed by "{repo-with-dashes}-{number}", bounded by
+    /// an LRU eviction policy budgeted primarily in bytes
+    /// (`PRDetailCache.maxRetainedDiffBytes`, 8 MiB) with a secondary entry
+    /// cap (`PRDetailCache.maxRetainedEntries`, 64). See `PRDetailCache` for
+    /// the policy itself.
+    private var prDetailCache = PRDetailCache()
     /// The item whose detail the user most recently requested; used to ignore stale fetches.
     private var pendingSelection: PRQueueItem?
 
@@ -538,11 +542,15 @@ class AppStore: ObservableObject {
         let key = prDetailCacheKey(item)
 
         // Cache hit: SHA matches (or we don't have a SHA yet — accept on TTL grounds).
-        if let cached = prDetailCache[key],
-           (item.headSha.isEmpty || cached.headSha == item.headSha) {
-            perriDetail        = cached
-            perriDetailLoading = false
-            return
+        if let cached = prDetailCache.detail(forKey: key) {
+            if item.headSha.isEmpty || cached.headSha == item.headSha {
+                perriDetail        = cached
+                perriDetailLoading = false
+                return
+            }
+            // Stale: the SHA moved on. Free the entry rather than retaining a
+            // diff for a commit that no longer exists.
+            prDetailCache.remove(forKey: key)
         }
 
         // Cache miss: show loading state and ask the daemon.
@@ -594,8 +602,8 @@ class AppStore: ObservableObject {
     /// Called when FileWatchers receives an updated PRDetail from current-pr-detail.json.
     private func handleDetailUpdate(_ detail: PRDetail?) {
         guard let detail else { return }
-        let key = "\(detail.repo.replacingOccurrences(of: "/", with: "-"))-\(detail.prNumber ?? 0)"
-        prDetailCache[key] = detail
+        let key = PRDetailCache.key(repo: detail.repo, number: detail.prNumber ?? 0)
+        prDetailCache.store(detail, forKey: key, protecting: pendingSelectionCacheKey)
 
         // Only publish if this matches the currently-pending selection.
         guard let pending = pendingSelection,
@@ -621,7 +629,7 @@ class AppStore: ObservableObject {
             else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.prDetailCache[key] = detail
+                self.prDetailCache.store(detail, forKey: key, protecting: self.pendingSelectionCacheKey)
                 // Only satisfy if still pending for this item.
                 guard let still = self.pendingSelection,
                       detail.repo == still.repo,
@@ -717,7 +725,14 @@ class AppStore: ObservableObject {
     }
 
     private func prDetailCacheKey(_ item: PRQueueItem) -> String {
-        "\(item.repo.replacingOccurrences(of: "/", with: "-"))-\(item.number)"
+        PRDetailCache.key(repo: item.repo, number: item.number)
+    }
+
+    /// The cache key that must be exempt from eviction right now: the PR the
+    /// operator is actively viewing (or awaiting), if any. Passed as
+    /// `protecting:` to every `prDetailCache.store` call.
+    private var pendingSelectionCacheKey: String? {
+        pendingSelection.map(prDetailCacheKey)
     }
 
     private static func findBinary(_ name: String) -> URL? {
