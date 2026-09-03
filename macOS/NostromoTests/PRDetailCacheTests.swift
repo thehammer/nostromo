@@ -2,13 +2,6 @@ import XCTest
 
 // CiState, CiCheck, PRDetail are compiled into this target directly
 // (logic test — no host app, same as PerriModelTests).
-//
-// RED phase: `PRDetailCache` currently exists only as an empty placeholder
-// stub (`struct PRDetailCache {}`) in `Nostromo/Data/PRDetailCache.swift`.
-// Every test below is expected to fail to COMPILE — referencing missing
-// members (`store`, `detail(forKey:)`, `remove(forKey:)`, `key(repo:number:)`,
-// `retainedDiffBytes`, `count`) — until Cody implements the real type. That
-// is the correct RED-phase result, not a bug in these tests.
 
 // MARK: - PRDetailCacheTests
 
@@ -253,26 +246,32 @@ final class PRDetailCacheTests: XCTestCase {
 
     // MARK: - 6. Eviction terminates when only the protected entry remains
 
-    /// If the protected entry alone exceeds the byte budget, eviction of
-    /// every other (evictable) entry must still terminate — not hang in a
-    /// loop trying to get under budget by evicting an unevictable entry.
-    /// The protected entry must survive, and the overage is simply reported
-    /// via `retainedDiffBytes` exceeding the budget — that is documented,
-    /// expected behaviour here, not a bug.
-    func testEvictionTerminatesWhenOnlyProtectedEntryRemainsOverBudget() throws {
+    /// Eviction must terminate promptly even when it has been driven all the
+    /// way down to a single surviving (protected) entry with nothing left to
+    /// evict — a naive "keep evicting until under budget" loop could spin
+    /// forever if it ever tried to evict past that point.
+    ///
+    /// Note this can no longer produce a permanent overage: `store` refuses
+    /// ANY entry (protected or not) whose diff alone exceeds
+    /// `maxRetainedDiffBytes` at admission time. So a lone surviving entry's
+    /// bytes can never exceed the budget by itself — the old "protected entry
+    /// alone is over budget" scenario is unreachable via the public API.
+    func testEvictionTerminatesWithoutHangingWhenOnlyProtectedEntryRemains() throws {
         var cache = PRDetailCache()
         let protectedKey = PRDetailCache.key(repo: "acme/web", number: 0)
 
-        // The protected entry's diff alone is bigger than the whole budget.
-        let hugeDiffBytes = PRDetailCache.maxRetainedDiffBytes + 1024
+        // The protected entry is well within budget on its own.
         cache.store(
-            try Self.makeDetail(number: 0, diffByteCount: hugeDiffBytes),
+            try Self.makeDetail(number: 0, diffByteCount: 8),
             forKey: protectedKey,
             protecting: protectedKey
         )
 
-        // Store a handful of other small entries, all protecting the same key.
-        for n in 1...5 {
+        // Store many more small entries, all protecting the same key — far
+        // past both the entry cap and, cumulatively, past the byte budget —
+        // so eviction is forced to run down to just the protected entry.
+        let overflow = PRDetailCache.maxRetainedEntries + 50
+        for n in 1...overflow {
             cache.store(
                 try Self.makeDetail(number: n, diffByteCount: 8),
                 forKey: PRDetailCache.key(repo: "acme/web", number: n),
@@ -280,16 +279,16 @@ final class PRDetailCacheTests: XCTestCase {
             )
         }
 
-        // This must return promptly (no hang) and the protected entry must
-        // still be present.
+        // Reaching this line at all proves termination — a hang here would
+        // time out the test rather than fail an assertion.
         XCTAssertNotNil(cache.detail(forKey: protectedKey), """
-            The protected entry must survive even though it alone exceeds the \
-            byte budget and there is nothing left to evict but itself.
+            The protected entry must survive even after eviction has run down \
+            to it being the sole remaining entry.
             """)
-        XCTAssertGreaterThan(cache.retainedDiffBytes, PRDetailCache.maxRetainedDiffBytes, """
-            When the sole surviving entry is protected and already over budget, \
-            the cache must simply report the overage via retainedDiffBytes rather \
-            than hide it — this is documented, expected behaviour, not a bug.
+        XCTAssertLessThanOrEqual(cache.retainedDiffBytes, PRDetailCache.maxRetainedDiffBytes, """
+            No permanent overage is possible anymore: oversized entries \
+            (protected or not) are refused at admission, so a lone surviving \
+            entry's bytes can never exceed the budget by itself.
             """)
     }
 
@@ -327,6 +326,51 @@ final class PRDetailCacheTests: XCTestCase {
         XCTAssertNotNil(cache.detail(forKey: survivorKey), """
             The pre-existing entry must still be present after the oversized \
             store attempt was rejected.
+            """)
+    }
+
+    /// The specific case an earlier implementation got wrong: admitting an
+    /// oversized entry *because* it was protected. That special case pushed
+    /// `retainedDiffBytes` over budget while the protected key was the one
+    /// entry eviction could never touch — so eviction went on to wipe out
+    /// every other entry trying (impossibly) to close the gap. An entry that
+    /// exceeds `maxRetainedDiffBytes` must be refused uniformly, protected or
+    /// not, with no exception — and, just as in the unprotected case, the
+    /// rejected attempt must not disturb any pre-existing entry.
+    func testOversizedEntryForProtectedKeyIsRefusedWithoutEvictingExistingEntries() throws {
+        var cache = PRDetailCache()
+
+        let survivorKey = PRDetailCache.key(repo: "acme/web", number: 1)
+        cache.store(try Self.makeDetail(number: 1, diffByteCount: 64), forKey: survivorKey, protecting: nil)
+
+        let countBefore = cache.count
+        let bytesBefore = cache.retainedDiffBytes
+
+        let oversizedKey = PRDetailCache.key(repo: "acme/web", number: 2)
+        let oversized = try Self.makeDetail(number: 2, diffByteCount: PRDetailCache.maxRetainedDiffBytes + 1)
+        cache.store(oversized, forKey: oversizedKey, protecting: oversizedKey)
+
+        XCTAssertNil(cache.detail(forKey: oversizedKey), """
+            An oversized entry must be refused even when it is passed as its \
+            own `protecting` key — protection must never grant an exception \
+            to the size gate.
+            """)
+        XCTAssertEqual(cache.count, countBefore, """
+            Rejecting an oversized protected entry must not evict any \
+            pre-existing entries on the way to being rejected. This is exactly \
+            the bug the uniform refusal fixes: admitting an oversized \
+            protected entry used to silently evict the entire rest of the \
+            working set, because eviction can never touch the protected key \
+            and so kept evicting everything else trying to close a gap only \
+            the protected entry itself caused.
+            """)
+        XCTAssertEqual(cache.retainedDiffBytes, bytesBefore, """
+            Rejecting an oversized protected entry must leave retainedDiffBytes \
+            unchanged from before the attempted store.
+            """)
+        XCTAssertNotNil(cache.detail(forKey: survivorKey), """
+            The pre-existing entry must still be present after the oversized \
+            protected-store attempt was rejected.
             """)
     }
 
@@ -399,11 +443,6 @@ final class PRDetailCacheTests: XCTestCase {
 /// subscript write, because that is exactly how the original unbounded-cache
 /// bug got in: a raw `prDetailCache[key] = detail` bypasses any eviction
 /// policy entirely, no matter how well-designed `PRDetailCache` itself is.
-///
-/// RED phase: `AppStore.swift` currently still contains
-/// `prDetailCache[key] = detail` (two call sites) — Cody has not rewired it
-/// to go through `PRDetailCache.store` yet. This test is EXPECTED TO FAIL
-/// right now; Cody's rewire step is what makes it pass.
 final class PRDetailCacheAppStoreWiringTests: XCTestCase {
 
     func testAppStoreNeverBypassesCacheWithDirectSubscriptWrite() throws {

@@ -61,24 +61,17 @@ struct PRDetailCache {
     /// `protecting`) until both budgets are satisfied.
     ///
     /// A detail whose diff alone exceeds `maxRetainedDiffBytes` is refused —
-    /// evicting the whole working set to admit some *other* PR's monster diff
-    /// would be worse than the re-fetch a refusal costs, and the on-screen
-    /// `perriDetail` still holds whatever's displayed regardless (RC3), so
-    /// refusing costs nothing visible.
-    ///
-    /// The one exception: a detail being stored **for the protected key
-    /// itself** (`key == protecting` — i.e. the actively-selected PR's own
-    /// detail) is always admitted, even oversized. It can never cause another
-    /// entry's eviction (the protected key is already exempt from being the
-    /// eviction victim), so admitting it doesn't touch the working set at
-    /// all — it just means the budget can be knowingly exceeded by exactly
-    /// one entry: the one the operator is currently looking at. Eviction
-    /// still runs afterward and reports the overage rather than hiding it
-    /// (see `evictUntilWithinBudget`).
+    /// uniformly, protected or not, no special case. Admitting an oversized
+    /// entry for the protected key would still push `retainedDiffBytes` over
+    /// budget, and because the protected key is the one entry eviction can
+    /// never touch, `evictUntilWithinBudget` would then evict *everything
+    /// else* trying to close a gap the protected entry alone caused — exactly
+    /// the "worse than the re-fetch" outcome this refusal exists to prevent.
+    /// The on-screen `perriDetail` still holds whatever's displayed
+    /// regardless (RC3), so refusing to cache it costs nothing visible.
     mutating func store(_ detail: PRDetail, forKey key: String, protecting: String?) {
         let diffBytes = detail.diff.utf8.count
-        let isProtected = key == protecting
-        guard diffBytes <= Self.maxRetainedDiffBytes || isProtected else { return }
+        guard diffBytes <= Self.maxRetainedDiffBytes else { return }
 
         if let existing = entries[key] {
             retainedDiffBytes -= existing.diffBytes
