@@ -121,13 +121,35 @@ class MainLayout: NSView {
         tabBar.onRemove      = { [weak self] focus in self?.removeFocus(focus) }
         tabBar.onForceStart  = { [weak self] focus in self?.forceStart(focus) }
 
-        // Subscribe to FocusStore so the tab bar rebuilds when focuses change
+        // Subscribe to FocusStore so the tab bar rebuilds when focuses change.
+        //
+        // FocusStore is the one app-wide truth on which focuses exist; every
+        // window's sink reacts uniformly to a removal here — not just the
+        // window whose tab bar was clicked (`removeFocus` below no longer
+        // does either of these itself). Before this, a focus closed from
+        // Window A left its content and its `viewCache` entry alive forever
+        // in Window B: the tab disappeared from B's tab bar (rebuilt below)
+        // while B's content view, if it was showing that focus, stayed on
+        // screen — and B's cached `NSView` kept its `ChatSession` reachable
+        // no matter what `AppStore.evictPerFocusState` did.
         FocusStore.shared.$focuses
             .receive(on: DispatchQueue.main)
             .sink { [weak self] focuses in
                 guard let self else { return }
                 self.tabBar.setFocuses(focuses)
                 self.tabBar.activeFocus = self.activeFocus
+                // This window's active focus was removed — fall back to
+                // Mother, exactly like a click-to-close used to for the one
+                // window that initiated it.
+                if !focuses.contains(where: { $0.id == self.activeFocus.id }) {
+                    let mother = focuses.first { $0.id == "mother" } ?? Focus.builtIns[1]
+                    self.switchFocus(mother)
+                }
+                // Evict this window's cached view for any focus that's gone —
+                // the other half of what makes eviction in AppStore actually
+                // free memory rather than just unlink a dictionary entry.
+                let liveIds = Set(focuses.map { $0.id })
+                self.viewCache = self.viewCache.filter { liveIds.contains($0.key) }
             }
             .store(in: &cancellables)
 
@@ -181,14 +203,14 @@ class MainLayout: NSView {
     }
 
     private func removeFocus(_ focus: Focus) {
+        // The switch-away and the viewCache prune used to happen right here,
+        // for this window only. They've moved into the `$focuses` sink above
+        // so every window reacts uniformly — this window included, since it
+        // also observes `$focuses` — rather than only the one whose tab bar
+        // was clicked. `FocusStore.remove` is the one thing that has to
+        // happen here: everything else follows from its `focusRemovals`/
+        // `$focuses` announcements.
         FocusStore.shared.remove(focus)
-        // If the removed focus was active, fall back to Mother
-        if activeFocus.id == focus.id {
-            let mother = FocusStore.shared.focuses.first { $0.id == "mother" } ?? Focus.builtIns[1]
-            switchFocus(mother)
-        }
-        // Evict from cache so it doesn't leak memory
-        viewCache.removeValue(forKey: focus.id)
     }
 
     // MARK: - Content switching

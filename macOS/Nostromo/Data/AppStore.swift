@@ -65,6 +65,10 @@ class AppStore: ObservableObject {
 
     // Agent-authored pane layout (Phase 1).
     // Keyed by focus tag; updated from FocusLayout / PaneContent broadcasts.
+    // An entry's lifetime now exactly matches its focus's: `evictPerFocusState`
+    // removes it the moment `FocusStore` reports the focus gone (see `start()`
+    // and `fix/per-focus-state-eviction`). A built-in focus can never be
+    // removed from `FocusStore`, so its entry is never evicted either.
     @Published private(set) var focusLayouts: [String: FocusLayoutModel] = [:]
 
     // Session health — keyed by focus agent tag.
@@ -110,7 +114,12 @@ class AppStore: ObservableObject {
     /// In-memory job map keyed by id — folded from broker snapshot + events.
     private var jobMap: [String: MotherJob] = [:]
 
-    /// Shared ChatSession instances keyed by agent tag.
+    /// Shared ChatSession instances keyed by agent tag. Like `focusLayouts`,
+    /// an entry's lifetime now exactly matches its focus's — see
+    /// `evictPerFocusState` and `start()`'s `FocusStore.shared.focusRemovals`
+    /// subscription. The removed session is also `detach()`ed (not just
+    /// dropped), which is what stops it re-issuing `session_spawn` on the
+    /// next daemon reconnect (see `ChatSession.detach()`).
     private var sessionRegistry: [String: ChatSession] = [:]
 
     private init() {}
@@ -154,6 +163,12 @@ class AppStore: ObservableObject {
 
     // MARK: - Session registry
 
+    /// Returns the shared `ChatSession` for `tag`, creating one if none
+    /// exists yet. This is a **lazy creator**, which is exactly why the
+    /// ordering in `FocusStore.remove(_:)` matters (see its comment): any
+    /// caller that reaches this after a focus is removed but before every
+    /// view holding a reference to its old session has let go would silently
+    /// recreate — and re-spawn — the session eviction just removed.
     func session(for tag: String, agentName: String? = nil, displayName: String? = nil,
                  workingDirectory: String? = nil) -> ChatSession {
         if let s = sessionRegistry[tag] { return s }
@@ -297,6 +312,19 @@ class AppStore: ObservableObject {
             .sink { [weak self] _ in self?.pushFocusRegistry() }
             .store(in: &cancellables)
 
+        // Per-focus state dies with the focus (fix/per-focus-state-eviction).
+        // Keyed on focus REMOVAL specifically — never on a session-lifecycle
+        // event (`.sessionExited`, `.sessionDown`, `.sessionState(.crashed)`)
+        // — because every one of those is non-terminal (a benign stop, a
+        // supervisor retry, a resumable daemon-side session) and evicting on
+        // one would drop state for a session the operator could still return
+        // to. A focus being removed is the one point its transcript becomes
+        // permanently unreachable through the UI — see `FocusStore.focusRemovals`.
+        FocusStore.shared.focusRemovals
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] focus in self?.evictPerFocusState(tag: focus.sessionTag) }
+            .store(in: &cancellables)
+
         // Perri queue: the daemon keeps the "queue" pane live on its own via
         // the live-pane-sources source-binding broadcaster — no FSEvents
         // watcher and no periodic bash shell-out needed on this side anymore.
@@ -307,6 +335,18 @@ class AppStore: ObservableObject {
 
     private func pushFocusRegistry() {
         client.focusRegistryPush(FocusStore.shared.wireProjection())
+    }
+
+    /// Per-focus state dies with the focus. Called once per `focusRemovals`
+    /// event (`start()`), never on any other schedule. Deliberately does NOT
+    /// touch `activityModels` or `sessionHealth` — both are also tag-keyed and
+    /// also never pruned, but `activityModels` belongs to a separate, already
+    /// queued fix, and `sessionHealth` is tracked as its own filed bug; adding
+    /// either eviction here would silently widen this fix's scope into a hunk
+    /// another job owns.
+    private func evictPerFocusState(tag: String) {
+        focusLayouts.removeValue(forKey: tag)
+        sessionRegistry.removeValue(forKey: tag)?.detach()
     }
 
     // MARK: - Broker event fold
@@ -879,6 +919,16 @@ class AppStore: ObservableObject {
             // structural `FocusLayout` broadcast caught up. Dropping it here
             // means a recycled pane starts from "waiting for content…" — a
             // brief, honest placeholder — instead of someone else's PR.
+            //
+            // Deliberately still read-modify-write, not
+            // `removeValue`-then-reinsert: the latter would restore unique
+            // ownership of the inner dictionaries (same non-uniqueness/copy
+            // cost documented at `ChatSession.swift:63-75`) but fires
+            // `@Published` TWICE per push, doubling `handleLayoutUpdate` on
+            // every `DynamicFocusView` in every window — inside a fix for
+            // redundant re-rendering. The entry-count leak this file's other
+            // fix (`evictPerFocusState`) closes is what actually bounds this
+            // dictionary; this shape is measured, not assumed, to be fine.
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
             model.tree        = tree
             model.focusedPane = focusedPane
@@ -891,6 +941,13 @@ class AppStore: ObservableObject {
         case .paneContent(let tag, let paneId, let content, let freshness, let address):
             // Content update — update the leaf without touching tree geometry so
             // operator drag-resizes survive.
+            //
+            // Read-modify-write, deliberately not restructured — see the
+            // identical note on the `.focusLayout` arm above. Now that
+            // `.jsonSnapshot`/`.unknown` compare structurally (D6), the no-op
+            // guard below actually fires for them too, which is the real fix
+            // for the redundant-@Published-write cost this shape has always
+            // paid — not a change to the shape itself.
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
             let existingContent = model.paneContent[paneId]
             // A `.loading` update must never clobber content the operator is

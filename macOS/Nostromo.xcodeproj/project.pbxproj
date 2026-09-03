@@ -88,6 +88,8 @@
 		RR0000000000000000000101 /* PRDetailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000001 /* PRDetailCache.swift */; };
 		RR0000000000000000000102 /* PRDetailCache.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000001 /* PRDetailCache.swift */; };
 		RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000003 /* PRDetailCacheTests.swift */; };
+		TT0000000000000000000001 /* ChatSessionDetachTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT0000000000000000000000 /* ChatSessionDetachTests.swift */; };
+		UU0000000000000000000001 /* PerFocusEvictionWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */; };
 		CC00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		GG00000000000000000000C1 /* NostromoKit in Frameworks (NostromoTests) */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		HH000000000000000000011 /* TurnReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000010 /* TurnReconciler.swift */; };
@@ -205,6 +207,8 @@
 		QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicFocusViewWiringTests.swift; sourceTree = "<group>"; };
 		RR0000000000000000000001 /* PRDetailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRDetailCache.swift; sourceTree = "<group>"; };
 		RR0000000000000000000003 /* PRDetailCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRDetailCacheTests.swift; sourceTree = "<group>"; };
+		TT0000000000000000000000 /* ChatSessionDetachTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionDetachTests.swift; sourceTree = "<group>"; };
+		UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerFocusEvictionWiringTests.swift; sourceTree = "<group>"; };
 		PP0000000000000000000001 /* TicketBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocumentTests.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000001 /* IPCLatencyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStats.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000002 /* DaemonDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiagnostics.swift; sourceTree = "<group>"; };
@@ -421,6 +425,8 @@
 				PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */,
 				PP0000000000000000000001 /* TicketBlockDocumentTests.swift */,
 				RR0000000000000000000003 /* PRDetailCacheTests.swift */,
+				TT0000000000000000000000 /* ChatSessionDetachTests.swift */,
+				UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */,
 
 			);
 			path = NostromoTests;
@@ -653,6 +659,8 @@
 				PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */,
 				RR0000000000000000000102 /* PRDetailCache.swift in TestSources */,
 				RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */,
+				TT0000000000000000000001 /* ChatSessionDetachTests.swift in Sources */,
+				UU0000000000000000000001 /* PerFocusEvictionWiringTests.swift in Sources */,
 
 			);
 			runOnlyForDeploymentPostprocessing = 0;
