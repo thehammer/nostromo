@@ -326,6 +326,115 @@ final class DynamicFocusViewWiringTests: XCTestCase {
             """)
     }
 
+    // MARK: f. M1 regression — one-shot deferred ratio apply must not return
+
+    /// Pins the pre-#122 defect fixed by `RatioSplitView`: `makeSplitView`
+    /// used to apply ratios via a one-shot `DispatchQueue.main.async` block
+    /// that was fresh-launch-conditioned — it could fire on the one
+    /// run-loop turn where the split still reported zero size, and because
+    /// it only ran once, the agent-authored (or operator-dragged) ratios
+    /// were silently abandoned forever. This is a diagnostics-only branch
+    /// (no fix here) but this regression must not silently come back while
+    /// unrelated work touches this file.
+    func testMakeSplitViewNeverGoesBackToAOneShotDeferredRatioApply() throws {
+        let source = try Self.dynamicFocusViewSource()
+
+        let body = try Self.functionBody(named: "makeSplitView", in: source)
+        // Matched with the trailing "{", not the bare "DispatchQueue.main.async"
+        // substring — same idiom testApplyRatiosIsNeverInvokedInsideADispatchMainAsyncBlock
+        // uses below, and for the same reason: this function's body legitimately
+        // contains a doc comment *mentioning* DispatchQueue.main.async (in
+        // backticks, explaining why it's no longer used), which a bare substring
+        // check would misfire on.
+        XCTAssertFalse(body.contains("DispatchQueue.main.async {"), """
+            Pinning M1: makeSplitView must not apply ratios via a one-shot DispatchQueue.main.async \
+            dispatch — see this test's doc comment for why that's exactly the pre-#122 "ratios \
+            silently abandoned forever" bug. Must not regress.
+            """)
+
+        XCTAssertTrue(source.contains("final class RatioSplitView"), """
+            Pinning M1: DynamicFocusView.swift must still define RatioSplitView — the type that \
+            replaced the one-shot deferred apply. Must not regress.
+            """)
+        let ratioSplitViewBody = try Self.classBody(named: "RatioSplitView", in: source)
+        XCTAssertTrue(ratioSplitViewBody.contains("override func layout()"), """
+            Pinning M1: RatioSplitView must keep retrying ratio application on every layout() pass \
+            (rather than a single deferred dispatch) so it can never abandon ratios just because the \
+            split had zero size on one particular run-loop turn. Must not regress.
+            """)
+    }
+
+    // MARK: g. M2 regression — silent content-push drop must not return
+
+    /// Pins the pre-#122 defect where `updateContent` silently dropped a
+    /// content push for a pane id it couldn't find a materialised view for
+    /// (the old bare `continue`) — a diverged hierarchy would eat the push
+    /// with zero trace of it ever happening. This is a diagnostics-only
+    /// branch (no fix here) but this regression must not silently come back.
+    func testUpdateContentLogsAMissInsteadOfSilentlyDroppingIt() throws {
+        let source = try Self.dynamicFocusViewSource()
+        let body = try Self.functionBody(named: "updateContent", in: source)
+
+        // updateContent is already one of the four functions
+        // testGuardDrivenRepairFunctionsHaveNoBareContinueOrReturn checks for
+        // bare continue/return — re-asserting it here documents *why* it
+        // matters for this specific function (M2) rather than re-deriving
+        // the check differently.
+        let violations = Self.bareStatementLines(in: body)
+        XCTAssertTrue(violations.isEmpty, """
+            Pinning M2: updateContent's miss branch (no materialised view for a pane id paneContent \
+            names) must not silently drop the push via a bare continue. Must not regress. \
+            Found \(violations.count) bare occurrence(s).
+            """)
+
+        XCTAssertTrue(body.contains(".error("), """
+            Pinning M2: updateContent's miss branch must now log at .error level when it can't find \
+            a materialised view for a pane id paneContent names — before #122 this branch did \
+            nothing at all, so a diverged hierarchy silently ate the content push with no trace. \
+            Must not regress.
+            """)
+    }
+
+    // MARK: h. Tripwire is wired in
+
+    func testPaneFirstPaintAuditTripwireIsWiredIntoPaneContentNSView() throws {
+        let source = try Self.dynamicFocusViewSource()
+
+        let paneContentBody = try Self.classBody(named: "PaneContentNSView", in: source)
+        XCTAssertTrue(paneContentBody.contains("override func layout()"), """
+            PaneContentNSView must override layout() to run the PaneFirstPaintAudit tripwire — \
+            the tripwire must not be removable without this test noticing.
+            """)
+        XCTAssertTrue(source.contains("PaneFirstPaintAudit"), """
+            DynamicFocusView.swift must reference PaneFirstPaintAudit — the tripwire must not be \
+            removable without this test noticing.
+            """)
+    }
+
+    // MARK: i. Ratio machinery untouched (sequencing guard, not correctness guard)
+
+    /// This is a *sequencing* guard, not a correctness guard: it only checks
+    /// that these three symbols still exist by name, not that their
+    /// behaviour is unchanged, and it has no tooling here to diff against a
+    /// base branch. `.claude/plans/fix-collapsed-split-ratio-persistence.md`
+    /// is a separately-queued job that owns and is actively rewriting the
+    /// ratio machinery in this same file — if this fails, the useful
+    /// question is "did that work collide with the diagnostics added here?",
+    /// not "which side is wrong?".
+    func testRatioMachinerySymbolsStillExistSequencingGuardOnly() throws {
+        let source = try Self.dynamicFocusViewSource()
+
+        let sequencingGuardMessage = """
+            Sequencing guard, not a correctness guard — see \
+            .claude/plans/fix-collapsed-split-ratio-persistence.md, a separately-queued job that \
+            owns and is actively rewriting the ratio machinery in this same file. This symbol's \
+            presence is necessary-but-not-sufficient evidence nothing here collided with that work.
+            """
+        XCTAssertTrue(source.contains("fileprivate static func applyRatios"), sequencingGuardMessage)
+        XCTAssertTrue(source.contains("private static func currentRatios"), sequencingGuardMessage)
+        XCTAssertTrue(source.contains("final class RatioSplitView"), sequencingGuardMessage)
+    }
+
     // MARK: - Helpers
 
     private static func dynamicFocusViewSource() throws -> String {
@@ -414,5 +523,24 @@ final class DynamicFocusViewWiringTests: XCTestCase {
             idx = source.index(after: idx)
         }
         return String(source[braceStart.lowerBound..<idx])
+    }
+
+    /// The source text of the class declaration named `name` (matches
+    /// `class <name>` whether or not it's prefixed `final`), from the
+    /// declaring line up to (but not including) the next top-level
+    /// `class`/`final class` declaration, or the end of the file if there
+    /// isn't one. Textual, not brace-depth matched like `functionBody` —
+    /// sufficient for "does this class's source text contain X" checks,
+    /// not a structural proof of where the class actually ends.
+    private static func classBody(named name: String, in source: String) throws -> String {
+        guard let classRange = source.range(of: "class \(name)") else {
+            throw SourceScanError(description: "'class \(name)' not found in DynamicFocusView.swift — did it move or rename?")
+        }
+        let rest = source[classRange.upperBound...]
+        let nextClassStart = [
+            rest.range(of: "\nclass ")?.lowerBound,
+            rest.range(of: "\nfinal class ")?.lowerBound,
+        ].compactMap { $0 }.min() ?? rest.endIndex
+        return String(source[classRange.lowerBound..<nextClassStart])
     }
 }

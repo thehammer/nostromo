@@ -107,6 +107,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appLog.info("code-pane diagnostics copied to pasteboard")
     }
 
+    @objc private func copyPaneDiagnostics() {
+        let report = AppStore.shared.paneDiagnosticsReport()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(report, forType: .string)
+        appLog.info("pane diagnostics copied to pasteboard")
+    }
+
     // MARK: - Private
 
     private func setupMenu() {
@@ -162,6 +170,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         codePaneDiagItem.keyEquivalentModifierMask = [.command, .shift]
         codePaneDiagItem.target = self
         debugMenu.addItem(codePaneDiagItem)
+        let paneDiagItem = NSMenuItem(title: "Copy pane diagnostics",
+                                      action: #selector(copyPaneDiagnostics),
+                                      keyEquivalent: "p")
+        paneDiagItem.keyEquivalentModifierMask = [.command, .shift]
+        paneDiagItem.target = self
+        debugMenu.addItem(paneDiagItem)
 
         NSApplication.shared.mainMenu = mainMenu
     }
