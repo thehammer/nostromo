@@ -4,6 +4,12 @@ import Combine
 import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "store")
+/// Shared with `DynamicFocusView.swift`'s render-path logging (same
+/// subsystem/category there) so `log show --predicate 'category == "panes"'`
+/// reads as one timeline: FocusLayout/PaneContent frame arrival here,
+/// reconcile/content-push/layout on the render side. Counts, ids, kinds and
+/// geometry only — never pane content.
+private let panesLog = Logger(subsystem: "com.hammer.nostromo", category: "panes")
 
 /// Shared observable state for the whole app.
 ///
@@ -166,6 +172,27 @@ class AppStore: ObservableObject {
                 \(preview.isEmpty ? "  (none)" : preview)
                 """
         }.joined(separator: "\n---\n")
+    }
+
+    /// Every live agent-authored content pane, weakly held — mirrors
+    /// `transcriptPanes` exactly. Registration must never be what keeps a
+    /// pane alive; it exists only so "Copy pane diagnostics" (AppDelegate's
+    /// Debug menu) can report on every pane currently on screen without a
+    /// debugger.
+    private let panes = NSHashTable<PaneContentNSView>.weakObjects()
+
+    func registerPane(_ pane: PaneContentNSView) {
+        panes.add(pane)
+    }
+
+    /// One line per live pane — content kind, sibling-renderer visibility,
+    /// owning focus tag, and the `PaneFirstPaintAudit` verdict — everything
+    /// needed to tell "the model is empty" from "the model is fine and the
+    /// geometry is not" without a debugger. Never includes pane content.
+    func paneDiagnosticsReport() -> String {
+        let lines = panes.allObjects.map { $0.diagnosticsLine() }.sorted()
+        guard !lines.isEmpty else { return "No live panes." }
+        return lines.joined(separator: "\n")
     }
 
     /// Start watching the app's own footprint. Called once, from `AppDelegate`.
@@ -965,10 +992,15 @@ class AppStore: ObservableObject {
             model.tree        = tree
             model.focusedPane = focusedPane
             let livePaneIds = Set(tree.paneIds)
+            let droppedContentCount = model.paneContent.keys.filter { !livePaneIds.contains($0) }.count
             model.paneContent   = Self.pruned(model.paneContent,   keeping: livePaneIds)
             model.paneFreshness = Self.pruned(model.paneFreshness, keeping: livePaneIds)
             model.paneAddress   = Self.pruned(model.paneAddress,   keeping: livePaneIds)
             focusLayouts[tag] = model
+            panesLog.debug("""
+                focusLayout tag=\(tag, privacy: .public) paneIds=\(Array(livePaneIds).sorted(), privacy: .public) \
+                prunedContentEntries=\(droppedContentCount, privacy: .public)
+                """)
 
         case .paneContent(let tag, let paneId, let content, let freshness, let address):
             // Content update — update the leaf without touching tree geometry so
@@ -982,11 +1014,16 @@ class AppStore: ObservableObject {
             // paid — not a change to the shape itself.
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
             let existingContent = model.paneContent[paneId]
+            let kindLabel = Self.paneContentKindLabel(content)
             // A `.loading` update must never clobber content the operator is
             // already looking at — render it only on first paint (D10): no
             // prior content for this pane, or the prior content was itself
             // `.loading`.
             if content == .loading, let existingContent, existingContent != .loading {
+                panesLog.debug("""
+                    paneContent SWALLOWED (loading-clobber guard) tag=\(tag, privacy: .public) \
+                    pane=\(paneId, privacy: .public)
+                    """)
                 return
             }
             // No-op write guard (D9): an idempotent push (identical content,
@@ -997,8 +1034,15 @@ class AppStore: ObservableObject {
             if existingContent == content
                 && model.paneFreshness[paneId] == freshness
                 && model.paneAddress[paneId] == address {
+                panesLog.debug("""
+                    paneContent SWALLOWED (no-op guard) tag=\(tag, privacy: .public) pane=\(paneId, privacy: .public) \
+                    kind=\(kindLabel, privacy: .public)
+                    """)
                 return
             }
+            panesLog.debug("""
+                paneContent tag=\(tag, privacy: .public) pane=\(paneId, privacy: .public) kind=\(kindLabel, privacy: .public)
+                """)
             model.paneContent[paneId] = content
             model.paneFreshness[paneId] = freshness
             model.paneAddress[paneId] = address
@@ -1048,5 +1092,25 @@ class AppStore: ObservableObject {
     /// for why this prune exists at all).
     private static func pruned<Value>(_ dict: [String: Value], keeping ids: Set<String>) -> [String: Value] {
         dict.filter { ids.contains($0.key) }
+    }
+
+    /// A short, content-free label for `PaneContentWire` — counts/ids/kinds
+    /// only, never the payload itself. Duplicated (not shared) with
+    /// `DynamicFocusView.contentKindLabel`: same shape, different file, and
+    /// three similar lines beat a premature cross-file abstraction for
+    /// something this small.
+    private static func paneContentKindLabel(_ content: PaneContentWire) -> String {
+        switch content {
+        case .text:           return "text"
+        case .jsonSnapshot:   return "jsonSnapshot"
+        case .prList:         return "prList"
+        case .loading:        return "loading"
+        case .error:          return "error"
+        case .code:           return "code"
+        case .diff:           return "diff"
+        case .prConversation: return "prConversation"
+        case .ticket:         return "ticket"
+        case .unknown:        return "unknown"
+        }
     }
 }

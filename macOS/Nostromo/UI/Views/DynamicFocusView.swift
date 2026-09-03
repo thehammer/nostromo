@@ -1,6 +1,12 @@
 import AppKit
 import Combine
 import SwiftUI
+import os
+
+/// Counts, ids, kinds and geometry only — never pane content. A `pr_list`
+/// carries repo names and PR titles and must not reach the system log.
+/// See `docs/diagnostics.md` for how to read this category's timeline.
+private let log = Logger(subsystem: "com.hammer.nostromo", category: "panes")
 
 /// Renders a focus's agent-authored pane tree as nested NSSplitViews (plus, as
 /// of W1 — curated-agent-views, `TabRegionView` for any `PaneTree.tabs` node).
@@ -186,7 +192,13 @@ final class DynamicFocusView: NSView {
     /// and must not wipe the operator's dragged ratios.
     private func reconcile(_ model: FocusLayoutModel, clearRatios: Bool = false) {
         let expected = PaneRenderPlan.build(from: model.tree)
-        if clearRatios || !matchesRenderedHierarchy(expected) {
+        let needsRebuild = clearRatios || !matchesRenderedHierarchy(expected)
+        log.debug("""
+            reconcile tag=\(self.focus.sessionTag, privacy: .public) clearRatios=\(clearRatios, privacy: .public) \
+            rebuild=\(needsRebuild, privacy: .public) expectedPanes=\(expected.paneIds.count, privacy: .public) \
+            renderedPanes=\(self.leafViews.count, privacy: .public)
+            """)
+        if needsRebuild {
             renderLayout(model, clearRatios: clearRatios)
         }
         renderedTree = model.tree
@@ -359,6 +371,8 @@ final class DynamicFocusView: NSView {
             return repl
         } else {
             let wrapper = PaneContentNSView()
+            wrapper.paneId = paneId
+            wrapper.focusTag = focus.sessionTag
             // Wire pr_list row actions through AppStore so the existing
             // PerriState load path fires (D2: reuse existing PerriAction path).
             wrapper.onLoadPR    = { repo, number in AppStore.shared.loadPR(repo: repo, number: number) }
@@ -738,6 +752,11 @@ final class DynamicFocusView: NSView {
     ) {
         for (paneId, content) in paneContent {
             if let leafView = leafViews[paneId] as? PaneContentNSView {
+                let changed = content != leafView.currentContent
+                log.debug("""
+                    updateContent pane=\(paneId, privacy: .public) kind=\(Self.contentKindLabel(content), privacy: .public) \
+                    changed=\(changed, privacy: .public)
+                    """)
                 leafView.update(content: content, freshness: freshness[paneId], address: address[paneId])
 
                 // A tabs-hosted pane also gets its caption refreshed and,
@@ -747,13 +766,42 @@ final class DynamicFocusView: NSView {
                     region.setCaption(address[paneId]?.reason, for: paneId)
                     region.noteContentPushed(for: paneId)
                 }
+            } else {
+                // A miss here — no materialised view for a pane id `paneContent`
+                // names — means the hierarchy has already diverged from what's
+                // expected. Silently dropping the push (the old `continue`) is
+                // exactly the bug this file fixes; `reconcile`, called from
+                // every branch of `handleLayoutUpdate` right around this, is
+                // what actually detects and repairs that divergence. Logged at
+                // .error because a push landing here is never expected to be
+                // silent again — M2's regression.
+                let expected = renderedTree.map { Set(PaneRenderPlan.build(from: $0).paneIds) } ?? []
+                log.error("""
+                    updateContent MISS pane=\(paneId, privacy: .public) — no materialised view for this \
+                    pane id. expected=\(expected.sorted(), privacy: .public) \
+                    rendered=\(Array(self.leafViews.keys).sorted(), privacy: .public)
+                    """)
             }
-            // A miss here — no materialised view for a pane id `paneContent`
-            // names — means the hierarchy has already diverged from what's
-            // expected. Silently dropping the push (the old `continue`) is
-            // exactly the bug this file fixes; `reconcile`, called from
-            // every branch of `handleLayoutUpdate` right around this, is
-            // what actually detects and repairs that divergence.
+        }
+    }
+
+    /// A short, content-free label for `PaneContentWire` — counts/ids/kinds
+    /// only, never the payload itself (a `pr_list` carries repo names and PR
+    /// titles that must never reach the system log). `fileprivate`, not
+    /// `private`: `PaneContentNSView.diagnosticsLine()` (a different
+    /// top-level type in this same file) reuses it for the same reason.
+    fileprivate static func contentKindLabel(_ content: PaneContentWire) -> String {
+        switch content {
+        case .text:           return "text"
+        case .jsonSnapshot:   return "jsonSnapshot"
+        case .prList:         return "prList"
+        case .loading:        return "loading"
+        case .error:          return "error"
+        case .code:           return "code"
+        case .diff:           return "diff"
+        case .prConversation: return "prConversation"
+        case .ticket:         return "ticket"
+        case .unknown:        return "unknown"
         }
     }
 }
@@ -840,7 +888,32 @@ final class RatioSplitView: NSSplitView {
 final class PaneContentNSView: NSView {
 
     private let model = PaneContentModel()
-    private var currentContent: PaneContentWire?
+    /// `fileprivate`, not `private`: `DynamicFocusView.updateContent` (a
+    /// different top-level type in this same file) reads this to log
+    /// whether an incoming push actually changed anything — a boolean
+    /// comparison only, never the content itself.
+    fileprivate var currentContent: PaneContentWire?
+
+    /// How many times `layout()` has run — `PaneFirstPaintAudit` treats zero
+    /// passes as "no evidence either way" so a pane can never trip the
+    /// tripwire before it's had a chance to actually lay out.
+    private var layoutPassCount = 0
+    /// The last `PaneFirstPaintAudit.summary(of:)` string logged at `.error`
+    /// — rate-limits the tripwire so a pane relaying out at resize rate (or
+    /// staying in the same bad state across many layout passes) logs once
+    /// per distinct verdict, not once per frame. Reset whenever content
+    /// changes so a *new* violation on the same pane is never swallowed by
+    /// an old one's rate limit.
+    private var lastLoggedViolationSummary: String?
+
+    /// Set by `DynamicFocusView.makeLeafView` right after construction —
+    /// diagnostics-only identity, never used for rendering decisions. Used
+    /// by `currentMeasurements()` and by "Copy pane diagnostics" (D1/D2).
+    var paneId: String = ""
+    /// Set by `DynamicFocusView.makeLeafView` right after construction — the
+    /// focus tag (e.g. "perri", "mother") this pane belongs to, purely for
+    /// the operator-facing diagnostics report.
+    var focusTag: String = ""
 
     /// The line-addressable renderer for the `code`/`diff` kinds (W2 —
     /// curated-agent-views). A persistent sibling of the hosting view, shown
@@ -943,6 +1016,13 @@ final class PaneContentNSView: NSView {
             staleLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
             staleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
         ])
+
+        // So "Copy pane diagnostics" (AppDelegate's Debug menu) can report on
+        // every live pane, not just the ones whose owning DynamicFocusView
+        // happens to still be reachable. Weakly held (AppStore.registerPane
+        // mirrors registerTranscriptPane's NSHashTable<...>.weakObjects()) —
+        // this must never be what keeps a pane alive.
+        AppStore.shared.registerPane(self)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -971,9 +1051,17 @@ final class PaneContentNSView: NSView {
     /// — an idempotent push must be visually invisible: no flicker, no
     /// scroll reset, no spinner.
     func update(content: PaneContentWire, freshness: PaneFreshness?, address: PaneAddress? = nil) {
-        if content != currentContent {
+        let changed = content != currentContent
+        log.debug("PaneContentNSView.update pane content changed=\(changed, privacy: .public)")
+        if changed {
             model.content = content
             currentContent = content
+            // A content change means whatever `.notDrawable` verdict was
+            // last logged no longer describes the current state — the next
+            // layout pass must be free to log again even if it reports the
+            // exact same summary string as before (e.g. the same pane
+            // flips content but stays zero-height).
+            lastLoggedViolationSummary = nil
         }
         // W2/W3: `code`/`diff`/`pr_conversation` each render in AppKit, not
         // SwiftUI — there is no gutter, no scroll-to-offset, and no range
@@ -1031,5 +1119,63 @@ final class PaneContentNSView: NSView {
             staleLabel.stringValue = "stale"
         }
         staleLabel.isHidden = false
+    }
+
+    // MARK: - First-paint tripwire (D2/D3)
+
+    /// Every layout pass is another chance for `PaneFirstPaintAudit` to
+    /// judge this pane's drawable size — deliberately hooked here rather
+    /// than in the ratio machinery (`RatioSplitView`/`applyRatios`) so it
+    /// catches a non-drawable pane from *any* cause, not only the one
+    /// currently suspected, and stays entirely off that code's change
+    /// surface. No mitigation lives here (D5) — this only measures and
+    /// reports.
+    override func layout() {
+        super.layout()
+        layoutPassCount += 1
+        auditAfterLayout()
+    }
+
+    /// `PaneContentNSView` measures; `PaneFirstPaintAudit` (Foundation-only,
+    /// no AppKit) judges. Logs at `.error`, rate-limited by
+    /// `lastLoggedViolationSummary` so a pane stuck in the same bad state
+    /// across many layout passes (e.g. a resize) logs once per distinct
+    /// verdict, not once per frame.
+    private func auditAfterLayout() {
+        let measurements = currentMeasurements()
+        guard case .notDrawable = PaneFirstPaintAudit.verdict(measurements) else { return }
+        let summary = PaneFirstPaintAudit.summary(of: measurements)
+        guard summary != lastLoggedViolationSummary else { return }
+        lastLoggedViolationSummary = summary
+        log.error("PaneFirstPaintAudit \(summary, privacy: .public)")
+    }
+
+    /// Exposed so "Copy pane diagnostics" (AppDelegate's Debug menu) can
+    /// sample every live pane on demand, not only the ones currently
+    /// mid-violation.
+    func currentMeasurements() -> PaneFirstPaintAudit.Measurements {
+        PaneFirstPaintAudit.Measurements(
+            paneId: paneId,
+            hasContent: currentContent != nil,
+            isLoading: currentContent == .loading,
+            boundsWidth: Double(bounds.width),
+            boundsHeight: Double(bounds.height),
+            hasWindow: window != nil,
+            layoutPassCount: layoutPassCount
+        )
+    }
+
+    /// The content kind currently held, and whether each of the three
+    /// sibling AppKit renderers is hidden — everything "Copy pane
+    /// diagnostics" needs to tell "the model is empty" from "the model is
+    /// fine and the geometry is not" without a debugger. Content-free: only
+    /// the kind label, never the payload.
+    func diagnosticsLine() -> String {
+        let kindLabel = currentContent.map(DynamicFocusView.contentKindLabel) ?? "none"
+        return """
+            pane=\(paneId) focus=\(focusTag) kind=\(kindLabel) \
+            codeHidden=\(codeView.isHidden) conversationHidden=\(conversationView.isHidden) \
+            ticketHidden=\(ticketView.isHidden) \(PaneFirstPaintAudit.summary(of: currentMeasurements()))
+            """
     }
 }
