@@ -51,14 +51,13 @@ use serde::{Deserialize, Serialize};
 use super::decisions::DecisionRegistry;
 use super::pane_registry::{PaneContentProvider, PaneRegistry};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
-use super::stream_json::{load_scrollback, SessionState, SessionTranscript, Turn, TurnDelta};
+use super::stream_json::{
+    load_scrollback, SessionState, SessionTranscript, TurnDelta, SCROLLBACK_TURNS,
+};
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
 /// operators with a non-standard install).
 pub const CLAUDE_BIN_ENV: &str = "NOSTROMO_CLAUDE_BIN";
-
-/// How many scrollback turns to replay when resuming a session.
-const SCROLLBACK_TURNS: usize = 30;
 
 /// Crash-loop guard: at most this many auto-restarts within the sliding window.
 const MAX_RESTARTS: u32 = 3;
@@ -718,7 +717,6 @@ impl SessionManager {
                 .get_mut(tag)
                 .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
             session.attached_clients.insert(client_id.to_string());
-            let mut turns = session.shared.transcript.lock().unwrap().snapshot();
             // Cap what a freshly-attaching client receives to the last
             // SCROLLBACK_TURNS turns — mirrors the cap already applied when
             // loading scrollback at spawn time (`load_scrollback`). Without
@@ -727,10 +725,16 @@ impl SessionManager {
             // gets re-applied) sends its entire accumulated in-memory
             // history to any client that attaches later. A GUI client
             // rendering that as one flat turn list can peg Auto Layout
-            // trying to lay out thousands of historical turns at once.
-            if turns.len() > SCROLLBACK_TURNS {
-                turns = turns.split_off(turns.len() - SCROLLBACK_TURNS);
-            }
+            // trying to lay out thousands of historical turns at once. The
+            // live transcript is itself now bounded (RETAINED_TURNS /
+            // RETAINED_BYTES), so this only clones the tail actually served
+            // rather than the whole retained history.
+            let turns = session
+                .shared
+                .transcript
+                .lock()
+                .unwrap()
+                .recent_turns(SCROLLBACK_TURNS);
             let state = session.state();
             let rx = session.shared.event_tx.subscribe();
             (turns, state, rx)
@@ -1206,17 +1210,26 @@ impl SessionManager {
 
     /// Scan all sessions for pending summary emissions.  Called from the
     /// supervisor tick immediately after `reap_and_recover`.  For each session
-    /// whose `summary_sent` flag is still false, derives a summary from
-    /// `turns[0].user_input` and broadcasts it to all clients.  The flag is
-    /// set to `true` before the broadcast so a second tick is a no-op even if
-    /// the send fails.
+    /// whose `summary_sent` flag is still false, derives a summary from the
+    /// transcript's first user prompt and broadcasts it to all clients.  The
+    /// flag is set to `true` before the broadcast so a second tick is a no-op
+    /// even if the send fails.
     pub fn emit_pending_summaries(&self) {
         for (tag, session) in &self.sessions {
             if session.summary_sent.load(Ordering::SeqCst) {
                 continue;
             }
-            let turns = session.shared.transcript.lock().unwrap().snapshot();
-            if let Some(summary) = derive_summary(&turns) {
+            let first = session
+                .shared
+                .transcript
+                .lock()
+                .unwrap()
+                .first_user_input()
+                .map(str::to_owned);
+            let Some(first) = first else {
+                continue;
+            };
+            if let Some(summary) = derive_summary(&first) {
                 session.summary_sent.store(true, Ordering::SeqCst);
                 self.send_to_all_clients(ServerMsg::SessionSummaryUpdate {
                     tag: tag.clone(),
@@ -1517,14 +1530,12 @@ fn augment_path(cmd: &mut Command) {
 
 // ── summary derivation ────────────────────────────────────────────────────────
 
-/// Derive a short display summary from the first user turn.
+/// Derive a short display summary from the first user turn's raw text.
 ///
 /// - Collapses newlines and runs of whitespace to a single space.
 /// - Returns `None` for empty / whitespace-only input.
 /// - Truncates to 40 chars (by `char` count) with a `…` suffix if longer.
-fn derive_summary(turns: &[Turn]) -> Option<String> {
-    let raw = turns.first().map(|t| t.user_input.as_str())?;
-
+fn derive_summary(raw: &str) -> Option<String> {
     // Collapse all whitespace (including newlines) to single spaces, then trim.
     let collapsed: String = raw
         .chars()
@@ -1619,35 +1630,25 @@ mod tests {
 
     // ── derive_summary ────────────────────────────────────────────────────────
 
-    fn make_turns(user_input: &str) -> Vec<Turn> {
-        vec![Turn {
-            id: "t0".into(),
-            user_input: user_input.into(),
-            timestamp: None,
-            blocks: vec![],
-            is_complete: false,
-        }]
-    }
-
     #[test]
     fn derive_summary_short_passthrough() {
-        let turns = make_turns("Build the auth flow");
-        assert_eq!(derive_summary(&turns), Some("Build the auth flow".into()));
+        assert_eq!(
+            derive_summary("Build the auth flow"),
+            Some("Build the auth flow".into())
+        );
     }
 
     #[test]
     fn derive_summary_exactly_40_chars_not_truncated() {
         // 40 chars — should pass through unchanged
         let input = "a".repeat(40);
-        let turns = make_turns(&input);
-        assert_eq!(derive_summary(&turns), Some(input));
+        assert_eq!(derive_summary(&input), Some(input));
     }
 
     #[test]
     fn derive_summary_41_chars_gets_ellipsis() {
         let input = "a".repeat(41);
-        let turns = make_turns(&input);
-        let result = derive_summary(&turns).unwrap();
+        let result = derive_summary(&input).unwrap();
         assert!(result.ends_with('\u{2026}'), "should end with ellipsis: {result:?}");
         // The truncated part is 40 chars + 1 ellipsis codepoint
         assert_eq!(result.chars().count(), 41);
@@ -1655,31 +1656,66 @@ mod tests {
 
     #[test]
     fn derive_summary_collapses_newlines() {
-        let turns = make_turns("Fix the bug\nin the login\r\nmodule");
-        assert_eq!(derive_summary(&turns), Some("Fix the bug in the login module".into()));
+        assert_eq!(
+            derive_summary("Fix the bug\nin the login\r\nmodule"),
+            Some("Fix the bug in the login module".into())
+        );
     }
 
     #[test]
     fn derive_summary_collapses_extra_spaces() {
-        let turns = make_turns("  lots   of   spaces  ");
-        assert_eq!(derive_summary(&turns), Some("lots of spaces".into()));
+        assert_eq!(
+            derive_summary("  lots   of   spaces  "),
+            Some("lots of spaces".into())
+        );
     }
 
     #[test]
     fn derive_summary_empty_returns_none() {
-        let turns = make_turns("");
-        assert_eq!(derive_summary(&turns), None);
+        assert_eq!(derive_summary(""), None);
     }
 
     #[test]
     fn derive_summary_whitespace_only_returns_none() {
-        let turns = make_turns("   \n\t\r\n   ");
-        assert_eq!(derive_summary(&turns), None);
+        assert_eq!(derive_summary("   \n\t\r\n   "), None);
     }
 
     #[test]
-    fn derive_summary_no_turns_returns_none() {
-        assert_eq!(derive_summary(&[]), None);
+    fn derive_summary_empty_str_returns_none() {
+        assert_eq!(derive_summary(""), None);
+    }
+
+    #[test]
+    fn summary_survives_transcript_trimming() {
+        use super::super::stream_json::RETAINED_TURNS;
+
+        // Regression guard for RC3: the session summary must not silently
+        // change or disappear once old turns get trimmed away by
+        // SessionTranscript's retention bound.
+        let mut t = SessionTranscript::new();
+        let total = RETAINED_TURNS + 50;
+        for i in 0..total {
+            let text = if i == 0 {
+                "first request".to_string()
+            } else {
+                format!("turn {i}")
+            };
+            let _ = t.ingest_line(&format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"{text}"}},"isReplay":true}}"#
+            ));
+            let _ = t.ingest_line(
+                r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}"#,
+            );
+        }
+
+        let first_input = t
+            .first_user_input()
+            .expect("first_user_input must survive trimming past RETAINED_TURNS");
+        assert_eq!(
+            derive_summary(first_input),
+            Some("first request".to_string()),
+            "the session summary must not silently change or disappear once old turns are trimmed"
+        );
     }
 
     // ── arg construction ──────────────────────────────────────────────────────
