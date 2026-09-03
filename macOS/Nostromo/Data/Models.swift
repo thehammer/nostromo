@@ -14,6 +14,12 @@ struct QuickAction: Codable, Hashable {
     static let clearContext = QuickAction(
         id: "clear-context", label: "Clear Context", prompt: "", clearFirst: true
     )
+
+    /// `id` of the built-in "Reset Layout" action (see `Focus.builtIns`).
+    /// `ReplView.runQuickAction` matches on this to trigger the D5 client-side
+    /// side effect (clear saved ratios, rebuild from the daemon's tree) in
+    /// addition to sending `prompt`.
+    static let resetLayoutActionID = "perri-reset-layout"
 }
 
 // MARK: - Focus
@@ -70,7 +76,7 @@ struct Focus: Codable, Hashable, Identifiable {
                       clearFirst: true
                   ),
                   QuickAction(
-                      id: "perri-reset-layout",
+                      id: QuickAction.resetLayoutActionID,
                       label: "Reset Layout",
                       prompt: "apply your standard layout",
                       clearFirst: false

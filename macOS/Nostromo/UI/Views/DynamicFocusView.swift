@@ -150,6 +150,26 @@ final class DynamicFocusView: NSView {
         updateContent(model.paneContent, freshness: model.paneFreshness, address: model.paneAddress)
     }
 
+    /// The operator's escape hatch (D5) when a saved ratio has left a pane
+    /// unusable and "apply your standard layout" alone can't fix it — the
+    /// agent's re-broadcast still loses to whatever is saved on disk (D2
+    /// closes that for *future* corruption, but this is the in-app way to
+    /// clear a *current* one without `defaults delete`). Rebuilds from
+    /// whatever tree the store currently holds via the same `clearRatios:
+    /// true` path a genuine `.splitTopology` change takes — not a special
+    /// case, just invoked directly instead of waiting for the daemon to send
+    /// a structurally different tree.
+    ///
+    /// Not `private`/`fileprivate`: `ReplView.runQuickAction` calls this
+    /// directly on the `DynamicFocusView` it finds by walking its own
+    /// superview chain (every `ReplView` is built as a leaf under exactly
+    /// one live `DynamicFocusView` — see `makeLeafView` — so that ancestor
+    /// always exists once the pane is on screen).
+    func performLayoutReset() {
+        let model = AppStore.shared.focusLayouts[focus.sessionTag] ?? FocusLayoutModel.initial
+        reconcile(model, clearRatios: true)
+    }
+
     /// Every structural repair ends here. If the hierarchy we actually hold
     /// no longer matches the tree we were told to render — because an
     /// incremental repair above silently failed to reach it — rebuild from
@@ -382,6 +402,28 @@ final class DynamicFocusView: NSView {
         let udKey = "nostromo.dynlayout.\(tag).\(path)"
         split.translatesAutoresizingMaskIntoConstraints = false
 
+        // A saved ratio set is trusted only after it passes
+        // `RatioPersistencePolicy.isWellFormed` — the same shape check that
+        // gates writing one — plus a count check against this split's actual
+        // child count (fix-collapsed-split-ratio-persistence D2). This is
+        // what heals an already-corrupt value like `[0.977, 0.022]` on the
+        // very next launch with no migration step, and closes the path-key
+        // reuse hazard: `udKey` is keyed by tag + tree path, so a
+        // structurally different split that lands at the same path would
+        // otherwise silently inherit its predecessor's ratios. There's no
+        // real size to check a `total` against yet at this point in
+        // `makeSplitView`, which is exactly why this asks `isWellFormed`
+        // (shape only) rather than the fuller `shouldPersist`.
+        let savedRatios = UserDefaults.standard.array(forKey: udKey) as? [Double]
+        let validatedRatios = savedRatios.flatMap { saved -> [Double]? in
+            guard saved.count == children.count, RatioPersistencePolicy.isWellFormed(ratios: saved)
+            else { return nil }
+            return saved
+        }
+        if savedRatios != nil && validatedRatios == nil {
+            UserDefaults.standard.removeObject(forKey: udKey)
+        }
+
         // Applied on the first layout pass where `split` actually has a
         // size (see `RatioSplitView.layout()`) — not a one-shot
         // `DispatchQueue.main.async` dispatch, which used to silently
@@ -392,18 +434,43 @@ final class DynamicFocusView: NSView {
         // turn. `RatioSplitView` instead keeps trying on every layout pass
         // until it succeeds, then stops — so it can never fight an operator
         // drag either.
-        let savedRatios = UserDefaults.standard.array(forKey: udKey) as? [Double]
-        split.desiredRatios = savedRatios ?? ratios
+        split.desiredRatios = validatedRatios ?? ratios
 
-        // Persist the operator's drag-resize. The token is retained so a
-        // future structural rebuild can remove this observer instead of
-        // leaking it (D7) — see `removeSplitObservers`.
+        // Persist the operator's drag-resize — and only that. The policy
+        // check is what stops this observer from writing the transient
+        // near-zero state of a region being inserted, or our own
+        // programmatic `applyRatios` call re-entering this same
+        // notification, back to disk as if the operator had chosen it
+        // (fix-collapsed-split-ratio-persistence D1/RC1). The token is
+        // retained so a future structural rebuild can remove this observer
+        // instead of leaking it (D7) — see `removeSplitObservers`.
+        //
+        // `queue: nil`, not `.main`, is load-bearing, not cosmetic: `.main`
+        // makes this block an *async* enqueued operation, not a synchronous
+        // one on the posting thread. `RatioSplitView.layout()` sets
+        // `isApplyingProgrammatically`, calls `applyRatios`, and clears it
+        // again — all synchronously within the same run-loop turn — so by
+        // the time an `.main`-queued block actually ran, the flag had
+        // already gone back to `false` and this guard was silently a no-op
+        // in production (second-pass adherence finding: a fresh launch with
+        // no saved ratio wrote one to disk on the very first daemon-driven
+        // layout). `queue: nil` runs this block synchronously on the
+        // posting thread — which, for an `NSSplitView` layout pass, is
+        // always the main thread — so it reads `isApplyingProgrammatically`
+        // and `isDraggingDivider` at the moment they're actually true.
         let token = NotificationCenter.default.addObserver(
             forName: NSSplitView.didResizeSubviewsNotification,
             object: split,
-            queue: .main
+            queue: nil
         ) { _ in
+            let total = Double(DynamicFocusView.extent(of: split.bounds.size, isVertical: split.isVertical))
             let newRatios = DynamicFocusView.currentRatios(for: split)
+            guard RatioPersistencePolicy.shouldPersist(
+                ratios: newRatios,
+                total: total,
+                isProgrammatic: split.isApplyingProgrammatically,
+                isUserDrag: split.isDraggingDivider
+            ) else { return }
             UserDefaults.standard.set(newRatios, forKey: udKey)
         }
         splitObserverTokens.append(token)
@@ -600,11 +667,17 @@ final class DynamicFocusView: NSView {
     /// apply them. A `nil` from the solver (no real size yet, a count
     /// mismatch, or ratios that don't sum to ~1.0) means "don't touch the
     /// split" — obedience is everything this does; every judgement call
-    /// about whether it's safe to apply lives in `RatioSolver`.
+    /// about whether it's safe to apply lives in `RatioSolver`. Returns
+    /// whether the ratios were actually applied, so `RatioSplitView.layout()`
+    /// can tell a real application apart from a refusal (D3) — the exact
+    /// distinction `RatioSolver`'s own doc comment says the caller must
+    /// honour: keep trying next layout pass on `false`, stop trying on
+    /// `true`.
     ///
     /// `fileprivate` rather than `private`: `RatioSplitView`, a separate
     /// top-level type in this same file, is the only other caller.
-    fileprivate static func applyRatios(_ ratios: [Double], to split: NSSplitView) {
+    @discardableResult
+    fileprivate static func applyRatios(_ ratios: [Double], to split: NSSplitView) -> Bool {
         let subviews = split.subviews
         let total = extent(of: split.bounds.size, isVertical: split.isVertical)
         guard let positions = RatioSolver.dividerPositions(
@@ -612,21 +685,32 @@ final class DynamicFocusView: NSView {
             total: Double(total),
             dividerThickness: Double(split.dividerThickness),
             subviewCount: subviews.count
-        ) else { return }
+        ) else { return false }
         for (i, position) in positions.enumerated() {
             split.setPosition(CGFloat(position), ofDividerAt: i)
         }
         split.adjustSubviews()
+        return true
     }
 
+    /// The operator's actual current split, normalized so the result sums to
+    /// 1.0 (fix-collapsed-split-ratio-persistence D4). Divides each child's
+    /// extent by the *sum of the children's own extents*, not by the split's
+    /// full bounds — the split's bounds also include divider thickness,
+    /// which belongs to no child, so normalizing against it produced a set
+    /// that systematically summed to `1 - dividerThickness/total` (observed:
+    /// 0.9995, 0.9993, 0.9994). On a narrow split that deficit is large
+    /// enough to trip `RatioSolver.dividerPositions`'s `abs(sum - 1.0) < 0.01`
+    /// tolerance, and a solver refusal used to be indistinguishable from a
+    /// successful application (see `RatioSplitView.layout()`), silently
+    /// abandoning the ratios. Normalizing against the child-extent sum makes
+    /// `applyRatios` → `currentRatios` a round trip.
     private static func currentRatios(for split: NSSplitView) -> [Double] {
         let subviews = split.subviews
-        let totalSize = extent(of: split.bounds.size, isVertical: split.isVertical)
-        guard totalSize > 0 else { return Array(repeating: 1.0 / Double(subviews.count), count: subviews.count) }
-        return subviews.map { sv in
-            let size = extent(of: sv.frame.size, isVertical: split.isVertical)
-            return Double(size / totalSize)
-        }
+        let sizes = subviews.map { extent(of: $0.frame.size, isVertical: split.isVertical) }
+        let sum = sizes.reduce(0, +)
+        guard sum > 0 else { return Array(repeating: 1.0 / Double(subviews.count), count: subviews.count) }
+        return sizes.map { Double($0 / sum) }
     }
 
     // MARK: - Content update
@@ -689,22 +773,57 @@ final class DynamicFocusView: NSView {
 /// actually lands.
 final class RatioSplitView: NSSplitView {
 
-    /// Set once by `DynamicFocusView.makeSplitView`; cleared the first time
-    /// `layout()` is able to apply it. `nil` means either "never asked" or
-    /// "already applied" — both mean "leave the split alone."
+    /// Set once by `DynamicFocusView.makeSplitView`; cleared only once
+    /// `applyRatios` actually succeeds (D3). `nil` means either "never
+    /// asked" or "already successfully applied" — both mean "leave the
+    /// split alone." A solver refusal (no real size yet, a count mismatch,
+    /// or ratios that don't sum to ~1.0) leaves this set so the next layout
+    /// pass tries again, exactly the contract `RatioSolver`'s own doc
+    /// comment describes — clearing this unconditionally, before knowing
+    /// whether the apply landed, used to silently abandon the ratios
+    /// forever on a refusal.
     var desiredRatios: [Double]?
+
+    /// True for the duration of a programmatic ratio application —
+    /// `DynamicFocusView.makeSplitView`'s resize observer consults this via
+    /// `RatioPersistencePolicy` so `setPosition`/`adjustSubviews` below
+    /// (which post `NSSplitView.didResizeSubviewsNotification` just like an
+    /// operator drag does) can never be mistaken for one and written to
+    /// disk. This — not clearing `desiredRatios` before applying — is what
+    /// actually guards re-entrancy through that observer
+    /// (fix-collapsed-split-ratio-persistence D1/D3).
+    private(set) var isApplyingProgrammatically = false
+
+    /// True only while the operator's mouse button is down on one of this
+    /// split's dividers — an actual, in-progress drag. This is the positive
+    /// signal `RatioPersistencePolicy.shouldPersist` needs
+    /// (fix-collapsed-split-ratio-persistence, second-pass finding): window
+    /// resizes, fullscreen transitions and display reconfiguration all fire
+    /// the exact same `NSSplitView.didResizeSubviewsNotification` a divider
+    /// drag does, and `isProgrammatic` alone can't tell any of them apart
+    /// from an operator's deliberate choice, because none of them are
+    /// programmatic either. `NSSplitView` only routes a `mouseDown` to the
+    /// split view itself when the hit point falls in the divider-thickness
+    /// gap between arranged subviews — a click inside a child view never
+    /// reaches here — so this is set exactly when, and only when, a divider
+    /// is grabbed.
+    private(set) var isDraggingDivider = false
+
+    override func mouseDown(with event: NSEvent) {
+        isDraggingDivider = true
+        defer { isDraggingDivider = false }
+        super.mouseDown(with: event)
+    }
 
     override func layout() {
         super.layout()
         guard let ratios = desiredRatios, bounds.width > 0, bounds.height > 0 else { return }
-        // Clear before applying: `setPosition`/`adjustSubviews` inside
-        // `DynamicFocusView.applyRatios` post
-        // `NSSplitView.didResizeSubviewsNotification`, which must not
-        // re-enter this block through the observer
-        // `DynamicFocusView.makeSplitView` wires up for persisting operator
-        // drags.
-        desiredRatios = nil
-        DynamicFocusView.applyRatios(ratios, to: self)
+        isApplyingProgrammatically = true
+        let applied = DynamicFocusView.applyRatios(ratios, to: self)
+        isApplyingProgrammatically = false
+        if applied {
+            desiredRatios = nil
+        }
     }
 }
 

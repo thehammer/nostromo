@@ -15,6 +15,15 @@ import Foundation
 /// split that had zero size the one time a one-shot `DispatchQueue.main.async`
 /// callback happened to run.
 ///
+/// `applyRatios` now honours that contract explicitly
+/// (fix-collapsed-split-ratio-persistence D3): it returns whether
+/// `dividerPositions` actually produced an answer, and `RatioSplitView.layout()`
+/// clears its `desiredRatios` only on `true`. Before D3 it cleared
+/// unconditionally *before* calling `applyRatios`, so a refusal here — e.g.
+/// the systematic under-sum `currentRatios` used to produce, which could
+/// trip the `abs(sum - 1.0) < 0.01` tolerance below on a narrow split — was
+/// indistinguishable from success and abandoned the ratios for good.
+///
 /// `import Foundation` only, no AppKit — dual Sources/TestSources
 /// membership, same pattern as `LayoutChangeClassifier.swift`.
 enum RatioSolver {

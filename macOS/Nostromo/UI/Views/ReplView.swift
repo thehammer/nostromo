@@ -724,6 +724,20 @@ class ReplView: NSView {
     }
 
     private func runQuickAction(_ action: QuickAction) {
+        // D5: in addition to whatever prompt this action sends, a "Reset
+        // Layout" quick action also clears this focus's saved split ratios
+        // and forces its `DynamicFocusView` to rebuild from the daemon's
+        // tree directly — the prompt alone re-broadcasts the agent's
+        // standard layout, but a corrupt saved ratio on disk would still win
+        // over that broadcast (see `DynamicFocusView.makeSplitView`'s
+        // resize observer). Special-cased on id here rather than adding a
+        // client-side-effect field to `QuickAction`: that would need a
+        // hand-written `Decodable` (see `Focus.init(from:)`'s note on why a
+        // defaulted non-optional field can't just rely on the synthesized
+        // one) for what is, so far, exactly one action.
+        if action.id == QuickAction.resetLayoutActionID {
+            resetOwningLayout()
+        }
         if action.clearFirst {
             // Mirror newSessionTapped's local-history clear so the transcript
             // empties immediately, then start a fresh daemon session.
@@ -734,6 +748,22 @@ class ReplView: NSView {
         if !prompt.isEmpty {
             isPinnedToBottom = true
             session.send(prompt)
+        }
+    }
+
+    /// Walk up the view hierarchy to find the `DynamicFocusView` that built
+    /// this pane as a leaf (see `DynamicFocusView.makeLeafView`) and ask it
+    /// to reset this focus's layout. A no-op if this view isn't (yet) under
+    /// one — quick actions only fire from an on-screen button, so in
+    /// practice that ancestor is always there by the time this runs.
+    private func resetOwningLayout() {
+        var view: NSView? = superview
+        while let current = view {
+            if let dynamicFocusView = current as? DynamicFocusView {
+                dynamicFocusView.performLayoutReset()
+                return
+            }
+            view = current.superview
         }
     }
 }

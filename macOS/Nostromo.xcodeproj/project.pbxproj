@@ -93,6 +93,9 @@
 		RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000003 /* PRDetailCacheTests.swift */; };
 		TT0000000000000000000001 /* ChatSessionDetachTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT0000000000000000000000 /* ChatSessionDetachTests.swift */; };
 		UU0000000000000000000001 /* PerFocusEvictionWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */; };
+		QQ0000000000000000000601 /* RatioPersistencePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000006 /* RatioPersistencePolicy.swift */; };
+		QQ0000000000000000000602 /* RatioPersistencePolicy.swift in TestSources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000006 /* RatioPersistencePolicy.swift */; };
+		QQ0000000000000000000701 /* RatioPersistencePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000007 /* RatioPersistencePolicyTests.swift */; };
 		CC00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		GG00000000000000000000C1 /* NostromoKit in Frameworks (NostromoTests) */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		HH000000000000000000011 /* TurnReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000010 /* TurnReconciler.swift */; };
@@ -216,6 +219,8 @@
 		RR0000000000000000000003 /* PRDetailCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRDetailCacheTests.swift; sourceTree = "<group>"; };
 		TT0000000000000000000000 /* ChatSessionDetachTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionDetachTests.swift; sourceTree = "<group>"; };
 		UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerFocusEvictionWiringTests.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000006 /* RatioPersistencePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioPersistencePolicy.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000007 /* RatioPersistencePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioPersistencePolicyTests.swift; sourceTree = "<group>"; };
 		PP0000000000000000000001 /* TicketBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocumentTests.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000001 /* IPCLatencyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStats.swift; sourceTree = "<group>"; };
 		JJ0000000000000000000002 /* DaemonDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiagnostics.swift; sourceTree = "<group>"; };
@@ -370,6 +375,7 @@
 				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
 				QQ0000000000000000000001 /* PaneRenderPlan.swift */,
 				QQ0000000000000000000002 /* RatioSolver.swift */,
+				QQ0000000000000000000006 /* RatioPersistencePolicy.swift */,
 				PP000000000000000000001 /* ActivityStreamModel.swift */,
 				PP000000000000000000004 /* ActivityTickerView.swift */,
 				AA0000020000000000000021 /* Views */,
@@ -428,6 +434,7 @@
 				QQ0000000000000000000003 /* PaneRenderPlanTests.swift */,
 				QQ0000000000000000000004 /* RatioSolverTests.swift */,
 				QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */,
+				QQ0000000000000000000007 /* RatioPersistencePolicyTests.swift */,
 				OO000000000000000000100 /* DecisionStoreTests.swift */,
 				NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */,
 				PP000000000000000000006 /* ActivityEventDecodeTests.swift */,
@@ -593,6 +600,7 @@
 				KK0000000000000000000021 /* TabRegionView.swift in Sources */,
 				QQ0000000000000000000101 /* PaneRenderPlan.swift in Sources */,
 				QQ0000000000000000000201 /* RatioSolver.swift in Sources */,
+				QQ0000000000000000000601 /* RatioPersistencePolicy.swift in Sources */,
 				OO000000000000000000011 /* DecisionStore.swift in Sources */,
 				OO000000000000000000021 /* DecisionSheet.swift in Sources */,
 				OO000000000000000000031 /* DecisionPresenter.swift in Sources */,
@@ -661,9 +669,11 @@
 				KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */,
 				QQ0000000000000000000102 /* PaneRenderPlan.swift in TestSources */,
 				QQ0000000000000000000202 /* RatioSolver.swift in TestSources */,
+				QQ0000000000000000000602 /* RatioPersistencePolicy.swift in TestSources */,
 				QQ0000000000000000000301 /* PaneRenderPlanTests.swift in Sources */,
 				QQ0000000000000000000401 /* RatioSolverTests.swift in Sources */,
 				QQ0000000000000000000501 /* DynamicFocusViewWiringTests.swift in Sources */,
+				QQ0000000000000000000701 /* RatioPersistencePolicyTests.swift in Sources */,
 				OO000000000000000000012 /* DecisionStore.swift in TestSources */,
 				KK000000000000000000102 /* DecisionStoreTests.swift in Sources */,
 				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,

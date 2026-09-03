@@ -145,6 +145,187 @@ final class DynamicFocusViewWiringTests: XCTestCase {
             """)
     }
 
+    // MARK: f. RC1 — every UserDefaults write of a saved ratio is gated by RatioPersistencePolicy
+
+    func testTheOnlySavedRatioWriteIsGatedByRatioPersistencePolicy() throws {
+        let source = try Self.dynamicFocusViewSource()
+
+        // The corrupted-forever bug (fix-collapsed-split-ratio-persistence
+        // RC1): the resize observer wrote every
+        // `NSSplitView.didResizeSubviewsNotification` straight to
+        // `UserDefaults` unconditionally, so an operator's observed
+        // near-collapsed `[0.977, 0.022]` — once written — outranked every
+        // later daemon-broadcast ratio forever. There must be exactly one
+        // place in the whole file that ever writes a ratio to disk, and
+        // `RatioPersistencePolicy` must be consulted somewhere before it in
+        // file order — i.e. the write path actually gates on the policy
+        // rather than writing unconditionally again.
+        let writeLines = Self.lines(containing: "UserDefaults.standard.set(", in: source)
+        XCTAssertEqual(writeLines.count, 1, """
+            RC1: exactly one place in DynamicFocusView.swift may write a ratio to UserDefaults — found \
+            \(writeLines.count):
+            \(writeLines.joined(separator: "\n"))
+            """)
+
+        guard let onlyWriteLine = writeLines.first,
+              let writeRange = source.range(of: onlyWriteLine)
+        else { return }
+
+        let precedingSource = source[source.startIndex..<writeRange.lowerBound]
+        XCTAssertTrue(precedingSource.contains("RatioPersistencePolicy"), """
+            RC1: RatioPersistencePolicy must be referenced (and consulted as a guard) before the sole \
+            UserDefaults.standard.set(...) call that persists a ratio — otherwise the write path can still \
+            persist a corrupt or transient value the way it did before this fix, with no policy check anywhere \
+            upstream of it.
+            """)
+    }
+
+    // MARK: g. RC3 — desiredRatios is cleared exactly once, only on a successful apply
+
+    func testDesiredRatiosIsClearedExactlyOnceAndOnlyAfterASuccessfulApply() throws {
+        let source = try Self.dynamicFocusViewSource()
+
+        let clearLines = Self.lines(containing: "desiredRatios = nil", in: source)
+        XCTAssertEqual(clearLines.count, 1, """
+            RC3: desiredRatios must be cleared in exactly one place. Before D3, `RatioSplitView.layout()` cleared \
+            desiredRatios unconditionally *before* calling applyRatios, so a solver refusal (e.g. the narrow-split \
+            under-sum case) was indistinguishable from a successful application and the ratios were abandoned for \
+            good. Found \(clearLines.count) occurrence(s):
+            \(clearLines.joined(separator: "\n"))
+            """)
+
+        // The clear must sit inside a truthy-condition success branch (e.g.
+        // `if applied { ... }`), not unconditional and not preceding the call
+        // that produces that condition. `balancedBraceBlocks` finds every
+        // `if applied {` block (brace-depth matched, so a nested closure
+        // inside doesn't truncate it) and this asserts the sole clear lives
+        // inside one of them.
+        let appliedBlocks = Self.balancedBraceBlocks(startingAt: "if applied {", in: source)
+        XCTAssertTrue(appliedBlocks.contains { $0.contains("desiredRatios = nil") }, """
+            RC3: desiredRatios = nil must sit inside an `if applied { ... }` (or equivalent truthy-condition) \
+            block, not unconditionally — clearing it before knowing whether applyRatios actually succeeded is \
+            exactly the bug D3 fixes. Blocks found starting at "if applied {":
+            \(appliedBlocks.joined(separator: "\n---\n"))
+            """)
+
+        // And that condition must itself be produced by the call to
+        // applyRatios, appearing earlier in the file — not a stale/unrelated
+        // `applied` flag the clear happens to piggyback on.
+        if let applyCallRange = source.range(of: "DynamicFocusView.applyRatios(ratios, to: self)"),
+           let ifAppliedRange = source.range(of: "if applied {") {
+            XCTAssertTrue(applyCallRange.lowerBound < ifAppliedRange.lowerBound, """
+                RC3: the call to applyRatios must precede the `if applied {` branch that clears desiredRatios — \
+                the clear can only be gated on a result that was actually computed first.
+                """)
+        } else {
+            XCTFail("RC3: could not locate both the applyRatios call site and the `if applied {` branch — did the shape change?")
+        }
+    }
+
+    // MARK: h. RC2/D2 — makeSplitView never falls back to the bare, unvalidated saved ratios
+
+    func testMakeSplitViewNeverFallsBackToBareUnvalidatedSavedRatios() throws {
+        let source = try Self.dynamicFocusViewSource()
+        let body = try Self.functionBody(named: "makeSplitView", in: source)
+
+        // The literal old buggy line: a saved ratio, straight off disk, with
+        // no validation at all, applied as-is. This is precisely how a
+        // corrupted `[0.977, 0.022]` became authoritative forever — it must
+        // always be routed through RatioPersistencePolicy (and a count check
+        // against the split's actual child count) before ever reaching
+        // `desiredRatios`.
+        XCTAssertFalse(body.contains("savedRatios ?? ratios"), """
+            RC2/D2: makeSplitView must not contain the bare `savedRatios ?? ratios` fallback — a saved ratio must \
+            be validated (via RatioPersistencePolicy plus a child-count check) before it can ever be trusted over \
+            the agent-supplied defaults.
+            """)
+    }
+
+    // MARK: j. Second-pass adherence finding — the resize observer must run synchronously, not on an async queue
+
+    func testResizeObserverIsRegisteredSynchronouslyNotOnAnAsyncMainQueue() throws {
+        let source = try Self.dynamicFocusViewSource()
+        let body = try Self.functionBody(named: "makeSplitView", in: source)
+
+        // `RatioSplitView.layout()` sets `isApplyingProgrammatically`, calls
+        // `applyRatios`, and clears the flag again — all synchronously
+        // within one run-loop turn. An observer registered with `queue:
+        // .main` runs as a *deferred, async* block: by the time it actually
+        // executes, the flag has already been reset to `false`, so
+        // `RatioPersistencePolicy.shouldPersist`'s `isProgrammatic` check
+        // silently never fires in production — a fresh launch with no saved
+        // ratio key writes one to disk on the very first daemon-driven
+        // layout, exactly the bug `RatioPersistencePolicyTests` couldn't
+        // catch because it only calls the pure policy function directly.
+        // `queue: nil` runs the block synchronously on the posting thread
+        // (main, for an NSSplitView layout pass), which is what makes the
+        // flag observable while it's still true.
+        XCTAssertFalse(body.contains("queue: .main"), """
+            Second-pass finding: the didResizeSubviewsNotification observer in makeSplitView must not be \
+            registered with `queue: .main` — that defers the block to a later, async run-loop turn, by which \
+            time RatioSplitView.layout() has already synchronously cleared isApplyingProgrammatically back to \
+            false. The isProgrammatic guard becomes a permanent no-op and a fresh launch persists a ratio nobody \
+            dragged.
+            """)
+        XCTAssertTrue(body.contains("queue: nil"), """
+            Second-pass finding: the didResizeSubviewsNotification observer in makeSplitView must be registered \
+            with `queue: nil` so it runs synchronously on the posting thread and can actually observe \
+            isApplyingProgrammatically/isDraggingDivider at the moment they're true.
+            """)
+    }
+
+    // MARK: k. Second-pass adherence finding — persistence is gated on an actual divider-drag signal
+
+    func testShouldPersistIsGatedByAnActualDividerDragSignal() throws {
+        let source = try Self.dynamicFocusViewSource()
+
+        // The pre-existing signature (`ratios`, `total`, `isProgrammatic`)
+        // had no way to distinguish an operator's divider drag from a window
+        // resize, a fullscreen transition, or a display reconfiguration —
+        // all of which fire the exact same didResizeSubviewsNotification
+        // and are equally non-programmatic. Persistence must be gated on a
+        // real positive "a divider is under the mouse right now" signal.
+        let makeSplitViewBody = try Self.functionBody(named: "makeSplitView", in: source)
+        XCTAssertTrue(makeSplitViewBody.contains("isUserDrag: split.isDraggingDivider"), """
+            Second-pass finding: makeSplitView's call to RatioPersistencePolicy.shouldPersist must pass \
+            `isUserDrag: split.isDraggingDivider` — without it, a window resize/fullscreen toggle/display \
+            reconfiguration (none of which are "isProgrammatic") persists a ratio nobody dragged.
+            """)
+
+        let mouseDownBody = try Self.functionBody(named: "mouseDown", in: source, signaturePrefix: "override func mouseDown(")
+        XCTAssertTrue(mouseDownBody.contains("isDraggingDivider = true"), """
+            Second-pass finding: RatioSplitView.mouseDown(with:) must set isDraggingDivider = true for the \
+            duration of the divider-drag tracking loop — this is the only reliable "an operator actually grabbed \
+            a divider" signal, since NSSplitView only routes mouseDown to the split view itself when the hit \
+            point falls in the divider gap between arranged subviews, never inside a child view.
+            """)
+    }
+
+    // MARK: i. D4 — currentRatios normalizes against child extents, never the split's own bounds
+
+    func testCurrentRatiosNeverNormalizesAgainstTheSplitsOwnBounds() throws {
+        let source = try Self.dynamicFocusViewSource()
+        let body = try Self.functionBody(named: "currentRatios", in: source)
+
+        // The split's own `bounds` also includes divider thickness, which
+        // belongs to no child — normalizing against it is exactly what
+        // produced the systematic under-sum (observed: 0.9995, 0.9993,
+        // 0.9994) that could trip RatioSolver's `abs(sum - 1.0) < 0.01`
+        // tolerance on a narrow split. D4 requires normalizing against the
+        // *sum of the children's own extents* instead.
+        XCTAssertFalse(body.contains("split.bounds"), """
+            D4: currentRatios must not reference split.bounds — it must normalize against the sum of the \
+            children's own extents, not the split's full bounds (which includes divider thickness belonging to \
+            no child). Body:
+            \(body)
+            """)
+        XCTAssertFalse(body.contains(".bounds.size"), """
+            D4: currentRatios must not reference any view's .bounds.size when computing the returned ratios — \
+            only child frame extents (summed) may be used as the normalization denominator. Body:
+            \(body)
+            """)
+    }
+
     // MARK: - Helpers
 
     private static func dynamicFocusViewSource() throws -> String {
