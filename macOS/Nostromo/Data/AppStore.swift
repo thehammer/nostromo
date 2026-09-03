@@ -33,7 +33,11 @@ class AppStore: ObservableObject {
     // Activity — one assembled ActivityStreamModel per focus tag (keyed by
     // ActivityEvent.focusTag, or "unattributed" for events the daemon
     // couldn't resolve to a known focus — never dropped, never guessed at).
-    @Published private(set) var activityModels: [String: ActivityStreamModel] = [:]
+    // `ActivityStreamStore` bounds both axes: each model's own retention
+    // (event count per stream, subagent stream entry count) and the number
+    // of tracked focus tags itself — see the 2026-09-02 "unbounded memory
+    // growth" bug doc and ActivityStreamModel.swift's retention constants.
+    @Published private(set) var activityStreams = ActivityStreamStore()
     /// Daemon-wide ambient-activity ingestion health. Defaults optimistic
     /// (ingesting) until the first real `ActivityHealth` frame arrives on
     /// connect, so a fresh launch doesn't flash a false "not receiving" state.
@@ -172,15 +176,18 @@ class AppStore: ObservableObject {
 
     // MARK: - Ambient activity (activity-path wedge)
 
-    /// Key `activityModels` is stored under for an event the daemon could not
-    /// attribute to a known focus — never dropped, never guessed onto an
-    /// arbitrary tab.
-    static let unattributedActivityKey = "__unattributed__"
+    /// Key `activityStreams` is stored under for an event the daemon could
+    /// not attribute to a known focus — never dropped, never guessed onto an
+    /// arbitrary tab. Aliases `ActivityStreamStore.unattributedTag`, which is
+    /// the canonical value — `AppStore.swift` isn't part of
+    /// `ActivityStreamModel.swift`'s dual `Sources`/`TestSources` membership,
+    /// so the constant itself must live there, not here.
+    static let unattributedActivityKey = ActivityStreamStore.unattributedTag
 
     /// The `ActivityStreamModel` for `tag`, or an empty (neutral "waiting")
     /// model if nothing has arrived for it yet.
     func activityModel(for tag: String) -> ActivityStreamModel {
-        activityModels[tag] ?? ActivityStreamModel()
+        activityStreams.model(for: tag)
     }
 
     /// Return the ChatSession for `tag` if one has already been created (lazy —
@@ -763,9 +770,19 @@ class AppStore: ObservableObject {
         case .activity(let ev):
             log.debug("activity: \(ev.agent, privacy: .public) — \(ev.summary, privacy: .public)")
             let tag = ev.focusTag ?? Self.unattributedActivityKey
-            var model = activityModels[tag] ?? ActivityStreamModel()
-            let gapDetected = model.ingest(ev)
-            activityModels[tag] = model
+            // Read-modify-write, not `activityStreams[tag, default:].ingest(ev)`
+            // or a remove-then-reinsert — deliberately. `ActivityStreamModel`'s
+            // arrays are now bounded (≤2000 events store-wide), so the
+            // non-unique-reference deep copy this shape can cause is bounded
+            // constant work, not the unbounded-O(n²) cost `ChatSession.swift`'s
+            // `turns` comment (:63-75) documents avoiding for an *unbounded*
+            // array. Don't "improve" this without measuring: `@Published`
+            // has no `_modify`, `default:` subscript access depends on
+            // Combine's willSet timing rather than a language guarantee, and
+            // remove-then-reinsert fires the publisher twice per event —
+            // doubling `render()` on every `ActivityTickerView` in every
+            // attached-display window, inside a fix for a memory bug.
+            let gapDetected = activityStreams.ingest(ev, tag: tag)
             if gapDetected {
                 // A seq gap means this stream may already be presenting an
                 // incomplete record — re-sync from a full daemon snapshot
@@ -781,7 +798,7 @@ class AppStore: ObservableObject {
                     model.ingest(event)
                 }
             }
-            activityModels[tag] = model
+            activityStreams.replace(tag: tag, with: model)
 
         case .activityHealth(let ingesting, let reason, _, let hookInstalled):
             activityHealth = ActivityHealthState(ingesting: ingesting, reason: reason, hookInstalled: hookInstalled)

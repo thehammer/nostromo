@@ -46,6 +46,36 @@ struct ActivityHealthState {
 /// `ingest(_:)` reports a gap; this type only detects the gap.
 struct ActivityStreamModel {
 
+    // MARK: - Retention constants
+    //
+    // Bounded retention, ported verbatim from
+    // Shared/NostromoKit/Sources/NostromoKit/Store/ActivityStreamModel.swift
+    // (which added these bounds for iOS; macOS's copy lacked them until now
+    // — see the 2026-09-02 "unbounded memory growth" bug doc).
+
+    /// Per-stream retention cap. Mirrors Rust
+    /// `activity::store::MAX_EVENTS_PER_STREAM` (`src/activity/store.rs`) —
+    /// keep these in sync. A client cap below the daemon's would silently
+    /// discard part of a snapshot the daemon still considers current; a cap
+    /// above it could never bind, since the daemon already trimmed first.
+    static let maxEventsPerStream = 200
+
+    /// Store-wide retention cap across all of a focus's streams combined.
+    /// Mirrors Rust `activity::store::MAX_TOTAL_EVENTS` (`src/activity/store.rs`)
+    /// — keep these in sync, for the same reason as `maxEventsPerStream`.
+    static let maxTotalEvents = 2000
+
+    /// Cap on the number of subagent stream *entries* retained — distinct
+    /// from `maxEventsPerStream`, which only bounds the events *within* one
+    /// entry. Without this, a long-lived focus that spawns many subagents
+    /// over time accumulates one permanent dictionary entry per subagent
+    /// forever (RC2 in the retention bug doc), each holding its own
+    /// (already-capped) event array. 64 because the consumer is the
+    /// expanded panel, which renders one row per stream and is already
+    /// unreadable past ~20 rows — this bounds the per-entry metadata cost
+    /// without ever being the binding constraint in practice.
+    static let maxSubagentStreams = 64
+
     // MARK: - State
 
     private var main: ActivityAgentStream?
@@ -67,6 +97,12 @@ struct ActivityStreamModel {
     /// subagent's first event). Marks a subagent stream `finished` on a
     /// `subagent_stop` event.
     ///
+    /// Enforces bounded retention on every axis: the per-stream event cap
+    /// (`maxEventsPerStream`), the subagent stream *entry* cap
+    /// (`maxSubagentStreams`, evicting oldest-finished-first — see
+    /// `evictOverEntryCapIfPossible`), and the store-wide event budget
+    /// (`maxTotalEvents`, see `reclaimIfOverBudget`).
+    ///
     /// Returns `true` exactly when this event's `seq` reveals a gap versus
     /// the last `seq` seen for its stream: `seq` present, a prior `seq` was
     /// already recorded for this stream, and the new value is not exactly
@@ -74,7 +110,12 @@ struct ActivityStreamModel {
     /// the pre-`seq` wire shape) never counts as a gap — treat "can't tell"
     /// as "don't false-alarm". The first event ever ingested into a given
     /// stream never counts as a gap, regardless of its `seq`, because there
-    /// is nothing yet to compare it against.
+    /// is nothing yet to compare it against — this includes a stream that
+    /// was just recreated after its prior entry was evicted under entry-cap
+    /// pressure: eviction clears its `seq` baseline along with the rest of
+    /// its state (see `evictOverEntryCapIfPossible`), so a recreated stream
+    /// can never falsely report a gap and trigger a spurious snapshot
+    /// request.
     @discardableResult
     mutating func ingest(_ event: ActivityEvent) -> Bool {
         let streamKey = event.agentId ?? ""
@@ -91,16 +132,24 @@ struct ActivityStreamModel {
                     finished: false)
             }
             subagentsByAgentId[agentId]?.events.append(event)
+            if let count = subagentsByAgentId[agentId]?.events.count, count > Self.maxEventsPerStream {
+                subagentsByAgentId[agentId]?.events.removeFirst()
+            }
             if event.kind == "subagent_stop" {
                 subagentsByAgentId[agentId]?.finished = true
             }
+            evictOverEntryCapIfPossible()
         } else {
             if main == nil {
                 main = ActivityAgentStream(agentId: nil, agentType: nil, parentAgentId: nil, events: [], finished: false)
             }
             main?.events.append(event)
+            if let count = main?.events.count, count > Self.maxEventsPerStream {
+                main?.events.removeFirst()
+            }
         }
 
+        reclaimIfOverBudget()
         return gap
     }
 
@@ -121,6 +170,85 @@ struct ActivityStreamModel {
         defer { lastSeqByStreamKey[streamKey] = seq }
         guard let previous = lastSeqByStreamKey[streamKey] else { return false }
         return seq != previous + 1
+    }
+
+    // MARK: - Bounded retention: subagent stream entry cap (RC2)
+
+    /// If the number of *entries* in `subagentsByAgentId` exceeds
+    /// `maxSubagentStreams`, evicts the oldest entry (by `subagentOrder`)
+    /// whose `finished` flag is `true` — removing it from
+    /// `subagentsByAgentId`, `subagentOrder`, **and** `lastSeqByStreamKey`
+    /// together, so a later event for the same `agentId` recreates a clean
+    /// stream rather than resurrecting a stale `seq` baseline.
+    ///
+    /// Deliberately never evicts merely because a stream just finished —
+    /// only because the store is over the entry-count budget. If every
+    /// retained entry is still running, evicts nothing: a running
+    /// subagent's history is exactly what an operator would want to
+    /// inspect, and the event-count budget (`maxTotalEvents`) already
+    /// bounds memory regardless of how many running entries pile up.
+    private mutating func evictOverEntryCapIfPossible() {
+        while subagentOrder.count > Self.maxSubagentStreams {
+            guard let victimIndex = subagentOrder.firstIndex(where: { subagentsByAgentId[$0]?.finished == true }) else {
+                return // every retained entry is still running — evict nothing
+            }
+            let victim = subagentOrder.remove(at: victimIndex)
+            subagentsByAgentId.removeValue(forKey: victim)
+            lastSeqByStreamKey.removeValue(forKey: victim)
+        }
+    }
+
+    // MARK: - Bounded retention: store-wide event budget
+
+    /// While the total event count across every stream (main + all
+    /// subagents) exceeds `maxTotalEvents`, reclaim the oldest events first
+    /// from *finished* subagent streams, then from *running* subagent
+    /// streams, and only then from the main stream — the main stream is
+    /// what the ticker reads, so it's reclaimed last. `total` is tracked
+    /// locally (rather than recomputed via `totalEventCount` at each step)
+    /// so each tier below is a cheap no-op once an earlier tier has already
+    /// brought the aggregate back within budget.
+    private mutating func reclaimIfOverBudget() {
+        var total = totalEventCount
+        guard total > Self.maxTotalEvents else { return }
+
+        reclaimSubagentTier(finished: true, total: &total)
+        reclaimSubagentTier(finished: false, total: &total)
+        reclaimMainStream(total: &total)
+    }
+
+    /// Reclaims the oldest events from subagent streams whose `finished`
+    /// flag matches `finished`, oldest-stream-first per `subagentOrder`
+    /// (the order streams were first seen stands in for "oldest" among
+    /// peers in the same tier), stopping the moment `total` is back within
+    /// `maxTotalEvents`.
+    private mutating func reclaimSubagentTier(finished: Bool, total: inout Int) {
+        for agentId in subagentOrder {
+            guard total > Self.maxTotalEvents else { return }
+            guard subagentsByAgentId[agentId]?.finished == finished else { continue }
+            while total > Self.maxTotalEvents, !(subagentsByAgentId[agentId]?.events.isEmpty ?? true) {
+                subagentsByAgentId[agentId]?.events.removeFirst()
+                total -= 1
+            }
+        }
+    }
+
+    /// Reclaims the oldest main-stream events. Only ever removes anything
+    /// once both subagent tiers above have already been drained and the
+    /// budget is still exceeded.
+    private mutating func reclaimMainStream(total: inout Int) {
+        while total > Self.maxTotalEvents, !(main?.events.isEmpty ?? true) {
+            main?.events.removeFirst()
+            total -= 1
+        }
+    }
+
+    /// Total retained events across the main stream and every subagent
+    /// stream combined. Internal (not private) so tests can assert the
+    /// aggregate bound directly — this type has dual `Sources`/`TestSources`
+    /// membership, so internal visibility is all a test needs.
+    var totalEventCount: Int {
+        (main?.events.count ?? 0) + subagentsByAgentId.values.reduce(0) { $0 + $1.events.count }
     }
 
     // MARK: - Queries
@@ -200,5 +328,109 @@ struct ActivityStreamModel {
     private static func clip(_ summary: String) -> String {
         guard summary.count > 40 else { return summary }
         return String(summary.prefix(37)) + "…"
+    }
+}
+
+// MARK: - ActivityStreamStore
+
+/// Tag-keyed layer holding one `ActivityStreamModel` per focus tag (RC3 in
+/// the retention bug doc — `AppStore.activityModels`'s entry count was
+/// itself unbounded, growing by one entry per focus tag ever seen, forever).
+///
+/// Bounds the *number of tracked tags*, independent of `ActivityStreamModel`'s
+/// own per-tag event bounds above. Eviction is LRU by last ingest, and never
+/// evicts the tag just touched nor `unattributedTag` — the operator's own
+/// current focus (or the catch-all unattributed bucket) must never be the
+/// one that silently goes quiet just because it hasn't ingested recently.
+/// An evicted tag isn't gone forever: `model(for:)` returns a fresh, empty
+/// model for it, rendering the same neutral "no events yet" state as a tag
+/// that's never been seen — never stale text — and it repopulates on that
+/// focus's next event.
+struct ActivityStreamStore {
+
+    /// Cap on the number of tracked focus tags. 32 is generous headroom
+    /// over the sidebar's realistic focus count; the point is a ceiling,
+    /// not a tight budget.
+    static let maxTrackedFocusTags = 32
+
+    /// Key an event is stored under when the daemon could not attribute it
+    /// to a known focus. Mirrors `AppStore.unattributedActivityKey`, which
+    /// is defined in terms of this constant (`AppStore.swift` isn't part of
+    /// this file's dual `Sources`/`TestSources` membership, so the
+    /// canonical value lives here and `AppStore` aliases it).
+    static let unattributedTag = "__unattributed__"
+
+    // MARK: - State
+
+    private var modelsByTag: [String: ActivityStreamModel] = [:]
+    /// Least-recently-touched first; touching a tag (ingest or replace)
+    /// moves it to the end.
+    private var tagOrder: [String] = []
+
+    // MARK: - Init
+
+    init() {}
+
+    // MARK: - Ingest
+
+    /// Routes `event` to `tag`'s model (creating an empty one if `tag`
+    /// hasn't been seen before), marks `tag` most-recently-touched, and
+    /// evicts down to `maxTrackedFocusTags` if this pushed the store over
+    /// budget. Returns the underlying model's gap-detection result, exactly
+    /// as `ActivityStreamModel.ingest(_:)` would.
+    @discardableResult
+    mutating func ingest(_ event: ActivityEvent, tag: String) -> Bool {
+        var model = modelsByTag[tag] ?? ActivityStreamModel()
+        let gap = model.ingest(event)
+        modelsByTag[tag] = model
+        touch(tag)
+        evictIfNeeded(justTouched: tag)
+        return gap
+    }
+
+    /// Wholesale-replaces `tag`'s model — the shape a daemon snapshot
+    /// rebuild needs (replay every event of every stream into a fresh
+    /// model, then swap it in for `tag` in one step). Leaves every other
+    /// tag's model untouched.
+    mutating func replace(tag: String, with model: ActivityStreamModel) {
+        modelsByTag[tag] = model
+        touch(tag)
+        evictIfNeeded(justTouched: tag)
+    }
+
+    // MARK: - Queries
+
+    /// The `ActivityStreamModel` for `tag`, or an empty (neutral "waiting")
+    /// model if nothing has arrived for it yet — whether `tag` has never
+    /// been seen, or its entry was since evicted under tag-count pressure.
+    func model(for tag: String) -> ActivityStreamModel {
+        modelsByTag[tag] ?? ActivityStreamModel()
+    }
+
+    /// Number of focus tags currently tracked. Exposed so tests can assert
+    /// the tag-count bound directly.
+    var trackedTagCount: Int { modelsByTag.count }
+
+    // MARK: - LRU bookkeeping
+
+    private mutating func touch(_ tag: String) {
+        if let index = tagOrder.firstIndex(of: tag) {
+            tagOrder.remove(at: index)
+        }
+        tagOrder.append(tag)
+    }
+
+    /// While tracking more tags than `maxTrackedFocusTags`, evicts the
+    /// least-recently-touched tag that isn't `tag` (the one just ingested
+    /// into / replaced — never evict the tag that caused the overflow) and
+    /// isn't `unattributedTag` (never evicted, regardless of recency).
+    private mutating func evictIfNeeded(justTouched tag: String) {
+        while modelsByTag.count > Self.maxTrackedFocusTags {
+            guard let victimIndex = tagOrder.firstIndex(where: { $0 != tag && $0 != Self.unattributedTag }) else {
+                return // nothing left that's safe to evict
+            }
+            let victim = tagOrder.remove(at: victimIndex)
+            modelsByTag.removeValue(forKey: victim)
+        }
     }
 }
