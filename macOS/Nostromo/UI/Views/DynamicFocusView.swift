@@ -865,7 +865,25 @@ final class RatioSplitView: NSSplitView {
 
     override func layout() {
         super.layout()
-        guard let ratios = desiredRatios, bounds.width > 0, bounds.height > 0 else { return }
+        // Reentrancy guard (2026-09-03 hotfix): `DynamicFocusView.applyRatios`
+        // calls `NSSplitView.setPosition(_:ofDividerAtIndex:)`, which AppKit
+        // answers by synchronously running another layout pass on this same
+        // view *before returning* — re-entering `layout()` while
+        // `desiredRatios` is still set (it isn't cleared until the outer
+        // call's `applyRatios` returns). Without this guard that inner call
+        // sees the same non-nil `desiredRatios` and applies again, whose own
+        // `setPosition` re-enters again, forever — an unconditional
+        // stack-overflow crash (`EXC_BAD_ACCESS`, "Thread stack size
+        // exceeded due to excessive recursion") on every launch that reaches
+        // this split. `isApplyingProgrammatically` already exists (for the
+        // resize-observer persistence guard) and is set for exactly the
+        // window this recursion happens in, so it doubles as the reentrancy
+        // flag: the inner call sees it `true`, does nothing beyond the
+        // already-completed `super.layout()`, and returns — letting the
+        // outer `setPosition` call unwind normally.
+        guard !isApplyingProgrammatically,
+              let ratios = desiredRatios, bounds.width > 0, bounds.height > 0
+        else { return }
         isApplyingProgrammatically = true
         let applied = DynamicFocusView.applyRatios(ratios, to: self)
         isApplyingProgrammatically = false
