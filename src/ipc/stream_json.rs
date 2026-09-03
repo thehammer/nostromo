@@ -20,9 +20,57 @@
 //! `tool_result` content blocks are rendered. `thinking` blocks are dropped —
 //! exactly as the Swift parser did — so the GUI renders identically to before
 //! the daemon owned parsing.
+//!
+//! ## Retention
+//!
+//! [`SessionTranscript`] is a **cache**, not the record of truth — the stored
+//! session JSONL under `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` is
+//! authoritative, and the daemon already re-reads it on resume
+//! ([`load_scrollback`]). Retention is bounded two ways, enforced after every
+//! ingest:
+//!
+//! - **Turn count** ≤ [`RETAINED_TURNS`] (4× [`SCROLLBACK_TURNS`], the number
+//!   of turns actually served on attach/resume — headroom beyond that window
+//!   costs memory for no benefit).
+//! - **Payload bytes** ≤ [`RETAINED_BYTES`] (32 MiB) — a turn-count cap alone
+//!   does not bound memory, since `ToolResult` content and `ToolCall`
+//!   `input_full` are retained verbatim and a single agentic turn can carry
+//!   hundreds of large tool results.
+//!
+//! Newest data always wins: trimming drops the oldest complete turns first: if
+//! a single retained turn is, on its own, over the byte budget (the
+//! in-flight turn is never evicted as a whole to make room), its own oldest
+//! blocks are shed instead, newest block last. The one accepted degradation:
+//! a single turn whose own text has no blocks to shed (e.g. one oversized user
+//! prompt) is retained over budget rather than dropped — being over a soft
+//! budget is survivable, dropping human input or spinning forever is not.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// How many turns a fresh attach or resume is served. Do not change this
+/// value or its two call sites as part of retention work — it is a separate,
+/// already-tested concern (see `.claude/prds/bounded-transcript-memory.md`).
+pub const SCROLLBACK_TURNS: usize = 30;
+
+/// Hard cap on retained turns — 4× the served window. The in-memory
+/// transcript is a cache; the on-disk JSONL is authoritative and is re-read
+/// on resume, so anything past the served window is pure headroom.
+pub const RETAINED_TURNS: usize = 4 * SCROLLBACK_TURNS;
+
+/// Hard cap on retained payload bytes per session. A turn cap alone does not
+/// bound memory: `TurnBlock::ToolResult.content` and
+/// `TurnBlock::ToolCall.input_full` are retained verbatim, and one agentic
+/// turn can carry hundreds of ≥256 KB tool results.
+pub const RETAINED_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
+
+/// Fixed per-block accounting overhead. Without it, a block whose only
+/// content is empty strings (e.g. a degenerate `ResultSummary`) would cost
+/// nothing against the byte budget no matter how many are retained.
+const BLOCK_OVERHEAD: usize = 64;
+
+/// Fixed per-turn accounting overhead, on top of its blocks' own accounting.
+const TURN_OVERHEAD: usize = 128;
 
 // ── turn model ──────────────────────────────────────────────────────────────
 
@@ -578,6 +626,14 @@ pub struct SessionTranscript {
     next_seq: u64,
     /// Most recent context-window token count from an assistant message's usage field.
     last_context_tokens: Option<u64>,
+    /// Running total of retained payload bytes — see the module-level
+    /// `## Retention` docs. Kept incrementally in sync with `turns` at every
+    /// mutation site; never recomputed from scratch on the hot path.
+    retained_bytes: usize,
+    /// The very first user prompt this transcript ever ingested. Set once and
+    /// never cleared by trimming, so the session summary (derived from it)
+    /// doesn't change or disappear once old turns fall out of `turns`.
+    first_user_input: Option<String>,
 }
 
 impl SessionTranscript {
@@ -591,6 +647,33 @@ impl SessionTranscript {
 
     pub fn snapshot(&self) -> Vec<Turn> {
         self.turns.clone()
+    }
+
+    /// Current retained payload byte total — see the module-level
+    /// `## Retention` docs. Always ≤ [`RETAINED_BYTES`], except for the one
+    /// documented escape hatch: a single turn with no blocks left to shed.
+    pub fn byte_len(&self) -> usize {
+        self.retained_bytes
+    }
+
+    /// Number of turns currently retained. Always ≤ [`RETAINED_TURNS`].
+    pub fn turn_count(&self) -> usize {
+        self.turns.len()
+    }
+
+    /// The very first user prompt this transcript ever ingested, surviving
+    /// trimming (see the `first_user_input` field doc).
+    pub fn first_user_input(&self) -> Option<&str> {
+        self.first_user_input.as_deref()
+    }
+
+    /// The last `max_turns` turns, newest last — same order as `snapshot()`.
+    /// Returns everything if `max_turns` exceeds the retained count, and an
+    /// empty vec for `max_turns == 0`. Clones only the requested tail, unlike
+    /// `snapshot()` + a manual `split_off`.
+    pub fn recent_turns(&self, max_turns: usize) -> Vec<Turn> {
+        let len = self.turns.len();
+        self.turns[len.saturating_sub(max_turns)..].to_vec()
     }
 
     /// `true` while the most recent turn is still open.
@@ -626,6 +709,9 @@ impl SessionTranscript {
                 if let Some(last) = self.turns.last_mut() {
                     last.is_complete = true;
                 }
+                if self.first_user_input.is_none() {
+                    self.first_user_input = Some(text.clone());
+                }
                 let id = self.alloc_id();
                 let turn = Turn {
                     id,
@@ -634,8 +720,11 @@ impl SessionTranscript {
                     blocks: vec![],
                     is_complete: false,
                 };
+                self.retained_bytes += turn_bytes(&turn);
                 self.turns.push(turn.clone());
-                vec![TurnDelta::TurnStarted { turn }]
+                let deltas = vec![TurnDelta::TurnStarted { turn }];
+                self.enforce_limits();
+                deltas
             }
 
             ParsedLine::Blocks {
@@ -649,6 +738,7 @@ impl SessionTranscript {
                 if let Some(turn) = self.turns.last_mut() {
                     let turn_id = turn.id.clone();
                     for b in blocks {
+                        self.retained_bytes += block_bytes(&b);
                         turn.blocks.push(b.clone());
                         deltas.push(TurnDelta::BlockAppended {
                             turn_id: turn_id.clone(),
@@ -656,17 +746,20 @@ impl SessionTranscript {
                         });
                     }
                 }
+                self.enforce_limits();
                 deltas
             }
 
             ParsedLine::Result(summary) => {
-                if let Some(turn) = self.turns.last_mut() {
+                let deltas = if let Some(turn) = self.turns.last_mut() {
                     let turn_id = turn.id.clone();
-                    turn.blocks.push(TurnBlock::ResultSummary {
+                    let block = TurnBlock::ResultSummary {
                         duration_ms: summary.duration_ms,
                         cost_usd: summary.cost_usd,
                         is_error: summary.is_error,
-                    });
+                    };
+                    self.retained_bytes += block_bytes(&block);
+                    turn.blocks.push(block);
                     turn.is_complete = true;
                     let context_tokens = self.last_context_tokens;
                     vec![TurnDelta::TurnCompleted {
@@ -676,7 +769,9 @@ impl SessionTranscript {
                     }]
                 } else {
                     vec![]
-                }
+                };
+                self.enforce_limits();
+                deltas
             }
         }
     }
@@ -688,14 +783,18 @@ impl SessionTranscript {
         if turn.is_complete {
             return None;
         }
-        turn.blocks.push(TurnBlock::ErrorMessage {
+        let block = TurnBlock::ErrorMessage {
             message: message.to_string(),
-        });
+        };
+        self.retained_bytes += block_bytes(&block);
+        turn.blocks.push(block);
         turn.is_complete = true;
-        Some(TurnDelta::TurnErrored {
+        let delta = Some(TurnDelta::TurnErrored {
             turn_id: turn.id.clone(),
             message: message.to_string(),
-        })
+        });
+        self.enforce_limits();
+        delta
     }
 
     /// Complete any trailing open turn without a delta (used after replaying a
@@ -708,11 +807,111 @@ impl SessionTranscript {
 
     /// Keep only the last `max_turns` turns (scrollback trimming).
     pub fn truncate_to_last(&mut self, max_turns: usize) {
-        if self.turns.len() > max_turns {
-            let drop = self.turns.len() - max_turns;
-            self.turns.drain(0..drop);
+        while self.turns.len() > max_turns {
+            self.drop_oldest_turn();
         }
     }
+
+    /// Enforce both retention bounds, in order: turn count, then byte budget
+    /// by dropping whole (completed-first) turns, then — last resort — the
+    /// oldest blocks of a single turn that's over budget on its own. Every
+    /// loop removes exactly one element per iteration and stops when there is
+    /// nothing left to remove, so this always terminates: it runs on the
+    /// session's blocking stdout reader thread while holding the transcript
+    /// mutex, and a non-terminating trim would hang every attached client.
+    fn enforce_limits(&mut self) {
+        while self.turns.len() > RETAINED_TURNS {
+            self.drop_oldest_turn();
+        }
+        // Never drop the last turn here — `ingest_line` appends to
+        // `turns.last_mut()`, so evicting it as a whole would silently
+        // discard the live turn's output.
+        while self.retained_bytes > RETAINED_BYTES && self.turns.len() > 1 {
+            self.drop_oldest_turn();
+        }
+        if self.retained_bytes > RETAINED_BYTES {
+            self.shed_oldest_blocks_of_last_turn();
+        }
+    }
+
+    /// Drop the oldest retained turn and subtract its bytes from the running
+    /// total. No-op on an empty transcript.
+    fn drop_oldest_turn(&mut self) {
+        if let Some(t) = self.turns.first() {
+            self.retained_bytes = self.retained_bytes.saturating_sub(turn_bytes(t));
+        }
+        if !self.turns.is_empty() {
+            self.turns.remove(0);
+        }
+    }
+
+    /// Last resort when a single retained turn is, on its own, over budget:
+    /// shed its own oldest blocks (never its newest) until back within budget
+    /// or no blocks are left. May leave the transcript over budget afterward
+    /// (e.g. a single oversized user prompt with no blocks at all) — a
+    /// soft-budget overage is survivable, spinning on the reader thread is
+    /// not.
+    fn shed_oldest_blocks_of_last_turn(&mut self) {
+        let over = self.retained_bytes - RETAINED_BYTES;
+        let Some(turn) = self.turns.last_mut() else {
+            return;
+        };
+        let mut shed = 0usize;
+        let mut count = 0usize;
+        for b in turn.blocks.iter() {
+            if shed >= over {
+                break;
+            }
+            shed += block_bytes(b);
+            count += 1;
+        }
+        if count > 0 {
+            let freed: usize = turn.blocks.drain(0..count).map(|b| block_bytes(&b)).sum();
+            self.retained_bytes = self.retained_bytes.saturating_sub(freed);
+        }
+    }
+}
+
+/// Accounting weight of one block: fixed overhead plus its own String
+/// payloads. Matches on every [`TurnBlock`] variant with no wildcard arm, so
+/// adding a variant to the wire type is a compile error here rather than a
+/// silently unmetered payload.
+fn block_bytes(b: &TurnBlock) -> usize {
+    let payload = match b {
+        TurnBlock::Text { text } => text.len(),
+        TurnBlock::ToolCall {
+            tool_name,
+            input_summary,
+            input_full,
+        } => tool_name.len() + input_summary.len() + input_full.len(),
+        TurnBlock::ToolResult { content, .. } => content.len(),
+        TurnBlock::ResultSummary { .. } => 0,
+        TurnBlock::ErrorMessage { message } => message.len(),
+        TurnBlock::AskQuestion {
+            question,
+            header,
+            options,
+            ..
+        } => {
+            question.len()
+                + header.len()
+                + options
+                    .iter()
+                    .map(|o| o.label.len() + o.description.len())
+                    .sum::<usize>()
+        }
+    };
+    BLOCK_OVERHEAD + payload
+}
+
+/// Accounting weight of one turn: fixed overhead, its own String fields, and
+/// every block it currently holds.
+fn turn_bytes(t: &Turn) -> usize {
+    TURN_OVERHEAD
+        + t.id.len()
+        + t.user_input.len()
+        + t.timestamp.as_deref().map(str::len).unwrap_or(0)
+        + t.blocks.iter().map(block_bytes).sum::<usize>()
 }
 
 /// Build a [`SessionTranscript`] from the lines of a stored-session JSONL.
@@ -726,6 +925,11 @@ pub fn transcript_from_jsonl(content: &str, max_turns: usize) -> SessionTranscri
     }
     t.flush();
     t.truncate_to_last(max_turns);
+    // Rebase to the oldest SURVIVING turn, matching what `derive_summary`
+    // reads via `turns.first()` today — preserves today's resume-summary
+    // behavior exactly, even though the true first prompt of the whole
+    // session may have been trimmed away by `truncate_to_last` above.
+    t.first_user_input = t.turns.first().map(|turn| turn.user_input.clone());
     t
 }
 
@@ -1305,5 +1509,450 @@ mod tests {
             serde_json::to_string(&SessionState::MidTurn).unwrap(),
             "\"mid_turn\""
         );
+    }
+
+    // ── retention bounds ──────────────────────────────────────────────────────
+
+    fn user_line(i: usize) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"prompt {i}"}},"isReplay":true}}"#
+        )
+    }
+
+    fn user_prompt_line(text: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{text}"}},"isReplay":true}}"#
+        )
+    }
+
+    fn tool_result_line(bytes: usize) -> String {
+        let content = "x".repeat(bytes);
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","content":"{content}","is_error":false,"tool_use_id":"t"}}]}}}}"#
+        )
+    }
+
+    /// Like `tool_result_line`, but the content starts with a distinguishing
+    /// `marker` so a test can tell WHICH specific block survived trimming.
+    /// Plain `tool_result_line` output is byte-for-byte identical across
+    /// calls, which makes "is the first one gone / is the last one present"
+    /// unanswerable without a marker.
+    fn tool_result_line_marked(marker: &str, bytes: usize) -> String {
+        let mut content = marker.to_string();
+        if bytes > content.len() {
+            content.push_str(&"x".repeat(bytes - content.len()));
+        }
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","content":"{content}","is_error":false,"tool_use_id":"t"}}]}}}}"#
+        )
+    }
+
+    /// A fat `tool_use` block — its `input_full` (pretty-printed JSON) also
+    /// counts toward retained bytes, same as a tool_result's content.
+    fn tool_use_line(bytes: usize) -> String {
+        let payload = "y".repeat(bytes);
+        format!(
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Bash","id":"tu","input":{{"command":"{payload}"}}}}]}}}}"#
+        )
+    }
+
+    fn result_line() -> &'static str {
+        r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}"#
+    }
+
+    /// Independent recount of retained byte volume, used as a drift guard
+    /// against `byte_len()`'s own running total. The per-turn/per-block
+    /// payload summing below is written independently of `turn_bytes`/
+    /// `block_bytes` — only the two fixed overhead constants are shared,
+    /// since they're production-side *parameters*, not summing logic. A
+    /// mismatch here means the running total has drifted from what's
+    /// actually retained, which is the real bug this recount exists to
+    /// catch.
+    fn recount_bytes(t: &SessionTranscript) -> usize {
+        t.snapshot()
+            .iter()
+            .map(|turn| {
+                let mut n = TURN_OVERHEAD
+                    + turn.id.len()
+                    + turn.user_input.len()
+                    + turn.timestamp.clone().unwrap_or_default().len();
+                for b in &turn.blocks {
+                    n += BLOCK_OVERHEAD;
+                    n += match b {
+                        TurnBlock::Text { text } => text.len(),
+                        TurnBlock::ToolCall {
+                            tool_name,
+                            input_summary,
+                            input_full,
+                        } => tool_name.len() + input_summary.len() + input_full.len(),
+                        TurnBlock::ToolResult { content, .. } => content.len(),
+                        TurnBlock::ResultSummary { .. } => 0,
+                        TurnBlock::ErrorMessage { message } => message.len(),
+                        TurnBlock::AskQuestion {
+                            question,
+                            header,
+                            options,
+                            ..
+                        } => {
+                            question.len()
+                                + header.len()
+                                + options
+                                    .iter()
+                                    .map(|o| o.label.len() + o.description.len())
+                                    .sum::<usize>()
+                        }
+                    };
+                }
+                n
+            })
+            .sum()
+    }
+
+    #[test]
+    fn ingest_past_retained_turns_keeps_only_the_newest() {
+        let mut t = SessionTranscript::new();
+        let total = 5 * RETAINED_TURNS;
+        for i in 0..total {
+            t.ingest_line(&user_line(i));
+            t.ingest_line(result_line());
+        }
+
+        assert_eq!(
+            t.turn_count(),
+            RETAINED_TURNS,
+            "turn count must be capped at RETAINED_TURNS after heavy ingest"
+        );
+
+        let turns = t.snapshot();
+        let newest = turns.last().expect("transcript must not be empty");
+        assert_eq!(
+            newest.user_input,
+            format!("prompt {}", total - 1),
+            "the newest turn ingested must survive"
+        );
+        assert!(
+            turns.iter().all(|turn| turn.user_input != "prompt 0"),
+            "the very first turn must have been evicted by retention trimming"
+        );
+
+        // Turn ids stay unique and strictly increasing across trims — the
+        // monotonic counter must never reset or reuse an id.
+        let ids: Vec<u64> = turns
+            .iter()
+            .map(|turn| turn.id.trim_start_matches('t').parse::<u64>().unwrap())
+            .collect();
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort_unstable();
+        assert_eq!(
+            ids, sorted_ids,
+            "surviving turn ids must remain in strictly increasing order"
+        );
+        let mut deduped_ids = ids.clone();
+        deduped_ids.dedup();
+        assert_eq!(
+            deduped_ids.len(),
+            ids.len(),
+            "surviving turn ids must be unique — the id counter must not be reset by trimming"
+        );
+    }
+
+    #[test]
+    fn retained_bytes_accounting_matches_a_full_recount() {
+        let mut t = SessionTranscript::new();
+        // Mixed workload: plenty of small turns, a couple carrying big
+        // tool-result blocks, one carrying a fat tool_use, and one completed
+        // via mark_current_errored instead of a result line — enough total
+        // volume to cross BOTH RETAINED_TURNS and RETAINED_BYTES.
+        let total = RETAINED_TURNS + 20;
+        for i in 0..total {
+            t.ingest_line(&user_line(i));
+            if i == 5 {
+                t.ingest_line(&tool_result_line(100 * 1024));
+            }
+            if i == 6 {
+                t.ingest_line(&tool_result_line(250 * 1024));
+                t.ingest_line(&tool_use_line(50 * 1024));
+            }
+            if i == 7 {
+                // Completed via the crash path instead of a `result` line.
+                t.mark_current_errored("simulated crash");
+                continue;
+            }
+            t.ingest_line(result_line());
+        }
+
+        assert_eq!(
+            t.byte_len(),
+            recount_bytes(&t),
+            "byte_len() must match an independent recount of retained turn content \
+             (drift guard, not an exact-formula check — see comment on recount_bytes)"
+        );
+    }
+
+    #[test]
+    fn byte_budget_drops_whole_turns_before_touching_the_live_one() {
+        let mut t = SessionTranscript::new();
+        let one_mib = 1024 * 1024;
+        // Enough completed 1 MiB turns to blow well past RETAINED_BYTES.
+        let completed_turns = (RETAINED_BYTES / one_mib) + 10;
+        for i in 0..completed_turns {
+            t.ingest_line(&user_line(i));
+            t.ingest_line(&tool_result_line(one_mib));
+            t.ingest_line(result_line());
+        }
+
+        // One more turn, left in-flight, carrying a couple of small blocks.
+        t.ingest_line(&user_line(completed_turns));
+        t.ingest_line(&tool_result_line(1024));
+        t.ingest_line(&tool_result_line(2048));
+
+        assert!(
+            t.byte_len() <= RETAINED_BYTES,
+            "byte_len {} must respect RETAINED_BYTES {} after heavy ingest",
+            t.byte_len(),
+            RETAINED_BYTES
+        );
+        assert!(
+            t.turn_count() < RETAINED_TURNS,
+            "the byte budget must bite before the turn-count cap, given how large each turn is"
+        );
+
+        let snap = t.snapshot();
+        let live = snap.last().expect("transcript must not be empty");
+        assert!(
+            !live.is_complete,
+            "the freshly ingested turn must still be in-flight"
+        );
+        let has_len = |n: usize| {
+            live.blocks
+                .iter()
+                .any(|b| matches!(b, TurnBlock::ToolResult { content, .. } if content.len() == n))
+        };
+        assert!(
+            has_len(1024) && has_len(2048),
+            "both blocks appended to the live in-flight turn must survive trimming untouched: {:?}",
+            live.blocks
+        );
+    }
+
+    #[test]
+    fn single_oversized_turn_sheds_its_oldest_blocks() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_line(0));
+
+        let one_mib = 1024 * 1024;
+        let block_count = (RETAINED_BYTES / one_mib) + 10;
+        for i in 0..block_count {
+            t.ingest_line(&tool_result_line_marked(&format!("block{i}"), one_mib));
+        }
+
+        assert_eq!(
+            t.turn_count(),
+            1,
+            "a single in-flight turn must never be dropped as a whole turn"
+        );
+        assert!(
+            t.byte_len() <= RETAINED_BYTES,
+            "byte_len {} must be capped at RETAINED_BYTES {} even for one oversized turn",
+            t.byte_len(),
+            RETAINED_BYTES
+        );
+
+        let snap = t.snapshot();
+        let blocks = &snap[0].blocks;
+        let has_marker = |marker: &str| {
+            blocks.iter().any(
+                |b| matches!(b, TurnBlock::ToolResult { content, .. } if content.starts_with(marker)),
+            )
+        };
+        assert!(
+            has_marker(&format!("block{}", block_count - 1)),
+            "the LAST block ingested must still be present after shedding"
+        );
+        assert!(
+            !has_marker("block0"),
+            "the FIRST block ingested must have been shed to make room — newest data wins"
+        );
+    }
+
+    #[test]
+    fn a_single_giant_user_prompt_terminates_without_spinning() {
+        let mut t = SessionTranscript::new();
+        // The prompt text alone exceeds RETAINED_BYTES, with no blocks at all
+        // — nothing left to shed, so it's retained as-is (documented escape
+        // hatch). The test itself completing within the normal test timeout
+        // IS the proof that enforcement doesn't spin/hang on this case.
+        let giant = "x".repeat(RETAINED_BYTES + 1);
+        t.ingest_line(&user_prompt_line(&giant));
+
+        assert_eq!(
+            t.turn_count(),
+            1,
+            "the oversized prompt turn must be retained since there's nothing left to shed"
+        );
+
+        // The transcript must keep working afterward.
+        t.ingest_line(&user_line(999));
+        t.ingest_line(result_line());
+        assert!(
+            t.turn_count() >= 1,
+            "transcript must still be operable after housing an oversized turn"
+        );
+        let snap = t.snapshot();
+        assert_eq!(
+            snap.last().unwrap().user_input,
+            "prompt 999",
+            "a normal turn ingested after the giant one must complete normally"
+        );
+    }
+
+    #[test]
+    fn trimming_never_drops_the_in_flight_turn() {
+        let mut t = SessionTranscript::new();
+        let one_mib = 1024 * 1024;
+        // Drive well past BOTH RETAINED_TURNS and RETAINED_BYTES with
+        // completed turns — a trim must fire on at least one of these ingests.
+        let completed_turns = 2 * RETAINED_TURNS;
+        for i in 0..completed_turns {
+            t.ingest_line(&user_line(i));
+            t.ingest_line(&tool_result_line(one_mib));
+            t.ingest_line(result_line());
+        }
+
+        // Drive one fresh turn through start → block → complete, capturing
+        // the deltas each ingest_line call returns.
+        let started = t.ingest_line(&user_line(completed_turns));
+        let blocked = t.ingest_line(&tool_result_line(1024));
+        let completed = t.ingest_line(result_line());
+
+        let started_id = match started.as_slice() {
+            [TurnDelta::TurnStarted { turn }] => turn.id.clone(),
+            other => panic!("expected a single TurnStarted delta, got {other:?}"),
+        };
+        let blocked_id = match blocked.as_slice() {
+            [TurnDelta::BlockAppended { turn_id, .. }] => turn_id.clone(),
+            other => panic!("expected a single BlockAppended delta, got {other:?}"),
+        };
+        let completed_id = match completed.as_slice() {
+            [TurnDelta::TurnCompleted { turn_id, .. }] => turn_id.clone(),
+            other => panic!("expected a single TurnCompleted delta, got {other:?}"),
+        };
+        assert_eq!(
+            started_id, blocked_id,
+            "the block must land on the turn that was just started"
+        );
+        assert_eq!(
+            blocked_id, completed_id,
+            "the completion must land on the same turn that was started and blocked"
+        );
+
+        let snap = t.snapshot();
+        let last = snap.last().expect("transcript must not be empty");
+        assert!(
+            last.is_complete,
+            "the freshly driven turn must have completed"
+        );
+        assert_eq!(
+            last.id, started_id,
+            "the in-flight turn must never be evicted mid-turn by a trim triggered by earlier ingests"
+        );
+        assert!(
+            last.blocks.iter().any(
+                |b| matches!(b, TurnBlock::ToolResult { content, .. } if content.len() == 1024)
+            ),
+            "the block appended to the live turn must survive: {:?}",
+            last.blocks
+        );
+    }
+
+    #[test]
+    fn first_user_input_survives_trimming() {
+        let mut t = SessionTranscript::new();
+        let total = RETAINED_TURNS + 50;
+        for i in 0..total {
+            t.ingest_line(&user_line(i));
+            t.ingest_line(result_line());
+        }
+
+        assert_eq!(
+            t.first_user_input(),
+            Some("prompt 0"),
+            "first_user_input must survive trimming even though the first turn is long gone"
+        );
+        assert_ne!(
+            t.snapshot()[0].user_input,
+            "prompt 0",
+            "sanity check: the oldest surviving turn really has been trimmed away"
+        );
+    }
+
+    #[test]
+    fn transcript_from_jsonl_rebases_first_user_input_to_the_oldest_retained_turn() {
+        // Same fixture + max_turns as `truncate_keeps_last_n_turns`, which
+        // proves the surviving turn's user_input is "list the file".
+        // first_user_input() must rebase to match — preserving today's
+        // resume-summary behavior (which reads turns.first()) exactly, NOT
+        // the true first prompt of the whole session if that was trimmed away.
+        let t = transcript_from_jsonl(SCROLLBACK, 1);
+        assert_eq!(
+            t.first_user_input(),
+            Some("list the file"),
+            "first_user_input must rebase to the oldest SURVIVING turn after load-time truncation"
+        );
+    }
+
+    #[test]
+    fn truncate_to_last_updates_byte_accounting() {
+        let mut t = SessionTranscript::new();
+        for i in 0..10 {
+            t.ingest_line(&user_line(i));
+            if i % 3 == 0 {
+                t.ingest_line(&tool_result_line(50_000));
+            } else {
+                t.ingest_line(&tool_result_line(500));
+            }
+            t.ingest_line(result_line());
+        }
+
+        t.truncate_to_last(4);
+
+        assert_eq!(t.snapshot().len(), 4);
+        assert_eq!(
+            t.byte_len(),
+            recount_bytes(&t),
+            "byte_len() must be updated to reflect only the surviving turns after truncate_to_last"
+        );
+    }
+
+    #[test]
+    fn recent_turns_returns_the_newest_and_never_more_than_asked() {
+        let mut t = SessionTranscript::new();
+        for i in 0..5 {
+            t.ingest_line(&user_line(i));
+            t.ingest_line(result_line());
+        }
+        let snap = t.snapshot();
+
+        let last_two = t.recent_turns(2);
+        assert_eq!(last_two.len(), 2);
+        assert_eq!(
+            last_two,
+            snap[snap.len() - 2..],
+            "recent_turns(2) must be the last two turns, newest last, same order as snapshot()"
+        );
+
+        assert_eq!(
+            t.recent_turns(0).len(),
+            0,
+            "recent_turns(0) must return an empty vec"
+        );
+
+        let all = t.recent_turns(100);
+        assert_eq!(
+            all.len(),
+            5,
+            "asking for more turns than exist must return everything, not panic"
+        );
+        assert_eq!(all, snap);
     }
 }
