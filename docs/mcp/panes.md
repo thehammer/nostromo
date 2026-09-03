@@ -196,6 +196,20 @@ does. Unread state (a content push for a tab that isn't currently frontmost)
 is derived entirely client-side — the daemon has no business knowing which
 tab the operator is looking at.
 
+**`json_snapshot`/`unknown` decode and equality (`fix/per-focus-state-eviction`).**
+Until this fix, macOS's local JSON decoder (`Models.swift`'s private
+`AnyDecodable`) had no keyed-container branch, so a `json_snapshot`/`unknown`
+`value` that was a JSON *object* silently decoded to an empty value and
+rendered nothing — NostromoKit's own decoder (used by iOS) never had this
+gap. That decoder was replaced with `JSONValue`, a recursive
+`Decodable & Equatable` type that decodes objects correctly, so an object
+payload now renders on macOS the same generic key/value rows iOS has always
+shown. The equality fix is not just cosmetic: a `json_snapshot`/`unknown`
+push with byte-identical content is now suppressed by the same client-side
+no-op guard every other content kind already got (previously these two kinds
+compared unequal unconditionally, so a repeated push always re-rendered the
+pane — a flicker/scroll-reset/spinner cost paid on every redundant refresh).
+
 iOS got decoder correctness only in W1: a tabs node's children flattened into
 the existing per-pane `TabView` alongside every other non-repl pane, with no
 dedicated tabs UI, no `active`/`focused_pane` honouring, and tabs labelled

@@ -1486,7 +1486,7 @@ struct TicketPayload: Decodable, Equatable {
 /// Content payload pushed to a single pane, decoupled from layout geometry.
 enum PaneContentWire {
     case text(String)
-    case jsonSnapshot(Any)
+    case jsonSnapshot(JSONValue)
     /// Typed list of PR queue items; rendered by `PerriPRRow`.
     case prList([PrListItemModel])
     /// Transient loading state — agent signals it is refreshing this pane.
@@ -1502,7 +1502,7 @@ enum PaneContentWire {
     /// An issue-tracker ticket (W4).
     case ticket(TicketPayload)
     /// A future content kind not yet recognised by this client version.
-    case unknown(Any)
+    case unknown(JSONValue)
 }
 
 extension PaneContentWire: Decodable {
@@ -1518,7 +1518,7 @@ extension PaneContentWire: Decodable {
             let t = try c.decode(String.self, forKey: .text)
             self = .text(t)
         case "json_snapshot":
-            let raw = (try? c.decode(AnyDecodable.self, forKey: .value))?.value ?? [:]
+            let raw = (try? c.decode(JSONValue.self, forKey: .value)) ?? .object([:])
             self = .jsonSnapshot(raw)
         case "pr_list":
             let items = (try? c.decode([PrListItemModel].self, forKey: .items)) ?? []
@@ -1539,17 +1539,22 @@ extension PaneContentWire: Decodable {
         case "ticket":
             self = .ticket(try TicketPayload(from: decoder))
         default:
-            let raw = (try? AnyDecodable(from: decoder))?.value ?? [:]
+            let raw = (try? JSONValue(from: decoder)) ?? .object([:])
             self = .unknown(raw)
         }
     }
 }
 
 extension PaneContentWire: Equatable {
-    /// `.text`/`.loading`/`.error`/`.prList` compare structurally. `.jsonSnapshot`
-    /// and `.unknown` always compare unequal — a deliberate conservative choice
-    /// (report "changed" rather than risk a false "unchanged" for a payload
-    /// kind this client can't actually compare; they carry `Any`).
+    /// Every case now compares structurally, including `.jsonSnapshot` and
+    /// `.unknown`. Those two used to hard-code `false` unconditionally — a
+    /// deliberate conservative choice ("report changed rather than risk a
+    /// false unchanged") that was defensible only while their payload was an
+    /// uncomparable `Any`. Now that it's a real `Equatable` `JSONValue`, that
+    /// conservatism just costs a spurious re-render of every pane in every
+    /// window on every daemon push (the no-op-write guard at
+    /// `AppStore.swift:876-880` could never fire for these two kinds), so the
+    /// conservative default is gone.
     static func == (lhs: PaneContentWire, rhs: PaneContentWire) -> Bool {
         switch (lhs, rhs) {
         case (.text(let a), .text(let b)):
@@ -1568,10 +1573,10 @@ extension PaneContentWire: Equatable {
             return a == b
         case (.ticket(let a), .ticket(let b)):
             return a == b
-        case (.jsonSnapshot, .jsonSnapshot):
-            return false
-        case (.unknown, .unknown):
-            return false
+        case (.jsonSnapshot(let a), .jsonSnapshot(let b)):
+            return a == b
+        case (.unknown(let a), .unknown(let b)):
+            return a == b
         default:
             return false
         }
@@ -1770,25 +1775,69 @@ struct ResolvedDecision: Equatable {
     let choiceId: String?
 }
 
-/// Minimal Decodable wrapper for an arbitrary JSON value.
-private struct AnyDecodable: Decodable {
-    let value: Any
+/// A decoded JSON value that can be compared structurally. Replaces the
+/// former `AnyDecodable`, which had no keyed-container branch and therefore
+/// decoded every JSON *object* to `""` — silently dropping `json_snapshot`
+/// content and making structural equality impossible (which is why
+/// `PaneContentWire`'s `Equatable` conformance used to hard-code `false` for
+/// `.jsonSnapshot`/`.unknown`). NostromoKit's own copy already decodes
+/// objects (see `AnyDecodable.DynamicKey` in
+/// `Shared/NostromoKit/Sources/NostromoKit/Wire/PaneLayout.swift`); this
+/// closes that divergence on the macOS side.
+///
+/// `internal`, not `private` — `Models.swift` is compiled directly into the
+/// `NostromoTests` logic-test target (see the header comment atop
+/// `PaneContentWireEqualityTests.swift`), and those tests construct
+/// `JSONValue` values directly. `Equatable` is auto-synthesized: every
+/// associated value (`String`, `Int`, `Double`, `Bool`, `[JSONValue]`,
+/// `[String: JSONValue]`) is itself `Equatable`.
+indirect enum JSONValue: Decodable, Equatable {
+    case string(String)
+    case int(Int)
+    case double(Double)
+    case bool(Bool)
+    case null
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    private struct DynamicKey: CodingKey {
+        let stringValue: String
+        let intValue: Int?
+        init?(stringValue: String) { self.stringValue = stringValue; self.intValue = nil }
+        init?(intValue: Int) { self.stringValue = "\(intValue)"; self.intValue = intValue }
+    }
 
     init(from decoder: Decoder) throws {
-        if let c = try? decoder.singleValueContainer() {
-            if let b = try? c.decode(Bool.self)   { value = b; return }
-            if let i = try? c.decode(Int.self)    { value = i; return }
-            if let d = try? c.decode(Double.self) { value = d; return }
-            if let s = try? c.decode(String.self) { value = s; return }
+        // Keyed, then unkeyed, then single-value: for any given JSON node
+        // exactly one of these three container requests actually succeeds
+        // (an object supports only `container(keyedBy:)`, an array only
+        // `unkeyedContainer()`), so the order between the first two doesn't
+        // matter — what matters is that BOTH are tried before falling back to
+        // scalars. The single-value container is checked last because
+        // requesting it always succeeds regardless of underlying shape; only
+        // the subsequent `decode(_:)` call on it can fail.
+        if let c = try? decoder.container(keyedBy: DynamicKey.self) {
+            var dict: [String: JSONValue] = [:]
+            for key in c.allKeys {
+                dict[key.stringValue] = try c.decode(JSONValue.self, forKey: key)
+            }
+            self = .object(dict)
+            return
         }
         if var c = try? decoder.unkeyedContainer() {
-            var arr: [Any] = []
+            var arr: [JSONValue] = []
             while !c.isAtEnd {
-                let el = try c.decode(AnyDecodable.self)
-                arr.append(el.value)
+                arr.append(try c.decode(JSONValue.self))
             }
-            value = arr; return
+            self = .array(arr)
+            return
         }
-        value = ""
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null; return }
+        if let b = try? c.decode(Bool.self)   { self = .bool(b);   return }
+        if let i = try? c.decode(Int.self)    { self = .int(i);    return }
+        if let d = try? c.decode(Double.self) { self = .double(d); return }
+        if let s = try? c.decode(String.self) { self = .string(s); return }
+        self = .null
     }
 }

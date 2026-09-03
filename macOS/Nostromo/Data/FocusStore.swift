@@ -6,6 +6,14 @@ final class FocusStore {
 
     @Published private(set) var focuses: [Focus]
 
+    /// Fires once per focus actually removed — never on a no-op double-remove
+    /// or a built-in (`remove(_:)` guards both). A `PassthroughSubject`, NOT
+    /// `@Published`: eviction (see `AppStore.evictPerFocusState`) must run
+    /// once per removal EVENT, not once per new subscriber replaying the
+    /// current value — same precedent as `AppStore.decisionRequests` /
+    /// `FileWatchers.shared.thresholdEvents`.
+    let focusRemovals = PassthroughSubject<Focus, Never>()
+
     private let storageURL: URL
 
     private init() {
@@ -41,8 +49,30 @@ final class FocusStore {
 
     func remove(_ focus: Focus) {
         guard !focus.isBuiltIn else { return }
+        // Guard on membership so a double-remove (e.g. two windows racing a
+        // close on the same tab) never sends `focusRemovals` twice for one
+        // focus — `AppStore.evictPerFocusState` must run exactly once per
+        // actual removal.
+        guard focuses.contains(where: { $0.id == focus.id }) else { return }
         focuses.removeAll { $0.id == focus.id }
         save()
+        // `focusRemovals` fires AFTER `focuses` is mutated and saved — never
+        // before. `@Published` notifies `$focuses` subscribers (via
+        // `willSet`) synchronously at the point of mutation, but every real
+        // subscriber (MainLayout, AppStore's registry push) uses
+        // `.receive(on: DispatchQueue.main)`, which defers the actual sink
+        // invocation to an enqueued `DispatchQueue.main.async` block rather
+        // than running it inline. Because `DispatchQueue.main` is FIFO, that
+        // block is enqueued strictly before the one this `send` enqueues on
+        // `AppStore`'s `focusRemovals` subscriber — so every `$focuses`
+        // observer (in particular `MainLayout`, which releases its cached
+        // view for this focus) has already run by the time eviction does.
+        // That ordering is what stops `AppStore.session(for:)` — a lazy
+        // creator — from recreating the very session eviction just removed.
+        // Reversing these two lines (or collapsing them into one signal)
+        // silently reintroduces that resurrection with no test failing
+        // anywhere else; see `PerFocusEvictionWiringTests`.
+        focusRemovals.send(focus)
     }
 
     func save() {
