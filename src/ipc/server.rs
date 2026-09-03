@@ -755,10 +755,12 @@ fn handle_client_msg(
                 if let Err(e) = crate::perri_cli::run_perri_action(&action, pr_number, repo.as_deref(), &psd).await {
                     tracing::warn!(conn, %action, "PerriAction failed: {e:#}");
                 }
-                // The native Perri sources watch dirty-file sentinels; for
-                // "load_pr"/"clear" the `perri` CLI writes those sentinels.
-                // For "approve" the handler writes approvals.jsonl + queue.dirty
-                // directly so the broadcaster fires without a separate re-poll.
+                // The native Perri sources watch dirty-file sentinels; all
+                // three actions write their own sentinels in-process now.
+                // "load_pr"/"clear" write through `perri_current_pr`
+                // (current-pr.dirty, and "clear" also touches queue.dirty).
+                // "approve" writes approvals.jsonl + queue.dirty directly.
+                // Either way the broadcaster fires without a separate re-poll.
             });
         }
 

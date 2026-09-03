@@ -477,15 +477,17 @@ public final class DaemonStore: ObservableObject {
 
     /// Load a specific PR into the Perri current-PR view.
     ///
-    /// The daemon shells out to `perri load_pr -- <number> <repo>` and the
-    /// native source re-broadcasts a fresh `perri_state` snapshot.
+    /// The daemon writes `current-pr.json` directly (via
+    /// `crate::data::perri_current_pr::write_pointer`) and the native source
+    /// re-broadcasts a fresh `perri_state` snapshot.
     public func perriLoadPr(number: Int, repo: String) {
         client.send(ClientPerriAction(action: "load_pr", prNumber: number, repo: repo))
     }
 
     /// Clear the current PR from the Perri view.
     ///
-    /// The daemon shells out to `perri clear_current_pr` and the native source
+    /// The daemon removes `current-pr.json` directly (via
+    /// `crate::data::perri_current_pr::clear_pointer`) and the native source
     /// re-broadcasts a fresh `perri_state` snapshot.
     public func perriClear() {
         client.send(ClientPerriAction(action: "clear", prNumber: nil, repo: nil))
