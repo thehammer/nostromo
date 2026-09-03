@@ -51,14 +51,26 @@ enum RatioPersistencePolicy {
     /// split.
     ///
     /// Refuses when:
+    /// - `isUserDrag` is false — this resize did not happen while the
+    ///   operator's mouse button was down on a divider. A window resize,
+    ///   fullscreen transition, or display reconfiguration fires the exact
+    ///   same `NSSplitView.didResizeSubviewsNotification` a divider drag
+    ///   does, and none of them is an operator choice; `isUserDrag` is the
+    ///   one signal that actually distinguishes "the operator grabbed a
+    ///   divider" from all of those (fix-collapsed-split-ratio-persistence,
+    ///   second-pass finding: the original signature had no way to tell
+    ///   them apart at all, so a window resize persisted a ratio just like a
+    ///   drag did).
     /// - `isProgrammatic` is true — this resize was caused by our own code
-    ///   applying ratios, not an operator drag. Whatever value resulted is
-    ///   not the operator's choice, full stop, regardless of how plausible
-    ///   it looks.
+    ///   applying ratios, not an operator drag. Kept as an explicit,
+    ///   independent guard even though a programmatic apply and a user drag
+    ///   should never overlap in practice — belt-and-suspenders, not the
+    ///   primary signal.
     /// - `total` is not a plausible container size (`<= 0`) — no real
     ///   geometry to have chosen a ratio from.
     /// - `ratios` isn't `isWellFormed` (see above).
-    static func shouldPersist(ratios: [Double], total: Double, isProgrammatic: Bool) -> Bool {
+    static func shouldPersist(ratios: [Double], total: Double, isProgrammatic: Bool, isUserDrag: Bool) -> Bool {
+        guard isUserDrag else { return false }
         guard !isProgrammatic else { return false }
         guard total > 0 else { return false }
         return isWellFormed(ratios: ratios)

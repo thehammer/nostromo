@@ -241,6 +241,66 @@ final class DynamicFocusViewWiringTests: XCTestCase {
             """)
     }
 
+    // MARK: j. Second-pass adherence finding — the resize observer must run synchronously, not on an async queue
+
+    func testResizeObserverIsRegisteredSynchronouslyNotOnAnAsyncMainQueue() throws {
+        let source = try Self.dynamicFocusViewSource()
+        let body = try Self.functionBody(named: "makeSplitView", in: source)
+
+        // `RatioSplitView.layout()` sets `isApplyingProgrammatically`, calls
+        // `applyRatios`, and clears the flag again — all synchronously
+        // within one run-loop turn. An observer registered with `queue:
+        // .main` runs as a *deferred, async* block: by the time it actually
+        // executes, the flag has already been reset to `false`, so
+        // `RatioPersistencePolicy.shouldPersist`'s `isProgrammatic` check
+        // silently never fires in production — a fresh launch with no saved
+        // ratio key writes one to disk on the very first daemon-driven
+        // layout, exactly the bug `RatioPersistencePolicyTests` couldn't
+        // catch because it only calls the pure policy function directly.
+        // `queue: nil` runs the block synchronously on the posting thread
+        // (main, for an NSSplitView layout pass), which is what makes the
+        // flag observable while it's still true.
+        XCTAssertFalse(body.contains("queue: .main"), """
+            Second-pass finding: the didResizeSubviewsNotification observer in makeSplitView must not be \
+            registered with `queue: .main` — that defers the block to a later, async run-loop turn, by which \
+            time RatioSplitView.layout() has already synchronously cleared isApplyingProgrammatically back to \
+            false. The isProgrammatic guard becomes a permanent no-op and a fresh launch persists a ratio nobody \
+            dragged.
+            """)
+        XCTAssertTrue(body.contains("queue: nil"), """
+            Second-pass finding: the didResizeSubviewsNotification observer in makeSplitView must be registered \
+            with `queue: nil` so it runs synchronously on the posting thread and can actually observe \
+            isApplyingProgrammatically/isDraggingDivider at the moment they're true.
+            """)
+    }
+
+    // MARK: k. Second-pass adherence finding — persistence is gated on an actual divider-drag signal
+
+    func testShouldPersistIsGatedByAnActualDividerDragSignal() throws {
+        let source = try Self.dynamicFocusViewSource()
+
+        // The pre-existing signature (`ratios`, `total`, `isProgrammatic`)
+        // had no way to distinguish an operator's divider drag from a window
+        // resize, a fullscreen transition, or a display reconfiguration —
+        // all of which fire the exact same didResizeSubviewsNotification
+        // and are equally non-programmatic. Persistence must be gated on a
+        // real positive "a divider is under the mouse right now" signal.
+        let makeSplitViewBody = try Self.functionBody(named: "makeSplitView", in: source)
+        XCTAssertTrue(makeSplitViewBody.contains("isUserDrag: split.isDraggingDivider"), """
+            Second-pass finding: makeSplitView's call to RatioPersistencePolicy.shouldPersist must pass \
+            `isUserDrag: split.isDraggingDivider` — without it, a window resize/fullscreen toggle/display \
+            reconfiguration (none of which are "isProgrammatic") persists a ratio nobody dragged.
+            """)
+
+        let mouseDownBody = try Self.functionBody(named: "mouseDown", in: source, signaturePrefix: "override func mouseDown(")
+        XCTAssertTrue(mouseDownBody.contains("isDraggingDivider = true"), """
+            Second-pass finding: RatioSplitView.mouseDown(with:) must set isDraggingDivider = true for the \
+            duration of the divider-drag tracking loop — this is the only reliable "an operator actually grabbed \
+            a divider" signal, since NSSplitView only routes mouseDown to the split view itself when the hit \
+            point falls in the divider gap between arranged subviews, never inside a child view.
+            """)
+    }
+
     // MARK: i. D4 — currentRatios normalizes against child extents, never the split's own bounds
 
     func testCurrentRatiosNeverNormalizesAgainstTheSplitsOwnBounds() throws {

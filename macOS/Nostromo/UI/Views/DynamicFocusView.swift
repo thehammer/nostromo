@@ -444,17 +444,32 @@ final class DynamicFocusView: NSView {
         // (fix-collapsed-split-ratio-persistence D1/RC1). The token is
         // retained so a future structural rebuild can remove this observer
         // instead of leaking it (D7) — see `removeSplitObservers`.
+        //
+        // `queue: nil`, not `.main`, is load-bearing, not cosmetic: `.main`
+        // makes this block an *async* enqueued operation, not a synchronous
+        // one on the posting thread. `RatioSplitView.layout()` sets
+        // `isApplyingProgrammatically`, calls `applyRatios`, and clears it
+        // again — all synchronously within the same run-loop turn — so by
+        // the time an `.main`-queued block actually ran, the flag had
+        // already gone back to `false` and this guard was silently a no-op
+        // in production (second-pass adherence finding: a fresh launch with
+        // no saved ratio wrote one to disk on the very first daemon-driven
+        // layout). `queue: nil` runs this block synchronously on the
+        // posting thread — which, for an `NSSplitView` layout pass, is
+        // always the main thread — so it reads `isApplyingProgrammatically`
+        // and `isDraggingDivider` at the moment they're actually true.
         let token = NotificationCenter.default.addObserver(
             forName: NSSplitView.didResizeSubviewsNotification,
             object: split,
-            queue: .main
+            queue: nil
         ) { _ in
             let total = Double(DynamicFocusView.extent(of: split.bounds.size, isVertical: split.isVertical))
             let newRatios = DynamicFocusView.currentRatios(for: split)
             guard RatioPersistencePolicy.shouldPersist(
                 ratios: newRatios,
                 total: total,
-                isProgrammatic: split.isApplyingProgrammatically
+                isProgrammatic: split.isApplyingProgrammatically,
+                isUserDrag: split.isDraggingDivider
             ) else { return }
             UserDefaults.standard.set(newRatios, forKey: udKey)
         }
@@ -778,6 +793,27 @@ final class RatioSplitView: NSSplitView {
     /// actually guards re-entrancy through that observer
     /// (fix-collapsed-split-ratio-persistence D1/D3).
     private(set) var isApplyingProgrammatically = false
+
+    /// True only while the operator's mouse button is down on one of this
+    /// split's dividers — an actual, in-progress drag. This is the positive
+    /// signal `RatioPersistencePolicy.shouldPersist` needs
+    /// (fix-collapsed-split-ratio-persistence, second-pass finding): window
+    /// resizes, fullscreen transitions and display reconfiguration all fire
+    /// the exact same `NSSplitView.didResizeSubviewsNotification` a divider
+    /// drag does, and `isProgrammatic` alone can't tell any of them apart
+    /// from an operator's deliberate choice, because none of them are
+    /// programmatic either. `NSSplitView` only routes a `mouseDown` to the
+    /// split view itself when the hit point falls in the divider-thickness
+    /// gap between arranged subviews — a click inside a child view never
+    /// reaches here — so this is set exactly when, and only when, a divider
+    /// is grabbed.
+    private(set) var isDraggingDivider = false
+
+    override func mouseDown(with event: NSEvent) {
+        isDraggingDivider = true
+        defer { isDraggingDivider = false }
+        super.mouseDown(with: event)
+    }
 
     override func layout() {
         super.layout()
