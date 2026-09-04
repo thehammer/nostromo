@@ -54,7 +54,7 @@ validation ritual — is verified by actually running this script and
 macOS/scripts/launch-smoke-validate.sh; see the PR body for that evidence.
 
 Usage:
-    bin/nostromo-launch-smoke [--release] [--skip-build] [--keep-artifacts DIR]
+    bin/nostromo-launch-smoke [--release] [--skip-build]
 """
 
 import argparse
@@ -90,10 +90,15 @@ _STATE_PRECEDENCE = (FAIL, INCONCLUSIVE, PASS)
 
 # The only causes this tool may ever report for an overall INCONCLUSIVE
 # verdict. "build failed" / "prerequisite missing" come from main()'s
-# pre-Evidence short-circuit (there is no Evidence yet to grade). The other
-# three come from the three REACH detectors below. Since GATE detectors can
-# never be INCONCLUSIVE (see `gate_verdict`), this set is exhaustive by
-# construction, not by convention — pinned here the same way
+# pre-Evidence short-circuit (there is no Evidence yet to grade). The rest
+# come from the three REACH detectors below — and since `split-ratios-
+# applied` corroborates rendered shape and applied/laid-out ratios via
+# `split_layout_agreement`, it alone contributes 4 causes, not 1 (three come
+# from the shape/ratio corroboration itself, and the fourth — "diagnostics
+# row omitted the split shape fields" — is what it reports when the stream
+# never said enough to corroborate anything at all, see f4). Since GATE
+# detectors can never be INCONCLUSIVE (see `gate_verdict`), this set is
+# exhaustive by construction, not by convention — pinned here the same way
 # transcript-load-report.py pins MATERIALIZED_LIMIT, so widening it is a
 # visible, deliberate edit rather than a silent drift.
 AGGREGATE_INCONCLUSIVE_CAUSES = frozenset({
@@ -102,7 +107,19 @@ AGGREGATE_INCONCLUSIVE_CAUSES = frozenset({
     "multi-pane layout not reached",
     "another instance took the launch",
     "timed out before the app came up",
+    "rendered layout shape did not match the fixture",
+    "not every rendered split applied its ratios",
+    "diagnostics row omitted the split shape fields",
 })
+
+# The committed shape of tests/fixtures/focus_layout_split.json: each frame's
+# tree is one outer split containing one inner split (2 split nodes total)
+# and three leaves (queue/diff/repl). Pinned from both
+# tests/launch_smoke/test_launch_smoke.py (FixtureShapeConstantsTests) and
+# tests/launch_smoke_fixture.rs, so editing the fixture's shape without
+# editing these two constants fails the suite instead of quietly drifting.
+FIXTURE_SPLIT_NODES_PER_FOCUS = 2
+FIXTURE_LEAVES_PER_FOCUS = 3
 
 Verdict = namedtuple("Verdict", ["key", "name", "state", "measured", "cause", "observations"])
 
@@ -166,6 +183,8 @@ class Evidence(namedtuple("Evidence", [
     "crash_reports_attributed_pids",
     "notdrawable_violations",
     "panes_scanned",
+    "collapsed_geometry_violations",
+    "geometry_panes_judged",
     "window_seconds",
 ])):
     """Everything a detector may look at.
@@ -175,6 +194,15 @@ class Evidence(namedtuple("Evidence", [
     re-filtering `observed_pids`-wide data themselves, so "which pid's data
     is this" is decided once, by whoever builds the Evidence, not by each
     detector.
+
+    `collapsed_geometry_violations` and `geometry_panes_judged` are the
+    content-independent counterparts to `notdrawable_violations`/
+    `panes_scanned`: the fixture daemon never pushes `pane_content`, so
+    `hasContent` is `False` for every pane on every real run, and
+    `notdrawable_violations_from_rows`'s audit-mirroring predicate (which
+    requires `hasContent`) can never see a pane that genuinely collapsed to
+    zero size under that condition. See `collapsed_geometry_violations_from_rows`
+    and `geometry_judged_pane_count` below.
     """
 
     __slots__ = ()
@@ -189,7 +217,9 @@ class Evidence(namedtuple("Evidence", [
             launched_pid=None, rows=(), observed_pids=(), another_instance_pid=None,
             alive_at_window_end=None, cpu_percent=None, crash_reports_scanned=0,
             crash_reports_dir_present=False, crash_reports_attributed_pids=(),
-            notdrawable_violations=(), panes_scanned=0, window_seconds=0.0,
+            notdrawable_violations=(), panes_scanned=0,
+            collapsed_geometry_violations=(), geometry_panes_judged=0,
+            window_seconds=0.0,
         )
 
 
@@ -227,11 +257,14 @@ def _multi_pane_laid_out(ev):
 @detector("split-ratios-applied", REACH)
 def _split_ratios_applied(ev):
     key, name = "split-ratios-applied", "split ratios applied"
-    applied = max_splits_ratios_applied(ev.rows)
-    ok = applied >= 1
-    return reach_verdict(key, name, ok=ok,
-                         measured=f"{applied} split(s) reported ratios applied",
-                         cause="multi-pane layout not reached", observations=applied)
+    agreement = split_layout_agreement(ev.rows)
+    measured = (
+        f"rendered {agreement.rendered_splits} split(s)/{agreement.rendered_leaves} "
+        f"leaf(ves), {agreement.laid_out} laid out, {agreement.applied} applied "
+        f"(max {max_splits_ratios_applied(ev.rows)} applied across all rows)"
+    )
+    return reach_verdict(key, name, ok=agreement.ok, measured=measured,
+                         cause=agreement.cause, observations=agreement.applied)
 
 
 # ── detectors: failure gates (any FAIL makes the whole run FAIL) ────────────
@@ -300,10 +333,49 @@ def _no_zero_size_laid_out_pane(ev):
     # INCONCLUSIVE) instead — "multi-pane layout not reached", not a FAIL
     # this detector has no business raising over a tree it was never asked
     # to judge.
-    ok = not ev.notdrawable_violations
+    #
+    # This detector grades `collapsed_geometry_violations` ALONE —
+    # content-independent (`hasWindow && layoutPassCount > 0 && zero size`,
+    # no `hasContent` gate at all). `notdrawable_violations` (mirrors
+    # `PaneFirstPaintAudit.verdict` exactly, gated on `hasContent &&
+    # !isLoading`) is a strict SUBSET of it pane-wise: both dedup on the
+    # identical key (paneId, boundsWidth, boundsHeight, layoutPassCount), and
+    # the geometry predicate is everything the audit-mirror predicate is,
+    # minus the content/loading gate. So grading `collapsed_geometry_
+    # violations` alone is exactly equivalent to grading the union that used
+    # to be graded here — nothing that FAILs under `notdrawable_violations`
+    # can ever be absent from `collapsed_geometry_violations` (see
+    # `NotdrawableIsASubsetOfCollapsedGeometryTests`). Grading the union
+    # instead would have duplicated every content-gated violation as a
+    # second, textually distinct entry (`verdict=notDrawable(...)` next to
+    # `verdict=collapsed(...)` for the identical pane), and `cause` is capped
+    # at 3 joined entries below, so that duplication could crowd out a
+    # genuinely distinct third violation from ever being named. The
+    # audit-mirror population is kept only as a reporting annotation in
+    # `measured`, not a second graded population.
+    #
+    # The fixture daemon never pushes `pane_content`, so `hasContent` is
+    # `False` for every pane on every real run; without the geometry
+    # population, this detector would PASS unconditionally regardless of
+    # what actually laid out, which is exactly the "criterion satisfied by
+    # the absence of the thing it measures" defect this file's own header
+    # warns against. The geometry predicate's precondition (`hasWindow &&
+    # layoutPassCount > 0`) is a strict superset of `multi-pane-laid-out`'s
+    # REACH proof (which additionally requires non-zero size), so on every
+    # run this tool is allowed to report PASS, `geometry_panes_judged >= 2`
+    # — never a silently zero-judged detector (see
+    # `GeometryGateIsLiveOnEveryPassingRunTests`).
+    ok = not ev.collapsed_geometry_violations
+    # `notdrawable_violations` is a strict subset of `collapsed_geometry_
+    # violations` with an identical dedup key, so its length IS the overlap
+    # count — no string matching needed.
+    overlap = len(ev.notdrawable_violations)
     measured = (f"{ev.panes_scanned} pane observation(s) scanned, "
-                f"{len(ev.notdrawable_violations)} violation(s)")
-    cause = "; ".join(ev.notdrawable_violations[:3])
+                f"{ev.geometry_panes_judged} judged for geometry, "
+                f"{len(ev.collapsed_geometry_violations)} collapsed-geometry "
+                f"violation(s) ({overlap} of which also tripped the "
+                f"content-gated audit mirror)")
+    cause = "; ".join(ev.collapsed_geometry_violations[:3])
     return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
                         observations=ev.panes_scanned)
 
@@ -510,6 +582,126 @@ def max_splits_ratios_applied(rows):
     return max(values) if values else 0
 
 
+SplitLayoutAgreement = namedtuple(
+    "SplitLayoutAgreement",
+    ["ok", "cause", "rendered_splits", "rendered_leaves", "laid_out", "applied"],
+)
+
+
+def _is_whole_multiple_of_fixture_shape(rendered_splits, rendered_leaves):
+    """True iff (rendered_splits, rendered_leaves) is some integer n >= 1
+    copies of the fixture's own per-focus shape."""
+    if rendered_splits % FIXTURE_SPLIT_NODES_PER_FOCUS != 0:
+        return False
+    n = rendered_splits // FIXTURE_SPLIT_NODES_PER_FOCUS
+    return n >= 1 and rendered_leaves == FIXTURE_LEAVES_PER_FOCUS * n
+
+
+def split_layout_agreement(rows):
+    """Per-row proof that the app's rendered split tree fully applied its
+    ratios and laid out — the f2 fix. A single scalar max (the old
+    `applied >= 1` check `max_splits_ratios_applied` backed) is satisfied by
+    an outer split whose `setPosition` never returns, as long as some other
+    split in the tree (e.g. a nested inner split) did apply — the tree read
+    as "ratios applied" while a real split was permanently hung.
+
+    Considers only rows where `splitNodesRendered` is present and > 0
+    ("rendered rows"): if there are none, nothing ever rendered a split, so
+    `ok=False` with cause "multi-pane layout not reached" — the same cause
+    `multi-pane-laid-out` uses for an analogous absence.
+
+    Among rendered rows, a row is "complete" iff `leavesRendered`,
+    `splitsLaidOut`, and `splitsRatiosApplied` are all present (not `None`)
+    — the f4 fix. Swift guards `splitNodesRendered`/`leavesRendered` and
+    `splitsLaidOut`/`splitsRatiosApplied` on two different conditions
+    (`TranscriptDiagnostics.snapshot`), so a row can have a real
+    `splitNodesRendered` while any of the other three is still absent. An
+    incomplete row is filtered out rather than treated as a shape mismatch
+    or an under-applied tree — `row.get(...) or 0` used to silently coerce
+    "the field is missing" into "the field is zero", which reports "rendered
+    layout shape did not match the fixture" or "not every rendered split
+    applied its ratios" for what is actually an absent-telemetry problem,
+    sending a debugger into the wrong subsystem. If NO rendered row is
+    complete, `ok=False` with cause "diagnostics row omitted the split shape
+    fields" — but only then: a stream with some complete rows and some
+    incomplete ones is graded on the complete ones, same as any other
+    filter here.
+
+    Among complete rows, a row's rendered shape is "valid" iff it is some
+    integer number of copies of the fixture's own per-focus shape
+    (`FIXTURE_SPLIT_NODES_PER_FOCUS`/`FIXTURE_LEAVES_PER_FOCUS`) — this is
+    what catches "the outer split never rendered at all" (1 split, 2 leaves
+    is not a whole multiple of 2 splits/3 leaves) rather than only "some
+    split rendered". If no complete row has a valid shape, `ok=False` with
+    cause "rendered layout shape did not match the fixture".
+
+    Among shape-valid rows, `ok=True` iff at least one has
+    `splitsRatiosApplied >= splitNodesRendered` AND
+    `splitsLaidOut >= splitNodesRendered` — checked per-row (a single
+    instant), not as independent maxima across rows, so a row that saw N
+    applied can't vouch for a different row that saw N rendered. Otherwise
+    `ok=False` with cause "not every rendered split applied its ratios".
+    """
+    rendered_rows = [row for row in rows
+                     if (row.get("splitNodesRendered") or 0) > 0]
+    if not rendered_rows:
+        return SplitLayoutAgreement(ok=False, cause="multi-pane layout not reached",
+                                    rendered_splits=0, rendered_leaves=0,
+                                    laid_out=0, applied=0)
+
+    complete_rows = [
+        row for row in rendered_rows
+        if row.get("leavesRendered") is not None
+        and row.get("splitsLaidOut") is not None
+        and row.get("splitsRatiosApplied") is not None
+    ]
+    if not complete_rows:
+        best = max(rendered_rows, key=lambda row: row["splitNodesRendered"])
+        return SplitLayoutAgreement(
+            ok=False, cause="diagnostics row omitted the split shape fields",
+            rendered_splits=best["splitNodesRendered"],
+            rendered_leaves=best.get("leavesRendered") or 0,
+            laid_out=best.get("splitsLaidOut") or 0,
+            applied=best.get("splitsRatiosApplied") or 0,
+        )
+
+    shape_valid_rows = [
+        row for row in complete_rows
+        if _is_whole_multiple_of_fixture_shape(
+            row["splitNodesRendered"], row["leavesRendered"],
+        )
+    ]
+    if not shape_valid_rows:
+        best = max(complete_rows, key=lambda row: row["splitNodesRendered"])
+        return SplitLayoutAgreement(
+            ok=False, cause="rendered layout shape did not match the fixture",
+            rendered_splits=best["splitNodesRendered"],
+            rendered_leaves=best["leavesRendered"],
+            laid_out=best["splitsLaidOut"],
+            applied=best["splitsRatiosApplied"],
+        )
+
+    for row in shape_valid_rows:
+        rendered = row["splitNodesRendered"]
+        laid_out = row["splitsLaidOut"]
+        applied = row["splitsRatiosApplied"]
+        if laid_out >= rendered and applied >= rendered:
+            return SplitLayoutAgreement(
+                ok=True, cause=None, rendered_splits=rendered,
+                rendered_leaves=row["leavesRendered"],
+                laid_out=laid_out, applied=applied,
+            )
+
+    best = max(shape_valid_rows, key=lambda row: row["splitsRatiosApplied"])
+    return SplitLayoutAgreement(
+        ok=False, cause="not every rendered split applied its ratios",
+        rendered_splits=best["splitNodesRendered"],
+        rendered_leaves=best["leavesRendered"],
+        laid_out=best["splitsLaidOut"],
+        applied=best["splitsRatiosApplied"],
+    )
+
+
 def multi_launch_summary(observed_pids, attributed_pids):
     """(launches_observed, launches_crashed) — how many distinct launches
     this run's diagnostics stream observed, and how many of those specific
@@ -523,12 +715,19 @@ def multi_launch_summary(observed_pids, attributed_pids):
     return len(observed_pids), len(set(observed_pids) & set(attributed_pids))
 
 
-def notdrawable_violations_from_rows(rows):
-    """Apply `PaneFirstPaintAudit.verdict`'s exact predicate
-    (macOS/Nostromo/UI/PaneFirstPaintAudit.swift) to every `panesMeasured`
-    entry across `rows`. Returns one summary string per DISTINCT violating
-    (paneId, boundsWidth, boundsHeight, layoutPassCount) tuple — the same
-    rate-limiting spirit as the Swift side's `lastLoggedViolationSummary`."""
+def _zero_size_violations_from_rows(rows, *, judged, verdict_label):
+    """Shared body behind `notdrawable_violations_from_rows` and
+    `collapsed_geometry_violations_from_rows` (the f5 extraction) — the two
+    differed only in their guard condition and their `verdict=` label, with
+    the `pane.get()` reads/defaults, the zero-size short-circuit, the dedup
+    key, the reasons list, and the summary f-string byte-identical between
+    them. `judged(has_content, is_loading, has_window, layout_passes)`
+    decides which panes are even in scope for this population — the one
+    place the two callers actually differ; `verdict_label` is the string
+    embedded in the summary (`notDrawable` or `collapsed`). Returns one
+    summary string per DISTINCT violating (paneId, boundsWidth, boundsHeight,
+    layoutPassCount) tuple — the same rate-limiting spirit as the Swift
+    side's `lastLoggedViolationSummary`."""
     seen = set()
     out = []
     for row in rows:
@@ -539,7 +738,7 @@ def notdrawable_violations_from_rows(rows):
             layout_passes = pane.get("layoutPassCount", 0)
             width = pane.get("boundsWidth", 0)
             height = pane.get("boundsHeight", 0)
-            if not (has_content and not is_loading and has_window and layout_passes > 0):
+            if not judged(has_content, is_loading, has_window, layout_passes):
                 continue
             if width > 0 and height > 0:
                 continue
@@ -556,9 +755,58 @@ def notdrawable_violations_from_rows(rows):
                 f"pane={pane.get('paneId')} hasContent={str(has_content).lower()} "
                 f"loading={str(is_loading).lower()} hasWindow={str(has_window).lower()} "
                 f"layoutPasses={layout_passes} bounds={width}x{height} "
-                f"verdict=notDrawable({','.join(reasons)})"
+                f"verdict={verdict_label}({','.join(reasons)})"
             )
     return tuple(out)
+
+
+def notdrawable_violations_from_rows(rows):
+    """Apply `PaneFirstPaintAudit.verdict`'s exact predicate
+    (macOS/Nostromo/UI/PaneFirstPaintAudit.swift) to every `panesMeasured`
+    entry across `rows`. Returns one summary string per DISTINCT violating
+    (paneId, boundsWidth, boundsHeight, layoutPassCount) tuple — the same
+    rate-limiting spirit as the Swift side's `lastLoggedViolationSummary`."""
+    return _zero_size_violations_from_rows(
+        rows,
+        judged=lambda has_content, is_loading, has_window, layout_passes: (
+            has_content and not is_loading and has_window and layout_passes > 0
+        ),
+        verdict_label="notDrawable",
+    )
+
+
+def collapsed_geometry_violations_from_rows(rows):
+    """Content-independent counterpart to `notdrawable_violations_from_rows`:
+    a `panesMeasured` entry is a violation iff `hasWindow && layoutPassCount
+    > 0 && (boundsWidth <= 0 || boundsHeight <= 0)` — regardless of
+    `hasContent`/`isLoading`. The fixture daemon never pushes `pane_content`,
+    so `hasContent` is `False` for every pane on every real run, and the
+    audit-mirroring predicate above (which requires `hasContent`) can never
+    see a pane that genuinely collapsed to zero size under that condition.
+    Same distinct-tuple dedup key and summary-string shape as the audit
+    mirror, but `verdict=collapsed(...)` rather than `verdict=notDrawable(...)`
+    so the two populations are distinguishable in a report."""
+    return _zero_size_violations_from_rows(
+        rows,
+        judged=lambda has_content, is_loading, has_window, layout_passes: (
+            has_window and layout_passes > 0
+        ),
+        verdict_label="collapsed",
+    )
+
+
+def geometry_judged_pane_count(rows):
+    """Distinct paneIds across `rows` with a window and a completed layout
+    pass — deliberately NOT requiring non-zero size (contrast
+    `_qualifying_panes`/`distinct_multipane_count`, which does). A judged
+    pane can be zero-size; that's exactly what makes it judgeable for
+    `collapsed_geometry_violations_from_rows` in the first place."""
+    seen = set()
+    for row in rows:
+        for pane in row.get("panesMeasured") or []:
+            if pane.get("hasWindow") and (pane.get("layoutPassCount") or 0) > 0:
+                seen.add(pane["paneId"])
+    return len(seen)
 
 
 # ── IPC: length-prefixed JSON frames over a Unix socket ─────────────────────
@@ -1008,7 +1256,20 @@ def another_nostromo_pid(exclude_pid, clone_bundle_id):
         return None
     if result.returncode != 0:
         return None
-    for line in result.stdout.splitlines()[1:]:
+    return nostromo_pid_from_ps_output(
+        result.stdout, exclude_pid=exclude_pid, clone_bundle_id=clone_bundle_id,
+    )
+
+
+def nostromo_pid_from_ps_output(text, *, exclude_pid, clone_bundle_id,
+                                bundle_id_of=_bundle_identifier_of):
+    """The pure parsing/matching loop behind `another_nostromo_pid` (see its
+    docstring for the full rationale). `text` is `ps -axo pid,command`
+    output: a header row followed by one row per process. Returns the first
+    matching pid in `ps` order, or `None`. Never raises. `bundle_id_of` is
+    injectable for tests; production callers always use
+    `_bundle_identifier_of`."""
+    for line in text.splitlines()[1:]:  # skip the header row
         line = line.strip()
         if not line:
             continue
@@ -1022,7 +1283,7 @@ def another_nostromo_pid(exclude_pid, clone_bundle_id):
         executable = parts[1].split(None, 1)[0]
         if not executable.endswith("/Contents/MacOS/Nostromo"):
             continue
-        if _bundle_identifier_of(executable) == clone_bundle_id:
+        if bundle_id_of(executable) == clone_bundle_id:
             return pid
     return None
 
@@ -1390,6 +1651,8 @@ def _collect_evidence(launched_pid, diag_path, clone, alive_at_window_end, cpu_p
         crash_reports_attributed_pids=crash_attributed,
         notdrawable_violations=notdrawable_violations_from_rows(rows),
         panes_scanned=panes_scanned,
+        collapsed_geometry_violations=collapsed_geometry_violations_from_rows(rows),
+        geometry_panes_judged=geometry_judged_pane_count(rows),
         window_seconds=window_seconds,
     )
 
@@ -1397,10 +1660,9 @@ def _collect_evidence(launched_pid, diag_path, clone, alive_at_window_end, cpu_p
 def _capture_sample_on_fail(state, launched_pid, tools):
     """On FAIL only: an `sample(1)` capture for a human to inspect, written
     outside the temp dir (which is removed unconditionally) so it survives
-    the run. Never a verdict input. Returns the sample path, or None if no
-    sample was captured."""
+    the run. Never a verdict input."""
     if state != FAIL or not _pid_alive(launched_pid) or not tools.get("sample"):
-        return None
+        return
     sample_out = tempfile.mktemp(prefix="nostromo-launch-smoke-sample-", suffix=".txt")
     sample_result = subprocess.run(
         [tools["sample"], str(launched_pid), "3", "-file", sample_out],
@@ -1408,44 +1670,6 @@ def _capture_sample_on_fail(state, launched_pid, tools):
     )
     if sample_result.returncode == 0 and os.path.exists(sample_out):
         _log(f"sample captured on FAIL: {sample_out}")
-        return sample_out
-    return None
-
-
-def _export_artifacts(keep_dir, tmpdir, report_text, sample_path):
-    """Copy this run's report, app output, and diagnostics stream out of the
-    per-run temp dir before `_cleanup()` deletes it unconditionally — CI has
-    nowhere else to look once the job's steps finish. Purely additive: it
-    changes no verdict, and it does not replace or delay `_cleanup()`'s
-    unconditional teardown of everything this run launched.
-
-    Best-effort — a failure to export artifacts is logged and swallowed
-    rather than turned into a verdict-altering exception, the same
-    discipline `_cleanup()` itself uses."""
-    try:
-        os.makedirs(keep_dir, exist_ok=True)
-    except OSError as exc:
-        _log(f"WARNING: could not create --keep-artifacts dir {keep_dir}: {exc}")
-        return
-    if report_text is not None:
-        try:
-            with open(os.path.join(keep_dir, "report.txt"), "w") as f:
-                f.write(report_text)
-        except OSError as exc:
-            _log(f"WARNING: could not write report.txt to {keep_dir}: {exc}")
-    if tmpdir is not None:
-        for name in ("diagnostics.jsonl", "app.log"):
-            src = os.path.join(tmpdir, name)
-            if os.path.isfile(src):
-                try:
-                    shutil.copy2(src, os.path.join(keep_dir, name))
-                except OSError as exc:
-                    _log(f"WARNING: could not copy {name} to {keep_dir}: {exc}")
-    if sample_path is not None and os.path.isfile(sample_path):
-        try:
-            shutil.copy2(sample_path, os.path.join(keep_dir, os.path.basename(sample_path)))
-        except OSError as exc:
-            _log(f"WARNING: could not copy sample capture to {keep_dir}: {exc}")
 
 
 def run(args):
@@ -1509,27 +1733,18 @@ def run(args):
 
         detectors = evaluate_evidence(ev)
         state, cause = aggregate(detectors)
-        sample_path = _capture_sample_on_fail(state, launched_pid, tools)
+        _capture_sample_on_fail(state, launched_pid, tools)
 
-        report_text = format_report(state, cause, detectors, ev)
-        print(report_text)
-        if args.keep_artifacts:
-            _export_artifacts(args.keep_artifacts, tmpdir, report_text, sample_path)
+        print(format_report(state, cause, detectors, ev))
         return exit_code_for(state)
 
     except _PrerequisiteMissing as exc:
-        report_text = format_report(INCONCLUSIVE, "prerequisite missing", [], Evidence.empty())
-        print(report_text)
+        print(format_report(INCONCLUSIVE, "prerequisite missing", [], Evidence.empty()))
         _log(f"prerequisite missing: {exc}")
-        if args.keep_artifacts:
-            _export_artifacts(args.keep_artifacts, tmpdir, report_text, None)
         return exit_code_for(INCONCLUSIVE)
     except _BuildFailed as exc:
-        report_text = format_report(INCONCLUSIVE, "build failed", [], Evidence.empty())
-        print(report_text)
+        print(format_report(INCONCLUSIVE, "build failed", [], Evidence.empty()))
         _log(f"build failed: {exc}")
-        if args.keep_artifacts:
-            _export_artifacts(args.keep_artifacts, tmpdir, report_text, None)
         return exit_code_for(INCONCLUSIVE)
     finally:
         _cleanup(tmpdir, daemon, broker, proc)
@@ -1566,13 +1781,6 @@ def parse_args(argv):
                         help="use the Release build instead of Debug")
     parser.add_argument("--skip-build", action="store_true",
                         help="use whatever bundle is already built; do not rebuild")
-    parser.add_argument("--keep-artifacts", metavar="DIR",
-                        default=os.environ.get("NOSTROMO_SMOKE_ARTIFACT_DIR"),
-                        help="copy this run's report, the app's captured stdout/stderr, and "
-                             "the diagnostics NDJSON stream (plus any FAIL sample capture) "
-                             "into DIR before the per-run temp dir is cleaned up. Also settable "
-                             "via NOSTROMO_SMOKE_ARTIFACT_DIR. Purely additive: changes no "
-                             "verdict and does not affect cleanup of what this run launched.")
     return parser.parse_args(argv)
 
 

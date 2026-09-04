@@ -170,11 +170,15 @@ laid out at a non-zero size, that at least one `RatioSplitView` reported its
 ratios successfully applied (positive proof it reached
 `NSSplitView.setPosition` and returned — the exact call that hung forever in
 the 2026-09-03 defect), that the app survived 15 real seconds without dying,
-spinning, or producing a crash report, and that no pane reports content in a
-window with zero width or height. Validated against the bug it exists to
-catch: `make mac-smoke-validate` reintroduces the exact 2026-09-03 defect in
-a scratch worktree and asserts the check reports FAIL, then reverts and
-asserts PASS.
+spinning, or producing a crash report, and that no pane laid out to zero
+width or height. That last check is content-independent: a pane that
+completed a layout pass in a real window but collapsed to zero size is a
+violation whether or not `pane_content` has arrived for it, since the
+fixture daemon this check drives never pushes content at all — gating the
+check on content having arrived would make it silently inert on every run.
+Validated against the bug it exists to catch: `make mac-smoke-validate`
+reintroduces the exact 2026-09-03 defect in a scratch worktree and asserts
+the check reports FAIL, then reverts and asserts PASS.
 
 **What it cannot verify:** anything this file's "out of scope" list already
 names for the feature that built it — no UI driving (no clicks, no divider

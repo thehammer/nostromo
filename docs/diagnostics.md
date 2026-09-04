@@ -189,6 +189,17 @@ has):
 | `splitsRatiosApplied` | Count of live `RatioSplitView`s whose `applyRatios` call has returned `true` — positive proof the app reached `NSSplitView.setPosition` and returned, the exact call that never returned in the 2026-09-03 defect. |
 | `panesMeasured` | Verbatim `PaneFirstPaintAudit.Measurements` for every live agent-authored pane. |
 
+`bin/nostromo-launch-smoke`'s `split-ratios-applied` detector consumes
+`splitNodesRendered`/`leavesRendered` together with `splitsLaidOut`/
+`splitsRatiosApplied` as a requested-vs-rendered shape check, not just as
+independent scalars: it corroborates, per diagnostics row, that the number
+of splits and leaves the app actually rendered agrees with some whole
+multiple of the fixture's own per-focus shape, and that every rendered
+split both laid out and applied its ratios — rather than trusting a single
+"at least one split applied" count that a fully-rendered-but-partially-
+applied tree (e.g. an outer split whose `setPosition` never returned while
+an inner split's did) could satisfy on its own.
+
 ## Daemon-side diff/code payload logging
 
 `src/mcp/tools/apply_layout.rs` logs one line (via `tracing::info!`) every

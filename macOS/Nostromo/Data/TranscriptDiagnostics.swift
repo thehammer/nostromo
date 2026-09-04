@@ -196,6 +196,18 @@ enum TranscriptDiagnostics {
         _recordFirstLayoutIfNeeded(using: AppStore.shared.currentPaneMeasurements())
     }
 
+    /// Drop a focus's rendered-shape entry when the focus itself goes away.
+    /// `renderedTreeShapeByTag` is strong and keyed by tag, while `splits` is
+    /// a weak table that self-prunes — so without this, a removed focus's
+    /// splits stay counted in `splitNodesRendered` forever while
+    /// `splitsLaidOut`/`splitsRatiosApplied` drop to reflect only live views,
+    /// and every subsequent row reports a tree that under-applied its ratios
+    /// when nothing of the kind happened. Called from
+    /// `AppStore.evictPerFocusState`.
+    static func forgetTag(_ tag: String) {
+        renderedTreeShapeByTag.removeValue(forKey: tag)
+    }
+
     /// Set `firstLayoutReconcileAt` (and emit a stream line immediately) the
     /// first time any pane measurement shows a real, laid-out size. Safe to
     /// call repeatedly — a no-op once already set.

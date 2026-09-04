@@ -419,10 +419,22 @@ class AppStore: ObservableObject {
     /// other three maps could. Its lack of *focus-removal* pruning is a
     /// separate, lower-severity hygiene gap, not the retention bug this hook
     /// exists to close — see `ActivityStreamStore` for details.
+    ///
+    /// `TranscriptDiagnostics.forgetTag` IS in scope here, even though it
+    /// looks like the same shape of tag-keyed cleanup as `activityStreams`:
+    /// it is emitter bookkeeping for a number a human reads in the
+    /// diagnostics stream (`splitNodesRendered`), not app state another
+    /// queued fix owns, and — unlike `activityStreams` — leaving it unpruned
+    /// produces an actively wrong, permanently inflated count rather than a
+    /// merely stale one. It only covers focus *removal*; the window-close and
+    /// multi-window staleness this doesn't cover is tracked as its own filed
+    /// bug (`.claude/bugs/open/2026-09-04-renderedtreeshapebytag-still-goes-
+    /// stale-on-window-close.md`).
     private func evictPerFocusState(tag: String) {
         focusLayouts.removeValue(forKey: tag)
         sessionRegistry.removeValue(forKey: tag)?.detach()
         sessionHealth.removeValue(forKey: tag)
+        TranscriptDiagnostics.forgetTag(tag)
     }
 
     // MARK: - Broker event fold
