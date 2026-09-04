@@ -1,0 +1,1250 @@
+#!/usr/bin/python3
+"""nostromo-launch-smoke — launch the built macOS app against a fixture
+daemon, prove it reached a real multi-pane AppKit layout, and report a
+PASS/FAIL/INCONCLUSIVE verdict.
+
+## Why this exists
+
+`make mac-test` runs a host-less logic bundle: no `NSApplication`, no
+`NSWindow`, no AppKit layout loop. `DynamicFocusView.swift` is not even in
+its compile phase. An AppKit reentrancy bug — the 2026-09-03
+`RatioSplitView.layout()` infinite recursion that crashed every launch —
+is structurally unreachable there. This check is the missing layer: it
+builds the one thing that can catch a live-layout crash automatically,
+instead of when the operator happens to relaunch the app and notice CPU
+pegged. Full background:
+`.claude/bugs/resolved/2026-09-03-ratiosplitview-layout-infinite-recursion-crash-on-launch.md`
+and `.claude/prds/launch-smoke-test.md` in the primary repo checkout.
+
+## Design constraints (mirrors bin/nostromo-doctor)
+
+  - No build/install step to run this tool. It is a single stdlib-only
+    script; adding a check means editing this file.
+  - A run that cannot positively confirm multi-pane layout is never PASS.
+    The dominant risk this check exists to close is false confidence: the
+    naive version (build, launch, sleep, assert alive) would have passed
+    the crashing build outright, because a cold launch with no daemon never
+    reaches a split view at all.
+  - Every external tool is invoked via subprocess with `shell=False` and an
+    absolute, pre-resolved path.
+  - A criterion ("detector") is a registered function operating on an
+    `Evidence` object. There are exactly two kinds:
+      - REACH detectors ("did we even reach the code that matters") can only
+        report PASS or INCONCLUSIVE — never FAIL. They gate whether the run
+        may report PASS at all.
+      - GATE detectors ("is the app's own behavior broken") can only report
+        PASS or FAIL — never INCONCLUSIVE. Absence of a measurement is
+        treated as FAIL, not as a pass by omission — the same "a criterion
+        satisfied by the absence of the thing it measures is worse than no
+        criterion" discipline `macOS/scripts/transcript-load-report.py`
+        applies to its own registry.
+  - `FAIL > INCONCLUSIVE > PASS`, unconditionally. This is the single most
+    important line in this file: it is what keeps a build with the launch
+    guard removed (which dies mid-layout, so the REACH detectors read
+    INCONCLUSIVE — nothing ever proved it reached multi-pane layout) from
+    reporting INCONCLUSIVE instead of FAIL. A FAILing GATE detector always
+    wins, regardless of what the REACH detectors saw.
+  - Exit codes: 0 = PASS, 1 = FAIL, 2 = INCONCLUSIVE.
+
+This file is unit-tested (see tests/launch_smoke/) for its pure parse/
+classify/aggregate functions and for the fixture daemon's IPC handshake. The
+live-system behavior — building, cloning the bundle, launching, isolating
+from the operator's daemon/Mother/UserDefaults domain, and the known-bad
+validation ritual — is verified by actually running this script and
+macOS/scripts/launch-smoke-validate.sh; see the PR body for that evidence.
+
+Usage:
+    bin/nostromo-launch-smoke [--release] [--skip-build]
+"""
+
+import argparse
+import copy
+import glob
+import json
+import os
+import plistlib
+import re
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
+from collections import namedtuple
+
+# ── verdict model ────────────────────────────────────────────────────────────
+
+PASS, FAIL, INCONCLUSIVE = "PASS", "FAIL", "INCONCLUSIVE"
+REACH, GATE = "reach", "gate"
+
+EXIT_CODES = {PASS: 0, FAIL: 1, INCONCLUSIVE: 2}
+
+# Precedence for aggregation purposes: FAIL beats INCONCLUSIVE beats PASS.
+# Mirrors bin/nostromo-doctor's _STATUS_PRECEDENCE, minus WARN (this tool has
+# no WARN state).
+_STATE_PRECEDENCE = (FAIL, INCONCLUSIVE, PASS)
+
+# The only causes this tool may ever report for an overall INCONCLUSIVE
+# verdict. "build failed" / "prerequisite missing" come from main()'s
+# pre-Evidence short-circuit (there is no Evidence yet to grade). The other
+# three come from the three REACH detectors below. Since GATE detectors can
+# never be INCONCLUSIVE (see `gate_verdict`), this set is exhaustive by
+# construction, not by convention — pinned here the same way
+# transcript-load-report.py pins MATERIALIZED_LIMIT, so widening it is a
+# visible, deliberate edit rather than a silent drift.
+AGGREGATE_INCONCLUSIVE_CAUSES = frozenset({
+    "build failed",
+    "prerequisite missing",
+    "multi-pane layout not reached",
+    "another instance took the launch",
+    "timed out before the app came up",
+})
+
+Verdict = namedtuple("Verdict", ["key", "name", "state", "measured", "cause", "observations"])
+
+
+def reach_verdict(key, name, *, ok, measured, cause, observations):
+    """The only way to build a REACH detector's Verdict: PASS or INCONCLUSIVE,
+    never FAIL. `cause` must be non-empty when `ok` is False."""
+    return Verdict(key=key, name=name, state=(PASS if ok else INCONCLUSIVE),
+                   measured=measured, cause=(None if ok else cause),
+                   observations=observations)
+
+
+def gate_verdict(key, name, *, ok, measured, cause, observations):
+    """The only way to build a GATE detector's Verdict: PASS or FAIL, never
+    INCONCLUSIVE. `cause` must be non-empty when `ok` is False."""
+    return Verdict(key=key, name=name, state=(PASS if ok else FAIL),
+                   measured=measured, cause=(None if ok else cause),
+                   observations=observations)
+
+
+# ── registry ─────────────────────────────────────────────────────────────────
+
+_Registered = namedtuple("_Registered", ["key", "kind", "fn"])
+
+#: The detector table, in registration order. `evaluate_evidence()` returns
+#: exactly one verdict per entry for every possible input, including
+#: `Evidence.empty()`. A row silently omitted when its input is missing reads
+#: as "not a problem" in a report where every other line says PASS — the
+#: registry is what keeps a row from vanishing, duplicating, or reordering.
+CRITERIA = []
+
+
+def detector(key, kind):
+    """Register a detector function. `kind` is REACH or GATE."""
+    def wrap(fn):
+        CRITERIA.append(_Registered(key=key, kind=kind, fn=fn))
+        return fn
+    return wrap
+
+
+def registration(key):
+    """The registry entry for `key`. Raises KeyError if unknown."""
+    for reg in CRITERIA:
+        if reg.key == key:
+            return reg
+    raise KeyError(key)
+
+
+# ── evidence ─────────────────────────────────────────────────────────────────
+
+
+class Evidence(namedtuple("Evidence", [
+    "launched_pid",
+    "rows",
+    "observed_pids",
+    "another_instance_pid",
+    "alive_at_window_end",
+    "cpu_percent",
+    "crash_reports_scanned",
+    "crash_reports_dir_present",
+    "crash_reports_attributed_pids",
+    "notdrawable_violations",
+    "panes_scanned",
+    "window_seconds",
+])):
+    """Everything a detector may look at.
+
+    `rows` are diagnostics.jsonl rows already attributed to `launched_pid`
+    (see `rows_for_pid`) — detectors read `rows` directly rather than
+    re-filtering `observed_pids`-wide data themselves, so "which pid's data
+    is this" is decided once, by whoever builds the Evidence, not by each
+    detector.
+    """
+
+    __slots__ = ()
+
+    @classmethod
+    def empty(cls):
+        """Nothing observed at all. A synthetic fixture for barren-input
+        tests — no real `main()` run produces literally this; a real run
+        that never got a pid short-circuits to INCONCLUSIVE before an
+        Evidence is ever constructed (see `main()`)."""
+        return cls(
+            launched_pid=None, rows=(), observed_pids=(), another_instance_pid=None,
+            alive_at_window_end=None, cpu_percent=None, crash_reports_scanned=0,
+            crash_reports_dir_present=False, crash_reports_attributed_pids=(),
+            notdrawable_violations=(), panes_scanned=0, window_seconds=0.0,
+        )
+
+
+# ── detectors: reach proofs (gate PASS; alone, produce INCONCLUSIVE) ─────────
+
+
+@detector("our-process-ran-the-app", REACH)
+def _our_process_ran_the_app(ev):
+    key, name = "our-process-ran-the-app", "our process ran the app"
+    ok = ev.launched_pid is not None and ev.launched_pid in ev.observed_pids
+    if ok:
+        return reach_verdict(key, name, ok=True,
+                             measured=f"pid {ev.launched_pid} observed in the diagnostics stream",
+                             cause=None, observations=len(ev.observed_pids))
+    cause = ("another instance took the launch" if ev.another_instance_pid is not None
+             else "timed out before the app came up")
+    measured = (f"pid {ev.another_instance_pid} was observed instead of "
+                f"{ev.launched_pid}" if ev.another_instance_pid is not None
+                else f"launched pid {ev.launched_pid} never appeared "
+                     f"(observed: {list(ev.observed_pids)})")
+    return reach_verdict(key, name, ok=False, measured=measured, cause=cause,
+                         observations=len(ev.observed_pids))
+
+
+@detector("multi-pane-laid-out", REACH)
+def _multi_pane_laid_out(ev):
+    key, name = "multi-pane-laid-out", "multi-pane layout laid out"
+    count = distinct_multipane_count(ev.rows)
+    ok = count >= 2
+    return reach_verdict(key, name, ok=ok,
+                         measured=f"{count} distinct pane(s) laid out with a real size",
+                         cause="multi-pane layout not reached", observations=count)
+
+
+@detector("split-ratios-applied", REACH)
+def _split_ratios_applied(ev):
+    key, name = "split-ratios-applied", "split ratios applied"
+    applied = max_splits_ratios_applied(ev.rows)
+    ok = applied >= 1
+    return reach_verdict(key, name, ok=ok,
+                         measured=f"{applied} split(s) reported ratios applied",
+                         cause="multi-pane layout not reached", observations=applied)
+
+
+# ── detectors: failure gates (any FAIL makes the whole run FAIL) ────────────
+
+
+@detector("alive-at-window-end", GATE)
+def _alive_at_window_end(ev):
+    key, name = "alive-at-window-end", "alive at window end"
+    ok = ev.alive_at_window_end is True
+    measured = ("alive" if ok else
+                "not measured" if ev.alive_at_window_end is None else "not alive")
+    return gate_verdict(key, name, ok=ok, measured=measured,
+                        cause="process died before window end", observations=1)
+
+
+@detector("no-attributable-crash-report", GATE)
+def _no_attributable_crash_report(ev):
+    key, name = "no-attributable-crash-report", "no attributable crash report"
+    attributed = ev.crash_reports_attributed_pids
+    ok = ev.crash_reports_dir_present and not attributed
+    measured = (f"{ev.crash_reports_scanned} report(s) scanned, "
+                f"{len(attributed)} attributed, "
+                f"dir_present={ev.crash_reports_dir_present}")
+    if attributed:
+        cause = f"{len(attributed)} of {len(ev.observed_pids)} observed launch(es) crashed"
+    else:
+        cause = "crash-report directory could not be scanned"
+    return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
+                        observations=ev.crash_reports_scanned)
+
+
+@detector("cpu-settled", GATE)
+def _cpu_settled(ev):
+    key, name = "cpu-settled", "CPU settled"
+    cpu = ev.cpu_percent
+    if cpu is None:
+        return gate_verdict(key, name, ok=False, measured="not measured",
+                            cause="could not measure CPU over the observation window",
+                            observations=0)
+    if cpu == 0:
+        return gate_verdict(key, name, ok=False, measured=f"{cpu:.2f}%",
+                            cause="0.00% — no CPU at all over the window (wedged, not idle)",
+                            observations=1)
+    if cpu >= 90:
+        return gate_verdict(key, name, ok=False, measured=f"{cpu:.2f}%",
+                            cause=f"pinned at {cpu:.0f}%", observations=1)
+    return gate_verdict(key, name, ok=True, measured=f"{cpu:.2f}%", cause=None, observations=1)
+
+
+@detector("no-zero-size-laid-out-pane", GATE)
+def _no_zero_size_laid_out_pane(ev):
+    key, name = "no-zero-size-laid-out-pane", "no zero-size laid-out pane"
+    ok = ev.panes_scanned > 0 and not ev.notdrawable_violations
+    measured = (f"{ev.panes_scanned} pane observation(s) scanned, "
+                f"{len(ev.notdrawable_violations)} violation(s)")
+    if ev.panes_scanned == 0:
+        cause = "no pane was ever measured — nothing was scanned"
+    else:
+        cause = "; ".join(ev.notdrawable_violations[:3])
+    return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
+                        observations=ev.panes_scanned)
+
+
+# ── evaluation ───────────────────────────────────────────────────────────────
+
+
+def evaluate_evidence(ev):
+    """Exactly one verdict per registered detector, in registry order, for
+    every possible input. A detector that raises becomes a FAIL row naming
+    the exception rather than a traceback that kills the whole report —
+    mirrors transcript-load-report.py's evaluate_evidence."""
+    out = []
+    for reg in CRITERIA:
+        try:
+            verdict = reg.fn(ev)
+            if verdict.key != reg.key:
+                raise ValueError(f"detector {reg.key!r} returned key={verdict.key!r}")
+            out.append(verdict)
+        except Exception as exc:  # noqa: BLE001 - a crashing detector must not crash the tool
+            out.append(Verdict(
+                key=reg.key, name=reg.key, state=FAIL,
+                measured=f"detector raised {type(exc).__name__}: {exc}",
+                cause=f"detector raised {type(exc).__name__}: {exc}", observations=0,
+            ))
+    return out
+
+
+def aggregate(detectors):
+    """(state, cause) — the worst state across all detector verdicts, per
+    `FAIL > INCONCLUSIVE > PASS`. `cause` is the cause of the first
+    (registry-order) verdict at that worst state; `None` when state is PASS.
+    """
+    present = {v.state for v in detectors}
+    for state in _STATE_PRECEDENCE:
+        if state in present:
+            if state == PASS:
+                return (PASS, None)
+            cause = next(v.cause for v in detectors if v.state == state)
+            return (state, cause)
+    return (PASS, None)
+
+
+def exit_code_for(state):
+    return EXIT_CODES[state]
+
+
+# ── .ips crash-report parsing ────────────────────────────────────────────────
+
+
+def parse_ips_report(text):
+    """Parse a macOS `.ips` crash report: a JSON header object on line 1
+    followed by a JSON body (which may itself span many lines). Returns a
+    dict with `pid` (Optional[int]), `proc_path` (Optional[str]),
+    `capture_time` (Optional[str], from the body's `captureTime`), and
+    `header_timestamp` (Optional[str], from the header's `timestamp`) — or
+    `None` for anything that doesn't parse as two JSON values back to back.
+    Never raises.
+    """
+    if not text or not text.strip():
+        return None
+    lines = text.split("\n", 1)
+    if len(lines) < 2:
+        return None
+    header_line, rest = lines
+    try:
+        header = json.loads(header_line)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(header, dict):
+        return None
+    try:
+        decoder = json.JSONDecoder()
+        body, _end = decoder.raw_decode(rest.strip())
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    return {
+        "pid": body.get("pid"),
+        "proc_path": body.get("procPath"),
+        "capture_time": body.get("captureTime"),
+        "header_timestamp": header.get("timestamp"),
+    }
+
+
+def crash_report_matches(parsed, *, pids, bundle_root):
+    """True iff `parsed`'s pid is one of `pids` and its proc_path is under
+    `bundle_root`. Pure predicate — timestamp corroboration happens in the
+    impure scan loop, not here."""
+    pid = parsed.get("pid")
+    proc_path = parsed.get("proc_path")
+    if pid not in pids or proc_path is None:
+        return False
+    return proc_path.startswith(bundle_root)
+
+
+# ── CPU arithmetic ───────────────────────────────────────────────────────────
+
+
+def cpu_percent_from_times(t0_seconds, t1_seconds, elapsed_wall_seconds):
+    """Cumulative CPU *time* delta over wall-clock elapsed time, as a
+    percentage. `t0_seconds`/`t1_seconds` are already-parsed `ps -o time=`
+    values (see macOS/scripts/ps-time-seconds.awk)."""
+    return (t1_seconds - t0_seconds) / elapsed_wall_seconds * 100
+
+
+# ── diagnostics-row pure helpers ─────────────────────────────────────────────
+
+
+def rows_for_pid(all_rows, pid):
+    return tuple(row for row in all_rows if row.get("pid") == pid)
+
+
+def distinct_pids(all_rows):
+    pids = {row["pid"] for row in all_rows if row.get("pid") is not None}
+    return tuple(sorted(pids))
+
+
+def _qualifying_panes(rows):
+    """Distinct paneIds across `rows` with a window, a completed layout
+    pass, and a real (non-zero) size."""
+    seen = set()
+    for row in rows:
+        for pane in row.get("panesMeasured") or []:
+            if (pane.get("hasWindow") and (pane.get("layoutPassCount") or 0) > 0
+                    and (pane.get("boundsWidth") or 0) > 0
+                    and (pane.get("boundsHeight") or 0) > 0):
+                seen.add(pane["paneId"])
+    return seen
+
+
+def distinct_multipane_count(rows):
+    return len(_qualifying_panes(rows))
+
+
+def max_splits_ratios_applied(rows):
+    values = [row["splitsRatiosApplied"] for row in rows
+              if row.get("splitsRatiosApplied") is not None]
+    return max(values) if values else 0
+
+
+def notdrawable_violations_from_rows(rows):
+    """Apply `PaneFirstPaintAudit.verdict`'s exact predicate
+    (macOS/Nostromo/UI/PaneFirstPaintAudit.swift) to every `panesMeasured`
+    entry across `rows`. Returns one summary string per DISTINCT violating
+    (paneId, boundsWidth, boundsHeight, layoutPassCount) tuple — the same
+    rate-limiting spirit as the Swift side's `lastLoggedViolationSummary`."""
+    seen = set()
+    out = []
+    for row in rows:
+        for pane in row.get("panesMeasured") or []:
+            has_content = pane.get("hasContent", False)
+            is_loading = pane.get("isLoading", False)
+            has_window = pane.get("hasWindow", False)
+            layout_passes = pane.get("layoutPassCount", 0)
+            width = pane.get("boundsWidth", 0)
+            height = pane.get("boundsHeight", 0)
+            if not (has_content and not is_loading and has_window and layout_passes > 0):
+                continue
+            if width > 0 and height > 0:
+                continue
+            key = (pane.get("paneId"), width, height, layout_passes)
+            if key in seen:
+                continue
+            seen.add(key)
+            reasons = []
+            if width <= 0:
+                reasons.append("zeroWidth")
+            if height <= 0:
+                reasons.append("zeroHeight")
+            out.append(
+                f"pane={pane.get('paneId')} hasContent={str(has_content).lower()} "
+                f"loading={str(is_loading).lower()} hasWindow={str(has_window).lower()} "
+                f"layoutPasses={layout_passes} bounds={width}x{height} "
+                f"verdict=notDrawable({','.join(reasons)})"
+            )
+    return tuple(out)
+
+
+# ── IPC: length-prefixed JSON frames over a Unix socket ─────────────────────
+# Copied from bin/nostromo-doctor's ipc_connect/ipc_write_frame/ipc_read_frame
+# — same signatures, same framing (4-byte big-endian length + UTF-8 JSON,
+# max 4 MiB), deliberately not shared via import so this script stays a
+# single self-contained file per the design constraints above.
+
+
+def ipc_connect(socket_path, timeout=2.0):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect(socket_path)
+    return sock
+
+
+def ipc_write_frame(sock, obj):
+    body = json.dumps(obj).encode("utf-8")
+    header = struct.pack(">I", len(body))
+    sock.sendall(header + body)
+
+
+def _recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("socket closed while reading frame")
+        buf += chunk
+    return buf
+
+
+def ipc_read_frame(sock, timeout=2.0):
+    sock.settimeout(timeout)
+    header = _recv_exact(sock, 4)
+    (length,) = struct.unpack(">I", header)
+    body = _recv_exact(sock, length)
+    return json.loads(body.decode("utf-8"))
+
+
+# ── fixture daemon ───────────────────────────────────────────────────────────
+
+# The real handshake, from src/ipc/server.rs / macOS/Nostromo/Data/NostromodClient.swift:
+# client sends hello then subscribe (back-to-back, without waiting for
+# welcome); server replies welcome to hello, and once subscribed, pushes one
+# focus_layout per focus. This fixture speaks just enough of that to drive a
+# live app into multi-pane layout — nothing else. It never spawns a real
+# agent: session_spawn/session_attach/etc. are read and logged, never acted
+# on, so the daemon simply never confirms a session and ChatSession never
+# gets anywhere near a real `claude` child.
+PROTOCOL_VERSION = 4
+
+
+class FixtureDaemon:
+    """A threaded AF_UNIX listener bound to `socket_path`, serving `frames`
+    (a list of already-JSON-shaped dicts, e.g. focus_layout messages) to
+    every subscribed connection, in order. Tolerant of hello/subscribe
+    arriving in either order; ignores (but logs) any other frame type and
+    keeps the connection open rather than closing it — a close would trigger
+    the real client's reconnect/backoff loop."""
+
+    def __init__(self, socket_path, frames):
+        self.socket_path = socket_path
+        self.frames = list(frames)
+        self.log = []
+        self._log_lock = threading.Lock()
+        self._server_sock = None
+        self._accept_thread = None
+        self._conn_threads = []
+        self._stopped = False
+
+    def start(self):
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(self.socket_path)
+        srv.listen(8)
+        self._server_sock = srv
+        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accept_thread.start()
+
+    def stop(self):
+        if self._stopped:
+            return
+        self._stopped = True
+        if self._server_sock is not None:
+            try:
+                self._server_sock.close()
+            except OSError:
+                pass
+        if self._accept_thread is not None:
+            self._accept_thread.join(timeout=2.0)
+        for t in self._conn_threads:
+            t.join(timeout=0.5)
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
+            pass
+
+    def _accept_loop(self):
+        while not self._stopped:
+            try:
+                conn, _addr = self._server_sock.accept()
+            except OSError:
+                return
+            t = threading.Thread(target=self._handle_conn, args=(conn,), daemon=True)
+            self._conn_threads.append(t)
+            t.start()
+
+    def _handle_conn(self, conn):
+        subscribed = False
+        frames_sent = False
+        try:
+            while not self._stopped:
+                try:
+                    frame = ipc_read_frame(conn, timeout=30.0)
+                except (OSError, ConnectionError, ValueError, socket.timeout):
+                    return
+                t = frame.get("type")
+                if t == "hello":
+                    ipc_write_frame(conn, {
+                        "type": "welcome",
+                        "protocol_version": PROTOCOL_VERSION,
+                        "daemon_pid": os.getpid(),
+                    })
+                elif t == "subscribe":
+                    subscribed = True
+                    if not frames_sent:
+                        for f in self.frames:
+                            ipc_write_frame(conn, f)
+                        frames_sent = True
+                elif t == "ping":
+                    ipc_write_frame(conn, {"type": "pong"})
+                else:
+                    with self._log_lock:
+                        self.log.append(t)
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        # `subscribed` is read for clarity in a debugger; not otherwise used.
+        _ = subscribed
+
+
+class BrokerStub:
+    """A minimal Mother-broker stub: on every connection, sends the NDJSON
+    `hello` event the real broker sends first (see
+    macOS/Nostromo/Data/MotherBrokerClient.swift's `parseHello`/`doConnect`),
+    then drains every subsequent line without replying. This is what lets
+    `AppStore.start()`'s 5s "broker offline, spawn mother daemon start"
+    backstop see `brokerConnected == true` and never fire — the handshake
+    must complete within 5 seconds of the app connecting."""
+
+    def __init__(self, socket_path):
+        self.socket_path = socket_path
+        self._server_sock = None
+        self._accept_thread = None
+        self._stopped = False
+
+    def start(self):
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(self.socket_path)
+        srv.listen(8)
+        self._server_sock = srv
+        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accept_thread.start()
+
+    def stop(self):
+        if self._stopped:
+            return
+        self._stopped = True
+        if self._server_sock is not None:
+            try:
+                self._server_sock.close()
+            except OSError:
+                pass
+        if self._accept_thread is not None:
+            self._accept_thread.join(timeout=2.0)
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
+            pass
+
+    def _accept_loop(self):
+        while not self._stopped:
+            try:
+                conn, _addr = self._server_sock.accept()
+            except OSError:
+                return
+            t = threading.Thread(target=self._handle_conn, args=(conn,), daemon=True)
+            t.start()
+
+    def _handle_conn(self, conn):
+        try:
+            hello = {
+                "v": 1, "dir": "event", "t": "hello", "id": str(uuid.uuid4()),
+                "ts": _iso_now(),
+                "data": {"protocol_version": 1, "capabilities": []},
+            }
+            conn.sendall((json.dumps(hello) + "\n").encode("utf-8"))
+            # Drain everything else — no reply, ever.
+            buf = b""
+            while not self._stopped:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+                while b"\n" in buf:
+                    _line, buf = buf.split(b"\n", 1)
+        except OSError:
+            return
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+def _iso_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000Z"
+
+
+# =============================================================================
+# The impure driver: build, clone, launch, observe, report, clean up.
+# =============================================================================
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+FIXTURE_FRAMES_PATH = os.path.join(REPO_ROOT, "tests", "fixtures", "focus_layout_split.json")
+PS_TIME_AWK = os.path.join(REPO_ROOT, "macOS", "scripts", "ps-time-seconds.awk")
+CLONE_BUNDLE_ID = "com.hammer.nostromo.smoke"
+CLONE_PLIST = os.path.expanduser(f"~/Library/Preferences/{CLONE_BUNDLE_ID}.plist")
+FOCUSES_JSON = os.path.expanduser("~/.nostromo/focuses.json")
+DIAGNOSTIC_REPORTS_DIR = os.path.expanduser("~/Library/Logs/DiagnosticReports")
+
+ANCHOR_TIMEOUT_SECONDS = 20.0
+WINDOW_SECONDS = 15.0
+CPU_TAIL_SECONDS = 10.0
+CRASH_REPORT_POLL_SECONDS = 15.0
+
+# Absolute, pre-resolved tool paths — never resolved through the invoking
+# shell's PATH, and every subprocess call below passes shell=False. Mirrors
+# bin/nostromo-doctor's _TOOL_CANDIDATES discipline.
+_TOOL_CANDIDATES = {
+    "ps": ["/bin/ps"],
+    "codesign": ["/usr/bin/codesign"],
+    "plutil": ["/usr/bin/plutil"],
+    "xattr": ["/usr/bin/xattr"],
+    "awk": ["/usr/bin/awk"],
+    "sample": ["/usr/bin/sample"],
+}
+
+
+def _resolve_tool(candidates):
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _resolve_tools():
+    return {name: _resolve_tool(candidates) for name, candidates in _TOOL_CANDIDATES.items()}
+
+
+class _PrerequisiteMissing(Exception):
+    """Raised for anything that makes a real run impossible before an
+    Evidence can even be constructed. Always caught in main() and turned into
+    an overall INCONCLUSIVE("prerequisite missing")."""
+
+
+class _BuildFailed(Exception):
+    """Raised when the build step itself fails. Always caught in main() and
+    turned into an overall INCONCLUSIVE("build failed")."""
+
+
+def _log(msg):
+    print(f"[nostromo-launch-smoke] {msg}", file=sys.stderr)
+
+
+# ── build ────────────────────────────────────────────────────────────────────
+
+
+def app_bundle_path(release):
+    config = "Release" if release else "Debug"
+    return os.path.join(REPO_ROOT, "macOS", "build", "Build", "Products", config, "Nostromo.app")
+
+
+def build_app(release, skip_build):
+    target = "mac-release" if release else "mac"
+    bundle = app_bundle_path(release)
+    if skip_build:
+        if not os.path.isdir(bundle):
+            raise _PrerequisiteMissing(f"--skip-build given but {bundle} does not exist")
+        return bundle
+    _log(f"building (make {target})...")
+    result = subprocess.run(
+        ["/usr/bin/make", "-C", REPO_ROOT, target],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        tail = "\n".join((result.stdout + result.stderr).splitlines()[-40:])
+        raise _BuildFailed(f"make {target} exited {result.returncode}:\n{tail}")
+    if not os.path.isdir(bundle):
+        raise _BuildFailed(f"make {target} succeeded but {bundle} was not produced")
+    return bundle
+
+
+# ── isolation: a cloned bundle with a distinct bundle identifier ────────────
+
+
+def clone_bundle(source_bundle, dest_dir, tools):
+    """Copy `source_bundle` into `dest_dir`, rewrite its CFBundleIdentifier to
+    `CLONE_BUNDLE_ID`, and re-sign ad-hoc. Returns the clone's path."""
+    clone_path = os.path.join(dest_dir, "Nostromo.app")
+    shutil.copytree(source_bundle, clone_path, symlinks=True)
+
+    plist_path = os.path.join(clone_path, "Contents", "Info.plist")
+    with open(plist_path, "rb") as f:
+        info = plistlib.load(f)
+    info["CFBundleIdentifier"] = CLONE_BUNDLE_ID
+    with open(plist_path, "wb") as f:
+        plistlib.dump(info, f)
+
+    if tools.get("xattr"):
+        subprocess.run([tools["xattr"], "-cr", clone_path], capture_output=True, timeout=30)
+
+    codesign = tools.get("codesign")
+    if not codesign:
+        raise _PrerequisiteMissing("codesign not found at /usr/bin/codesign")
+    result = subprocess.run(
+        [codesign, "--force", "--sign", "-", "--deep", clone_path],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise _PrerequisiteMissing(f"codesign failed: {result.stderr.strip()}")
+    return clone_path
+
+
+# ── process helpers ──────────────────────────────────────────────────────────
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _kill_process_group(pid, grace=3.0):
+    """Kill `pid`'s process group with SIGTERM then SIGKILL. Never raises —
+    cleanup must complete regardless of what the OS says about a process
+    that may already be exiting or gone. Falls back to signalling `pid`
+    directly if the group signal is refused (observed in practice: a launched
+    GUI app can be re-parented by launchd/WindowServer during startup, after
+    which the original process-group id can no longer be signalled even by
+    the same user that spawned it)."""
+    if pid is None:
+        return
+    if not _pid_alive(pid):
+        return
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        pgid = None
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if pgid is not None:
+            try:
+                os.killpg(pgid, sig)
+            except OSError:
+                pgid = None  # fall back to signalling the pid directly from here on
+        if pgid is None:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                return
+        deadline = time.time() + grace
+        while time.time() < deadline:
+            if not _pid_alive(pid):
+                return
+            time.sleep(0.1)
+
+
+def sample_cpu_seconds(ps_path, pid):
+    """`ps -o time= -p PID` piped through ps-time-seconds.awk, as
+    macOS/scripts/transcript-load-test.sh's cpu_seconds() does. None if the
+    process is gone or the value can't be parsed."""
+    if not _pid_alive(pid):
+        return None
+    result = subprocess.run(
+        [ps_path, "-o", "time=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        awk = subprocess.run(
+            ["/usr/bin/awk", "-f", PS_TIME_AWK], input=result.stdout,
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if awk.returncode != 0 or not awk.stdout.strip():
+        return None
+    try:
+        return float(awk.stdout.strip())
+    except ValueError:
+        return None
+
+
+def another_nostromo_pid(exclude_pid):
+    """A live, non-excluded process whose command line names a Nostromo
+    executable — used to detect a stray/duplicate smoke-clone instance
+    activating in place of ours (AppDelegate's single-instance enforcement).
+    Best-effort; None on any tooling failure."""
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-axo", "pid,command"], capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines()[1:]:
+        line = line.strip()
+        if not line or "Contents/MacOS/Nostromo" not in line:
+            continue
+        try:
+            pid = int(line.split(None, 1)[0])
+        except ValueError:
+            continue
+        if pid != exclude_pid:
+            return pid
+    return None
+
+
+# ── diagnostics stream reading ───────────────────────────────────────────────
+
+
+def _read_json_lines(path):
+    rows = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except (ValueError, TypeError):
+                    continue
+    except OSError:
+        pass
+    return rows
+
+
+def wait_for_anchor(diag_path, launched_pid, proc, deadline):
+    """Poll `diag_path` until a row for `launched_pid` carries a non-null
+    `firstLayoutReconcileAt`, the process dies, or `deadline` passes.
+    Returns the wall-clock time the anchor was observed, or None."""
+    while time.time() < deadline:
+        for row in _read_json_lines(diag_path):
+            if row.get("pid") == launched_pid and row.get("firstLayoutReconcileAt"):
+                return time.time()
+        if proc.poll() is not None:
+            return None
+        time.sleep(0.2)
+    return None
+
+
+def wait_until(deadline, proc):
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.2)
+
+
+# ── crash-report scanning ────────────────────────────────────────────────────
+
+
+def _ips_paths():
+    paths = list(glob.glob(os.path.join(DIAGNOSTIC_REPORTS_DIR, "*.ips")))
+    paths += list(glob.glob(os.path.join(DIAGNOSTIC_REPORTS_DIR, "Retired", "*.ips")))
+    return paths
+
+
+def scan_crash_reports(pids, bundle_root, poll_seconds=0.0):
+    """(scanned_count, dir_present, attributed_pids).
+
+    `poll_seconds` should only be non-zero when there is a real reason to
+    expect a crash report might still be landing — i.e. the launched process
+    is no longer alive — since `ReportCrash` writes asynchronously and a
+    crash a moment ago may not have a file on disk yet. On a healthy run
+    (process still alive, nothing to wait for) this scans once and returns
+    immediately; polling unconditionally would add its full duration to
+    every single healthy run for no reason.
+    """
+    dir_present = os.path.isdir(DIAGNOSTIC_REPORTS_DIR)
+    if not dir_present:
+        return (0, False, ())
+
+    deadline = time.time() + poll_seconds
+    attributed = set()
+    scanned = 0
+    seen_paths = set()
+    while True:
+        for path in _ips_paths():
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            scanned += 1
+            try:
+                with open(path, errors="replace") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            parsed = parse_ips_report(text)
+            if parsed and crash_report_matches(parsed, pids=pids, bundle_root=bundle_root):
+                attributed.add(parsed["pid"])
+        if attributed or time.time() >= deadline:
+            break
+        time.sleep(1.0)
+    return (scanned, dir_present, tuple(sorted(attributed)))
+
+
+# ── report printing ──────────────────────────────────────────────────────────
+
+
+def format_report(overall_state, overall_cause, detectors, ev):
+    lines = [f"Verdict: {overall_state}" + (f" ({overall_cause})" if overall_cause else "")]
+    lines.append(
+        f"panes laid out: {distinct_multipane_count(ev.rows)}   "
+        f"observation window: {ev.window_seconds:.1f}s   "
+        f"CPU: {'not measured' if ev.cpu_percent is None else f'{ev.cpu_percent:.2f}%'}   "
+        f"crash report: {'yes' if ev.crash_reports_attributed_pids else 'no'}"
+    )
+    lines.append("")
+    width = max((len(v.name) for v in detectors), default=20) + 2
+    lines.append(f"{'detector':<{width}} | {'state':<12} | measured")
+    lines.append("-" * (width + 60))
+    for v in detectors:
+        lines.append(f"{v.name:<{width}} | {v.state:<12} | {v.measured}")
+        if v.cause:
+            lines.append(f"{'':<{width}} |              -> {v.cause}")
+    return "\n".join(lines)
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+
+def _cleanup(tmpdir, daemon, broker, proc):
+    if daemon is not None:
+        try:
+            daemon.stop()
+        except Exception:  # noqa: BLE001 - cleanup must never raise past this point
+            pass
+    if broker is not None:
+        try:
+            broker.stop()
+        except Exception:  # noqa: BLE001
+            pass
+    if proc is not None:
+        try:
+            _kill_process_group(proc.pid)
+        except Exception:  # noqa: BLE001 - cleanup must never raise past this point
+            pass
+    try:
+        os.remove(CLONE_PLIST)
+    except OSError:
+        pass
+    if tmpdir is not None:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def run(args):
+    tmpdir = None
+    daemon = None
+    broker = None
+    proc = None
+
+    def _sig_handler(signum, _frame):
+        _cleanup(tmpdir, daemon, broker, proc)
+        sys.exit(exit_code_for(INCONCLUSIVE))
+
+    signal.signal(signal.SIGINT, _sig_handler)
+    signal.signal(signal.SIGTERM, _sig_handler)
+
+    try:
+        tools = _resolve_tools()
+        if not os.path.isfile(FIXTURE_FRAMES_PATH):
+            raise _PrerequisiteMissing(f"missing fixture: {FIXTURE_FRAMES_PATH}")
+        if not os.path.isfile(PS_TIME_AWK):
+            raise _PrerequisiteMissing(f"missing awk script: {PS_TIME_AWK}")
+        if not tools.get("ps"):
+            raise _PrerequisiteMissing("ps not found at /bin/ps")
+
+        bundle = build_app(args.release, args.skip_build)
+
+        tmpdir = tempfile.mkdtemp(prefix="nostromo-launch-smoke-")
+        clone = clone_bundle(bundle, tmpdir, tools)
+        socket_path = os.path.join(tmpdir, "nostromd.sock")
+        broker_socket_path = os.path.join(tmpdir, "broker.sock")
+        diag_path = os.path.join(tmpdir, "diagnostics.jsonl")
+        app_log_path = os.path.join(tmpdir, "app.log")
+
+        frames = json.loads(open(FIXTURE_FRAMES_PATH).read())
+        daemon = FixtureDaemon(socket_path, frames)
+        daemon.start()
+        broker = BrokerStub(broker_socket_path)
+        broker.start()
+
+        focuses_hash_before = _file_hash(FOCUSES_JSON)
+        operator_defaults_before = _defaults_export("com.hammer.nostromo")
+
+        child_env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": os.environ.get("HOME", ""),
+            "USER": os.environ.get("USER", ""),
+            "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+            "NOSTROMD_SOCKET": socket_path,
+            "NOSTROMOD_SOCKET": socket_path,
+            "NOSTROMO_DIAG_PATH": diag_path,
+            "NOSTROMO_DIAG_INTERVAL": "1",
+            "NOSTROMO_WINDOW_MODE": "smoke",
+            "MOTHER_BROKER_SOCK": broker_socket_path,
+        }
+
+        _log(f"launching clone at {clone}")
+        launch_time = time.time()
+        with open(app_log_path, "wb") as app_log:
+            try:
+                proc = subprocess.Popen(
+                    [os.path.join(clone, "Contents", "MacOS", "Nostromo")],
+                    env=child_env, stdout=app_log, stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                raise _PrerequisiteMissing(f"could not launch the clone: {exc}") from exc
+
+            launched_pid = proc.pid
+
+            anchor_time = wait_for_anchor(
+                diag_path, launched_pid, proc, deadline=launch_time + ANCHOR_TIMEOUT_SECONDS,
+            )
+            window_start = anchor_time if anchor_time is not None else launch_time
+            first_phase_end = window_start + (WINDOW_SECONDS - CPU_TAIL_SECONDS)
+            wait_until(first_phase_end, proc)
+
+            t0 = sample_cpu_seconds(tools["ps"], launched_pid)
+            t0_time = time.time()
+            wait_until(t0_time + CPU_TAIL_SECONDS, proc)
+            t1 = sample_cpu_seconds(tools["ps"], launched_pid)
+            elapsed = time.time() - t0_time
+
+            alive_at_window_end = _pid_alive(launched_pid)
+            cpu_percent = None
+            if t0 is not None and t1 is not None and elapsed > 0:
+                cpu_percent = cpu_percent_from_times(t0, t1, elapsed)
+
+            another_pid = None
+            if not alive_at_window_end and (time.time() - launch_time) < 5.0:
+                another_pid = another_nostromo_pid(exclude_pid=launched_pid)
+
+            all_rows = _read_json_lines(diag_path)
+            observed_pids = distinct_pids(all_rows)
+            rows = rows_for_pid(all_rows, launched_pid)
+
+            crash_scanned, crash_dir_present, crash_attributed = scan_crash_reports(
+                pids=set(observed_pids) | {launched_pid}, bundle_root=clone,
+                poll_seconds=(0.0 if alive_at_window_end else CRASH_REPORT_POLL_SECONDS),
+            )
+
+            panes_scanned = len({
+                p.get("paneId") for row in rows for p in (row.get("panesMeasured") or [])
+            })
+
+            window_seconds = time.time() - window_start
+
+            ev = Evidence(
+                launched_pid=launched_pid,
+                rows=rows,
+                observed_pids=observed_pids,
+                another_instance_pid=another_pid,
+                alive_at_window_end=alive_at_window_end,
+                cpu_percent=cpu_percent,
+                crash_reports_scanned=crash_scanned,
+                crash_reports_dir_present=crash_dir_present,
+                crash_reports_attributed_pids=crash_attributed,
+                notdrawable_violations=notdrawable_violations_from_rows(rows),
+                panes_scanned=panes_scanned,
+                window_seconds=window_seconds,
+            )
+
+        focuses_hash_after = _file_hash(FOCUSES_JSON)
+        if focuses_hash_before != focuses_hash_after:
+            _log("WARNING: ~/.nostromo/focuses.json changed during this run — isolation failure")
+        operator_defaults_after = _defaults_export("com.hammer.nostromo")
+        if operator_defaults_before != operator_defaults_after:
+            _log("WARNING: `defaults export com.hammer.nostromo` changed during this run "
+                 "— the clone's UserDefaults domain leaked into the operator's — isolation failure")
+
+        detectors = evaluate_evidence(ev)
+        state, cause = aggregate(detectors)
+
+        # On FAIL only: diagnostic evidence for a human, never a verdict
+        # input. Captured into a location outside the temp dir (which is
+        # removed unconditionally) so it survives to be inspected.
+        if state == FAIL and _pid_alive(launched_pid) and tools.get("sample"):
+            sample_out = tempfile.mktemp(prefix="nostromo-launch-smoke-sample-", suffix=".txt")
+            sample_result = subprocess.run(
+                [tools["sample"], str(launched_pid), "3", "-file", sample_out],
+                capture_output=True, timeout=15,
+            )
+            if sample_result.returncode == 0 and os.path.exists(sample_out):
+                _log(f"sample captured on FAIL: {sample_out}")
+
+        print(format_report(state, cause, detectors, ev))
+        return exit_code_for(state)
+
+    except _PrerequisiteMissing as exc:
+        print(format_report(INCONCLUSIVE, "prerequisite missing", [], Evidence.empty()))
+        _log(f"prerequisite missing: {exc}")
+        return exit_code_for(INCONCLUSIVE)
+    except _BuildFailed as exc:
+        print(format_report(INCONCLUSIVE, "build failed", [], Evidence.empty()))
+        _log(f"build failed: {exc}")
+        return exit_code_for(INCONCLUSIVE)
+    finally:
+        _cleanup(tmpdir, daemon, broker, proc)
+
+
+def _file_hash(path):
+    import hashlib
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def _defaults_export(domain):
+    """`defaults export <domain> -`, or None if the domain doesn't exist or
+    the tool isn't available. Used to assert the operator's real
+    `com.hammer.nostromo` UserDefaults domain is byte-identical before and
+    after a run — the clone lives entirely under `com.hammer.nostromo.smoke`
+    and must never touch this one."""
+    try:
+        result = subprocess.run(
+            ["/usr/bin/defaults", "export", domain, "-"],
+            capture_output=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--release", action="store_true",
+                        help="use the Release build instead of Debug")
+    parser.add_argument("--skip-build", action="store_true",
+                        help="use whatever bundle is already built; do not rebuild")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    return run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
