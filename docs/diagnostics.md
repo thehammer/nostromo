@@ -197,3 +197,5 @@ file/hunk/line counts and byte lengths, never content. Cross-referencing this
 against the client's `codepane` log or a `NOSTROMO_PANE_DUMP` capture is what
 turns "the daemon probably didn't send something empty" into "the daemon
 logged N rows and the client received exactly N rows."
+
+<!-- scratch: skip-demo touch -->
