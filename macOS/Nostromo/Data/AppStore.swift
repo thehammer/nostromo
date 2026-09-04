@@ -814,20 +814,22 @@ class AppStore: ObservableObject {
         // summary it was actually good at. A client-side line budget was the
         // silent truncation the PRD set out to remove.
 
-        var model = focusLayouts["perri"] ?? FocusLayoutModel.initial
         // Never overwrite a pane the daemon is driving with structured content
-        // (W2). This writes `focusLayouts` directly, bypassing the
-        // `.paneContent` handler entirely, so without this guard a `Diff` or
+        // (W2), and never write a pane that doesn't exist in this focus's
+        // current tree — in `perri-curated` there is no pane literally named
+        // `diff` (its detail panes are `detail.0`/`detail.1`), so writing
+        // blind here invents a pane id the daemon never sent. This writes
+        // `focusLayouts` directly, bypassing the `.paneContent` handler
+        // entirely, so without the ownership half of this guard a `Diff` or
         // `Code` push would be clobbered within milliseconds of arriving and
         // the pane would flicker back to a text summary on every PR load.
         // `nil` and `.text` are the states this function has always owned.
-        switch model.paneContent["diff"] {
-        case nil, .text:
-            model.paneContent["diff"] = .text(lines.joined(separator: "\n"))
-            focusLayouts["perri"] = model
-        default:
-            break
-        }
+        let existing = focusLayouts["perri"]?.paneContent[DiffPaneSummaryPolicy.paneId]
+        guard DiffPaneSummaryPolicy.shouldWriteSummary(tree: focusLayouts["perri"]?.tree, existing: existing)
+        else { return }
+        var model = focusLayouts["perri"] ?? FocusLayoutModel.initial
+        model.paneContent[DiffPaneSummaryPolicy.paneId] = .text(lines.joined(separator: "\n"))
+        focusLayouts["perri"] = model
     }
 
     private func prDetailCacheKey(_ item: PRQueueItem) -> String {
