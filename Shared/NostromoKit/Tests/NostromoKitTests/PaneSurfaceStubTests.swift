@@ -34,9 +34,11 @@ final class PaneSurfaceStubTests: XCTestCase {
         ("unknown", .unknown(["k": "v"])),
     ]
 
-    /// Kinds W2 defers rendering on — the only kinds `message(for:)` may
-    /// return non-nil for.
-    private static let deferredKinds: Set<String> = ["code", "diff", "prConversation", "ticket"]
+    /// Kinds still deferred — the only kinds `message(for:)` may return
+    /// non-nil for. `code` moved out of this set in
+    /// `ios-curated-view-parity` W7 (`CodeSurfaceView` is a real renderer
+    /// now); `diff`/`prConversation`/`ticket` remain deferred to W8/W9.
+    private static let deferredKinds: Set<String> = ["diff", "prConversation", "ticket"]
 
     // MARK: - Every deferred kind has a non-empty message
 
@@ -75,17 +77,15 @@ final class PaneSurfaceStubTests: XCTestCase {
         XCTAssertEqual(Set(Self.allCases.map(\.name)).count, 10, "case names must be unique")
     }
 
-    // MARK: - Each stub names its own missing addressing (the PRD's honesty rule)
+    // MARK: - `.code` no longer carries a stub message (W7)
 
-    func testCodeStubNamesTheMissingLineAddressing() {
-        let message = PaneSurfaceStub.message(for: .code(
+    func testCodeHasNoStubMessage() {
+        XCTAssertNil(PaneSurfaceStub.message(for: .code(
             CodePayload(path: "a.rs", revision: "abc", firstLine: 1, text: "x")
-        ))
-        XCTAssertTrue(
-            message?.detail.contains("line") ?? false,
-            "code's addressing is Anchor.line — the stub must say so, not just 'unavailable'"
-        )
+        )), "code is rendered by CodeSurfaceView as of W7 and must not carry a stub message")
     }
+
+    // MARK: - Each stub names its own missing addressing (the PRD's honesty rule)
 
     func testDiffStubNamesTheMissingLineAddressing() {
         let message = PaneSurfaceStub.message(for: .diff(

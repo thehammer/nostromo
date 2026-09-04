@@ -64,6 +64,13 @@ struct PaneSurfaceView: View {
                 ScrollView { jsonView(value) }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .prList(let items):
                 prListView(items)
+            case .code(let payload):
+                CodeSurfaceView(
+                    payload: payload,
+                    address: address,
+                    saveScrollKey: saveScrollKey,
+                    restoreScroll: restoreScroll
+                )
             case .loading:
                 ScrollView {
                     VStack(spacing: 8) {
@@ -90,20 +97,20 @@ struct PaneSurfaceView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .unknown(let raw):
                 ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            // `.code`/`.diff`/`.prConversation`/`.ticket` are honest deferrals,
-            // not half-built renderings — the PRD's organizing rule is that a
+            // `.diff`/`.prConversation`/`.ticket` are honest deferrals, not
+            // half-built renderings — the PRD's organizing rule is that a
             // surface may be absent or simplified but must never look
-            // complete when it isn't. `.code` used to dump its raw file
-            // contents into a monospaced Text here: no gutter, no
+            // complete when it isn't. `.code` used to be a fourth member of
+            // this set: a raw dump of the file's text with no gutter, no
             // scroll-to-anchor, no emphasis, discarding the path/revision/
             // first-line fields entirely — exactly the half-rendering that
-            // rule forbids, and it is deleted rather than kept (W7 replaces
-            // it with a real renderer). Each stub below names the specific
-            // addressing it cannot show, not just that something is missing;
-            // `PaneSurfaceStub` (NostromoKit) is the single source of that
-            // wording so W7/W8/W9 delete a table entry instead of hunting a
-            // string in a view.
-            case .code, .diff, .prConversation, .ticket:
+            // rule forbids. W2 deleted that rendering; W7 replaces it with
+            // `CodeSurfaceView`, a real renderer, above. Each remaining stub
+            // names the specific addressing it cannot show, not just that
+            // something is missing; `PaneSurfaceStub` (NostromoKit) is the
+            // single source of that wording so W8/W9 delete a table entry
+            // instead of hunting a string in a view.
+            case .diff, .prConversation, .ticket:
                 if let content, let message = PaneSurfaceStub.message(for: content) {
                     stubView(headline: message.headline, detail: message.detail)
                 }
