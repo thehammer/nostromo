@@ -917,8 +917,7 @@ final class RatioSplitView: NSSplitView, TranscriptDiagnostics.SplitReporting {
         // flag: the inner call sees it `true`, does nothing beyond the
         // already-completed `super.layout()`, and returns — letting the
         // outer `setPosition` call unwind normally.
-        guard !isApplyingProgrammatically,
-              let ratios = desiredRatios, bounds.width > 0, bounds.height > 0
+        guard let ratios = desiredRatios, bounds.width > 0, bounds.height > 0
         else { return }
         isApplyingProgrammatically = true
         let applied = DynamicFocusView.applyRatios(ratios, to: self)
