@@ -48,6 +48,20 @@ final class PerFocusEvictionWiringTests: XCTestCase {
             """)
     }
 
+    // MARK: - evictPerFocusState also forgets the focus's diagnostics shape entry
+
+    func testEvictPerFocusStateForgetsTranscriptDiagnosticsTag() throws {
+        let source = try Self.appStoreSource()
+        let body = try Self.isolatedFunctionBody(named: "func evictPerFocusState", in: source, sourceFile: "AppStore.swift")
+        XCTAssertTrue(body.contains("TranscriptDiagnostics.forgetTag"), """
+            evictPerFocusState must call TranscriptDiagnostics.forgetTag(tag) — without this, a \
+            removed focus's entry in renderedTreeShapeByTag (strong, tag-keyed) stays counted in \
+            splitNodesRendered/leavesRendered forever while the weak `splits` table's counts drop \
+            to reflect only live views, permanently wedging split-layout-agreement's \
+            applied/laid-out >= rendered check for every subsequent row.
+            """)
+    }
+
     // MARK: - Eviction detaches the removed session
 
     func testEvictionCallsDetachOnTheRemovedSession() throws {

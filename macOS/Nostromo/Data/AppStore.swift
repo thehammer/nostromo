@@ -411,10 +411,20 @@ class AppStore: ObservableObject {
     /// also never pruned, but `activityModels` belongs to a separate, already
     /// queued fix, and `sessionHealth` is tracked as its own filed bug; adding
     /// either eviction here would silently widen this fix's scope into a hunk
-    /// another job owns.
+    /// another job owns. `TranscriptDiagnostics.forgetTag` IS in scope here,
+    /// even though it looks like the same shape of tag-keyed cleanup: it is
+    /// emitter bookkeeping for a number a human reads in the diagnostics
+    /// stream (`splitNodesRendered`), not app state another queued fix owns,
+    /// and — unlike `sessionHealth`/`activityModels` — leaving it unpruned
+    /// produces an actively wrong, permanently inflated count rather than a
+    /// merely stale one. It only covers focus *removal*; the window-close and
+    /// multi-window staleness this doesn't cover is tracked as its own filed
+    /// bug (`.claude/bugs/open/2026-09-04-renderedtreeshapebytag-still-goes-
+    /// stale-on-window-close.md`).
     private func evictPerFocusState(tag: String) {
         focusLayouts.removeValue(forKey: tag)
         sessionRegistry.removeValue(forKey: tag)?.detach()
+        TranscriptDiagnostics.forgetTag(tag)
     }
 
     // MARK: - Broker event fold
