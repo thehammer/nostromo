@@ -53,6 +53,12 @@ enum SessionHealth: Equatable {
 ///
 /// Replaces the previous model of spawning a fresh `claude -p` per message.
 /// Conversation persistence + session-id management now live in the daemon.
+///
+/// A `ChatSession` outlives nothing: it lives exactly as long as its entry in
+/// `AppStore.sessionRegistry`, which in turn lives exactly as long as the
+/// `Focus` it belongs to. When that focus is closed, `AppStore` calls
+/// `detach()` on the way out — see `detach()`'s doc comment for why that's
+/// necessary even though the registry entry is also being dropped.
 class ChatSession: ObservableObject {
 
     let tag: String            // local IPC address for this focus's session
@@ -88,6 +94,15 @@ class ChatSession: ObservableObject {
     /// When true, the health indicator is suppressed for the current `health` value.
     /// Cleared automatically on the next health *change* so the indicator re-appears.
     private(set) var isDismissed: Bool = false
+
+    /// How many times `spawnAndAttach()` has run — once per `client.connected`
+    /// false→true edge (see `init`). Exists so tests can observe the
+    /// respawn-on-reconnect behavior `detach()` exists to stop (RC2); not
+    /// otherwise consulted by production code.
+    private(set) var attachCount = 0
+
+    /// True once `detach()` has run. See `detach()`.
+    private(set) var isDetached = false
 
     /// The health value to show in the UI. Returns `.healthy` when the indicator
     /// has been dismissed, so callers don't need to check `isDismissed` separately.
@@ -148,6 +163,7 @@ class ChatSession: ObservableObject {
     /// Spawn (or resume) this focus's session and attach for turn deltas.
     /// Both calls are idempotent daemon-side, so re-issuing on reconnect is safe.
     private func spawnAndAttach() {
+        attachCount += 1
         // remoteControl: false. EMPIRICAL FINDING (2026-05-31): `--remote-control`
         // is INERT in `--input-format stream-json`/`--print` mode — it's accepted
         // but never registers a session with Anthropic's relay (claude's own
@@ -212,6 +228,32 @@ class ChatSession: ObservableObject {
     func restart() {
         client.sessionControl(tag: tag, action: "restart")
         log.info("ChatSession[\(self.tag, privacy: .public)] restart requested")
+    }
+
+    /// Stop responding to the daemon for good. Called when this session's
+    /// focus is removed, which is the one point at which its transcript
+    /// becomes permanently unreachable through the UI (a dynamic focus's tag
+    /// embeds its UUID — `Focus.sessionTag` — so a re-created focus gets a
+    /// different tag; built-in focuses can never be removed at all).
+    ///
+    /// Cancelling `cancellables` is the point: `init` subscribes to both
+    /// `client.messages` and `client.connected` on that same set, and the
+    /// `client.connected` subscription re-issues `session_spawn` on every
+    /// reconnect (see `spawnAndAttach()`). A retained session for a closed
+    /// focus that was never detached **respawns its agent** every time the
+    /// daemon restarts — that's the bug this exists to close, independently
+    /// of whether anything still holds a reference to this object. Cancelling
+    /// `client.messages` too is a side effect of sharing the one set, and a
+    /// welcome one: a detached session has no reason to keep reacting to
+    /// daemon traffic either.
+    ///
+    /// Idempotent, and deliberately a pure client-side unsubscribe — no
+    /// `client.*` call in this body. Whether the daemon-side agent itself
+    /// should stop when a tab closes is a product decision this method does
+    /// not make.
+    func detach() {
+        cancellables.removeAll()
+        isDetached = true
     }
 
     /// Suppress the health indicator for the current health value. The

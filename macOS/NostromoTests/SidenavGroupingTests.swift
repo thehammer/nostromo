@@ -427,6 +427,26 @@ final class SidenavGroupingTests: XCTestCase {
                        "nil org + non-nil projectPath → effectiveOrg is Carefeed")
     }
 
+    func testCodable_jsonMissingQuickActions_decodesAsEmptyArray() throws {
+        // JSON that predates the `quickActions` field — must not throw, and
+        // `quickActions` (non-optional, defaulted to []) must decode as an
+        // empty array rather than crashing the whole saved focus list.
+        let json = """
+        {
+          "id": "legacy-uuid",
+          "agentTag": "cody",
+          "isBuiltIn": false
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let f = try JSONDecoder().decode(Focus.self, from: data)
+
+        XCTAssertEqual(f.id, "legacy-uuid")
+        XCTAssertEqual(f.agentTag, "cody")
+        XCTAssertEqual(f.quickActions, [],
+                       "missing 'quickActions' key in JSON must decode as an empty array, not throw")
+    }
+
     // MARK: - Test: Empty focus list → empty rows
 
     func testEmptyFocuses_producesNoRows() {

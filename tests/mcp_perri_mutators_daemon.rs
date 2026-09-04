@@ -271,3 +271,67 @@ async fn load_pr_without_highlights_settles_or_reports_pending_quickly() {
     assert_eq!(res["ok"], true);
     assert_eq!(res["pending"], true);
 }
+
+/// End-to-end: `perri.clear_current_pr` on a **curated** focus (a layout
+/// where the only fixed pane is `queue` — the review's detail panes are
+/// created on demand by `nostromo.show`, named `detail.0`/`detail.1`/…, not
+/// the legacy `diff`) must still find and close the review tab it opened.
+/// Before this fix, `clear_current_pr`'s daemon branch only ever pushed to
+/// panes literally named `"diff"`/`"queue"`, so on this layout it was a
+/// silent no-op: `ok: true`, nothing closed, no content pushed, no visible
+/// error — exactly the bug this fix targets.
+#[tokio::test]
+async fn clear_current_pr_over_the_real_socket_closes_a_curated_pr_diff_tab() {
+    let harness = make_daemon_state();
+    let socket_path = harness._dir.path().join("mcp-daemon3.sock");
+    let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
+        .await
+        .expect("server should bind");
+
+    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let bound = Duration::from_millis(1500);
+
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.apply_layout",
+        json!({ "name": "perri-curated" }),
+        Duration::from_secs(1),
+    )
+    .await;
+    assert_eq!(res["ok"], true);
+
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        3,
+        "nostromo.show",
+        json!({ "type": "pr_diff", "target": { "repo": "acme/web", "number": 42 } }),
+        bound,
+    )
+    .await;
+    assert_eq!(res["ok"], true, "nostromo.show should open the pr_diff tab: {res}");
+
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        4,
+        "perri.clear_current_pr",
+        json!({}),
+        bound,
+    )
+    .await;
+    assert_eq!(res["ok"], true);
+    assert!(
+        res.get("warnings").is_none(),
+        "a healthy clear on a layout it actually applied must never warn: {res}"
+    );
+    let closed = res["closed"]
+        .as_array()
+        .expect("`closed` must be present and an array");
+    assert!(
+        !closed.is_empty(),
+        "the pr_diff tab nostromo.show just opened must have been closed: {res}"
+    );
+}
