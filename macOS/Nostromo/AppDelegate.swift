@@ -33,9 +33,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // (see DecisionPresenter's header comment for why that matters).
         DecisionPresenter.shared.start()
         TranscriptDiagnostics.startStreamingIfRequested()
-        appLog.info("Opening windows for \(NSScreen.screens.count, privacy: .public) screen(s)")
-        for (index, screen) in NSScreen.screens.enumerated() {
-            openWindow(for: screen, index: index)
+
+        // `NOSTROMO_WINDOW_MODE=smoke` (W1 — launch-smoke-test): open exactly
+        // one window, for the main screen only, instead of one per attached
+        // display. Unset (the default) is byte-identical to today's
+        // behaviour — every other launch path is untouched.
+        if ProcessInfo.processInfo.environment["NOSTROMO_WINDOW_MODE"] == "smoke" {
+            appLog.info("NOSTROMO_WINDOW_MODE=smoke — opening a single non-key window")
+            if let screen = NSScreen.main {
+                openWindow(for: screen, index: 0, smoke: true)
+            } else {
+                appLog.error("NOSTROMO_WINDOW_MODE=smoke but NSScreen.main is nil — no window opened")
+            }
+        } else {
+            appLog.info("Opening windows for \(NSScreen.screens.count, privacy: .public) screen(s)")
+            for (index, screen) in NSScreen.screens.enumerated() {
+                openWindow(for: screen, index: index, smoke: false)
+            }
         }
 
         NotificationCenter.default.addObserver(
@@ -180,9 +194,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.mainMenu = mainMenu
     }
 
-    private func openWindow(for screen: NSScreen, index: Int) {
+    private func openWindow(for screen: NSScreen, index: Int, smoke: Bool = false) {
+        // Smoke mode uses a fixed 1440x900 content frame rather than the
+        // screen's frame — a real, on-screen size a `NSSplitView` can lay
+        // out at, without taking over the whole display.
+        let contentRect = smoke
+            ? NSRect(x: screen.frame.origin.x, y: screen.frame.origin.y, width: 1440, height: 900)
+            : screen.frame
         let win = NostromoWindow(
-            contentRect: screen.frame,
+            contentRect: contentRect,
             styleMask: [.titled, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -202,13 +222,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Position on the target screen before entering full-screen so the
         // Space is created on the right display.
-        win.setFrameOrigin(screen.frame.origin)
+        win.setFrameOrigin(contentRect.origin)
 
         win.alphaValue = 0.0
-        win.makeKeyAndOrderFront(nil)
 
-        if !win.styleMask.contains(.fullScreen) {
-            win.toggleFullScreen(nil)
+        if smoke {
+            // Ordered in, never made key — focus is not stolen from
+            // whatever the operator is doing — and never full-screened.
+            // `windowWillEnterFullScreen`'s fade to alpha 1.0
+            // (NostromoWindow.swift) is never reached, so the window stays
+            // fully transparent: laid out and on screen, invisible to the
+            // operator. See docs/diagnostics.md for the residual this
+            // accepts (no full-screen transition is exercised) and the
+            // empirical check the plan required before landing this.
+            win.orderFront(nil)
+        } else {
+            win.makeKeyAndOrderFront(nil)
+            if !win.styleMask.contains(.fullScreen) {
+                win.toggleFullScreen(nil)
+            }
         }
 
         windows.append(win)

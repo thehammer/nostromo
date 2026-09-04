@@ -125,6 +125,70 @@ diagnostics report (`TranscriptDiagnostics`), the same JSON **Copy transcript
 diagnostics** puts on the pasteboard. Used by
 `macOS/scripts/transcript-load-test.sh`.
 
+## `NOSTROMO_DIAG_PATH`
+
+```sh
+NOSTROMO_DIAG_PATH=/absolute/path/to/diagnostics.jsonl
+```
+
+Overrides the diagnostics stream's path entirely (default:
+`~/Library/Application Support/Nostromo/diagnostics.jsonl`). This is what
+lets `bin/nostromo-launch-smoke` (see below) point a launch at its own
+per-run temp file instead of appending to the operator's real
+`diagnostics.jsonl`. Unset, behaviour is unchanged.
+
+## `NOSTROMO_WINDOW_MODE`
+
+```sh
+NOSTROMO_WINDOW_MODE=smoke
+```
+
+Unset (the default): unchanged — one full-screen window per attached
+display, exactly as today. Set to `smoke`: opens exactly one window, sized
+1440×900, on `NSScreen.main` only; never enters full screen; is ordered in
+via `orderFront` (never `makeKeyAndOrderFront`), so it never steals focus
+from whatever else is running; and its `alphaValue` stays at the `0.0`
+`AppDelegate` already sets before ordering any window in, since
+`windowWillEnterFullScreen`'s fade to opaque (`NostromoWindow.swift`) is
+never reached on this path. The window is genuinely on screen and laid out
+— just fully transparent, so nothing is visible to the operator and the
+frontmost application does not change. This is the launch-smoke check's own
+isolation mechanism; the residual it accepts is that no full-screen
+transition is exercised on this path, so a defect specific to that
+transition would not be caught here. See `bin/nostromo-launch-smoke` and
+`docs/ios-verification.md`'s L4 section.
+
+## The launch smoke check (L4)
+
+```sh
+make mac-smoke
+```
+
+Builds the Debug app, launches it against an in-process fixture daemon
+(speaking just enough of the real IPC handshake to serve a genuine
+multi-pane `focus_layout` tree — see `src/mcp/layouts/perri-standard.yaml`),
+and asserts it reaches a real, laid-out multi-pane AppKit layout without
+crashing, spinning, or laying out a zero-size pane. Reports exactly one of
+`PASS`/`FAIL`/`INCONCLUSIVE` (exit 0/1/2). This is the missing layer between
+"compiles and passes logic tests" and "a human happens to relaunch the app
+and watch CPU" — see
+`.claude/bugs/resolved/2026-09-03-ratiosplitview-layout-infinite-recursion-crash-on-launch.md`
+in the primary repo checkout for why it exists, and
+`macOS/scripts/launch-smoke-validate.sh` (`make mac-smoke-validate`) for the
+validation that it actually catches that defect.
+
+New diagnostics-stream fields this check consumes (all `Optional`, so a
+plain launch with nothing watching writes exactly the same lines it always
+has):
+
+| Field | What it is |
+|-------|------------|
+| `firstLayoutReconcileAt` | ISO8601 timestamp of the first observed pane with a real window, a completed layout pass, and non-zero bounds. Anchors the check's 15s observation window. |
+| `splitNodesRendered` / `leavesRendered` | Split-node / leaf counts from the most recently reconciled tree, summed across every live focus. |
+| `splitsLaidOut` | Count of live `RatioSplitView`s that have completed a layout pass with a non-zero size. |
+| `splitsRatiosApplied` | Count of live `RatioSplitView`s whose `applyRatios` call has returned `true` — positive proof the app reached `NSSplitView.setPosition` and returned, the exact call that never returned in the 2026-09-03 defect. |
+| `panesMeasured` | Verbatim `PaneFirstPaintAudit.Measurements` for every live agent-authored pane. |
+
 ## Daemon-side diff/code payload logging
 
 `src/mcp/tools/apply_layout.rs` logs one line (via `tracing::info!`) every

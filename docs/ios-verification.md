@@ -11,9 +11,11 @@ landing as a comment explaining after the fact why a particular case was a
 stub — a target maintained by the compiler complaining, one incident at a
 time.
 
-That gap is what this doc is about, and why it's split into three layers
-rather than one. Run all three before considering an iOS change to pane
-rendering, addressing, or queue marking complete.
+That gap is what this doc is about, and why it's split into layers rather
+than one. Run L1–L3 before considering an iOS change to pane rendering,
+addressing, or queue marking complete. L4 (below) is macOS-only — it exists
+because the same "compiles" vs. "actually runs" gap this doc names for iOS
+turned out to have a macOS instance too, discovered the hard way.
 
 ## L1 — logic
 
@@ -128,6 +130,78 @@ exists separately from L2: this repo does not run iOS unit tests against a
 simulator, anywhere, ever (see below), so the only way to get L3's
 signal — "does this actually compile for the real target" — is against
 real hardware, which CI doesn't have.
+
+## L4 — does the thing actually run (macOS)
+
+**What:** `bin/nostromo-launch-smoke` — build the macOS app, launch it
+against a fixture daemon, and confirm from the running app's own reported
+measurements that it reached a real, laid-out multi-pane AppKit layout,
+survived a 15s observation window, produced no crash report, settled its
+CPU, and painted every pane at a real size.
+
+**Run:**
+
+```
+make mac-smoke
+```
+
+**Why this layer exists.** L3 (`xcodebuild build`) proves the Swift
+compiles. It cannot prove anything about live AppKit behavior — in
+particular, AppKit *reentrancy*: on 2026-09-03, every launch of the macOS
+app crashed with a stack overflow inside `RatioSplitView.layout()`
+(`.claude/bugs/resolved/2026-09-03-ratiosplitview-layout-infinite-recursion-crash-on-launch.md`
+in the primary repo checkout), while `make mac` built cleanly, `make
+mac-test` passed 535 tests, and CI was green on both jobs. `NostromoTests`
+is a host-less logic bundle — no `NSApplication`, no `NSWindow`, no AppKit
+layout loop — so this class of bug was not under-tested there, it was
+*structurally unreachable* there, the same way L1/L2 on the iOS side cannot
+observe anything that needs a real render pass. This is that gap's macOS
+instance, closed the same way: build the smallest thing that can actually
+exercise the live behavior, and make it fast enough to run before opening a
+PR.
+
+**What it can verify:** that the built app launches, that a focus reaches a
+tree containing a real split (not just a single leaf — the daemon-driven
+pane tree at a fresh launch, with no daemon answering, degrades to a
+single leaf that never constructs a split view at all, so this is not
+optional setup, it's the reproduction condition), that ≥2 panes actually
+laid out at a non-zero size, that at least one `RatioSplitView` reported its
+ratios successfully applied (positive proof it reached
+`NSSplitView.setPosition` and returned — the exact call that hung forever in
+the 2026-09-03 defect), that the app survived 15 real seconds without dying,
+spinning, or producing a crash report, and that no pane reports content in a
+window with zero width or height. Validated against the bug it exists to
+catch: `make mac-smoke-validate` reintroduces the exact 2026-09-03 defect in
+a scratch worktree and asserts the check reports FAIL, then reverts and
+asserts PASS.
+
+**What it cannot verify:** anything this file's "out of scope" list already
+names for the feature that built it — no UI driving (no clicks, no divider
+drags), no screenshot/visual-diff verification, and only four failure
+modes (process death, a crash report, unsettled CPU, a zero-size laid-out
+pane) — not constraint conflicts, layout warnings, wrong-but-alive layouts,
+or drawing artifacts. It also cannot verify multi-window or
+multi-display-specific layout: it opens exactly one window, on one screen,
+to avoid commandeering the operator's real displays, so a defect that only
+manifests with several windows or at a particular display geometry is
+outside what a green here means. A CI runner (from W2 on) is one virtual
+display of unstable size, while the operator has three real ones — the same
+environment-divergence caveat L2's "textual heuristic, not a control-flow
+proof" line carries, restated for geometry instead of source text. **A green
+here means "it launched and exercised a live multi-pane split for 15
+seconds," not "the GUI is fine."**
+
+**Why this one is not deferred the way L3's `xcodebuild` CI job is (for
+iOS).** The "why no simulator, anywhere" section below stops at one
+load-bearing argument: *a check nobody can run locally without attaching
+hardware is a check that silently stops being checked.* That argument does
+not apply to this check. It needs no simulator and no paired device — the
+identical command runs on the Mac a developer is already developing on and
+(from W2) on a stock GitHub-hosted macOS runner, because GitHub's macOS
+runner images auto-login into a real, live Aqua/WindowServer session. The
+incidental objection for iOS (a hand-edited test target, no committed
+scheme) is also not in play — this needs no test target at all, just a
+built `.app` and a socket.
 
 ## Worked example: ambient activity (W4)
 

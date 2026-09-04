@@ -1,0 +1,90 @@
+[
+  {
+    "type": "focus_layout",
+    "tag": "fred",
+    "tree": {
+      "kind": "split",
+      "direction": "vertical",
+      "ratios": [0.6, 0.4],
+      "children": [
+        {
+          "kind": "split",
+          "direction": "horizontal",
+          "ratios": [0.5, 0.5],
+          "children": [
+            {"kind": "leaf", "pane_id": "queue"},
+            {"kind": "leaf", "pane_id": "diff"}
+          ]
+        },
+        {"kind": "leaf", "pane_id": "repl"}
+      ]
+    },
+    "focused_pane": null
+  },
+  {
+    "type": "focus_layout",
+    "tag": "mother",
+    "tree": {
+      "kind": "split",
+      "direction": "vertical",
+      "ratios": [0.6, 0.4],
+      "children": [
+        {
+          "kind": "split",
+          "direction": "horizontal",
+          "ratios": [0.5, 0.5],
+          "children": [
+            {"kind": "leaf", "pane_id": "queue"},
+            {"kind": "leaf", "pane_id": "diff"}
+          ]
+        },
+        {"kind": "leaf", "pane_id": "repl"}
+      ]
+    },
+    "focused_pane": null
+  },
+  {
+    "type": "focus_layout",
+    "tag": "perri",
+    "tree": {
+      "kind": "split",
+      "direction": "vertical",
+      "ratios": [0.6, 0.4],
+      "children": [
+        {
+          "kind": "split",
+          "direction": "horizontal",
+          "ratios": [0.5, 0.5],
+          "children": [
+            {"kind": "leaf", "pane_id": "queue"},
+            {"kind": "leaf", "pane_id": "diff"}
+          ]
+        },
+        {"kind": "leaf", "pane_id": "repl"}
+      ]
+    },
+    "focused_pane": null
+  },
+  {
+    "type": "focus_layout",
+    "tag": "teri",
+    "tree": {
+      "kind": "split",
+      "direction": "vertical",
+      "ratios": [0.6, 0.4],
+      "children": [
+        {
+          "kind": "split",
+          "direction": "horizontal",
+          "ratios": [0.5, 0.5],
+          "children": [
+            {"kind": "leaf", "pane_id": "queue"},
+            {"kind": "leaf", "pane_id": "diff"}
+          ]
+        },
+        {"kind": "leaf", "pane_id": "repl"}
+      ]
+    },
+    "focused_pane": null
+  }
+]
