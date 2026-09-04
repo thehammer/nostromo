@@ -59,6 +59,7 @@ Usage:
 
 import argparse
 import copy
+import fnmatch
 import glob
 import json
 import os
@@ -387,15 +388,38 @@ def parse_ips_report(text):
     }
 
 
+# macOS's crash reporter redacts the full executable path for a non-first-
+# party, ad-hoc-signed app running from a temp directory — verified
+# empirically against a real crash report from this check's own known-bad
+# validation run: a real absolute clone path
+# (".../nostromo-launch-smoke-validate.XXXX/Nostromo.app/Contents/MacOS/
+# Nostromo") came back in the `.ips` body's `procPath` as literally
+# "/var/folders/*/Nostromo.app/Contents/MacOS/Nostromo" — the entire
+# variable middle of the path collapsed into one `*`. An exact prefix match
+# against `bundle_root` is therefore unreliable for exactly the bundles this
+# check itself produces, which is why `crash_report_matches` also accepts
+# this literal redacted shape (see below) rather than only a real prefix.
+_REDACTED_TEMP_CLONE_PROC_PATH = "/var/folders/*/Nostromo.app/Contents/MacOS/Nostromo"
+
+
 def crash_report_matches(parsed, *, pids, bundle_root):
     """True iff `parsed`'s pid is one of `pids` and its proc_path is under
-    `bundle_root`. Pure predicate — timestamp corroboration happens in the
-    impure scan loop, not here."""
+    `bundle_root` — or is macOS's redacted form of a temp-directory path
+    (see `_REDACTED_TEMP_CLONE_PROC_PATH` above), accepted only when
+    `bundle_root` itself lives under a temp directory, so this can't be
+    satisfied by an unrelated report (e.g. the operator's real
+    `/Applications/Nostromo.app`) whose path merely happens to end the same
+    way. Pure predicate — timestamp corroboration happens in the impure scan
+    loop, not here."""
     pid = parsed.get("pid")
     proc_path = parsed.get("proc_path")
     if pid not in pids or proc_path is None:
         return False
-    return proc_path.startswith(bundle_root)
+    if proc_path.startswith(bundle_root):
+        return True
+    if bundle_root.startswith(("/var/folders/", "/tmp/", "/private/")):
+        return fnmatch.fnmatch(proc_path, _REDACTED_TEMP_CLONE_PROC_PATH)
+    return False
 
 
 # ── CPU arithmetic ───────────────────────────────────────────────────────────

@@ -943,6 +943,36 @@ class CrashReportMatchesTests(unittest.TestCase):
             launch_smoke.crash_report_matches(parsed, pids=(100,), bundle_root="/tmp/clone")
         )
 
+    def test_macos_redacted_temp_clone_path_matches_when_bundle_root_is_a_temp_dir(self):
+        # Verified against a real crash report from this check's own
+        # known-bad validation run: macOS's crash reporter redacted a real
+        # absolute clone path under /var/folders/ down to exactly this
+        # literal shape (the whole variable middle collapsed to one `*`).
+        parsed = self._parsed(
+            pid=100, proc_path="/var/folders/*/Nostromo.app/Contents/MacOS/Nostromo",
+        )
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,),
+                bundle_root="/var/folders/m8/abc123/T/nostromo-launch-smoke-xyz/Nostromo.app",
+            )
+        )
+
+    def test_redacted_shape_does_not_match_when_bundle_root_is_not_a_temp_dir(self):
+        # The redacted-shape acceptance must not become a blanket "any
+        # Nostromo.app matches" rule — it only applies when OUR OWN clone is
+        # itself under a temp directory (always true in practice), so an
+        # unrelated report whose path merely looks like this can't slip
+        # through for a `bundle_root` that was never a temp path at all.
+        parsed = self._parsed(
+            pid=100, proc_path="/var/folders/*/Nostromo.app/Contents/MacOS/Nostromo",
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/Applications/Nostromo.app",
+            )
+        )
+
 
 # ---------------------------------------------------------------------------
 # CPU arithmetic
