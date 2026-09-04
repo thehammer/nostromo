@@ -158,6 +158,22 @@ fn every_frame_has_unique_leaf_pane_ids() {
     }
 }
 
+#[test]
+fn every_frame_renders_exactly_two_split_nodes_and_three_leaves() {
+    let frames = load_fixture_frames();
+    for frame in &frames {
+        let ServerMsg::FocusLayout { tag, tree, .. } = frame else {
+            panic!("expected FocusLayout, got {frame:?}");
+        };
+        let mut split_count = 0;
+        for_each_split(tree, &mut |_node| split_count += 1);
+        let mut leaves = Vec::new();
+        collect_leaf_pane_ids(tree, &mut leaves);
+        assert_eq!(split_count, 2, "focus {tag:?}: expected exactly 2 split nodes");
+        assert_eq!(leaves.len(), 3, "focus {tag:?}: expected exactly 3 leaves");
+    }
+}
+
 /// Strip JSON-null-valued object keys, recursively.
 ///
 /// `ServerMsg::FocusLayout.focused_pane` is `#[serde(skip_serializing_if =
