@@ -215,67 +215,6 @@ struct DynamicFocusView: View {
         }
     }
 
-    // MARK: - Multi-pane presentation
-
-    /// The tab strip plus its resident, visibility-toggled pane content —
-    /// only ever reached when `plan` has more than one entry (see `body`).
-    private func tabbedContent(plan: [TabPlanEntry], layout: FocusLayoutModel) -> some View {
-        let region    = store.focusRegionStates[tag] ?? FocusRegionState()
-        let available = plan.map(\.paneId)
-        let frontmost = region.frontmostPane(for: Self.regionPath, available: available, fallback: "repl")
-        let reason    = layout.paneAddress[frontmost]?.reason
-
-        return VStack(spacing: 0) {
-            TabStripView(
-                entries: plan,
-                frontmostPaneId: frontmost,
-                reason: reason,
-                isUnread: { paneId in
-                    region.isUnread(
-                        paneId: paneId, regionPath: Self.regionPath,
-                        contentVersion: layout.paneContentVersion[paneId] ?? 0
-                    )
-                },
-                onSelect: { paneId in
-                    store.selectPane(tag: tag, regionPath: Self.regionPath, paneId: paneId)
-                }
-            )
-
-            ZStack {
-                ForEach(plan, id: \.paneId) { entry in
-                    paneContentView(for: entry.paneId, layout: layout)
-                        .opacity(entry.paneId == frontmost ? 1 : 0)
-                        .allowsHitTesting(entry.paneId == frontmost)
-                        .accessibilityHidden(entry.paneId != frontmost)
-                }
-            }
-        }
-        .navigationTitle(plan.first(where: { $0.paneId == frontmost })?.label ?? displayName)
-        .navigationBarTitleDisplayMode(.inline)
-    }
-
-    // MARK: - Per-pane content
-
-    @ViewBuilder
-    private func paneContentView(for paneId: String, layout: FocusLayoutModel) -> some View {
-        if paneId == "repl" {
-            transcriptView
-        } else {
-            PaneSurfaceView(
-                paneId:    paneId,
-                content:   layout.paneContent[paneId],
-                freshness: layout.paneFreshness[paneId],
-                address:   layout.paneAddress[paneId]
-            )
-            .environmentObject(store)
-            // Ambient activity (W4, D3): a plain bottom inset on non-repl
-            // surfaces, which have no input bar of their own to compose
-            // above. Re-hosted here after the W5 rewrite (D9) — every
-            // non-repl surface still carries the ticker.
-            .safeAreaInset(edge: .bottom) { activityTicker }
-        }
-    }
-
     // MARK: - Ambient activity (ios-curated-view-parity W4)
 
     /// This focus's assembled activity model — an empty (neutral "waiting")
