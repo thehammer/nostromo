@@ -14,11 +14,13 @@ import XCTest
 /// to catch the concrete, plausible ways this fix regresses, each named in
 /// its own failure message.
 ///
-/// RED phase: none of this wiring exists in the current source, so most of
-/// these assertions are expected to fail until Cody adds it — that is the
-/// correct RED-phase result, not a bug in these tests. (The two scope-guard
-/// tests at the bottom are the exception: they assert an ABSENCE that
-/// already holds today, and must keep holding after the fix.)
+/// These are regression fitness functions, not RED-phase specs: the wiring
+/// they check — the FocusStore subscription, evictPerFocusState removing
+/// from focusLayouts/sessionRegistry/sessionHealth, detach-on-eviction,
+/// FocusStore.remove's ordering, and MainLayout's viewCache pruning — already
+/// exists and shipped across two merged PRs. Every assertion below is
+/// expected to keep passing; a failure here means one of those already-fixed
+/// behaviors regressed, not that a feature is still pending.
 final class PerFocusEvictionWiringTests: XCTestCase {
 
     // MARK: - AppStore.swift subscribes to FocusStore.shared.focusRemovals
@@ -142,42 +144,26 @@ final class PerFocusEvictionWiringTests: XCTestCase {
             """)
     }
 
-    // MARK: - Scope guard: activityModels and sessionHealth are out of scope
+    // MARK: - evictPerFocusState also evicts sessionHealth
 
-    /// `activityModels` eviction belongs to a different, already-queued job.
-    /// Unlike `sessionHealth` (below), no legitimate `activityModels.removeValue`
-    /// call exists anywhere in AppStore.swift today, so this is a safe
-    /// whole-file check. It must hold both before AND after this fix — adding
-    /// an eviction line here would silently widen this PR's scope into a hunk
-    /// that other job owns.
-    func testEvictionScopeDoesNotTouchActivityModels() throws {
-        let source = try Self.appStoreSource()
-        XCTAssertFalse(source.contains("activityModels.removeValue"), """
-            AppStore.swift must not evict activityModels anywhere — that dictionary's eviction is \
-            explicitly out of scope for this fix (it belongs to a separate, already-queued job); \
-            adding an eviction line here would silently widen this PR's scope into a hunk that \
-            job owns.
-            """)
-    }
-
-    /// `sessionHealth.removeValue` already exists today, legitimately, inside
-    /// `applySessionHealth` (clearing an entry back to the implicit-healthy
-    /// default on every `.healthy` transition — unrelated to focus closure).
-    /// A whole-file absence check would therefore fail against CURRENT,
-    /// correct code, not just against a future scope violation — so this
-    /// check is deliberately scoped to the new `evictPerFocusState` function
-    /// only. `sessionHealth`'s own per-focus eviction is tracked as a
-    /// separate, already-filed bug; folding it into this fix would silently
-    /// widen this PR's scope into that bug's hunk.
-    func testEvictionScopeDoesNotTouchSessionHealth() throws {
+    /// Scoped to the isolated `evictPerFocusState` body rather than a
+    /// whole-file `contains` check because `sessionHealth.removeValue` also
+    /// appears legitimately elsewhere in AppStore.swift, inside
+    /// `applySessionHealth` (~line 1089-1095): clearing an entry back to the
+    /// implicit-healthy default on a `.healthy` transition, unrelated to
+    /// focus closure. A whole-file check would pass even if
+    /// `evictPerFocusState` lost its call, since the other legitimate call
+    /// site would keep the string present in the file.
+    func testEvictPerFocusStateEvictsSessionHealth() throws {
         let source = try Self.appStoreSource()
         let body = try Self.isolatedFunctionBody(named: "func evictPerFocusState", in: source, sourceFile: "AppStore.swift")
-        XCTAssertFalse(body.contains("sessionHealth.removeValue"), """
-            evictPerFocusState must not evict sessionHealth — its own per-focus eviction is a \
-            separate, already-filed bug, and folding it into this fix would silently widen this \
-            PR's scope into that bug's hunk. (sessionHealth.removeValue legitimately appears \
-            elsewhere in this file, in applySessionHealth — this check is scoped to \
-            evictPerFocusState specifically for that reason.)
+        XCTAssertTrue(body.contains("sessionHealth.removeValue"), """
+            evictPerFocusState must remove the closed focus's entry from sessionHealth — without \
+            this, sessionHealth is the only per-focus dictionary whose entries outlive their \
+            focus, so the map grows by one entry per non-healthy removed tag, and any future \
+            reader that indexes it by raw tag (rather than through a live focus, the way \
+            TabBarView/PaceBarsView do today) would see health state for a focus that no longer \
+            exists.
             """)
     }
 
