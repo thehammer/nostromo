@@ -81,6 +81,7 @@ class AppStore: ObservableObject {
     // Updated from the IPC stream for every tag the client sees events for,
     // so the sidebar badge can render for any opened focus without the active
     // focus view being visible. `.healthy` entries are omitted (implicitly healthy).
+    // An entry's lifetime now ends with its focus, via `evictPerFocusState`.
     @Published private(set) var sessionHealth: [String: SessionHealth] = [:]
 
     // Daemon-driven decision modal (multi-window decision-sheet fix). Plain
@@ -406,15 +407,22 @@ class AppStore: ObservableObject {
     }
 
     /// Per-focus state dies with the focus. Called once per `focusRemovals`
-    /// event (`start()`), never on any other schedule. Deliberately does NOT
-    /// touch `activityModels` or `sessionHealth` — both are also tag-keyed and
-    /// also never pruned, but `activityModels` belongs to a separate, already
-    /// queued fix, and `sessionHealth` is tracked as its own filed bug; adding
-    /// either eviction here would silently widen this fix's scope into a hunk
-    /// another job owns.
+    /// event (`start()`), never on any other schedule. Evicts `focusLayouts`,
+    /// `sessionRegistry` (detached, not merely dropped — that is what stops
+    /// the daemon-side session from being respawned on the next reconnect),
+    /// and `sessionHealth`.
+    ///
+    /// Deliberately does NOT touch `activityStreams`: `ActivityStreamStore`
+    /// bounds its own tag count internally (LRU eviction over
+    /// `maxTrackedFocusTags`) and hands back a fresh empty model for any tag
+    /// it has already dropped, so it cannot grow without bound the way the
+    /// other three maps could. Its lack of *focus-removal* pruning is a
+    /// separate, lower-severity hygiene gap, not the retention bug this hook
+    /// exists to close — see `ActivityStreamStore` for details.
     private func evictPerFocusState(tag: String) {
         focusLayouts.removeValue(forKey: tag)
         sessionRegistry.removeValue(forKey: tag)?.detach()
+        sessionHealth.removeValue(forKey: tag)
     }
 
     // MARK: - Broker event fold
