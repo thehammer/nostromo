@@ -749,7 +749,7 @@ views:
 | **R5** focus asymmetry | `placement::place` unconditionally makes the target tab frontmost, new or reused, by construction of `tab_index`; `tools::show` sends `FocusLayout` with `focused_pane` set to it unconditionally. There is no configuration knob for this — a deliberate, settled PRD decision. |
 | **R6** no pointless motion | **Enforced on the client, not here.** The daemon has no way to know what the operator's viewport is currently showing, so `nostromo.show` always sends the anchor and lets W2's client-side `ScrollDecision` decide whether that means actually scrolling. This is the one rule with no representation anywhere in `src/mcp/views/`. |
 | **R7** modals are not a content channel | **Enforced by omission.** `ViewType` has no modal variant and `nostromo.show`'s schema has no free-text content field (see `docs/mcp/tools.md`) — there is no plumbing through which a decision could be routed as a "view." W6 owns the decision surface. |
-| **R8** PR change resets | `placement::place`, when a `pr_conversation`/`pr_diff` show names a `(repo, number)` other than the one currently live in the detail region; and `placement::reset_for_pr_change`, called from `tools::show::reset_for_pr_change`, which `perri.load_pr`/`perri.clear_current_pr` invoke when the PR under review itself changes. Both close every `file`/`ticket` tab and the previous PR's conversation/diff tabs, keeping only the new PR's. |
+| **R8** PR change resets | `placement::place`, when a `pr_conversation`/`pr_diff` show names a `(repo, number)` other than the one currently live in the detail region; and `placement::reset_for_pr_change`, called from `tools::show::reset_for_pr_change`, which `perri.load_pr`/`perri.clear_current_pr` invoke when the PR under review itself changes. Both close every `file`/`ticket` tab and the previous PR's conversation/diff tabs, keeping only the new PR's. Teardown alone isn't the whole story for `perri.clear_current_pr`: a paramless-bound PR tab survives it (it derives its identity from "the PR under review," which is now none), so `perri.clear_current_pr` also resolves whatever PR-content panes remain and pushes the no-PR placeholder to them — see `perri.clear_current_pr` in `docs/mcp/tools.md`. |
 
 ### The `perri-curated` layout
 
@@ -862,7 +862,7 @@ Two things a client must do to stay correct under recycling:
 | Tool | Effect |
 |------|--------|
 | `perri.load_pr({ number, repo, highlights? })` | Writes `current-pr.json` + touches `.dirty` → native watcher fetches PR diff |
-| `perri.clear_current_pr()` | Removes `current-pr.json` + touches `.dirty` → diff pane clears |
+| `perri.clear_current_pr()` | Removes `current-pr.json` + touches `.dirty` → closes stale curated tabs (R8) and pushes the no-PR placeholder to whatever live pane holds PR content, wherever the layout template put it |
 | `perri.set_selected_index({ index })` | Moves the queue selection cursor |
 
 ---
