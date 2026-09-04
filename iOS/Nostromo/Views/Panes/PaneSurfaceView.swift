@@ -109,19 +109,17 @@ struct PaneSurfaceView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .unknown(let raw):
                 ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            // `.diff`/`.prConversation`/`.ticket` are honest deferrals, not
-            // half-built renderings — the PRD's organizing rule is that a
-            // surface may be absent or simplified but must never look
-            // complete when it isn't. `.code` used to be a fourth member of
-            // this set: a raw dump of the file's text with no gutter, no
-            // scroll-to-anchor, no emphasis, discarding the path/revision/
-            // first-line fields entirely — exactly the half-rendering that
-            // rule forbids. W2 deleted that rendering; W7 replaces it with
-            // `CodeSurfaceView`, a real renderer, above. Each remaining stub
-            // names the specific addressing it cannot show, not just that
-            // something is missing; `PaneSurfaceStub` (NostromoKit) is the
-            // single source of that wording so W8/W9 delete a table entry
-            // instead of hunting a string in a view.
+            // `.diff`, `.prConversation` and `.ticket` were the last honest
+            // deferrals — the PRD's organizing rule is that a surface may be
+            // absent or simplified but must never look complete when it
+            // isn't. `.code` was a fourth member of this set until W7
+            // replaced its raw-dump rendering with `CodeSurfaceView`; W8
+            // gave `.diff` a real renderer (`DiffSurfaceView`); W9 gives
+            // `.prConversation`/`.ticket` theirs (`ProseSurfaceView`, shared
+            // by both — see that file). `PaneSurfaceStub`, NostromoKit's
+            // single source of stub wording for a deferred kind, has no
+            // entries left as of W9 and was deleted along with its test
+            // rather than kept as a vestigial empty table.
             case .diff(let payload):
                 DiffSurfaceView(
                     payload: payload,
@@ -131,10 +129,24 @@ struct PaneSurfaceView: View {
                     saveSelectedFile: saveSelectedDiffFile,
                     restoreSelectedFile: restoreSelectedDiffFile
                 )
-            case .prConversation, .ticket:
-                if let content, let message = PaneSurfaceStub.message(for: content) {
-                    stubView(headline: message.headline, detail: message.detail)
-                }
+            case .prConversation(let payload):
+                let plan = ConversationPlan(payload: payload)
+                ProseSurfaceView(
+                    rows: plan.rows,
+                    anchorResolution: plan.resolve(anchor: address?.anchor),
+                    emphasisResolution: plan.resolve(emphasis: address?.emphasis ?? []),
+                    saveScrollKey: saveScrollKey,
+                    restoreScroll: restoreScroll
+                )
+            case .ticket(let payload):
+                let plan = TicketPlan(payload: payload)
+                ProseSurfaceView(
+                    rows: plan.rows,
+                    anchorResolution: plan.resolve(anchor: address?.anchor),
+                    emphasisResolution: plan.resolve(emphasis: address?.emphasis ?? []),
+                    saveScrollKey: saveScrollKey,
+                    restoreScroll: restoreScroll
+                )
             }
         }
         // D11: a quiet as-of footnote when this pane's data hasn't refreshed in
@@ -299,31 +311,6 @@ struct PaneSurfaceView: View {
         formatter.dateStyle = .none
         formatter.timeStyle = .short
         return "stale · as of \(formatter.string(from: asOf))"
-    }
-
-    // MARK: - Stub renderer (deferred content kinds)
-
-    /// Honest-deferral rendering for a content kind iOS doesn't have a real
-    /// renderer for yet. `detail` is required, not optional — a stub that
-    /// says only "isn't available" is an absence; naming the missing
-    /// addressing is what makes the deferral legible (see `PaneSurfaceStub`).
-    private func stubView(headline: String, detail: String) -> some View {
-        ScrollView {
-            VStack(spacing: 8) {
-                Spacer(minLength: 60)
-                Text(headline)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                Text(detail)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                Spacer()
-            }.frame(maxWidth: .infinity)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Text / JSON renderers

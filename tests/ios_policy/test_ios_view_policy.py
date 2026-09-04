@@ -1256,6 +1256,232 @@ def check_diff_toolarge_notice_not_one_row_among_many(files):
     return violations
 
 
+# --------------------------------------------------------------------------
+# ios-curated-view-parity W9 — the `pr_conversation`/`ticket` prose surface
+# --------------------------------------------------------------------------
+#
+# `ProseSurfaceView.swift` is the one iOS-side file for this wedge — the
+# platform-neutral row model and the two payload adapters
+# (`ConversationPlan`/`TicketPlan`) live in `Shared/NostromoKit/Sources/
+# NostromoKit/Prose/`, out of this suite's remit (see `_ios_swift_files`'s
+# own docstring: Shared/ has its own L1 coverage — `ProsePlanTests`,
+# `ConversationPlanTests`, `TicketPlanTests`, `ProseAddressingTests`). Every
+# check below is therefore scoped to the one view file this suite can see,
+# in the same existence-only spirit as `check_diff_toolarge_notice_not_one_row_among_many`
+# where a check can only prove a branch exists, not that Shared-side data
+# actually reaches it — that link is what L1 proves instead.
+
+def _prose_surface_entry(files):
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "ProseSurfaceView.swift"), None)
+    return match if match else ("iOS/Nostromo/Views/Panes/ProseSurfaceView.swift", "")
+
+
+def check_prose_surface_reads_no_width_class(files):
+    """`ProseSurfaceView.swift` never mentions `WidthClass` or
+    `horizontalSizeClass`.
+
+    D7: prose is the same prose at both widths. `pr_diff`
+    (`DiffSurfaceView.swift`) remains the only renderer on
+    `WIDTH_CLASS_ALLOWLIST` (memo B9) — this check is a dedicated,
+    wedge-specific pin on top of the generic
+    `check_width_class_referenced_only_by_the_allowlist`, which would also
+    catch this, so a regression here is reported by name rather than only
+    by the generic allowlist check.
+    """
+    path, source = _prose_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+    if re.search(r"\bWidthClass\b|\bnostromoWidthClass\b", stripped):
+        violations.append((path, "ProseSurfaceView.swift references WidthClass — prose is identical at both widths"))
+    if "horizontalSizeClass" in stripped:
+        violations.append((path, "ProseSurfaceView.swift references horizontalSizeClass — prose is identical at both widths"))
+    return violations
+
+
+def check_prose_surface_no_truncation(files):
+    """`ProseSurfaceView.swift` truncates nothing: no `.prefix(`, no numeric
+    row cap on its row `ForEach`, and no `lineLimit(` inside the function
+    that renders a code block.
+
+    D6: a long paragraph or fenced code block wraps and stays fully
+    readable, relying on `LazyVStack`'s own laziness rather than a cap — the
+    same rule `check_code_surface_no_truncation`/`check_diff_surface_no_truncation`
+    enforce for `file`/`pr_diff`. The `lineLimit(` check is scoped to
+    `codeBlockView(...)` rather than the whole file because the document
+    header legitimately applies `lineLimit(1)` to its one-line url — the
+    same carve-out those two checks make for their own path labels.
+    `PerriView.swift` is excluded by construction: this check only ever
+    looks at `ProseSurfaceView.swift`.
+    """
+    path, source = _prose_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+
+    if re.search(r"\.prefix\(", stripped):
+        violations.append((path, "ProseSurfaceView.swift calls .prefix( — no truncation of any kind is permitted"))
+
+    if re.search(r"ForEach\(\s*0\s*\.\.<\s*\d+", stripped):
+        violations.append((path, "ProseSurfaceView.swift's row ForEach is bounded by a numeric literal — rows must come from the plan, not a cap"))
+
+    for span in _spans_after(stripped, r"func\s+codeBlockView\("):
+        if "lineLimit(" in span:
+            violations.append((path, "codeBlockView(...) applies lineLimit( to code block content"))
+
+    return violations
+
+
+def check_prose_surface_no_horizontal_panning(files):
+    """`ProseSurfaceView.swift` never scrolls horizontally.
+
+    Code blocks wrap instead (D6), the same rule `file`/`pr_diff` follow: no
+    `ScrollView(.horizontal` and no `axes: .horizontal` anywhere in this
+    file.
+    """
+    path, source = _prose_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+    if re.search(r"ScrollView\(\s*\.horizontal", stripped):
+        violations.append((path, "ProseSurfaceView.swift contains ScrollView(.horizontal"))
+    if re.search(r"axes\s*:\s*\.horizontal", stripped):
+        violations.append((path, "ProseSurfaceView.swift sets axes: .horizontal"))
+    return violations
+
+
+def check_prose_surface_scroll_only_via_decision(files):
+    """Every `scrollTo(` call in `ProseSurfaceView.swift` sits inside a
+    `case .scrollTo` arm — never called unconditionally.
+
+    Mirrors `check_code_surface_scroll_only_via_decision`/
+    `check_diff_scroll_only_via_decision`: this surface consults both
+    `ScrollDecision` (a resolved anchor arriving) and `ScrollRestore` (a
+    saved position being restored after a width-class rebuild), and both
+    share the identical `.scrollTo(target:)` case and the identical
+    discipline — a scroll is a decision, never a bare call.
+    """
+    path, source = _prose_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    lines = stripped.splitlines()
+    violations = []
+    for i, line in enumerate(lines):
+        if not re.search(r"\bscrollTo\(", line):
+            continue
+        if re.search(r"case\s+(let\s+)?\.scrollTo", line):
+            continue  # this line is the case pattern itself, not a call
+        window = lines[max(0, i - 5):i + 1]
+        if not any(re.search(r"case\s+(let\s+)?\.scrollTo", w) for w in window):
+            violations.append((path, "scrollTo( call not gated by a `case .scrollTo` pattern: %s" % line.strip()))
+    return violations
+
+
+def check_prose_surface_thread_metadata_rendered(files):
+    """`ProseSurfaceView.swift` references a thread's `resolved`, `path` and
+    `line` fields.
+
+    The anti-`MarkdownBlockDocument` policy: macOS decodes
+    `ConversationThreadModel.kind`/`path`/`line`/`diffHunk`/`resolved` and
+    reads none of them (`MarkdownBlockDocument.swift:29-58`) — an inline
+    review comment renders identically to a general PR comment there. This
+    check exists so that regression can't happen quietly here too.
+    """
+    path, source = _prose_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+    for field in ("resolved", "path", "line"):
+        if field not in stripped:
+            violations.append((path, "ProseSurfaceView.swift never references thread.%s — thread metadata would be discarded, the macOS defect this wedge exists to not repeat" % field))
+    return violations
+
+
+def check_conversation_error_notice_is_rendered(files):
+    """`ProseSurfaceView.swift` renders the `conversationError` notice case.
+
+    D3, the PRD's forbidden state in its purest form: a partial conversation
+    must never be presented as a complete one. `ConversationPlan` (Shared/
+    NostromoKit — out of this suite's remit) emits a
+    `.notice(.conversationIncomplete(reason:))` row exactly when the
+    daemon's `conversation_error` was set, covered at L1 by
+    `ConversationPlanTests`'s "renders when set" / "renders nothing when
+    absent" pair; this is the client-side half — an existence-only check,
+    in the same spirit as `check_diff_toolarge_notice_not_one_row_among_many`,
+    that the view actually renders that case rather than silently dropping
+    it.
+    """
+    path, source = _prose_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+    if "conversationIncomplete" not in stripped:
+        violations.append((path, "ProseSurfaceView.swift never renders .conversationIncomplete — conversationError would be silently dropped, exactly like macOS"))
+    return violations
+
+
+def check_prose_surface_renders_every_resolution_case(files):
+    """Every `AnchorResolution` and `EmphasisResolution` case name is
+    referenced somewhere in `ProseSurfaceView.swift`.
+
+    Mirrors `check_code_surface_renders_every_resolution_case`/
+    `check_diff_renders_every_resolution_case`: paired with the L1
+    exhaustive-case switches in `ProseAddressingTests`, an added case fails
+    to compile in `ConversationPlan.resolve`/`TicketPlan.resolve` (no
+    `default:`) AND is invisible here until this file is updated, so both
+    ends of "an added case cannot be silently ignored" are covered.
+    """
+    path, source = _prose_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    required = (".notRequested", ".resolved", ".unresolved", ".none", ".rows", ".matchedNothing")
+    violations = []
+    for case_name in required:
+        if case_name not in stripped:
+            violations.append((path, "case %s is never referenced in ProseSurfaceView.swift" % case_name))
+    return violations
+
+
+def check_no_client_side_markdown_parsing(files):
+    """No `.swift` file under `iOS/` parses markdown itself: no
+    `AttributedString(markdown:`, and no manual backtick or `#`-prefix
+    scanning.
+
+    The parent PRD's B5: the daemon parses markdown with `pulldown-cmark`
+    and sends structured `MdBlock`/`MdSpan` trees; the client renders them
+    dumbly. A second parser on the client — even a small one, reached for
+    to "just handle this one case" — is exactly the disagreeing-renderers
+    problem this PRD family exists to end. Scoped to the whole `iOS/` tree,
+    not just the prose surface: this is a standing prohibition, not a
+    property of one file.
+    """
+    violations = []
+    backtick_scan = re.compile(r'hasPrefix\(\s*"`"|hasSuffix\(\s*"`"|contains\(\s*"```"')
+    heading_scan = re.compile(r'hasPrefix\(\s*"#"')
+    for path, source in files:
+        stripped = _strip_line_comments(source)
+        if "AttributedString(markdown:" in stripped:
+            violations.append((path, "%s constructs AttributedString(markdown:) — the daemon parses markdown, not the client" % os.path.basename(path)))
+        if backtick_scan.search(stripped):
+            violations.append((path, "%s manually scans for backticks — markdown parsing belongs to the daemon" % os.path.basename(path)))
+        if heading_scan.search(stripped):
+            violations.append((path, "%s manually scans for a '#' heading prefix — markdown parsing belongs to the daemon" % os.path.basename(path)))
+    return violations
+
+
+def check_lang_not_discarded_in_prose_surface(files):
+    """`ProseSurfaceView.swift` never discards a code block's `lang`.
+
+    D6: `lang` is retained even though syntax highlighting is out of scope
+    on both clients — the assertion macOS's `_ = lang`
+    (`MarkdownBlockDocument.swift:233`) fails. Bans both the exact shape
+    macOS uses (an explicit discard statement) and the client-side
+    equivalent (a `.codeBlock` case pattern that never binds `lang` at all,
+    which would discard it just as completely at the pattern match).
+    """
+    path, source = _prose_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+    if re.search(r"_\s*=\s*lang\b", stripped):
+        violations.append((path, "ProseSurfaceView.swift discards lang via `_ = lang` — the exact macOS defect this wedge (D6) must not repeat"))
+    if re.search(r"\.codeBlock\(\s*_\s*,", stripped):
+        violations.append((path, "ProseSurfaceView.swift's .codeBlock case pattern never binds lang — it is discarded at the match"))
+    return violations
+
+
 CHECKS = (
     check_no_default_in_panecontentwire_switch,
     check_every_toRowModel_call_passes_marked,
@@ -1299,6 +1525,15 @@ CHECKS = (
     check_diff_selected_file_not_view_state,
     check_diff_renders_every_resolution_case,
     check_diff_toolarge_notice_not_one_row_among_many,
+    check_prose_surface_reads_no_width_class,
+    check_prose_surface_no_truncation,
+    check_prose_surface_no_horizontal_panning,
+    check_prose_surface_scroll_only_via_decision,
+    check_prose_surface_thread_metadata_rendered,
+    check_conversation_error_notice_is_rendered,
+    check_prose_surface_renders_every_resolution_case,
+    check_no_client_side_markdown_parsing,
+    check_lang_not_discarded_in_prose_surface,
 )
 
 
@@ -2584,6 +2819,158 @@ class DiffTooLargeNoticeNotOneRowAmongManyTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# ios-curated-view-parity W9 bites-tests
+# --------------------------------------------------------------------------
+
+class ProseSurfaceReadsNoWidthClassTests(unittest.TestCase):
+    def test_bites_on_WidthClass_reference(self):
+        source = "let width: WidthClass = .compact"
+        violations = check_prose_surface_reads_no_width_class([("ProseSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_horizontalSizeClass_reference(self):
+        source = "@Environment(\\.horizontalSizeClass) private var sizeClass"
+        violations = check_prose_surface_reads_no_width_class([("ProseSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_clean_source(self):
+        source = "struct ProseSurfaceView: View { let rows: [ProseRow] }"
+        self.assertEqual(check_prose_surface_reads_no_width_class([("ProseSurfaceView.swift", source)]), [])
+
+
+class ProseSurfaceNoTruncationTests(unittest.TestCase):
+    def test_bites_on_prefix(self):
+        source = "Text(text.prefix(200))"
+        violations = check_prose_surface_no_truncation([("ProseSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_numeric_row_cap(self):
+        source = "ForEach(0..<50) { i in rowView(rows[i]) }"
+        violations = check_prose_surface_no_truncation([("ProseSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_lineLimit_inside_codeBlockView(self):
+        source = "func codeBlockView(lang: String?, text: String) -> some View { Text(text).lineLimit(4) }"
+        violations = check_prose_surface_no_truncation([("ProseSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_ignores_lineLimit_outside_codeBlockView(self):
+        # The document header's url legitimately truncates to one line.
+        source = (
+            "func documentHeaderView(_ header: ProseHeader) -> some View { Link(url, destination: u).lineLimit(1) }\n"
+            "func codeBlockView(lang: String?, text: String) -> some View { Text(text) }"
+        )
+        self.assertEqual(check_prose_surface_no_truncation([("ProseSurfaceView.swift", source)]), [])
+
+    def test_passes_on_clean_source(self):
+        source = "ForEach(rows) { row in rowView(row) }"
+        self.assertEqual(check_prose_surface_no_truncation([("ProseSurfaceView.swift", source)]), [])
+
+
+class ProseSurfaceNoHorizontalPanningTests(unittest.TestCase):
+    def test_bites_on_horizontal_scrollview(self):
+        source = "ScrollView(.horizontal) { content }"
+        violations = check_prose_surface_no_horizontal_panning([("ProseSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_horizontal_axes(self):
+        source = "ScrollView(axes: .horizontal) { content }"
+        violations = check_prose_surface_no_horizontal_panning([("ProseSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_clean_source(self):
+        source = "ScrollView { content }"
+        self.assertEqual(check_prose_surface_no_horizontal_panning([("ProseSurfaceView.swift", source)]), [])
+
+
+class ProseSurfaceScrollOnlyViaDecisionTests(unittest.TestCase):
+    def test_bites_on_unconditional_scrollTo(self):
+        source = "proxy.scrollTo(target, anchor: .top)"
+        violations = check_prose_surface_scroll_only_via_decision([("ProseSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_gated_by_case_scrollTo(self):
+        source = "switch decision {\ncase .scrollTo(let target):\n    proxy.scrollTo(target, anchor: .top)\ncase .none:\n    break\n}"
+        self.assertEqual(check_prose_surface_scroll_only_via_decision([("ProseSurfaceView.swift", source)]), [])
+
+
+class ProseSurfaceThreadMetadataRenderedTests(unittest.TestCase):
+    def test_bites_when_resolved_is_never_referenced(self):
+        source = "Text(thread.path ?? \"\")\nText(\"\\(thread.line ?? 0)\")"
+        violations = check_prose_surface_thread_metadata_rendered([("ProseSurfaceView.swift", source)])
+        self.assertTrue(any("resolved" in msg for _, msg in violations))
+
+    def test_bites_when_path_and_line_are_never_referenced(self):
+        source = "Text(thread.resolved ? \"Resolved\" : \"\")"
+        violations = check_prose_surface_thread_metadata_rendered([("ProseSurfaceView.swift", source)])
+        self.assertTrue(any("path" in msg for _, msg in violations))
+        self.assertTrue(any("line" in msg for _, msg in violations))
+
+    def test_passes_when_all_three_are_referenced(self):
+        source = "thread.resolved\nthread.path\nthread.line"
+        self.assertEqual(check_prose_surface_thread_metadata_rendered([("ProseSurfaceView.swift", source)]), [])
+
+
+class ConversationErrorNoticeIsRenderedTests(unittest.TestCase):
+    def test_bites_when_never_referenced(self):
+        source = "struct ProseSurfaceView: View { var body: some View { EmptyView() } }"
+        violations = check_conversation_error_notice_is_rendered([("ProseSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_referenced(self):
+        source = "case .notice(.conversationIncomplete(let reason)): NoticeBanner(text: reason)"
+        self.assertEqual(check_conversation_error_notice_is_rendered([("ProseSurfaceView.swift", source)]), [])
+
+
+class ProseSurfaceRendersEveryResolutionCaseTests(unittest.TestCase):
+    def test_bites_when_a_case_is_missing(self):
+        source = ".resolved(let target): scroll(target)\n.unresolved(let reason): notice(reason)"
+        violations = check_prose_surface_renders_every_resolution_case([("ProseSurfaceView.swift", source)])
+        self.assertTrue(len(violations) > 0)
+
+    def test_passes_when_every_case_is_present(self):
+        source = ".notRequested .resolved .unresolved .none .rows .matchedNothing"
+        self.assertEqual(check_prose_surface_renders_every_resolution_case([("ProseSurfaceView.swift", source)]), [])
+
+
+class NoClientSideMarkdownParsingTests(unittest.TestCase):
+    def test_bites_on_attributedstring_markdown_initializer(self):
+        source = 'let s = try? AttributedString(markdown: text)'
+        violations = check_no_client_side_markdown_parsing([("SomeView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_manual_backtick_scanning(self):
+        source = 'if line.hasPrefix("`") { }'
+        violations = check_no_client_side_markdown_parsing([("SomeView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_manual_heading_prefix_scanning(self):
+        source = 'if line.hasPrefix("#") { }'
+        violations = check_no_client_side_markdown_parsing([("SomeView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_clean_source(self):
+        source = "Text(attributedText(for: row.spans))"
+        self.assertEqual(check_no_client_side_markdown_parsing([("ProseSurfaceView.swift", source)]), [])
+
+
+class LangNotDiscardedInProseSurfaceTests(unittest.TestCase):
+    def test_bites_on_the_macos_shaped_discard(self):
+        source = "case .codeBlock(let lang, let text):\n    _ = lang\n    renderPlain(text)"
+        violations = check_lang_not_discarded_in_prose_surface([("ProseSurfaceView.swift", source)])
+        self.assertTrue(len(violations) > 0)
+
+    def test_bites_when_the_case_pattern_never_binds_lang(self):
+        source = "case .codeBlock(_, let text): renderPlain(text)"
+        violations = check_lang_not_discarded_in_prose_surface([("ProseSurfaceView.swift", source)])
+        self.assertTrue(len(violations) > 0)
+
+    def test_passes_when_lang_is_bound_and_threaded_through(self):
+        source = "case .codeBlock(let lang, let text): codeBlockView(lang: lang, text: text)"
+        self.assertEqual(check_lang_not_discarded_in_prose_surface([("ProseSurfaceView.swift", source)]), [])
+
+
+# --------------------------------------------------------------------------
 # The real gate: every check against the actual iOS/Nostromo tree.
 # --------------------------------------------------------------------------
 
@@ -2783,6 +3170,42 @@ class RealIOSTreeTests(unittest.TestCase):
 
     def test_diff_toolarge_notice_not_one_row_among_many(self):
         violations = check_diff_toolarge_notice_not_one_row_among_many(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_prose_surface_reads_no_width_class(self):
+        violations = check_prose_surface_reads_no_width_class(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_prose_surface_no_truncation(self):
+        violations = check_prose_surface_no_truncation(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_prose_surface_no_horizontal_panning(self):
+        violations = check_prose_surface_no_horizontal_panning(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_prose_surface_scroll_only_via_decision(self):
+        violations = check_prose_surface_scroll_only_via_decision(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_prose_surface_thread_metadata_rendered(self):
+        violations = check_prose_surface_thread_metadata_rendered(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_conversation_error_notice_is_rendered(self):
+        violations = check_conversation_error_notice_is_rendered(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_prose_surface_renders_every_resolution_case(self):
+        violations = check_prose_surface_renders_every_resolution_case(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_client_side_markdown_parsing(self):
+        violations = check_no_client_side_markdown_parsing(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_lang_not_discarded_in_prose_surface(self):
+        violations = check_lang_not_discarded_in_prose_surface(self.files)
         self.assertEqual(violations, [], violations)
 
 

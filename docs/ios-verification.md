@@ -21,8 +21,9 @@ rendering, addressing, or queue marking complete.
 covered by XCTest in `Shared/NostromoKit/Tests/NostromoKitTests/`.
 Everything the iOS *and* macOS clients share — wire decoding, the
 `DaemonStore` message-routing logic, `PerriPRRowModel`/`PaneAddress.marks`,
-`PaneSurfaceStub`'s stub-message table — lives here, not in either app
-target, specifically so it can be tested this way.
+and, as of W9, the platform-neutral `ProseRow` plan and its
+`ConversationPlan`/`TicketPlan`/`ProseAddressing` resolvers — lives here,
+not in either app target, specifically so it can be tested this way.
 
 **Run:**
 
@@ -454,6 +455,113 @@ three signals, never the only one); and that a `tooLarge` diff really reads
 as gated rather than as an empty, unremarkable PR. L1 proves the resolution
 arithmetic agrees between clients; only a device shows the two clients
 agreeing on screen, side by side.
+
+## Worked example: the prose surface (W9)
+
+`ios-curated-view-parity` W9 replaces both remaining stubs (`pr_conversation`,
+`ticket`) with one renderer, and is the wedge where iOS deliberately renders
+**more** of the payload than macOS does — thread grouping, resolved state,
+and `conversation_error` are all on the wire and all discarded by macOS's
+`MarkdownBlockDocument`. That asymmetry is exactly why this wedge's L1 suite
+is unusually load-bearing: every one of those three facts, plus every
+unresolved-anchor reason, is a property of a row list, not of a rendered
+screen, so it is provable with no device at all.
+
+- **L1** (`ProsePlanTests.swift`, `ConversationPlanTests.swift`,
+  `TicketPlanTests.swift`, `ProseAddressingTests.swift`): every `MdBlock`/
+  `MdSpan` kind maps to a row/span, including nesting (increasing `indent`,
+  never flattening), `lang` surviving a fenced block, and a stable,
+  ascending row `id` sequence. `ConversationPlanTests` ports
+  `MarkdownBlockDocumentTests`'s ordering assertion as a row-index
+  assertion — thread order, then comment order, never interleaved — and
+  separately proves an inline thread's header carries `path`/`line` while a
+  general thread's does not, a resolved thread's header carries the flag, and
+  `conversation_error` produces a notice row when set and none when absent
+  (both directions asserted, so a permanent warning on a healthy PR would be
+  caught same as a missing one on a broken one). `TicketPlanTests` ports
+  `TicketBlockDocumentTests`'s header/nil-assignee assertions and proves the
+  display-name mapping matches macOS's `TicketBlockDocument.displayName(_:)`
+  by name in the test comment. `ProseAddressingTests` is the honesty suite:
+  every `Anchor`/`Emphasis` case this surface can't use resolves to
+  `.unresolved`/`.matchedNothing` with a reason naming what was asked for —
+  an absent comment id (naming the id and the actual comment count), an
+  anchor kind a conversation can't use (naming the kind — the exact case
+  macOS's `ConversationContentView` drops), a ticket section name that
+  cannot be matched (naming the requested name **and** falling back to the
+  description's row — both halves asserted in one test, because either half
+  alone reproduces a different macOS bug), a malformed or out-of-range
+  `"comment:<n>"` index (naming both the requested and actual counts), and
+  that re-emphasising is a pure function — calling `resolve(emphasis:)` a
+  second time carries no memory of the first call, which is what makes the
+  `TicketContentView.clearEmphasis` wipe-everything defect structurally
+  impossible here rather than merely avoided by care.
+- **L2** (`tests/ios_policy/test_ios_view_policy.py`): `ProseSurfaceView.swift`
+  reads no width class (a dedicated pin, on top of the generic allowlist
+  check `DiffSurfaceView.swift` alone remains on); no truncation (no
+  `prefix(`, no numeric row cap, no `lineLimit(` scoped to `codeBlockView`);
+  no horizontal panning; every `scrollTo(` gated by a `case .scrollTo`
+  decision; `thread.resolved`/`.path`/`.line` all referenced in the view (the
+  anti-`MarkdownBlockDocument` policy, named as such in its failure message);
+  `.conversationIncomplete` referenced (the client-side half of "the PRD's
+  forbidden state is pinned," paired with L1's "renders when set, not when
+  absent" pair); every `AnchorResolution`/`EmphasisResolution` case name
+  present (paired with L1's exhaustive switches); no client-side markdown
+  parsing anywhere under `iOS/` (no `AttributedString(markdown:`, no manual
+  backtick or `#`-prefix scan) — a standing prohibition, not a property of
+  one file; and `lang` is never discarded, banning both macOS's exact shape
+  (`_ = lang`) and its client-side equivalent (a `.codeBlock` pattern that
+  never binds `lang` at all). Every check from W2–W8 still passes unchanged,
+  and the `PaneSurfaceStub` table — empty as of this wedge — was deleted
+  along with its L1 test rather than kept as a vestigial table with no
+  entries and no explanation.
+- **L3** (`make ios-build`): that `ProseSurfaceView.swift` compiles and is
+  wired into the app target's build phase, with no new warnings, and that
+  `.prConversation`/`.ticket` leaving the stub table doesn't break the
+  `PaneContentWire` switch's exhaustiveness.
+
+What's left over — genuinely **UI-observable only** — is everything about
+*seeing* the divergence from macOS land correctly: that an inline review
+thread's `path:line` badge and a resolved thread's three-signal styling are
+actually legible (in dark mode and in greyscale); that a `conversation_error`
+notice actually sits above the partial threads rather than replacing them;
+that a fenced code block in a comment actually renders monospaced rather
+than as flattened prose; that re-emphasising a ticket section actually
+leaves the previous section's inline-code and code-block tints alone on
+screen (not just in the resolver's return value); and that the same PR,
+viewed on macOS and iOS side by side, visibly shows the divergence this PRD
+accepts as a risk — an inline comment and a general comment looking
+identical on one client and distinct on the other; an unmatched section
+anchor looking identical to a matched one on macOS and stating its own
+failure on iOS. L1 proves every one of these is a fact about the row list;
+only a device (two, side by side) shows the two clients disagreeing on
+screen exactly where this PRD says they're allowed to.
+
+## Coverage across all nine wedges
+
+Every wedge from `ios-curated-view-parity` is now shipped. This table is the
+honest summary: what is provable without a device (L1 pure-function logic,
+L2 source-scanning policy), and what remains checkable only by hand.
+
+| Wedge | Surface | L1 | L2 | Device-only |
+|---|---|---|---|---|
+| W1 | Tabs decoder correctness | ✅ | — | Tab strip rendering on a real tree |
+| W2 | Verification harness + `pr_list`/queue-row marking | ✅ | ✅ | — |
+| W3 | (macOS) PR conversation data/fetch | ✅ (macOS) | — | — |
+| W4 | Ambient activity ticker | ✅ | ✅ | No-visible-motion while scrolled; long-fan-out memory plateau |
+| W5 | Compact tab strip: focus, labels, `reason`, unread | ✅ | ✅ | Frontmost-on-arrival, scroll-position-on-switch, unread-dot reflow, background-tab isolation |
+| W6 | iPad two-presentation layout | ✅ (plan only) | ✅ | The entire regular-width presentation on screen: proportions, live rotation, Split View divider drag, per-region unread legibility, Slide Over |
+| W7 | `code` surface | ✅ | ✅ | Wrap/gutter rendering, anchor-in-viewport stability, re-show without flash, emoji gutter alignment |
+| W8 | `pr_diff` surface | ✅ | ✅ | Anchored bypass with no list flash, side-by-side file list, cross-client line agreement on screen, dark-mode/greyscale kind legibility |
+| W9 | `pr_conversation`/`ticket` prose surface | ✅ | ✅ | Thread/resolved-state/`conversation_error` legibility, fenced-code rendering, per-range emphasis surviving re-emphasis on screen, the macOS/iOS divergence seen side by side |
+
+The pattern holds across every wedge with a rendering surface: the
+**decision** (what should be shown, and what an anchor resolves to) is
+provable at L1 with no device; the **rendering** of that decision — wrapping,
+scrolling, colour, legibility, motion — is provable only by running the app
+on real hardware and looking. A green `make kit-test`/`make python-test`/
+`make ios-build` run is a necessary, not sufficient, signal for any wedge in
+this table; the device-only column is what a PR body must still report on
+by hand.
 
 ## Why no simulator, anywhere
 
