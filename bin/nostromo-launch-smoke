@@ -58,6 +58,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import fnmatch
 import glob
 import json
@@ -251,11 +252,14 @@ def _no_attributable_crash_report(ev):
     key, name = "no-attributable-crash-report", "no attributable crash report"
     attributed = ev.crash_reports_attributed_pids
     ok = ev.crash_reports_dir_present and not attributed
+    launches_observed, launches_crashed = multi_launch_summary(ev.observed_pids, attributed)
     measured = (f"{ev.crash_reports_scanned} report(s) scanned, "
                 f"{len(attributed)} attributed, "
-                f"dir_present={ev.crash_reports_dir_present}")
+                f"dir_present={ev.crash_reports_dir_present}, "
+                f"launches_observed={launches_observed}, launches_crashed={launches_crashed}")
     if attributed:
-        cause = f"{len(attributed)} crash report(s) attributed to this run's launch(es)"
+        cause = (f"{launches_crashed} of {launches_observed} observed launch(es) crashed "
+                 f"({len(attributed)} crash report(s) attributed)")
     else:
         cause = "crash-report directory could not be scanned"
     return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
@@ -400,15 +404,56 @@ def parse_ips_report(text):
 _REDACTED_TEMP_CLONE_PROC_PATH = "/var/folders/*/Nostromo.app/Contents/MacOS/Nostromo"
 
 
-def crash_report_matches(parsed, *, pids, bundle_root):
-    """True iff `parsed`'s pid is one of `pids` and its proc_path is under
+def parse_ips_timestamp(s):
+    """Parse a macOS `.ips` timestamp of the form
+    `"YYYY-MM-DD HH:MM:SS.ff ±ZZZZ"` (used for both the header's `timestamp`
+    and the body's `captureTime`) into epoch seconds. Returns `None` for
+    anything that doesn't parse this exact shape — `None`, a non-string, an
+    empty string, garbage, or a plausible-looking variant missing the UTC
+    offset — so a malformed or absent timestamp fails closed rather than
+    raising. Never raises."""
+    if not isinstance(s, str) or not s.strip():
+        return None
+    try:
+        dt = datetime.datetime.strptime(s.strip(), "%Y-%m-%d %H:%M:%S.%f %z")
+    except (ValueError, TypeError):
+        return None
+    return dt.timestamp()
+
+
+def crash_report_matches(parsed, *, pids, bundle_root, window_start, window_end):
+    """True iff `parsed`'s pid is one of `pids`, its proc_path is under
     `bundle_root` — or is macOS's redacted form of a temp-directory path
     (see `_REDACTED_TEMP_CLONE_PROC_PATH` above), accepted only when
     `bundle_root` itself lives under a temp directory, so this can't be
     satisfied by an unrelated report (e.g. the operator's real
     `/Applications/Nostromo.app`) whose path merely happens to end the same
-    way. Pure predicate — timestamp corroboration happens in the impure scan
-    loop, not here."""
+    way — AND its `capture_time` (preferred) or `header_timestamp`,
+    whichever parses first, falls within `[window_start, window_end]`
+    (inclusive, epoch seconds).
+
+    pid/procPath equality alone is not sufficient: macOS recycles pids, and
+    this check's own known-bad validation runs deposit real `.ips` reports
+    that carry this exact bundle's redacted procPath shape. Without timestamp
+    corroboration, a months-old report from an unrelated validation run could
+    be falsely attributed to a healthy run purely because the OS happened to
+    reuse the same pid. If neither timestamp field parses, the report does
+    not corroborate and this returns False — pid/path equality is never
+    enough on its own. Pure predicate; the caller (the impure scan loop)
+    supplies the window."""
+    if not _crash_report_structurally_matches(parsed, pids=pids, bundle_root=bundle_root):
+        return False
+    for key in ("capture_time", "header_timestamp"):
+        epoch = parse_ips_timestamp(parsed.get(key))
+        if epoch is not None:
+            return window_start <= epoch <= window_end
+    return False
+
+
+def _crash_report_structurally_matches(parsed, *, pids, bundle_root):
+    """The pid/procPath half of `crash_report_matches`, factored out so the
+    impure scan loop can tell "didn't match at all" apart from "matched
+    structurally but the timestamp didn't corroborate" for logging."""
     pid = parsed.get("pid")
     proc_path = parsed.get("proc_path")
     if pid not in pids or proc_path is None:
@@ -463,6 +508,19 @@ def max_splits_ratios_applied(rows):
     values = [row["splitsRatiosApplied"] for row in rows
               if row.get("splitsRatiosApplied") is not None]
     return max(values) if values else 0
+
+
+def multi_launch_summary(observed_pids, attributed_pids):
+    """(launches_observed, launches_crashed) — how many distinct launches
+    this run's diagnostics stream observed, and how many of those specific
+    launches were attributed to a crash report. Since `diag_path` is a fresh
+    temp file scoped to a single run, more than one distinct pid appearing
+    in it means more than one launch happened during a single invocation of
+    this check (e.g. a crash-relaunch) — worth surfacing explicitly rather
+    than leaving it implicit in whether the crash-report GATE happened to
+    FAIL. An attributed pid this run never actually observed as a launch
+    does not inflate the crashed count."""
+    return len(observed_pids), len(set(observed_pids) & set(attributed_pids))
 
 
 def notdrawable_violations_from_rows(rows):
@@ -726,6 +784,12 @@ ANCHOR_TIMEOUT_SECONDS = 20.0
 WINDOW_SECONDS = 15.0
 CPU_TAIL_SECONDS = 10.0
 CRASH_REPORT_POLL_SECONDS = 15.0
+# Added on top of the nominal observation-window end when corroborating a
+# crash report's timestamp, to absorb clock skew between `time.time()` and
+# the crash reporter's own captureTime plus `ReportCrash`'s own write lag —
+# not to be confused with CRASH_REPORT_POLL_SECONDS above, which is how long
+# the scan itself waits for a report to land on disk.
+CRASH_REPORT_TIMESTAMP_GRACE_SECONDS = 60.0
 
 # Absolute, pre-resolved tool paths — never resolved through the invoking
 # shell's PATH, and every subprocess call below passes shell=False. Mirrors
@@ -963,6 +1027,82 @@ def another_nostromo_pid(exclude_pid, clone_bundle_id):
     return None
 
 
+# ── isolation invariant: no nostromd/mother/claude process started ─────────
+# A third isolation invariant alongside the focuses.json hash and the
+# `defaults export com.hammer.nostromo` domain (see `_isolation_snapshot` /
+# `_warn_if_isolation_broken` below) — WARNING-only, never a verdict input.
+# This is NOT a fifth detector: the plan fixes the verdict set at 3 REACH +
+# 4 GATE, and "did the operator's machine stay undisturbed" is a distinct
+# concern from "did the app's own launch behave".
+
+#: The exact set of process names whose *appearance* during a run is a sign
+#: that something the run should never have touched got touched: the real
+#: daemon, Mother, or a live coding-agent child. Matched against the
+#: EXECUTABLE's basename only (see `matching_monitored_processes`), never a
+#: substring of the whole command line.
+MONITORED_PROCESS_NAMES = frozenset({"nostromd", "mother", "claude"})
+
+
+def matching_monitored_processes(ps_output_text, names=MONITORED_PROCESS_NAMES):
+    """Parse `ps -axo pid,command` output (a header row followed by one row
+    per process) and return the `(pid, basename)` pairs whose EXECUTABLE's
+    basename — the first whitespace-separated token of the command, never
+    the rest of the argument string — is exactly a member of `names`.
+    Sorted by pid. Never raises; blank or malformed lines are skipped.
+
+    Matching only the executable's basename (not a substring of the whole
+    command line) mirrors `another_nostromo_pid`'s documented rationale: an
+    unrelated process's arguments can easily mention "mother" or "claude"
+    (e.g. a script path, or this very check's own coding-agent process)
+    without that process being the thing being monitored for."""
+    out = []
+    for line in ps_output_text.splitlines()[1:]:  # skip the header row
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        executable = parts[1].split(None, 1)[0]
+        name = os.path.basename(executable)
+        if name in names:
+            out.append((pid, name))
+    return tuple(sorted(out, key=lambda pair: pair[0]))
+
+
+def new_monitored_processes(before, after):
+    """The entries in `after` (as returned by `matching_monitored_processes`)
+    whose pid was not present in `before` — a monitored process that started
+    during the run. A monitored process already running before the run
+    started is excluded even though it's still present in `after`; it isn't
+    something this run caused."""
+    before_pids = {pid for pid, _name in before}
+    return tuple(entry for entry in after if entry[0] not in before_pids)
+
+
+def _process_snapshot(tools):
+    """Best-effort `matching_monitored_processes()` snapshot of the real
+    system's processes right now. Empty tuple on any tooling failure —
+    this is a WARNING-only signal, never a verdict input, so failing to take
+    a snapshot must not raise or block the run."""
+    ps_path = tools.get("ps")
+    if not ps_path:
+        return ()
+    try:
+        result = subprocess.run(
+            [ps_path, "-axo", "pid,command"], capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    if result.returncode != 0:
+        return ()
+    return matching_monitored_processes(result.stdout)
+
+
 # ── diagnostics stream reading ───────────────────────────────────────────────
 
 
@@ -1013,8 +1153,12 @@ def _ips_paths():
     return paths
 
 
-def scan_crash_reports(pids, bundle_root, poll_seconds=0.0):
+def scan_crash_reports(pids, bundle_root, window_start, window_end, poll_seconds=0.0):
     """(scanned_count, dir_present, attributed_pids).
+
+    `window_start`/`window_end` (epoch seconds) are the corroboration window
+    passed through to `crash_report_matches` — see its docstring for why pid/
+    procPath equality alone is not enough.
 
     `poll_seconds` should only be non-zero when there is a real reason to
     expect a crash report might still be landing — i.e. the launched process
@@ -1044,8 +1188,16 @@ def scan_crash_reports(pids, bundle_root, poll_seconds=0.0):
             except OSError:
                 continue
             parsed = parse_ips_report(text)
-            if parsed and crash_report_matches(parsed, pids=pids, bundle_root=bundle_root):
+            if not parsed:
+                continue
+            if crash_report_matches(
+                parsed, pids=pids, bundle_root=bundle_root,
+                window_start=window_start, window_end=window_end,
+            ):
                 attributed.add(parsed["pid"])
+            elif _crash_report_structurally_matches(parsed, pids=pids, bundle_root=bundle_root):
+                _log(f"crash report {path} matched pid/path but its timestamp fell "
+                     f"outside this run's observation window — not attributed")
         if attributed or time.time() >= deadline:
             break
         time.sleep(1.0)
@@ -1063,6 +1215,10 @@ def format_report(overall_state, overall_cause, detectors, ev):
         f"CPU: {'not measured' if ev.cpu_percent is None else f'{ev.cpu_percent:.2f}%'}   "
         f"crash report: {'yes' if ev.crash_reports_attributed_pids else 'no'}"
     )
+    launches_observed, launches_crashed = multi_launch_summary(
+        ev.observed_pids, ev.crash_reports_attributed_pids
+    )
+    lines.append(f"launches observed: {launches_observed}   launches crashed: {launches_crashed}")
     lines.append("")
     width = max((len(v.name) for v in detectors), default=20) + 2
     lines.append(f"{'detector':<{width}} | {'state':<12} | measured")
@@ -1130,24 +1286,35 @@ def _child_env(socket_path, broker_socket_path, diag_path):
     }
 
 
-def _isolation_snapshot():
-    """(focuses.json hash, `defaults export com.hammer.nostromo`) — the
-    operator-state baseline `run()` takes once before launch and compares
-    again after teardown, via `_warn_if_isolation_broken`."""
-    return _file_hash(FOCUSES_JSON), _defaults_export("com.hammer.nostromo")
+def _isolation_snapshot(tools):
+    """(focuses.json hash, `defaults export com.hammer.nostromo`, monitored
+    process snapshot) — the operator-state baseline `run()` takes once
+    before launch and compares again after teardown, via
+    `_warn_if_isolation_broken`."""
+    return (
+        _file_hash(FOCUSES_JSON),
+        _defaults_export("com.hammer.nostromo"),
+        _process_snapshot(tools),
+    )
 
 
 def _warn_if_isolation_broken(before, after):
     """Log a WARNING for each part of `_isolation_snapshot()` that changed
     between `before` and `after` — never a verdict input, just a loud signal
-    that the clone leaked into the operator's real state."""
-    focuses_before, defaults_before = before
-    focuses_after, defaults_after = after
+    that the clone leaked into the operator's real state, or that a process
+    this run must never start (`nostromd`, `mother`, `claude`) started
+    anyway."""
+    focuses_before, defaults_before, processes_before = before
+    focuses_after, defaults_after, processes_after = after
     if focuses_before != focuses_after:
         _log("WARNING: ~/.nostromo/focuses.json changed during this run — isolation failure")
     if defaults_before != defaults_after:
         _log("WARNING: `defaults export com.hammer.nostromo` changed during this run "
              "— the clone's UserDefaults domain leaked into the operator's — isolation failure")
+    for pid, name in new_monitored_processes(processes_before, processes_after):
+        _log(f"WARNING: process '{name}' (pid {pid}) started during this run — isolation "
+             f"failure; if this is 'mother', the t+5s broker-offline daemon-start backstop "
+             f"likely fired despite BrokerStub and the scrubbed child PATH")
 
 
 def _wait_and_measure(proc, launched_pid, tools, launch_time, diag_path):
@@ -1183,16 +1350,25 @@ def _wait_and_measure(proc, launched_pid, tools, launch_time, diag_path):
 
 
 def _collect_evidence(launched_pid, diag_path, clone, alive_at_window_end, cpu_percent,
-                       another_pid, window_start):
+                       another_pid, window_start, launch_time):
     """Everything after the wait/measure phase: read the diagnostics stream,
     scan for an attributable crash report, and assemble the `Evidence`
-    detectors grade."""
+    detectors grade.
+
+    The crash-report corroboration window is `[launch_time, nominal window
+    end + CRASH_REPORT_TIMESTAMP_GRACE_SECONDS]` — `launch_time` rather than
+    `window_start` as the lower bound, since `window_start` can itself be up
+    to `ANCHOR_TIMEOUT_SECONDS` after `launch_time` when the anchor is
+    delayed, and a crash during that anchor-wait phase (the known-bad
+    build's own failure mode) must still be attributable."""
     all_rows = _read_json_lines(diag_path)
     observed_pids = distinct_pids(all_rows)
     rows = rows_for_pid(all_rows, launched_pid)
 
+    crash_window_end = window_start + WINDOW_SECONDS + CRASH_REPORT_TIMESTAMP_GRACE_SECONDS
     crash_scanned, crash_dir_present, crash_attributed = scan_crash_reports(
         pids=set(observed_pids) | {launched_pid}, bundle_root=clone,
+        window_start=launch_time, window_end=crash_window_end,
         poll_seconds=(0.0 if alive_at_window_end else CRASH_REPORT_POLL_SECONDS),
     )
 
@@ -1265,7 +1441,7 @@ def run(args):
         broker = BrokerStub(broker_socket_path)
         broker.start()
 
-        operator_state_before = _isolation_snapshot()
+        operator_state_before = _isolation_snapshot(tools)
         child_env = _child_env(socket_path, broker_socket_path, diag_path)
 
         _log(f"launching clone at {clone}")
@@ -1287,10 +1463,10 @@ def run(args):
             )
             ev = _collect_evidence(
                 launched_pid, diag_path, clone, alive_at_window_end, cpu_percent,
-                another_pid, window_start,
+                another_pid, window_start, launch_time,
             )
 
-        _warn_if_isolation_broken(operator_state_before, _isolation_snapshot())
+        _warn_if_isolation_broken(operator_state_before, _isolation_snapshot(tools))
 
         detectors = evaluate_evidence(ev)
         state, cause = aggregate(detectors)

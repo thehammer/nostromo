@@ -28,10 +28,12 @@ Run with:
     /usr/bin/python3 -m unittest discover -s tests/launch_smoke
 """
 
+import datetime
 import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -903,44 +905,119 @@ class ParseIpsReportTests(unittest.TestCase):
         self.assertIsNone(self._parse_never_raises(text))
 
 
+class ParseIpsTimestampTests(unittest.TestCase):
+    """`parse_ips_timestamp` — the piece that lets `crash_report_matches`
+    corroborate a report's pid/path match against the actual observation
+    window, rather than trusting pid equality alone (macOS recycles pids,
+    so a stale `.ips` file from an unrelated, months-old run can share a pid
+    with the current run purely by chance)."""
+
+    def _parse_never_raises(self, s):
+        try:
+            return launch_smoke.parse_ips_timestamp(s)
+        except Exception as e:  # noqa: BLE001 - the contract says this must never raise
+            self.fail(f"parse_ips_timestamp raised {type(e).__name__}: {e} on {s!r}")
+
+    def test_a_realistic_timestamp_parses_to_the_correct_epoch_value(self):
+        s = "2026-09-03 10:15:22.00 -0700"
+        expected = datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S.%f %z").timestamp()
+        self.assertEqual(self._parse_never_raises(s), expected)
+
+    def test_none_returns_none(self):
+        self.assertIsNone(self._parse_never_raises(None))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(self._parse_never_raises(""))
+
+    def test_garbage_string_returns_none(self):
+        self.assertIsNone(self._parse_never_raises("not a timestamp"))
+
+    def test_missing_utc_offset_returns_none(self):
+        # Plausible-looking but malformed: the same date/time as a real
+        # capture_time, minus the trailing " ±ZZZZ" the format requires.
+        self.assertIsNone(self._parse_never_raises("2026-09-03 10:15:22.00"))
+
+    def test_non_string_input_returns_none(self):
+        self.assertIsNone(self._parse_never_raises(12345))
+        self.assertIsNone(self._parse_never_raises(["2026-09-03 10:15:22.00 -0700"]))
+
+
+# A window that contains the realistic default capture_time/header_timestamp
+# `CrashReportMatchesTests._parsed()` below hands out, so the pre-existing
+# pid/path structural tests keep testing exactly what they tested before
+# `crash_report_matches` gained timestamp corroboration.
+_WINDOW_TZ = datetime.timezone(datetime.timedelta(hours=-7))
+_WINDOW_START_DT = datetime.datetime(2026, 9, 3, 10, 0, 0, tzinfo=_WINDOW_TZ)
+_WINDOW_END_DT = datetime.datetime(2026, 9, 3, 10, 30, 0, tzinfo=_WINDOW_TZ)
+_WINDOW_START = _WINDOW_START_DT.timestamp()
+_WINDOW_END = _WINDOW_END_DT.timestamp()
+_DEFAULT_CAPTURE_TIME = "2026-09-03 10:15:23.50 -0700"      # inside the window
+_DEFAULT_HEADER_TIMESTAMP = "2026-09-03 10:15:22.00 -0700"  # inside the window
+
+
+def _ips_ts(dt):
+    return dt.strftime("%Y-%m-%d %H:%M:%S.00 %z")
+
+
 class CrashReportMatchesTests(unittest.TestCase):
     @staticmethod
-    def _parsed(pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo"):
+    def _parsed(pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+                capture_time=_DEFAULT_CAPTURE_TIME, header_timestamp=_DEFAULT_HEADER_TIMESTAMP):
         return {
             "pid": pid, "proc_path": proc_path,
-            "capture_time": "x", "header_timestamp": "y",
+            "capture_time": capture_time, "header_timestamp": header_timestamp,
         }
+
+    # -- pre-existing structural (pid/path) tests, now given a window that
+    # contains the realistic default timestamps above, so they still test
+    # only the structural check they always tested. --
 
     def test_matching_pid_and_path_under_bundle_root_matches(self):
         parsed = self._parsed(pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo")
         self.assertTrue(
-            launch_smoke.crash_report_matches(parsed, pids=(100,), bundle_root="/tmp/clone")
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
         )
 
     def test_wrong_pid_does_not_match(self):
         parsed = self._parsed(pid=999, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo")
         self.assertFalse(
-            launch_smoke.crash_report_matches(parsed, pids=(100,), bundle_root="/tmp/clone")
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
         )
 
     def test_matching_pid_but_path_outside_bundle_root_does_not_match(self):
         parsed = self._parsed(pid=100, proc_path="/Applications/Nostromo.app/Contents/MacOS/Nostromo")
         self.assertFalse(
-            launch_smoke.crash_report_matches(parsed, pids=(100,), bundle_root="/tmp/clone")
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
         )
 
     def test_both_pid_and_path_right_matches_among_multiple_candidate_pids(self):
         parsed = self._parsed(pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo")
         self.assertTrue(
             launch_smoke.crash_report_matches(
-                parsed, pids=(50, 100, 200), bundle_root="/tmp/clone"
+                parsed, pids=(50, 100, 200), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
             )
         )
 
     def test_missing_proc_path_does_not_match(self):
-        parsed = {"pid": 100, "proc_path": None, "capture_time": "x", "header_timestamp": "y"}
+        parsed = {
+            "pid": 100, "proc_path": None,
+            "capture_time": _DEFAULT_CAPTURE_TIME, "header_timestamp": _DEFAULT_HEADER_TIMESTAMP,
+        }
         self.assertFalse(
-            launch_smoke.crash_report_matches(parsed, pids=(100,), bundle_root="/tmp/clone")
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
         )
 
     def test_macos_redacted_temp_clone_path_matches_when_bundle_root_is_a_temp_dir(self):
@@ -955,6 +1032,7 @@ class CrashReportMatchesTests(unittest.TestCase):
             launch_smoke.crash_report_matches(
                 parsed, pids=(100,),
                 bundle_root="/var/folders/m8/abc123/T/nostromo-launch-smoke-xyz/Nostromo.app",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
             )
         )
 
@@ -970,6 +1048,109 @@ class CrashReportMatchesTests(unittest.TestCase):
         self.assertFalse(
             launch_smoke.crash_report_matches(
                 parsed, pids=(100,), bundle_root="/Applications/Nostromo.app",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    # -- new: timestamp corroboration --
+
+    def test_matching_pid_and_path_but_timestamp_outside_window_does_not_match_a_stale_report(self):
+        """The core regression this gap exists to fix: macOS recycles pids,
+        so a *stale* `.ips` file left over from a months-old validation run
+        can share a pid with the current run's launched process purely by
+        chance, and — because this check's own runs always produce the same
+        redacted temp-clone `procPath` shape — the structural pid+path check
+        alone would falsely attribute that ancient crash to a perfectly
+        healthy current run, turning a false-negative crash into a false
+        FAIL. Corroborating against the run's own observation window closes
+        that hole: pid/path matching is necessary but no longer sufficient.
+        """
+        stale = "2026-01-01 09:00:00.00 -0700"  # months before the window
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=stale, header_timestamp=stale,
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_unparseable_capture_time_falls_back_to_header_timestamp(self):
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time="not a timestamp", header_timestamp=_DEFAULT_HEADER_TIMESTAMP,
+        )
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_both_timestamps_unparseable_fails_closed_even_with_correct_pid_and_path(self):
+        # Pid/path equality alone is never enough — if neither timestamp
+        # field parses, the report does not corroborate and must not match,
+        # regardless of how convincing the structural match looks.
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time="garbage", header_timestamp=None,
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_timestamp_exactly_at_window_start_matches_inclusive_boundary(self):
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=_ips_ts(_WINDOW_START_DT), header_timestamp=_ips_ts(_WINDOW_START_DT),
+        )
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_timestamp_exactly_at_window_end_matches_inclusive_boundary(self):
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=_ips_ts(_WINDOW_END_DT), header_timestamp=_ips_ts(_WINDOW_END_DT),
+        )
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_timestamp_one_second_before_window_start_does_not_match(self):
+        before = _WINDOW_START_DT - datetime.timedelta(seconds=1)
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=_ips_ts(before), header_timestamp=_ips_ts(before),
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_timestamp_one_second_after_window_end_does_not_match(self):
+        after = _WINDOW_END_DT + datetime.timedelta(seconds=1)
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=_ips_ts(after), header_timestamp=_ips_ts(after),
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
             )
         )
 
@@ -1135,6 +1316,200 @@ class NotdrawableViolationsFromRowsTests(unittest.TestCase):
 
     def test_no_rows_yields_no_violations(self):
         self.assertEqual(launch_smoke.notdrawable_violations_from_rows(()), ())
+
+
+# ---------------------------------------------------------------------------
+# Process-snapshot isolation invariant: no nostromd/mother/claude process
+# started during a run. Per the same discipline `_warn_if_isolation_broken`
+# already applies to the focuses.json hash and the
+# `defaults export com.hammer.nostromo` domain, this is a third isolation
+# invariant — WARNING-only, never a verdict input, and NOT a new GATE/REACH
+# detector (the plan caps verdict detectors at 4 GATE + 3 REACH). Only the
+# pure parsing/diffing logic is tested here; the impure `ps` invocation and
+# the before/after wiring into `run()`/`_isolation_snapshot()` are Cody's.
+# ---------------------------------------------------------------------------
+
+
+class MonitoredProcessNamesConstantTests(unittest.TestCase):
+    def test_pinned_exactly(self):
+        self.assertEqual(
+            launch_smoke.MONITORED_PROCESS_NAMES, frozenset({"nostromd", "mother", "claude"})
+        )
+
+
+class MatchingMonitoredProcessesTests(unittest.TestCase):
+    """`matching_monitored_processes` parses `ps -axo pid,command` text and
+    returns the `(pid, basename)` pairs whose EXECUTABLE's basename — not
+    the whole command string — is exactly a monitored name. Mirrors the
+    documented rationale for `another_nostromo_pid`'s path-vs-substring
+    distinction: matching anywhere in the command line would flag an
+    unrelated process whose arguments merely happen to mention "mother" or
+    "claude" (e.g. a coding agent's own invocation, or a script path)."""
+
+    SAMPLE = (
+        "  PID COMMAND\n"
+        "  501 /usr/local/bin/mother daemon start\n"
+        "  502 /opt/homebrew/bin/claude --resume\n"
+        "  503 /usr/local/bin/nostromod\n"
+        "  504 /usr/local/bin/nostromd\n"
+        "  505 /usr/bin/ps -axo pid,command\n"
+        "  506 /usr/bin/python3 /Users/x/plans/mother-plan.py\n"
+    )
+
+    def test_matches_exactly_the_monitored_processes_by_executable_basename(self):
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertEqual(
+            set(result), {(501, "mother"), (502, "claude"), (504, "nostromd")}
+        )
+
+    def test_nostromod_is_not_a_substring_or_prefix_match_for_nostromd(self):
+        # "nostromod" (pid 503) and "nostromd" (pid 504) are different
+        # strings — an exact basename match must tell them apart, or a
+        # process that has nothing to do with the real daemon binary would
+        # be reported as if it were nostromd.
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertNotIn(503, [pid for pid, _name in result])
+        self.assertIn((504, "nostromd"), result)
+
+    def test_a_monitored_name_embedded_only_in_the_arguments_does_not_match(self):
+        # pid 506's executable is /usr/bin/python3; "mother" only appears
+        # deep in an argument (a plan file path). Only the executable's own
+        # basename is ever checked — never the rest of the command string.
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertNotIn(506, [pid for pid, _name in result])
+
+    def test_an_unrelated_process_does_not_match(self):
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertNotIn(505, [pid for pid, _name in result])
+
+    def test_a_basename_that_merely_starts_with_a_monitored_name_does_not_match(self):
+        # /opt/foo/mothership -> basename "mothership" -- a prefix of
+        # "mother", not equal to it. Exact basename equality only.
+        text = "  PID COMMAND\n  600 /opt/foo/mothership\n"
+        self.assertEqual(launch_smoke.matching_monitored_processes(text), ())
+
+    def test_empty_string_returns_empty_tuple(self):
+        self.assertEqual(launch_smoke.matching_monitored_processes(""), ())
+
+    def test_header_only_returns_empty_tuple(self):
+        self.assertEqual(launch_smoke.matching_monitored_processes("  PID COMMAND\n"), ())
+
+    def test_result_is_sorted_by_pid(self):
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertEqual(list(result), sorted(result, key=lambda pair: pair[0]))
+
+    def test_never_raises_on_malformed_or_blank_lines_mixed_in(self):
+        text = (
+            "  PID COMMAND\n"
+            "\n"
+            "   \n"
+            "  501 /usr/local/bin/mother daemon start\n"
+        )
+        try:
+            result = launch_smoke.matching_monitored_processes(text)
+        except Exception as e:  # noqa: BLE001 - the contract says this must never raise
+            self.fail(f"matching_monitored_processes raised {type(e).__name__}: {e}")
+        self.assertEqual(set(result), {(501, "mother")})
+
+
+class NewMonitoredProcessesTests(unittest.TestCase):
+    """`new_monitored_processes(before, after)` — the entries in `after`
+    whose pid wasn't present in `before`. A monitored process that was
+    already running before the run started (e.g. the operator's own Mother
+    daemon, coincidentally) is excluded even though it's still present in
+    `after` — it isn't something this run caused."""
+
+    def test_a_process_absent_before_is_new(self):
+        self.assertEqual(
+            launch_smoke.new_monitored_processes((), ((501, "mother"),)),
+            ((501, "mother"),),
+        )
+
+    def test_a_process_present_in_both_before_and_after_is_not_new(self):
+        before = ((501, "mother"),)
+        after = ((501, "mother"),)
+        self.assertEqual(launch_smoke.new_monitored_processes(before, after), ())
+
+    def test_only_the_genuinely_new_pid_is_returned_when_one_was_pre_existing(self):
+        before = ((501, "mother"),)
+        after = ((501, "mother"), (502, "claude"))
+        self.assertEqual(
+            launch_smoke.new_monitored_processes(before, after), ((502, "claude"),)
+        )
+
+    def test_both_empty_returns_empty(self):
+        self.assertEqual(launch_smoke.new_monitored_processes((), ()), ())
+
+    def test_this_is_the_structural_defence_against_the_broker_offline_backstop_firing_silently(self):
+        """`AppStore.start()`'s 5s "broker offline, spawn mother daemon
+        start" backstop is exactly what `BrokerStub` (answering the hello
+        handshake immediately) and the scrubbed child `PATH` in `_child_env`
+        exist to prevent from ever firing. If it fires anyway — a bug in
+        BrokerStub's timing, a PATH leak, anything — this diff is what
+        surfaces it: "mother" shows up as a newly-started process even
+        though the whole run otherwise looks perfectly healthy (still
+        reaches multi-pane layout, stays alive, settles CPU). Without this
+        check, that failure mode passes completely silently.
+        """
+        before = ()
+        after = ((777, "mother"),)
+        self.assertEqual(
+            launch_smoke.new_monitored_processes(before, after), ((777, "mother"),)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Multi-launch accounting: "if more than one launch is observed in a run,
+# the report states how many launches crashed and FAILs if that count
+# exceeds zero." The FAIL-on-any-attributed-crash behavior already exists
+# (`no-attributable-crash-report` FAILs on any non-empty
+# `crash_reports_attributed_pids`); what's missing is purely making the
+# launch/crash counts explicit and visible in the printed report.
+# ---------------------------------------------------------------------------
+
+
+class MultiLaunchSummaryTests(unittest.TestCase):
+    def test_single_healthy_launch(self):
+        self.assertEqual(launch_smoke.multi_launch_summary((100,), ()), (1, 0))
+
+    def test_two_launches_observed_one_attributed_to_a_crash(self):
+        # e.g. a crash-relaunch within one run's observation window.
+        self.assertEqual(launch_smoke.multi_launch_summary((100, 200), (200,)), (2, 1))
+
+    def test_nothing_observed_and_nothing_attributed(self):
+        self.assertEqual(launch_smoke.multi_launch_summary((), ()), (0, 0))
+
+    def test_three_launches_two_crashed(self):
+        self.assertEqual(
+            launch_smoke.multi_launch_summary((100, 200, 300), (200, 300)), (3, 2)
+        )
+
+    def test_an_attributed_pid_not_among_observed_pids_does_not_inflate_the_crashed_count(self):
+        # An attributed pid this run never actually observed as a launch
+        # (e.g. a pid seen only in an unrelated stale scan) must not count
+        # towards "crashed launches" — it wasn't a launch this run observed.
+        self.assertEqual(launch_smoke.multi_launch_summary((100,), (999,)), (1, 0))
+
+
+class FormatReportMultiLaunchTests(unittest.TestCase):
+    """`format_report` must make the launch/crash accounting visible in the
+    printed report, not only implicit in whether `no-attributable-crash-
+    report` happened to FAIL. Substring-only assertions — the exact
+    formatting/column layout is Cody's call, not part of this contract."""
+
+    def test_report_mentions_launches_observed_and_launches_crashed_counts(self):
+        ev = healthy_evidence()._replace(
+            observed_pids=(100, 200), crash_reports_attributed_pids=(200,),
+        )
+        detectors = launch_smoke.evaluate_evidence(ev)
+        state, cause = launch_smoke.aggregate(detectors)
+        report = launch_smoke.format_report(state, cause, detectors, ev)
+
+        self.assertEqual(launch_smoke.multi_launch_summary(ev.observed_pids,
+                                                             ev.crash_reports_attributed_pids),
+                          (2, 1))
+        self.assertRegex(report, r"launches observed[^0-9]*2")
+        self.assertRegex(report, r"launches crashed[^0-9]*1")
 
 
 # ---------------------------------------------------------------------------
