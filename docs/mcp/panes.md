@@ -331,15 +331,16 @@ AppKit siblings layered over it — SwiftUI only, all the way down. `text`,
 including the queue-row marking below and the swipe-to-approve confirmation
 gate.
 
-`pr_conversation` and `ticket` are **not rendered** — each shows an honest
-stub instead (`PaneSurfaceStub` in NostromoKit is the single source of the
-stub copy). This is deliberate, not a gap nobody got to: the PRD's organizing
-rule is that "a surface may be absent, and a surface may be simplified. A
-surface may never look complete when it isn't." Each stub names the specific
-addressing it can't show (a comment, a section) rather than saying only
-"isn't available." W9 replaces these stubs with real renderers; that wedge
-updates this section when it does, so this stays the one place a reader
-learns the two clients aren't rendering the same thing.
+`pr_conversation` and `ticket` render for real, as of `ios-curated-view-parity`
+W9 (`iOS/Nostromo/Views/Panes/ProseSurfaceView.swift`) — the honest stubs
+`PaneSurfaceStub` used to show (deleted along with its now-empty table) are
+gone. Both payloads are already trees of `MdBlock`/`MdSpan` from the daemon's
+server-side `pulldown-cmark` parse (see "Markdown blocks and
+`pr_conversation`" and "`ticket`" below), so **one renderer serves both**:
+`Shared/NostromoKit/Sources/NostromoKit/Prose/` turns a payload into a
+platform-neutral `[ProseRow]` plan (`ConversationPlan`/`TicketPlan`), and
+`ProseSurfaceView` renders rows — it knows nothing about PRs or tickets. A
+rendering improvement lands on both surfaces at once.
 
 **`code` renders for real, as of `ios-curated-view-parity` W7**
 (`iOS/Nostromo/Views/Panes/CodeSurfaceView.swift`). Before W7, `code`
@@ -454,14 +455,86 @@ completeness:
   and where in it, the same way `code`'s scroll position survives those
   transitions.
 
+**`pr_conversation` and `ticket` render for real, as of `ios-curated-view-parity`
+W9** (`iOS/Nostromo/Views/Panes/ProseSurfaceView.swift`,
+`Shared/NostromoKit/Sources/NostromoKit/Prose/`) — and **this is the one
+place iOS deliberately renders more of the same payload than macOS does**,
+which is worth stating plainly rather than leaving a reader to notice it on
+their own:
+
+- **iOS renders thread structure; macOS flattens it.** macOS's
+  `MarkdownBlockDocument.init(title:body:threads:)`
+  (`macOS/Nostromo/UI/MarkdownBlockDocument.swift:29-58`) concatenates every
+  comment from every thread into one linear document — an inline review
+  comment on `session_manager.rs:412` renders identically to a general PR
+  comment. iOS groups by thread: one `threadHeader` row per thread (naming
+  its kind, and — for an inline thread only — the `path:line` it's attached
+  to), followed by that thread's comments in order, never interleaved with
+  another thread's.
+- **iOS renders resolved state; macOS discards it.** `ConversationThreadModel
+  .resolved` is decoded on both clients and read by neither view before this
+  wedge. iOS marks a resolved thread with three signals — a glyph, the word
+  "Resolved," and a de-emphasised header — so the distinction survives
+  greyscale; macOS still shows a resolved and an unresolved thread
+  identically.
+- **iOS states an incomplete conversation; macOS shows nothing.**
+  `PrConversationPayload.conversationError` is set exactly when the PR fetch
+  succeeded but the conversation fetch failed — `threads` then carries
+  whatever was retrieved, never meant to be read as the whole conversation.
+  iOS renders a non-dismissible notice above the threads it did get, naming
+  the daemon's own error; macOS decodes the field and displays it nowhere,
+  so a partial conversation there looks exactly like a complete one — this
+  PRD's forbidden state, still live on one client.
+- **Unresolved anchors are stated on iOS and silent on macOS.**
+  `TicketContentView`/`ConversationContentView`
+  (`macOS/Nostromo/UI/Views/TicketContentView.swift:115-125`,
+  `ConversationContentView.swift:115-131`) collapse anchor resolution to
+  `Int?`: an anchor kind the view doesn't handle, or a name/id that doesn't
+  match, produces `nil`, which reads identically to "no anchor was
+  requested" — no scroll, no notice, no operator-visible signal. iOS's
+  `ConversationPlan.resolve(anchor:)`/`TicketPlan.resolve(anchor:)` return
+  the same three-state `AnchorResolution`/`EmphasisResolution` `code` and
+  `pr_diff` use (W7's memo B12): not requested, resolved, or
+  requested-and-unresolvable with a named reason. A `.comment(id:)` naming
+  an absent id names the id and how many comments are actually present; an
+  anchor kind a conversation can't use (`.line`, `.section`, `.queueRow`)
+  names the kind — exactly the case macOS drops on the floor.
+- **A ticket's comments share the section-addressing convention.** Both
+  clients key ticket lookups by either a canonical section name or the
+  string `"comment:<index>"` (`TicketBlockDocument.ranges`,
+  `macOS/Nostromo/UI/TicketBlockDocument.swift:20-24`, ported unchanged to
+  `TicketPlan.sectionOrCommentRowIndex`), so `anchor: {section:
+  "comment:3"}` means the same thing on both. An unmatched section name on
+  iOS renders the top of the description **and states that the section
+  wasn't found**; on macOS the identical request silently renders the top of
+  the description with no way to tell that from a successful anchor at all
+  — the PRD's forbidden state again, in its section-anchor shape. An
+  out-of-range comment index (`"comment:99"` on a four-comment ticket) is
+  reported by iOS naming both numbers, and silently ignored by macOS.
+- **Fenced code renders as a code block on both clients**, monospaced and
+  wrapping, sharing `code`/`pr_diff`'s no-truncation rule; `lang` is carried
+  on the row but never rendered (no syntax highlighting on either client) —
+  unlike macOS's `MarkdownBlockDocument.codeBlockRun`, which discards `lang`
+  outright (`_ = lang`, `:233`) rather than merely declining to render it.
+- **Markdown tables render as pipe-separated rows and images as
+  `[image: alt]` placeholders on both clients** — a real grid is worse at
+  phone width, not better, and image loading is out of scope for both.
+- **Re-emphasising a ticket clears only its own prior emphasis on iOS.**
+  macOS's `TicketContentView.clearEmphasis` (`:128-131`) removes
+  `.backgroundColor` over the *entire* document, which also wipes the
+  inline-code and code-block tints that emphasis had nothing to do with;
+  iOS tracks the emphasised row set explicitly and replaces it wholesale, so
+  a second emphasis never disturbs unrelated formatting.
+
 `PaneAddress` (below) reaches iOS the same way it reaches macOS —
 `DynamicFocusView` passes `layout.paneAddress[paneId]` into
-`PaneSurfaceView` — and iOS's present uses of `anchor`/`emphasis` are
-`pr_list` queue-row marking, `code`'s line/range addressing, and `pr_diff`'s
-line/range addressing (identical resolution semantics to `code`, applied to
-a flattened diff instead of a flattened file) above; the remaining stub
-kinds have no addressing to render yet, matching what they show. `reason` is
-used more broadly — see the tab strip below.
+`PaneSurfaceView` — and iOS's uses of `anchor`/`emphasis` are `pr_list`
+queue-row marking, `code`'s line/range addressing, `pr_diff`'s line/range
+addressing (identical resolution semantics to `code`, applied to a
+flattened diff instead of a flattened file), and, as of W9,
+`pr_conversation`'s comment addressing and `ticket`'s section/comment
+addressing above — every content kind that has any addressing to render now
+renders it. `reason` is used more broadly — see the tab strip below.
 
 ### Tabs and layout on iOS: the compact strip (`ios-curated-view-parity` W5)
 

@@ -31,6 +31,7 @@
 		AA0000010000000000000033 /* ActivityStreamsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000032 /* ActivityStreamsSheet.swift */; };
 		AA0000010000000000000035 /* DecisionSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000036 /* DecisionSheetView.swift */; };
 		AA00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000100000000000000AA /* NostromoKit */; };
+		AA00000100000000000000AC /* ProseSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00000100000000000000AD /* ProseSurfaceView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -59,6 +60,7 @@
 		AA0000010000000000000032 /* ActivityStreamsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamsSheet.swift; sourceTree = "<group>"; };
 		AA0000010000000000000036 /* DecisionSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheetView.swift; sourceTree = "<group>"; };
 		AA00000100000000000000A0 /* Nostromo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nostromo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA00000100000000000000AD /* ProseSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProseSurfaceView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -123,6 +125,7 @@
 				AA0000010000000000000041 /* DiffSurfaceView.swift */,
 				AA0000010000000000000043 /* DiffFileListView.swift */,
 				AA0000010000000000000045 /* DiffFileContentView.swift */,
+				AA00000100000000000000AD /* ProseSurfaceView.swift */,
 			);
 			path = Panes;
 			sourceTree = "<group>";
@@ -241,6 +244,7 @@
 				AA0000010000000000000031 /* ActivityTickerBar.swift in Sources */,
 				AA0000010000000000000033 /* ActivityStreamsSheet.swift in Sources */,
 				AA0000010000000000000035 /* DecisionSheetView.swift in Sources */,
+				AA00000100000000000000AC /* ProseSurfaceView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
