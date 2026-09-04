@@ -53,9 +53,24 @@ if [ "$COUNT" -ne 1 ]; then
 fi
 
 echo "==> removing the reentrancy guard clause (reproducing the 2026-09-03 defect)"
-# Delete the line containing the clause entirely (it is its own line in the
-# `guard` statement — see DynamicFocusView.swift's RatioSplitView.layout()).
-grep -v -F "$GUARD_CLAUSE" "$TARGET" > "$TARGET.tmp" && mv "$TARGET.tmp" "$TARGET"
+# Remove exactly the clause substring, not the whole line: the clause is the
+# first item in a multi-line `guard` condition list —
+#   guard !isApplyingProgrammatically,
+#         let ratios = desiredRatios, bounds.width > 0, bounds.height > 0
+#   else { return }
+# — and deleting the entire first line would leave `let ratios = ...` as a
+# dangling statement with no `guard` keyword, a syntax error rather than the
+# intended semantic change. Removing just the substring leaves a
+# still-valid `guard let ratios = ..., bounds.width > 0, bounds.height > 0
+# else { return }`.
+python3 -c "
+import sys
+path = sys.argv[1]
+clause = sys.argv[2]
+text = open(path).read()
+assert text.count(clause) == 1, f'expected exactly one occurrence, found {text.count(clause)}'
+open(path, 'w').write(text.replace(clause, '', 1))
+" "$TARGET" "$GUARD_CLAUSE"
 
 echo "==> building the known-bad worktree (make mac)"
 if ! make -C "$WORKTREE_DIR" mac >/tmp/nostromo-launch-smoke-validate-bad-build.log 2>&1; then

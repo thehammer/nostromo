@@ -284,13 +284,23 @@ def _cpu_settled(ev):
 @detector("no-zero-size-laid-out-pane", GATE)
 def _no_zero_size_laid_out_pane(ev):
     key, name = "no-zero-size-laid-out-pane", "no zero-size laid-out pane"
-    ok = ev.panes_scanned > 0 and not ev.notdrawable_violations
+    # Deliberately NOT gated on `panes_scanned > 0`: this mirrors
+    # `PaneFirstPaintAudit.verdict` itself, which reports `.healthy` whenever
+    # there is nothing to judge (no content, no window, no completed layout
+    # pass) — the same "nothing to violate" state as a tree with no
+    # PaneContentNSView-backed panes at all (e.g. a single `repl` leaf, which
+    # is never registered in the pane registry `panesMeasured` reads from).
+    # That is not this run's own setup failing to measure anything; it's a
+    # completely normal tree shape, and the fixture-rot demonstration this
+    # check exists to pass depends on it staying PASS here so the failure
+    # shows up in `multi-pane-laid-out`/`split-ratios-applied` (REACH,
+    # INCONCLUSIVE) instead — "multi-pane layout not reached", not a FAIL
+    # this detector has no business raising over a tree it was never asked
+    # to judge.
+    ok = not ev.notdrawable_violations
     measured = (f"{ev.panes_scanned} pane observation(s) scanned, "
                 f"{len(ev.notdrawable_violations)} violation(s)")
-    if ev.panes_scanned == 0:
-        cause = "no pane was ever measured — nothing was scanned"
-    else:
-        cause = "; ".join(ev.notdrawable_violations[:3])
+    cause = "; ".join(ev.notdrawable_violations[:3])
     return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
                         observations=ev.panes_scanned)
 

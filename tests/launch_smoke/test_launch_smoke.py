@@ -391,55 +391,70 @@ class VerdictCausePassInvariantTests(unittest.TestCase):
 
 class UniversalVacuityTests(unittest.TestCase):
     """On evidence that observed nothing at all, no registered detector may
-    produce a passing verdict, and the aggregate must be INCONCLUSIVE with a
-    named cause. Mirrors T1a in transcript_load's suite.
+    produce a passing verdict — with one pinned, documented exception, in the
+    same spirit as transcript-load-report.py's two-row-wide STREAM/PROCESS
+    exemption from its own universal vacuity test (see that module's
+    docstring: "these CAN pass on a file holding one clean line ... the
+    exemption exists, it is two rows wide, and moving a criterion into it
+    fails the suite until someone edits that line on purpose").
+
+    `no-zero-size-laid-out-pane` is that exemption here, and it is
+    load-bearing, not an oversight: verified empirically by actually running
+    `bin/nostromo-launch-smoke` against the fixture daemon serving a
+    single-`repl`-leaf tree instead of the split tree (the literal
+    fixture-rot demonstration the PRD requires). `repl` is a `ReplView`, not
+    a `PaneContentNSView`, so it is never registered in the pane registry
+    `panesMeasured` reads from — a perfectly healthy, ordinary tree
+    legitimately produces `panes_scanned == 0` and zero violations. Gating
+    this detector on `panes_scanned > 0` (as an earlier revision did) made it
+    FAIL on that tree, which — because a GATE FAIL always dominates
+    `aggregate()` — reported the whole run FAIL instead of the required
+    INCONCLUSIVE "multi-pane layout not reached", breaking the fixture-rot
+    demonstration outright. This mirrors `PaneFirstPaintAudit.verdict` itself
+    (`macOS/Nostromo/UI/PaneFirstPaintAudit.swift`): it reports `.healthy`
+    whenever there is nothing to judge (no content, no window, no completed
+    layout pass) — "nothing to violate" is not the same failure mode as
+    "something was measured and it's wrong," and only the latter is what
+    this detector exists to catch.
     """
 
-    def test_no_registered_detector_passes_on_evidence_empty(self):
+    #: Detectors that may legitimately PASS on `Evidence.empty()`. Exactly
+    #: one entry, pinned here the same way transcript-load-report.py pins
+    #: its STREAM/PROCESS partition — widening this is a visible, deliberate
+    #: edit, not a silent drift.
+    VACUOUS_PASS_EXEMPT = frozenset({"no-zero-size-laid-out-pane"})
+
+    def test_no_registered_detector_passes_on_evidence_empty_except_the_pinned_exemption(self):
         verdicts = launch_smoke.evaluate_evidence(launch_smoke.Evidence.empty())
-        offenders = [v for v in verdicts if v.state == launch_smoke.PASS]
+        offenders = [
+            v for v in verdicts
+            if v.state == launch_smoke.PASS and v.key not in self.VACUOUS_PASS_EXEMPT
+        ]
         self.assertEqual(
             offenders, [],
             f"detectors passed on Evidence.empty(): {[v.key for v in offenders]}",
         )
+        # And the exempted detector really does still PASS here — otherwise
+        # the exemption itself would be dead code nobody's fixture exercises.
+        exempted = keyed(verdicts)[next(iter(self.VACUOUS_PASS_EXEMPT))]
+        self.assertEqual(exempted.state, launch_smoke.PASS)
 
-    # NOTE for Cody/Archie: no test here asserts
-    # `aggregate(evaluate_evidence(Evidence.empty())) == INCONCLUSIVE`, even
-    # though the module contract states it. It is not achievable given the
-    # rest of the *same* contract, taken literally:
-    #   - "alive-at-window-end" (GATE) has `ok = alive_at_window_end is True`.
-    #     On Evidence.empty(), alive_at_window_end is None, so ok=False, and
-    #     gate_verdict() can only produce FAIL for ok=False (GATE has no
-    #     INCONCLUSIVE branch by construction) -> FAIL.
-    #   - "cpu-settled" (GATE) is explicitly specified to FAIL (not
-    #     INCONCLUSIVE) when cpu_percent is None: "could not measure CPU".
-    #     On Evidence.empty(), cpu_percent is None -> FAIL.
-    #   - aggregate()'s precedence is FAIL > INCONCLUSIVE > PASS,
-    #     unconditionally.
-    # So two GATE detectors independently and correctly FAIL on totally
-    # barren evidence per their own literal spec, and any GATE FAIL forces
-    # aggregate() to FAIL — never INCONCLUSIVE — regardless of what the three
-    # REACH detectors report. This was verified against a reference
-    # implementation of the literal spec (all seven detectors, no invented
-    # behavior): aggregate(evaluate_evidence(Evidence.empty())) came back
-    # ("FAIL", "process died before window end"), not INCONCLUSIVE. See the
-    # handoff summary for the two design options that would resolve this
-    # (gate the GATE detectors' evaluation on the REACH phase having actually
-    # observed something, or accept that Evidence.empty() is a synthetic
-    # fixture that never arises from a real main() and re-scope this specific
-    # claim to whatever barren-but-non-empty fixture actually can occur).
     def test_no_registered_detector_is_inconclusive_since_gate_never_is_and_reach_never_fails(self):
-        # What IS provable without resolving the tension above: every verdict
-        # on Evidence.empty() is either INCONCLUSIVE (a REACH detector) or
-        # FAIL (a GATE detector) — never PASS — which is exactly
-        # `test_no_registered_detector_passes_on_evidence_empty` above,
-        # restated per-kind so a reader sees why the aggregate can't be
-        # INCONCLUSIVE here without re-deriving it.
+        # Every verdict on Evidence.empty() is either INCONCLUSIVE (a REACH
+        # detector), FAIL (a GATE detector), or PASS (the one pinned
+        # exemption above) — never an unpinned PASS — which is exactly
+        # `test_no_registered_detector_passes_on_evidence_empty_except_the_pinned_exemption`
+        # above, restated per-kind so a reader sees why the aggregate can't
+        # be INCONCLUSIVE here without re-deriving it (some GATE detector
+        # always FAILs on totally barren evidence, and a GATE FAIL always
+        # dominates `aggregate()` — see AggregateTests below).
         verdicts = launch_smoke.evaluate_evidence(launch_smoke.Evidence.empty())
         for v in verdicts:
             kind = launch_smoke.registration(v.key).kind
             with self.subTest(key=v.key, kind=kind):
-                if kind == launch_smoke.REACH:
+                if v.key in self.VACUOUS_PASS_EXEMPT:
+                    self.assertEqual(v.state, launch_smoke.PASS)
+                elif kind == launch_smoke.REACH:
                     self.assertEqual(v.state, launch_smoke.INCONCLUSIVE)
                 elif kind == launch_smoke.GATE:
                     self.assertEqual(v.state, launch_smoke.FAIL)
@@ -595,16 +610,6 @@ def mutate_zero_size_pane_violation():
     )
 
 
-def mutate_pane_scan_never_happened():
-    # Same reasoning as mutate_crash_scan_never_happened: zero panes were
-    # ever scanned, so "zero violations" is not evidence of health.
-    return (
-        healthy_evidence()._replace(panes_scanned=0, notdrawable_violations=()),
-        launch_smoke.FAIL,
-        None,
-    )
-
-
 #: registry key -> list of (builder returning (evidence, expected_state,
 #: cause_substring_or_None)) — every registered detector must appear at least
 #: once. `cause_substring_or_None` is only checked when not None, since the
@@ -623,10 +628,12 @@ SENSITIVITY = {
         mutate_crash_scan_never_happened,
     ],
     "cpu-settled": [mutate_cpu_unmeasured, mutate_cpu_wedged_at_zero, mutate_cpu_pinned],
-    "no-zero-size-laid-out-pane": [
-        mutate_zero_size_pane_violation,
-        mutate_pane_scan_never_happened,
-    ],
+    # `no-zero-size-laid-out-pane`: deliberately only one mutation, unlike
+    # its GATE siblings above. There is no "zero panes scanned" failure case
+    # for this detector — see `PaneScanNeverHappenedStillPassesTests` below
+    # and `UniversalVacuityTests`'s docstring for why that absence is
+    # intentional, not an oversight.
+    "no-zero-size-laid-out-pane": [mutate_zero_size_pane_violation],
 }
 
 #: All the (evidence, ...) fixtures the sensitivity mutations produce, used to
@@ -666,6 +673,30 @@ class CriterionSensitivityTests(unittest.TestCase):
                             f"{key}/{build.__name__}: cause {row.cause!r} does not "
                             f"contain {cause_substring!r}",
                         )
+
+
+class PaneScanNeverHappenedStillPassesTests(unittest.TestCase):
+    """`no-zero-size-laid-out-pane` must PASS when zero panes were ever
+    scanned — the load-bearing counterpart to
+    `UniversalVacuityTests.VACUOUS_PASS_EXEMPT` above. `panes_scanned == 0`
+    is the ordinary, healthy shape of a tree with no `PaneContentNSView`-
+    backed panes (a single `repl` leaf — `repl` is a `ReplView`, never
+    registered in the pane registry `panesMeasured` reads from), not evidence
+    that this run's own plumbing failed to measure anything. Verified
+    empirically: this is precisely the diagnostics shape
+    `bin/nostromo-launch-smoke` observed when actually run against the
+    fixture daemon serving a single-leaf tree instead of the split tree — the
+    literal fixture-rot demonstration the PRD requires to report
+    INCONCLUSIVE ("multi-pane layout not reached"), which an earlier
+    revision of this detector broke by FAILing on exactly that shape (a GATE
+    FAIL always dominates `aggregate()`, so the whole run read FAIL instead).
+    """
+
+    def test_zero_panes_scanned_and_zero_violations_still_passes(self):
+        ev = healthy_evidence()._replace(panes_scanned=0, notdrawable_violations=())
+        row = keyed(launch_smoke.evaluate_evidence(ev))["no-zero-size-laid-out-pane"]
+        self.assertEqual(row.state, launch_smoke.PASS, row)
+        self.assertIsNone(row.cause)
 
 
 class DetectorKindInvariantTests(unittest.TestCase):
