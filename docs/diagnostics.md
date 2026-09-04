@@ -199,3 +199,4 @@ turns "the daemon probably didn't send something empty" into "the daemon
 logged N rows and the client received exactly N rows."
 
 <!-- scratch: skip-demo touch -->
+<!-- retrigger -->
