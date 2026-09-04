@@ -287,7 +287,7 @@ unbinds it.**
 | `nostromo.set_pane_content` | **Unbinds** the pane — agent-authored content is authoritative from here on, or the next automatic push would silently overwrite it. |
 | `perri.load_pr` **with** `highlights` | Unbinds `diff` — highlights are final content. |
 | `perri.load_pr` **without** `highlights` | Binds `diff` to `perri.get_current_pr`. |
-| `perri.clear_current_pr` | Binds both `diff` (to `perri.get_current_pr` — its own empty state) and `queue` (to `perri.list_pr_queue`). |
+| `perri.clear_current_pr` | Resolves which of the focus's *live* panes currently hold PR-review content and which hold the queue from the tree and its existing bindings — any pane bound to `perri.get_current_pr`/`perri.get_pr_diff`/`perri.get_pr_conversation` counts as PR content, any pane bound to `perri.list_pr_queue` counts as the queue, and (the one legacy exception) an *unbound* pane literally named `diff`/`queue` counts too, since `perri.load_pr({highlights})` leaves `diff` unbound in a `perri-standard` focus. Only a pane that was unbound gets (re)bound here — a pane already bound to `perri.get_pr_diff`/`perri.get_pr_conversation` (a curated tab) is never repurposed onto a different source. |
 
 Bindings persist across a daemon restart, `params` included; a restarted
 daemon repaints every bound pane immediately, with no tool call. The one
@@ -488,20 +488,28 @@ Source: `src/mcp/tools/perri_mutators.rs`, `src/data/perri_current_pr.rs`
 
 ### `perri.clear_current_pr`
 
-Clear the currently-loaded PR from Perri's diff pane.
+Clear the currently-loaded PR from every pane that's showing it — whichever
+layout template built the focus, and whatever those panes happen to be named.
 
 - **Daemon**: removes `current-pr.json` (a no-op, not an error, if it's
   already absent), touches both `current-pr.dirty` and `queue.dirty`,
-  signals both native sources' refresh channels, pushes `"No PR loaded."`
-  to the `diff` pane, and pushes `Loading` (first paint only — same
-  suppression rule) then the current PR-queue list to the `queue` pane (via
-  the same fetcher `nostromo.apply_layout` uses).
+  signals both native sources' refresh channels, then closes every curated
+  review tab whose PR just stopped being under review (same teardown
+  `perri.load_pr` triggers on a PR change — a no-op for a focus with no
+  curated regions, e.g. one still driving `perri-standard`). It then resolves
+  the focus's *remaining* live panes into "holds PR content" vs. "holds the
+  queue" (see the bindings table above) and, for each: a PR-content pane gets
+  `"No PR loaded."` pushed (rebinding it to `perri.get_current_pr` first, but
+  only if it wasn't already bound to something else); a queue pane gets
+  `Loading` (first paint only — same suppression rule) then the current
+  PR-queue list (via the same fetcher `nostromo.apply_layout` uses), fetched
+  once and pushed to every queue pane found.
 - **Standalone TUI**: removes the file/touches the sentinel via `PerriView`
   only — no pane pushes.
 
 **Input**: `{ "view_id": "optional — daemon-hosted only" }`
 
-**Output**: `{ "ok": true }`, optionally with a `warnings` array (daemon).
+**Output**: `{ "ok": true, "cleared": ["<pane ids pushed the no-PR placeholder>"], "queue": ["<pane ids refreshed with the queue>"], "closed": ["<pane ids the curated teardown closed>"] }`, optionally with a `warnings` array (daemon).
 
 **Errors**: `not_supported` (daemon only), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only).
 
@@ -711,11 +719,14 @@ sheet to.
   subscribed topics, or set `renders_decisions: true` on its `Subscribe`
   frame — either is a claim that it can actually present the request to a
   human and answer it. A client that merely subscribed to everything
-  (`topics: []`, e.g. the connected-but-still-headless iOS app) does **not**
-  count until it declares `renders_decisions: true`, even though it still
-  receives `decision_request` broadcasts like any other subscriber. Returned
-  **immediately** rather than blocking for the full timeout — an agent
-  blocking on a closed GUI for minutes is a worse failure than a fast
+  (`topics: []`) does **not** count until it declares
+  `renders_decisions: true`, even though it still receives `decision_request`
+  broadcasts like any other subscriber. As of `ios-curated-view-parity` W3,
+  iOS presents and answers decisions and subscribes with
+  `renders_decisions: true` — a phone-only setup (no Mac connected) is now a
+  valid operator and `ask_decision` no longer fails fast or times out on it.
+  Returned **immediately** rather than blocking for the full timeout — an
+  agent blocking on a closed GUI for minutes is a worse failure than a fast
   refusal.
 - `{ "error": "timeout" }` — nobody answered within `timeout_secs`.
 - `{ "error": "cancelled" }` — the asking session died while this call was
@@ -730,11 +741,29 @@ stacked.
 
 **Answer-once.** A decision can be answered exactly once, enforced daemon-side
 by `DecisionRegistry` (a second answer for an already-resolved `request_id` is
-logged and never forwarded to the waiting caller) *and* client-side by
-`DecisionStore`, which holds resolved state outside the sheet so a
-reconstructed sheet for the same request can never re-arm and send twice —
-the same class of bug `TurnInteractionStore` exists to prevent for
-`AskQuestionView`.
+logged and never forwarded to the waiting caller) *and* client-side by each
+client's own `DecisionStore` (macOS: `macOS/Nostromo/UI/DecisionStore.swift`;
+iOS/shared: `Shared/NostromoKit/Sources/NostromoKit/Store/DecisionStore.swift`),
+which holds resolved state outside the presenting view so a reconstructed
+sheet for the same request can never re-arm and send twice — the same class
+of bug `TurnInteractionStore` exists to prevent for `AskQuestionView`.
+
+**iOS (`ios-curated-view-parity` W3).** iOS presents a modal sheet above its
+root tab view — never from a region or focus view, so answering a decision
+never changes which tab the operator is on — naming the prompt, the optional
+detail, the display name of the focus that asked (falling back to the raw
+tag if unknown), and one control per choice showing that choice's own
+optional `detail`. Answering takes exactly one tap: unlike the queue's
+swipe-to-approve, there is no confirmation dialog, because the modal itself
+already interrupted the operator with the full context of what they're
+choosing. `DaemonStore.pendingDecisions` is a queue, not a slot — the daemon
+allows one active request per focus tag, so two different focuses can each
+have a decision outstanding at once, and both are eventually presented and
+answered, oldest first. A request this client has already answered, or that
+the daemon reports resolved elsewhere (`decision_resolved`), renders as
+already-answered rather than as a live prompt with inert controls, and a
+system-initiated close (superseded by an answer elsewhere, or by that
+notice) sends no `decision_answer` frame at all.
 
 **Presented once, app-wide; resolves everywhere.** Nostromo can open one
 window per attached display, but a decision is never presented more than
@@ -781,7 +810,9 @@ means deciding a permission posture, which is a different feature.
 
 Source: `src/mcp/tools/ask_decision.rs`, `src/ipc/decisions.rs`, `src/ipc/protocol.rs`
 (`ServerMsg::DecisionResolved`), `macOS/Nostromo/UI/DecisionPresenter.swift`,
-`macOS/Nostromo/UI/DecisionStore.swift`
+`macOS/Nostromo/UI/DecisionStore.swift`, `Shared/NostromoKit/Sources/NostromoKit/Store/DecisionStore.swift`,
+`Shared/NostromoKit/Sources/NostromoKit/Store/DaemonStore.swift`,
+`iOS/Nostromo/Views/DecisionSheetView.swift`, `iOS/Nostromo/NostromoApp.swift`
 
 ---
 

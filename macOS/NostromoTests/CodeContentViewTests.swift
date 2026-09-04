@@ -77,6 +77,46 @@ final class CodeContentViewTests: XCTestCase {
         }
     }
 
+    // MARK: 29. drawHashMarksAndLabels feeds CodePaneRenderAudit
+
+    func testDrawHashMarksAndLabelsFeedsCodePaneRenderAudit() throws {
+        let source = try Self.codeContentViewSource()
+        XCTAssertTrue(source.contains("CodePaneRenderAudit.Measurements("), """
+            drawHashMarksAndLabels must construct a CodePaneRenderAudit.Measurements from the pass it \
+            just drew — removing this call would silently disable the tripwire this diagnostics job \
+            exists to add, leaving a rare blank-body-with-correct-gutter render bug undetectable again.
+            """)
+        XCTAssertTrue(source.contains("CodePaneRenderAudit.verdict("), """
+            some path reachable from drawHashMarksAndLabels must hand its Measurements to \
+            CodePaneRenderAudit.verdict( — this may live in a different method than \
+            drawHashMarksAndLabels itself (e.g. a closure/hook it calls), but if verdict( is never \
+            invoked at all the audit computes a verdict nobody ever reads, which is the same as not \
+            having a tripwire.
+            """)
+    }
+
+    // MARK: 30. The off-by-one guard's counter arithmetic survives untouched
+
+    func testRowIncrementGuardArithmeticIsUnperturbedByTheAuditWiring() throws {
+        let source = try Self.codeContentViewSource()
+        let rowIncrementLines = Self.lines(containing: "row += 1", in: source)
+        XCTAssertEqual(rowIncrementLines.count, 1, """
+            "row += 1" must appear exactly once in CodeContentView.swift — this counter is the fix for \
+            a real, previously-shipped off-by-one bug (see the large comment above it in \
+            drawHashMarksAndLabels), and this diagnostics job must not perturb it, whether by \
+            duplicating it, deleting it, or introducing a second increment site while wiring in the \
+            audit:
+            \(rowIncrementLines.joined(separator: "\n"))
+            """)
+
+        XCTAssertTrue(source.contains("if !isFirstFragment && isParagraphStart"), """
+            the guard condition that gates "row += 1" — if !isFirstFragment && isParagraphStart — must \
+            still be present verbatim; this is the exact condition the off-by-one fix depends on, and \
+            this diagnostics job touches drawHashMarksAndLabels only to add measurement/audit code \
+            around it, never to change when the row counter advances.
+            """)
+    }
+
     // MARK: - Helpers
 
     /// `CodeContentView.swift` is not compiled into this target, so it has to

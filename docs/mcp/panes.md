@@ -199,11 +199,55 @@ does. Unread state (a content push for a tab that isn't currently frontmost)
 is derived entirely client-side — the daemon has no business knowing which
 tab the operator is looking at.
 
+**`json_snapshot`/`unknown` decode and equality (`fix/per-focus-state-eviction`).**
+Until this fix, macOS's local JSON decoder (`Models.swift`'s private
+`AnyDecodable`) had no keyed-container branch, so a `json_snapshot`/`unknown`
+`value` that was a JSON *object* silently decoded to an empty value and
+rendered nothing — NostromoKit's own decoder (used by iOS) never had this
+gap. That decoder was replaced with `JSONValue`, a recursive
+`Decodable & Equatable` type that decodes objects correctly, so an object
+payload now renders on macOS the same generic key/value rows iOS has always
+shown. The equality fix is not just cosmetic: a `json_snapshot`/`unknown`
+push with byte-identical content is now suppressed by the same client-side
+no-op guard every other content kind already got (previously these two kinds
+compared unequal unconditionally, so a repeated push always re-rendered the
+pane — a flicker/scroll-reset/spinner cost paid on every redundant refresh).
+
 iOS got decoder correctness only in W1: a tabs node's children flattened into
 the existing per-pane `TabView` alongside every other non-repl pane, with no
 dedicated tabs UI, no `active`/`focused_pane` honouring, and tabs labelled
 from the pane id rather than `labels`. `ios-curated-view-parity` W5 replaced
 that with a real compact tab strip — see below.
+
+### Split ratio persistence (macOS)
+
+A `Split` node's `ratios` are the daemon's *default*, not the last word.
+`DynamicFocusView` treats a split's on-disk ratios as client-side operator
+state: once an operator drags a divider, that ratio is saved to
+`UserDefaults` under `nostromo.dynlayout.<tag>.<path>` (`tag` is the focus's
+session tag, `path` is the tree path — `"root"`, `"root.0"`, `"root.tab1"`,
+…) and wins over whatever the daemon broadcasts next, so the workspace looks
+the same across a content refresh, a tab switch, or a relaunch. Only a
+genuine agent-authored structural change (`LayoutChangeClassifier`'s
+`.splitTopology`) clears it, and the operator can always clear it manually
+via a focus's "Reset Layout" quick action.
+
+Two things guard that state so it can't strand the operator:
+
+- **Not every resize is an operator drag.** Programmatic ratio application
+  (`RatioSplitView` applying `desiredRatios`) and other non-operator resize
+  churn (window resize, fullscreen, display reconfiguration) never get
+  written back to disk — only `RatioPersistencePolicy.shouldPersist` returning
+  true does that, and it requires the resize not be our own doing.
+- **A ratio that would collapse a pane is refused, not written.** Any share
+  below `RatioPersistencePolicy.minimumShare` (5%) leaves a pane with no
+  grabbable divider edge and no visible content — effectively un-recoverable
+  from the UI — so it's never persisted, and a value already on disk that
+  fails this check (or whose element count no longer matches the split's
+  child count) is discarded the next time that split is built rather than
+  applied. If a focus's detail region ever renders at implausible width, look
+  at `defaults read com.hammer.nostromo` for a `nostromo.dynlayout.*` key
+  before suspecting the daemon's tree.
 
 ### Client rendering (iOS): two presentations, one width test
 
@@ -372,6 +416,14 @@ reaches the pane tree on either platform (R1), so it doesn't appear in
 `TranscriptView`'s input bar (or as a plain bottom inset on a non-repl
 surface). See `docs/activity.md` for the full ambient-activity picture,
 including where iOS's client-side retention bounds diverge from macOS's.
+
+Decision modals (`ios-curated-view-parity` W3) are likewise not a pane or a
+tab: a `decision_request` never reaches the pane tree, so it doesn't appear
+in `PaneSurfaceView`'s switch either. It's a `.sheet` presented from
+`iOS/Nostromo/NostromoApp.swift`, above the root `TabView` rather than from
+any region or focus view — a decision arriving while the operator is on a
+given tab leaves them on that tab once they've answered. See
+`docs/mcp/tools.md`'s "Decision modals" section for the full behavior.
 
 ---
 
@@ -771,7 +823,7 @@ views:
 | **R5** focus asymmetry | `placement::place` unconditionally makes the target tab frontmost, new or reused, by construction of `tab_index`; `tools::show` sends `FocusLayout` with `focused_pane` set to it unconditionally. There is no configuration knob for this — a deliberate, settled PRD decision. |
 | **R6** no pointless motion | **Enforced on the client, not here.** The daemon has no way to know what the operator's viewport is currently showing, so `nostromo.show` always sends the anchor and lets W2's client-side `ScrollDecision` decide whether that means actually scrolling. This is the one rule with no representation anywhere in `src/mcp/views/`. |
 | **R7** modals are not a content channel | **Enforced by omission.** `ViewType` has no modal variant and `nostromo.show`'s schema has no free-text content field (see `docs/mcp/tools.md`) — there is no plumbing through which a decision could be routed as a "view." W6 owns the decision surface. |
-| **R8** PR change resets | `placement::place`, when a `pr_conversation`/`pr_diff` show names a `(repo, number)` other than the one currently live in the detail region; and `placement::reset_for_pr_change`, called from `tools::show::reset_for_pr_change`, which `perri.load_pr`/`perri.clear_current_pr` invoke when the PR under review itself changes. Both close every `file`/`ticket` tab and the previous PR's conversation/diff tabs, keeping only the new PR's. |
+| **R8** PR change resets | `placement::place`, when a `pr_conversation`/`pr_diff` show names a `(repo, number)` other than the one currently live in the detail region; and `placement::reset_for_pr_change`, called from `tools::show::reset_for_pr_change`, which `perri.load_pr`/`perri.clear_current_pr` invoke when the PR under review itself changes. Both close every `file`/`ticket` tab and the previous PR's conversation/diff tabs, keeping only the new PR's. Teardown alone isn't the whole story for `perri.clear_current_pr`: a paramless-bound PR tab survives it (it derives its identity from "the PR under review," which is now none), so `perri.clear_current_pr` also resolves whatever PR-content panes remain and pushes the no-PR placeholder to them — see `perri.clear_current_pr` in `docs/mcp/tools.md`. |
 
 ### The `perri-curated` layout
 
@@ -814,6 +866,51 @@ leaving zero survivors in the region.
 
 ---
 
+## Pane ids are recycled — client state must be too
+
+`new_pane_id` (`src/mcp/views/placement.rs`) allocates the lowest free
+`<prefix>.<n>` id for a tabbed region (e.g. `detail.0`) — it does not mint a
+fresh, ever-increasing id. The same id is reissued the moment its previous
+occupant's tab closes: R8's PR-change reset tears down every
+`pr_conversation`/`pr_diff`/`file`/`ticket` tab in the detail region, and the
+very next `nostromo.show` can hand `detail.0` right back out for a
+**completely different view**.
+
+This makes a pane id a **slot**, not an identity. A client that keys any
+per-pane cache — a rendered document, a scroll offset, a "last rendered this
+content, skip the repaint" check, whatever a given content-kind renderer
+holds onto between pushes — by pane id alone, and never clears that cache
+when the pane's occupant changes, will go on rendering a new PR's diff with
+the previous PR's document still cached underneath it: a gutter, a cached
+line count, or an idempotent-push guard built on top of that stale cache is
+now describing a document nobody asked for.
+
+Two things a client must do to stay correct under recycling:
+
+- **Prune per-pane content/freshness/address state down to the pane ids
+  named by the *current* tree, on every structural layout broadcast** — not
+  only when a later content push happens to touch that pane. A structural
+  broadcast and the content push(es) that follow it are separate messages;
+  there is a real (short) window between them where a recycled pane id has
+  no content yet. Show a plain "waiting for content…" placeholder in that
+  window — that's the correct, honest intermediate state — rather than
+  carrying the previous occupant's content forward into it.
+- **Clear a content-kind renderer's own cached state the moment that pane
+  stops being rendered as that kind** — not just on a content *change*
+  within the same kind, but on the transition away from the kind
+  altogether. Otherwise a renderer that's hidden and later reshown
+  resurfaces holding whatever document it last had, independently of what
+  the pane actually contains now — e.g. a line-number gutter left over from
+  a file that isn't on screen anymore, drawn over whatever text a different
+  kind is now showing in the same space.
+
+(Nostromo's macOS client implements both of these — see
+`AppStore.swift`'s `.focusLayout` handling for the prune, and
+`DynamicFocusView.swift`'s `PaneContentNSView.update` /
+`CodeContentView.clearContent()` and its siblings for the per-kind clear.)
+
+---
+
 ## Views and panes
 
 ### `perri` — PR review view
@@ -839,7 +936,7 @@ leaving zero survivors in the region.
 | Tool | Effect |
 |------|--------|
 | `perri.load_pr({ number, repo, highlights? })` | Writes `current-pr.json` + touches `.dirty` → native watcher fetches PR diff |
-| `perri.clear_current_pr()` | Removes `current-pr.json` + touches `.dirty` → diff pane clears |
+| `perri.clear_current_pr()` | Removes `current-pr.json` + touches `.dirty` → closes stale curated tabs (R8) and pushes the no-PR placeholder to whatever live pane holds PR content, wherever the layout template put it |
 | `perri.set_selected_index({ index })` | Moves the queue selection cursor |
 
 ---

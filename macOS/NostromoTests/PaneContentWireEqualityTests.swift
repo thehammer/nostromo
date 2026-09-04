@@ -84,29 +84,178 @@ final class PaneContentWireEqualityTests: XCTestCase {
         XCTAssertNotEqual(lhs, rhs)
     }
 
-    // MARK: - .jsonSnapshot (conservative "always changed")
+    // MARK: - .jsonSnapshot
+    //
+    // Formerly "(conservative 'always changed')": `.jsonSnapshot` carried an
+    // uncomparable `Any` and hard-coded `==` to `false` for every pair — a
+    // deliberate "report changed rather than risk a false unchanged" choice.
+    // That trade-off only made sense while equality was actually impossible
+    // to compute. Now that the payload is a real Equatable `JSONValue`, the
+    // conservative choice just costs a spurious re-render of every pane in
+    // every window on every daemon push, so it's reversed below.
 
-    func testJsonSnapshotCasesWithIdenticalPayloadsAreNeverEqual() {
-        let payload: [String: Any] = ["x": 1]
+    func testJsonSnapshotCasesWithIdenticalPayloadsAreEqual() {
+        let payload = JSONValue.object(["x": .int(1)])
         let lhs = PaneContentWire.jsonSnapshot(payload)
         let rhs = PaneContentWire.jsonSnapshot(payload)
-        XCTAssertNotEqual(
+        XCTAssertEqual(
             lhs, rhs,
-            ".jsonSnapshot must compare unequal to any other value, even with an identical payload — " +
-            "this is a deliberate conservative choice (report 'changed' rather than risk a false 'unchanged')"
+            "identical .jsonSnapshot payloads must compare equal now that the payload is a real " +
+            "Equatable JSONValue rather than uncomparable Any — comparing unequal here forces a " +
+            "spurious re-render of every pane in every window on every daemon push."
         )
     }
 
-    // MARK: - .unknown (conservative "always changed")
+    func testJsonSnapshotPayloadsDifferingByALeafValueAreNotEqual() {
+        let a = PaneContentWire.jsonSnapshot(.object(["x": .object(["y": .int(1)])]))
+        let b = PaneContentWire.jsonSnapshot(.object(["x": .object(["y": .int(2)])]))
+        XCTAssertNotEqual(a, b, "a changed leaf value nested inside .jsonSnapshot must be caught")
+    }
 
-    func testUnknownCasesWithIdenticalPayloadsAreNeverEqual() {
-        let payload: [String: Any] = ["future_field": "value"]
+    func testJsonSnapshotPayloadsDifferingByAMissingKeyAreNotEqual() {
+        let a = PaneContentWire.jsonSnapshot(.object(["x": .int(1), "y": .int(2)]))
+        let b = PaneContentWire.jsonSnapshot(.object(["x": .int(1)]))
+        XCTAssertNotEqual(a, b, "a key missing from one .jsonSnapshot payload must be caught")
+    }
+
+    func testJsonSnapshotPayloadsDifferingByAnExtraKeyAreNotEqual() {
+        let a = PaneContentWire.jsonSnapshot(.object(["x": .int(1)]))
+        let b = PaneContentWire.jsonSnapshot(.object(["x": .int(1), "y": .int(2)]))
+        XCTAssertNotEqual(a, b, "a key present in only one .jsonSnapshot payload must be caught")
+    }
+
+    func testJsonSnapshotPayloadsWithAReorderedArrayAreNotEqual() {
+        // Arrays are ordered (unlike object keys) — reordering IS a content change.
+        let a = PaneContentWire.jsonSnapshot(.array([.int(1), .int(2)]))
+        let b = PaneContentWire.jsonSnapshot(.array([.int(2), .int(1)]))
+        XCTAssertNotEqual(a, b, "a reordered array nested inside .jsonSnapshot must be caught")
+    }
+
+    // MARK: - .unknown
+    //
+    // Same inversion, same reasoning, as `.jsonSnapshot` above.
+
+    func testUnknownCasesWithIdenticalPayloadsAreEqual() {
+        let payload = JSONValue.object(["future_field": .string("value")])
         let lhs = PaneContentWire.unknown(payload)
         let rhs = PaneContentWire.unknown(payload)
-        XCTAssertNotEqual(
+        XCTAssertEqual(
             lhs, rhs,
-            ".unknown must compare unequal to any other value, even with an identical payload — " +
-            "this is a deliberate conservative choice (report 'changed' rather than risk a false 'unchanged')"
+            "identical .unknown payloads must compare equal now that the payload is a real " +
+            "Equatable JSONValue rather than uncomparable Any — comparing unequal here forces a " +
+            "spurious re-render of every pane in every window on every daemon push."
+        )
+    }
+
+    func testUnknownPayloadsDifferingByALeafValueAreNotEqual() {
+        let a = PaneContentWire.unknown(.object(["x": .object(["y": .int(1)])]))
+        let b = PaneContentWire.unknown(.object(["x": .object(["y": .int(2)])]))
+        XCTAssertNotEqual(a, b, "a changed leaf value nested inside .unknown must be caught")
+    }
+
+    func testUnknownPayloadsDifferingByAMissingKeyAreNotEqual() {
+        let a = PaneContentWire.unknown(.object(["x": .int(1), "y": .int(2)]))
+        let b = PaneContentWire.unknown(.object(["x": .int(1)]))
+        XCTAssertNotEqual(a, b, "a key missing from one .unknown payload must be caught")
+    }
+
+    func testUnknownPayloadsDifferingByAnExtraKeyAreNotEqual() {
+        let a = PaneContentWire.unknown(.object(["x": .int(1)]))
+        let b = PaneContentWire.unknown(.object(["x": .int(1), "y": .int(2)]))
+        XCTAssertNotEqual(a, b, "a key present in only one .unknown payload must be caught")
+    }
+
+    func testUnknownPayloadsWithAReorderedArrayAreNotEqual() {
+        let a = PaneContentWire.unknown(.array([.int(1), .int(2)]))
+        let b = PaneContentWire.unknown(.array([.int(2), .int(1)]))
+        XCTAssertNotEqual(a, b, "a reordered array nested inside .unknown must be caught")
+    }
+
+    // MARK: - .jsonSnapshot decoding (JSONValue — the real object-payload bug)
+
+    /// The single most important test in this file. `AnyDecodable` (the type
+    /// `JSONValue` replaces) had no keyed-container branch at all, so any JSON
+    /// *object* payload fell through every `try?` in its `init(from:)` and
+    /// silently decoded to `""` — a real rendering bug, not just an equality
+    /// defect. This proves a nested object decodes to its actual structure.
+    func testJsonSnapshotDecodesAJSONObjectRatherThanCollapsingToAnEmptyValue() throws {
+        let json = """
+        {"kind":"json_snapshot","value":{"a":1,"b":{"c":[1,2,3]}}}
+        """
+        let wire = try decode(json)
+        guard case .jsonSnapshot(let value) = wire else {
+            XCTFail("Expected .jsonSnapshot, got \(wire)")
+            return
+        }
+        let expected = JSONValue.object([
+            "a": .int(1),
+            "b": .object(["c": .array([.int(1), .int(2), .int(3)])]),
+        ])
+        XCTAssertEqual(value, expected, """
+            AnyDecodable/JSONValue has no keyed-container branch — JSON objects must not \
+            collapse to an empty value.
+            """)
+    }
+
+    func testJsonSnapshotDecodesAnArrayOfObjects() throws {
+        let json = """
+        {"kind":"json_snapshot","value":[{"id":1},{"id":2}]}
+        """
+        let wire = try decode(json)
+        guard case .jsonSnapshot(let value) = wire else {
+            XCTFail("Expected .jsonSnapshot, got \(wire)")
+            return
+        }
+        XCTAssertEqual(value, .array([.object(["id": .int(1)]), .object(["id": .int(2)])]))
+    }
+
+    func testJsonSnapshotDecodesEveryScalarType() throws {
+        let json = """
+        {"kind":"json_snapshot","value":{"s":"hello","i":42,"d":3.5,"b":true}}
+        """
+        let wire = try decode(json)
+        guard case .jsonSnapshot(let value) = wire else {
+            XCTFail("Expected .jsonSnapshot, got \(wire)")
+            return
+        }
+        XCTAssertEqual(value, .object([
+            "s": .string("hello"),
+            "i": .int(42),
+            "d": .double(3.5),
+            "b": .bool(true),
+        ]))
+    }
+
+    func testJsonSnapshotDecodesJSONNullAsDotNullNotAsAString() throws {
+        let json = """
+        {"kind":"json_snapshot","value":{"x":null}}
+        """
+        let wire = try decode(json)
+        guard case .jsonSnapshot(let value) = wire else {
+            XCTFail("Expected .jsonSnapshot, got \(wire)")
+            return
+        }
+        XCTAssertEqual(value, .object(["x": .null]),
+                       "JSON null must decode to .null, not to an empty string or a dropped key")
+    }
+
+    /// Sibling of `testAPrConversationShapedPayloadWithAnUnrecognisedKindStringDecodesToUnknown`:
+    /// a `json_snapshot`-shaped frame with a garbled/unrecognised `kind` must still
+    /// decode to `.unknown` holding a real `JSONValue` for the whole frame, not throw.
+    func testAJsonSnapshotShapedPayloadWithAnUnrecognisedKindStringDecodesToUnknownHoldingARealValue() throws {
+        let json = """
+        {"kind":"json_snapshot_v2","value":{"a":1}}
+        """
+        let wire = try decode(json)
+        guard case .unknown(let value) = wire else {
+            XCTFail("Expected .unknown for an unrecognised kind string, got \(wire)")
+            return
+        }
+        XCTAssertEqual(
+            value,
+            .object(["kind": .string("json_snapshot_v2"), "value": .object(["a": .int(1)])]),
+            "an unrecognised kind must still decode the whole frame into a real JSONValue " +
+            "rather than throwing or collapsing to an empty value"
         )
     }
 

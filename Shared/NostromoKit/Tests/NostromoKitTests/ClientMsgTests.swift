@@ -83,24 +83,31 @@ final class ClientMsgTests: XCTestCase {
         )
     }
 
-    // MARK: - source guard: sendHello() must explicitly pass rendersDecisions: false
+    // MARK: - source guard: sendHello() must explicitly pass rendersDecisions: true
     //
     // `ClientSubscribe.init(topics:rendersDecisions:)` deliberately has no
     // default value for `rendersDecisions` — every construction site must
     // state it explicitly. `NetworkClient.sendHello()` is the one production
-    // call site today, and it must construct `ClientSubscribe` with
-    // `rendersDecisions: false` explicitly: iOS has no code path to render or
-    // answer a decision yet, so it must not be counted as an operator. A
-    // future job (W3) flips this to `true` once iOS can actually answer
-    // decisions — this test exists so that flip (or an accidental revert of
-    // it) is visible in the diff and caught by CI, rather than silently
-    // changing iOS's operator status.
+    // call site today.
+    //
+    // This test used to assert `rendersDecisions: false` (written by W1,
+    // correctly describing the pre-W3 state: iOS had no code path to render
+    // or answer a decision, so it had to disclaim operator status). W3 is the
+    // wedge that adds that surface — `PendingDecision`, `DecisionStore`, and
+    // `DaemonStore.answerDecision(requestId:choiceId:)` — so iOS can now
+    // actually present and answer a `decision_request`, and `sendHello()`
+    // flips to `rendersDecisions: true` accordingly: a client that can answer
+    // decisions must claim operator status, or `nostromo.ask_decision`'s
+    // `no_operator` fail-fast gate (`src/ipc/server.rs::handle_client`) has
+    // no way to know it can. This test exists so that flip (or a future
+    // accidental revert of it) is visible in the diff and caught by CI,
+    // rather than silently changing iOS's operator status.
     //
     // This is a source-text assertion, not a wire/behavior test — there's no
     // existing precedent for reading `NetworkClient.swift`'s source in this
     // target, but a plain literal-text check is the simplest thing that
     // fails the instant the literal changes.
-    func testSendHelloExplicitlyPassesRendersDecisionsFalse() throws {
+    func testSendHelloExplicitlyPassesRendersDecisionsTrue() throws {
         let testFile = URL(fileURLWithPath: #filePath)
         let networkClientURL = testFile
             .deletingLastPathComponent() // .../Tests/NostromoKitTests/ClientMsgTests.swift -> .../Tests/NostromoKitTests/
@@ -111,11 +118,13 @@ final class ClientMsgTests: XCTestCase {
         let source = try String(contentsOf: networkClientURL, encoding: .utf8)
 
         XCTAssertTrue(
-            source.contains("ClientSubscribe(topics: [], rendersDecisions: false)"),
-            "sendHello() must construct ClientSubscribe with rendersDecisions: false " +
-            "explicitly — iOS cannot render or answer decisions yet, so it must not be " +
-            "counted as an operator. If this literal changed (e.g. to `true`), that's a " +
-            "deliberate W3 change and this test's expectation should be updated alongside it."
+            source.contains("ClientSubscribe(topics: [], rendersDecisions: true)"),
+            "sendHello() must construct ClientSubscribe with rendersDecisions: true " +
+            "explicitly — W3 gives iOS a real surface to present and answer a decision, " +
+            "so it must count as an operator. If this literal reverted (e.g. back to " +
+            "`false`), that's a regression of W3's whole point and this test's " +
+            "expectation should only change alongside a deliberate decision to withdraw " +
+            "the surface."
         )
     }
 }

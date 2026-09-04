@@ -89,7 +89,7 @@ class ActivityTickerView: NSView {
             }
             .store(in: &cancellables)
 
-        Publishers.CombineLatest(AppStore.shared.$activityModels, AppStore.shared.$activityHealth)
+        Publishers.CombineLatest(AppStore.shared.$activityStreams, AppStore.shared.$activityHealth)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _, _ in self?.render() }
             .store(in: &cancellables)

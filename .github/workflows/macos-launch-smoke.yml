@@ -1,0 +1,172 @@
+name: macOS launch smoke
+
+# Advisory only (see docs/ci.md for the promotion criteria). This is a
+# separate workflow file, not a job added to ci.yml, because GitHub's
+# `paths:` filter applies at the workflow level, not the job level — folding
+# this into ci.yml would either path-filter the Rust/Python jobs that must
+# always run, or run this expensive, environmentally exposed macOS job on
+# every PR regardless of whether it could affect macOS launch behavior. It
+# also keeps a flaky new job off the workflow-level failure surface that the
+# checks in ci.yml already use to gate merges.
+
+on:
+  push:
+    branches: [main]
+    # Keep this list identical to the pull_request block below — YAML
+    # anchors would remove the duplication, but tests/ci_policy scans this
+    # file as idiomatic plain-list text rather than parsing it, so an
+    # anchor/alias pair reads as an empty filter to that policy check (and
+    # to a human skimming the diff). Duplicated on purpose.
+    paths:
+      - "macOS/Nostromo/**"
+      - "macOS/Nostromo.xcodeproj/**"
+      - "Shared/NostromoKit/**"
+      - "bin/nostromo-launch-smoke"
+      - "tests/launch_smoke/**"
+      - "tests/fixtures/focus_layout_split.json"
+      - "macOS/scripts/ps-time-seconds.awk"
+      - "macOS/scripts/launch-smoke-validate.sh"
+      - "src/ipc/protocol.rs"
+      - "Makefile"
+      - ".github/workflows/macos-launch-smoke.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "macOS/Nostromo/**"
+      - "macOS/Nostromo.xcodeproj/**"
+      - "Shared/NostromoKit/**"
+      - "bin/nostromo-launch-smoke"
+      - "tests/launch_smoke/**"
+      - "tests/fixtures/focus_layout_split.json"
+      - "macOS/scripts/ps-time-seconds.awk"
+      - "macOS/scripts/launch-smoke-validate.sh"
+      - "src/ipc/protocol.rs"
+      - "Makefile"
+      - ".github/workflows/macos-launch-smoke.yml"
+
+jobs:
+  launch-smoke:
+    name: Launch smoke (advisory)
+    # Pinned, not `macos-latest`: a silent runner-image rollover is exactly
+    # the kind of environmental change that would produce an unexplained red
+    # (or false green) on an unrelated PR. The operator's own machine is
+    # macOS 26.5.1, so this keeps local and CI on the same major.
+    runs-on: macos-26
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Explicit, not the runner's floating default — so a toolchain bump
+      # shows up as a diff in this file's git blame, not as an unexplained
+      # change in behavior inferred after the fact. See
+      # actions/runner-images' macos-26-arm64-Readme.md for the installed
+      # version table.
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+
+      - name: Log toolchain and OS versions
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      # Evidence that a WindowServer/Aqua session exists on this runner —
+      # never branched on. Runner screen size is neither guaranteed nor
+      # stable between parallel jobs on the same label (docs/ci.md), so
+      # nothing here or in bin/nostromo-launch-smoke may depend on a
+      # particular geometry.
+      - name: Log display state
+        run: system_profiler SPDisplaysDataType
+
+      # Build and launch in the same job, in one command. Never split across
+      # jobs: moving the built .app between jobs (upload/download-artifact)
+      # can attach a quarantine attribute, which makes the launch hang on an
+      # invisible Gatekeeper consent dialog instead of failing fast.
+      #
+      # continue-on-error: this check is advisory (see docs/ci.md) — neither
+      # FAIL nor INCONCLUSIVE may block a merge yet. The step's own exit
+      # code is still captured and translated into PR-visible annotations
+      # below regardless of this flag.
+      #
+      # Invokes the driver directly rather than through `make mac-smoke`
+      # (same command, same args `make mac-smoke` uses — see the Makefile's
+      # `mac-smoke` recipe) because GNU Make does not propagate a failed
+      # recipe's own exit code: any nonzero recipe exit makes `make` itself
+      # exit 2, which collapsed this check's FAIL (1) into the INCONCLUSIVE
+      # branch below on the first live rehearsal of this workflow. `make
+      # mac-smoke` remains the documented local-reproduction command
+      # (docs/ci.md) — this is purely about capturing the real exit code
+      # in CI's own annotation step.
+      - name: Run launch smoke check
+        id: smoke
+        continue-on-error: true
+        env:
+          NOSTROMO_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/launch-smoke-artifacts
+        run: |
+          set +e
+          bin/nostromo-launch-smoke
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      # Exit code -> PR-visible verdict. This is the whole reason the
+      # three-verdict contract exists: a reader must be able to tell FAIL
+      # from INCONCLUSIVE from the PR's Checks/Files tabs, without opening
+      # this step's log. `::error::`/`::warning::` workflow commands do
+      # that; nothing here changes the check's exit code or overrides
+      # continue-on-error above.
+      #
+      # Never retried. An app that crashes on one launch in three is a
+      # defect and the finding, not a flake to be smoothed over — the only
+      # thing eligible for a retry is an INCONCLUSIVE, and that retry is a
+      # human clicking "re-run job", not automation in this file.
+      - name: Report verdict
+        if: always()
+        run: |
+          set -u
+          code="${{ steps.smoke.outputs.exit_code }}"
+          report="${{ runner.temp }}/launch-smoke-artifacts/report.txt"
+          body="(no report.txt was produced)"
+          if [ -f "$report" ]; then
+            body="$(cat "$report")"
+          fi
+
+          {
+            echo "## macOS launch smoke"
+            echo
+            echo '```'
+            echo "$body"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          case "$code" in
+            0)
+              echo "launch smoke PASS"
+              ;;
+            1)
+              echo "::error::launch smoke FAIL — see the job summary for which detector fired"
+              ;;
+            2)
+              cause="$(printf '%s\n' "$body" | grep -m1 '^Verdict: INCONCLUSIVE' | sed -n 's/.*(\(.*\))/\1/p')"
+              if [ -z "$cause" ]; then
+                cause="cause not parsed from report — see the job summary"
+              fi
+              echo "::warning::launch smoke INCONCLUSIVE — $cause"
+              ;;
+            *)
+              echo "::warning::launch smoke INCONCLUSIVE — driver exited unexpectedly (code $code)"
+              ;;
+          esac
+
+      # Always uploaded, regardless of verdict: the run's report, the app's
+      # captured stdout/stderr, the diagnostics NDJSON stream, and (on FAIL)
+      # a `sample` capture. --keep-artifacts / NOSTROMO_SMOKE_ARTIFACT_DIR is
+      # purely additive on the driver side — it changes no verdict and does
+      # not affect the driver's own unconditional cleanup of what it
+      # launched.
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch-smoke-diagnostics
+          path: ${{ runner.temp }}/launch-smoke-artifacts
+          if-no-files-found: warn
+          retention-days: 14

@@ -151,6 +151,15 @@ pub(crate) const SOURCE_PR_CONVERSATION: &str = "perri.get_pr_conversation";
 /// other sync-path caller already applies.
 pub(crate) const SOURCE_TICKET: &str = "nostromo.get_ticket";
 
+/// Every source that renders whatever PR the daemon currently has under
+/// review, and therefore goes empty exactly when nothing is under review.
+/// `pane_sources.rs`'s `pr_rx` arm iterates this to re-push all three on a
+/// single watch change; `perri_mutators::resolve_perri_targets` iterates it
+/// to classify a pane as holding PR-review content by checking whether it is
+/// bound to one of these — independent of which layout template created it.
+pub(crate) const PR_BACKED_SOURCES: &[&str] =
+    &[SOURCE_CURRENT_PR, SOURCE_PR_DIFF, SOURCE_PR_CONVERSATION];
+
 /// The closed set of `source` names a `PaneSpec` may bind to. Adding a new
 /// source is a deliberate code change: add a `match` arm in [`fetch`], a
 /// constant above, list it here, and ensure the corresponding receiver is
@@ -282,6 +291,14 @@ pub(crate) fn fetch(
             if snapshot.is_null() {
                 return Ok(no_pr_loaded(args.placeholder));
             }
+            let pr_number = snapshot.get("pr_number").and_then(|v| v.as_u64());
+            let error = snapshot
+                .get("error")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if describes_no_pr(pr_number, &error) {
+                return Ok(no_pr_loaded(args.placeholder));
+            }
             match render_pr_summary(&snapshot) {
                 Some(text) => Ok(PaneContentWire::Text { text }),
                 None => Err(ApplyLayoutError::FetchFailed),
@@ -292,6 +309,9 @@ pub(crate) fn fetch(
             let Some(snap) = snapshot else {
                 return Ok(no_pr_loaded(args.placeholder));
             };
+            if describes_no_pr(snap.pr_number, &snap.error) {
+                return Ok(no_pr_loaded(args.placeholder));
+            }
             // D4: the fetch-level large-diff gate blanks `diff` and sets
             // `diff_too_large`. Say so explicitly, with the file count, rather
             // than broadcasting an empty `files` list that renders as "this PR
@@ -301,6 +321,29 @@ pub(crate) fn fetch(
             } else {
                 crate::data::unified_diff::parse_unified_diff(&snap.diff)
             };
+            // Diagnostics job (instrument-code-pane-render-diagnostics): E4
+            // shows the daemon can't produce "numbers without text", but
+            // "the daemon says it sent N rows / M bytes and the client says
+            // it received exactly that" is the assertion that turns that
+            // exoneration into proof. Counts and lengths only — never diff
+            // content.
+            let hunk_count: usize = files.iter().map(|f| f.hunks.len()).sum();
+            let line_count: usize = files
+                .iter()
+                .flat_map(|f| f.hunks.iter())
+                .map(|h| h.lines.len())
+                .sum();
+            tracing::info!(
+                repo = %snap.repo,
+                pr_number = ?snap.pr_number,
+                too_large = snap.diff_too_large,
+                changed_files = snap.changed_files,
+                file_count = files.len(),
+                hunk_count,
+                line_count,
+                diff_bytes = snap.diff.len(),
+                "apply_layout: built Diff pane content"
+            );
             Ok(PaneContentWire::Diff {
                 repo: snap.repo,
                 number: snap.pr_number,
@@ -320,6 +363,9 @@ pub(crate) fn fetch(
             let Some(snap) = snapshot else {
                 return Ok(no_pr_loaded(args.placeholder));
             };
+            if describes_no_pr(snap.pr_number, &snap.error) {
+                return Ok(no_pr_loaded(args.placeholder));
+            }
             let threads = conversation_threads_wire(&snap.threads);
             if let Some(params) = args.params {
                 validate_comment_ids(params, &threads)?;
@@ -585,6 +631,16 @@ fn file_request_context(
 /// because [`fetch`] and [`fetch_async`] both build exactly this, differing
 /// only in how hard they worked to get `text`.
 fn code_content(request: FileRequest, revision: String, text: String) -> PaneContentWire {
+    // Diagnostics job (instrument-code-pane-render-diagnostics): see the
+    // matching log in the `SOURCE_PR_DIFF` arm of `fetch` above for why this
+    // costs nothing and closes E4 empirically. Counts and lengths only.
+    tracing::info!(
+        path = %request.path,
+        revision = %revision,
+        text_len = text.len(),
+        line_count = text.lines().count(),
+        "apply_layout: built Code pane content"
+    );
     PaneContentWire::Code {
         path: request.path,
         revision,
@@ -621,6 +677,18 @@ fn no_pr_loaded(placeholder: Option<&str>) -> PaneContentWire {
     PaneContentWire::Text {
         text: placeholder.unwrap_or(NO_PR_LOADED_PLACEHOLDER).to_string(),
     }
+}
+
+/// True when a fetched PR snapshot means "nothing is under review" rather
+/// than a real PR or a real failure — the single predicate all three
+/// PR-backed sources (`SOURCE_CURRENT_PR`, `SOURCE_PR_DIFF`,
+/// `SOURCE_PR_CONVERSATION`) apply so they can't drift on what "empty" means
+/// (D5). `error.is_none()` is load-bearing: the native PR source publishes a
+/// `pr_number: None` snapshot that also carries an `error` when its GitHub
+/// client fails to initialise (see `perri_pr_native.rs`), and swallowing
+/// *that* as "no PR loaded" would hide a real failure from the operator.
+fn describes_no_pr(pr_number: Option<u64>, error: &Option<String>) -> bool {
+    pr_number.is_none() && error.is_none()
 }
 
 /// The [`PaneAddress`] a source's `params` imply, if any (W2 —
@@ -1094,6 +1162,86 @@ mod tests {
             }
         }
         assert!(saw_placeholder);
+    }
+
+    // ── describes_no_pr / the three PR-backed fetch arms (D5) ───────────────
+    //
+    // Before this fix, only a *missing* `perri_pr_rx` snapshot (`None`)
+    // triggered the placeholder — a snapshot that exists but describes "no PR
+    // under review" (the shape the native source publishes right after a
+    // clear) fell through to each source's normal rendering path and produced
+    // garbled output (an empty diff claiming to be a real PR, a summary line
+    // with no title). `describes_no_pr` is the single predicate all three
+    // arms now share, so they can't drift on what "empty" means.
+
+    /// A `PrSnapshot` with just `pr_number`/`error` varied — every other field
+    /// carries `#[serde(default)]`, so this is the minimal shape `fetch`'s
+    /// three PR-backed arms need to exercise.
+    fn snapshot_with(pr_number: Option<u64>, error: Option<&str>) -> crate::data::perri_pr::PrSnapshot {
+        serde_json::from_value(json!({
+            "pr_number": pr_number, "repo": "acme/web", "title": "Add widget",
+            "author": "alice", "url": "https://example.com", "diff": "",
+            "stale": false, "error": error
+        }))
+        .unwrap()
+    }
+
+    /// Point both `perri.get_current_pr`'s snapshot source and
+    /// `perri.get_pr_diff`/`perri.get_pr_conversation`'s (`perri_pr_rx`) at
+    /// the same snapshot — all three sources read the identical channel in
+    /// the daemon, so a single injection point exercises all three fetch
+    /// arms identically.
+    fn state_with_pr_snapshot(snap: crate::data::perri_pr::PrSnapshot) -> McpSharedState {
+        let (mut state, _bcast) = make_state();
+        let (_tx, rx) = watch::channel(Some(snap));
+        state.perri_pr_rx = rx;
+        state
+    }
+
+    #[test]
+    fn every_pr_backed_source_produces_the_placeholder_for_a_no_pr_under_review_snapshot() {
+        let state = state_with_pr_snapshot(snapshot_with(None, None));
+
+        for source in [SOURCE_CURRENT_PR, SOURCE_PR_DIFF, SOURCE_PR_CONVERSATION] {
+            let content = fetch(source, &state, FetchArgs::default())
+                .unwrap_or_else(|e| panic!("{source}: fetch failed: {e:?}"));
+            match content {
+                PaneContentWire::Text { text } => {
+                    assert_eq!(text, NO_PR_LOADED_PLACEHOLDER, "{source}");
+                }
+                other => panic!("{source}: expected the placeholder Text, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_pr_backed_source_still_surfaces_a_real_error_rather_than_the_placeholder() {
+        // D5's regression guard: `pr_number: None` alone must not swallow a
+        // real failure — the native source publishes exactly this shape (no
+        // number, an error) when its GitHub client fails to initialise.
+        let state = state_with_pr_snapshot(snapshot_with(None, Some("client init failed")));
+
+        // get_current_pr: still renders the plain-text summary (repo, no
+        // "#N"), not the placeholder — render_pr_summary doesn't itself look
+        // at `error`.
+        match fetch(SOURCE_CURRENT_PR, &state, FetchArgs::default()).unwrap() {
+            PaneContentWire::Text { text } => {
+                assert_ne!(text, NO_PR_LOADED_PLACEHOLDER);
+                assert!(text.contains("acme/web"), "expected the summary, got {text:?}");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+
+        // pr_diff / pr_conversation: still their own normal content shape,
+        // not the placeholder Text.
+        match fetch(SOURCE_PR_DIFF, &state, FetchArgs::default()).unwrap() {
+            PaneContentWire::Diff { .. } => {}
+            other => panic!("expected Diff, not the placeholder: {other:?}"),
+        }
+        match fetch(SOURCE_PR_CONVERSATION, &state, FetchArgs::default()).unwrap() {
+            PaneContentWire::PrConversation { .. } => {}
+            other => panic!("expected PrConversation, not the placeholder: {other:?}"),
+        }
     }
 
     #[tokio::test]

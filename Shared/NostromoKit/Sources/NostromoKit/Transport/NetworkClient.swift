@@ -231,12 +231,14 @@ public final class NetworkClient: ObservableObject {
     private func sendHello() {
         send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
         // Phase 0: subscribe to all topics (empty list = "everything").
-        // rendersDecisions: false — iOS has no code path to present or answer
-        // a decision-modal request yet, so it must not be counted as an
-        // operator (`nostromo.ask_decision`'s `no_operator` fail-fast gate
-        // would otherwise be defeated by a client that can never answer). W3
-        // is the wedge that adds that surface and flips this to `true`.
-        send(ClientSubscribe(topics: [], rendersDecisions: false))
+        // rendersDecisions: true — ios-curated-view-parity W3 gave iOS a
+        // real decision-modal surface (DaemonStore.pendingDecisions /
+        // DecisionStore / DecisionSheetView), so this client can now
+        // actually present and answer a `decision_request`. This claim is
+        // earned, not aspirational: `DaemonStore.handle`'s `.decisionRequest`
+        // arm is what makes it true, and a test ties the two together so
+        // they can't silently drift apart in either direction.
+        send(ClientSubscribe(topics: [], rendersDecisions: true))
     }
 
     // MARK: - Send
