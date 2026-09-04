@@ -196,12 +196,31 @@ def check_every_toRowModel_call_passes_marked(files):
     return violations
 
 
-def check_payload_text_not_referenced(files):
-    """`payload.text` appears nowhere — the deleted raw-text `.code` dump."""
+def check_payload_text_only_inside_codedocument_construction(files):
+    """`payload.text` may be referenced only inside a `CodeDocument(`
+    construction's argument list (ios-curated-view-parity W7).
+
+    Supersedes W2's absolute "`payload.text` appears nowhere" prohibition.
+    That prohibition was the whole property that mattered when `.code` had
+    no renderer at all — any reference to it was necessarily the deleted raw
+    dump. Now that `CodeSurfaceView` (W7) renders `.code` for real, the raw
+    text has to reach the screen somehow; the property that actually matters
+    is that it only ever does so by being split into `CodeDocument.lines`
+    and addressed through it, never handed straight to a rendering view.
+
+    Comments are stripped first — the same carve-out `_strip_line_comments`
+    makes everywhere else in this suite — so a comment merely *naming* the
+    old behaviour (as `CodeSurfaceView.swift`'s own header comment does,
+    explaining why W2 deleted the dump) cannot trip this check.
+    """
     violations = []
     for path, source in files:
-        if "payload.text" in source:
-            violations.append((path, "`payload.text` referenced — the deleted raw-text code dump"))
+        stripped = _strip_line_comments(source)
+        if "payload.text" not in stripped:
+            continue
+        calls = _balanced_call_args(stripped, r"\bCodeDocument\(")
+        if not any("payload.text" in call for call in calls):
+            violations.append((path, "`payload.text` referenced outside a CodeDocument( construction"))
     return violations
 
 
@@ -1028,10 +1047,185 @@ def check_region_container_reuses_the_shared_tab_strip(files):
     return violations
 
 
+# --------------------------------------------------------------------------
+# ios-curated-view-parity W7 — the `code` surface
+# --------------------------------------------------------------------------
+
+#: `PerriView.swift` truncates its own raw diff at 4000 characters/60 lines
+#: (D8) — a different, deferred surface, excluded by name from the
+#: no-truncation check below rather than fixed here.
+CODE_SURFACE_TRUNCATION_EXCLUDED_FILES = ("PerriView.swift",)
+
+
+def _code_surface_entry(files):
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "CodeSurfaceView.swift"), None)
+    return match if match else ("iOS/Nostromo/Views/Panes/CodeSurfaceView.swift", "")
+
+
+def check_code_surface_no_truncation(files):
+    """`CodeSurfaceView.swift` truncates nothing: no `prefix(`, no numeric
+    row cap on its `ForEach`, and no `lineLimit(` in the row that renders a
+    line's text.
+
+    D8: unlike `PerriView.swift`'s raw diff (truncated at 4000 characters
+    and 60 lines — a different, deferred surface, excluded here by name, not
+    fixed), a large file relies on `LazyVStack`'s own laziness rather than a
+    cap. The `lineLimit(` check is scoped to the file's `codeRow` function
+    rather than the whole file, because the header legitimately applies
+    `lineLimit(1)` to the path label (D6) — that is a one-line header, not
+    the content column this criterion is about.
+    """
+    path, source = _code_surface_entry(files)
+    if os.path.basename(path) in CODE_SURFACE_TRUNCATION_EXCLUDED_FILES:
+        return []
+    stripped = _strip_line_comments(source)
+    violations = []
+
+    if re.search(r"\.prefix\(", stripped):
+        violations.append((path, "CodeSurfaceView.swift calls .prefix( — no truncation of any kind is permitted (D8)"))
+
+    if re.search(r"ForEach\(\s*0\s*\.\.<\s*\d+", stripped):
+        violations.append((path, "CodeSurfaceView.swift's row ForEach is bounded by a numeric literal — rows must come from the document, not a cap"))
+
+    for span in _spans_after(stripped, r"func\s+codeRow\("):
+        if "lineLimit(" in span:
+            violations.append((path, "codeRow(...) applies lineLimit( to the content column"))
+
+    return violations
+
+
+def check_code_surface_no_horizontal_panning(files):
+    """`CodeSurfaceView.swift` never scrolls horizontally.
+
+    A long line wraps (D3); a phone user two-finger-panning a code view is
+    worse than a wrapped line, so there is no `ScrollView(.horizontal` and no
+    `axes: .horizontal` anywhere in this file.
+    """
+    path, source = _code_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+    if re.search(r"ScrollView\(\s*\.horizontal", stripped):
+        violations.append((path, "CodeSurfaceView.swift contains ScrollView(.horizontal"))
+    if re.search(r"axes\s*:\s*\.horizontal", stripped):
+        violations.append((path, "CodeSurfaceView.swift sets axes: .horizontal"))
+    return violations
+
+
+def check_code_surface_gutter_top_aligned_wrapping_column(files):
+    """`CodeSurfaceView.swift` renders each row as an `HStack(alignment:
+    .top` with no `lineLimit` on the line text (D3).
+
+    This is the mechanism, not just a style choice: a top-aligned gutter
+    cell beside a freely-wrapping text column is what puts a wrapped line's
+    number beside its first visual line and leaves the rest of the gutter
+    blank, structurally, with no fragment-counting arithmetic (contrast
+    macOS's `LineNumberRulerView.drawHashMarksAndLabels`).
+    """
+    path, source = _code_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+    if not re.search(r"HStack\(\s*alignment:\s*\.top", stripped):
+        violations.append((path, "CodeSurfaceView.swift has no HStack(alignment: .top — the gutter/wrap mechanism (D3)"))
+    for span in _spans_after(stripped, r"func\s+codeRow\("):
+        if "lineLimit(" in span:
+            violations.append((path, "codeRow(...) applies lineLimit( — a wrapped line must stay fully readable"))
+    return violations
+
+
+def check_code_surface_scroll_only_via_decision(files):
+    """Every `scrollTo(` call in `CodeSurfaceView.swift` sits inside a `case
+    .scrollTo` arm — never called unconditionally.
+
+    Ported from macOS's `CodeContentViewTests.
+    testCodeContentViewConsultsScrollDecisionAndOnlyScrollsFromTheScrollToBranch`,
+    broadened to accept either of the two decision types this surface
+    legitimately consults: `ScrollDecision` (an anchor arriving) and
+    `ScrollRestore` (a saved position being restored after a width-class
+    rebuild — a case macOS has no analogue of, since it has only one
+    presentation). Both share the identical `.scrollTo(target:)` case and
+    the identical discipline: a scroll is a decision, never a bare call.
+    """
+    path, source = _code_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    lines = stripped.splitlines()
+    violations = []
+    for i, line in enumerate(lines):
+        if not re.search(r"\bscrollTo\(", line):
+            continue
+        if re.search(r"case\s+(let\s+)?\.scrollTo", line):
+            continue  # this line is the case pattern itself, not a call
+        window = lines[max(0, i - 5):i + 1]
+        if not any(re.search(r"case\s+(let\s+)?\.scrollTo", w) for w in window):
+            violations.append((path, "scrollTo( call not gated by a `case .scrollTo` pattern: %s" % line.strip()))
+    return violations
+
+
+def check_code_surface_no_rebuild_on_address_change(files):
+    """No `.id(` expression in `CodeSurfaceView.swift` references `address`,
+    `anchor`, or `emphasis` (D5).
+
+    The surface's SwiftUI identity must not include the address — an
+    address-only push (a re-anchor/re-mark) must never force a rebuild of
+    the document, the row views, or their scroll position. Ported from
+    macOS's `CodeContentViewTests.
+    testCodeContentViewNeverTearsDownItsScrollOrTextViewOnUpdate` (the same
+    property, checked there by asserting `scrollView.documentView` is
+    assigned exactly once, in `init`).
+    """
+    path, source = _code_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+    # `\w*` after each root, case-insensitive: a careless `.id(anchorResolution)`
+    # or `.id(emphasisResolution)` is exactly as much a rebuild trigger as a
+    # bare `.id(address)`, and must not slip past a check anchored only to
+    # the exact identifier.
+    banned = re.compile(r"\b(address|anchor|emphasis)\w*", re.IGNORECASE)
+    for call in _balanced_call_args(stripped, r"\.id\("):
+        if banned.search(call):
+            violations.append((path, ".id(...) expression references address/anchor/emphasis: %s" % call))
+    return violations
+
+
+def check_code_surface_renders_every_resolution_case(files):
+    """Every `AnchorResolution` and `EmphasisResolution` case name is
+    referenced somewhere in `CodeSurfaceView.swift`.
+
+    Paired with the L1 exhaustive-case switches in `AnchorResolutionTests`:
+    an added case fails to compile in `CodeDocument.resolve` (no `default:`)
+    AND is invisible here until this file is updated, so both ends of "an
+    added case cannot be silently ignored" are covered.
+    """
+    path, source = _code_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    required = (".notRequested", ".resolved", ".unresolved", ".none", ".rows", ".matchedNothing")
+    violations = []
+    for case_name in required:
+        if case_name not in stripped:
+            violations.append((path, "case %s is never referenced in CodeSurfaceView.swift" % case_name))
+    return violations
+
+
+def check_code_surface_no_syntax_highlighting(files):
+    """`CodeSurfaceView.swift` builds no `AttributedString` and references no
+    highlighter dependency.
+
+    D8: macOS does not highlight either, and the wire type reserves room for
+    it. Not here, on either client.
+    """
+    path, source = _code_surface_entry(files)
+    stripped = _strip_line_comments(source)
+    violations = []
+    if "AttributedString(" in stripped:
+        violations.append((path, "CodeSurfaceView.swift constructs an AttributedString — no syntax highlighting (D8)"))
+    if re.search(r"\bsyntect\b", stripped, re.IGNORECASE):
+        violations.append((path, "CodeSurfaceView.swift references a highlighter dependency — no syntax highlighting (D8)"))
+    return violations
+
+
 CHECKS = (
     check_no_default_in_panecontentwire_switch,
     check_every_toRowModel_call_passes_marked,
-    check_payload_text_not_referenced,
+    check_payload_text_only_inside_codedocument_construction,
     check_address_plumbed_into_pane_surface,
     check_swipe_actions_do_not_reference_address,
     check_stub_strings_come_from_PaneSurfaceStub,
@@ -1062,6 +1256,13 @@ CHECKS = (
     check_region_container_computes_no_layout_fraction,
     check_no_scroll_restore_key_in_view_state,
     check_region_container_reuses_the_shared_tab_strip,
+    check_code_surface_no_truncation,
+    check_code_surface_no_horizontal_panning,
+    check_code_surface_gutter_top_aligned_wrapping_column,
+    check_code_surface_scroll_only_via_decision,
+    check_code_surface_no_rebuild_on_address_change,
+    check_code_surface_renders_every_resolution_case,
+    check_code_surface_no_syntax_highlighting,
 )
 
 
@@ -1155,15 +1356,23 @@ class ToRowModelMarkedTests(unittest.TestCase):
         self.assertEqual(check_every_toRowModel_call_passes_marked([("Synthetic.swift", source)]), [])
 
 
-class PayloadTextTests(unittest.TestCase):
-    def test_bites_on_the_deleted_raw_text_dump(self):
+class PayloadTextOnlyInsideCodeDocumentConstructionTests(unittest.TestCase):
+    def test_bites_on_a_direct_render_of_the_raw_text(self):
         source = "ScrollView { textView(payload.text) }"
-        violations = check_payload_text_not_referenced([("Synthetic.swift", source)])
+        violations = check_payload_text_only_inside_codedocument_construction([("Synthetic.swift", source)])
         self.assertEqual(len(violations), 1)
 
     def test_passes_when_absent(self):
         source = "ScrollView { textView(text) }"
-        self.assertEqual(check_payload_text_not_referenced([("Synthetic.swift", source)]), [])
+        self.assertEqual(check_payload_text_only_inside_codedocument_construction([("Synthetic.swift", source)]), [])
+
+    def test_passes_when_inside_a_codedocument_construction(self):
+        source = "let document = CodeDocument(path: p, revision: r, firstLine: 1, text: payload.text)"
+        self.assertEqual(check_payload_text_only_inside_codedocument_construction([("Synthetic.swift", source)]), [])
+
+    def test_ignores_a_comment_naming_the_deleted_dump(self):
+        source = "// W2 deleted the raw payload.text dump; W7 replaced it with CodeSurfaceView."
+        self.assertEqual(check_payload_text_only_inside_codedocument_construction([("Synthetic.swift", source)]), [])
 
 
 class AddressPlumbingTests(unittest.TestCase):
@@ -1962,6 +2171,22 @@ class WidthClassReferencedOnlyByTheAllowlistTests(unittest.TestCase):
         files = [("SomeOtherView.swift", "// WidthClass is deliberately not read here")]
         self.assertEqual(check_width_class_referenced_only_by_the_allowlist(files), [])
 
+    def test_bites_when_code_surface_view_names_width_class(self):
+        # ios-curated-view-parity W7: a file view is the same file view at
+        # both widths — W8's diff surface is the sole intended WidthClass
+        # consumer, not this one.
+        files = [("CodeSurfaceView.swift", "let w: WidthClass = .compact")]
+        violations = check_width_class_referenced_only_by_the_allowlist(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_code_surface_view_reads_horizontal_size_class(self):
+        files = [
+            ("DynamicFocusView.swift", "@Environment(\\.horizontalSizeClass) private var widthClass"),
+            ("CodeSurfaceView.swift", "@Environment(\\.horizontalSizeClass) private var widthClass"),
+        ]
+        violations = check_horizontal_size_class_read_in_exactly_one_file(files)
+        self.assertEqual(len(violations), 1)
+
 
 class NoRegionResizeAffordanceTests(unittest.TestCase):
     def test_bites_on_draggesture(self):
@@ -2127,6 +2352,136 @@ class RegionContainerReusesTheSharedTabStripTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# ios-curated-view-parity W7 — the `code` surface
+# --------------------------------------------------------------------------
+
+class CodeSurfaceNoTruncationTests(unittest.TestCase):
+    def test_bites_on_prefix(self):
+        source = "Text(document.lines[row].prefix(200))"
+        violations = check_code_surface_no_truncation([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_a_numeric_row_cap(self):
+        source = "ForEach(0..<600, id: \\.self) { row in codeRow(row) }"
+        violations = check_code_surface_no_truncation([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_lineLimit_inside_codeRow(self):
+        source = "func codeRow(_ row: Int) -> some View { Text(document.lines[row]).lineLimit(1) }"
+        violations = check_code_surface_no_truncation([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_ignores_lineLimit_outside_codeRow(self):
+        # The header's path label legitimately truncates to one line (D6) —
+        # this check is scoped to the content column, not the whole file.
+        source = "var header: some View { Text(document.path).lineLimit(1) }\nfunc codeRow(_ row: Int) -> some View { Text(document.lines[row]) }"
+        self.assertEqual(check_code_surface_no_truncation([("CodeSurfaceView.swift", source)]), [])
+
+    def test_ignores_perriview_by_path(self):
+        source = "Text(pr.diff.prefix(4000)).lineLimit(60)"
+        self.assertEqual(check_code_surface_no_truncation([("PerriView.swift", source)]), [])
+
+    def test_passes_on_clean_source(self):
+        source = "ForEach(0..<document.lineCount, id: \\.self) { row in codeRow(row) }\nfunc codeRow(_ row: Int) -> some View { Text(document.lines[row]) }"
+        self.assertEqual(check_code_surface_no_truncation([("CodeSurfaceView.swift", source)]), [])
+
+
+class CodeSurfaceNoHorizontalPanningTests(unittest.TestCase):
+    def test_bites_on_scrollview_horizontal(self):
+        source = "ScrollView(.horizontal) { content }"
+        violations = check_code_surface_no_horizontal_panning([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_axes_horizontal(self):
+        source = "ScrollView(axes: .horizontal) { content }"
+        violations = check_code_surface_no_horizontal_panning([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_clean_source(self):
+        source = "ScrollView { content }"
+        self.assertEqual(check_code_surface_no_horizontal_panning([("CodeSurfaceView.swift", source)]), [])
+
+
+class CodeSurfaceGutterTopAlignedWrappingColumnTests(unittest.TestCase):
+    def test_bites_when_no_top_aligned_hstack_exists(self):
+        source = "func codeRow(_ row: Int) -> some View { HStack { Text(\"x\") } }"
+        violations = check_code_surface_gutter_top_aligned_wrapping_column([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_lineLimit_inside_codeRow(self):
+        source = "HStack(alignment: .top) {}\nfunc codeRow(_ row: Int) -> some View { Text(document.lines[row]).lineLimit(1) }"
+        violations = check_code_surface_gutter_top_aligned_wrapping_column([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_clean_source(self):
+        source = "func codeRow(_ row: Int) -> some View { HStack(alignment: .top, spacing: 8) { Text(document.lines[row]) } }"
+        self.assertEqual(check_code_surface_gutter_top_aligned_wrapping_column([("CodeSurfaceView.swift", source)]), [])
+
+
+class CodeSurfaceScrollOnlyViaDecisionTests(unittest.TestCase):
+    def test_bites_on_an_unconditional_scrollTo(self):
+        source = "func jumpToTop(proxy: ScrollViewProxy) { proxy.scrollTo(0) }"
+        violations = check_code_surface_scroll_only_via_decision([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_gated_by_scrolldecision(self):
+        source = "switch ScrollDecision.decide(anchor: a, visibleRange: r) {\ncase .none: break\ncase .scrollTo(let row):\nproxy.scrollTo(row, anchor: .center)\n}"
+        self.assertEqual(check_code_surface_scroll_only_via_decision([("CodeSurfaceView.swift", source)]), [])
+
+    def test_passes_when_gated_by_scrollrestore(self):
+        source = "switch restoreScroll(range) {\ncase .scrollTo(let target):\nproxy.scrollTo(target, anchor: .top)\ncase .none: break\n}"
+        self.assertEqual(check_code_surface_scroll_only_via_decision([("CodeSurfaceView.swift", source)]), [])
+
+
+class CodeSurfaceNoRebuildOnAddressChangeTests(unittest.TestCase):
+    def test_bites_on_id_referencing_address(self):
+        source = "SomeView().id(address)"
+        violations = check_code_surface_no_rebuild_on_address_change([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_id_referencing_anchor(self):
+        source = "SomeView().id(anchorResolution)"
+        violations = check_code_surface_no_rebuild_on_address_change([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_id_referencing_emphasis(self):
+        source = "SomeView().id(emphasisResolution)"
+        violations = check_code_surface_no_rebuild_on_address_change([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_id_references_only_row(self):
+        source = "codeRow(row).id(row)"
+        self.assertEqual(check_code_surface_no_rebuild_on_address_change([("CodeSurfaceView.swift", source)]), [])
+
+
+class CodeSurfaceRendersEveryResolutionCaseTests(unittest.TestCase):
+    def test_bites_when_a_case_is_missing(self):
+        source = ".resolved(let row): return row\n.unresolved(let reason): notice(reason)"
+        violations = check_code_surface_renders_every_resolution_case([("CodeSurfaceView.swift", source)])
+        self.assertTrue(len(violations) > 0)
+
+    def test_passes_when_every_case_is_present(self):
+        source = ".notRequested .resolved .unresolved .none .rows .matchedNothing"
+        self.assertEqual(check_code_surface_renders_every_resolution_case([("CodeSurfaceView.swift", source)]), [])
+
+
+class CodeSurfaceNoSyntaxHighlightingTests(unittest.TestCase):
+    def test_bites_on_attributedstring_construction(self):
+        source = "let s = AttributedString(line, language: lang)"
+        violations = check_code_surface_no_syntax_highlighting([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_syntect_reference(self):
+        source = "let highlighted = Syntect.highlight(line)"
+        violations = check_code_surface_no_syntax_highlighting([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_clean_source(self):
+        source = "Text(document.lines[row])"
+        self.assertEqual(check_code_surface_no_syntax_highlighting([("CodeSurfaceView.swift", source)]), [])
+
+
+# --------------------------------------------------------------------------
 # The real gate: every check against the actual iOS/Nostromo tree.
 # --------------------------------------------------------------------------
 
@@ -2155,8 +2510,8 @@ class RealIOSTreeTests(unittest.TestCase):
         violations = check_every_toRowModel_call_passes_marked(self.files)
         self.assertEqual(violations, [], violations)
 
-    def test_payload_text_is_referenced_nowhere(self):
-        violations = check_payload_text_not_referenced(self.files)
+    def test_payload_text_is_referenced_only_inside_codedocument_construction(self):
+        violations = check_payload_text_only_inside_codedocument_construction(self.files)
         self.assertEqual(violations, [], violations)
 
     def test_address_is_plumbed_into_the_pane_surface(self):
@@ -2287,6 +2642,34 @@ class RealIOSTreeTests(unittest.TestCase):
 
     def test_region_container_reuses_the_shared_tab_strip(self):
         violations = check_region_container_reuses_the_shared_tab_strip(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_code_surface_no_truncation(self):
+        violations = check_code_surface_no_truncation(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_code_surface_no_horizontal_panning(self):
+        violations = check_code_surface_no_horizontal_panning(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_code_surface_gutter_top_aligned_wrapping_column(self):
+        violations = check_code_surface_gutter_top_aligned_wrapping_column(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_code_surface_scroll_only_via_decision(self):
+        violations = check_code_surface_scroll_only_via_decision(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_code_surface_no_rebuild_on_address_change(self):
+        violations = check_code_surface_no_rebuild_on_address_change(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_code_surface_renders_every_resolution_case(self):
+        violations = check_code_surface_renders_every_resolution_case(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_code_surface_no_syntax_highlighting(self):
+        violations = check_code_surface_no_syntax_highlighting(self.files)
         self.assertEqual(violations, [], violations)
 
 

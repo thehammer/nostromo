@@ -331,29 +331,76 @@ AppKit siblings layered over it — SwiftUI only, all the way down. `text`,
 including the queue-row marking below and the swipe-to-approve confirmation
 gate.
 
-`code`, `diff`, `pr_conversation`, and `ticket` are **not rendered** — each
-shows an honest stub instead (`PaneSurfaceStub` in NostromoKit is the single
-source of the stub copy). This is deliberate, not a gap nobody got to: the
-PRD's organizing rule is that "a surface may be absent, and a surface may be
-simplified. A surface may never look complete when it isn't." Before
-ios-curated-view-parity W2, `code` rendered its raw file text in a
-monospaced view — no gutter, no scroll-to-anchor, no emphasis, discarding
-`path`/`revision`/`first_line` entirely. That looked like a working file
-view and wasn't one; the operator had no way to tell that the line an agent
-pointed at wasn't the line she was reading. W2 deleted that rendering rather
-than keep a half-built one, and each stub names the specific addressing it
-can't show (a line, a comment, a section) rather than saying only "isn't
-available." W7 (`code`), W8 (`diff`), and W9 (`pr_conversation`/`ticket`)
-replace these stubs with real renderers; each later wedge updates this
-section when it does, so this stays the one place a reader learns the two
-clients aren't rendering the same thing.
+`diff`, `pr_conversation`, and `ticket` are **not rendered** — each shows an
+honest stub instead (`PaneSurfaceStub` in NostromoKit is the single source of
+the stub copy). This is deliberate, not a gap nobody got to: the PRD's
+organizing rule is that "a surface may be absent, and a surface may be
+simplified. A surface may never look complete when it isn't." Each stub
+names the specific addressing it can't show (a line, a comment, a section)
+rather than saying only "isn't available." W8 (`diff`) and W9
+(`pr_conversation`/`ticket`) replace these stubs with real renderers; each
+later wedge updates this section when it does, so this stays the one place a
+reader learns the two clients aren't rendering the same thing.
+
+**`code` renders for real, as of `ios-curated-view-parity` W7**
+(`iOS/Nostromo/Views/Panes/CodeSurfaceView.swift`). Before W7, `code`
+rendered its raw file text in a monospaced view — no gutter, no
+scroll-to-anchor, no emphasis, discarding `path`/`revision`/`first_line`
+entirely. That looked like a working file view and wasn't one; the operator
+had no way to tell that the line an agent pointed at wasn't the line she was
+reading. W2 deleted that rendering rather than keep a half-built one, and W7
+replaces the stub it left behind with a real one:
+
+- **The line arithmetic is the same code macOS uses**, ported rather than
+  reimplemented: `CodeDocument`, `RowOffsetIndex`, and `ScrollDecision`
+  (`Shared/NostromoKit/Sources/NostromoKit/Code/`) are copies of macOS's own
+  types (`macOS/Nostromo/UI/`), with macOS's test suites ported alongside
+  them and passing unmodified. Offsets are UTF-16 code units, so `path:line`
+  lands on the same line on both clients even for a file containing an
+  emoji. The two clients keep separate copies rather than a shared move
+  (deduplicating them is a deferred cleanup), but they cannot silently drift
+  apart in behaviour without a ported test noticing.
+- **The gutter is one cell per logical line, top-aligned against a freely
+  wrapping text column**, with no `NSTextView` and no fragment-counting
+  arithmetic behind it (contrast macOS's `LineNumberRulerView`, which
+  numbers only paragraph-starting line fragments and carries a long comment
+  about the off-by-one that produces). A soft-wrapped continuation gets a
+  blank gutter cell for free, structurally, rather than by computing which
+  fragment starts a paragraph. A long line is fully readable with no
+  horizontal panning.
+- **Anchor and emphasis resolution is three states, not two.** Macos's own
+  resolution collapses to `Int?` and silently drops any anchor that isn't
+  `.line`/`.section` (`TicketContentView.swift`'s `resolveRows`) — the exact
+  silent fallback this PRD forbids. iOS's `CodeDocument.resolve(anchor:)` /
+  `resolve(emphasis:)` return `AnchorResolution`/`EmphasisResolution`: not
+  requested, resolved, or requested-and-unresolvable-with-a-reason. An
+  anchor line outside the file, an anchor for a different path, an anchor
+  kind this surface can't use, or an emphasis range that matches nothing are
+  all **stated** at the top of the content — never clamped to the nearest
+  valid line and rendered as though it had matched, and never silently
+  dropped.
+- **The header names the path and the revision** — `working` renders as
+  words ("working tree"), never as though it were a hash; a SHA renders
+  abbreviated to 7–8 characters, with the full value available via
+  tap-and-hold, so a PR head SHA and the working tree are distinguishable at
+  a glance. The path is rendered in full, truncated from the leading end if
+  it must be, so the filename survives.
+- **A re-show re-anchors without rebuilding.** The surface's SwiftUI
+  identity is `(path, revision)`, never the address — an address-only push
+  re-resolves and re-marks without rebuilding the document, the row views,
+  or their scroll position, and an anchor already in the viewport does not
+  move it.
+- **No truncation, no syntax highlighting.** Unlike `PerriView`'s raw diff
+  (truncated at 4000 characters and 60 lines — a different, deferred
+  surface), a large file relies on `LazyVStack`'s own laziness rather than a
+  cap. Neither client highlights syntax; the wire type reserves room for it.
 
 `PaneAddress` (below) reaches iOS the same way it reaches macOS —
 `DynamicFocusView` passes `layout.paneAddress[paneId]` into
-`PaneSurfaceView` — and iOS's only present use of `anchor`/`emphasis` is
-`pr_list` queue-row marking; the stub kinds above have no addressing to
-render yet, matching what they show. `reason` is used more broadly — see the
-tab strip below.
+`PaneSurfaceView` — and iOS's present uses of `anchor`/`emphasis` are
+`pr_list` queue-row marking and `code`'s line/range addressing above; the
+remaining stub kinds have no addressing to render yet, matching what they
+show. `reason` is used more broadly — see the tab strip below.
 
 ### Tabs and layout on iOS: the compact strip (`ios-curated-view-parity` W5)
 

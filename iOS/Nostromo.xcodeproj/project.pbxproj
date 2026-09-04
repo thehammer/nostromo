@@ -23,6 +23,7 @@
 		AA0000010000000000000029 /* PaneSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000002E /* PaneSurfaceView.swift */; };
 		AA000001000000000000003E /* TabStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000003D /* TabStripView.swift */; };
 		AA000001000000000000003C /* RegionContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000003B /* RegionContainerView.swift */; };
+		AA0000010000000000000040 /* CodeSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000003F /* CodeSurfaceView.swift */; };
 		AA0000010000000000000031 /* ActivityTickerBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000030 /* ActivityTickerBar.swift */; };
 		AA0000010000000000000033 /* ActivityStreamsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000032 /* ActivityStreamsSheet.swift */; };
 		AA0000010000000000000035 /* DecisionSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000036 /* DecisionSheetView.swift */; };
@@ -47,6 +48,7 @@
 		AA000001000000000000002E /* PaneSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneSurfaceView.swift; sourceTree = "<group>"; };
 		AA000001000000000000003D /* TabStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabStripView.swift; sourceTree = "<group>"; };
 		AA000001000000000000003B /* RegionContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegionContainerView.swift; sourceTree = "<group>"; };
+		AA000001000000000000003F /* CodeSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeSurfaceView.swift; sourceTree = "<group>"; };
 		AA0000010000000000000030 /* ActivityTickerBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityTickerBar.swift; sourceTree = "<group>"; };
 		AA0000010000000000000032 /* ActivityStreamsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamsSheet.swift; sourceTree = "<group>"; };
 		AA0000010000000000000036 /* DecisionSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheetView.swift; sourceTree = "<group>"; };
@@ -111,6 +113,7 @@
 				AA000001000000000000002E /* PaneSurfaceView.swift */,
 				AA000001000000000000003D /* TabStripView.swift */,
 				AA000001000000000000003B /* RegionContainerView.swift */,
+				AA000001000000000000003F /* CodeSurfaceView.swift */,
 			);
 			path = Panes;
 			sourceTree = "<group>";
@@ -222,6 +225,7 @@
 				AA0000010000000000000029 /* PaneSurfaceView.swift in Sources */,
 				AA000001000000000000003E /* TabStripView.swift in Sources */,
 				AA000001000000000000003C /* RegionContainerView.swift in Sources */,
+				AA0000010000000000000040 /* CodeSurfaceView.swift in Sources */,
 				AA0000010000000000000031 /* ActivityTickerBar.swift in Sources */,
 				AA0000010000000000000033 /* ActivityStreamsSheet.swift in Sources */,
 				AA0000010000000000000035 /* DecisionSheetView.swift in Sources */,

@@ -454,6 +454,61 @@ survives a rebuild whose `onAppear`/`onDisappear` can fire in either order.
 That ordering is not something L1 can observe either — it is on the manual
 list above, under the rotation row.
 
+## Worked example: the `code` surface (W7)
+
+`ios-curated-view-parity` W7 replaces the `code` stub with a real renderer
+(`CodeSurfaceView.swift`) and is the wedge the PRD names as the one that must
+not be softened: on a phone, "the agent points at line 412" is the entire
+value of showing a file at all. It is also a useful worked example because
+most of what makes it trustworthy is, unusually, provable with no device —
+the line arithmetic and the honesty rule are both pure functions ported into
+`Shared/NostromoKit`, and only the wrapping/scrolling/gutter *rendering* is
+UI-observable only.
+
+- **L1** (`CodeDocumentTests.swift`, `RowOffsetIndexTests.swift`,
+  `ScrollDecisionTests.swift`, `AnchorResolutionTests.swift`,
+  `RevisionLabelTests.swift`): the ported macOS suites passing unmodified —
+  line splitting, UTF-16 character-range arithmetic (including an emoji
+  case that diverges from `String.count`), out-of-document lookups
+  returning `nil` rather than a clamped range, and the scroll/no-scroll
+  decision table. `AnchorResolutionTests` is new: the three-state
+  `AnchorResolution`/`EmphasisResolution` resolvers, including the case
+  macOS's own `TicketContentView.resolveRows` gets wrong — an anchor kind
+  this surface can't use (`.comment`, `.section`, `.queueRow`) resolves to
+  `.unresolved` with a reason, where macOS silently drops it — and the
+  "partially in range clips to the intersecting rows, fully out of range is
+  `.matchedNothing`, never a clamped span" rule for emphasis.
+  `RevisionLabelTests` proves `working` and a 40-character SHA produce
+  different, non-hash-shaped, non-blank labels.
+- **L2** (`tests/ios_policy/test_ios_view_policy.py`): that the raw dump
+  cannot come back (`payload.text` referenced only inside a
+  `CodeDocument(` construction — the file-scanning analogue of the L1
+  proof), no truncation of any kind (no `prefix(`, no `lineLimit(` on the
+  content column, no numeric row cap — `PerriView.swift`'s own truncated
+  diff excluded by path as the deliberately different, deferred surface),
+  no horizontal scrolling, the `HStack(alignment: .top` gutter/wrap
+  mechanism, every `scrollTo(` gated by a `case .scrollTo` decision (ported
+  from macOS's `CodeContentViewTests`, broadened to accept `ScrollRestore`
+  alongside `ScrollDecision` — iOS's width-class rebuild has no macOS
+  analogue), no `.id(` keyed on `address`/`anchor`/`emphasis` (the
+  never-rebuilds-on-re-anchor property), every `AnchorResolution`/
+  `EmphasisResolution` case name referenced in the view (paired with L1's
+  exhaustive switches so an added case can't be silently ignored on either
+  end), and that `WidthClass`/`horizontalSizeClass` appear nowhere in this
+  file — a file view is the same file view at both widths.
+- **L3** (`make ios-build`): that `CodeSurfaceView.swift` compiles and is
+  wired into the app target's build phase, with no new warnings.
+
+What's left over — genuinely **UI-observable only** — is watching a real
+file render: that a soft-wrapped line's continuation actually shows a blank
+gutter cell rather than a repeated or advancing number, that a long line
+visibly wraps rather than requiring a horizontal pan, that an anchor already
+in the viewport really doesn't move the scroll position, that re-showing the
+same file at a new line really doesn't flash or rebuild before moving, and
+that an emoji-bearing file's gutter numbers stay visually aligned with the
+lines they label. L1 proves the arithmetic behind each of these; only a
+device shows the arithmetic landing on screen.
+
 ## Why no simulator, anywhere
 
 It would be easy to ask: why not add an `xcodebuild test -destination
