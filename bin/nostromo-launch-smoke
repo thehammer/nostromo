@@ -255,7 +255,7 @@ def _no_attributable_crash_report(ev):
                 f"{len(attributed)} attributed, "
                 f"dir_present={ev.crash_reports_dir_present}")
     if attributed:
-        cause = f"{len(attributed)} of {len(ev.observed_pids)} observed launch(es) crashed"
+        cause = f"{len(attributed)} crash report(s) attributed to this run's launch(es)"
     else:
         cause = "crash-report directory could not be scanned"
     return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
