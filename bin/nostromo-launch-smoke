@@ -554,19 +554,23 @@ def ipc_read_frame(sock, timeout=2.0):
 PROTOCOL_VERSION = 4
 
 
-class FixtureDaemon:
-    """A threaded AF_UNIX listener bound to `socket_path`, serving `frames`
-    (a list of already-JSON-shaped dicts, e.g. focus_layout messages) to
-    every subscribed connection, in order. Tolerant of hello/subscribe
-    arriving in either order; ignores (but logs) any other frame type and
-    keeps the connection open rather than closing it — a close would trigger
-    the real client's reconnect/backoff loop."""
+class _ThreadedUnixServer:
+    """Shared start()/stop()/accept-loop shape for a threaded `AF_UNIX`
+    listener: bind `socket_path`, accept connections on a background thread,
+    and hand each one to `self._handle_conn(conn)` on its own thread.
+    Subclasses implement `_handle_conn`.
 
-    def __init__(self, socket_path, frames):
+    `_track_conn_threads` (class attribute) controls whether `stop()` waits
+    for in-flight connection handlers to finish before unlinking the socket.
+    `FixtureDaemon` needs that — its handler touches shared log state —
+    `BrokerStub`'s handler doesn't outlive the socket close in any way that
+    matters, and never joined its connection threads; that difference is
+    preserved here rather than flattened away."""
+
+    _track_conn_threads = False
+
+    def __init__(self, socket_path):
         self.socket_path = socket_path
-        self.frames = list(frames)
-        self.log = []
-        self._log_lock = threading.Lock()
         self._server_sock = None
         self._accept_thread = None
         self._conn_threads = []
@@ -595,8 +599,9 @@ class FixtureDaemon:
                 pass
         if self._accept_thread is not None:
             self._accept_thread.join(timeout=2.0)
-        for t in self._conn_threads:
-            t.join(timeout=0.5)
+        if self._track_conn_threads:
+            for t in self._conn_threads:
+                t.join(timeout=0.5)
         try:
             os.unlink(self.socket_path)
         except OSError:
@@ -609,8 +614,26 @@ class FixtureDaemon:
             except OSError:
                 return
             t = threading.Thread(target=self._handle_conn, args=(conn,), daemon=True)
-            self._conn_threads.append(t)
+            if self._track_conn_threads:
+                self._conn_threads.append(t)
             t.start()
+
+
+class FixtureDaemon(_ThreadedUnixServer):
+    """A threaded AF_UNIX listener bound to `socket_path`, serving `frames`
+    (a list of already-JSON-shaped dicts, e.g. focus_layout messages) to
+    every subscribed connection, in order. Tolerant of hello/subscribe
+    arriving in either order; ignores (but logs) any other frame type and
+    keeps the connection open rather than closing it — a close would trigger
+    the real client's reconnect/backoff loop."""
+
+    _track_conn_threads = True
+
+    def __init__(self, socket_path, frames):
+        super().__init__(socket_path)
+        self.frames = list(frames)
+        self.log = []
+        self._log_lock = threading.Lock()
 
     def _handle_conn(self, conn):
         subscribed = False
@@ -648,7 +671,7 @@ class FixtureDaemon:
         _ = subscribed
 
 
-class BrokerStub:
+class BrokerStub(_ThreadedUnixServer):
     """A minimal Mother-broker stub: on every connection, sends the NDJSON
     `hello` event the real broker sends first (see
     macOS/Nostromo/Data/MotherBrokerClient.swift's `parseHello`/`doConnect`),
@@ -656,49 +679,6 @@ class BrokerStub:
     `AppStore.start()`'s 5s "broker offline, spawn mother daemon start"
     backstop see `brokerConnected == true` and never fire — the handshake
     must complete within 5 seconds of the app connecting."""
-
-    def __init__(self, socket_path):
-        self.socket_path = socket_path
-        self._server_sock = None
-        self._accept_thread = None
-        self._stopped = False
-
-    def start(self):
-        try:
-            os.unlink(self.socket_path)
-        except OSError:
-            pass
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(self.socket_path)
-        srv.listen(8)
-        self._server_sock = srv
-        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
-        self._accept_thread.start()
-
-    def stop(self):
-        if self._stopped:
-            return
-        self._stopped = True
-        if self._server_sock is not None:
-            try:
-                self._server_sock.close()
-            except OSError:
-                pass
-        if self._accept_thread is not None:
-            self._accept_thread.join(timeout=2.0)
-        try:
-            os.unlink(self.socket_path)
-        except OSError:
-            pass
-
-    def _accept_loop(self):
-        while not self._stopped:
-            try:
-                conn, _addr = self._server_sock.accept()
-            except OSError:
-                return
-            t = threading.Thread(target=self._handle_conn, args=(conn,), daemon=True)
-            t.start()
 
     def _handle_conn(self, conn):
         try:
@@ -1121,6 +1101,138 @@ def _cleanup(tmpdir, daemon, broker, proc):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _check_prerequisites(tools):
+    """Anything that makes a real run impossible before a build is even
+    attempted. Raises `_PrerequisiteMissing`."""
+    if not os.path.isfile(FIXTURE_FRAMES_PATH):
+        raise _PrerequisiteMissing(f"missing fixture: {FIXTURE_FRAMES_PATH}")
+    if not os.path.isfile(PS_TIME_AWK):
+        raise _PrerequisiteMissing(f"missing awk script: {PS_TIME_AWK}")
+    if not tools.get("ps"):
+        raise _PrerequisiteMissing("ps not found at /bin/ps")
+
+
+def _child_env(socket_path, broker_socket_path, diag_path):
+    """The clone's environment: a minimal `PATH`, the sockets it should
+    dial instead of the operator's real daemon/broker, and the diagnostics
+    override that points its stream at this run's own temp file."""
+    return {
+        "PATH": "/usr/bin:/bin",
+        "HOME": os.environ.get("HOME", ""),
+        "USER": os.environ.get("USER", ""),
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "NOSTROMD_SOCKET": socket_path,
+        "NOSTROMOD_SOCKET": socket_path,
+        "NOSTROMO_DIAG_PATH": diag_path,
+        "NOSTROMO_DIAG_INTERVAL": "1",
+        "NOSTROMO_WINDOW_MODE": "smoke",
+        "MOTHER_BROKER_SOCK": broker_socket_path,
+    }
+
+
+def _isolation_snapshot():
+    """(focuses.json hash, `defaults export com.hammer.nostromo`) — the
+    operator-state baseline `run()` takes once before launch and compares
+    again after teardown, via `_warn_if_isolation_broken`."""
+    return _file_hash(FOCUSES_JSON), _defaults_export("com.hammer.nostromo")
+
+
+def _warn_if_isolation_broken(before, after):
+    """Log a WARNING for each part of `_isolation_snapshot()` that changed
+    between `before` and `after` — never a verdict input, just a loud signal
+    that the clone leaked into the operator's real state."""
+    focuses_before, defaults_before = before
+    focuses_after, defaults_after = after
+    if focuses_before != focuses_after:
+        _log("WARNING: ~/.nostromo/focuses.json changed during this run — isolation failure")
+    if defaults_before != defaults_after:
+        _log("WARNING: `defaults export com.hammer.nostromo` changed during this run "
+             "— the clone's UserDefaults domain leaked into the operator's — isolation failure")
+
+
+def _wait_and_measure(proc, launched_pid, tools, launch_time, diag_path):
+    """The anchor-wait / CPU-sampling phase: wait for the diagnostics anchor
+    (or timeout), hold until the tail of the observation window, sample CPU
+    seconds before and after the `CPU_TAIL_SECONDS` tail, and only then check
+    liveness / another-instance collision. Returns
+    `(alive_at_window_end, cpu_percent, another_pid, window_start)`."""
+    anchor_time = wait_for_anchor(
+        diag_path, launched_pid, proc, deadline=launch_time + ANCHOR_TIMEOUT_SECONDS,
+    )
+    window_start = anchor_time if anchor_time is not None else launch_time
+    first_phase_end = window_start + (WINDOW_SECONDS - CPU_TAIL_SECONDS)
+    wait_until(first_phase_end, proc)
+
+    t0 = sample_cpu_seconds(tools["ps"], launched_pid)
+    t0_time = time.time()
+    wait_until(t0_time + CPU_TAIL_SECONDS, proc)
+    t1 = sample_cpu_seconds(tools["ps"], launched_pid)
+    elapsed = time.time() - t0_time
+
+    alive_at_window_end = _pid_alive(launched_pid)
+    cpu_percent = None
+    if t0 is not None and t1 is not None and elapsed > 0:
+        cpu_percent = cpu_percent_from_times(t0, t1, elapsed)
+
+    another_pid = None
+    if not alive_at_window_end and (time.time() - launch_time) < 5.0:
+        another_pid = another_nostromo_pid(
+            exclude_pid=launched_pid, clone_bundle_id=CLONE_BUNDLE_ID,
+        )
+    return alive_at_window_end, cpu_percent, another_pid, window_start
+
+
+def _collect_evidence(launched_pid, diag_path, clone, alive_at_window_end, cpu_percent,
+                       another_pid, window_start):
+    """Everything after the wait/measure phase: read the diagnostics stream,
+    scan for an attributable crash report, and assemble the `Evidence`
+    detectors grade."""
+    all_rows = _read_json_lines(diag_path)
+    observed_pids = distinct_pids(all_rows)
+    rows = rows_for_pid(all_rows, launched_pid)
+
+    crash_scanned, crash_dir_present, crash_attributed = scan_crash_reports(
+        pids=set(observed_pids) | {launched_pid}, bundle_root=clone,
+        poll_seconds=(0.0 if alive_at_window_end else CRASH_REPORT_POLL_SECONDS),
+    )
+
+    panes_scanned = len({
+        p.get("paneId") for row in rows for p in (row.get("panesMeasured") or [])
+    })
+
+    window_seconds = time.time() - window_start
+
+    return Evidence(
+        launched_pid=launched_pid,
+        rows=rows,
+        observed_pids=observed_pids,
+        another_instance_pid=another_pid,
+        alive_at_window_end=alive_at_window_end,
+        cpu_percent=cpu_percent,
+        crash_reports_scanned=crash_scanned,
+        crash_reports_dir_present=crash_dir_present,
+        crash_reports_attributed_pids=crash_attributed,
+        notdrawable_violations=notdrawable_violations_from_rows(rows),
+        panes_scanned=panes_scanned,
+        window_seconds=window_seconds,
+    )
+
+
+def _capture_sample_on_fail(state, launched_pid, tools):
+    """On FAIL only: an `sample(1)` capture for a human to inspect, written
+    outside the temp dir (which is removed unconditionally) so it survives
+    the run. Never a verdict input."""
+    if state != FAIL or not _pid_alive(launched_pid) or not tools.get("sample"):
+        return
+    sample_out = tempfile.mktemp(prefix="nostromo-launch-smoke-sample-", suffix=".txt")
+    sample_result = subprocess.run(
+        [tools["sample"], str(launched_pid), "3", "-file", sample_out],
+        capture_output=True, timeout=15,
+    )
+    if sample_result.returncode == 0 and os.path.exists(sample_out):
+        _log(f"sample captured on FAIL: {sample_out}")
+
+
 def run(args):
     tmpdir = None
     daemon = None
@@ -1136,12 +1248,7 @@ def run(args):
 
     try:
         tools = _resolve_tools()
-        if not os.path.isfile(FIXTURE_FRAMES_PATH):
-            raise _PrerequisiteMissing(f"missing fixture: {FIXTURE_FRAMES_PATH}")
-        if not os.path.isfile(PS_TIME_AWK):
-            raise _PrerequisiteMissing(f"missing awk script: {PS_TIME_AWK}")
-        if not tools.get("ps"):
-            raise _PrerequisiteMissing("ps not found at /bin/ps")
+        _check_prerequisites(tools)
 
         bundle = build_app(args.release, args.skip_build)
 
@@ -1158,21 +1265,8 @@ def run(args):
         broker = BrokerStub(broker_socket_path)
         broker.start()
 
-        focuses_hash_before = _file_hash(FOCUSES_JSON)
-        operator_defaults_before = _defaults_export("com.hammer.nostromo")
-
-        child_env = {
-            "PATH": "/usr/bin:/bin",
-            "HOME": os.environ.get("HOME", ""),
-            "USER": os.environ.get("USER", ""),
-            "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
-            "NOSTROMD_SOCKET": socket_path,
-            "NOSTROMOD_SOCKET": socket_path,
-            "NOSTROMO_DIAG_PATH": diag_path,
-            "NOSTROMO_DIAG_INTERVAL": "1",
-            "NOSTROMO_WINDOW_MODE": "smoke",
-            "MOTHER_BROKER_SOCK": broker_socket_path,
-        }
+        operator_state_before = _isolation_snapshot()
+        child_env = _child_env(socket_path, broker_socket_path, diag_path)
 
         _log(f"launching clone at {clone}")
         launch_time = time.time()
@@ -1188,82 +1282,19 @@ def run(args):
 
             launched_pid = proc.pid
 
-            anchor_time = wait_for_anchor(
-                diag_path, launched_pid, proc, deadline=launch_time + ANCHOR_TIMEOUT_SECONDS,
+            alive_at_window_end, cpu_percent, another_pid, window_start = _wait_and_measure(
+                proc, launched_pid, tools, launch_time, diag_path,
             )
-            window_start = anchor_time if anchor_time is not None else launch_time
-            first_phase_end = window_start + (WINDOW_SECONDS - CPU_TAIL_SECONDS)
-            wait_until(first_phase_end, proc)
-
-            t0 = sample_cpu_seconds(tools["ps"], launched_pid)
-            t0_time = time.time()
-            wait_until(t0_time + CPU_TAIL_SECONDS, proc)
-            t1 = sample_cpu_seconds(tools["ps"], launched_pid)
-            elapsed = time.time() - t0_time
-
-            alive_at_window_end = _pid_alive(launched_pid)
-            cpu_percent = None
-            if t0 is not None and t1 is not None and elapsed > 0:
-                cpu_percent = cpu_percent_from_times(t0, t1, elapsed)
-
-            another_pid = None
-            if not alive_at_window_end and (time.time() - launch_time) < 5.0:
-                another_pid = another_nostromo_pid(
-                    exclude_pid=launched_pid, clone_bundle_id=CLONE_BUNDLE_ID,
-                )
-
-            all_rows = _read_json_lines(diag_path)
-            observed_pids = distinct_pids(all_rows)
-            rows = rows_for_pid(all_rows, launched_pid)
-
-            crash_scanned, crash_dir_present, crash_attributed = scan_crash_reports(
-                pids=set(observed_pids) | {launched_pid}, bundle_root=clone,
-                poll_seconds=(0.0 if alive_at_window_end else CRASH_REPORT_POLL_SECONDS),
+            ev = _collect_evidence(
+                launched_pid, diag_path, clone, alive_at_window_end, cpu_percent,
+                another_pid, window_start,
             )
 
-            panes_scanned = len({
-                p.get("paneId") for row in rows for p in (row.get("panesMeasured") or [])
-            })
-
-            window_seconds = time.time() - window_start
-
-            ev = Evidence(
-                launched_pid=launched_pid,
-                rows=rows,
-                observed_pids=observed_pids,
-                another_instance_pid=another_pid,
-                alive_at_window_end=alive_at_window_end,
-                cpu_percent=cpu_percent,
-                crash_reports_scanned=crash_scanned,
-                crash_reports_dir_present=crash_dir_present,
-                crash_reports_attributed_pids=crash_attributed,
-                notdrawable_violations=notdrawable_violations_from_rows(rows),
-                panes_scanned=panes_scanned,
-                window_seconds=window_seconds,
-            )
-
-        focuses_hash_after = _file_hash(FOCUSES_JSON)
-        if focuses_hash_before != focuses_hash_after:
-            _log("WARNING: ~/.nostromo/focuses.json changed during this run — isolation failure")
-        operator_defaults_after = _defaults_export("com.hammer.nostromo")
-        if operator_defaults_before != operator_defaults_after:
-            _log("WARNING: `defaults export com.hammer.nostromo` changed during this run "
-                 "— the clone's UserDefaults domain leaked into the operator's — isolation failure")
+        _warn_if_isolation_broken(operator_state_before, _isolation_snapshot())
 
         detectors = evaluate_evidence(ev)
         state, cause = aggregate(detectors)
-
-        # On FAIL only: diagnostic evidence for a human, never a verdict
-        # input. Captured into a location outside the temp dir (which is
-        # removed unconditionally) so it survives to be inspected.
-        if state == FAIL and _pid_alive(launched_pid) and tools.get("sample"):
-            sample_out = tempfile.mktemp(prefix="nostromo-launch-smoke-sample-", suffix=".txt")
-            sample_result = subprocess.run(
-                [tools["sample"], str(launched_pid), "3", "-file", sample_out],
-                capture_output=True, timeout=15,
-            )
-            if sample_result.returncode == 0 and os.path.exists(sample_out):
-                _log(f"sample captured on FAIL: {sample_out}")
+        _capture_sample_on_fail(state, launched_pid, tools)
 
         print(format_report(state, cause, detectors, ev))
         return exit_code_for(state)
