@@ -38,9 +38,11 @@ use crate::data::perri_queue::PrQueueSnapshot;
 use crate::ipc::pane_registry::PaneContentProvider;
 use crate::ipc::protocol::{PaneAddress, PaneContentWire, PaneFreshness, ServerMsg};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
-use crate::mcp::tools::apply_layout::{
-    self, FetchArgs, SOURCE_CURRENT_PR, SOURCE_PR_CONVERSATION, SOURCE_PR_DIFF, SOURCE_PR_QUEUE,
-};
+use crate::mcp::tools::apply_layout::{self, FetchArgs, SOURCE_PR_QUEUE};
+// Only used by this module's tests below (the broadcaster itself iterates
+// `apply_layout::PR_BACKED_SOURCES` instead of naming these individually).
+#[cfg(test)]
+use crate::mcp::tools::apply_layout::{SOURCE_CURRENT_PR, SOURCE_PR_CONVERSATION, SOURCE_PR_DIFF};
 
 /// How long a source can go without producing good data before a pane
 /// carrying its content is marked `badly_stale` (D6). Derived from the
@@ -253,14 +255,14 @@ pub async fn run_pane_source_broadcaster(
             }
             result = pr_rx.changed() => {
                 if result.is_err() { break; }
-                push_for_source(&state, SOURCE_CURRENT_PR, &mut last_sent);
                 // All three PR-backed sources read the same snapshot, so one
                 // watch change feeds all of them. `nostromo.get_file` is
                 // deliberately absent here: a file pane is a snapshot of a
                 // revision, and there is no channel that could tell it
                 // otherwise (W2 — D2).
-                push_for_source(&state, SOURCE_PR_DIFF, &mut last_sent);
-                push_for_source(&state, SOURCE_PR_CONVERSATION, &mut last_sent);
+                for source in apply_layout::PR_BACKED_SOURCES {
+                    push_for_source(&state, source, &mut last_sent);
+                }
             }
             _ = ticker.tick() => {
                 reevaluate_staleness(&state, &mut last_sent);

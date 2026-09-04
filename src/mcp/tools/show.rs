@@ -226,14 +226,18 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
 /// content follows the change through the ordinary broadcaster with no tool
 /// call. Only the tabs that can *not* follow it — a previous PR's views, and
 /// the `file`/`ticket` tabs that belonged to that review — are closed here.
-pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<(&str, u64)>) {
+///
+/// Returns the pane ids that were closed, empty when this was a no-op (no
+/// curated regions for `tag`, or nothing stale) — so a caller like
+/// `perri.clear_current_pr` can report truthfully what it tore down.
+pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<(&str, u64)>) -> Vec<String> {
     let Ok(cfg) = views_config::load() else {
-        return;
+        return Vec::new();
     };
-    let broadcast = {
+    let (broadcast, closed) = {
         let mut reg = daemon.pane_registry.lock().unwrap();
         let Some(tree) = reg.get(tag).cloned() else {
-            return;
+            return Vec::new();
         };
         let bindings = bindings_for(&reg, tag);
         // `new_pr` is already the PR under review by the time this runs, so it
@@ -243,7 +247,7 @@ pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<
         let state = derive::view_state(&cfg, &tree, &bindings, new_pr, &order);
         let closed = placement::reset_for_pr_change(&cfg, &state, new_pr);
         if closed.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let mut tree = tree;
@@ -289,7 +293,7 @@ pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<
                 );
             }
         }
-        reg.set_layout(tag, &json!({ "tree": tree })).ok()
+        (reg.set_layout(tag, &json!({ "tree": tree })).ok(), closed)
     };
 
     if let Some(tree) = broadcast {
@@ -299,6 +303,7 @@ pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<
             focused_pane: None,
         });
     }
+    closed
 }
 
 // ── argument mapping ─────────────────────────────────────────────────────────
