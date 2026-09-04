@@ -87,6 +87,16 @@ jobs:
       # FAIL nor INCONCLUSIVE may block a merge yet. The step's own exit
       # code is still captured and translated into PR-visible annotations
       # below regardless of this flag.
+      #
+      # Invokes the driver directly rather than through `make mac-smoke`
+      # (same command, same args `make mac-smoke` uses — see the Makefile's
+      # `mac-smoke` recipe) because GNU Make does not propagate a failed
+      # recipe's own exit code: any nonzero recipe exit makes `make` itself
+      # exit 2, which collapsed this check's FAIL (1) into the INCONCLUSIVE
+      # branch below on the first live rehearsal of this workflow. `make
+      # mac-smoke` remains the documented local-reproduction command
+      # (docs/ci.md) — this is purely about capturing the real exit code
+      # in CI's own annotation step.
       - name: Run launch smoke check
         id: smoke
         continue-on-error: true
@@ -94,7 +104,7 @@ jobs:
           NOSTROMO_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/launch-smoke-artifacts
         run: |
           set +e
-          make mac-smoke
+          bin/nostromo-launch-smoke
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
       # Exit code -> PR-visible verdict. This is the whole reason the
