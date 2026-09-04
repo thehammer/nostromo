@@ -429,6 +429,200 @@ def check_streams_sheet_presented_from_focus_view(files):
     return violations
 
 
+def _is_decision_path(path):
+    """`True` when `path`'s basename contains "Decision" — the naming
+    convention every file in this wedge (ios-curated-view-parity W3) uses
+    for the `nostromo.ask_decision` surface (`DecisionSheetView.swift`).
+    """
+    return "Decision" in os.path.basename(path)
+
+
+def check_no_answered_state_in_decision_views(files):
+    """No `@State` declaration in a `Decision`-named file holds
+    answered/resolved-shaped state.
+
+    This is the `AskQuestionPrompt` shape (`@State private var answered`
+    inside a view rendered from a `LazyVStack` — the recycle-and-re-arm
+    hazard that forced `TurnInteractionStore` into existence on macOS),
+    named as forbidden for the decision surface specifically. The answer-once
+    gate lives in `NostromoKit.DecisionStore`, held outside every view;
+    `DecisionSheetView` must never shadow it with a local flag.
+    """
+    banned = re.compile(r"@State[^\n]*\bvar\s+\w*(?:answered|hasAnswered|didAnswer|resolved)\w*", re.IGNORECASE)
+    violations = []
+    for path, source in files:
+        if not _is_decision_path(path):
+            continue
+        stripped = _strip_line_comments(source)
+        if banned.search(stripped):
+            violations.append((path, "a @State declaration holds answered/resolved-shaped state"))
+    return violations
+
+
+def check_decision_sheet_constructed_only_from_app_root(files):
+    """`DecisionSheetView(` is constructed exactly from `NostromoApp.swift`,
+    and from nowhere else under `iOS/Nostromo/Views/`.
+
+    This is D1/B8 asserted structurally: the decision surface presents above
+    the root `TabView`, never from a region or focus view, so it can never
+    be inside a lazy container and never gets recycled across requests.
+    """
+    violations = []
+    found_at_app_root = False
+    for path, source in files:
+        if "DecisionSheetView(" not in source:
+            continue
+        if os.path.basename(path) == "NostromoApp.swift":
+            found_at_app_root = True
+        else:
+            violations.append((path, "DecisionSheetView(...) constructed outside NostromoApp.swift"))
+    if not found_at_app_root:
+        violations.append(("iOS/Nostromo/NostromoApp.swift", "DecisionSheetView(...) is never constructed from NostromoApp.swift"))
+    return violations
+
+
+def check_no_hardcoded_nil_resolution(files):
+    """No construction site passes a hard-coded `resolution: nil`.
+
+    `DecisionSheetView.init`'s `resolution` parameter has no default value
+    specifically so every call site is forced to compute it from
+    `DaemonStore.decisionStore.resolution(for:)` — a hard-coded `nil`
+    literal would defeat that wiring check by construction.
+    """
+    violations = []
+    for path, source in files:
+        if re.search(r"resolution\s*:\s*nil\b", source):
+            violations.append((path, "a construction site passes a hard-coded `resolution: nil`"))
+    return violations
+
+
+def check_claim_answer_precedes_answer_decision(files):
+    """Exactly one `answerDecision(` call site exists under `iOS/`, and
+    `claimAnswer` appears before it in file order.
+
+    The gate, asserted: claiming the answer before sending it is what makes
+    a second, contradictory answer for the same request structurally
+    impossible on this client, not merely caught downstream by the daemon's
+    `AlreadyAnswered` guard.
+    """
+    violations = []
+    total_calls = 0
+    for path, source in files:
+        count = len(re.findall(r"\banswerDecision\(", source))
+        if count == 0:
+            continue
+        total_calls += count
+        claim_idx = source.find("claimAnswer")
+        answer_idx = source.find("answerDecision(")
+        if claim_idx == -1 or claim_idx > answer_idx:
+            violations.append((path, "answerDecision( appears before claimAnswer (or claimAnswer is absent) in file order"))
+    if total_calls != 1:
+        violations.append(("iOS/Nostromo", "expected exactly one answerDecision( call site under iOS/, found %d" % total_calls))
+    return violations
+
+
+def _case_body_spans(source, case_pattern):
+    """For each regex match of `case_pattern` (which must end right after a
+    Swift `case ... :` label), return the body text from there up to
+    whichever comes first: the next `case .` label, or the next line that is
+    only a closing brace (`}`) — a best-effort text bound for a brace-less
+    switch-case body, in the same "textual heuristic, not a control-flow
+    proof" spirit as `_balanced_span`/`_spans_after` above.
+    """
+    spans = []
+    for m in re.finditer(case_pattern, source):
+        start = m.end()
+        next_case = re.search(r"\bcase\s+\.", source[start:])
+        next_close = re.search(r"\n[ \t]*\}", source[start:])
+        ends = [x.start() for x in (next_case, next_close) if x is not None]
+        end = start + min(ends) if ends else len(source)
+        spans.append(source[start:end])
+    return spans
+
+
+def check_superseded_close_sends_nothing(files):
+    """Every `case .supersededByDaemon:` body contains no `answerDecision(`,
+    `onAnswer(`, or `onClose(`.
+
+    D5's safety property: a system-initiated close (this request was already
+    resolved elsewhere) must never send a `decision_answer` frame — a
+    spurious one would read to the calling agent as an explicit choice or an
+    implicit Skip the operator never made.
+    """
+    forbidden = ("answerDecision(", "onAnswer(", "onClose(")
+    violations = []
+    for path, source in files:
+        for span in _case_body_spans(source, r"case\s+\.supersededByDaemon\s*:"):
+            for needle in forbidden:
+                if needle in span:
+                    violations.append((path, "case .supersededByDaemon body calls %s" % needle))
+    return violations
+
+
+def _confirmation_dialog_trailing_spans(source):
+    """For each `.confirmationDialog(` call, return the (start, end) index
+    spans of its trailing closure(s) — the button block, and the `message:`
+    block when present. Skips past the call's own parenthesised argument
+    list first (which itself may contain `{ ... }` closures, e.g. `Binding(
+    get: { ... }, set: { ... })`) before looking for the trailing `{`, so
+    those nested closures are never mistaken for the trailing one.
+    """
+    spans = []
+    for m in re.finditer(r"\.confirmationDialog\(", source):
+        open_paren = m.end() - 1
+        if source[open_paren] != "(":
+            continue
+        depth = 0
+        i = open_paren
+        end_parens = None
+        while i < len(source):
+            c = source[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    end_parens = i + 1
+                    break
+            i += 1
+        if end_parens is None:
+            continue
+        brace_index = source.find("{", end_parens)
+        if brace_index == -1:
+            continue
+        end = _balanced_span(source, brace_index)
+        spans.append((brace_index, end))
+        tail = source[end:end + 60]
+        m2 = re.match(r"\s*\w+\s*:\s*\{", tail)
+        if m2:
+            brace_index2 = end + tail.index("{")
+            end2 = _balanced_span(source, brace_index2)
+            spans.append((brace_index2, end2))
+    return spans
+
+
+def check_one_tap_decision_asymmetry(files):
+    """No `Decision`-named file contains `confirmationDialog`, and every
+    `perriApprove(` call site under `iOS/` sits inside a `confirmationDialog`
+    block.
+
+    One check, both halves of a deliberate asymmetry (D6): a decision answer
+    takes exactly one tap (the modal itself already interrupted the operator
+    with full context — the tap IS the confirmation), while a queue approval
+    always stays gated, because it posts to GitHub.
+    """
+    violations = []
+    for path, source in files:
+        if _is_decision_path(path) and "confirmationDialog" in source:
+            violations.append((path, "confirmationDialog found in a Decision-named file — one-tap must stay ungated"))
+        spans = _confirmation_dialog_trailing_spans(source)
+        for m in re.finditer(r"\bperriApprove\(", source):
+            idx = m.start()
+            if not any(s <= idx < e for s, e in spans):
+                violations.append((path, "perriApprove( call is not inside a confirmationDialog block"))
+    return violations
+
+
 def check_no_pane_id_visible_via_capitalized(files):
     """No pane id ever reaches the operator's eyes via `.capitalized`.
 
@@ -1269,6 +1463,12 @@ CHECKS = (
     check_no_secrets_in_activity_views,
     check_no_suppression_affordance_in_activity_views,
     check_streams_sheet_presented_from_focus_view,
+    check_no_answered_state_in_decision_views,
+    check_decision_sheet_constructed_only_from_app_root,
+    check_no_hardcoded_nil_resolution,
+    check_claim_answer_precedes_answer_decision,
+    check_superseded_close_sends_nothing,
+    check_one_tap_decision_asymmetry,
     check_no_pane_id_visible_via_capitalized,
     check_no_second_bottom_tab_bar,
     check_no_root_tab_hijack,
@@ -1650,6 +1850,152 @@ class NoSuppressionAffordanceInActivityViewsTests(unittest.TestCase):
         violations = check_no_suppression_affordance_in_activity_views(
             [("iOS/Nostromo/Views/Activity/ActivityTickerBar.swift", source)])
         self.assertEqual(violations, [])
+
+
+class NoAnsweredStateInDecisionViewsTests(unittest.TestCase):
+    def test_bites_on_a_plain_answered_flag(self):
+        source = "struct DecisionSheetView: View {\n    @State private var answered = false\n}\n"
+        violations = check_no_answered_state_in_decision_views([("DecisionSheetView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_hasAnswered_didAnswer_or_resolved_variants(self):
+        for name in ("hasAnswered", "didAnswer", "resolvedFlag"):
+            source = "@State private var %s = false" % name
+            violations = check_no_answered_state_in_decision_views([("DecisionSheetView.swift", source)])
+            self.assertEqual(len(violations), 1, "expected a violation for @State var %s" % name)
+
+    def test_ignores_files_without_decision_in_the_name(self):
+        source = "@State private var answered = false"
+        self.assertEqual(check_no_answered_state_in_decision_views([("AskQuestionPrompt.swift", source)]), [])
+
+    def test_ignores_a_comment_explaining_the_ban(self):
+        source = "// must never hold @State private var answered here\nlet resolution: DecisionResolutionRecord?"
+        self.assertEqual(check_no_answered_state_in_decision_views([("DecisionSheetView.swift", source)]), [])
+
+    def test_passes_on_the_real_shape(self):
+        source = "let resolution: DecisionResolutionRecord?\nlet onClose: (DecisionCloseReason) -> Void"
+        self.assertEqual(check_no_answered_state_in_decision_views([("DecisionSheetView.swift", source)]), [])
+
+
+class DecisionSheetConstructedOnlyFromAppRootTests(unittest.TestCase):
+    def test_bites_when_constructed_from_another_view_file(self):
+        files = [
+            ("NostromoApp.swift", "// no construction here"),
+            ("DynamicFocusView.swift", "DecisionSheetView(request: r, askingFocusName: n, resolution: res, onClose: c)"),
+        ]
+        violations = check_decision_sheet_constructed_only_from_app_root(files)
+        self.assertEqual(len(violations), 2, "expected both: wrong-file construction AND app-root has none")
+
+    def test_bites_when_never_constructed_anywhere(self):
+        files = [("NostromoApp.swift", "// nothing")]
+        violations = check_decision_sheet_constructed_only_from_app_root(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_constructed_only_from_app_root(self):
+        files = [
+            ("NostromoApp.swift", "DecisionSheetView(request: r, askingFocusName: n, resolution: res, onClose: c)"),
+            ("DynamicFocusView.swift", "// no mention"),
+        ]
+        self.assertEqual(check_decision_sheet_constructed_only_from_app_root(files), [])
+
+
+class NoHardcodedNilResolutionTests(unittest.TestCase):
+    def test_bites_on_a_hardcoded_nil(self):
+        source = "DecisionSheetView(request: r, askingFocusName: n, resolution: nil, onClose: c)"
+        violations = check_no_hardcoded_nil_resolution([("NostromoApp.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_computed_from_the_store(self):
+        source = "DecisionSheetView(request: r, askingFocusName: n, resolution: store.decisionStore.resolution(for: r.requestId), onClose: c)"
+        self.assertEqual(check_no_hardcoded_nil_resolution([("NostromoApp.swift", source)]), [])
+
+
+class ClaimAnswerPrecedesAnswerDecisionTests(unittest.TestCase):
+    def test_bites_when_claimAnswer_is_absent(self):
+        source = "store.answerDecision(requestId: id, choiceId: c)"
+        violations = check_claim_answer_precedes_answer_decision([("NostromoApp.swift", source)])
+        self.assertTrue(any("claimAnswer" in msg for _, msg in violations))
+
+    def test_bites_when_answerDecision_appears_before_claimAnswer(self):
+        source = "store.answerDecision(requestId: id, choiceId: c)\nstore.decisionStore.claimAnswer(requestId: id, record: r)"
+        violations = check_claim_answer_precedes_answer_decision([("NostromoApp.swift", source)])
+        self.assertTrue(any("claimAnswer" in msg for _, msg in violations))
+
+    def test_bites_when_there_are_two_call_sites(self):
+        files = [
+            ("NostromoApp.swift", "store.decisionStore.claimAnswer(requestId: id, record: r)\nstore.answerDecision(requestId: id, choiceId: c)"),
+            ("SomeOtherView.swift", "store.answerDecision(requestId: id2, choiceId: c2)"),
+        ]
+        violations = check_claim_answer_precedes_answer_decision(files)
+        self.assertTrue(any("exactly one" in msg for _, msg in violations))
+
+    def test_passes_on_the_real_shape(self):
+        source = "if store.decisionStore.claimAnswer(requestId: requestId, record: record) {\n    store.answerDecision(requestId: requestId, choiceId: choiceId)\n}"
+        self.assertEqual(check_claim_answer_precedes_answer_decision([("NostromoApp.swift", source)]), [])
+
+
+class SupersededCloseSendsNothingTests(unittest.TestCase):
+    def test_bites_when_the_case_forwards_to_onAnswer(self):
+        source = "switch reason {\ncase .supersededByDaemon:\n    onAnswer(nil)\ncase .operatorDismissed:\n    onAnswer(nil)\n}"
+        violations = check_superseded_close_sends_nothing([("NostromoApp.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_the_case_calls_answerDecision_directly(self):
+        source = "switch reason {\ncase .supersededByDaemon:\n    store.answerDecision(requestId: id, choiceId: nil)\n}"
+        violations = check_superseded_close_sends_nothing([("NostromoApp.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_the_case_is_a_no_op(self):
+        source = (
+            "switch reason {\n"
+            "case .operatorChose(let id):\n"
+            "    closeDecision(.operatorChose(id), for: requestId)\n"
+            "case .operatorDismissed:\n"
+            "    closeDecision(.operatorDismissed, for: requestId)\n"
+            "case .supersededByDaemon:\n"
+            "    break\n"
+            "}\n"
+        )
+        self.assertEqual(check_superseded_close_sends_nothing([("NostromoApp.swift", source)]), [])
+
+    def test_passes_when_no_supersededByDaemon_case_exists_in_the_file(self):
+        source = "let x = 1"
+        self.assertEqual(check_superseded_close_sends_nothing([("Unrelated.swift", source)]), [])
+
+
+class OneTapDecisionAsymmetryTests(unittest.TestCase):
+    def test_bites_on_confirmationDialog_in_a_decision_file(self):
+        source = ".confirmationDialog(\"Sure?\", isPresented: $x) { Button(\"OK\") {} }"
+        violations = check_one_tap_decision_asymmetry([("DecisionSheetView.swift", source)])
+        self.assertTrue(any("Decision-named file" in msg for _, msg in violations))
+
+    def test_bites_when_perriApprove_is_not_inside_a_confirmationDialog(self):
+        source = "Button(\"Approve\") { store.perriApprove(number: n, repo: r) }"
+        violations = check_one_tap_decision_asymmetry([("PerriView.swift", source)])
+        self.assertTrue(any("perriApprove" in msg for _, msg in violations))
+
+    def test_passes_on_the_real_perriview_shape_with_nested_closures_before_the_trailing_one(self):
+        source = (
+            ".confirmationDialog(\n"
+            "    pendingApproval.map { \"Approve PR #\\($0.number)?\" } ?? \"\",\n"
+            "    isPresented: Binding(\n"
+            "        get:  { pendingApproval != nil },\n"
+            "        set:  { if !$0 { pendingApproval = nil } }\n"
+            "    ),\n"
+            "    titleVisibility: .visible\n"
+            ") {\n"
+            "    if let item = pendingApproval {\n"
+            "        Button(\"Approve\") {\n"
+            "            store.perriApprove(number: item.number, repo: item.repo)\n"
+            "            pendingApproval = nil\n"
+            "        }\n"
+            "    }\n"
+            "    Button(\"Cancel\", role: .cancel) { pendingApproval = nil }\n"
+            "} message: {\n"
+            "    Text(\"Posted to GitHub.\")\n"
+            "}\n"
+        )
+        self.assertEqual(check_one_tap_decision_asymmetry([("PerriView.swift", source)]), [])
 
 
 class StreamsSheetPresentedFromFocusViewTests(unittest.TestCase):
@@ -2650,6 +2996,30 @@ class RealIOSTreeTests(unittest.TestCase):
 
     def test_streams_sheet_presented_from_focus_view(self):
         violations = check_streams_sheet_presented_from_focus_view(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_answered_state_in_decision_views(self):
+        violations = check_no_answered_state_in_decision_views(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_decision_sheet_constructed_only_from_app_root(self):
+        violations = check_decision_sheet_constructed_only_from_app_root(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_hardcoded_nil_resolution(self):
+        violations = check_no_hardcoded_nil_resolution(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_claim_answer_precedes_answer_decision(self):
+        violations = check_claim_answer_precedes_answer_decision(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_superseded_close_sends_nothing(self):
+        violations = check_superseded_close_sends_nothing(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_one_tap_decision_asymmetry(self):
+        violations = check_one_tap_decision_asymmetry(self.files)
         self.assertEqual(violations, [], violations)
 
     def test_no_pane_id_visible_via_capitalized(self):

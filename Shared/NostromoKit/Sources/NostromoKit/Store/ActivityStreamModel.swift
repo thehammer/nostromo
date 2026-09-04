@@ -7,15 +7,21 @@
 // macOS original. macOS keeps its own copy; deduplicating the two is
 // deferred (see the wedge plan's Decision 1 / memo B11).
 //
-// What macOS's copy lacks and this one adds: bounded retention.
-// `maxEventsPerStream`/`maxTotalEvents` mirror the daemon's own
-// `activity::store::MAX_EVENTS_PER_STREAM` / `MAX_TOTAL_EVENTS`
-// (src/activity/store.rs) — a client-side cap below the daemon's would
-// silently discard part of a snapshot the daemon still considers current;
-// a cap above it would never bind. On overflow, the oldest events of
-// *finished* subagent streams are reclaimed first, then the oldest events
-// of *running* subagent streams, and only then the main stream — the main
-// stream is what the ticker reads, so it is reclaimed last.
+// Both copies now bound retention the same way: `maxEventsPerStream`/
+// `maxTotalEvents` mirror the daemon's own `activity::store::
+// MAX_EVENTS_PER_STREAM` / `MAX_TOTAL_EVENTS` (src/activity/store.rs) — a
+// client-side cap below the daemon's would silently discard part of a
+// snapshot the daemon still considers current; a cap above it would never
+// bind. On overflow, the oldest events of *finished* subagent streams are
+// reclaimed first, then the oldest events of *running* subagent streams,
+// and only then the main stream — the main stream is what the ticker
+// reads, so it is reclaimed last.
+//
+// What this copy still lacks that macOS's has: a cap on the *number* of
+// subagent stream entries (macOS's `maxSubagentStreams`) and on the number
+// of tracked focus tags (macOS's `ActivityStreamStore.maxTrackedFocusTags`)
+// — see docs/activity.md. A separate, lower-magnitude bug on iOS, since
+// entries here hold already-bounded event arrays.
 
 import Foundation
 

@@ -132,6 +132,18 @@ struct CodeSurfaceView: View {
                 }
                 .onAppear { onFirstAppear(proxy: proxy) }
                 .onChange(of: payload) { _, newPayload in
+                    // Reset before rebuilding `document`, not after: rows
+                    // report their own visibility via onAppear/onDisappear on
+                    // SwiftUI's next diff pass, not synchronously with this
+                    // assignment, so `applyScrollDecision` below would
+                    // otherwise evaluate the new anchor against the
+                    // *previous* document's visible row range. If the new
+                    // anchor's row happened to fall inside that stale range,
+                    // `ScrollDecision.decide` would wrongly return `.none`
+                    // and silently fail to scroll to a freshly-requested
+                    // anchor on brand-new content — exactly the case this
+                    // indirection exists to get right (see the file header).
+                    visibleRowIndices = []
                     document = CodeDocument(payload: newPayload)
                     applyScrollDecision(proxy: proxy)
                 }

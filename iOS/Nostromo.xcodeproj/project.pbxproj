@@ -21,14 +21,15 @@
 		AA0000010000000000000024 /* DaemonDiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000025 /* DaemonDiscoveryView.swift */; };
 		AA0000010000000000000027 /* DynamicFocusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000028 /* DynamicFocusView.swift */; };
 		AA0000010000000000000029 /* PaneSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000002E /* PaneSurfaceView.swift */; };
-		AA0000010000000000000036 /* TabStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000035 /* TabStripView.swift */; };
-		AA0000010000000000000038 /* RegionContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000037 /* RegionContainerView.swift */; };
-		AA000001000000000000003C /* CodeSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000039 /* CodeSurfaceView.swift */; };
-		AA000001000000000000003D /* DiffSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000040 /* DiffSurfaceView.swift */; };
-		AA000001000000000000003E /* DiffFileListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000041 /* DiffFileListView.swift */; };
-		AA000001000000000000003F /* DiffFileContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000042 /* DiffFileContentView.swift */; };
+		AA000001000000000000003E /* TabStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000003D /* TabStripView.swift */; };
+		AA000001000000000000003C /* RegionContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000003B /* RegionContainerView.swift */; };
+		AA0000010000000000000040 /* CodeSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000003F /* CodeSurfaceView.swift */; };
+		AA0000010000000000000042 /* DiffSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000041 /* DiffSurfaceView.swift */; };
+		AA0000010000000000000044 /* DiffFileListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000043 /* DiffFileListView.swift */; };
+		AA0000010000000000000046 /* DiffFileContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000045 /* DiffFileContentView.swift */; };
 		AA0000010000000000000031 /* ActivityTickerBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000030 /* ActivityTickerBar.swift */; };
 		AA0000010000000000000033 /* ActivityStreamsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000032 /* ActivityStreamsSheet.swift */; };
+		AA0000010000000000000035 /* DecisionSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000036 /* DecisionSheetView.swift */; };
 		AA00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000100000000000000AA /* NostromoKit */; };
 /* End PBXBuildFile section */
 
@@ -48,14 +49,15 @@
 		AA0000010000000000000026 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA0000010000000000000028 /* DynamicFocusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicFocusView.swift; sourceTree = "<group>"; };
 		AA000001000000000000002E /* PaneSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneSurfaceView.swift; sourceTree = "<group>"; };
-		AA0000010000000000000035 /* TabStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabStripView.swift; sourceTree = "<group>"; };
-		AA0000010000000000000037 /* RegionContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegionContainerView.swift; sourceTree = "<group>"; };
-		AA0000010000000000000039 /* CodeSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeSurfaceView.swift; sourceTree = "<group>"; };
-		AA0000010000000000000040 /* DiffSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffSurfaceView.swift; sourceTree = "<group>"; };
-		AA0000010000000000000041 /* DiffFileListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffFileListView.swift; sourceTree = "<group>"; };
-		AA0000010000000000000042 /* DiffFileContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffFileContentView.swift; sourceTree = "<group>"; };
+		AA000001000000000000003D /* TabStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabStripView.swift; sourceTree = "<group>"; };
+		AA000001000000000000003B /* RegionContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegionContainerView.swift; sourceTree = "<group>"; };
+		AA000001000000000000003F /* CodeSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeSurfaceView.swift; sourceTree = "<group>"; };
+		AA0000010000000000000041 /* DiffSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffSurfaceView.swift; sourceTree = "<group>"; };
+		AA0000010000000000000043 /* DiffFileListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffFileListView.swift; sourceTree = "<group>"; };
+		AA0000010000000000000045 /* DiffFileContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffFileContentView.swift; sourceTree = "<group>"; };
 		AA0000010000000000000030 /* ActivityTickerBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityTickerBar.swift; sourceTree = "<group>"; };
 		AA0000010000000000000032 /* ActivityStreamsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamsSheet.swift; sourceTree = "<group>"; };
+		AA0000010000000000000036 /* DecisionSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheetView.swift; sourceTree = "<group>"; };
 		AA00000100000000000000A0 /* Nostromo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nostromo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -104,6 +106,7 @@
 				AA0000010000000000000023 /* FredView.swift */,
 				AA0000010000000000000025 /* DaemonDiscoveryView.swift */,
 				AA0000010000000000000028 /* DynamicFocusView.swift */,
+				AA0000010000000000000036 /* DecisionSheetView.swift */,
 				AA000001000000000000002F /* Panes */,
 				AA0000010000000000000034 /* Activity */,
 			);
@@ -114,12 +117,12 @@
 			isa = PBXGroup;
 			children = (
 				AA000001000000000000002E /* PaneSurfaceView.swift */,
-				AA0000010000000000000035 /* TabStripView.swift */,
-				AA0000010000000000000037 /* RegionContainerView.swift */,
-				AA0000010000000000000039 /* CodeSurfaceView.swift */,
-				AA0000010000000000000040 /* DiffSurfaceView.swift */,
-				AA0000010000000000000041 /* DiffFileListView.swift */,
-				AA0000010000000000000042 /* DiffFileContentView.swift */,
+				AA000001000000000000003D /* TabStripView.swift */,
+				AA000001000000000000003B /* RegionContainerView.swift */,
+				AA000001000000000000003F /* CodeSurfaceView.swift */,
+				AA0000010000000000000041 /* DiffSurfaceView.swift */,
+				AA0000010000000000000043 /* DiffFileListView.swift */,
+				AA0000010000000000000045 /* DiffFileContentView.swift */,
 			);
 			path = Panes;
 			sourceTree = "<group>";
@@ -229,14 +232,15 @@
 				AA0000010000000000000024 /* DaemonDiscoveryView.swift in Sources */,
 				AA0000010000000000000027 /* DynamicFocusView.swift in Sources */,
 				AA0000010000000000000029 /* PaneSurfaceView.swift in Sources */,
-				AA0000010000000000000036 /* TabStripView.swift in Sources */,
-				AA0000010000000000000038 /* RegionContainerView.swift in Sources */,
-				AA000001000000000000003C /* CodeSurfaceView.swift in Sources */,
-				AA000001000000000000003D /* DiffSurfaceView.swift in Sources */,
-				AA000001000000000000003E /* DiffFileListView.swift in Sources */,
-				AA000001000000000000003F /* DiffFileContentView.swift in Sources */,
+				AA000001000000000000003E /* TabStripView.swift in Sources */,
+				AA000001000000000000003C /* RegionContainerView.swift in Sources */,
+				AA0000010000000000000040 /* CodeSurfaceView.swift in Sources */,
+				AA0000010000000000000042 /* DiffSurfaceView.swift in Sources */,
+				AA0000010000000000000044 /* DiffFileListView.swift in Sources */,
+				AA0000010000000000000046 /* DiffFileContentView.swift in Sources */,
 				AA0000010000000000000031 /* ActivityTickerBar.swift in Sources */,
 				AA0000010000000000000033 /* ActivityStreamsSheet.swift in Sources */,
+				AA0000010000000000000035 /* DecisionSheetView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

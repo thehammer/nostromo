@@ -44,7 +44,12 @@ const _: () = assert!(MIN_CLIENT_VERSION <= PROTOCOL_VERSION);
 /// Maximum accepted frame body size (4 MiB).
 pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
 
-/// Return the socket path, honouring `NOSTROMD_SOCKET` if set.
+/// Return the socket path, honouring `NOSTROMOD_SOCKET` if set (see
+/// `SOCKET_PATH_ENV` above — this doc comment previously said `NOSTROMD_SOCKET`,
+/// which is a different string the Swift client reads instead; the two
+/// spellings coexist today because their defaults agree, so nothing broke
+/// until something overrode one and not the other. Consolidating them is a
+/// separate cleanup — see `bin/nostromo-launch-smoke`, which sets both).
 pub fn default_socket_path() -> PathBuf {
     if let Ok(v) = std::env::var(SOCKET_PATH_ENV) {
         return PathBuf::from(v);

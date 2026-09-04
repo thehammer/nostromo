@@ -813,8 +813,18 @@ class NostromodClient {
             }
 
         case "pane_content":
-            if let m = try? decoder.decode(PaneContentResp.self, from: raw) {
+            // Captured before the decode attempt so a frame that fails to
+            // decode is still on disk to inspect — a decode failure is
+            // exactly the moment the raw bytes matter most.
+            PaneContentDump.writeIfRequested(raw: raw, paneId: json["pane_id"] as? String)
+            do {
+                let m = try decoder.decode(PaneContentResp.self, from: raw)
                 return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content, freshness: m.freshness, address: m.address)
+            } catch {
+                log.error("""
+                    failed to decode pane_content (pane_id=\(json["pane_id"] as? String ?? "unknown", privacy: .public)): \
+                    \(String(describing: error), privacy: .public)
+                    """)
             }
 
         case "focus_created":

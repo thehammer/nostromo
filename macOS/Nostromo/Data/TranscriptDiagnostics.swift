@@ -96,6 +96,21 @@ enum TranscriptDiagnostics {
     /// identity at all.
     private static let runID = UUID().uuidString
 
+    /// One `PaneFirstPaintAudit.Measurements` value, Codable so it can ride
+    /// in a `Report` line. Field-for-field identical to `Measurements` — see
+    /// `PaneFirstPaintAudit.swift` — deliberately not made `Encodable`
+    /// itself, since that type is intentionally content-free and has no
+    /// reason to know about JSON.
+    struct PaneMeasurementReport: Encodable {
+        let paneId: String
+        let hasContent: Bool
+        let isLoading: Bool
+        let boundsWidth: Double
+        let boundsHeight: Double
+        let hasWindow: Bool
+        let layoutPassCount: Int
+    }
+
     struct Report: Encodable {
         let timestamp: String
         /// Which run wrote this line. See `TranscriptDiagnostics.runID`.
@@ -117,7 +132,99 @@ enum TranscriptDiagnostics {
         /// Focuses the run asked for, so a run that drove 1 of 8 fails a
         /// criterion instead of reading as a clean 1-focus run.
         let harnessRequestedFocuses: Int?
+
+        // ── launch-layout observability (W1 — launch-smoke-test) ────────────
+        // Every field below is `Optional`, so a plain launch — no
+        // NOSTROMO_DIAG_PATH override, no smoke check watching — writes
+        // exactly the same lines it always has once nothing below has
+        // anything to say. See `bin/nostromo-launch-smoke`, which is the
+        // actual consumer of these fields.
+
+        /// ISO8601 timestamp of the first `DynamicFocusView.reconcile` that
+        /// produced at least one pane with `hasWindow == true` and
+        /// `layoutPassCount > 0`, across every live focus. This anchors the
+        /// launch-smoke check's observation window. `nil` until that happens.
+        let firstLayoutReconcileAt: String?
+        /// Split-node count from the most recently reconciled tree, summed
+        /// across every live `DynamicFocusView`.
+        let splitNodesRendered: Int?
+        /// Leaf count from the most recently reconciled tree, summed across
+        /// every live `DynamicFocusView`.
+        let leavesRendered: Int?
+        /// Count of live `RatioSplitView`s that have completed a layout pass
+        /// with a non-zero size.
+        let splitsLaidOut: Int?
+        /// Count of live `RatioSplitView`s whose `applyRatios` call has
+        /// returned `true` — the crux observation: positive proof the app
+        /// reached `NSSplitView.setPosition` and returned from it, which is
+        /// exactly the call that never returned in the 2026-09-03 defect.
+        let splitsRatiosApplied: Int?
+        /// Verbatim `PaneFirstPaintAudit.Measurements` for every live
+        /// agent-authored pane (`PaneContentNSView`), from
+        /// `AppStore.currentPaneMeasurements()`. Not re-derived or re-graded
+        /// here — the launch-smoke check applies `PaneFirstPaintAudit`'s own
+        /// predicate itself.
+        let panesMeasured: [PaneMeasurementReport]?
     }
+
+    /// See `firstLayoutReconcileAt` above. Written once, by
+    /// `_recordFirstLayoutIfNeeded`, never cleared.
+    private static var firstLayoutReconcileAt: String?
+    /// tag -> (split-node count, leaf count) from that focus's most recent
+    /// reconcile. `snapshot()` sums these for `splitNodesRendered`/
+    /// `leavesRendered`.
+    private static var renderedTreeShapeByTag: [String: (splits: Int, leaves: Int)] = [:]
+
+    /// Called once per `DynamicFocusView.reconcile`, right after
+    /// `renderedTree` is assigned — the documented sole choke point every
+    /// structural repair funnels through.
+    ///
+    /// This is the *hint* path for `firstLayoutReconcileAt`, not the only
+    /// one: a `reconcile()` is driven by a `FocusLayout` broadcast, which
+    /// typically arrives well before AppKit has actually run a layout pass
+    /// on the freshly built views (a real layout pass is scheduled
+    /// asynchronously on the next display cycle). A fixture that sends
+    /// exactly one static tree — as `bin/nostromo-launch-smoke`'s does —
+    /// then never calls `reconcile` again, so relying on this path alone
+    /// left `firstLayoutReconcileAt` unset for tens of seconds until some
+    /// unrelated event happened to trigger another reconcile. `snapshot()`
+    /// below checks the same condition on every diagnostics-stream tick, so
+    /// whichever fires first — another reconcile, or the next tick — records
+    /// it.
+    static func noteReconcile(tag: String, splitNodes: Int, leaves: Int) {
+        renderedTreeShapeByTag[tag] = (splits: splitNodes, leaves: leaves)
+        _recordFirstLayoutIfNeeded(using: AppStore.shared.currentPaneMeasurements())
+    }
+
+    /// Set `firstLayoutReconcileAt` (and emit a stream line immediately) the
+    /// first time any pane measurement shows a real, laid-out size. Safe to
+    /// call repeatedly — a no-op once already set.
+    private static func _recordFirstLayoutIfNeeded(using measurements: [PaneFirstPaintAudit.Measurements]) {
+        guard firstLayoutReconcileAt == nil else { return }
+        let anyPaneLaidOut = measurements.contains {
+            $0.hasWindow && $0.layoutPassCount > 0 && $0.boundsWidth > 0 && $0.boundsHeight > 0
+        }
+        guard anyPaneLaidOut else { return }
+        firstLayoutReconcileAt = ISO8601DateFormatter().string(from: Date())
+        emitStreamLineNow()
+    }
+
+    /// Anything a live `RatioSplitView` can report about itself — see
+    /// `RatioSplitView`'s conformance in `DynamicFocusView.swift`.
+    protocol SplitReporting: AnyObject {
+        var hasLaidOut: Bool { get }
+        var ratiosApplied: Bool { get }
+        var splitBoundsWidth: Double { get }
+        var splitBoundsHeight: Double { get }
+    }
+
+    private static var splits = NSHashTable<AnyObject>.weakObjects()
+
+    /// Registered by `DynamicFocusView.makeSplitView` right after
+    /// construction. Weakly held, like `panes` above — registration must
+    /// never be what keeps a split alive, and a rebuilt-away split simply
+    /// drops out once deallocated; no explicit unregister needed.
+    static func registerSplit(_ split: SplitReporting) { splits.add(split) }
 
     static func snapshot() -> Report {
         let footprint = physicalFootprint()
@@ -131,6 +238,27 @@ enum TranscriptDiagnostics {
                               estimatedDocHeight: pane.estimatedDocumentHeight,
                               transcriptClears: pane.transcriptClearCount)
         }
+        let splitReports = splits.allObjects.compactMap { $0 as? SplitReporting }
+        let splitsLaidOutCount = splitReports.filter {
+            $0.hasLaidOut && $0.splitBoundsWidth > 0 && $0.splitBoundsHeight > 0
+        }.count
+        let splitsRatiosAppliedCount = splitReports.filter { $0.ratiosApplied }.count
+        let rawMeasurements = AppStore.shared.currentPaneMeasurements()
+        // Catch-up path for `firstLayoutReconcileAt` — see `noteReconcile`'s
+        // doc comment: a fixture (or a real launch) that never triggers a
+        // second `reconcile()` still gets this recorded within one
+        // diagnostics-stream tick of AppKit actually completing a layout
+        // pass, rather than waiting on an unrelated later reconcile.
+        _recordFirstLayoutIfNeeded(using: rawMeasurements)
+        let paneMeasurements = rawMeasurements.map {
+            PaneMeasurementReport(paneId: $0.paneId, hasContent: $0.hasContent,
+                                  isLoading: $0.isLoading, boundsWidth: $0.boundsWidth,
+                                  boundsHeight: $0.boundsHeight, hasWindow: $0.hasWindow,
+                                  layoutPassCount: $0.layoutPassCount)
+        }
+        let treeShape = renderedTreeShapeByTag.values.reduce((splits: 0, leaves: 0)) {
+            (splits: $0.splits + $1.splits, leaves: $0.leaves + $1.leaves)
+        }
         return Report(timestamp: ISO8601DateFormatter().string(from: Date()),
                       runID: runID,
                       pid: Int(ProcessInfo.processInfo.processIdentifier),
@@ -140,7 +268,13 @@ enum TranscriptDiagnostics {
                       panes: reports.sorted { $0.tag < $1.tag },
                       turnsProcessed: TranscriptLoadHarness.shared?.turnsDelivered,
                       harnessTargetedPanes: TranscriptLoadHarness.shared?.targetedPaneCount,
-                      harnessRequestedFocuses: TranscriptLoadHarness.shared?.requestedFocusCount)
+                      harnessRequestedFocuses: TranscriptLoadHarness.shared?.requestedFocusCount,
+                      firstLayoutReconcileAt: firstLayoutReconcileAt,
+                      splitNodesRendered: renderedTreeShapeByTag.isEmpty ? nil : treeShape.splits,
+                      leavesRendered: renderedTreeShapeByTag.isEmpty ? nil : treeShape.leaves,
+                      splitsLaidOut: splitReports.isEmpty ? nil : splitsLaidOutCount,
+                      splitsRatiosApplied: splitReports.isEmpty ? nil : splitsRatiosAppliedCount,
+                      panesMeasured: paneMeasurements.isEmpty ? nil : paneMeasurements)
     }
 
     static func reportJSON() -> String {
@@ -164,8 +298,16 @@ enum TranscriptDiagnostics {
 
     private static var timer: DispatchSourceTimer?
 
+    /// `NOSTROMO_DIAG_PATH`, resolved once, overrides the default path
+    /// entirely — this is what lets `bin/nostromo-launch-smoke` point a
+    /// launch at its own per-run temp file instead of appending to the
+    /// operator's `diagnostics.jsonl`. Falls back to the existing path when
+    /// unset, so default behaviour (no `NOSTROMO_*` variables) is unchanged.
     static var streamURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        if let override = ProcessInfo.processInfo.environment["NOSTROMO_DIAG_PATH"] {
+            return URL(fileURLWithPath: override)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Nostromo/diagnostics.jsonl")
     }
 
