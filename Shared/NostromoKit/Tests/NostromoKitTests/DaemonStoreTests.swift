@@ -765,3 +765,246 @@ private enum ActivityStreamWireFixture {
             events: events, finished: finished)
     }
 }
+
+// MARK: - DaemonStoreDecisionTests
+
+/// Verifies `DaemonStore`'s handling of `decision_request` / `decision_resolved`
+/// broadcasts (W3 — iOS decision answering): FIFO enqueue into
+/// `pendingDecisions`, de-duplication of a re-broadcast for the same
+/// `requestId`, dropping a request for an id that already has a claimed
+/// resolution, `answerDecision(requestId:choiceId:)` popping the matching
+/// entry, a resolution silently removing a still-queued entry, resolution
+/// mapping into `decisionStore` (`"answered"` + a `choiceId` → `.choice`,
+/// `"dismissed"` → `.dismissed`, anything else — `"timeout"`, `"cancelled"`
+/// — → `.resolvedElsewhere`), and `pendingDecisions` clearing on disconnect.
+///
+/// Since `ServerMsg.decisionRequest`/`.decisionResolved` wire decoding is
+/// covered separately in `DecisionWireTests.swift`, these tests construct the
+/// `ServerMsg` enum cases directly in Swift and push them through
+/// `client.messages`, exactly like `DaemonStoreActivityTests`'s `.activity`
+/// tests above — no JSON involved at this layer. Same construction technique
+/// as `DaemonStoreTests`/`DaemonStoreActivityTests`: a real `NetworkClient`
+/// that never calls `start()` (so no socket ever opens), and a short sleep
+/// after each send to let `DaemonStore`'s `.receive(on: RunLoop.main)`
+/// pipeline flush.
+///
+/// `store.decisionStore` is read from these (non-isolated) `async` test
+/// methods as `await store.decisionStore.resolution(for:)` — reading the
+/// `@MainActor`-isolated `decisionStore` property requires the `await`, but
+/// the returned `DecisionStore` is a plain object, so the trailing
+/// `.resolution(for:)` call itself is NOT guaranteed to execute on the main
+/// thread just because the property fetch was awaited — it runs back on the
+/// calling (non-isolated) context. `DecisionStore` asserts
+/// `Thread.isMainThread` internally, so that pattern crashes. Wrapping the
+/// whole expression in `await MainActor.run { ... }` forces both the
+/// property read and the method call onto the main actor's executor.
+final class DaemonStoreDecisionTests: XCTestCase {
+
+    private func deliver(_ msg: ServerMsg, via client: NetworkClient) async {
+        await client.messages.send(msg)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+    }
+
+    private func makeChoices() -> [DecisionChoice] {
+        [DecisionChoice(id: "yes", label: "Yes", detail: nil)]
+    }
+
+    // MARK: - A single decision_request enqueues exactly one matching entry
+
+    func testSingleDecisionRequestEnqueuesExactlyOneMatchingEntry() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let choices = makeChoices()
+
+        await deliver(
+            .decisionRequest(tag: "fred", requestId: "req-1", prompt: "Continue?",
+                              detail: "some detail", choices: choices, contextPaneId: "pane-1"),
+            via: client
+        )
+
+        let pending = await store.pendingDecisions
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?.tag, "fred")
+        XCTAssertEqual(pending.first?.requestId, "req-1")
+        XCTAssertEqual(pending.first?.prompt, "Continue?")
+        XCTAssertEqual(pending.first?.detail, "some detail")
+        XCTAssertEqual(pending.first?.choices, choices)
+        XCTAssertEqual(pending.first?.contextPaneId, "pane-1")
+    }
+
+    // MARK: - A duplicate decision_request for the same id is not enqueued twice
+
+    func testDuplicateDecisionRequestForSameIdIsNotEnqueuedTwice() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let msg = ServerMsg.decisionRequest(
+            tag: "fred", requestId: "req-1", prompt: "Continue?",
+            detail: nil, choices: makeChoices(), contextPaneId: nil)
+
+        await deliver(msg, via: client)
+        await deliver(msg, via: client)
+
+        let pending = await store.pendingDecisions
+        XCTAssertEqual(pending.count, 1, "a duplicate re-broadcast for the same requestId must not enqueue a second entry")
+    }
+
+    // MARK: - Two decision_requests for different tags preserve arrival order
+
+    func testTwoDecisionRequestsForDifferentTagsPreserveArrivalOrder() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let choices = makeChoices()
+
+        await deliver(
+            .decisionRequest(tag: "fred", requestId: "req-1", prompt: "First?",
+                              detail: nil, choices: choices, contextPaneId: nil),
+            via: client
+        )
+        await deliver(
+            .decisionRequest(tag: "perri", requestId: "req-2", prompt: "Second?",
+                              detail: nil, choices: choices, contextPaneId: nil),
+            via: client
+        )
+
+        let pending = await store.pendingDecisions
+        XCTAssertEqual(pending.count, 2)
+        XCTAssertEqual(pending[0].tag, "fred")
+        XCTAssertEqual(pending[0].requestId, "req-1")
+        XCTAssertEqual(pending[1].tag, "perri")
+        XCTAssertEqual(pending[1].requestId, "req-2")
+    }
+
+    // MARK: - answerDecision removes the head entry and promotes the next one
+
+    func testAnswerDecisionRemovesHeadEntryAndPromotesTheNextOne() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let choices = makeChoices()
+
+        await deliver(
+            .decisionRequest(tag: "fred", requestId: "req-1", prompt: "First?",
+                              detail: nil, choices: choices, contextPaneId: nil),
+            via: client
+        )
+        await deliver(
+            .decisionRequest(tag: "perri", requestId: "req-2", prompt: "Second?",
+                              detail: nil, choices: choices, contextPaneId: nil),
+            via: client
+        )
+
+        await store.answerDecision(requestId: "req-1", choiceId: "yes")
+
+        let pending = await store.pendingDecisions
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending[0].requestId, "req-2", "the second entry must become the new head after the first is answered")
+    }
+
+    // MARK: - decision_resolved for a still-queued request removes it silently
+
+    func testDecisionResolvedForAQueuedRequestRemovesItSilently() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(
+            .decisionRequest(tag: "fred", requestId: "req-1", prompt: "Continue?",
+                              detail: nil, choices: makeChoices(), contextPaneId: nil),
+            via: client
+        )
+        await deliver(
+            .decisionResolved(tag: "fred", requestId: "req-1", resolution: "dismissed", choiceId: nil),
+            via: client
+        )
+
+        let pending = await store.pendingDecisions
+        XCTAssertTrue(pending.isEmpty, "a resolved decision must be removed from the pending queue, without crashing")
+    }
+
+    // MARK: - decision_resolved resolution mapping into decisionStore
+
+    func testDecisionResolvedAnsweredWithChoiceIdRecordsChoiceInDecisionStore() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(
+            .decisionResolved(tag: "fred", requestId: "req-1", resolution: "answered", choiceId: "approve"),
+            via: client
+        )
+
+        let resolution = await MainActor.run { store.decisionStore.resolution(for: "req-1") }
+        XCTAssertEqual(resolution, .choice("approve"))
+    }
+
+    func testDecisionResolvedDismissedRecordsDismissedInDecisionStore() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(
+            .decisionResolved(tag: "fred", requestId: "req-1", resolution: "dismissed", choiceId: nil),
+            via: client
+        )
+
+        let resolution = await MainActor.run { store.decisionStore.resolution(for: "req-1") }
+        XCTAssertEqual(resolution, .dismissed)
+    }
+
+    func testDecisionResolvedTimeoutRecordsResolvedElsewhereInDecisionStore() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(
+            .decisionResolved(tag: "fred", requestId: "req-1", resolution: "timeout", choiceId: nil),
+            via: client
+        )
+
+        let resolution = await MainActor.run { store.decisionStore.resolution(for: "req-1") }
+        XCTAssertEqual(resolution, .resolvedElsewhere("timeout"))
+    }
+
+    // MARK: - A decision_request for an already-resolved id is dropped
+
+    func testDecisionRequestForAnAlreadyResolvedIdIsDropped() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(
+            .decisionResolved(tag: "fred", requestId: "req-1", resolution: "timeout", choiceId: nil),
+            via: client
+        )
+        await deliver(
+            .decisionRequest(tag: "fred", requestId: "req-1", prompt: "Too late?",
+                              detail: nil, choices: makeChoices(), contextPaneId: nil),
+            via: client
+        )
+
+        let pending = await store.pendingDecisions
+        XCTAssertTrue(
+            pending.isEmpty,
+            "a request for an id that already has a claimed resolution must be dropped, never enqueued"
+        )
+    }
+
+    // MARK: - Disconnect clears pendingDecisions
+
+    /// Same seam as `DaemonStoreActivityTests.testStoppingTheClientClearsActivityState`:
+    /// `NetworkClient.connected` has no test-only setter, so `client.stop()`
+    /// is the only public way to re-drive `DaemonStore`'s "not connected"
+    /// clearing branch without opening a real socket.
+    func testDisconnectClearsPendingDecisions() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(
+            .decisionRequest(tag: "fred", requestId: "req-1", prompt: "Continue?",
+                              detail: nil, choices: makeChoices(), contextPaneId: nil),
+            via: client
+        )
+        let beforeStop = await store.pendingDecisions.count
+        XCTAssertEqual(beforeStop, 1, "sanity check: the request must be queued before we stop the client")
+
+        await client.stop()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        let afterStop = await store.pendingDecisions
+        XCTAssertTrue(afterStop.isEmpty, "pendingDecisions must be cleared on disconnect")
+    }
+}

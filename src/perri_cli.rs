@@ -1,5 +1,10 @@
-//! Helpers for shelling out to the `perri` CLI and `gh` from the daemon's
-//! `PerriAction` IPC handler.
+//! Helpers backing the daemon's `PerriAction` IPC handler.
+//!
+//! `"load_pr"`/`"clear"` write the `current-pr` file contract directly
+//! through [`crate::data::perri_current_pr`] — the same module the
+//! daemon-hosted `perri.load_pr`/`perri.clear_current_pr` MCP handlers write
+//! through — so the two hosts can never drift on the file shape. Only
+//! `"approve"` shells out, to the real `gh` CLI.
 //!
 //! Mirrors the pattern in `src/mother/mod.rs` (`run_mother` + `validate_job_id`).
 
@@ -8,15 +13,10 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-/// `PERRI_BIN` env var overrides the default `perri` binary name.
-const PERRI_BIN_ENV: &str = "PERRI_BIN";
+use crate::data::perri_current_pr;
 
 /// `GH_BIN` env var overrides the default `gh` binary name (used for approve).
 const GH_BIN_ENV: &str = "GH_BIN";
-
-fn perri_bin() -> String {
-    std::env::var(PERRI_BIN_ENV).unwrap_or_else(|_| "perri".to_owned())
-}
 
 fn gh_bin() -> String {
     std::env::var(GH_BIN_ENV).unwrap_or_else(|_| "gh".to_owned())
@@ -37,10 +37,16 @@ fn validate_repo(repo: &str) -> Result<()> {
     Ok(())
 }
 
-/// Execute the appropriate `perri` CLI or `gh` invocation for the given `action`.
+/// Execute the appropriate write-through or `gh` invocation for the given `action`.
 ///
-/// - `"load_pr"` → `perri load_pr -- <pr_number> <repo>`
-/// - `"clear"`   → `perri clear_current_pr`
+/// - `"load_pr"` → writes `current-pr.json` + touches `current-pr.dirty` via
+///   `crate::data::perri_current_pr::write_pointer` (no `highlights` — that's
+///   the MCP tool's agent-authored-content feature, with no client affordance
+///   here).
+/// - `"clear"`   → removes `current-pr.json`, touches `current-pr.dirty` via
+///   `perri_current_pr::clear_pointer`, then touches `queue.dirty` via
+///   `perri_current_pr::touch_queue_dirty` — matching
+///   `clear_current_pr_daemon`'s order.
 /// - `"approve"` → resolves HEAD sha, posts `gh pr review --approve`, then
 ///   writes the Phase 1 approval signal to `<perri_state_dir>/approvals.jsonl`
 ///   and touches `<perri_state_dir>/queue.dirty` for instant queue suppression.
@@ -51,41 +57,27 @@ pub async fn run_perri_action(
     repo: Option<&str>,
     perri_state_dir: &Path,
 ) -> Result<()> {
-    let bin = perri_bin();
-
     match action {
         "load_pr" => {
             let number = pr_number
                 .filter(|&n| n > 0)
                 .with_context(|| "load_pr requires a non-zero pr_number")?;
             let repo = repo.with_context(|| "load_pr requires a repo slug")?;
-            validate_repo(repo)?;
 
-            let status = tokio::process::Command::new(&bin)
-                .args(["load_pr", "--", &number.to_string(), repo])
-                .status()
-                .await
-                .with_context(|| format!("spawning {bin} load_pr"))?;
-
-            if !status.success() {
-                bail!("{bin} load_pr exited with status {status}");
-            }
+            // `highlights: None` — agent-authored highlights are the MCP
+            // tool's feature; `ClientMsg::PerriAction` carries no such field.
+            perri_current_pr::write_pointer(perri_state_dir, number, repo, None)
+                .map_err(|e| anyhow::anyhow!(e))
+                .with_context(|| "load_pr: writing current-pr pointer")?;
         }
 
         "clear" => {
-            let status = tokio::process::Command::new(&bin)
-                .arg("clear_current_pr")
-                .status()
-                .await
-                .with_context(|| format!("spawning {bin} clear_current_pr"))?;
-
-            if !status.success() {
-                tracing::warn!(
-                    "{bin} clear_current_pr exited with {status} — \
-                     the CLI may not support this subcommand yet"
-                );
-                // Non-fatal: the subcommand may not exist in all perri versions.
-            }
+            perri_current_pr::clear_pointer(perri_state_dir)
+                .map_err(|e| anyhow::anyhow!(e))
+                .with_context(|| "clear: removing current-pr pointer")?;
+            perri_current_pr::touch_queue_dirty(perri_state_dir)
+                .map_err(|e| anyhow::anyhow!(e))
+                .with_context(|| "clear: touching queue.dirty")?;
         }
 
         "approve" => {
@@ -289,5 +281,174 @@ mod tests {
             msg.contains("pr_number") || msg.contains("requires"),
             "expected missing pr_number error, got: {msg}"
         );
+    }
+
+    // ── load_pr / clear write-through (fix for shelling out to a nonexistent
+    //    `perri` binary) ─────────────────────────────────────────────────────
+    // These exercise the post-fix contract: "load_pr"/"clear" must write
+    // through `crate::data::perri_current_pr` (the same file contract the
+    // daemon's `perri.load_pr`/`perri.clear_current_pr` MCP tools use)
+    // instead of shelling out to a `perri` binary that doesn't exist.
+
+    #[tokio::test]
+    async fn load_pr_writes_a_current_pr_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = run_perri_action("load_pr", Some(42), Some("acme/widget"), dir.path()).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let content = std::fs::read_to_string(dir.path().join("current-pr.json"))
+            .expect("current-pr.json must exist after load_pr");
+        let pointer: crate::data::perri_pr_native::CurrentPrPointer =
+            serde_json::from_str(&content).expect("must deserialize as CurrentPrPointer");
+        assert_eq!(pointer.number, 42);
+        assert_eq!(pointer.repo, "acme/widget");
+
+        assert!(
+            dir.path().join("current-pr.dirty").exists(),
+            "load_pr must touch current-pr.dirty"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_removes_the_pointer_and_touches_both_sentinels() {
+        let dir = tempfile::tempdir().unwrap();
+
+        run_perri_action("load_pr", Some(1), Some("acme/widget"), dir.path())
+            .await
+            .expect("load_pr must succeed before clear");
+        assert!(dir.path().join("current-pr.json").exists());
+
+        let result = run_perri_action("clear", None, None, dir.path()).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        assert!(
+            !dir.path().join("current-pr.json").exists(),
+            "clear must remove the current-pr pointer"
+        );
+        assert!(
+            dir.path().join("current-pr.dirty").exists(),
+            "clear must touch current-pr.dirty"
+        );
+        assert!(
+            dir.path().join("queue.dirty").exists(),
+            "clear must touch queue.dirty"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_on_an_absent_pointer_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        // No prior load_pr — current-pr.json never existed.
+
+        let result = run_perri_action("clear", None, None, dir.path()).await;
+        assert!(result.is_ok(), "clearing an absent pointer must not error");
+
+        assert!(dir.path().join("current-pr.dirty").exists());
+        assert!(dir.path().join("queue.dirty").exists());
+    }
+
+    #[tokio::test]
+    async fn load_pr_creates_a_missing_state_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        assert!(!nested.exists());
+
+        let result = run_perri_action("load_pr", Some(9), Some("acme/widget"), &nested).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        assert!(
+            nested.join("current-pr.json").exists(),
+            "load_pr must create the state dir and write into it"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_pr_rejects_a_slugless_repo() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = run_perri_action("load_pr", Some(1), Some("acmewidget"), dir.path()).await;
+        assert!(result.is_err());
+        assert!(!dir.path().join("current-pr.json").exists());
+    }
+
+    #[tokio::test]
+    async fn load_pr_rejects_a_multi_segment_repo() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result =
+            run_perri_action("load_pr", Some(1), Some("acme/widget/extra"), dir.path()).await;
+        assert!(result.is_err());
+        assert!(!dir.path().join("current-pr.json").exists());
+    }
+
+    #[tokio::test]
+    async fn load_pr_rejects_an_unsafe_repo() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = run_perri_action(
+            "load_pr",
+            Some(1),
+            Some("org/repo;rm -rf /"),
+            dir.path(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!dir.path().join("current-pr.json").exists());
+    }
+
+    #[tokio::test]
+    async fn load_pr_still_requires_a_nonzero_pr_number() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = run_perri_action("load_pr", Some(0), Some("acme/widget"), dir.path()).await;
+        assert!(result.is_err(), "pr_number: Some(0) must be rejected");
+        assert!(!dir.path().join("current-pr.json").exists());
+
+        let result = run_perri_action("load_pr", None, Some("acme/widget"), dir.path()).await;
+        assert!(result.is_err(), "pr_number: None must be rejected");
+        assert!(!dir.path().join("current-pr.json").exists());
+    }
+
+    /// Heuristic textual guard, not a control-flow proof — same spirit as the
+    /// `include_str!`-based fixture tests in `src/ipc/stream_json.rs`. This
+    /// greps this file's own *production* source text (everything before
+    /// `#[cfg(test)]`) for evidence that "load_pr"/"clear" still shell out to
+    /// a `perri` binary: the `PERRI_BIN` env-var indirection, or a
+    /// subcommand string like `"load_pr"`/`"clear_current_pr"` sitting near
+    /// a `Command::new` call. It cannot prove the daemon never shells out to
+    /// `perri` anywhere in the process — only that this file doesn't
+    /// reintroduce the exact shell-out this bug report is about.
+    ///
+    /// Deliberately excludes the test module itself: this very test's own
+    /// guard messages mention "PERRI_BIN" as a string, and `include_str!`
+    /// pulls in the whole file, so scanning past `#[cfg(test)]` would make
+    /// the assertion trip on itself.
+    #[test]
+    fn perri_cli_does_not_shell_out_to_the_perri_binary() {
+        let full_src = include_str!("perri_cli.rs");
+        let src = full_src
+            .split_once("#[cfg(test)]")
+            .map(|(production, _)| production)
+            .unwrap_or(full_src);
+
+        assert!(
+            !src.contains("PERRI_BIN"),
+            "the PERRI_BIN env var indirection for a `perri` binary should be gone"
+        );
+
+        for (idx, _) in src.match_indices("Command::new") {
+            let window = src.get(idx..(idx + 200).min(src.len())).unwrap_or("");
+            assert!(
+                !window.contains("load_pr"),
+                "found \"load_pr\" within 200 chars of a Command::new call — \
+                 looks like a reintroduced shell-out: {window:?}"
+            );
+            assert!(
+                !window.contains("clear_current_pr"),
+                "found \"clear_current_pr\" within 200 chars of a Command::new call — \
+                 looks like a reintroduced shell-out: {window:?}"
+            );
+        }
     }
 }

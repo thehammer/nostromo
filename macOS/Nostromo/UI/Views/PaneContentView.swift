@@ -235,7 +235,7 @@ struct PaneContentView: View {
     }
 
     @ViewBuilder
-    private func jsonView(_ value: Any) -> some View {
+    private func jsonView(_ value: JSONValue) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(jsonRows(from: value), id: \.key) { row in
@@ -260,29 +260,30 @@ struct PaneContentView: View {
 
     private struct JsonRow { let key: String; let value: String }
 
-    private func jsonRows(from value: Any) -> [JsonRow] {
-        if let dict = value as? [String: Any] {
+    private func jsonRows(from value: JSONValue) -> [JsonRow] {
+        switch value {
+        case .object(let dict):
             return dict.map { k, v in JsonRow(key: k, value: jsonString(v)) }
                        .sorted { $0.key < $1.key }
-        }
-        if let arr = value as? [Any] {
+        case .array(let arr):
             return arr.enumerated().map { i, v in JsonRow(key: "\(i)", value: jsonString(v)) }
+        default:
+            return [JsonRow(key: "value", value: jsonString(value))]
         }
-        return [JsonRow(key: "value", value: jsonString(value))]
     }
 
-    private func jsonString(_ value: Any) -> String {
-        if let s = value as? String { return s }
-        if let b = value as? Bool   { return b ? "true" : "false" }
-        if let i = value as? Int    { return "\(i)" }
-        if let d = value as? Double { return "\(d)" }
-        if let arr = value as? [Any] {
+    private func jsonString(_ value: JSONValue) -> String {
+        switch value {
+        case .string(let s): return s
+        case .bool(let b):   return b ? "true" : "false"
+        case .int(let i):    return "\(i)"
+        case .double(let d): return "\(d)"
+        case .null:          return "null"
+        case .array(let arr):
             return "[\(arr.map { jsonString($0) }.joined(separator: ", "))]"
-        }
-        if let dict = value as? [String: Any] {
+        case .object(let dict):
             let pairs = dict.map { "\($0.key): \(jsonString($0.value))" }.joined(separator: ", ")
             return "{\(pairs)}"
         }
-        return "\(value)"
     }
 }

@@ -163,29 +163,40 @@ selection, or keyboard focus when an event arrives, and shows only
 `summary`/`agent`/`agentType`/`kind` — never `tool_input`, `cwd`, or
 `tool_use_id`.
 
-### Client-side retention diverges from macOS
+### Client-side retention — what still diverges between macOS and iOS
 
-macOS's `ActivityStreamModel` (`macOS/Nostromo/UI/ActivityStreamModel.swift`)
-is **unbounded** — `ingest` only ever appends, with no cap, no trim, and no
-eviction anywhere in the file. On a Mac with plenty of memory this is a slow
-leak; on a phone streaming tool-call events over cellular for an evening it
-is a defect the parent PRD's own criterion rules out. iOS's copy of the
-model adds what macOS's lacks: a per-stream cap
-(`ActivityStreamModel.maxEventsPerStream = 200`) and a store-wide budget
-(`ActivityStreamModel.maxTotalEvents = 2000`), both mirroring the daemon's
-own `activity::store::MAX_EVENTS_PER_STREAM` / `MAX_TOTAL_EVENTS`
+Both clients now bound retention the same way. macOS's `ActivityStreamModel`
+(`macOS/Nostromo/UI/ActivityStreamModel.swift`) and iOS/NostromoKit's copy
+(`Shared/NostromoKit/Sources/NostromoKit/Store/ActivityStreamModel.swift`)
+each enforce a per-stream cap (`maxEventsPerStream = 200`) and a store-wide
+budget (`maxTotalEvents = 2000`), both mirroring the daemon's own
+`activity::store::MAX_EVENTS_PER_STREAM` / `MAX_TOTAL_EVENTS`
 (`src/activity/store.rs`) — matching rather than inventing new numbers,
 since the daemon's snapshot is what a reconnect replays and a client cap
 below the daemon's would silently truncate a snapshot the daemon still
-considers current. On overflow, iOS reclaims the oldest events of
+considers current. On overflow, both reclaim the oldest events of
 *finished* subagent streams first, then *running* subagent streams, and
 only then the main stream (the main stream is what the ticker reads, so
 it's reclaimed last) — a stricter, more thorough policy than the daemon's
 own (which only ever reclaims whole finished streams, and never touches a
-running stream or the main stream at all). Deduplicating the two
-`ActivityStreamModel` copies across macOS and iOS is deferred; bounding
-macOS's own copy to close this divergence is tracked as a known defect but
-is explicitly out of scope for the wedge that added iOS's bounds.
+running stream or the main stream at all).
+
+Two divergences remain between the two copies:
+
+- macOS additionally caps the *number* of subagent stream entries
+  (`maxSubagentStreams = 64`, evicting oldest-finished-first) and the
+  *number* of tracked focus tags (`ActivityStreamStore.maxTrackedFocusTags =
+  32`, LRU by last ingest) — closing the "one permanent dictionary entry per
+  subagent/per focus tag, forever" defect the 2026-09-02 "unbounded memory
+  growth" bug doc identified. NostromoKit's copy does not yet have either
+  cap (a separate, low-magnitude bug on iOS — entries there hold
+  already-bounded event arrays, so the impact is smaller).
+- NostromoKit's `ActivityHealthState` retains `lastEventAt`, which macOS's
+  copy does not — it lets iOS's not-ingesting message say *how long* the
+  pipe has been silent, which matters more on a phone than on a Mac.
+
+Deduplicating the two `ActivityStreamModel` copies across macOS and iOS
+remains deferred (memo B11).
 
 ## Out of scope (Phase 1)
 

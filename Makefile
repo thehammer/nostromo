@@ -25,6 +25,8 @@ python-test:
 	python3 -m unittest discover -s tests/transcript_load -v
 	python3 -m unittest discover -s tests/doctor -v
 	python3 -m unittest discover -s tests/ios_policy -v
+	python3 -m unittest discover -s tests/launch_smoke -v
+	python3 -m unittest discover -s tests/ci_policy -v
 
 clean:
 	cargo clean
@@ -77,7 +79,7 @@ IOS_DEVICE_ID   ?= 195907F5-56CB-5334-B012-6F71CFA5EB21# Hammer's iPhone Pro
 IPAD_DEVICE_ID  ?= BA38C738-E848-5694-B1C4-7D5DB4C631EE# Hammer's iPad Pro
 IOS_APP_RELEASE  = iOS/build/Build/Products/Release-iphoneos/Nostromo.app
 
-.PHONY: mac mac-test mac-load-test mac-run mac-kill mac-icon mac-release mac-install kit-test ios-build ios-install ios-install-ipad ios-install-all
+.PHONY: mac mac-test mac-load-test mac-run mac-kill mac-icon mac-release mac-install kit-test ios-build ios-install ios-install-ipad ios-install-all mac-smoke mac-smoke-validate
 
 # Release build uses an explicit derived-data path so the product location is
 # predictable (no DerivedData hash dependency). Ad-hoc signed so the arm64
@@ -205,3 +207,22 @@ mac-install: mac-release
 	@cp -R "$(APP_RELEASE)" "$(INSTALLED)"
 	@xattr -cr "$(INSTALLED)" 2>/dev/null || true
 	@echo "installed → $(INSTALLED)  (launch from Spotlight/Launchpad like any app)"
+
+## Launch smoke test (L4 — docs/ios-verification.md): build the Debug app,
+## launch it against a fixture daemon, and assert it reaches a real
+## multi-pane AppKit layout. The identical command a developer runs locally
+## and (from W2 on) what CI runs — see bin/nostromo-launch-smoke for the
+## full design (it does its own build; no `mac`/`mac-release` prerequisite
+## here, so `RELEASE=1` doesn't waste time on an unwanted Debug build first).
+## Debug is the default: it's what `make mac`/`mac-run` produce and the
+## fastest warm loop. `make mac-smoke RELEASE=1` uses the Release bundle.
+RELEASE ?=
+mac-smoke:
+	bin/nostromo-launch-smoke $(if $(RELEASE),--release,)
+
+## Validate the launch smoke check against the bug it exists to catch: the
+## 2026-09-03 RatioSplitView.layout() infinite-recursion crash. Builds a
+## scratch worktree with the reentrancy guard removed and asserts FAIL, then
+## reverts and asserts PASS. Never touches this working tree.
+mac-smoke-validate:
+	macOS/scripts/launch-smoke-validate.sh
