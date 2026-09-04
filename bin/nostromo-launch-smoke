@@ -918,21 +918,43 @@ def sample_cpu_seconds(ps_path, pid):
         return None
 
 
-def another_nostromo_pid(exclude_pid):
-    """A live, non-excluded process whose invoked executable IS a Nostromo
-    binary — used to detect a stray/duplicate smoke-clone instance
-    activating in place of ours (AppDelegate's single-instance enforcement).
-    Best-effort; None on any tooling failure.
+def _bundle_identifier_of(executable_path):
+    """CFBundleIdentifier from `<bundle>/Contents/Info.plist`, given
+    `executable_path` = `<bundle>/Contents/MacOS/<name>`. None on any
+    failure to locate or parse it."""
+    macos_dir = os.path.dirname(executable_path)
+    contents_dir = os.path.dirname(macos_dir)
+    plist_path = os.path.join(contents_dir, "Info.plist")
+    try:
+        with open(plist_path, "rb") as f:
+            info = plistlib.load(f)
+    except (OSError, ValueError):
+        return None
+    return info.get("CFBundleIdentifier")
 
-    Checks only the executable path itself (`command`'s first token), never
-    a substring match across the whole command line: a Nostromo.app process
-    is invoked with no arguments, so its `command` field IS just that path,
-    but an unrelated process can easily have "Contents/MacOS/Nostromo"
-    appear somewhere deep in a long argument string (observed in practice:
-    this check's own coding-agent process, whose invocation embeds the text
-    of the plan it's implementing, which quotes that very path) — a
-    substring match across the full line matched THAT process and reported
-    "another instance took the launch" for a launch nothing actually took.
+
+def another_nostromo_pid(exclude_pid, clone_bundle_id):
+    """A live, non-excluded process whose invoked executable is a Nostromo
+    binary claiming THE SAME bundle identifier as our own clone — the exact
+    thing AppDelegate's single-instance enforcement checks
+    (`NSRunningApplication.runningApplications(withBundleIdentifier:
+    Bundle.main.bundleIdentifier)`), so this only ever reports a real
+    collision, never merely "some Nostromo is running somewhere." Best-effort;
+    None on any tooling failure.
+
+    Checking bundle identifier, not just executable path, matters: the
+    operator's own real `/Applications/Nostromo.app` is *also* "a Nostromo
+    binary" by path, and is almost always running — matching on path alone
+    reported "another instance took the launch" for every early death
+    regardless of cause, including a genuine crash inside our own clone that
+    had nothing to do with any other instance (observed in practice, in this
+    check's own known-bad validation run). Checking only the executable path
+    itself (never a substring match across the whole command line) also
+    matters on its own: an unrelated process can easily have
+    "Contents/MacOS/Nostromo" appear somewhere deep in a long argument
+    string (observed in practice: this check's own coding-agent process,
+    whose invocation embeds the text of the plan it's implementing, which
+    quotes that very path).
     """
     try:
         result = subprocess.run(
@@ -954,7 +976,9 @@ def another_nostromo_pid(exclude_pid):
         if pid == exclude_pid or len(parts) < 2:
             continue
         executable = parts[1].split(None, 1)[0]
-        if executable.endswith("/Contents/MacOS/Nostromo"):
+        if not executable.endswith("/Contents/MacOS/Nostromo"):
+            continue
+        if _bundle_identifier_of(executable) == clone_bundle_id:
             return pid
     return None
 
@@ -1184,7 +1208,9 @@ def run(args):
 
             another_pid = None
             if not alive_at_window_end and (time.time() - launch_time) < 5.0:
-                another_pid = another_nostromo_pid(exclude_pid=launched_pid)
+                another_pid = another_nostromo_pid(
+                    exclude_pid=launched_pid, clone_bundle_id=CLONE_BUNDLE_ID,
+                )
 
             all_rows = _read_json_lines(diag_path)
             observed_pids = distinct_pids(all_rows)
