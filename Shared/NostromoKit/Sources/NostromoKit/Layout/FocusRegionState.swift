@@ -159,6 +159,82 @@ public struct FocusRegionState: Equatable {
     public mutating func setScrollKey(_ key: Int, for paneId: String) {
         scrollKeys[paneId] = key
     }
+
+    /// What restoring `paneId`'s saved scroll key should do, given what the
+    /// surface currently reports visible (W6 — ios-curated-view-parity, D5).
+    ///
+    /// A width-class change genuinely restructures the view tree — the
+    /// container that held a `ScrollView` is gone, so its offset is lost no
+    /// matter how stable the `.id()` is. Every other piece of state this
+    /// type holds survives a transition by never having been in the view;
+    /// scroll position is the one thing that needs an explicit save and an
+    /// explicit restore, and this is the restore half.
+    ///
+    /// The "already visible means don't move" clause is what stops a restore
+    /// from producing a visible jump on a transition that happened not to
+    /// move anything — the same rule, and the same three lines, as macOS's
+    /// `ScrollDecision.decide(anchor:visibleRange:)`
+    /// (`macOS/Nostromo/UI/ScrollDecision.swift:37-41`), mirrored here rather
+    /// than reinvented because both clients are answering the identical
+    /// question.
+    public func scrollRestore(for paneId: String, visibleRange: ClosedRange<Int>?) -> ScrollRestore {
+        ScrollRestore.decide(savedKey: scrollKeys[paneId], visibleRange: visibleRange)
+    }
+
+    // MARK: - Pruning (W6, D5)
+
+    /// Drop every region path not in `livePaths` and every pane not in
+    /// `livePanes`.
+    ///
+    /// Region paths are a pure function of the tree, so a tree rebuild that
+    /// removes a split or closes a tab leaves this type holding entries no
+    /// presentation can ever reach again. Without this they accumulate for
+    /// the lifetime of the connection — and worse, a later rebuild that
+    /// happens to reintroduce the same path resurrects a stale frontmost
+    /// pane or a stale unread mark from a layout the operator last saw
+    /// minutes ago. Call sites pass `LayoutRegions.allPaths(in:)` and
+    /// `Set(tree.paneIds)`.
+    public mutating func prune(livePaths: Set<String>, livePanes: Set<String>) {
+        frontmostPane = frontmostPane.filter { livePaths.contains($0.key) && livePanes.contains($0.value) }
+        readState = readState
+            .filter { livePaths.contains($0.key) }
+            .mapValues { $0.filter { livePanes.contains($0.key) } }
+        scrollKeys = scrollKeys.filter { livePanes.contains($0.key) }
+    }
+}
+
+// MARK: - ScrollRestore
+
+/// Whether restoring a saved scroll key should move the viewport (W6 —
+/// ios-curated-view-parity, D5).
+///
+/// A separate value type for the same reason macOS's `ScrollDecision` is one:
+/// "restoring a position already on screen does not move the viewport" is
+/// otherwise only observable by watching a real `ScrollView` not move, which
+/// is not a thing a device-less test bundle can assert. Extracting the
+/// decision is the only form in which that criterion is testable, so the
+/// view's job shrinks to obeying whatever this returns.
+public enum ScrollRestore: Equatable {
+    /// Leave the viewport exactly where it is.
+    case none
+    /// Bring `target` back into view.
+    case scrollTo(target: Int)
+
+    /// The whole rule, in one place so every caller shares it.
+    ///
+    /// - No saved key: nothing was ever recorded for this surface, so there
+    ///   is nothing to restore.
+    /// - No `visibleRange`: the surface hasn't been laid out yet and doesn't
+    ///   know what it is showing. That is a first paint, and a first paint
+    ///   always honours its saved key.
+    /// - Key already inside `visibleRange`: do nothing. This clause is what
+    ///   stops a restore from producing a visible jump on a transition that
+    ///   happened not to move anything.
+    public static func decide(savedKey: Int?, visibleRange: ClosedRange<Int>?) -> ScrollRestore {
+        guard let savedKey else { return .none }
+        guard let visibleRange else { return .scrollTo(target: savedKey) }
+        return visibleRange.contains(savedKey) ? .none : .scrollTo(target: savedKey)
+    }
 }
 
 // MARK: - PaneTree.resolvedActivePaneId
