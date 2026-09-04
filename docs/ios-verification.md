@@ -327,6 +327,133 @@ that a show arriving while the operator is in an unrelated root tab (Fred)
 leaves them there. L1's transition-table tests prove the *decision* is
 correct in isolation; only a device shows the decision landing on screen.
 
+## Worked example: the iPad's regions (W6) — and the widest gap in this doc
+
+`ios-curated-view-parity` W6 (two presentations, selected by horizontal width
+class) is the wedge where the distance between **tested** and **verified** is
+largest, and the PRD says so itself:
+
+> The iPad layout is the one thing here nobody will be able to check… "Two
+> regions, correctly proportioned, that survive a rotation with their scroll
+> positions intact" is a claim about a live view hierarchy on a device that is
+> not in CI and has no test target. The mitigation is the pure-function
+> requirement — the layout *decision* is testable even when the layout
+> *rendering* isn't — but it is a partial mitigation, and the regular-width
+> presentation is the part of this PRD most likely to be quietly half-working.
+
+This section is the honest accounting of which half is which. Treat it as a
+warning about where to spend review attention, not as a formality.
+
+### Covered at L1 — decided by a value, proven with no device
+
+`layoutPlan(tree:width:)` is a pure function of a `PaneTree` and a
+`WidthClass`, with no view hierarchy, no `GeometryReader`, no environment and
+no device. That is not stylistic: extracting the layout *decision* is the only
+form in which any of this is checkable at all, so everything that can live
+there does.
+
+- **The plan shape**, for both widths: a single `repl` leaf as one bare
+  region; a two-way split as two regions with the direction preserved;
+  nested splits as regions *within* regions rather than a flattened row (the
+  assertion that catches a depth-one walk); two `tabs` nodes under a split as
+  two regions with distinct paths sharing no pane; a `tabs` node whose child
+  is a `split` as a region within a tab.
+- **Direction semantics** — that `horizontal` means a vertical divider
+  (left | right), asserted on the plan's own field, with the meaning stated in
+  the test's name. Getting this backwards produces a layout that looks
+  deliberate and is wrong.
+- **Ratio normalisation**, against every malformed shape a daemon could emit:
+  unnormalised, too short, too long, empty, zero, negative, `NaN`, `±inf`,
+  extreme skew. Every case asserts the invariant the view depends on — shares
+  sum to 1, every share strictly positive — because a plan whose shares don't
+  sum to 1 blanks a region on screen.
+- **Totality**: for a table of ~15 tree shapes (including one decoded through
+  the unknown-`kind` fallback), every leaf in `tree.paneIds` appears exactly
+  once in the plan, at **both** widths. No drops, no duplicates.
+- **Path stability**: a given node's `RegionPath` is identical whether the
+  plan was built compact or regular. This is the single most load-bearing
+  assertion in the wedge — it is what lets a frontmost tab, an unread mark or
+  a scroll key written in one presentation resolve in the other.
+- **The compact path is still W5's**, asserted by comparing the plan's entries
+  against `TabPlan.build` directly, so a future edit cannot quietly fork it.
+- **The state transitions** (`FocusRegionStateTests`): frontmost and unread
+  surviving a width-class change, the scroll-restore decision including its
+  already-visible-means-don't-move clause, and pruning of state for a region
+  the tree no longer contains.
+- **The store's per-region wiring** (`DaemonStoreTests`), driven through real
+  `focus_layout`/`pane_content` ingestion: a `focused_pane` landing in one
+  region leaves a sibling region's frontmost tab unmoved; unread is tracked
+  per region; the compact region keeps W5's behaviour alongside; a re-sent
+  identical tree still never fights the operator's per-region tab choice.
+
+### Covered at L2 — structural, checked by scanning source text
+
+- Nothing under `iOS/` references a device, screen, or orientation API
+  (`UIDevice`, `userInterfaceIdiom`, `UIScreen`, `UIInterfaceOrientation*`,
+  `orientation`, `willTransition(to:`). This is what keeps "the width test is
+  the only branch" true over time.
+- `@Environment(\.horizontalSizeClass)` is declared in exactly one file, and
+  `WidthClass` is named only by an **explicit allowlist** — the focus view,
+  the region container, and (from W8) the diff surface — so adding a consumer
+  requires editing the policy and therefore noticing.
+- No gesture in the region container and no persisted ratio key anywhere: the
+  operator cannot resize a region.
+- **No sheet is presented from inside a region view.** This is the structural
+  form of two preservation criteria (an open activity surface and a presented
+  decision surviving a width change), and asserting the structure is stronger
+  than asserting the outcome, because the outcome is only observable on a
+  device.
+- The region container references the plan's `shares` and contains no layout
+  fraction of its own — a heuristic over arithmetic, and one that will not
+  catch a fraction laundered through a named constant.
+- No durable scroll-restore key lives in view `@State`.
+
+### Checkable ONLY by hand, on an iPad
+
+These are not covered by L1, L2 or L3, and no amount of further test-writing
+would cover them. They are verified by running the manual pass in the wedge's
+plan on a real device and writing the observations into the PR body:
+
+| Criterion | Why nothing automated can see it |
+|---|---|
+| Two regions are **actually on screen at once**, visibly proportioned to the ratios the daemon sent | L1 proves the plan says `0.6/0.4`; only an eye confirms the pixels do |
+| The **live rotation transition** preserves both regions' frontmost tabs and both surfaces' scroll positions, with nothing reloading and nothing jumping to the top | A claim about a live view hierarchy mid-transition; there is no test target on this platform and no simulator in CI |
+| The same transition arriving by **dragging a Split View divider** rather than rotating | Same, by a second route that exercises different SwiftUI machinery |
+| **Per-region unread legibility** — that a mark in the region the operator is *not* looking at is noticeable from a normal viewing distance without hunting | An unread dot's existence is testable; its peripheral-vision legibility is a perceptual property |
+| The divider **does not look draggable** and nothing happens when you try | L2 proves no gesture is attached; only looking confirms it doesn't invite the attempt |
+| **Slide Over presents the compact layout**, identical to the phone | Requires an iPad in a multitasking configuration |
+| Every renderer and the ticker **look and behave identically at both widths** | The claim is about absence of difference across two live renderings |
+
+One row the PRD asks for is **not on that table, because it cannot be**: "a
+presented decision survives a width-class change." As of W6 the iOS app has no
+decision surface at all — W3 (`no_operator`/answer-once) landed on macOS only,
+and nothing under `iOS/` renders or answers an `ask_decision`. The structural
+half of the criterion is in place and enforced (no sheet is presented from
+inside a region, and the app root is where a decision would present, above the
+hierarchy a width change destroys), but the behavioural half is **vacuous on
+iOS today** and should be re-verified by hand by whichever wedge brings the
+decision surface to iOS. Recording it as passing would be exactly the
+false-confidence this doc exists to prevent.
+
+A build that passes L1, L2 and L3 is a **necessary but not sufficient** signal
+that W6 works. If you are reviewing this wedge and the PR body does not record
+what was actually seen on the device for each row above, the regular-width
+presentation has not been verified — it has only been argued for.
+
+### One thing W6 changed that is worth knowing about
+
+"Nothing reloads" could not be satisfied by scroll restoration alone. The
+transcript's turns used to live in a `@StateObject` inside `TranscriptView`,
+and a width-class change destroys and rebuilds that view — producing a fresh,
+empty store that re-requested the whole snapshot from the daemon, blanked the
+transcript, and let its autoscroll drag the operator to the bottom of a
+conversation she was reading the middle of. W6 hoists the `TranscriptStore`
+into `DaemonStore` (keyed by focus tag) and makes `attach`/`detach` idempotent
+and reference-counted, with teardown deferred one main-actor hop so it
+survives a rebuild whose `onAppear`/`onDisappear` can fire in either order.
+That ordering is not something L1 can observe either — it is on the manual
+list above, under the rotation row.
+
 ## Why no simulator, anywhere
 
 It would be easy to ask: why not add an `xcodebuild test -destination

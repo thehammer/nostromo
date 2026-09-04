@@ -28,6 +28,36 @@
 // position and view-local state survive a tab switch with no bookkeeping.
 // `FocusRegionState` (in `DaemonStore`, not view `@State`) is what survives
 // beyond that — a tree rebuild, backgrounding, or (W6) a width-class change.
+//
+// W6 (ios-curated-view-parity) adds the SECOND presentation. This file is
+// the ONE place in the whole app that reads `@Environment(\.horizontalSizeClass)`
+// — mapped once through `WidthClass`, passed down as a value, never re-read
+// — and the one place that branches on it. Nothing anywhere branches on the
+// device: no `UIDevice`, no `userInterfaceIdiom`, no `UIScreen`, no
+// orientation notification, no size threshold in points. Both halves of the
+// PRD's rule ("an iPad in a narrow multitasking window presents the compact
+// layout; a phone never presents the regular one") follow from the size
+// class for free, and both break the moment anything else is consulted;
+// `tests/ios_policy/test_ios_view_policy.py` enforces that as an explicit
+// allowlist so adding a consumer requires editing the policy and therefore
+// noticing.
+//
+// The width class is the ONLY branch. Every renderer, every addressing
+// behaviour, the ticker, the unread marks, the `reason` captions and the
+// decision surface are identical in both presentations — compact and
+// regular differ in how regions are ARRANGED and in nothing else. The
+// compact path below is W5's, called through unchanged rather than
+// reimplemented, and `LayoutPlanTests` asserts that equality directly.
+//
+// Losslessness across a live width-class change (D5) is achieved by having
+// almost nothing to lose: frontmost tabs and unread marks were never in the
+// view (they're in `DaemonStore`'s `FocusRegionState`, keyed by region path,
+// and region paths are a pure function of the tree rather than of the
+// presentation), and the activity sheet is presented from HERE — above the
+// hierarchy a width change destroys — rather than from inside a region.
+// Scroll position is the one thing that needs an explicit save and restore,
+// because a compact/regular change genuinely restructures the view tree and
+// the container that held a `ScrollView` is simply gone.
 
 import SwiftUI
 import NostromoKit
@@ -46,26 +76,78 @@ struct DynamicFocusView: View {
     /// the operator.
     @State private var showActivitySheet = false
 
-    /// The region path used for the compact, single-strip presentation this
-    /// wedge implements (W6 adds real per-region paths at regular width).
+    /// THE width read — the only one in the app (D1). Read here, mapped once
+    /// through `WidthClass`, and passed downward as a value; never re-read
+    /// further down the tree, and never consulted alongside anything about
+    /// the device.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    /// The region path used for the compact, single-strip presentation.
     private static let regionPath = FocusRegionState.compactRegion
+
+    /// `nil` (SwiftUI reporting no size class) and compact both mean
+    /// compact — the rule lives in `WidthClass.from(isRegular:)` so it is a
+    /// tested function rather than an inline `?? .compact` inside a view.
+    private var width: WidthClass {
+        WidthClass.from(isRegular: horizontalSizeClass.map { $0 == .regular })
+    }
 
     var body: some View {
         let layout = store.focusLayouts[tag] ?? FocusLayoutModel.initial
-        let plan   = TabPlan.build(tree: layout.tree, content: layout.paneContent)
+        let plan   = layoutPlan(tree: layout.tree, width: width, content: layout.paneContent)
 
         Group {
-            if plan.count <= 1 {
-                // Single pane: no tab chrome; identical to the previous
-                // TranscriptView experience.
-                transcriptView
-            } else {
-                tabbedContent(plan: plan, layout: layout)
+            switch plan {
+            case .singleRegion(let entries):
+                if entries.count <= 1 {
+                    // Single pane: no tab chrome; identical to the previous
+                    // TranscriptView experience.
+                    transcriptView
+                } else {
+                    tabbedContent(plan: entries, layout: layout)
+                }
+            case .regions(let node):
+                regionContent(node: node, layout: layout)
             }
         }
+        // Presented from the focus view — ABOVE the region hierarchy a
+        // width-class change tears down — so an open activity surface
+        // survives a rotation or a multitasking resize (W4 D5, W6 D5). A
+        // sheet presented from inside a region would vanish under the
+        // operator the instant the iPad turned; the L2 policy suite asserts
+        // structurally that none is.
         .sheet(isPresented: $showActivitySheet) {
             ActivityStreamsSheet(model: activityModel)
         }
+        // D8: published downward as a VALUE so a surface renderer never has
+        // to re-read the size class. The sole intended consumer is the
+        // `pr_diff` renderer (W8), whose file-list-beside-hunks arrangement
+        // at regular width is a property of that renderer rather than of the
+        // region layout. Nothing else may read it — the L2 policy suite
+        // holds an explicit allowlist.
+        .environment(\.nostromoWidthClass, width)
+    }
+
+    // MARK: - Regular width: real regions (W6)
+
+    /// The daemon's splits as real, simultaneously-visible regions. The
+    /// arrangement comes entirely from `layoutPlan`; this view supplies only
+    /// the per-pane surfaces, which are the same ones the compact strip
+    /// renders.
+    private func regionContent(node: RegionNode, layout: FocusLayoutModel) -> some View {
+        let region = store.focusRegionStates[tag] ?? FocusRegionState()
+        return RegionContainerView(
+            node:           node,
+            region:         region,
+            contentVersion: layout.paneContentVersion,
+            reason:         { paneId in layout.paneAddress[paneId]?.reason },
+            onSelect:       { regionPath, paneId in
+                store.selectPane(tag: tag, regionPath: regionPath, paneId: paneId)
+            },
+            surface:        { paneId in paneContentView(for: paneId, layout: layout) }
+        )
+        .navigationTitle(displayName)
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: - Multi-pane presentation
@@ -118,7 +200,11 @@ struct DynamicFocusView: View {
                 paneId:    paneId,
                 content:   layout.paneContent[paneId],
                 freshness: layout.paneFreshness[paneId],
-                address:   layout.paneAddress[paneId]
+                address:   layout.paneAddress[paneId],
+                saveScrollKey: { key in store.setScrollKey(tag: tag, paneId: paneId, key: key) },
+                restoreScroll: { range in
+                    store.scrollRestore(tag: tag, paneId: paneId, visibleRange: range)
+                }
             )
             .environmentObject(store)
             // Ambient activity (W4, D3): a plain bottom inset on non-repl
@@ -153,6 +239,14 @@ struct DynamicFocusView: View {
             agentName:   agentName,
             viewName:    viewName,
             client:      client,
+            // Owned by `DaemonStore`, not by the view (D5): a width-class
+            // change rebuilds this hierarchy, and a view-owned store would
+            // blank the transcript and re-request it from the daemon.
+            store:       store.transcriptStore(for: tag),
+            saveScrollKey: { key in store.setScrollKey(tag: tag, paneId: "repl", key: key) },
+            restoreScroll: { range in
+                store.scrollRestore(tag: tag, paneId: "repl", visibleRange: range)
+            },
             bottomAccessory: { activityTicker }
         )
     }

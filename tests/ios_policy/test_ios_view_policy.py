@@ -779,6 +779,255 @@ def check_ticker_survives_the_rewrite(files):
     return violations
 
 
+
+# --------------------------------------------------------------------------
+# W6 — ios-curated-view-parity: two presentations, one width test.
+#
+# Every check below is one this wedge MAKES true, in the suite's standing
+# convention that a policy is added by the wedge that satisfies it. They are
+# textual heuristics over Swift source, not control-flow proofs — the same
+# documented limitation the rest of this file carries — and each has a
+# companion bites-test below proving it can actually fail.
+# --------------------------------------------------------------------------
+
+#: The complete list of files permitted to name `WidthClass` (or the
+#: `nostromoWidthClass` environment key) at all. Explicit rather than a
+#: pattern, so ADDING a consumer requires editing this list and therefore
+#: noticing. W8 adds the `pr_diff` renderer here when it lands — its
+#: file-list-beside-hunks arrangement at regular width is a property of that
+#: renderer, not of the region layout, and is the single intended consumer
+#: of the published width. Anything else is the first "just this one thing
+#: different on iPad" exception, which is the PRD's stated revisit condition
+#: for this whole design.
+WIDTH_CLASS_ALLOWLIST = (
+    "DynamicFocusView.swift",
+    "RegionContainerView.swift",
+)
+
+#: Files that render a region's interior. None may present a sheet.
+REGION_INTERIOR_FILES = (
+    "RegionContainerView.swift",
+    "TabStripView.swift",
+    "PaneSurfaceView.swift",
+)
+
+
+def check_nothing_branches_on_the_device(files):
+    """No file under `iOS/Nostromo/` references a device, screen, or
+    orientation API.
+
+    The presentation is selected by the app's current horizontal width class
+    and by nothing else. Both halves of the PRD's rule — "an iPad in a
+    narrow multitasking window presents the compact layout" and "a phone
+    never presents the regular one" — follow from the size class for free,
+    and both break the instant anything else is consulted. This is the check
+    that keeps "the width test is the only branch" true over time, which is
+    the claim the whole design rests on: every other criterion in the PRD is
+    identical in both presentations, and a second branch is what would make
+    that stop being so.
+    """
+    banned = re.compile(
+        r"\bUIDevice\b|\buserInterfaceIdiom\b|\bUIScreen\b"
+        r"|\bUIInterfaceOrientation\w*\b|\borientation\b|willTransition\(\s*to\b"
+    )
+    violations = []
+    for path, source in files:
+        for m in banned.finditer(_strip_line_comments(source)):
+            violations.append((path, "device/screen/orientation API referenced: %s" % m.group(0)))
+    return violations
+
+
+def check_horizontal_size_class_read_in_exactly_one_file(files):
+    r"""`@Environment(\.horizontalSizeClass)` is declared in exactly one file
+    — `DynamicFocusView.swift` — and nowhere else.
+
+    D1: the width is read once, mapped once through `WidthClass`, and passed
+    down as a value. A second reader is how the two presentations start
+    disagreeing with each other in ways no test can see.
+
+    Setting the value (`.environment(\.horizontalSizeClass, .regular)`) is a
+    different act from reading it and is permitted inside the `WidthClass`
+    allowlist, where `#Preview` blocks use it to look at the regular
+    arrangement during development (D7 forbids a runtime override, not a
+    preview).
+    """
+    read_pattern = re.compile(r"@Environment\(\s*\\\.horizontalSizeClass")
+    set_pattern = re.compile(r"\.environment\(\s*\\\.horizontalSizeClass")
+    violations = []
+    readers = []
+    for path, source in files:
+        stripped = _strip_line_comments(source)
+        name = os.path.basename(path)
+        if read_pattern.search(stripped):
+            readers.append(name)
+            if name != "DynamicFocusView.swift":
+                violations.append((path, "%s reads @Environment(\\.horizontalSizeClass) — only DynamicFocusView.swift may" % name))
+        # The SET carve-out applies ONLY inside the allowlist. Stripping it
+        # unconditionally would quietly let any file publish a width class,
+        # which is a second branch by another name.
+        residue = read_pattern.sub("", stripped)
+        if name in WIDTH_CLASS_ALLOWLIST:
+            residue = set_pattern.sub("", residue)
+        if "horizontalSizeClass" in residue and name not in WIDTH_CLASS_ALLOWLIST:
+            violations.append((path, "%s mentions horizontalSizeClass outside the WidthClass allowlist" % name))
+    if "DynamicFocusView.swift" not in readers:
+        violations.append((
+            "iOS/Nostromo/Views/DynamicFocusView.swift",
+            "DynamicFocusView.swift no longer reads @Environment(\\.horizontalSizeClass) — nothing selects the presentation"
+        ))
+    return violations
+
+
+def check_width_class_referenced_only_by_the_allowlist(files):
+    """`WidthClass` (and the `nostromoWidthClass` environment key that
+    carries it) is named only by the files in `WIDTH_CLASS_ALLOWLIST`.
+
+    D8. The width is published downward so that ONE renderer — `pr_diff`,
+    in W8 — can rearrange its own two parts when there is room. That is a
+    deliberate, bounded exception, and it is bounded by this list rather
+    than by good intentions.
+    """
+    violations = []
+    for path, source in files:
+        name = os.path.basename(path)
+        if name in WIDTH_CLASS_ALLOWLIST:
+            continue
+        if re.search(r"\bWidthClass\b|\bnostromoWidthClass\b", _strip_line_comments(source)):
+            violations.append((path, "%s references WidthClass — not on the allowlist (see WIDTH_CLASS_ALLOWLIST)" % name))
+    return violations
+
+
+def check_no_region_resize_affordance(files):
+    """`RegionContainerView.swift` attaches no gesture, and no file under
+    `iOS/Nostromo/` persists a split ratio.
+
+    D6, and it is a line rather than an omission. The operator cannot resize
+    a region: no drag, no divider handle, no collapse/expand, no locally
+    persisted ratio that could diverge from the daemon's. A visible divider
+    between two regions is an obvious thing to try to make draggable, so
+    this check exists to make adding one a deliberate act. macOS's
+    ratio-persistence machinery (`clearSavedRatios`, the
+    `nostromo.dynlayout.<tag>.<path>` keys, the split-signature classifier)
+    is the hairiest part of its layout code and the parent PRD flagged it as
+    a hazard that silently eats the operator's dragged layout; deferring the
+    gesture is what keeps the layout decision a pure function of
+    (tree, width class), which is what makes it testable without a device.
+    """
+    violations = []
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "RegionContainerView.swift"), None)
+    path, source = match if match else ("iOS/Nostromo/Views/Panes/RegionContainerView.swift", "")
+    stripped = _strip_line_comments(source)
+    if re.search(r"\bDragGesture\b|\.gesture\(|\.simultaneousGesture\(|\bonDrag\b", stripped):
+        violations.append((path, "RegionContainerView.swift attaches a gesture — regions are not resizable (D6)"))
+
+    key_call_pattern = re.compile(r"(UserDefaults[^\n]*|@AppStorage\([^)]*\))", re.IGNORECASE)
+    key_needle = re.compile(r"ratio|dynlayout|split", re.IGNORECASE)
+    for p, s in files:
+        for m in key_call_pattern.finditer(_strip_line_comments(s)):
+            if key_needle.search(m.group(0)):
+                violations.append((p, "persisted layout key matching ratio|dynlayout|split: %s" % m.group(0)))
+    return violations
+
+
+def check_no_sheet_presented_from_inside_a_region(files):
+    """None of `RegionContainerView.swift`, `TabStripView.swift`, or
+    `PaneSurfaceView.swift` presents a `.sheet(`.
+
+    This is the structural form of two of the wedge's preservation criteria
+    — that an open activity surface and a presented decision both survive a
+    width-class change. A width change destroys and rebuilds the entire
+    region hierarchy; a sheet presented from inside a region goes with it,
+    vanishing under the operator mid-rotation. Sheets are presented from
+    above that hierarchy (the activity sheet from `DynamicFocusView`, the
+    decision surface from the app root) precisely so there is nothing to
+    preserve. Asserting the structure is stronger than asserting the
+    outcome, because the outcome is only observable on a device.
+    """
+    by_name = {os.path.basename(p): (p, s) for p, s in files}
+    violations = []
+    for name in REGION_INTERIOR_FILES:
+        entry = by_name.get(name)
+        path, source = entry if entry else (name, "")
+        if ".sheet(" in _strip_line_comments(source):
+            violations.append((path, "%s presents a .sheet( from inside a region — it would vanish on a width-class change" % name))
+    return violations
+
+
+def check_region_container_computes_no_layout_fraction(files):
+    """`RegionContainerView.swift` divides space only by the plan's
+    `shares`, never by a fraction of its own.
+
+    The layout DECISION is a pure function tested with no device and no
+    simulator (`LayoutPlanTests`); this view's job is to obey it. A literal
+    fraction appearing in a sizing expression here means some part of the
+    arrangement has escaped back into the view, where nothing can check it —
+    on the one target in this repo that has no test target at all.
+
+    A heuristic over arithmetic, and a narrow one: it looks for a decimal
+    literal strictly between 0 and 1 on a line that also sizes something
+    (`.frame(`) or measures the container (`geometry.size`). It will not
+    catch a fraction laundered through a named constant, and says so.
+    """
+    violations = []
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "RegionContainerView.swift"), None)
+    path, source = match if match else ("iOS/Nostromo/Views/Panes/RegionContainerView.swift", "")
+    stripped = _strip_line_comments(source)
+
+    if "shares" not in stripped:
+        violations.append((path, "RegionContainerView.swift never references the plan's `shares` — proportions must come from the plan"))
+
+    fraction = re.compile(r"0\.\d+")
+    for line in stripped.splitlines():
+        if ".frame(" not in line and "geometry.size" not in line:
+            continue
+        for m in fraction.finditer(line):
+            if 0 < float(m.group(0)) < 1:
+                violations.append((path, "layout fraction literal in a sizing expression: %s" % line.strip()))
+    return violations
+
+
+def check_no_scroll_restore_key_in_view_state(files):
+    """No `@State` under `iOS/Nostromo/` holds a durable scroll-restore key.
+
+    W5's `check_no_frontmost_tab_state_in_view` companion, for the other
+    half of what must survive a width-class change. A width change destroys
+    the view hierarchy, so anything the transition needs to preserve cannot
+    live in it: the frontmost tab and unread marks live in
+    `FocusRegionState`, and the scroll-restore key lives in `DaemonStore`.
+    View-local tracking of what is *currently* on screen is fine and
+    expected — that is not state anyone is trying to preserve — so this
+    matches only the saved-key vocabulary.
+    """
+    pattern = re.compile(
+        r"@State\s+(private\s+)?var\s+\w*(scrollKey|savedScroll|scrollRestore|restoreKey)\w*",
+        re.IGNORECASE,
+    )
+    violations = []
+    for path, source in files:
+        if pattern.search(_strip_line_comments(source)):
+            violations.append((path, "@State holds a durable scroll-restore key — it must come from DaemonStore"))
+    return violations
+
+
+def check_region_container_reuses_the_shared_tab_strip(files):
+    """`RegionContainerView.swift` renders a tabbed region with
+    `TabStripView`, the same view the compact strip uses.
+
+    The width test is the only branch: a region's strip is not a second,
+    iPad-only strip that could drift from the phone's in labels, unread
+    marks, or `reason` captions. W5 parameterised `TabStripView` by region
+    for exactly this, so "each tabbed region has its own tab strip and its
+    own frontmost tab" is one view instantiated per region rather than a
+    parallel implementation.
+    """
+    violations = []
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "RegionContainerView.swift"), None)
+    path, source = match if match else ("iOS/Nostromo/Views/Panes/RegionContainerView.swift", "")
+    if "TabStripView(" not in _strip_line_comments(source):
+        violations.append((path, "RegionContainerView.swift does not instantiate TabStripView — a region's strip must be the same view the compact strip uses"))
+    return violations
+
+
 CHECKS = (
     check_no_default_in_panecontentwire_switch,
     check_every_toRowModel_call_passes_marked,
@@ -805,6 +1054,14 @@ CHECKS = (
     check_no_local_placement_or_ratio_persistence,
     check_unread_glyph_uses_opacity_not_conditional_insertion,
     check_ticker_survives_the_rewrite,
+    check_nothing_branches_on_the_device,
+    check_horizontal_size_class_read_in_exactly_one_file,
+    check_width_class_referenced_only_by_the_allowlist,
+    check_no_region_resize_affordance,
+    check_no_sheet_presented_from_inside_a_region,
+    check_region_container_computes_no_layout_fraction,
+    check_no_scroll_restore_key_in_view_state,
+    check_region_container_reuses_the_shared_tab_strip,
 )
 
 
@@ -1549,6 +1806,327 @@ class TickerSurvivesTheRewriteTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# W6 bites-tests — one class per check, proving each can actually fail.
+# --------------------------------------------------------------------------
+
+class NothingBranchesOnTheDeviceTests(unittest.TestCase):
+    def test_bites_on_UIDevice(self):
+        source = "let idiom = UIDevice.current"
+        violations = check_nothing_branches_on_the_device([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("UIDevice", violations[0][1])
+
+    def test_bites_on_userInterfaceIdiom(self):
+        source = "let idiom = someType.userInterfaceIdiom"
+        violations = check_nothing_branches_on_the_device([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("userInterfaceIdiom", violations[0][1])
+
+    def test_bites_on_UIScreen(self):
+        source = "let bounds = UIScreen.main.bounds"
+        violations = check_nothing_branches_on_the_device([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("UIScreen", violations[0][1])
+
+    def test_bites_on_UIInterfaceOrientationMask(self):
+        source = "let mask: UIInterfaceOrientationMask = .portrait"
+        violations = check_nothing_branches_on_the_device([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("UIInterfaceOrientationMask", violations[0][1])
+
+    def test_bites_on_a_bare_orientation_identifier(self):
+        source = "let orientation = currentValue"
+        violations = check_nothing_branches_on_the_device([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("orientation", violations[0][1])
+
+    def test_bites_on_willTransition_to(self):
+        source = "coordinator.willTransition(to: newSize) { _ in }"
+        violations = check_nothing_branches_on_the_device([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("willTransition(to", violations[0][1])
+
+    def test_bites_on_willTransition_to_the_UIKit_override_declaration_form(self):
+        # The banned pattern widened from the call form (`willTransition(to:`)
+        # to `willTransition(\s*to\b` specifically so it also catches the
+        # UIKit override DECLARATION — `func willTransition(to newCollection:
+        # UITraitCollection, ...)` — which is how a real view controller
+        # would hook a size-class transition. That declaration form is the
+        # one that actually matters: it's the mechanism this policy exists
+        # to forbid, and the narrower call-only pattern would have missed it
+        # entirely (a view controller can declare the override without ever
+        # writing a matching call in the same file).
+        source = (
+            "func willTransition(to newCollection: UITraitCollection, "
+            "with coordinator: UIViewControllerTransitionCoordinator) {}"
+        )
+        violations = check_nothing_branches_on_the_device([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("willTransition(to", violations[0][1])
+
+    def test_ignores_a_banned_token_that_appears_only_in_a_line_comment(self):
+        # A doc-comment explaining why UIDevice is forbidden must not itself
+        # be a violation — the same _strip_line_comments carve-out the rest
+        # of this suite relies on.
+        source = "// UIDevice, UIScreen, and orientation are never read here — see the width-class PRD."
+        violations = check_nothing_branches_on_the_device([("Synthetic.swift", source)])
+        self.assertEqual(violations, [])
+
+    def test_passes_on_clean_source(self):
+        source = "let width = horizontalSizeClass == .compact ? WidthClass.compact : .regular"
+        self.assertEqual(check_nothing_branches_on_the_device([("Synthetic.swift", source)]), [])
+
+
+class HorizontalSizeClassReadInExactlyOneFileTests(unittest.TestCase):
+    def test_bites_when_a_second_file_declares_the_environment_read(self):
+        files = [
+            ("DynamicFocusView.swift", "@Environment(\\.horizontalSizeClass) private var widthClass"),
+            ("SomeOtherView.swift", "@Environment(\\.horizontalSizeClass) private var widthClass"),
+        ]
+        violations = check_horizontal_size_class_read_in_exactly_one_file(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("SomeOtherView.swift", violations[0][1])
+
+    def test_bites_when_DynamicFocusView_stops_reading_the_size_class(self):
+        # Nothing would select the presentation at all — the "missing
+        # wiring is itself a violation" shape this suite already uses.
+        files = [("DynamicFocusView.swift", "struct DynamicFocusView: View { var body: some View { EmptyView() } } ")]
+        violations = check_horizontal_size_class_read_in_exactly_one_file(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("no longer reads", violations[0][1])
+
+    def test_bites_when_a_non_allowlisted_file_merely_mentions_horizontalSizeClass(self):
+        files = [
+            ("DynamicFocusView.swift", "@Environment(\\.horizontalSizeClass) private var widthClass"),
+            ("SomeHelper.swift", "let compact = horizontalSizeClass == .compact"),
+        ]
+        violations = check_horizontal_size_class_read_in_exactly_one_file(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("SomeHelper.swift", violations[0][1])
+        self.assertIn("outside the WidthClass allowlist", violations[0][1])
+
+    def test_ignores_a_preview_only_environment_set_inside_an_allowlisted_file(self):
+        # #Preview blocks in RegionContainerView.swift SET the environment
+        # value to look at the regular arrangement during development —
+        # that is a different act from reading it and is explicitly
+        # permitted for allowlisted files.
+        files = [
+            ("DynamicFocusView.swift", "@Environment(\\.horizontalSizeClass) private var widthClass"),
+            ("RegionContainerView.swift", "#Preview { RegionContainerView().environment(\\.horizontalSizeClass, .regular) }"),
+        ]
+        self.assertEqual(check_horizontal_size_class_read_in_exactly_one_file(files), [])
+
+    def test_bites_when_a_non_allowlisted_file_sets_the_environment_value(self):
+        # The SET carve-out (`.environment(\.horizontalSizeClass, ...)`) is
+        # permitted ONLY inside WIDTH_CLASS_ALLOWLIST, per the docstring.
+        # Previously the carve-out was stripped unconditionally regardless of
+        # which file it appeared in, so a SET in a non-allowlisted file
+        # passed silently — a second file publishing a size-class override is
+        # a second branch by another name, exactly what D1 forbids.
+        files = [
+            ("DynamicFocusView.swift", "@Environment(\\.horizontalSizeClass) private var widthClass"),
+            ("SomeOtherView.swift", "#Preview { SomeOtherView().environment(\\.horizontalSizeClass, .regular) }"),
+        ]
+        violations = check_horizontal_size_class_read_in_exactly_one_file(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("SomeOtherView.swift", violations[0][1])
+        self.assertIn("outside the WidthClass allowlist", violations[0][1])
+
+    def test_passes_on_the_correct_single_reader_shape(self):
+        files = [
+            ("DynamicFocusView.swift", "@Environment(\\.horizontalSizeClass) private var widthClass"),
+            ("RegionContainerView.swift", "struct RegionContainerView: View { let widthClass: WidthClass }"),
+        ]
+        self.assertEqual(check_horizontal_size_class_read_in_exactly_one_file(files), [])
+
+
+class WidthClassReferencedOnlyByTheAllowlistTests(unittest.TestCase):
+    def test_bites_when_a_non_allowlisted_file_names_WidthClass(self):
+        files = [("SomeOtherView.swift", "let w: WidthClass = .compact")]
+        violations = check_width_class_referenced_only_by_the_allowlist(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_a_non_allowlisted_file_names_nostromoWidthClass(self):
+        files = [("SomeOtherView.swift", ".environment(\\.nostromoWidthClass, widthClass)")]
+        violations = check_width_class_referenced_only_by_the_allowlist(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_for_allowlisted_files(self):
+        files = [
+            ("DynamicFocusView.swift", "let w: WidthClass = .compact"),
+            ("RegionContainerView.swift", ".environment(\\.nostromoWidthClass, widthClass)"),
+        ]
+        self.assertEqual(check_width_class_referenced_only_by_the_allowlist(files), [])
+
+    def test_ignores_a_mention_in_a_line_comment(self):
+        files = [("SomeOtherView.swift", "// WidthClass is deliberately not read here")]
+        self.assertEqual(check_width_class_referenced_only_by_the_allowlist(files), [])
+
+
+class NoRegionResizeAffordanceTests(unittest.TestCase):
+    def test_bites_on_draggesture(self):
+        files = [("RegionContainerView.swift", "@State var drag = DragGesture().onChanged { _ in }")]
+        violations = check_no_region_resize_affordance(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("gesture", violations[0][1])
+
+    def test_bites_on_dot_gesture(self):
+        files = [("RegionContainerView.swift", "Divider().gesture(TapGesture())")]
+        violations = check_no_region_resize_affordance(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_dot_simultaneousGesture(self):
+        files = [("RegionContainerView.swift", "Divider().simultaneousGesture(TapGesture())")]
+        violations = check_no_region_resize_affordance(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_a_userdefaults_key_matching_ratio(self):
+        files = [("Synthetic.swift", 'UserDefaults.standard.set(0.5, forKey: "regionRatio")')]
+        violations = check_no_region_resize_affordance(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("persisted layout key", violations[0][1])
+
+    def test_bites_on_an_appstorage_key_matching_dynlayout(self):
+        files = [("Synthetic.swift", '@AppStorage("dynlayout.tabOrder") private var savedOrder = ""')]
+        violations = check_no_region_resize_affordance(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("persisted layout key", violations[0][1])
+
+    def test_bites_on_a_userdefaults_key_matching_split(self):
+        files = [("Synthetic.swift", 'UserDefaults.standard.set(pos, forKey: "splitPosition")')]
+        violations = check_no_region_resize_affordance(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("persisted layout key", violations[0][1])
+
+    def test_passes_on_unrelated_userdefaults_usage(self):
+        files = [("Synthetic.swift", 'UserDefaults.standard.set(host, forKey: "daemonHost")')]
+        self.assertEqual(check_no_region_resize_affordance(files), [])
+
+    def test_passes_on_a_clean_region_container(self):
+        files = [("RegionContainerView.swift", "struct RegionContainerView: View { var body: some View { EmptyView() } }")]
+        self.assertEqual(check_no_region_resize_affordance(files), [])
+
+
+class NoSheetPresentedFromInsideARegionTests(unittest.TestCase):
+    def test_bites_when_RegionContainerView_presents_a_sheet(self):
+        files = [
+            ("RegionContainerView.swift", ".sheet(isPresented: $x) { Foo() }"),
+            ("TabStripView.swift", "struct TabStripView: View {}"),
+            ("PaneSurfaceView.swift", "struct PaneSurfaceView: View {}"),
+        ]
+        violations = check_no_sheet_presented_from_inside_a_region(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("RegionContainerView.swift", violations[0][0])
+
+    def test_bites_when_TabStripView_presents_a_sheet(self):
+        files = [
+            ("RegionContainerView.swift", "struct RegionContainerView: View {}"),
+            ("TabStripView.swift", ".sheet(isPresented: $x) { Foo() }"),
+            ("PaneSurfaceView.swift", "struct PaneSurfaceView: View {}"),
+        ]
+        violations = check_no_sheet_presented_from_inside_a_region(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("TabStripView.swift", violations[0][0])
+
+    def test_bites_when_PaneSurfaceView_presents_a_sheet(self):
+        files = [
+            ("RegionContainerView.swift", "struct RegionContainerView: View {}"),
+            ("TabStripView.swift", "struct TabStripView: View {}"),
+            ("PaneSurfaceView.swift", ".sheet(isPresented: $x) { Foo() }"),
+        ]
+        violations = check_no_sheet_presented_from_inside_a_region(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("PaneSurfaceView.swift", violations[0][0])
+
+    def test_passes_when_none_of_the_three_present_a_sheet(self):
+        files = [
+            ("RegionContainerView.swift", "struct RegionContainerView: View {}"),
+            ("TabStripView.swift", "struct TabStripView: View {}"),
+            ("PaneSurfaceView.swift", "struct PaneSurfaceView: View {}"),
+        ]
+        self.assertEqual(check_no_sheet_presented_from_inside_a_region(files), [])
+
+
+class RegionContainerComputesNoLayoutFractionTests(unittest.TestCase):
+    def test_bites_on_a_layout_fraction_in_a_frame_expression(self):
+        files = [("RegionContainerView.swift", "let allocation = shares[i]\nFoo().frame(width: geometry.size.width * 0.6)")]
+        violations = check_region_container_computes_no_layout_fraction(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("layout fraction literal", violations[0][1])
+
+    def test_bites_when_the_file_never_references_shares(self):
+        files = [("RegionContainerView.swift", "struct RegionContainerView: View { var body: some View { EmptyView() } }")]
+        violations = check_region_container_computes_no_layout_fraction(files)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("never references the plan's `shares`", violations[0][1])
+
+    def test_ignores_opacity_on_a_non_sizing_line(self):
+        files = [("RegionContainerView.swift", "let allocation = shares[i]\nCircle().opacity(0.25)")]
+        self.assertEqual(check_region_container_computes_no_layout_fraction(files), [])
+
+    def test_ignores_an_integer_literal_on_a_frame_line(self):
+        # A 1-point hairline thickness, not a proportion of the container.
+        files = [("RegionContainerView.swift", "let allocation = shares[i]\nDivider().frame(height: 1)")]
+        self.assertEqual(check_region_container_computes_no_layout_fraction(files), [])
+
+    def test_ignores_a_literal_greater_than_or_equal_to_one_on_a_frame_line(self):
+        files = [("RegionContainerView.swift", "let allocation = shares[i]\nDivider().frame(width: 1.5)")]
+        self.assertEqual(check_region_container_computes_no_layout_fraction(files), [])
+
+    # Not covered, by the check's own docstring: a fraction laundered
+    # through a named constant (e.g. `.frame(width: geometry.size.width *
+    # regionSplitFraction)`) reads as an identifier, not a `0.\d+` literal,
+    # and this heuristic will not catch it. No test asserts otherwise.
+
+    def test_passes_on_a_clean_region_container(self):
+        files = [("RegionContainerView.swift", "let width = totalWidth * shares[i] / totalShares")]
+        self.assertEqual(check_region_container_computes_no_layout_fraction(files), [])
+
+
+class NoScrollRestoreKeyInViewStateTests(unittest.TestCase):
+    def test_bites_on_scrollKey_state(self):
+        source = "@State private var scrollKey: String = \"\""
+        violations = check_no_scroll_restore_key_in_view_state([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_savedScrollPosition_state(self):
+        source = "@State private var savedScrollPosition: String? = nil"
+        violations = check_no_scroll_restore_key_in_view_state([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_restoreKey_state(self):
+        source = "@State private var restoreKey: String = \"\""
+        violations = check_no_scroll_restore_key_in_view_state([("Synthetic.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_view_local_visible_row_indices(self):
+        # "What is on screen right now" is transient view state, not
+        # durable state anyone is trying to preserve across a width-class
+        # rebuild — banning this would be wrong.
+        source = "@State private var visibleRowIndices: Set<Int> = []"
+        self.assertEqual(check_no_scroll_restore_key_in_view_state([("Synthetic.swift", source)]), [])
+
+    def test_passes_on_view_local_visible_turn_indices(self):
+        source = "@State private var visibleTurnIndices: Set<Int> = []"
+        self.assertEqual(check_no_scroll_restore_key_in_view_state([("Synthetic.swift", source)]), [])
+
+
+class RegionContainerReusesTheSharedTabStripTests(unittest.TestCase):
+    def test_bites_when_RegionContainerView_does_not_instantiate_TabStripView(self):
+        source = "struct RegionContainerView: View { var body: some View { EmptyView() } }"
+        violations = check_region_container_reuses_the_shared_tab_strip([("RegionContainerView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_the_file_is_missing_entirely(self):
+        violations = check_region_container_reuses_the_shared_tab_strip([("SomeOtherFile.swift", "irrelevant")])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_TabStripView_is_instantiated(self):
+        source = "struct RegionContainerView: View { var body: some View { TabStripView(tag: tag, region: region) } }"
+        self.assertEqual(check_region_container_reuses_the_shared_tab_strip([("RegionContainerView.swift", source)]), [])
+
+
+# --------------------------------------------------------------------------
 # The real gate: every check against the actual iOS/Nostromo tree.
 # --------------------------------------------------------------------------
 
@@ -1677,6 +2255,38 @@ class RealIOSTreeTests(unittest.TestCase):
 
     def test_ticker_survives_the_rewrite(self):
         violations = check_ticker_survives_the_rewrite(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_nothing_branches_on_the_device(self):
+        violations = check_nothing_branches_on_the_device(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_horizontal_size_class_read_in_exactly_one_file(self):
+        violations = check_horizontal_size_class_read_in_exactly_one_file(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_width_class_referenced_only_by_the_allowlist(self):
+        violations = check_width_class_referenced_only_by_the_allowlist(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_region_resize_affordance(self):
+        violations = check_no_region_resize_affordance(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_sheet_presented_from_inside_a_region(self):
+        violations = check_no_sheet_presented_from_inside_a_region(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_region_container_computes_no_layout_fraction(self):
+        violations = check_region_container_computes_no_layout_fraction(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_no_scroll_restore_key_in_view_state(self):
+        violations = check_no_scroll_restore_key_in_view_state(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_region_container_reuses_the_shared_tab_strip(self):
+        violations = check_region_container_reuses_the_shared_tab_strip(self.files)
         self.assertEqual(violations, [], violations)
 
 

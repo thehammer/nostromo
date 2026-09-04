@@ -66,6 +66,14 @@ public final class DaemonStore: ObservableObject {
     /// visible tab is never marked unread).
     @Published public private(set) var focusRegionStates: [String: FocusRegionState] = [:]
 
+    /// Per-focus transcript stores, and per-(focus, pane) scroll-restore
+    /// keys (W6 — ios-curated-view-parity, D5). Deliberately NOT
+    /// `@Published`: neither is a rendering input for this object's own
+    /// observers, and both must survive a view-hierarchy rebuild. See
+    /// `transcriptStore(for:)` and `setScrollKey(tag:paneId:key:)`.
+    private var transcriptStores: [String: TranscriptStore] = [:]
+    private var scrollKeys: [String: [String: Int]] = [:]
+
     /// Focuses grouped + ordered for list rendering.
     public var focusRows: [FocusRow] { buildFocusRows(Array(focuses.values)) }
 
@@ -162,6 +170,17 @@ public final class DaemonStore: ObservableObject {
         var region = focusRegionStates[tag] ?? FocusRegionState()
         let version = focusLayouts[tag]?.paneContentVersion[paneId] ?? 0
         region.select(paneId: paneId, regionPath: regionPath, contentVersion: version)
+        // W6 (D5): the selection is ALSO recorded under the compact strip's
+        // region, so that rotating an iPad from a regular-width region into
+        // the single-strip presentation shows the surface the operator was
+        // actually reading rather than whatever the strip last held. At
+        // regular width `RegionPath.root` is never itself a visible region
+        // unless the tree's root IS the tabs node being selected in (in
+        // which case this is the same write), so this can't disturb a
+        // sibling region's own frontmost tab.
+        if regionPath != FocusRegionState.compactRegion {
+            region.select(paneId: paneId, regionPath: FocusRegionState.compactRegion, contentVersion: version)
+        }
         focusRegionStates[tag] = region
     }
 
@@ -355,15 +374,43 @@ public final class DaemonStore: ObservableObject {
             // show's `active`/`focused_pane` is honoured without an
             // unrelated content-only republish fighting the operator's own
             // tab choice.
+            //
+            // W6: applied to EVERY region in either presentation, not just
+            // the compact strip — a regular-width tree has one region per
+            // simultaneously-visible area, each with its own frontmost tab.
+            // Each region sees only the panes it hosts as `available`, which
+            // is what makes "a show that changes the frontmost tab of one
+            // region does not change the frontmost tab of another" true:
+            // `focused_pane` can only land in the region that actually holds
+            // it. Region paths are a pure function of the tree, so this
+            // maintains both presentations' state without the store ever
+            // knowing which width is on screen.
             let change = LayoutChangeClassifier.classify(old: oldTree, new: tree)
-            let plan = TabPlan.build(tree: tree, content: model.paneContent)
             var region = focusRegionStates[tag] ?? FocusRegionState()
-            region.apply(
-                change: change,
-                regionPath: FocusRegionState.compactRegion,
-                treeActivePaneId: tree.resolvedActivePaneId,
-                focusedPane: focusedPane,
-                available: plan.map(\.paneId)
+            for membership in Self.regionMemberships(tree: tree, content: model.paneContent) {
+                region.apply(
+                    change: change,
+                    regionPath: membership.path,
+                    // The compact strip keeps W5's whole-tree resolution
+                    // verbatim (nil when two tabs nodes disagree — one strip
+                    // has one frontmost thing, and guessing is worse than
+                    // declining). A regular-width region resolves its OWN
+                    // tabs node's `active`, because two regions are two
+                    // separate frontmost things and neither is ambiguous.
+                    treeActivePaneId: membership.path == FocusRegionState.compactRegion
+                        ? tree.resolvedActivePaneId
+                        : LayoutRegions.activePane(forRegion: membership.path, in: tree),
+                    focusedPane: focusedPane,
+                    available: membership.paneIds
+                )
+            }
+            // Region state for a path or pane the new tree no longer
+            // contains is discarded rather than accumulating for the
+            // lifetime of the connection — and, worse, resurrecting a stale
+            // frontmost pane if a later rebuild reintroduces the same path.
+            region.prune(
+                livePaths: LayoutRegions.allPaths(in: tree),
+                livePanes: Set(tree.paneIds)
             )
             focusRegionStates[tag] = region
 
@@ -388,12 +435,27 @@ public final class DaemonStore: ObservableObject {
             // A push to the pane that's already frontmost is immediately
             // seen — refresh its last-seen version so it's never marked
             // unread (D7).
+            //
+            // W6: noted for every region hosting this pane in EITHER
+            // presentation, so the unread mark is legible per region at
+            // regular width — where a show can land unseen in a region the
+            // operator isn't looking at *within a view he is looking at*.
+            // The compact strip's region is always included, even for a push
+            // that arrives before the `focus_layout` introducing its pane
+            // (when `hostingPaths` can't place it yet), so W5's behaviour is
+            // preserved exactly.
             var region = focusRegionStates[tag] ?? FocusRegionState()
-            region.noteContentVersion(
-                paneId: paneId,
-                regionPath: FocusRegionState.compactRegion,
-                contentVersion: model.paneContentVersion[paneId] ?? 0
-            )
+            var paths = LayoutRegions.hostingPaths(of: paneId, in: model.tree)
+            if !paths.contains(FocusRegionState.compactRegion) {
+                paths.insert(FocusRegionState.compactRegion, at: 0)
+            }
+            for path in paths {
+                region.noteContentVersion(
+                    paneId: paneId,
+                    regionPath: path,
+                    contentVersion: model.paneContentVersion[paneId] ?? 0
+                )
+            }
             focusRegionStates[tag] = region
 
         case .focusCreated(let meta):
@@ -525,3 +587,105 @@ public final class DaemonStore: ObservableObject {
     }
 }
 
+
+// MARK: - Long-lived per-focus view state (ios-curated-view-parity W6, D5)
+
+extension DaemonStore {
+
+    /// The `TranscriptStore` for `tag`, created on first request and kept
+    /// for the lifetime of this `DaemonStore`.
+    ///
+    /// The transcript's turns used to live in a `@StateObject` inside
+    /// `TranscriptView`, which is fine right up until something destroys and
+    /// rebuilds that view — which is exactly what a width-class change does.
+    /// A fresh `TranscriptStore` starts empty and re-requests the whole
+    /// snapshot, so rotating an iPad blanked the transcript, refilled it, and
+    /// let its autoscroll drag the operator to the bottom of a conversation
+    /// she was reading the middle of. Hoisting the store here is the same
+    /// move `FocusRegionState` makes for frontmost tabs and unread marks
+    /// (W5, memo B4): the state survives the transition because it was never
+    /// in the view.
+    ///
+    /// NOT `@Published` — nothing about this cache is a rendering input, and
+    /// republishing the whole store when a focus is first opened would
+    /// re-render every other view observing it. `TranscriptStore` is itself
+    /// an `ObservableObject`; views observe the returned instance directly.
+    public func transcriptStore(for tag: String) -> TranscriptStore {
+        if let existing = transcriptStores[tag] { return existing }
+        let created = TranscriptStore(client: client)
+        transcriptStores[tag] = created
+        return created
+    }
+
+    /// Record `paneId`'s scroll-restore key for `tag`.
+    ///
+    /// Held OUTSIDE `focusRegionStates` on purpose, even though
+    /// `FocusRegionState` owns the same notion for its own (tested) restore
+    /// decision: `focusRegionStates` is `@Published`, and a scroll key
+    /// changes as the operator's thumb moves. Republishing the store on
+    /// every scroll tick would re-render every surface in the focus mid-drag
+    /// — jank introduced by the very mechanism meant to stop the view
+    /// jumping. Surfaces save on teardown and restore on first layout, so
+    /// this is written rarely and read once.
+    public func setScrollKey(tag: String, paneId: String, key: Int) {
+        scrollKeys[tag, default: [:]][paneId] = key
+    }
+
+    /// What restoring `paneId`'s saved scroll position should do, given what
+    /// the surface currently reports visible. Delegates the decision to
+    /// `ScrollRestore.decide` — the same rule, and the same tested three
+    /// lines, `FocusRegionState.scrollRestore` uses and macOS's
+    /// `ScrollDecision` has used since W2.
+    public func scrollRestore(tag: String, paneId: String, visibleRange: ClosedRange<Int>?) -> ScrollRestore {
+        ScrollRestore.decide(savedKey: scrollKeys[tag]?[paneId], visibleRange: visibleRange)
+    }
+}
+
+// MARK: - Region membership (ios-curated-view-parity W6)
+
+extension DaemonStore {
+
+    /// Every region that hosts panes in EITHER presentation of `tree`, with
+    /// the panes it hosts — the compact strip's single `RegionPath.root`
+    /// region first, then each regular-width region in walk order.
+    ///
+    /// The store deliberately maintains both presentations' region state
+    /// without knowing which one is currently on screen: it can't know (the
+    /// width class is a SwiftUI environment value read in the focus view,
+    /// and there may be no view at all when a broadcast arrives), and it
+    /// doesn't need to, because region paths are a pure function of the tree
+    /// rather than of the presentation. That is the entire mechanism behind
+    /// W6's losslessness criterion — state written while the iPad was
+    /// landscape is found again the instant it turns portrait.
+    ///
+    /// Where both presentations name the same path (a `tabs` node sitting at
+    /// the tree root), the two memberships are merged rather than applied
+    /// twice, with the compact region's fuller pane list winning — a
+    /// superset of `available` only ever widens what `apply` will accept,
+    /// never narrows it.
+    static func regionMemberships(
+        tree: PaneTree,
+        content: [String: PaneContentWire]
+    ) -> [RegionMembership] {
+        var ordered: [String] = []
+        var panes: [String: [String]] = [:]
+
+        func add(_ membership: RegionMembership) {
+            if panes[membership.path] == nil {
+                ordered.append(membership.path)
+                panes[membership.path] = membership.paneIds
+                return
+            }
+            var merged = panes[membership.path] ?? []
+            for paneId in membership.paneIds where !merged.contains(paneId) {
+                merged.append(paneId)
+            }
+            panes[membership.path] = merged
+        }
+
+        layoutPlan(tree: tree, width: .compact, content: content).regions.forEach(add)
+        layoutPlan(tree: tree, width: .regular, content: content).regions.forEach(add)
+
+        return ordered.map { RegionMembership(path: $0, paneIds: panes[$0] ?? []) }
+    }
+}

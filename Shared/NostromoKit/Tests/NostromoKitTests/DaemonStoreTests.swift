@@ -269,6 +269,285 @@ final class DaemonStoreTests: XCTestCase {
             paneId: "b", regionPath: region, contentVersion: versionForB)
         XCTAssertEqual(unreadBeforeSelect, false, "selectPane must clear the pane's unread mark")
     }
+
+    // MARK: - W6: per-region state at regular width
+    //
+    // At regular width the daemon reports a tree with two simultaneously-
+    // visible tabbed regions ("root.0" hosting "a"/"b", "root.1" hosting
+    // "c"/"d"), each with its own tab strip and its own frontmost tab. The
+    // store-level guarantee this section exists to prove: a show that
+    // changes the frontmost tab of one region must never change the
+    // frontmost tab of another — and, doubling the surface a show can land
+    // on unseen, an unread mark must be legible per region. Every test below
+    // drives this through the real `.focusLayout`/`.paneContent` ingestion
+    // path, never by poking `FocusRegionState` directly, because the point
+    // is to prove the STORE wires the pure per-region logic up correctly.
+
+    private func twoRegionTree() -> PaneTree {
+        .split(direction: .horizontal, children: [
+            .tabs(children: [.leaf(paneId: "a"), .leaf(paneId: "b")], labels: ["A", "B"], active: 0),
+            .tabs(children: [.leaf(paneId: "c"), .leaf(paneId: "d")], labels: ["C", "D"], active: 0)
+        ], ratios: [0.5, 0.5])
+    }
+
+    func testFocusedPaneMovesOnlyTheRegionItLandsInLeavingASiblingRegionsFrontmostUnmoved() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+
+        // Move "root.0"'s frontmost away from its default ("a") first, so
+        // "unmoved" below is a real assertion, not the fallback happening
+        // to agree with the default.
+        await store.selectPane(tag: tag, regionPath: "root.0", paneId: "b")
+
+        // Same tree, only `focused_pane` differs — a deliberate show landing in "root.1".
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: "d"), via: client)
+
+        let root0Frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.0", available: ["a", "b"], fallback: "a")
+        XCTAssertEqual(root0Frontmost, "b", "a show landing in \"root.1\" must not move \"root.0\"'s frontmost pane")
+
+        let root1Frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.1", available: ["c", "d"], fallback: "c")
+        XCTAssertEqual(root1Frontmost, "d", "focused_pane \"d\" must make \"d\" frontmost in the region that actually hosts it")
+    }
+
+    func testFocusedPaneMirroredIntoTheOtherRegionLeavesItsSiblingUnmoved() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+
+        // Move BOTH regions away from their defaults, so each assertion
+        // below is checked against a specific, known-different value.
+        await store.selectPane(tag: tag, regionPath: "root.0", paneId: "b")
+        await store.selectPane(tag: tag, regionPath: "root.1", paneId: "d")
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: "a"), via: client)
+
+        let root0Frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.0", available: ["a", "b"], fallback: "a")
+        XCTAssertEqual(root0Frontmost, "a", "focused_pane \"a\" must make \"a\" frontmost in the region that actually hosts it")
+
+        let root1Frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.1", available: ["c", "d"], fallback: "c")
+        XCTAssertEqual(root1Frontmost, "d", "a show landing in \"root.0\" must not move \"root.1\"'s frontmost pane")
+    }
+
+    func testFocusedPaneNamingAPaneInNeitherRegionMovesNeitherRegionsFrontmost() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        await store.selectPane(tag: tag, regionPath: "root.0", paneId: "b")
+        await store.selectPane(tag: tag, regionPath: "root.1", paneId: "d")
+
+        // "ghost" names no pane in this tree at all.
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: "ghost"), via: client)
+
+        let root0Frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.0", available: ["a", "b"], fallback: "a")
+        let root1Frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.1", available: ["c", "d"], fallback: "c")
+        XCTAssertEqual(root0Frontmost, "b", "a focused_pane naming no pane in this region must not move its frontmost")
+        XCTAssertEqual(root1Frontmost, "d", "a focused_pane naming no pane in this region must not move its frontmost")
+    }
+
+    func testAPushToAPaneNotFrontmostInItsOwnRegionReadsUnreadForThatRegion() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        // "a" is "root.0"'s default frontmost (active: 0); "b" is not.
+        await deliver(
+            .paneContent(tag: tag, paneId: "b", content: .text("hello"), freshness: nil, address: nil), via: client)
+
+        let version = await store.focusLayouts[tag]?.paneContentVersion["b"] ?? 0
+        let unreadInRoot0 = await store.focusRegionStates[tag]?.isUnread(
+            paneId: "b", regionPath: "root.0", contentVersion: version)
+        XCTAssertEqual(
+            unreadInRoot0, true,
+            "a show landing on \"b\" while \"a\" is frontmost in \"root.0\" must read unread when asked about \"root.0\"")
+    }
+
+    func testAPushToAPaneHostedByTheOtherRegionMarksNothingUnreadInThisRegion() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        // "d" lives entirely in "root.1" — "root.0" has never heard of it.
+        await deliver(
+            .paneContent(tag: tag, paneId: "d", content: .text("hello"), freshness: nil, address: nil), via: client)
+
+        let version = await store.focusLayouts[tag]?.paneContentVersion["d"] ?? 0
+        let unreadInRoot0 = await store.focusRegionStates[tag]?.isUnread(
+            paneId: "d", regionPath: "root.0", contentVersion: version)
+        XCTAssertEqual(
+            unreadInRoot0, false,
+            "a push to a pane hosted only by \"root.1\" must not register as unread in the unrelated \"root.0\"")
+    }
+
+    func testAPushToThePaneAlreadyFrontmostInItsRegionIsNeverUnreadThere() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        // "a" is "root.0"'s default frontmost pane (active: 0).
+        await deliver(
+            .paneContent(tag: tag, paneId: "a", content: .text("hello"), freshness: nil, address: nil), via: client)
+
+        let version = await store.focusLayouts[tag]?.paneContentVersion["a"] ?? 0
+        let unreadInRoot0 = await store.focusRegionStates[tag]?.isUnread(
+            paneId: "a", regionPath: "root.0", contentVersion: version)
+        XCTAssertEqual(unreadInRoot0, false, "a push to the pane already frontmost in its region must never read unread")
+    }
+
+    func testTheCompactRegionKeepsW5sFrontmostAndUnreadBehaviourAlongsideRegularWidthRegions() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+        let compact = FocusRegionState.compactRegion
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: "d"), via: client)
+
+        let compactFrontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: compact, available: ["a", "b", "c", "d"], fallback: "a")
+        XCTAssertEqual(
+            compactFrontmost, "d",
+            "the compact strip's frontmost must still follow focused_pane exactly as W5 required, even though regular-width regions now also exist")
+
+        await deliver(
+            .paneContent(tag: tag, paneId: "b", content: .text("hello"), freshness: nil, address: nil), via: client)
+        let version = await store.focusLayouts[tag]?.paneContentVersion["b"] ?? 0
+        let unreadInCompact = await store.focusRegionStates[tag]?.isUnread(
+            paneId: "b", regionPath: compact, contentVersion: version)
+        XCTAssertEqual(
+            unreadInCompact, true,
+            "the compact strip must remain correct while the iPad is landscape, because it is what appears the instant it rotates")
+    }
+
+    func testSelectPaneInARegularWidthRegionAlsoUpdatesTheCompactRegionWithoutDisturbingASiblingRegion() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+        let compact = FocusRegionState.compactRegion
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+
+        // Give "root.0" a known, non-default frontmost so "unmoved" below is real.
+        await store.selectPane(tag: tag, regionPath: "root.0", paneId: "b")
+        // Move "root.1" away from its default too, so selecting "c" next is a genuine move.
+        await store.selectPane(tag: tag, regionPath: "root.1", paneId: "d")
+
+        await store.selectPane(tag: tag, regionPath: "root.1", paneId: "c")
+
+        let root1Frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.1", available: ["c", "d"], fallback: "d")
+        XCTAssertEqual(root1Frontmost, "c", "selecting \"c\" must make it frontmost in \"root.1\"")
+
+        let compactFrontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: compact, available: ["a", "b", "c", "d"], fallback: "a")
+        XCTAssertEqual(
+            compactFrontmost, "c",
+            "selecting a pane at regular width must also bridge into the compact region, so rotating to portrait shows the surface the operator was actually reading")
+
+        let root0Frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.0", available: ["a", "b"], fallback: "a")
+        XCTAssertEqual(root0Frontmost, "b", "selecting a pane in \"root.1\" must not disturb \"root.0\"'s own frontmost")
+    }
+
+    func testAPaneContentPushArrivingBeforeAnyFocusLayoutStillRecordsUnreadUnderTheCompactRegion() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+
+        // No .focusLayout has been delivered for this tag yet, so the
+        // daemon's tree is still FocusLayoutModel.initial and
+        // LayoutRegions.hostingPaths(of:in:) cannot place "x" anywhere —
+        // this is the W5-preservation guard: the compact region must still
+        // be recorded regardless.
+        await deliver(
+            .paneContent(tag: tag, paneId: "x", content: .text("hello"), freshness: nil, address: nil), via: client)
+
+        let version = await store.focusLayouts[tag]?.paneContentVersion["x"] ?? 0
+        let unreadInCompact = await store.focusRegionStates[tag]?.isUnread(
+            paneId: "x", regionPath: FocusRegionState.compactRegion, contentVersion: version)
+        XCTAssertEqual(
+            unreadInCompact, true,
+            "a push arriving before any focus_layout must still register unread under the compact region, same as W5")
+    }
+
+    func testAFocusLayoutThatDropsARegionDiscardsThatRegionsFrontmostAndUnreadState() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        await store.selectPane(tag: tag, regionPath: "root.1", paneId: "d")
+        await deliver(
+            .paneContent(tag: tag, paneId: "c", content: .text("hello"), freshness: nil, address: nil), via: client)
+
+        let version = await store.focusLayouts[tag]?.paneContentVersion["c"] ?? 0
+        let unreadBefore = await store.focusRegionStates[tag]?.isUnread(
+            paneId: "c", regionPath: "root.1", contentVersion: version)
+        XCTAssertEqual(
+            unreadBefore, true,
+            "sanity check: \"c\" must be recorded unread in \"root.1\" before that region is ever dropped")
+
+        // Collapse to a single tabs node at root — "root.1", "c", and "d" no longer exist anywhere in the tree.
+        let collapsed = PaneTree.tabs(children: [.leaf(paneId: "a"), .leaf(paneId: "b")], labels: ["A", "B"], active: 0)
+        await deliver(.focusLayout(tag: tag, tree: collapsed, focusedPane: nil), via: client)
+
+        let unreadAfter = await store.focusRegionStates[tag]?.isUnread(
+            paneId: "c", regionPath: "root.1", contentVersion: version)
+        XCTAssertEqual(
+            unreadAfter, false,
+            "state recorded for a region the new tree drops entirely must be discarded, not merely unreachable")
+
+        let root1FrontmostAfter = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.1", available: ["c", "d"], fallback: "c")
+        XCTAssertEqual(
+            root1FrontmostAfter, "c",
+            "\"root.1\"'s recorded frontmost (\"d\") must be discarded, not resurrected if the same path ever reappears")
+    }
+
+    func testResendingTheSameTreeNeverFightsTheOperatorsPerRegionTabChoiceAtRegularWidth() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let tag = "focus1"
+        let tree = twoRegionTree()
+
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+        await store.selectPane(tag: tag, regionPath: "root.0", paneId: "b")
+
+        // Byte-identical tree, no focused_pane — a content-only republish.
+        // The tree's own `active` (index 0) still points at "a", exactly as
+        // it did before "b" was tapped.
+        await deliver(.focusLayout(tag: tag, tree: tree, focusedPane: nil), via: client)
+
+        let root0Frontmost = await store.focusRegionStates[tag]?.frontmostPane(
+            for: "root.0", available: ["a", "b"], fallback: "a")
+        XCTAssertEqual(
+            root0Frontmost, "b",
+            "a content-only republish must never fight the operator's own tab choice — true at regular width, in each region, same as W5's compact rule")
+    }
 }
 
 // MARK: - DaemonStoreActivityTests

@@ -177,12 +177,15 @@ is bound in the top-level `panes` map.
 
 ### Client rendering (macOS, W1)
 
-As of `ios-curated-view-parity` W5 (below), this section and "Client
-rendering (iOS)" describe two presentations of the *same* tree — macOS
-renders every `Split` branch simultaneously with a tab strip per `Tabs`
-region; iOS flattens the whole tree into one compact strip. Both key off the
-same `LayoutChangeClassifier` semantics for when to honour `active` without
-fighting the operator.
+This section and "Client rendering (iOS)" describe how the *same* tree is
+presented on each client. As of `ios-curated-view-parity` W6 there are three
+presentations across two clients, not two: macOS renders every `Split` branch
+simultaneously with a tab strip per `Tabs` region; iOS renders the same
+regions at regular width (iPad, wide) and flattens the whole tree into one
+compact strip at compact width (phone, or iPad in a narrow window). All three
+key off the same `LayoutChangeClassifier` semantics for when to honour
+`active` without fighting the operator, and the same `RegionPath` convention
+for naming a node.
 
 A tabs node renders as a tab strip over a stack of **resident** child views —
 every tab's view is built once and kept alive for the container's whole
@@ -245,6 +248,77 @@ Two things guard that state so it can't strand the operator:
   applied. If a focus's detail region ever renders at implausible width, look
   at `defaults read com.hammer.nostromo` for a `nostromo.dynlayout.*` key
   before suspecting the daemon's tree.
+
+### Client rendering (iOS): two presentations, one width test
+
+As of `ios-curated-view-parity` W6, iOS has **two** presentations of the
+daemon's tree, and the branch between them is the app's current **horizontal
+width class** — nothing else. Not the device model, not the idiom, not the
+orientation, not a threshold in points. An iPad in a narrow multitasking
+window (Slide Over, a narrow Split View) presents the compact layout; a phone
+never presents the regular one. Both of those follow from the size class for
+free.
+
+- **Compact** — one surface at a time, one flattened tab strip. This is the
+  presentation described in "Tabs and layout on iOS" below, unchanged.
+- **Regular** — the daemon's `Split` nodes as **real, simultaneously visible
+  regions**, in the node's direction, proportioned by the node's ratios, with
+  a tab strip per `Tabs` region. This is the presentation macOS has always
+  had; W6 is where iOS got it.
+
+**The width test is the only branch.** Every renderer, every addressing
+behaviour, every label, the `reason` caption, the unread marks, the ambient
+ticker and the decision surface are identical in both presentations. Compact
+and regular differ in how regions are *arranged*, and in nothing else. If a
+surface ever seems to need to look different on an iPad beyond having more
+room, that is a signal the design is wrong, not a requirement.
+
+**Nesting is real nesting.** A `Split` whose child is a `Split` renders as
+regions within regions, not as a flattened row, and a `Tabs` node whose child
+is a `Split` renders as a region inside a tab. Every leaf in the tree is
+reachable in both presentations — the compact strip flattens the split
+structure rather than dropping it.
+
+**Directions and ratios are the daemon's, and are honoured.** `horizontal`
+means a vertical divider (left | right), `vertical` a horizontal one (top over
+bottom) — the same meaning as on macOS. Ratios are normalised into shares that
+sum to 1 with a small positive floor per region, so a malformed `ratios` array
+(one that doesn't sum to 1, is the wrong length, or contains a zero, a
+negative, a `NaN` or an infinity) degrades to a usable layout rather than
+blanking a region.
+
+**The operator cannot resize a region on iOS.** There is no drag-to-resize,
+no divider handle, no collapse/expand, and no locally persisted ratio state
+that could diverge from what the daemon sent. The divider is a hairline
+separator, not a grab affordance. This is deliberate: macOS's
+ratio-persistence machinery (`clearSavedRatios`, the
+`nostromo.dynlayout.<tag>.<path>` defaults keys, and the split-signature
+classifier) is the hairiest part of its layout code and has historically eaten
+the operator's dragged layout when tabs churned. Deferring the gesture also
+keeps the layout decision a pure function of `(tree, width class)`, which is
+what makes it testable on a target with no test bundle and no CI.
+
+**Changing width class at runtime is lossless.** Rotating an iPad or dragging
+a multitasking divider changes the presentation live, with no relaunch, and
+preserves every region's frontmost tab, every surface's scroll position, an
+open activity surface, and a presented decision. Nothing reloads and nothing
+scrolls back to the top. The mechanism is that almost nothing is in the view
+to begin with: frontmost tabs and unread marks live in `FocusRegionState`
+inside the client's store, keyed by a region path that is a pure function of
+the tree rather than of the presentation, so the same key resolves before and
+after; the transcript's turns live in a store that outlives the view; sheets
+are presented above the region hierarchy rather than inside it. Only scroll
+position needs an explicit save and restore, because a width change genuinely
+destroys the container that held the scroll view.
+
+The decision itself is `layoutPlan(tree:width:)` in
+`Shared/NostromoKit/Sources/NostromoKit/Layout/LayoutPlan.swift` — pure, with
+no view hierarchy, no `GeometryReader`, no environment and no device, and
+exercised for both width classes by tests that run with no device and no
+simulator. `iOS/Nostromo/Views/Panes/RegionContainerView.swift` renders
+whatever it returns and computes no proportion of its own. See
+`docs/ios-verification.md` for the honest split between what that buys and
+what is still checkable only by hand on an iPad.
 
 ### Client rendering (iOS)
 
