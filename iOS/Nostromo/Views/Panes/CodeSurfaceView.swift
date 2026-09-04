@@ -186,20 +186,11 @@ struct CodeSurfaceView: View {
     @ViewBuilder
     private var unresolvedNotices: some View {
         if case .unresolved(let reason) = anchorResolution {
-            notice(reason)
+            NoticeBanner(text: reason)
         }
         if case .matchedNothing(let reason) = emphasisResolution {
-            notice(reason)
+            NoticeBanner(text: reason)
         }
-    }
-
-    private func notice(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 12, design: .monospaced))
-            .foregroundStyle(.orange)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(8)
-            .background(Color.orange.opacity(0.12))
     }
 
     // MARK: - Rows (D3)
@@ -210,28 +201,21 @@ struct CodeSurfaceView: View {
     // `PerriView`'s deferred, separately-truncated raw diff.
 
     private func codeRow(_ row: Int) -> some View {
-        let marked = emphasisRows.contains(row)
-        return HStack(alignment: .top, spacing: 8) {
-            Text("\(document.firstLine + row)")
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(marked ? Color.accentColor : .secondary)
-                .frame(width: gutterWidth, alignment: .trailing)
-            Text(document.lines[row])
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 1)
-        .background(marked ? Color.accentColor.opacity(0.15) : Color.clear)
+        CodeRowView(
+            gutterText: "\(document.firstLine + row)",
+            text: document.lines[row],
+            marked: emphasisRows.contains(row),
+            gutterWidth: gutterWidth,
+            textColor: .primary,
+            background: .clear
+        )
         .id(row)
     }
 
     /// Sized from `gutterDigits` so it does not jitter as the operator
     /// scrolls into wider line numbers.
     private var gutterWidth: CGFloat {
-        CGFloat(document.gutterDigits) * 8 + 4
+        CodeRowView.gutterWidth(forDigits: document.gutterDigits)
     }
 
     // MARK: - Scrolling (D4)
@@ -271,5 +255,78 @@ struct CodeSurfaceView: View {
     private func visibleRowRange() -> ClosedRange<Int>? {
         guard let low = visibleRowIndices.min(), let high = visibleRowIndices.max() else { return nil }
         return low...high
+    }
+}
+
+// MARK: - CodeRowView (shared with DiffFileContentView, ios-curated-view-parity W8)
+//
+// The gutter-plus-wrapping row mechanism, extracted out of `codeRow(_:)`
+// unchanged so `pr_diff`'s hunk lines (`DiffFileContentView`) render through
+// the exact same view rather than a second implementation that could drift
+// from this one on wrapping, gutter alignment, or marking. A fixed-width
+// gutter cell top-aligned beside a freely wrapping text column, with no
+// `lineLimit` on the content — see `CodeSurfaceView`'s own header comment
+// (D3) for why this needs no fragment-counting arithmetic at all.
+//
+// `code`'s own use (`codeRow(_:)` above) passes `.primary`/`.clear` for
+// `textColor`/`background`, reproducing its exact prior appearance;
+// `DiffFileContentView` passes per-kind tints (D5) for the same two
+// parameters. Marked rows always win the background regardless of what's
+// passed, exactly as `codeRow(_:)` behaved before this extraction.
+struct CodeRowView: View {
+    let gutterText: String
+    let text: String
+    let marked: Bool
+    let gutterWidth: CGFloat
+    /// Foreground for the content column. A plain code row always passes
+    /// `.primary`; a diff row tints added/removed text (D5).
+    let textColor: Color
+    /// Background tint for the row when NOT marked. A plain code row always
+    /// passes `.clear`; a diff row tints added/removed/hunk-header rows.
+    let background: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(gutterText)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(marked ? Color.accentColor : .secondary)
+                .frame(width: gutterWidth, alignment: .trailing)
+            Text(text)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(textColor)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 1)
+        .background(marked ? Color.accentColor.opacity(0.15) : background)
+    }
+
+    /// The gutter-width formula both `CodeSurfaceView` and
+    /// `DiffFileContentView` size their gutter column with, from the widest
+    /// line number either actually shows — one formula for the column this
+    /// view renders, rather than each caller repeating the same arithmetic.
+    static func gutterWidth(forDigits digits: Int) -> CGFloat {
+        CGFloat(digits) * 8 + 4
+    }
+}
+
+// MARK: - NoticeBanner (shared with DiffSurfaceView/DiffFileContentView, ios-curated-view-parity W8)
+//
+// The orange, monospaced "why this couldn't be resolved" banner — identical
+// across `code`'s unresolved-anchor/matched-nothing notices (D7) and
+// `pr_diff`'s anchor/emphasis notices, extracted for the same reason as
+// `CodeRowView` above: one view rendered from three call sites, not a
+// phrase-for-phrase copy that could drift the next time any of them change.
+struct NoticeBanner: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 12, design: .monospaced))
+            .foregroundStyle(.orange)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(Color.orange.opacity(0.12))
     }
 }

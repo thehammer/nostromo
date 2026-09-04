@@ -56,6 +56,27 @@ public struct FocusRegionState: Equatable {
     /// currently hosting it.
     private var scrollKeys: [String: Int] = [:]
 
+    /// A pane's selected-file slot (W8, D2) — which file `pr_diff` currently
+    /// has open, scoped by an identity string the caller supplies at both
+    /// write and read time (`"\(repo)#\(number)"`-shaped). A changed PR means
+    /// a changed identity, so the old file silently stops resolving rather
+    /// than needing an explicit clear when the pane's content changes to a
+    /// different PR — see `selectedFile(for:identity:)`.
+    private var selectedFiles: [String: SelectedFile] = [:]
+
+    /// Per-file scroll-restore keys (W8) — one open diff pane can show
+    /// different files at different times, and the single `scrollKeys` slot
+    /// above (one `Int` per paneId) can't tell one file's saved row from
+    /// another's. Nested rather than folded into `scrollKeys`, whose flat
+    /// shape is exactly right for every pane that shows one document at a
+    /// time.
+    private var fileScrollKeys: [String: [String: Int]] = [:]
+
+    private struct SelectedFile: Equatable {
+        let path: String
+        let identity: String
+    }
+
     public init() {}
 
     // MARK: - Frontmost pane
@@ -181,6 +202,44 @@ public struct FocusRegionState: Equatable {
         ScrollRestore.decide(savedKey: scrollKeys[paneId], visibleRange: visibleRange)
     }
 
+    // MARK: - Selected file (W8 — ios-curated-view-parity, D2)
+
+    /// The file `pr_diff`'s `paneId` currently has open, or `nil` if none was
+    /// ever recorded, or if `identity` doesn't match what was recorded at
+    /// write time — see `setSelectedFile(_:identity:for:)`.
+    public func selectedFile(for paneId: String, identity: String) -> String? {
+        guard let entry = selectedFiles[paneId], entry.identity == identity else { return nil }
+        return entry.path
+    }
+
+    /// Record `path` as `paneId`'s open file, scoped to `identity`
+    /// (`"\(repo)#\(number)"`-shaped). A later read under a DIFFERENT
+    /// identity — the pane's content having moved on to a different PR —
+    /// returns `nil` rather than this stale path, so a filename from one PR
+    /// can never be carried into another's diff.
+    public mutating func setSelectedFile(_ path: String, identity: String, for paneId: String) {
+        selectedFiles[paneId] = SelectedFile(path: path, identity: identity)
+    }
+
+    // MARK: - Per-file scroll restore (W8 — ios-curated-view-parity, D2)
+
+    /// An opaque per-(pane, file) scroll-restore key — see `fileScrollKeys`'s
+    /// doc comment for why this needs its own slot rather than reusing
+    /// `scrollKeys` above.
+    public func scrollKey(for paneId: String, file: String) -> Int? {
+        fileScrollKeys[paneId]?[file]
+    }
+
+    public mutating func setScrollKey(_ key: Int, for paneId: String, file: String) {
+        fileScrollKeys[paneId, default: [:]][file] = key
+    }
+
+    /// The per-file counterpart to `scrollRestore(for:visibleRange:)` — same
+    /// rule, scoped to one file within a pane that can show several.
+    public func scrollRestore(for paneId: String, file: String, visibleRange: ClosedRange<Int>?) -> ScrollRestore {
+        ScrollRestore.decide(savedKey: fileScrollKeys[paneId]?[file], visibleRange: visibleRange)
+    }
+
     // MARK: - Pruning (W6, D5)
 
     /// Drop every region path not in `livePaths` and every pane not in
@@ -200,6 +259,8 @@ public struct FocusRegionState: Equatable {
             .filter { livePaths.contains($0.key) }
             .mapValues { $0.filter { livePanes.contains($0.key) } }
         scrollKeys = scrollKeys.filter { livePanes.contains($0.key) }
+        selectedFiles = selectedFiles.filter { livePanes.contains($0.key) }
+        fileScrollKeys = fileScrollKeys.filter { livePanes.contains($0.key) }
     }
 }
 

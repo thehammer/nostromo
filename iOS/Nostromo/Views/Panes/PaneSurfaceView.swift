@@ -30,6 +30,18 @@ struct PaneSurfaceView: View {
     /// width-class change that happened not to move this surface produces no
     /// visible jump.
     let restoreScroll: (ClosedRange<Int>?) -> ScrollRestore
+    /// `pr_diff`'s per-file scroll-restore (ios-curated-view-parity W8) —
+    /// `saveScrollKey`/`restoreScroll` above have exactly one slot per pane,
+    /// which isn't enough for a pane that can show different files at
+    /// different times. Only `DiffSurfaceView` calls these; every other
+    /// content kind ignores them.
+    let saveDiffFileScrollKey: (_ file: String, _ key: Int) -> Void
+    let restoreDiffFileScrollKey: (_ file: String, _ visibleRange: ClosedRange<Int>?) -> ScrollRestore
+    /// `pr_diff`'s selected-file slot (W8, D2) — which file the pane
+    /// currently has open, scoped by an identity string
+    /// (`"\(repo)#\(number)"`-shaped) `DiffSurfaceView` builds itself.
+    let saveSelectedDiffFile: (_ path: String, _ identity: String) -> Void
+    let restoreSelectedDiffFile: (_ identity: String) -> String?
 
     @EnvironmentObject var store: DaemonStore
 
@@ -110,7 +122,16 @@ struct PaneSurfaceView: View {
             // something is missing; `PaneSurfaceStub` (NostromoKit) is the
             // single source of that wording so W8/W9 delete a table entry
             // instead of hunting a string in a view.
-            case .diff, .prConversation, .ticket:
+            case .diff(let payload):
+                DiffSurfaceView(
+                    payload: payload,
+                    address: address,
+                    saveScrollKey: saveDiffFileScrollKey,
+                    restoreScroll: restoreDiffFileScrollKey,
+                    saveSelectedFile: saveSelectedDiffFile,
+                    restoreSelectedFile: restoreSelectedDiffFile
+                )
+            case .prConversation, .ticket:
                 if let content, let message = PaneSurfaceStub.message(for: content) {
                     stubView(headline: message.headline, detail: message.detail)
                 }

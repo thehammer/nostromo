@@ -204,6 +204,18 @@ struct DynamicFocusView: View {
                 saveScrollKey: { key in store.setScrollKey(tag: tag, paneId: paneId, key: key) },
                 restoreScroll: { range in
                     store.scrollRestore(tag: tag, paneId: paneId, visibleRange: range)
+                },
+                saveDiffFileScrollKey: { file, key in
+                    store.setDiffFileScrollKey(tag: tag, paneId: paneId, file: file, key: key)
+                },
+                restoreDiffFileScrollKey: { file, range in
+                    store.diffFileScrollRestore(tag: tag, paneId: paneId, file: file, visibleRange: range)
+                },
+                saveSelectedDiffFile: { path, identity in
+                    store.setSelectedDiffFile(tag: tag, paneId: paneId, path: path, identity: identity)
+                },
+                restoreSelectedDiffFile: { identity in
+                    store.selectedDiffFile(tag: tag, paneId: paneId, identity: identity)
                 }
             )
             .environmentObject(store)

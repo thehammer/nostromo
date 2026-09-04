@@ -618,15 +618,18 @@ def check_ticker_survives_the_rewrite(files):
 #: The complete list of files permitted to name `WidthClass` (or the
 #: `nostromoWidthClass` environment key) at all. Explicit rather than a
 #: pattern, so ADDING a consumer requires editing this list and therefore
-#: noticing. W8 adds the `pr_diff` renderer here when it lands — its
-#: file-list-beside-hunks arrangement at regular width is a property of that
-#: renderer, not of the region layout, and is the single intended consumer
-#: of the published width. Anything else is the first "just this one thing
-#: different on iPad" exception, which is the PRD's stated revisit condition
-#: for this whole design.
+#: noticing. W8 adds `DiffSurfaceView.swift`, the `pr_diff` renderer's
+#: container — its file-list-beside-hunks arrangement at regular width is a
+#: property of that renderer, not of the region layout, and is the single
+#: intended consumer of the published width. Its two leaf views
+#: (`DiffFileListView.swift`, `DiffFileContentView.swift`) take identical
+#: parameters at both widths and must NOT be on this list. Anything else is
+#: the first "just this one thing different on iPad" exception, which is the
+#: PRD's stated revisit condition for this whole design.
 WIDTH_CLASS_ALLOWLIST = (
     "DynamicFocusView.swift",
     "RegionContainerView.swift",
+    "DiffSurfaceView.swift",
 )
 
 #: Files that render a region's interior. None may present a sheet.
@@ -1028,6 +1031,231 @@ def check_code_surface_no_syntax_highlighting(files):
     return violations
 
 
+# --------------------------------------------------------------------------
+# ios-curated-view-parity W8 — the `pr_diff` surface
+# --------------------------------------------------------------------------
+
+#: The three new W8 view files, in the order the plan introduces them:
+#: the width-arranging container, the file list, and the anchored file
+#: content. `WIDTH_CLASS_ALLOWLIST` above names only the first of these —
+#: the other two take identical parameters at both widths.
+DIFF_SURFACE_FILES = ("DiffSurfaceView.swift", "DiffFileListView.swift", "DiffFileContentView.swift")
+
+
+def _diff_surface_entry(files, name):
+    """Look up one of `DIFF_SURFACE_FILES` by name, the same shape
+    `_code_surface_entry` uses for `CodeSurfaceView.swift` — a sensible
+    default path is returned when the file doesn't exist yet, so a check
+    against a not-yet-created file fails loudly (its default empty source
+    trips the check) rather than passing vacuously.
+    """
+    match = next(((p, s) for p, s in files if os.path.basename(p) == name), None)
+    return match if match else ("iOS/Nostromo/Views/Panes/%s" % name, "")
+
+
+def check_diff_surface_no_truncation(files):
+    """None of `DiffSurfaceView.swift`/`DiffFileListView.swift`/
+    `DiffFileContentView.swift` truncates: no `.prefix(`, no numeric row cap
+    on a `ForEach`, and — scoped only within `DiffFileContentView.swift`'s
+    `func row(` span — no `lineLimit(`.
+
+    D6: "the diff is not truncated to a fixed line or character budget",
+    the same criterion W7 established for `file`
+    (`check_code_surface_no_truncation`), now covering `pr_diff`'s three
+    files; `PerriView.swift`'s doubly-clipped raw diff
+    (`CODE_SURFACE_TRUNCATION_EXCLUDED_FILES`) stays the one deferred,
+    excluded-by-name exception (D6, D8). `DiffFileListView.swift`
+    legitimately truncates its own path label with `lineLimit(1)` (D7: "the
+    path, truncated from the leading end so the filename survives") — that
+    is a one-line label, not the hunk content this criterion is about, so
+    the `lineLimit(` ban is scoped to `DiffFileContentView.swift`'s
+    row-building function (`func row(`) rather than applied file-wide, the
+    same scoping `check_code_surface_no_truncation` applies to `codeRow`.
+    """
+    violations = []
+    for name in DIFF_SURFACE_FILES:
+        path, source = _diff_surface_entry(files, name)
+        stripped = _strip_line_comments(source)
+
+        if re.search(r"\.prefix\(", stripped):
+            violations.append((path, "%s calls .prefix( — no truncation of any kind is permitted (D6)" % name))
+
+        if re.search(r"ForEach\(\s*0\s*\.\.<\s*\d+", stripped):
+            violations.append((
+                path,
+                "%s's row ForEach is bounded by a numeric literal — rows must come from the document, not a cap" % name
+            ))
+
+        if name == "DiffFileContentView.swift":
+            for span in _spans_after(stripped, r"func\s+row\("):
+                if "lineLimit(" in span:
+                    violations.append((path, "row(...) applies lineLimit( to hunk content"))
+
+    return violations
+
+
+def check_diff_surface_no_horizontal_panning(files):
+    """None of the three `pr_diff` surface files scrolls horizontally.
+
+    Hunk lines wrap, same as `file` (W7's
+    `check_code_surface_no_horizontal_panning`, generalized here to iterate
+    all three files): no `ScrollView(.horizontal` and no `axes: .horizontal`
+    anywhere in `DiffSurfaceView.swift`/`DiffFileListView.swift`/
+    `DiffFileContentView.swift`.
+    """
+    violations = []
+    for name in DIFF_SURFACE_FILES:
+        path, source = _diff_surface_entry(files, name)
+        stripped = _strip_line_comments(source)
+        if re.search(r"ScrollView\(\s*\.horizontal", stripped):
+            violations.append((path, "%s contains ScrollView(.horizontal" % name))
+        if re.search(r"axes\s*:\s*\.horizontal", stripped):
+            violations.append((path, "%s sets axes: .horizontal" % name))
+    return violations
+
+
+def check_diff_content_uses_shared_code_row(files):
+    """`DiffFileContentView.swift` renders its rows through `CodeRowView(` —
+    the view W8 extracts from `CodeSurfaceView.swift` — rather than
+    reimplementing the gutter/wrapping mechanism a second time.
+
+    This is the check that keeps `file` and `pr_diff` from drifting: the
+    gutter, wrapping, and marking rules are one view instantiated twice, not
+    two views that merely look alike today and diverge tomorrow.
+    """
+    path, source = _diff_surface_entry(files, "DiffFileContentView.swift")
+    stripped = _strip_line_comments(source)
+    violations = []
+    if "CodeRowView(" not in stripped:
+        violations.append((
+            path,
+            "DiffFileContentView.swift does not reference CodeRowView( — rows must go through the shared row view, not a second implementation"
+        ))
+    return violations
+
+
+def check_diff_scroll_only_via_decision(files):
+    """Every `scrollTo(` call in `DiffFileContentView.swift` sits inside a
+    `case .scrollTo` arm — never called unconditionally.
+
+    Mirrors `check_code_surface_scroll_only_via_decision`'s line-window logic
+    exactly, pointed at `DiffFileContentView.swift` instead of
+    `CodeSurfaceView.swift`: a scroll is a decision (`ScrollDecision` for an
+    arriving anchor, `ScrollRestore` for a saved position being restored),
+    never a bare call.
+    """
+    path, source = _diff_surface_entry(files, "DiffFileContentView.swift")
+    stripped = _strip_line_comments(source)
+    lines = stripped.splitlines()
+    violations = []
+    for i, line in enumerate(lines):
+        if not re.search(r"\bscrollTo\(", line):
+            continue
+        if re.search(r"case\s+(let\s+)?\.scrollTo", line):
+            continue  # this line is the case pattern itself, not a call
+        window = lines[max(0, i - 5):i + 1]
+        if not any(re.search(r"case\s+(let\s+)?\.scrollTo", w) for w in window):
+            violations.append((path, "scrollTo( call not gated by a `case .scrollTo` pattern: %s" % line.strip()))
+    return violations
+
+
+def check_diff_no_line_resolution_reimplemented(files):
+    """No file under `iOS/Nostromo` compares `newN`/`oldN` with a comparison
+    operator.
+
+    Memo B10 as a policy, scanning every file in `files` (the whole
+    `iOS/Nostromo` tree, not just the three W8 files) rather than one named
+    file: line-resolution arithmetic belongs only to
+    `DiffDocument`/`DiffAddressing` (NostromoKit), never reimplemented in a
+    view — the exact defect class an independent implementation of "which
+    number does the gutter show" would reintroduce. A plain nil-coalescing
+    read like `row.newN ?? row.oldN` (the gutter's own new-or-old display
+    precedence, D5) is not comparison arithmetic and must not trip this —
+    only `==`/`!=`/`<=`/`>=`/`<`/`>` immediately adjacent to one of the two
+    identifiers, in either operand position, case-sensitive on the
+    identifiers themselves.
+    """
+    pattern = re.compile(
+        r"\b(newN|oldN)\b\s*(==|!=|<=|>=|<|>)|(==|!=|<=|>=|<|>)\s*\b(newN|oldN)\b"
+    )
+    violations = []
+    for path, source in files:
+        stripped = _strip_line_comments(source)
+        if pattern.search(stripped):
+            violations.append((
+                path,
+                "newN/oldN compared with a comparison operator — line resolution belongs to DiffDocument/DiffAddressing, not the view"
+            ))
+    return violations
+
+
+def check_diff_selected_file_not_view_state(files):
+    """None of the three `pr_diff` surface files declares `@State` holding
+    the selected file locally.
+
+    D2: the selected file is not view state — it lives in
+    `FocusRegionState` (the `selectedFile`/`setSelectedFile` slot), the same
+    reasoning W5's `check_no_frontmost_tab_state_in_view` applies to the
+    frontmost tab, so a width-class rebuild (which destroys the view
+    hierarchy) does not drop which file was open.
+    """
+    pattern = re.compile(r"@State[^\n]*\b(selectedFile|currentFile)\b", re.IGNORECASE)
+    violations = []
+    for name in DIFF_SURFACE_FILES:
+        path, source = _diff_surface_entry(files, name)
+        stripped = _strip_line_comments(source)
+        if pattern.search(stripped):
+            violations.append((
+                path,
+                "%s declares @State holding the selected file locally — it must come from FocusRegionState" % name
+            ))
+    return violations
+
+
+def check_diff_renders_every_resolution_case(files):
+    """Every `AnchorResolution` and `EmphasisResolution` case name is
+    referenced somewhere in `DiffSurfaceView.swift`.
+
+    Mirrors `check_code_surface_renders_every_resolution_case`, pointed at
+    the diff surface's container: paired with the L1 exhaustive-case
+    switches in `DiffAddressingTests`, an added case fails to compile in
+    `DiffDocument.resolve` (no `default:`) AND is invisible here until this
+    file is updated, so both ends of "an added case cannot be silently
+    ignored" are covered.
+    """
+    path, source = _diff_surface_entry(files, "DiffSurfaceView.swift")
+    stripped = _strip_line_comments(source)
+    required = (".notRequested", ".resolved", ".unresolved", ".none", ".rows", ".matchedNothing")
+    violations = []
+    for case_name in required:
+        if case_name not in stripped:
+            violations.append((path, "case %s is never referenced in DiffSurfaceView.swift" % case_name))
+    return violations
+
+
+def check_diff_toolarge_notice_not_one_row_among_many(files):
+    """`DiffSurfaceView.swift` contains the substring `tooLarge`.
+
+    D4: a gated diff has no rows, and a view that renders an empty file list
+    is indistinguishable from a PR that changes nothing — so the surface
+    must branch on `tooLarge` before rendering a list at all. This is an
+    honest heuristic, in the same spirit as this file's other
+    existence-only checks (e.g. `check_ticker_survives_the_rewrite`): it
+    only proves the branch exists, not that it is structured correctly (that
+    the notice truly replaces the list rather than merely decorating it) —
+    that half is a manual-verification item, not something a text scan can
+    prove.
+    """
+    path, source = _diff_surface_entry(files, "DiffSurfaceView.swift")
+    violations = []
+    if "tooLarge" not in source:
+        violations.append((
+            path,
+            "DiffSurfaceView.swift never references tooLarge — a gated diff must be rendered as its own notice, not an empty file list"
+        ))
+    return violations
+
+
 CHECKS = (
     check_no_default_in_panecontentwire_switch,
     check_every_toRowModel_call_passes_marked,
@@ -1063,6 +1291,14 @@ CHECKS = (
     check_code_surface_no_rebuild_on_address_change,
     check_code_surface_renders_every_resolution_case,
     check_code_surface_no_syntax_highlighting,
+    check_diff_surface_no_truncation,
+    check_diff_surface_no_horizontal_panning,
+    check_diff_content_uses_shared_code_row,
+    check_diff_scroll_only_via_decision,
+    check_diff_no_line_resolution_reimplemented,
+    check_diff_selected_file_not_view_state,
+    check_diff_renders_every_resolution_case,
+    check_diff_toolarge_notice_not_one_row_among_many,
 )
 
 
@@ -1841,6 +2077,23 @@ class WidthClassReferencedOnlyByTheAllowlistTests(unittest.TestCase):
         violations = check_horizontal_size_class_read_in_exactly_one_file(files)
         self.assertEqual(len(violations), 1)
 
+    def test_bites_when_diff_file_list_view_names_width_class(self):
+        # ios-curated-view-parity W8: DiffSurfaceView.swift is the sole
+        # intended WidthClass consumer for pr_diff — its two leaf views take
+        # identical parameters at both widths and must not branch on it.
+        files = [("DiffFileListView.swift", "let w: WidthClass = .compact")]
+        violations = check_width_class_referenced_only_by_the_allowlist(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_diff_file_content_view_names_width_class(self):
+        files = [("DiffFileContentView.swift", ".environment(\\.nostromoWidthClass, widthClass)")]
+        violations = check_width_class_referenced_only_by_the_allowlist(files)
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_diff_surface_view_names_width_class(self):
+        files = [("DiffSurfaceView.swift", "let w: WidthClass = .compact")]
+        self.assertEqual(check_width_class_referenced_only_by_the_allowlist(files), [])
+
 
 class NoRegionResizeAffordanceTests(unittest.TestCase):
     def test_bites_on_draggesture(self):
@@ -2136,6 +2389,201 @@ class CodeSurfaceNoSyntaxHighlightingTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# ios-curated-view-parity W8 — the `pr_diff` surface
+# --------------------------------------------------------------------------
+
+class DiffSurfaceNoTruncationTests(unittest.TestCase):
+    def test_bites_on_prefix_in_diff_file_content_view(self):
+        source = "Text(document.rows[i].text.prefix(200))"
+        violations = check_diff_surface_no_truncation([("DiffFileContentView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_prefix_in_diff_file_list_view(self):
+        source = "Text(file.path.prefix(80))"
+        violations = check_diff_surface_no_truncation([("DiffFileListView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_prefix_in_diff_surface_view(self):
+        source = "Text(document.rows.prefix(50).map(\\.text).joined())"
+        violations = check_diff_surface_no_truncation([("DiffSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_a_numeric_row_cap(self):
+        source = "ForEach(0..<600, id: \\.self) { i in row(i) }"
+        violations = check_diff_surface_no_truncation([("DiffFileContentView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_lineLimit_inside_row_in_diff_file_content_view(self):
+        source = "func row(_ index: Int) -> some View { CodeRowView(text: document.rows[index].text).lineLimit(1) }"
+        violations = check_diff_surface_no_truncation([("DiffFileContentView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_ignores_lineLimit_1_on_diff_file_list_views_truncated_path_label(self):
+        # DiffFileListView.swift legitimately truncates its own path label to
+        # one line (D7: "truncated from the leading end so the filename
+        # survives") — this check is scoped to DiffFileContentView's row(...)
+        # function, not applied file-wide.
+        source = "Text(file.path).lineLimit(1)"
+        self.assertEqual(check_diff_surface_no_truncation([("DiffFileListView.swift", source)]), [])
+
+    def test_ignores_lineLimit_outside_row_in_diff_file_content_view(self):
+        source = (
+            "var header: some View { Text(document.path).lineLimit(1) }\n"
+            "func row(_ index: Int) -> some View { CodeRowView(text: document.rows[index].text) }"
+        )
+        self.assertEqual(check_diff_surface_no_truncation([("DiffFileContentView.swift", source)]), [])
+
+    def test_passes_on_clean_source(self):
+        files = [
+            ("DiffSurfaceView.swift", "struct DiffSurfaceView: View { var body: some View { EmptyView() } }"),
+            ("DiffFileListView.swift", "ForEach(document.files, id: \\.path) { file in Text(file.path).lineLimit(1) }"),
+            (
+                "DiffFileContentView.swift",
+                "ForEach(0..<document.rowCount, id: \\.self) { i in row(i) }\n"
+                "func row(_ index: Int) -> some View { CodeRowView(text: document.rows[index].text) }"
+            ),
+        ]
+        self.assertEqual(check_diff_surface_no_truncation(files), [])
+
+
+class DiffSurfaceNoHorizontalPanningTests(unittest.TestCase):
+    def test_bites_on_scrollview_horizontal_in_diff_file_content_view(self):
+        source = "ScrollView(.horizontal) { content }"
+        violations = check_diff_surface_no_horizontal_panning([("DiffFileContentView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_axes_horizontal_in_diff_surface_view(self):
+        source = "ScrollView(axes: .horizontal) { content }"
+        violations = check_diff_surface_no_horizontal_panning([("DiffSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_clean_source(self):
+        files = [
+            ("DiffSurfaceView.swift", "HStack { DiffFileListView(document: d); DiffFileContentView(document: d) }"),
+            ("DiffFileListView.swift", "ScrollView { content }"),
+            ("DiffFileContentView.swift", "ScrollView { content }"),
+        ]
+        self.assertEqual(check_diff_surface_no_horizontal_panning(files), [])
+
+
+class DiffContentUsesSharedCodeRowTests(unittest.TestCase):
+    def test_bites_when_diff_file_content_view_does_not_reference_coderowview(self):
+        source = "func row(_ index: Int) -> some View { Text(document.rows[index].text) }"
+        violations = check_diff_content_uses_shared_code_row([("DiffFileContentView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_the_file_is_missing_entirely(self):
+        violations = check_diff_content_uses_shared_code_row([("SomeOtherFile.swift", "irrelevant")])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_coderowview_is_referenced(self):
+        source = "func row(_ index: Int) -> some View { CodeRowView(text: document.rows[index].text, kind: document.rows[index].kind) }"
+        self.assertEqual(check_diff_content_uses_shared_code_row([("DiffFileContentView.swift", source)]), [])
+
+
+class DiffScrollOnlyViaDecisionTests(unittest.TestCase):
+    def test_bites_on_an_unconditional_scrollTo(self):
+        source = "func jumpToTop(proxy: ScrollViewProxy) { proxy.scrollTo(0) }"
+        violations = check_diff_scroll_only_via_decision([("DiffFileContentView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_gated_by_scrolldecision(self):
+        source = (
+            "switch ScrollDecision.decide(anchor: a, visibleRange: r) {\n"
+            "case .none: break\n"
+            "case .scrollTo(let row):\n"
+            "proxy.scrollTo(row, anchor: .center)\n"
+            "}"
+        )
+        self.assertEqual(check_diff_scroll_only_via_decision([("DiffFileContentView.swift", source)]), [])
+
+    def test_passes_when_gated_by_scrollrestore(self):
+        source = (
+            "switch restoreScroll(range) {\n"
+            "case .scrollTo(let target):\n"
+            "proxy.scrollTo(target, anchor: .top)\n"
+            "case .none: break\n"
+            "}"
+        )
+        self.assertEqual(check_diff_scroll_only_via_decision([("DiffFileContentView.swift", source)]), [])
+
+
+class DiffNoLineResolutionReimplementedTests(unittest.TestCase):
+    def test_bites_on_newN_compared_with_equality(self):
+        source = "if row.newN == line { scrollTarget = row }"
+        violations = check_diff_no_line_resolution_reimplemented([("DiffFileContentView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_oldN_compared_with_the_operator_on_the_left(self):
+        # The operator-first alternative matches a bare identifier directly
+        # after the operator (whitespace only in between) — the shape a
+        # local extracted from `row.oldN` takes, as opposed to `row.oldN`
+        # itself, which the identifier-first alternative already covers.
+        source = "let oldN = row.oldN\nif line <= oldN { markEmphasis(row) }"
+        violations = check_diff_no_line_resolution_reimplemented([("DiffFileContentView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_scans_every_file_not_just_the_diff_surface_files(self):
+        # Memo B10's point: resolution must not be reimplemented ANYWHERE
+        # under iOS/, not merely kept out of the three new files.
+        source = "if row.newN == line { }"
+        violations = check_diff_no_line_resolution_reimplemented([("CodeSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_does_not_bite_on_a_nil_coalescing_read(self):
+        # The gutter's own new-or-old display precedence (D5) is a plain
+        # read, not comparison arithmetic, and must not trip this check.
+        source = 'Text("\\(row.newN ?? row.oldN ?? 0)")'
+        self.assertEqual(check_diff_no_line_resolution_reimplemented([("DiffFileContentView.swift", source)]), [])
+
+    def test_passes_on_clean_source(self):
+        source = "let gutterNumber = row.newN ?? row.oldN"
+        self.assertEqual(check_diff_no_line_resolution_reimplemented([("DiffFileContentView.swift", source)]), [])
+
+
+class DiffSelectedFileNotViewStateTests(unittest.TestCase):
+    def test_bites_on_selectedfile_state_in_diff_surface_view(self):
+        source = "@State private var selectedFile: String?"
+        violations = check_diff_selected_file_not_view_state([("DiffSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_on_currentfile_state_in_diff_file_content_view(self):
+        source = '@State var currentFile: String = ""'
+        violations = check_diff_selected_file_not_view_state([("DiffFileContentView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_on_unrelated_state(self):
+        source = "@State private var navPath: [String] = []"
+        self.assertEqual(check_diff_selected_file_not_view_state([("DiffSurfaceView.swift", source)]), [])
+
+
+class DiffRendersEveryResolutionCaseTests(unittest.TestCase):
+    def test_bites_when_a_case_is_missing(self):
+        source = ".resolved(let row): open(row)\n.unresolved(let reason): notice(reason)"
+        violations = check_diff_renders_every_resolution_case([("DiffSurfaceView.swift", source)])
+        self.assertTrue(len(violations) > 0)
+
+    def test_passes_when_every_case_is_present(self):
+        source = ".notRequested .resolved .unresolved .none .rows .matchedNothing"
+        self.assertEqual(check_diff_renders_every_resolution_case([("DiffSurfaceView.swift", source)]), [])
+
+
+class DiffTooLargeNoticeNotOneRowAmongManyTests(unittest.TestCase):
+    def test_bites_when_toolarge_is_never_referenced(self):
+        source = "struct DiffSurfaceView: View { var body: some View { DiffFileListView(document: document) } }"
+        violations = check_diff_toolarge_notice_not_one_row_among_many([("DiffSurfaceView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_the_file_is_missing_entirely(self):
+        violations = check_diff_toolarge_notice_not_one_row_among_many([("SomeOtherFile.swift", "irrelevant")])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_toolarge_is_referenced(self):
+        source = "if document.tooLarge { TooLargeNotice(changedFiles: document.changedFiles) } else { DiffFileListView(document: document) }"
+        self.assertEqual(check_diff_toolarge_notice_not_one_row_among_many([("DiffSurfaceView.swift", source)]), [])
+
+
+# --------------------------------------------------------------------------
 # The real gate: every check against the actual iOS/Nostromo tree.
 # --------------------------------------------------------------------------
 
@@ -2300,6 +2748,41 @@ class RealIOSTreeTests(unittest.TestCase):
 
     def test_code_surface_no_syntax_highlighting(self):
         violations = check_code_surface_no_syntax_highlighting(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_diff_surface_no_truncation(self):
+        # Expected to FAIL until W8 lands: DiffSurfaceView.swift,
+        # DiffFileListView.swift, and DiffFileContentView.swift don't exist
+        # yet.
+        violations = check_diff_surface_no_truncation(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_diff_surface_no_horizontal_panning(self):
+        violations = check_diff_surface_no_horizontal_panning(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_diff_content_uses_shared_code_row(self):
+        violations = check_diff_content_uses_shared_code_row(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_diff_scroll_only_via_decision(self):
+        violations = check_diff_scroll_only_via_decision(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_diff_no_line_resolution_reimplemented(self):
+        violations = check_diff_no_line_resolution_reimplemented(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_diff_selected_file_not_view_state(self):
+        violations = check_diff_selected_file_not_view_state(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_diff_renders_every_resolution_case(self):
+        violations = check_diff_renders_every_resolution_case(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_diff_toolarge_notice_not_one_row_among_many(self):
+        violations = check_diff_toolarge_notice_not_one_row_among_many(self.files)
         self.assertEqual(violations, [], violations)
 
 

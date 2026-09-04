@@ -20,11 +20,6 @@ public enum PaneSurfaceStub {
     /// stub cannot show — never just "isn't available."
     public static func message(for content: PaneContentWire) -> (headline: String, detail: String)? {
         switch content {
-        case .diff:
-            return (
-                headline: "Diff view isn't available on iOS yet.",
-                detail: "It can't show which line the agent pointed at."
-            )
         case .prConversation:
             return (
                 headline: "PR conversation isn't available on iOS yet.",
@@ -35,12 +30,11 @@ public enum PaneSurfaceStub {
                 headline: "Ticket view isn't available on iOS yet.",
                 detail: "It can't show which section the agent pointed at."
             )
-        // `.code` is a real renderer as of ios-curated-view-parity W7
-        // (`CodeSurfaceView`) — it is no longer a deferred kind, and this
-        // table's exhaustive switch forces this file to be updated the
-        // moment it stopped being one, rather than leaving a stale stub
-        // message nobody ever renders.
-        case .text, .jsonSnapshot, .prList, .loading, .error, .unknown, .code:
+        // `.code` (W7) and `.diff` (W8) are real renderers now — neither is
+        // a deferred kind any longer, and this table's exhaustive switch
+        // forces this file to be updated the moment each stopped being one,
+        // rather than leaving a stale stub message nobody ever renders.
+        case .text, .jsonSnapshot, .prList, .loading, .error, .unknown, .code, .diff:
             return nil
         }
     }
