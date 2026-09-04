@@ -95,6 +95,7 @@
 		WW0000000000000000000003 /* DiffPaneSummaryWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */; };
 		XX0000000000000000000011 /* NotificationDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = XX0000000000000000000001 /* NotificationDecodeTests.swift */; };
 		XX0000000000000000000012 /* MainLayoutNotificationWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */; };
+		YY0000000000000000000002 /* PaneContentViewForEachIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = YY0000000000000000000001 /* PaneContentViewForEachIdentityTests.swift */; };
 		WW0000000000000000000005 /* DiffPaneSummaryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */; };
 		WW0000000000000000000006 /* DiffPaneSummaryPolicy.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */; };
 		TT0000000000000000000001 /* ChatSessionDetachTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT0000000000000000000000 /* ChatSessionDetachTests.swift */; };
@@ -209,6 +210,7 @@
 		LL0000000000000000000007 /* DiffDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffDocumentTests.swift; sourceTree = "<group>"; };
 		LL0000000000000000000008 /* ScrollDecisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDecisionTests.swift; sourceTree = "<group>"; };
 		LL0000000000000000000009 /* CodeContentViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeContentViewTests.swift; sourceTree = "<group>"; };
+		YY0000000000000000000001 /* PaneContentViewForEachIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentViewForEachIdentityTests.swift; sourceTree = "<group>"; };
 		LL0000000000000000000011 /* RowOffsetIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowOffsetIndexTests.swift; sourceTree = "<group>"; };
 		LL0000000000000000000012 /* CodePaneRenderAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodePaneRenderAudit.swift; sourceTree = "<group>"; };
 		LL0000000000000000000013 /* CodePaneRenderAuditTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodePaneRenderAuditTests.swift; sourceTree = "<group>"; };
@@ -468,6 +470,7 @@
 				WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */,
 				XX0000000000000000000001 /* NotificationDecodeTests.swift */,
 				XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */,
+				YY0000000000000000000001 /* PaneContentViewForEachIdentityTests.swift */,
 
 			);
 			path = NostromoTests;
@@ -719,6 +722,7 @@
 				WW0000000000000000000003 /* DiffPaneSummaryWiringTests.swift in Sources */,
 				XX0000000000000000000011 /* NotificationDecodeTests.swift in Sources */,
 				XX0000000000000000000012 /* MainLayoutNotificationWiringTests.swift in Sources */,
+				YY0000000000000000000002 /* PaneContentViewForEachIdentityTests.swift in Sources */,
 
 			);
 			runOnlyForDeploymentPostprocessing = 0;

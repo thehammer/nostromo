@@ -99,6 +99,19 @@ extension PaneTree: Decodable {
 public struct PrListItemModel: Decodable, Identifiable, Equatable {
     /// Stable identity: `"owner/name#number"` — matching `PrQueueItem.id`.
     public var id: String { "\(repo)#\(number)" }
+    /// SwiftUI row identity only — never a domain identity. Do not use this
+    /// anywhere `id` is expected (persistence, addressing, cross-referencing
+    /// against `PrQueueItem.id`, etc.) — those must keep using `id` above.
+    ///
+    /// Folds `bucket` into `id` so that a PR moving between review-queue
+    /// buckets (e.g. `requested` -> `needs_review`, see
+    /// `src/data/perri_queue_native.rs` bucket precedence) changes this row's
+    /// SwiftUI identity, not just which section it's filtered into. Without
+    /// this, `ForEach(items) { … }` keyed on the bare `id` sees a bucket
+    /// change as a *move* rather than a content change, and can recycle the
+    /// existing row view under the new section header — rendering the PR's
+    /// previous bucket's badge.
+    public var bucketScopedId: String { "\(id)#\(bucket)" }
     public let repo:        String
     public let number:      Int
     public let title:       String
