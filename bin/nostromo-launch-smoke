@@ -54,7 +54,7 @@ validation ritual — is verified by actually running this script and
 macOS/scripts/launch-smoke-validate.sh; see the PR body for that evidence.
 
 Usage:
-    bin/nostromo-launch-smoke [--release] [--skip-build]
+    bin/nostromo-launch-smoke [--release] [--skip-build] [--keep-artifacts DIR]
 """
 
 import argparse
@@ -1397,9 +1397,10 @@ def _collect_evidence(launched_pid, diag_path, clone, alive_at_window_end, cpu_p
 def _capture_sample_on_fail(state, launched_pid, tools):
     """On FAIL only: an `sample(1)` capture for a human to inspect, written
     outside the temp dir (which is removed unconditionally) so it survives
-    the run. Never a verdict input."""
+    the run. Never a verdict input. Returns the sample path, or None if no
+    sample was captured."""
     if state != FAIL or not _pid_alive(launched_pid) or not tools.get("sample"):
-        return
+        return None
     sample_out = tempfile.mktemp(prefix="nostromo-launch-smoke-sample-", suffix=".txt")
     sample_result = subprocess.run(
         [tools["sample"], str(launched_pid), "3", "-file", sample_out],
@@ -1407,6 +1408,44 @@ def _capture_sample_on_fail(state, launched_pid, tools):
     )
     if sample_result.returncode == 0 and os.path.exists(sample_out):
         _log(f"sample captured on FAIL: {sample_out}")
+        return sample_out
+    return None
+
+
+def _export_artifacts(keep_dir, tmpdir, report_text, sample_path):
+    """Copy this run's report, app output, and diagnostics stream out of the
+    per-run temp dir before `_cleanup()` deletes it unconditionally — CI has
+    nowhere else to look once the job's steps finish. Purely additive: it
+    changes no verdict, and it does not replace or delay `_cleanup()`'s
+    unconditional teardown of everything this run launched.
+
+    Best-effort — a failure to export artifacts is logged and swallowed
+    rather than turned into a verdict-altering exception, the same
+    discipline `_cleanup()` itself uses."""
+    try:
+        os.makedirs(keep_dir, exist_ok=True)
+    except OSError as exc:
+        _log(f"WARNING: could not create --keep-artifacts dir {keep_dir}: {exc}")
+        return
+    if report_text is not None:
+        try:
+            with open(os.path.join(keep_dir, "report.txt"), "w") as f:
+                f.write(report_text)
+        except OSError as exc:
+            _log(f"WARNING: could not write report.txt to {keep_dir}: {exc}")
+    if tmpdir is not None:
+        for name in ("diagnostics.jsonl", "app.log"):
+            src = os.path.join(tmpdir, name)
+            if os.path.isfile(src):
+                try:
+                    shutil.copy2(src, os.path.join(keep_dir, name))
+                except OSError as exc:
+                    _log(f"WARNING: could not copy {name} to {keep_dir}: {exc}")
+    if sample_path is not None and os.path.isfile(sample_path):
+        try:
+            shutil.copy2(sample_path, os.path.join(keep_dir, os.path.basename(sample_path)))
+        except OSError as exc:
+            _log(f"WARNING: could not copy sample capture to {keep_dir}: {exc}")
 
 
 def run(args):
@@ -1470,18 +1509,27 @@ def run(args):
 
         detectors = evaluate_evidence(ev)
         state, cause = aggregate(detectors)
-        _capture_sample_on_fail(state, launched_pid, tools)
+        sample_path = _capture_sample_on_fail(state, launched_pid, tools)
 
-        print(format_report(state, cause, detectors, ev))
+        report_text = format_report(state, cause, detectors, ev)
+        print(report_text)
+        if args.keep_artifacts:
+            _export_artifacts(args.keep_artifacts, tmpdir, report_text, sample_path)
         return exit_code_for(state)
 
     except _PrerequisiteMissing as exc:
-        print(format_report(INCONCLUSIVE, "prerequisite missing", [], Evidence.empty()))
+        report_text = format_report(INCONCLUSIVE, "prerequisite missing", [], Evidence.empty())
+        print(report_text)
         _log(f"prerequisite missing: {exc}")
+        if args.keep_artifacts:
+            _export_artifacts(args.keep_artifacts, tmpdir, report_text, None)
         return exit_code_for(INCONCLUSIVE)
     except _BuildFailed as exc:
-        print(format_report(INCONCLUSIVE, "build failed", [], Evidence.empty()))
+        report_text = format_report(INCONCLUSIVE, "build failed", [], Evidence.empty())
+        print(report_text)
         _log(f"build failed: {exc}")
+        if args.keep_artifacts:
+            _export_artifacts(args.keep_artifacts, tmpdir, report_text, None)
         return exit_code_for(INCONCLUSIVE)
     finally:
         _cleanup(tmpdir, daemon, broker, proc)
@@ -1518,6 +1566,13 @@ def parse_args(argv):
                         help="use the Release build instead of Debug")
     parser.add_argument("--skip-build", action="store_true",
                         help="use whatever bundle is already built; do not rebuild")
+    parser.add_argument("--keep-artifacts", metavar="DIR",
+                        default=os.environ.get("NOSTROMO_SMOKE_ARTIFACT_DIR"),
+                        help="copy this run's report, the app's captured stdout/stderr, and "
+                             "the diagnostics NDJSON stream (plus any FAIL sample capture) "
+                             "into DIR before the per-run temp dir is cleaned up. Also settable "
+                             "via NOSTROMO_SMOKE_ARTIFACT_DIR. Purely additive: changes no "
+                             "verdict and does not affect cleanup of what this run launched.")
     return parser.parse_args(argv)
 
 
