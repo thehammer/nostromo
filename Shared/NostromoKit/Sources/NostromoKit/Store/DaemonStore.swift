@@ -639,6 +639,43 @@ extension DaemonStore {
     public func scrollRestore(tag: String, paneId: String, visibleRange: ClosedRange<Int>?) -> ScrollRestore {
         ScrollRestore.decide(savedKey: scrollKeys[tag]?[paneId], visibleRange: visibleRange)
     }
+
+    // MARK: - pr_diff: per-file scroll restore (ios-curated-view-parity W8)
+
+    /// `pr_diff` can show different files at different times, and the
+    /// single `scrollKeys[tag][paneId]` slot above can't tell one file's
+    /// saved row from another's. Reuses that same private, non-published
+    /// storage — no re-render per scroll tick here either — keyed by a
+    /// composite `"paneId#file"` string only this pair of methods ever
+    /// constructs, so it can never collide with a plain paneId used by any
+    /// other content kind.
+    public func setDiffFileScrollKey(tag: String, paneId: String, file: String, key: Int) {
+        setScrollKey(tag: tag, paneId: "\(paneId)#\(file)", key: key)
+    }
+
+    public func diffFileScrollRestore(tag: String, paneId: String, file: String, visibleRange: ClosedRange<Int>?) -> ScrollRestore {
+        scrollRestore(tag: tag, paneId: "\(paneId)#\(file)", visibleRange: visibleRange)
+    }
+
+    // MARK: - pr_diff: selected-file slot (ios-curated-view-parity W8, D2)
+
+    /// Which file `pr_diff`'s `paneId` currently has open, scoped by
+    /// `identity` (`"\(repo)#\(number)"`-shaped, built by `DiffSurfaceView`
+    /// itself). Delegated through `focusRegionStates` — unlike the scroll
+    /// keys above, this DOES need to be `@Published`: a manual file
+    /// selection at regular width (no fresh anchor, no address change) must
+    /// still re-render `DiffSurfaceView` so it reflects the new choice.
+    /// Writes are rare (a tap, not a scroll tick), so the jank concern the
+    /// scroll keys avoid doesn't apply here.
+    public func selectedDiffFile(tag: String, paneId: String, identity: String) -> String? {
+        focusRegionStates[tag]?.selectedFile(for: paneId, identity: identity)
+    }
+
+    public func setSelectedDiffFile(tag: String, paneId: String, path: String, identity: String) {
+        var region = focusRegionStates[tag] ?? FocusRegionState()
+        region.setSelectedFile(path, identity: identity, for: paneId)
+        focusRegionStates[tag] = region
+    }
 }
 
 // MARK: - Region membership (ios-curated-view-parity W6)

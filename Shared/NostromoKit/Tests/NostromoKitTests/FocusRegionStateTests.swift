@@ -254,6 +254,126 @@ final class FocusRegionStateTests: XCTestCase {
         XCTAssertEqual(state.scrollKey(for: "b"), 2)
     }
 
+    // MARK: - W8: the selected-file slot (pr_diff's per-pane "which file is open")
+    //
+    // Keyed the same way scrollKeys already is (per-pane, not per-region), and
+    // additionally scoped by an identity string the caller passes at both
+    // write and read time — `"\(repo)#\(number)"`-shaped. A changed PR means
+    // a changed identity, so the old file silently stops resolving rather
+    // than needing an explicit clear when the pane's content changes to a
+    // different PR.
+
+    func testSelectedFileRoundTrips() {
+        var state = FocusRegionState()
+        state.setSelectedFile("src/a.rs", identity: "acme/web#1", for: "diff-pane")
+        XCTAssertEqual(state.selectedFile(for: "diff-pane", identity: "acme/web#1"), "src/a.rs")
+    }
+
+    func testSelectedFileForAPaneNeverSetIsNil() {
+        let state = FocusRegionState()
+        XCTAssertNil(state.selectedFile(for: "never-set", identity: "acme/web#1"))
+    }
+
+    func testSelectedFileReadWithADifferentIdentityThanItWasWrittenWithIsNil() {
+        var state = FocusRegionState()
+        state.setSelectedFile("src/a.rs", identity: "acme/web#1", for: "diff-pane")
+        XCTAssertNil(
+            state.selectedFile(for: "diff-pane", identity: "acme/web#2"),
+            "a changed PR means a changed identity — the old file must silently stop resolving, not keep answering for a different PR"
+        )
+    }
+
+    func testSettingSelectedFileForOnePaneDoesNotAffectAnother() {
+        var state = FocusRegionState()
+        state.setSelectedFile("src/a.rs", identity: "acme/web#1", for: "pane-a")
+        state.setSelectedFile("src/b.rs", identity: "acme/web#1", for: "pane-b")
+        XCTAssertEqual(state.selectedFile(for: "pane-a", identity: "acme/web#1"), "src/a.rs")
+        XCTAssertEqual(state.selectedFile(for: "pane-b", identity: "acme/web#1"), "src/b.rs")
+    }
+
+    func testSelectedFileSurvivesASplitTopologyChangeUntouched() {
+        var state = FocusRegionState()
+        state.setSelectedFile("src/a.rs", identity: "acme/web#1", for: "diff-pane")
+
+        state.apply(
+            change: .splitTopology, regionPath: region,
+            treeActivePaneId: nil, focusedPane: nil, available: ["repl", "diff-pane"]
+        )
+
+        XCTAssertEqual(
+            state.selectedFile(for: "diff-pane", identity: "acme/web#1"), "src/a.rs",
+            "the selected file must survive a .splitTopology rebuild the same way scroll keys and unread marks do"
+        )
+    }
+
+    func testPruneDropsTheSelectedFileForAPaneNoLongerLive() {
+        var state = FocusRegionState()
+        state.setSelectedFile("src/a.rs", identity: "acme/web#1", for: "diff-pane")
+
+        state.prune(livePaths: [], livePanes: [])
+
+        XCTAssertNil(state.selectedFile(for: "diff-pane", identity: "acme/web#1"))
+    }
+
+    func testPruneKeepsTheSelectedFileForAPaneStillLive() {
+        var state = FocusRegionState()
+        state.setSelectedFile("src/a.rs", identity: "acme/web#1", for: "diff-pane")
+
+        state.prune(livePaths: [], livePanes: ["diff-pane"])
+
+        XCTAssertEqual(state.selectedFile(for: "diff-pane", identity: "acme/web#1"), "src/a.rs")
+    }
+
+    // MARK: - W8: per-file scroll-restore key
+    //
+    // One open diff pane can show different files at different times, and a
+    // single Int scroll slot keyed only by paneId can't tell one file's saved
+    // row from another's — this trio is semantically identical to the bare
+    // paneId scroll-key trio above, just additionally keyed by `file`.
+
+    func testPerFileScrollKeyRoundTrips() {
+        var state = FocusRegionState()
+        state.setScrollKey(42, for: "diff-pane", file: "a.rs")
+        XCTAssertEqual(state.scrollKey(for: "diff-pane", file: "a.rs"), 42)
+    }
+
+    func testPerFileScrollKeyForAnUnsetFileIsNil() {
+        let state = FocusRegionState()
+        XCTAssertNil(state.scrollKey(for: "diff-pane", file: "never-set.rs"))
+    }
+
+    func testTwoFilesUnderTheSamePaneDoNotCollide() {
+        var state = FocusRegionState()
+        state.setScrollKey(10, for: "diff-pane", file: "a.rs")
+        state.setScrollKey(20, for: "diff-pane", file: "b.rs")
+        XCTAssertEqual(state.scrollKey(for: "diff-pane", file: "a.rs"), 10)
+        XCTAssertEqual(state.scrollKey(for: "diff-pane", file: "b.rs"), 20)
+    }
+
+    func testPerFileScrollRestoreMirrorsTheBarePaneIdRule() {
+        var state = FocusRegionState()
+        state.setScrollKey(50, for: "diff-pane", file: "a.rs")
+        XCTAssertEqual(
+            state.scrollRestore(for: "diff-pane", file: "a.rs", visibleRange: 0...10), .scrollTo(target: 50),
+            "a key outside the visible range must scroll to it"
+        )
+        XCTAssertEqual(
+            state.scrollRestore(for: "diff-pane", file: "a.rs", visibleRange: 40...60), .none,
+            "a key already inside the visible range must not move the viewport"
+        )
+    }
+
+    func testPruneDropsAPanesEntirePerFileScrollMapWhenThatPaneIsNoLongerLive() {
+        var state = FocusRegionState()
+        state.setScrollKey(10, for: "diff-pane", file: "a.rs")
+        state.setScrollKey(20, for: "diff-pane", file: "b.rs")
+
+        state.prune(livePaths: [], livePanes: [])
+
+        XCTAssertNil(state.scrollKey(for: "diff-pane", file: "a.rs"))
+        XCTAssertNil(state.scrollKey(for: "diff-pane", file: "b.rs"))
+    }
+
     // MARK: - Scroll keys and unread marks for persisting panes survive a rebuild
 
     func testScrollKeysAndUnreadMarksForPersistingPanesSurviveASplitTopologyChangeUntouched() {

@@ -331,16 +331,15 @@ AppKit siblings layered over it — SwiftUI only, all the way down. `text`,
 including the queue-row marking below and the swipe-to-approve confirmation
 gate.
 
-`diff`, `pr_conversation`, and `ticket` are **not rendered** — each shows an
-honest stub instead (`PaneSurfaceStub` in NostromoKit is the single source of
-the stub copy). This is deliberate, not a gap nobody got to: the PRD's
-organizing rule is that "a surface may be absent, and a surface may be
-simplified. A surface may never look complete when it isn't." Each stub
-names the specific addressing it can't show (a line, a comment, a section)
-rather than saying only "isn't available." W8 (`diff`) and W9
-(`pr_conversation`/`ticket`) replace these stubs with real renderers; each
-later wedge updates this section when it does, so this stays the one place a
-reader learns the two clients aren't rendering the same thing.
+`pr_conversation` and `ticket` are **not rendered** — each shows an honest
+stub instead (`PaneSurfaceStub` in NostromoKit is the single source of the
+stub copy). This is deliberate, not a gap nobody got to: the PRD's organizing
+rule is that "a surface may be absent, and a surface may be simplified. A
+surface may never look complete when it isn't." Each stub names the specific
+addressing it can't show (a comment, a section) rather than saying only
+"isn't available." W9 replaces these stubs with real renderers; that wedge
+updates this section when it does, so this stays the one place a reader
+learns the two clients aren't rendering the same thing.
 
 **`code` renders for real, as of `ios-curated-view-parity` W7**
 (`iOS/Nostromo/Views/Panes/CodeSurfaceView.swift`). Before W7, `code`
@@ -395,12 +394,74 @@ replaces the stub it left behind with a real one:
   surface), a large file relies on `LazyVStack`'s own laziness rather than a
   cap. Neither client highlights syntax; the wire type reserves room for it.
 
+**`pr_diff` renders for real, as of `ios-curated-view-parity` W8**
+(`iOS/Nostromo/Views/Panes/DiffSurfaceView.swift`,
+`DiffFileListView.swift`, `DiffFileContentView.swift`) — and it is the one
+place this PRD deliberately diverges from macOS in *shape*, not just in
+completeness:
+
+- **iOS is file-list-first; macOS is one flat scrolling document.** macOS's
+  `DiffDocument`/`CodeContentView` render a whole PR's diff as one
+  continuous document — a one-line banner per file, then hunks, then lines.
+  iOS instead presents the changed files as a list (path, status, `+`/`-`
+  counts) and opens one file's hunks at a time. This is a deliberate
+  form-factor call, not a lesser rendering: a 40-file diff as one continuous
+  scroll is a defensible document at a Mac's width and a haystack at a
+  phone's. macOS is unchanged by this wedge.
+- **The two parts are one component pair, arranged two ways.**
+  `DiffFileListView` (the list) and `DiffFileContentView` (one file's hunks)
+  take identical parameters at both widths. At compact width they're a
+  `NavigationStack` push — list, then content, with the list still behind it
+  in the back stack. At regular width they sit side by side, list on the
+  leading edge; selecting a different file replaces the content and never
+  loses the list. `DiffSurfaceView` is the only renderer, besides
+  `DynamicFocusView`/`RegionContainerView` themselves, permitted to read the
+  app's `WidthClass` — enforced by an explicit allowlist in
+  `tests/ios_policy/test_ios_view_policy.py`.
+- **An anchored show bypasses the list entirely.** `Anchor.line(path:line:)`
+  opens the named file directly, scrolled to the resolved line, with any
+  emphasis marked — the operator never has to tap through the list to reach
+  the thing an agent pointed at. An anchor naming a file absent from the
+  diff, or of a kind this surface can't use, is stated and falls back to the
+  list rather than opening an arbitrary file.
+- **Line resolution is the SAME code on both clients**, which is the
+  property agents depend on for "line 412" to mean the same thing
+  everywhere. `DiffDocument` (`Shared/NostromoKit/Sources/NostromoKit/Code/`)
+  is a byte-for-byte port of macOS's own `DiffDocument.swift`, macOS's test
+  suite ported alongside it and passing unmodified, including the rule a
+  naive reimplementation gets backwards: a new-side line number wins, and a
+  line that exists only on the old side (one the PR deletes) resolves to its
+  removal row. `DiffAddressing` (new to iOS, since macOS's own diff view has
+  no three-state resolution) wraps that arithmetic in the same
+  `AnchorResolution`/`EmphasisResolution` types `code` uses, so "this file
+  isn't in the diff," "this line isn't in the diff," "this anchor kind
+  doesn't apply here," and "this diff was gated" are four distinct, stated
+  messages, never a silent fallback.
+- **Hunk lines share `code`'s exact gutter and wrapping mechanism**
+  (`CodeRowView`, extracted from `CodeSurfaceView` in this wedge) — the same
+  top-aligned gutter cell beside a freely wrapping text column, no
+  horizontal panning, no truncation. A line's added/removed/context/
+  hunk-header kind is distinguishable by three signals, not colour alone:
+  the restored `+`/`-`/space marker, a background tint, and the gutter's
+  new-or-old-number precedence.
+- **A `tooLarge` diff states that it is too large and names the changed-file
+  count**, replacing the entire surface — never an empty file list, which
+  would be indistinguishable from a PR that changes nothing.
+- **The selected file and its scroll position are not view state.** Both
+  live in `FocusRegionState` (a per-pane selected-file slot, and a per-file
+  scroll-restore key alongside the existing per-pane one), so a width-class
+  change, a tab switch, or a region rebuild all preserve which file is open
+  and where in it, the same way `code`'s scroll position survives those
+  transitions.
+
 `PaneAddress` (below) reaches iOS the same way it reaches macOS —
 `DynamicFocusView` passes `layout.paneAddress[paneId]` into
 `PaneSurfaceView` — and iOS's present uses of `anchor`/`emphasis` are
-`pr_list` queue-row marking and `code`'s line/range addressing above; the
-remaining stub kinds have no addressing to render yet, matching what they
-show. `reason` is used more broadly — see the tab strip below.
+`pr_list` queue-row marking, `code`'s line/range addressing, and `pr_diff`'s
+line/range addressing (identical resolution semantics to `code`, applied to
+a flattened diff instead of a flattened file) above; the remaining stub
+kinds have no addressing to render yet, matching what they show. `reason` is
+used more broadly — see the tab strip below.
 
 ### Tabs and layout on iOS: the compact strip (`ios-curated-view-parity` W5)
 

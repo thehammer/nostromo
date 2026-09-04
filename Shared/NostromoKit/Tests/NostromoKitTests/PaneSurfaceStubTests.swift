@@ -37,8 +37,9 @@ final class PaneSurfaceStubTests: XCTestCase {
     /// Kinds still deferred — the only kinds `message(for:)` may return
     /// non-nil for. `code` moved out of this set in
     /// `ios-curated-view-parity` W7 (`CodeSurfaceView` is a real renderer
-    /// now); `diff`/`prConversation`/`ticket` remain deferred to W8/W9.
-    private static let deferredKinds: Set<String> = ["diff", "prConversation", "ticket"]
+    /// now); `diff` moves out in W8 (`DiffSurfaceView` is a real renderer);
+    /// `prConversation`/`ticket` remain deferred to W9.
+    private static let deferredKinds: Set<String> = ["prConversation", "ticket"]
 
     // MARK: - Every deferred kind has a non-empty message
 
@@ -85,17 +86,15 @@ final class PaneSurfaceStubTests: XCTestCase {
         )), "code is rendered by CodeSurfaceView as of W7 and must not carry a stub message")
     }
 
-    // MARK: - Each stub names its own missing addressing (the PRD's honesty rule)
+    // MARK: - `.diff` no longer carries a stub message (W8)
 
-    func testDiffStubNamesTheMissingLineAddressing() {
-        let message = PaneSurfaceStub.message(for: .diff(
+    func testDiffHasNoStubMessage() {
+        XCTAssertNil(PaneSurfaceStub.message(for: .diff(
             DiffPayload(repo: "acme/web", number: 1, files: [])
-        ))
-        XCTAssertTrue(
-            message?.detail.contains("line") ?? false,
-            "diff's addressing is Anchor.line — the stub must say so, not just 'unavailable'"
-        )
+        )), "diff is rendered by DiffSurfaceView as of W8 and must not carry a stub message")
     }
+
+    // MARK: - Each stub names its own missing addressing (the PRD's honesty rule)
 
     func testPrConversationStubNamesTheMissingCommentAddressing() {
         let message = PaneSurfaceStub.message(for: .prConversation(

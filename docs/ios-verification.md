@@ -509,6 +509,70 @@ that an emoji-bearing file's gutter numbers stay visually aligned with the
 lines they label. L1 proves the arithmetic behind each of these; only a
 device shows the arithmetic landing on screen.
 
+## Worked example: `pr_diff` (W8)
+
+`ios-curated-view-parity` W8 replaces the `diff` stub with a real renderer
+that is also this PRD's only deliberate *structural* divergence from macOS
+(file-list-first on iOS, one flat document on macOS). That divergence is
+safe only because line resolution itself is NOT allowed to diverge — the
+same `path:line` must land on the same line on both clients — which is
+exactly the kind of claim a device can't check but a ported test suite can.
+
+- **L1** (`DiffDocumentTests.swift`, `DiffAddressingTests.swift`,
+  `FocusRegionStateTests.swift`'s new cases): `DiffDocumentTests` is macOS's
+  14-test suite ported and passing **unmodified** — flattening order, marker
+  restoration per kind (`.meta` verbatim), new-side-wins when a line is both
+  a removal and an addition, the removal-row fallback for an old-side-only
+  line, path-scoped vs. `nil`-path search, `rowIndices` empty-not-clamped,
+  the `tooLarge` notice's singular/plural wording, a rename header, and
+  `text == rows joined`. Any test that had needed a change to pass would
+  have been a reported cross-client divergence, not an adjustment — none
+  did. `DiffAddressingTests` covers the diff-flavoured resolvers: the
+  `tooLarge` gate taking priority over every anchor/emphasis-specific rule
+  (a gated diff has no rows to resolve against, so even an unusable anchor
+  kind must still report the gate), "this file isn't in the diff" and "this
+  line isn't in the diff" as two distinctly-worded, distinctly-assertable
+  reasons, and `matchedNothing` vs. `.rows([])` regression guards. The
+  `FocusRegionState` additions cover the selected-file slot (identity-scoped
+  so a changed PR silently stops resolving a stale filename, survives a
+  `.splitTopology` rebuild, pruned when its pane is no longer live) and the
+  per-file scroll-restore trio.
+- **L2** (`tests/ios_policy/test_ios_view_policy.py`): `WidthClass` named
+  only by the allowlist, now including `DiffSurfaceView.swift` (and *not*
+  `DiffFileListView.swift`/`DiffFileContentView.swift`, which take identical
+  parameters at both widths); no truncation and no horizontal panning across
+  the three new files; rows rendered through the SAME `CodeRowView` `code`
+  uses (asserted by reference, not by re-deriving the gutter/wrap rules a
+  second time); every scroll gated by a `case .scrollTo` decision; no
+  `newN`/`oldN` COMPARISON anywhere under `iOS/` (a plain nil-coalescing read
+  for gutter display is fine — resolving which row a line means is
+  `DiffDocument`/`DiffAddressing`'s job, never re-derived in a view); no
+  `@State` named `selectedFile`/`currentFile` (the selected file lives in
+  `FocusRegionState`); every `AnchorResolution`/`EmphasisResolution` case
+  name referenced in `DiffSurfaceView.swift`; and that `tooLarge` is named
+  in `DiffSurfaceView.swift` at all (an honest heuristic — it proves the
+  branch exists, not that it's structured to replace the whole surface;
+  that structural claim is why `tooLarge` is checked FIRST in this view's
+  `body`, before either width's arrangement, rather than trusted to a
+  regex).
+- **L3** (`make ios-build`): that the three new files and the extracted
+  `CodeRowView` compile and are wired into the app target's build phase,
+  with no new warnings, and that `.diff` leaving `PaneSurfaceStub`'s
+  deferred-kinds table doesn't break the switch's exhaustiveness anywhere.
+
+What's left over — genuinely **UI-observable only** — is everything the PRD
+actually cares about seeing: that the anchored bypass really opens straight
+into the file with **no list flash** first; that the regular-width
+arrangement really shows the list and the content **at the same time**,
+and that selecting a different file really doesn't lose the list; that a
+line this PR deletes really lands on the same visual line on both clients
+side by side; that added/removed/context/hunk-header rows are really
+distinguishable in dark mode and in a greyscale screenshot (colour is one of
+three signals, never the only one); and that a `tooLarge` diff really reads
+as gated rather than as an empty, unremarkable PR. L1 proves the resolution
+arithmetic agrees between clients; only a device shows the two clients
+agreeing on screen, side by side.
+
 ## Why no simulator, anywhere
 
 It would be easy to ask: why not add an `xcodebuild test -destination
