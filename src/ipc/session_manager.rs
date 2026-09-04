@@ -1189,6 +1189,13 @@ impl SessionManager {
             }
         }
         self.client_senders.lock().unwrap().remove(client_id);
+
+        // Drop any rendered-shape reports this connection contributed (W1 —
+        // render-state-visibility) — a closed window's report must not
+        // outlive the connection that sent it.
+        if let Some(reg) = &self.pane_registry {
+            reg.lock().unwrap().prune_rendered_shapes_for_conn(client_id);
+        }
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────

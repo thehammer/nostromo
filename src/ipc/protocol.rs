@@ -966,6 +966,36 @@ pub enum ClientMsg {
     ActivitySnapshotRequest {
         tag: String,
     },
+
+    /// A client's report of which pane ids one of its windows has actually
+    /// materialised for a focus (W1 — render-state-visibility).
+    ///
+    /// This is the missing half of the daemon's pane-state picture: the
+    /// daemon's `PaneRegistry` only ever knows the tree it was told to build
+    /// (structure), never what any window actually painted. This message is
+    /// how a client (the macOS app) reports that half back, so
+    /// `nostromo.get_render_state` / `nostromo.get_view_state`'s
+    /// `render_state` section can answer "did what I asked for actually
+    /// render" without a human reading a screenshot.
+    ///
+    /// Sent once per window at the end of `DynamicFocusView.reconcile` —
+    /// `pane_ids` is read straight from that view's `renderedTree` (never a
+    /// separately recomputed value, so it can't drift from what the
+    /// `panes`-category log already reports).
+    RenderedShape {
+        /// Focus tag this report is about.
+        tag: String,
+        /// Stable per-window identifier (macOS: the window's screen index,
+        /// stable across a `FocusLayout` replay and a reconnect, but not
+        /// persisted — a relaunch is free to renumber).
+        window_id: String,
+        /// Pane ids the reporting window's view hierarchy holds for `tag`.
+        pane_ids: Vec<String>,
+        /// The client's own wall-clock timestamp when this shape was
+        /// reconciled — the basis for the `age_ms` a caller sees back, since
+        /// the daemon has no other way to know how stale a report is.
+        rendered_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -2405,6 +2435,43 @@ mod tests {
     #[test]
     fn activity_snapshot_request_round_trips() {
         round_trip_client(ClientMsg::ActivitySnapshotRequest { tag: "cody-1".into() });
+    }
+
+    // ── render-state visibility (W1) ──────────────────────────────────────────
+
+    #[test]
+    fn rendered_shape_round_trips() {
+        round_trip_client(ClientMsg::RenderedShape {
+            tag: "perri".into(),
+            window_id: "0".into(),
+            pane_ids: vec!["queue".into(), "repl".into()],
+            rendered_at: chrono::Utc::now(),
+        });
+    }
+
+    #[test]
+    fn rendered_shape_round_trips_with_no_panes() {
+        round_trip_client(ClientMsg::RenderedShape {
+            tag: "perri".into(),
+            window_id: "2".into(),
+            pane_ids: vec![],
+            rendered_at: chrono::Utc::now(),
+        });
+    }
+
+    #[test]
+    fn rendered_shape_wire_type_is_snake_case() {
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&ClientMsg::RenderedShape {
+                tag: "perri".into(),
+                window_id: "0".into(),
+                pane_ids: vec!["repl".into()],
+                rendered_at: chrono::Utc::now(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["type"], "rendered_shape");
     }
 
     /// An old daemon build (pre-schema-growth) emits the original 4-field

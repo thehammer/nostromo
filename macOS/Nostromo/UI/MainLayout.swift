@@ -225,7 +225,7 @@ class MainLayout: NSView {
         // remain in the project for parity verification (W3 exit gate). Once
         // agent prompts (W5) assemble the equivalent layouts and visual parity
         // is confirmed, those files will be removed in a follow-up PR.
-        let v = DynamicFocusView(focus: focus)
+        let v = DynamicFocusView(focus: focus, windowId: String(windowIndex))
         viewCache[focus.id] = v
         return v
     }
