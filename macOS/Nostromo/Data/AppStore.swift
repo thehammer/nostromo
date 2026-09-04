@@ -81,6 +81,7 @@ class AppStore: ObservableObject {
     // Updated from the IPC stream for every tag the client sees events for,
     // so the sidebar badge can render for any opened focus without the active
     // focus view being visible. `.healthy` entries are omitted (implicitly healthy).
+    // An entry's lifetime now ends with its focus, via `evictPerFocusState`.
     @Published private(set) var sessionHealth: [String: SessionHealth] = [:]
 
     // Daemon-driven decision modal (multi-window decision-sheet fix). Plain
@@ -406,16 +407,24 @@ class AppStore: ObservableObject {
     }
 
     /// Per-focus state dies with the focus. Called once per `focusRemovals`
-    /// event (`start()`), never on any other schedule. Deliberately does NOT
-    /// touch `activityModels` or `sessionHealth` — both are also tag-keyed and
-    /// also never pruned, but `activityModels` belongs to a separate, already
-    /// queued fix, and `sessionHealth` is tracked as its own filed bug; adding
-    /// either eviction here would silently widen this fix's scope into a hunk
-    /// another job owns. `TranscriptDiagnostics.forgetTag` IS in scope here,
-    /// even though it looks like the same shape of tag-keyed cleanup: it is
-    /// emitter bookkeeping for a number a human reads in the diagnostics
-    /// stream (`splitNodesRendered`), not app state another queued fix owns,
-    /// and — unlike `sessionHealth`/`activityModels` — leaving it unpruned
+    /// event (`start()`), never on any other schedule. Evicts `focusLayouts`,
+    /// `sessionRegistry` (detached, not merely dropped — that is what stops
+    /// the daemon-side session from being respawned on the next reconnect),
+    /// and `sessionHealth`.
+    ///
+    /// Deliberately does NOT touch `activityStreams`: `ActivityStreamStore`
+    /// bounds its own tag count internally (LRU eviction over
+    /// `maxTrackedFocusTags`) and hands back a fresh empty model for any tag
+    /// it has already dropped, so it cannot grow without bound the way the
+    /// other three maps could. Its lack of *focus-removal* pruning is a
+    /// separate, lower-severity hygiene gap, not the retention bug this hook
+    /// exists to close — see `ActivityStreamStore` for details.
+    ///
+    /// `TranscriptDiagnostics.forgetTag` IS in scope here, even though it
+    /// looks like the same shape of tag-keyed cleanup as `activityStreams`:
+    /// it is emitter bookkeeping for a number a human reads in the
+    /// diagnostics stream (`splitNodesRendered`), not app state another
+    /// queued fix owns, and — unlike `activityStreams` — leaving it unpruned
     /// produces an actively wrong, permanently inflated count rather than a
     /// merely stale one. It only covers focus *removal*; the window-close and
     /// multi-window staleness this doesn't cover is tracked as its own filed
@@ -424,6 +433,7 @@ class AppStore: ObservableObject {
     private func evictPerFocusState(tag: String) {
         focusLayouts.removeValue(forKey: tag)
         sessionRegistry.removeValue(forKey: tag)?.detach()
+        sessionHealth.removeValue(forKey: tag)
         TranscriptDiagnostics.forgetTag(tag)
     }
 
@@ -833,20 +843,22 @@ class AppStore: ObservableObject {
         // summary it was actually good at. A client-side line budget was the
         // silent truncation the PRD set out to remove.
 
-        var model = focusLayouts["perri"] ?? FocusLayoutModel.initial
         // Never overwrite a pane the daemon is driving with structured content
-        // (W2). This writes `focusLayouts` directly, bypassing the
-        // `.paneContent` handler entirely, so without this guard a `Diff` or
+        // (W2), and never write a pane that doesn't exist in this focus's
+        // current tree — in `perri-curated` there is no pane literally named
+        // `diff` (its detail panes are `detail.0`/`detail.1`), so writing
+        // blind here invents a pane id the daemon never sent. This writes
+        // `focusLayouts` directly, bypassing the `.paneContent` handler
+        // entirely, so without the ownership half of this guard a `Diff` or
         // `Code` push would be clobbered within milliseconds of arriving and
         // the pane would flicker back to a text summary on every PR load.
         // `nil` and `.text` are the states this function has always owned.
-        switch model.paneContent["diff"] {
-        case nil, .text:
-            model.paneContent["diff"] = .text(lines.joined(separator: "\n"))
-            focusLayouts["perri"] = model
-        default:
-            break
-        }
+        let existing = focusLayouts["perri"]?.paneContent[DiffPaneSummaryPolicy.paneId]
+        guard DiffPaneSummaryPolicy.shouldWriteSummary(tree: focusLayouts["perri"]?.tree, existing: existing)
+        else { return }
+        var model = focusLayouts["perri"] ?? FocusLayoutModel.initial
+        model.paneContent[DiffPaneSummaryPolicy.paneId] = .text(lines.joined(separator: "\n"))
+        focusLayouts["perri"] = model
     }
 
     private func prDetailCacheKey(_ item: PRQueueItem) -> String {

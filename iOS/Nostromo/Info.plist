@@ -6,5 +6,7 @@
 	<array>
 		<string>_nostromo._tcp</string>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Nostromo finds your Mac's nostromd daemon on the local network via Bonjour so it can connect and show your agent sessions.</string>
 </dict>
 </plist>

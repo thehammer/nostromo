@@ -177,12 +177,15 @@ is bound in the top-level `panes` map.
 
 ### Client rendering (macOS, W1)
 
-As of `ios-curated-view-parity` W5 (below), this section and "Client
-rendering (iOS)" describe two presentations of the *same* tree — macOS
-renders every `Split` branch simultaneously with a tab strip per `Tabs`
-region; iOS flattens the whole tree into one compact strip. Both key off the
-same `LayoutChangeClassifier` semantics for when to honour `active` without
-fighting the operator.
+This section and "Client rendering (iOS)" describe how the *same* tree is
+presented on each client. As of `ios-curated-view-parity` W6 there are three
+presentations across two clients, not two: macOS renders every `Split` branch
+simultaneously with a tab strip per `Tabs` region; iOS renders the same
+regions at regular width (iPad, wide) and flattens the whole tree into one
+compact strip at compact width (phone, or iPad in a narrow window). All three
+key off the same `LayoutChangeClassifier` semantics for when to honour
+`active` without fighting the operator, and the same `RegionPath` convention
+for naming a node.
 
 A tabs node renders as a tab strip over a stack of **resident** child views —
 every tab's view is built once and kept alive for the container's whole
@@ -246,6 +249,77 @@ Two things guard that state so it can't strand the operator:
   at `defaults read com.hammer.nostromo` for a `nostromo.dynlayout.*` key
   before suspecting the daemon's tree.
 
+### Client rendering (iOS): two presentations, one width test
+
+As of `ios-curated-view-parity` W6, iOS has **two** presentations of the
+daemon's tree, and the branch between them is the app's current **horizontal
+width class** — nothing else. Not the device model, not the idiom, not the
+orientation, not a threshold in points. An iPad in a narrow multitasking
+window (Slide Over, a narrow Split View) presents the compact layout; a phone
+never presents the regular one. Both of those follow from the size class for
+free.
+
+- **Compact** — one surface at a time, one flattened tab strip. This is the
+  presentation described in "Tabs and layout on iOS" below, unchanged.
+- **Regular** — the daemon's `Split` nodes as **real, simultaneously visible
+  regions**, in the node's direction, proportioned by the node's ratios, with
+  a tab strip per `Tabs` region. This is the presentation macOS has always
+  had; W6 is where iOS got it.
+
+**The width test is the only branch.** Every renderer, every addressing
+behaviour, every label, the `reason` caption, the unread marks, the ambient
+ticker and the decision surface are identical in both presentations. Compact
+and regular differ in how regions are *arranged*, and in nothing else. If a
+surface ever seems to need to look different on an iPad beyond having more
+room, that is a signal the design is wrong, not a requirement.
+
+**Nesting is real nesting.** A `Split` whose child is a `Split` renders as
+regions within regions, not as a flattened row, and a `Tabs` node whose child
+is a `Split` renders as a region inside a tab. Every leaf in the tree is
+reachable in both presentations — the compact strip flattens the split
+structure rather than dropping it.
+
+**Directions and ratios are the daemon's, and are honoured.** `horizontal`
+means a vertical divider (left | right), `vertical` a horizontal one (top over
+bottom) — the same meaning as on macOS. Ratios are normalised into shares that
+sum to 1 with a small positive floor per region, so a malformed `ratios` array
+(one that doesn't sum to 1, is the wrong length, or contains a zero, a
+negative, a `NaN` or an infinity) degrades to a usable layout rather than
+blanking a region.
+
+**The operator cannot resize a region on iOS.** There is no drag-to-resize,
+no divider handle, no collapse/expand, and no locally persisted ratio state
+that could diverge from what the daemon sent. The divider is a hairline
+separator, not a grab affordance. This is deliberate: macOS's
+ratio-persistence machinery (`clearSavedRatios`, the
+`nostromo.dynlayout.<tag>.<path>` defaults keys, and the split-signature
+classifier) is the hairiest part of its layout code and has historically eaten
+the operator's dragged layout when tabs churned. Deferring the gesture also
+keeps the layout decision a pure function of `(tree, width class)`, which is
+what makes it testable on a target with no test bundle and no CI.
+
+**Changing width class at runtime is lossless.** Rotating an iPad or dragging
+a multitasking divider changes the presentation live, with no relaunch, and
+preserves every region's frontmost tab, every surface's scroll position, an
+open activity surface, and a presented decision. Nothing reloads and nothing
+scrolls back to the top. The mechanism is that almost nothing is in the view
+to begin with: frontmost tabs and unread marks live in `FocusRegionState`
+inside the client's store, keyed by a region path that is a pure function of
+the tree rather than of the presentation, so the same key resolves before and
+after; the transcript's turns live in a store that outlives the view; sheets
+are presented above the region hierarchy rather than inside it. Only scroll
+position needs an explicit save and restore, because a width change genuinely
+destroys the container that held the scroll view.
+
+The decision itself is `layoutPlan(tree:width:)` in
+`Shared/NostromoKit/Sources/NostromoKit/Layout/LayoutPlan.swift` — pure, with
+no view hierarchy, no `GeometryReader`, no environment and no device, and
+exercised for both width classes by tests that run with no device and no
+simulator. `iOS/Nostromo/Views/Panes/RegionContainerView.swift` renders
+whatever it returns and computes no proportion of its own. See
+`docs/ios-verification.md` for the honest split between what that buys and
+what is still checkable only by hand on an iPad.
+
 ### Client rendering (iOS)
 
 iOS renders a non-repl pane's content in
@@ -257,29 +331,210 @@ AppKit siblings layered over it — SwiftUI only, all the way down. `text`,
 including the queue-row marking below and the swipe-to-approve confirmation
 gate.
 
-`code`, `diff`, `pr_conversation`, and `ticket` are **not rendered** — each
-shows an honest stub instead (`PaneSurfaceStub` in NostromoKit is the single
-source of the stub copy). This is deliberate, not a gap nobody got to: the
-PRD's organizing rule is that "a surface may be absent, and a surface may be
-simplified. A surface may never look complete when it isn't." Before
-ios-curated-view-parity W2, `code` rendered its raw file text in a
-monospaced view — no gutter, no scroll-to-anchor, no emphasis, discarding
-`path`/`revision`/`first_line` entirely. That looked like a working file
-view and wasn't one; the operator had no way to tell that the line an agent
-pointed at wasn't the line she was reading. W2 deleted that rendering rather
-than keep a half-built one, and each stub names the specific addressing it
-can't show (a line, a comment, a section) rather than saying only "isn't
-available." W7 (`code`), W8 (`diff`), and W9 (`pr_conversation`/`ticket`)
-replace these stubs with real renderers; each later wedge updates this
-section when it does, so this stays the one place a reader learns the two
-clients aren't rendering the same thing.
+`pr_conversation` and `ticket` render for real, as of `ios-curated-view-parity`
+W9 (`iOS/Nostromo/Views/Panes/ProseSurfaceView.swift`) — the honest stubs
+`PaneSurfaceStub` used to show (deleted along with its now-empty table) are
+gone. Both payloads are already trees of `MdBlock`/`MdSpan` from the daemon's
+server-side `pulldown-cmark` parse (see "Markdown blocks and
+`pr_conversation`" and "`ticket`" below), so **one renderer serves both**:
+`Shared/NostromoKit/Sources/NostromoKit/Prose/` turns a payload into a
+platform-neutral `[ProseRow]` plan (`ConversationPlan`/`TicketPlan`), and
+`ProseSurfaceView` renders rows — it knows nothing about PRs or tickets. A
+rendering improvement lands on both surfaces at once.
+
+**`code` renders for real, as of `ios-curated-view-parity` W7**
+(`iOS/Nostromo/Views/Panes/CodeSurfaceView.swift`). Before W7, `code`
+rendered its raw file text in a monospaced view — no gutter, no
+scroll-to-anchor, no emphasis, discarding `path`/`revision`/`first_line`
+entirely. That looked like a working file view and wasn't one; the operator
+had no way to tell that the line an agent pointed at wasn't the line she was
+reading. W2 deleted that rendering rather than keep a half-built one, and W7
+replaces the stub it left behind with a real one:
+
+- **The line arithmetic is the same code macOS uses**, ported rather than
+  reimplemented: `CodeDocument`, `RowOffsetIndex`, and `ScrollDecision`
+  (`Shared/NostromoKit/Sources/NostromoKit/Code/`) are copies of macOS's own
+  types (`macOS/Nostromo/UI/`), with macOS's test suites ported alongside
+  them and passing unmodified. Offsets are UTF-16 code units, so `path:line`
+  lands on the same line on both clients even for a file containing an
+  emoji. The two clients keep separate copies rather than a shared move
+  (deduplicating them is a deferred cleanup), but they cannot silently drift
+  apart in behaviour without a ported test noticing.
+- **The gutter is one cell per logical line, top-aligned against a freely
+  wrapping text column**, with no `NSTextView` and no fragment-counting
+  arithmetic behind it (contrast macOS's `LineNumberRulerView`, which
+  numbers only paragraph-starting line fragments and carries a long comment
+  about the off-by-one that produces). A soft-wrapped continuation gets a
+  blank gutter cell for free, structurally, rather than by computing which
+  fragment starts a paragraph. A long line is fully readable with no
+  horizontal panning.
+- **Anchor and emphasis resolution is three states, not two.** Macos's own
+  resolution collapses to `Int?` and silently drops any anchor that isn't
+  `.line`/`.section` (`TicketContentView.swift`'s `resolveRows`) — the exact
+  silent fallback this PRD forbids. iOS's `CodeDocument.resolve(anchor:)` /
+  `resolve(emphasis:)` return `AnchorResolution`/`EmphasisResolution`: not
+  requested, resolved, or requested-and-unresolvable-with-a-reason. An
+  anchor line outside the file, an anchor for a different path, an anchor
+  kind this surface can't use, or an emphasis range that matches nothing are
+  all **stated** at the top of the content — never clamped to the nearest
+  valid line and rendered as though it had matched, and never silently
+  dropped.
+- **The header names the path and the revision** — `working` renders as
+  words ("working tree"), never as though it were a hash; a SHA renders
+  abbreviated to 7–8 characters, with the full value available via
+  tap-and-hold, so a PR head SHA and the working tree are distinguishable at
+  a glance. The path is rendered in full, truncated from the leading end if
+  it must be, so the filename survives.
+- **A re-show re-anchors without rebuilding.** The surface's SwiftUI
+  identity is `(path, revision)`, never the address — an address-only push
+  re-resolves and re-marks without rebuilding the document, the row views,
+  or their scroll position, and an anchor already in the viewport does not
+  move it.
+- **No truncation, no syntax highlighting.** Unlike `PerriView`'s raw diff
+  (truncated at 4000 characters and 60 lines — a different, deferred
+  surface), a large file relies on `LazyVStack`'s own laziness rather than a
+  cap. Neither client highlights syntax; the wire type reserves room for it.
+
+**`pr_diff` renders for real, as of `ios-curated-view-parity` W8**
+(`iOS/Nostromo/Views/Panes/DiffSurfaceView.swift`,
+`DiffFileListView.swift`, `DiffFileContentView.swift`) — and it is the one
+place this PRD deliberately diverges from macOS in *shape*, not just in
+completeness:
+
+- **iOS is file-list-first; macOS is one flat scrolling document.** macOS's
+  `DiffDocument`/`CodeContentView` render a whole PR's diff as one
+  continuous document — a one-line banner per file, then hunks, then lines.
+  iOS instead presents the changed files as a list (path, status, `+`/`-`
+  counts) and opens one file's hunks at a time. This is a deliberate
+  form-factor call, not a lesser rendering: a 40-file diff as one continuous
+  scroll is a defensible document at a Mac's width and a haystack at a
+  phone's. macOS is unchanged by this wedge.
+- **The two parts are one component pair, arranged two ways.**
+  `DiffFileListView` (the list) and `DiffFileContentView` (one file's hunks)
+  take identical parameters at both widths. At compact width they're a
+  `NavigationStack` push — list, then content, with the list still behind it
+  in the back stack. At regular width they sit side by side, list on the
+  leading edge; selecting a different file replaces the content and never
+  loses the list. `DiffSurfaceView` is the only renderer, besides
+  `DynamicFocusView`/`RegionContainerView` themselves, permitted to read the
+  app's `WidthClass` — enforced by an explicit allowlist in
+  `tests/ios_policy/test_ios_view_policy.py`.
+- **An anchored show bypasses the list entirely.** `Anchor.line(path:line:)`
+  opens the named file directly, scrolled to the resolved line, with any
+  emphasis marked — the operator never has to tap through the list to reach
+  the thing an agent pointed at. An anchor naming a file absent from the
+  diff, or of a kind this surface can't use, is stated and falls back to the
+  list rather than opening an arbitrary file.
+- **Line resolution is the SAME code on both clients**, which is the
+  property agents depend on for "line 412" to mean the same thing
+  everywhere. `DiffDocument` (`Shared/NostromoKit/Sources/NostromoKit/Code/`)
+  is a byte-for-byte port of macOS's own `DiffDocument.swift`, macOS's test
+  suite ported alongside it and passing unmodified, including the rule a
+  naive reimplementation gets backwards: a new-side line number wins, and a
+  line that exists only on the old side (one the PR deletes) resolves to its
+  removal row. `DiffAddressing` (new to iOS, since macOS's own diff view has
+  no three-state resolution) wraps that arithmetic in the same
+  `AnchorResolution`/`EmphasisResolution` types `code` uses, so "this file
+  isn't in the diff," "this line isn't in the diff," "this anchor kind
+  doesn't apply here," and "this diff was gated" are four distinct, stated
+  messages, never a silent fallback.
+- **Hunk lines share `code`'s exact gutter and wrapping mechanism**
+  (`CodeRowView`, extracted from `CodeSurfaceView` in this wedge) — the same
+  top-aligned gutter cell beside a freely wrapping text column, no
+  horizontal panning, no truncation. A line's added/removed/context/
+  hunk-header kind is distinguishable by three signals, not colour alone:
+  the restored `+`/`-`/space marker, a background tint, and the gutter's
+  new-or-old-number precedence.
+- **A `tooLarge` diff states that it is too large and names the changed-file
+  count**, replacing the entire surface — never an empty file list, which
+  would be indistinguishable from a PR that changes nothing.
+- **The selected file and its scroll position are not view state.** Both
+  live in `FocusRegionState` (a per-pane selected-file slot, and a per-file
+  scroll-restore key alongside the existing per-pane one), so a width-class
+  change, a tab switch, or a region rebuild all preserve which file is open
+  and where in it, the same way `code`'s scroll position survives those
+  transitions.
+
+**`pr_conversation` and `ticket` render for real, as of `ios-curated-view-parity`
+W9** (`iOS/Nostromo/Views/Panes/ProseSurfaceView.swift`,
+`Shared/NostromoKit/Sources/NostromoKit/Prose/`) — and **this is the one
+place iOS deliberately renders more of the same payload than macOS does**,
+which is worth stating plainly rather than leaving a reader to notice it on
+their own:
+
+- **iOS renders thread structure; macOS flattens it.** macOS's
+  `MarkdownBlockDocument.init(title:body:threads:)`
+  (`macOS/Nostromo/UI/MarkdownBlockDocument.swift:29-58`) concatenates every
+  comment from every thread into one linear document — an inline review
+  comment on `session_manager.rs:412` renders identically to a general PR
+  comment. iOS groups by thread: one `threadHeader` row per thread (naming
+  its kind, and — for an inline thread only — the `path:line` it's attached
+  to), followed by that thread's comments in order, never interleaved with
+  another thread's.
+- **iOS renders resolved state; macOS discards it.** `ConversationThreadModel
+  .resolved` is decoded on both clients and read by neither view before this
+  wedge. iOS marks a resolved thread with three signals — a glyph, the word
+  "Resolved," and a de-emphasised header — so the distinction survives
+  greyscale; macOS still shows a resolved and an unresolved thread
+  identically.
+- **iOS states an incomplete conversation; macOS shows nothing.**
+  `PrConversationPayload.conversationError` is set exactly when the PR fetch
+  succeeded but the conversation fetch failed — `threads` then carries
+  whatever was retrieved, never meant to be read as the whole conversation.
+  iOS renders a non-dismissible notice above the threads it did get, naming
+  the daemon's own error; macOS decodes the field and displays it nowhere,
+  so a partial conversation there looks exactly like a complete one — this
+  PRD's forbidden state, still live on one client.
+- **Unresolved anchors are stated on iOS and silent on macOS.**
+  `TicketContentView`/`ConversationContentView`
+  (`macOS/Nostromo/UI/Views/TicketContentView.swift:115-125`,
+  `ConversationContentView.swift:115-131`) collapse anchor resolution to
+  `Int?`: an anchor kind the view doesn't handle, or a name/id that doesn't
+  match, produces `nil`, which reads identically to "no anchor was
+  requested" — no scroll, no notice, no operator-visible signal. iOS's
+  `ConversationPlan.resolve(anchor:)`/`TicketPlan.resolve(anchor:)` return
+  the same three-state `AnchorResolution`/`EmphasisResolution` `code` and
+  `pr_diff` use (W7's memo B12): not requested, resolved, or
+  requested-and-unresolvable with a named reason. A `.comment(id:)` naming
+  an absent id names the id and how many comments are actually present; an
+  anchor kind a conversation can't use (`.line`, `.section`, `.queueRow`)
+  names the kind — exactly the case macOS drops on the floor.
+- **A ticket's comments share the section-addressing convention.** Both
+  clients key ticket lookups by either a canonical section name or the
+  string `"comment:<index>"` (`TicketBlockDocument.ranges`,
+  `macOS/Nostromo/UI/TicketBlockDocument.swift:20-24`, ported unchanged to
+  `TicketPlan.sectionOrCommentRowIndex`), so `anchor: {section:
+  "comment:3"}` means the same thing on both. An unmatched section name on
+  iOS renders the top of the description **and states that the section
+  wasn't found**; on macOS the identical request silently renders the top of
+  the description with no way to tell that from a successful anchor at all
+  — the PRD's forbidden state again, in its section-anchor shape. An
+  out-of-range comment index (`"comment:99"` on a four-comment ticket) is
+  reported by iOS naming both numbers, and silently ignored by macOS.
+- **Fenced code renders as a code block on both clients**, monospaced and
+  wrapping, sharing `code`/`pr_diff`'s no-truncation rule; `lang` is carried
+  on the row but never rendered (no syntax highlighting on either client) —
+  unlike macOS's `MarkdownBlockDocument.codeBlockRun`, which discards `lang`
+  outright (`_ = lang`, `:233`) rather than merely declining to render it.
+- **Markdown tables render as pipe-separated rows and images as
+  `[image: alt]` placeholders on both clients** — a real grid is worse at
+  phone width, not better, and image loading is out of scope for both.
+- **Re-emphasising a ticket clears only its own prior emphasis on iOS.**
+  macOS's `TicketContentView.clearEmphasis` (`:128-131`) removes
+  `.backgroundColor` over the *entire* document, which also wipes the
+  inline-code and code-block tints that emphasis had nothing to do with;
+  iOS tracks the emphasised row set explicitly and replaces it wholesale, so
+  a second emphasis never disturbs unrelated formatting.
 
 `PaneAddress` (below) reaches iOS the same way it reaches macOS —
 `DynamicFocusView` passes `layout.paneAddress[paneId]` into
-`PaneSurfaceView` — and iOS's only present use of `anchor`/`emphasis` is
-`pr_list` queue-row marking; the stub kinds above have no addressing to
-render yet, matching what they show. `reason` is used more broadly — see the
-tab strip below.
+`PaneSurfaceView` — and iOS's uses of `anchor`/`emphasis` are `pr_list`
+queue-row marking, `code`'s line/range addressing, `pr_diff`'s line/range
+addressing (identical resolution semantics to `code`, applied to a
+flattened diff instead of a flattened file), and, as of W9,
+`pr_conversation`'s comment addressing and `ticket`'s section/comment
+addressing above — every content kind that has any addressing to render now
+renders it. `reason` is used more broadly — see the tab strip below.
 
 ### Tabs and layout on iOS: the compact strip (`ios-curated-view-parity` W5)
 
@@ -749,7 +1004,7 @@ views:
 | **R5** focus asymmetry | `placement::place` unconditionally makes the target tab frontmost, new or reused, by construction of `tab_index`; `tools::show` sends `FocusLayout` with `focused_pane` set to it unconditionally. There is no configuration knob for this — a deliberate, settled PRD decision. |
 | **R6** no pointless motion | **Enforced on the client, not here.** The daemon has no way to know what the operator's viewport is currently showing, so `nostromo.show` always sends the anchor and lets W2's client-side `ScrollDecision` decide whether that means actually scrolling. This is the one rule with no representation anywhere in `src/mcp/views/`. |
 | **R7** modals are not a content channel | **Enforced by omission.** `ViewType` has no modal variant and `nostromo.show`'s schema has no free-text content field (see `docs/mcp/tools.md`) — there is no plumbing through which a decision could be routed as a "view." W6 owns the decision surface. |
-| **R8** PR change resets | `placement::place`, when a `pr_conversation`/`pr_diff` show names a `(repo, number)` other than the one currently live in the detail region; and `placement::reset_for_pr_change`, called from `tools::show::reset_for_pr_change`, which `perri.load_pr`/`perri.clear_current_pr` invoke when the PR under review itself changes. Both close every `file`/`ticket` tab and the previous PR's conversation/diff tabs, keeping only the new PR's. |
+| **R8** PR change resets | `placement::place`, when a `pr_conversation`/`pr_diff` show names a `(repo, number)` other than the one currently live in the detail region; and `placement::reset_for_pr_change`, called from `tools::show::reset_for_pr_change`, which `perri.load_pr`/`perri.clear_current_pr` invoke when the PR under review itself changes. Both close every `file`/`ticket` tab and the previous PR's conversation/diff tabs, keeping only the new PR's. Teardown alone isn't the whole story for `perri.clear_current_pr`: a paramless-bound PR tab survives it (it derives its identity from "the PR under review," which is now none), so `perri.clear_current_pr` also resolves whatever PR-content panes remain and pushes the no-PR placeholder to them — see `perri.clear_current_pr` in `docs/mcp/tools.md`. |
 
 ### The `perri-curated` layout
 
@@ -862,7 +1117,7 @@ Two things a client must do to stay correct under recycling:
 | Tool | Effect |
 |------|--------|
 | `perri.load_pr({ number, repo, highlights? })` | Writes `current-pr.json` + touches `.dirty` → native watcher fetches PR diff |
-| `perri.clear_current_pr()` | Removes `current-pr.json` + touches `.dirty` → diff pane clears |
+| `perri.clear_current_pr()` | Removes `current-pr.json` + touches `.dirty` → closes stale curated tabs (R8) and pushes the no-PR placeholder to whatever live pane holds PR content, wherever the layout template put it |
 | `perri.set_selected_index({ index })` | Moves the queue selection cursor |
 
 ---

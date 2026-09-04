@@ -26,6 +26,7 @@ python-test:
 	python3 -m unittest discover -s tests/doctor -v
 	python3 -m unittest discover -s tests/ios_policy -v
 	python3 -m unittest discover -s tests/launch_smoke -v
+	python3 -m unittest discover -s tests/ci_policy -v
 
 clean:
 	cargo clean
