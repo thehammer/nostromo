@@ -58,13 +58,11 @@ Usage:
 """
 
 import argparse
-import copy
 import fnmatch
 import glob
 import json
 import os
 import plistlib
-import re
 import shutil
 import signal
 import socket
@@ -921,10 +919,21 @@ def sample_cpu_seconds(ps_path, pid):
 
 
 def another_nostromo_pid(exclude_pid):
-    """A live, non-excluded process whose command line names a Nostromo
-    executable — used to detect a stray/duplicate smoke-clone instance
+    """A live, non-excluded process whose invoked executable IS a Nostromo
+    binary — used to detect a stray/duplicate smoke-clone instance
     activating in place of ours (AppDelegate's single-instance enforcement).
-    Best-effort; None on any tooling failure."""
+    Best-effort; None on any tooling failure.
+
+    Checks only the executable path itself (`command`'s first token), never
+    a substring match across the whole command line: a Nostromo.app process
+    is invoked with no arguments, so its `command` field IS just that path,
+    but an unrelated process can easily have "Contents/MacOS/Nostromo"
+    appear somewhere deep in a long argument string (observed in practice:
+    this check's own coding-agent process, whose invocation embeds the text
+    of the plan it's implementing, which quotes that very path) — a
+    substring match across the full line matched THAT process and reported
+    "another instance took the launch" for a launch nothing actually took.
+    """
     try:
         result = subprocess.run(
             ["/bin/ps", "-axo", "pid,command"], capture_output=True, text=True, timeout=5,
@@ -935,13 +944,17 @@ def another_nostromo_pid(exclude_pid):
         return None
     for line in result.stdout.splitlines()[1:]:
         line = line.strip()
-        if not line or "Contents/MacOS/Nostromo" not in line:
+        if not line:
             continue
+        parts = line.split(None, 1)
         try:
-            pid = int(line.split(None, 1)[0])
+            pid = int(parts[0])
         except ValueError:
             continue
-        if pid != exclude_pid:
+        if pid == exclude_pid or len(parts) < 2:
+            continue
+        executable = parts[1].split(None, 1)[0]
+        if executable.endswith("/Contents/MacOS/Nostromo"):
             return pid
     return None
 
