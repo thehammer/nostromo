@@ -178,7 +178,10 @@ class ModuleConstantsTests(unittest.TestCase):
         # exists yet); the rest come from the three REACH detectors — and
         # since `split-ratios-applied` now corroborates rendered shape and
         # applied/laid-out ratios via `split_layout_agreement`, it alone
-        # contributes 3 causes, not 1. Since GATE detectors can never be
+        # contributes 4 causes, not 1: three from the shape/ratio
+        # corroboration itself, and a fourth — "diagnostics row omitted the
+        # split shape fields" — for when the stream never said enough to
+        # corroborate anything at all (f4). Since GATE detectors can never be
         # INCONCLUSIVE, this is the complete set by construction — pinned
         # here the same way MATERIALIZED_LIMIT is pinned in
         # transcript-load-report.py, so widening it is a visible, deliberate
@@ -193,6 +196,7 @@ class ModuleConstantsTests(unittest.TestCase):
                 "timed out before the app came up",
                 "rendered layout shape did not match the fixture",
                 "not every rendered split applied its ratios",
+                "diagnostics row omitted the split shape fields",
             }),
         )
 
@@ -644,11 +648,25 @@ def mutate_cpu_pinned():
 
 
 def mutate_zero_size_pane_violation():
+    # f3: `notdrawable_violations` is always a subset of
+    # `collapsed_geometry_violations` for any state reachable from real
+    # `rows` (both dedup on the identical key, and the geometry predicate is
+    # a strict superset of the audit-mirror predicate). A content-gated
+    # violation therefore always has a corresponding collapsed-geometry
+    # entry -- setting only `notdrawable_violations` here (as this mutation
+    # did before f3) built an Evidence no real run can produce, and would
+    # now silently PASS once the detector grades `collapsed_geometry_
+    # violations` alone. Populating both keeps this a reachable state while
+    # still proving the content-gated case FAILs.
     return (
         healthy_evidence()._replace(
             notdrawable_violations=(
                 "pane=queue hasContent=true loading=false hasWindow=true "
                 "layoutPasses=1 bounds=0.0x50.0 verdict=notDrawable(zeroWidth)",
+            ),
+            collapsed_geometry_violations=(
+                "pane=queue hasContent=true loading=false hasWindow=true "
+                "layoutPasses=1 bounds=0.0x50.0 verdict=collapsed(zeroWidth)",
             ),
         ),
         launch_smoke.FAIL,
@@ -804,6 +822,36 @@ class CollapsedPaneMakesTheWholeRunFailTests(unittest.TestCase):
         self.assertEqual(launch_smoke.exit_code_for(state), 1)
 
 
+class ContentGatedOnlyViolationStillFailsTests(unittest.TestCase):
+    """The f3 finding: `_no_zero_size_laid_out_pane` now grades
+    `collapsed_geometry_violations` alone rather than the union with
+    `notdrawable_violations`. Since a content-gated violation is always a
+    subset of the collapsed-geometry population (see
+    `NotdrawableIsASubsetOfCollapsedGeometryTests` below), a run whose only
+    violation started out content-gated must still FAIL — dropping the union
+    changed no verdict. Deliberately does NOT test a hand-built Evidence with
+    a non-empty `notdrawable_violations` and an EMPTY
+    `collapsed_geometry_violations` — that state is unreachable from any real
+    `rows` and pinning it to PASS would enshrine a state the subset
+    invariant forbids.
+    """
+
+    def test_content_gated_violation_with_its_collapsed_geometry_counterpart_still_fails(self):
+        pane = make_pane("queue", has_content=True, is_loading=False, has_window=True,
+                         layout_pass_count=1, bounds_width=0.0, bounds_height=50.0)
+        rows = (make_row(panes=[pane]),)
+        notdrawable = launch_smoke.notdrawable_violations_from_rows(rows)
+        collapsed = launch_smoke.collapsed_geometry_violations_from_rows(rows)
+        self.assertEqual(len(notdrawable), 1)
+        self.assertEqual(len(collapsed), 1)
+        ev = healthy_evidence()._replace(
+            notdrawable_violations=notdrawable,
+            collapsed_geometry_violations=collapsed,
+        )
+        row = keyed(launch_smoke.evaluate_evidence(ev))["no-zero-size-laid-out-pane"]
+        self.assertEqual(row.state, launch_smoke.FAIL)
+
+
 class GeometryGateIsLiveOnEveryPassingRunTests(unittest.TestCase):
     """Guards against ever re-adding a hasContent (or isLoading) precondition
     to collapsed_geometry_violations_from_rows / geometry_judged_pane_count:
@@ -811,25 +859,70 @@ class GeometryGateIsLiveOnEveryPassingRunTests(unittest.TestCase):
     a strict subset of the geometry predicate's precondition (hasWindow &&
     layoutPassCount>0), so any run allowed to PASS overall necessarily has
     >=2 panes actually judged for geometry — never a silent zero-judged
-    detector. See PR #134's f1 finding and
-    .claude/plans/launch-smoke-test-integrity-findings.md.
+    detector. See PR #134's f1 finding and PR #149 round 2's f1 finding
+    (.claude/plans/launch-smoke-test-integrity-findings.md): the original
+    version of this test guarded its assertions behind
+    `if distinct_multipane_count(rows) >= 2`, and one of its two batteries
+    (the zero-size-queue-plus-diff row) had a multipane count of exactly 1
+    — so the guard was never entered and that battery ran zero assertions,
+    the only battery meant to exercise the case this whole test exists to
+    catch. The precondition is now itself an assertion: a battery that stops
+    qualifying is a broken battery, not a skippable one.
     """
     def test_multipane_reach_implies_geometry_panes_judged(self):
         batteries = [
             healthy_evidence().rows,
+            # Fixed from the original (zero-size queue + one qualifying
+            # pane, multipane count 1 -- the guard was never entered): now a
+            # zero-size-but-judged pane plus TWO qualifying panes, so
+            # distinct_multipane_count is 2 without relying on the
+            # zero-size pane to make up the count.
             (make_row(panes=[
                 make_pane("queue", has_content=False, is_loading=False,
                          has_window=True, layout_pass_count=3,
                          bounds_width=0.0, bounds_height=0.0),
                 make_pane("diff"),
+                make_pane("repl"),
             ]),),
         ]
         for rows in batteries:
             with self.subTest(rows=rows):
-                if launch_smoke.distinct_multipane_count(rows) >= 2:
-                    self.assertGreaterEqual(
-                        launch_smoke.geometry_judged_pane_count(rows), 2,
-                    )
+                self.assertGreaterEqual(
+                    launch_smoke.distinct_multipane_count(rows), 2,
+                    "this battery no longer has >=2 qualifying panes -- a "
+                    "battery that stops qualifying is a broken battery, not "
+                    "a skippable one; fix the fixture, don't reintroduce a "
+                    "conditional guard around the assertion below",
+                )
+                self.assertGreaterEqual(
+                    launch_smoke.geometry_judged_pane_count(rows), 2,
+                )
+
+    def test_geometry_judged_pane_count_strictly_exceeds_distinct_multipane_count(self):
+        # Makes the superset relationship strict rather than coincidental:
+        # two genuinely-qualifying panes (window, layout pass, non-zero
+        # bounds) plus a third zero-size-but-judged pane. Unlike the
+        # batteries above (where geometry_judged == distinct_multipane == 2
+        # is also possible without the geometry predicate doing any extra
+        # work), this fixture can only satisfy geometry_judged_pane_count ==
+        # 3 if the geometry predicate really does judge a pane that
+        # distinct_multipane_count would never count.
+        rows = (make_row(panes=[
+            make_pane("queue"),
+            make_pane("diff"),
+            make_pane("repl", has_content=False, has_window=True,
+                     layout_pass_count=3, bounds_width=0.0, bounds_height=0.0),
+        ]),)
+        self.assertEqual(launch_smoke.distinct_multipane_count(rows), 2)
+        self.assertEqual(launch_smoke.geometry_judged_pane_count(rows), 3)
+        self.assertGreater(
+            launch_smoke.geometry_judged_pane_count(rows),
+            launch_smoke.distinct_multipane_count(rows),
+            "geometry_judged_pane_count must be a STRICT superset of "
+            "distinct_multipane_count on a run with a genuinely zero-size "
+            "judged pane -- the class docstring's superset claim, actually "
+            "proven, not merely not-contradicted",
+        )
 
 
 class DetectorKindInvariantTests(unittest.TestCase):
@@ -1480,6 +1573,50 @@ class SplitLayoutAgreementTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.cause, "multi-pane layout not reached")
 
+    # -- f4: absent telemetry gets its own cause, distinct from a genuine
+    # shape mismatch or under-applied tree. --
+
+    def test_missing_leaves_rendered_yields_the_missing_telemetry_cause(self):
+        # Without the f4 fix, `row.get("leavesRendered") or 0` coerces this
+        # None into 0, which is not a whole multiple of the fixture shape --
+        # misreporting this as "rendered layout shape did not match the
+        # fixture" when the app never said what it rendered.
+        row = make_row(split_nodes_rendered=2, leaves_rendered=None,
+                        splits_laid_out=2, splits_ratios_applied=2)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "diagnostics row omitted the split shape fields")
+
+    def test_missing_splits_laid_out_yields_the_missing_telemetry_cause(self):
+        # Without the f4 fix, `row.get("splitsLaidOut") or 0` coerces this
+        # None into 0, which is < rendered -- misreporting this as "not
+        # every rendered split applied its ratios" when the app never said
+        # whether it laid out.
+        row = make_row(split_nodes_rendered=2, leaves_rendered=3,
+                        splits_laid_out=None, splits_ratios_applied=2)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "diagnostics row omitted the split shape fields")
+
+    def test_missing_splits_ratios_applied_yields_the_missing_telemetry_cause(self):
+        row = make_row(split_nodes_rendered=2, leaves_rendered=3,
+                        splits_laid_out=2, splits_ratios_applied=None)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "diagnostics row omitted the split shape fields")
+
+    def test_one_incomplete_row_does_not_preempt_a_complete_passing_row(self):
+        # The missing-telemetry cause is for the case where NOTHING is left
+        # to grade, not merely intermittent telemetry -- a stream with some
+        # incomplete rows and some complete, passing ones must still PASS on
+        # the complete ones.
+        incomplete = make_row(split_nodes_rendered=2, leaves_rendered=None,
+                              splits_laid_out=None, splits_ratios_applied=None)
+        complete = make_row(split_nodes_rendered=2, leaves_rendered=3,
+                            splits_laid_out=2, splits_ratios_applied=2)
+        result = self._agreement(incomplete, complete)
+        self.assertTrue(result.ok)
+
 
 class NotdrawableViolationsFromRowsTests(unittest.TestCase):
     """Pins the exact `PaneFirstPaintAudit.verdict` predicate
@@ -1618,6 +1755,89 @@ class CollapsedGeometryViolationsTests(unittest.TestCase):
                 "layoutPasses=3 bounds=0.0x0.0 verdict=collapsed(zeroWidth,zeroHeight)",
             ),
         )
+
+
+class NotdrawableIsASubsetOfCollapsedGeometryTests(unittest.TestCase):
+    """The f3 premise `_no_zero_size_laid_out_pane` now relies on to grade
+    `collapsed_geometry_violations` alone: `notdrawable_violations_from_rows`'s
+    predicate (`hasContent && !isLoading && hasWindow && layoutPassCount > 0
+    && zero size`) is a strict SUBSET of `collapsed_geometry_violations_
+    from_rows`'s (the same, minus the `hasContent && !isLoading` gate). Both
+    dedup on the identical (paneId, boundsWidth, boundsHeight,
+    layoutPassCount) key and produce byte-identical prefixes -- only the
+    trailing `verdict=notDrawable(...)`/`verdict=collapsed(...)` differs --
+    so comparing on the string with that suffix stripped is exactly
+    comparing on the dedup key.
+    """
+
+    @staticmethod
+    def _key(violation):
+        return violation.split(" verdict=")[0]
+
+    def test_notdrawable_keys_are_a_subset_of_collapsed_geometry_keys_across_a_battery(self):
+        panes = [
+            make_pane("content-zero-width", has_content=True, is_loading=False,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=0.0, bounds_height=50.0),
+            make_pane("content-zero-height", has_content=True, is_loading=False,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=50.0, bounds_height=0.0),
+            make_pane("no-content-zero", has_content=False, is_loading=False,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=0.0, bounds_height=0.0),
+            make_pane("loading-zero", has_content=True, is_loading=True,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=0.0, bounds_height=0.0),
+            make_pane("healthy", has_content=True, is_loading=False,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=100.0, bounds_height=50.0),
+        ]
+        rows = (make_row(panes=panes),)
+
+        notdrawable_keys = {
+            self._key(v) for v in launch_smoke.notdrawable_violations_from_rows(rows)
+        }
+        collapsed_keys = {
+            self._key(v) for v in launch_smoke.collapsed_geometry_violations_from_rows(rows)
+        }
+
+        # content-zero-width, content-zero-height trip both predicates;
+        # no-content-zero, loading-zero trip only the content-independent
+        # one; healthy trips neither.
+        self.assertEqual(len(notdrawable_keys), 2)
+        self.assertEqual(len(collapsed_keys), 4)
+        self.assertTrue(
+            notdrawable_keys.issubset(collapsed_keys),
+            f"notdrawable_violations_from_rows produced a key not present in "
+            f"collapsed_geometry_violations_from_rows: "
+            f"{notdrawable_keys - collapsed_keys}",
+        )
+
+
+class ViolationBuildersShareLogicTests(unittest.TestCase):
+    """The f5 extraction: `notdrawable_violations_from_rows` and
+    `collapsed_geometry_violations_from_rows` are now two thin call sites
+    over one shared helper (`_zero_size_violations_from_rows`) that differ
+    only in judged-predicate and verdict label. Proves that
+    behavior-preserving property directly: on a battery where both
+    predicates agree a pane qualifies, the two outputs are identical except
+    for the `notDrawable`/`collapsed` verdict-label substring.
+    """
+
+    def test_outputs_are_identical_up_to_the_verdict_label(self):
+        panes = [
+            make_pane("queue", has_content=True, is_loading=False, has_window=True,
+                      layout_pass_count=1, bounds_width=0.0, bounds_height=50.0),
+            make_pane("diff", has_content=True, is_loading=False, has_window=True,
+                      layout_pass_count=2, bounds_width=50.0, bounds_height=0.0),
+        ]
+        rows = (make_row(panes=panes),)
+        notdrawable = launch_smoke.notdrawable_violations_from_rows(rows)
+        collapsed = launch_smoke.collapsed_geometry_violations_from_rows(rows)
+        self.assertEqual(len(notdrawable), 2)
+        self.assertEqual(len(collapsed), 2)
+        for nd, cg in zip(sorted(notdrawable), sorted(collapsed)):
+            self.assertEqual(nd.replace("verdict=notDrawable(", "verdict=collapsed("), cg)
 
 
 class GeometryJudgedPaneCountTests(unittest.TestCase):

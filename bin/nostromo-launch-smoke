@@ -93,7 +93,10 @@ _STATE_PRECEDENCE = (FAIL, INCONCLUSIVE, PASS)
 # pre-Evidence short-circuit (there is no Evidence yet to grade). The rest
 # come from the three REACH detectors below — and since `split-ratios-
 # applied` corroborates rendered shape and applied/laid-out ratios via
-# `split_layout_agreement`, it alone contributes 3 causes, not 1. Since GATE
+# `split_layout_agreement`, it alone contributes 4 causes, not 1 (three come
+# from the shape/ratio corroboration itself, and the fourth — "diagnostics
+# row omitted the split shape fields" — is what it reports when the stream
+# never said enough to corroborate anything at all, see f4). Since GATE
 # detectors can never be INCONCLUSIVE (see `gate_verdict`), this set is
 # exhaustive by construction, not by convention — pinned here the same way
 # transcript-load-report.py pins MATERIALIZED_LIMIT, so widening it is a
@@ -106,6 +109,7 @@ AGGREGATE_INCONCLUSIVE_CAUSES = frozenset({
     "timed out before the app came up",
     "rendered layout shape did not match the fixture",
     "not every rendered split applied its ratios",
+    "diagnostics row omitted the split shape fields",
 })
 
 # The committed shape of tests/fixtures/focus_layout_split.json: each frame's
@@ -330,31 +334,48 @@ def _no_zero_size_laid_out_pane(ev):
     # this detector has no business raising over a tree it was never asked
     # to judge.
     #
-    # This detector grades the UNION of two violation populations:
-    # `notdrawable_violations` (mirrors `PaneFirstPaintAudit.verdict` exactly,
-    # gated on `hasContent`) and `collapsed_geometry_violations` (content-
-    # independent — `hasWindow && layoutPassCount > 0 && zero size`, with no
-    # `hasContent` gate at all). The fixture daemon never pushes
-    # `pane_content`, so `hasContent` is `False` for every pane on every real
-    # run; without the geometry population, this detector would PASS
-    # unconditionally regardless of what actually laid out, which is exactly
-    # the "criterion satisfied by the absence of the thing it measures"
-    # defect this file's own header warns against. The geometry predicate's
-    # precondition (`hasWindow && layoutPassCount > 0`) is a strict superset
-    # of `multi-pane-laid-out`'s REACH proof (which additionally requires
-    # non-zero size), so on every run this tool is allowed to report PASS,
-    # `geometry_panes_judged >= 2` — never a silently zero-judged detector
-    # (see `GeometryGateIsLiveOnEveryPassingRunTests`). And because the
-    # geometry predicate is a strict superset of the audit-mirror predicate,
-    # nothing that FAILs today under `notdrawable_violations` can start
-    # passing after this change.
-    combined = tuple(ev.notdrawable_violations) + tuple(ev.collapsed_geometry_violations)
-    ok = not combined
+    # This detector grades `collapsed_geometry_violations` ALONE —
+    # content-independent (`hasWindow && layoutPassCount > 0 && zero size`,
+    # no `hasContent` gate at all). `notdrawable_violations` (mirrors
+    # `PaneFirstPaintAudit.verdict` exactly, gated on `hasContent &&
+    # !isLoading`) is a strict SUBSET of it pane-wise: both dedup on the
+    # identical key (paneId, boundsWidth, boundsHeight, layoutPassCount), and
+    # the geometry predicate is everything the audit-mirror predicate is,
+    # minus the content/loading gate. So grading `collapsed_geometry_
+    # violations` alone is exactly equivalent to grading the union that used
+    # to be graded here — nothing that FAILs under `notdrawable_violations`
+    # can ever be absent from `collapsed_geometry_violations` (see
+    # `NotdrawableIsASubsetOfCollapsedGeometryTests`). Grading the union
+    # instead would have duplicated every content-gated violation as a
+    # second, textually distinct entry (`verdict=notDrawable(...)` next to
+    # `verdict=collapsed(...)` for the identical pane), and `cause` is capped
+    # at 3 joined entries below, so that duplication could crowd out a
+    # genuinely distinct third violation from ever being named. The
+    # audit-mirror population is kept only as a reporting annotation in
+    # `measured`, not a second graded population.
+    #
+    # The fixture daemon never pushes `pane_content`, so `hasContent` is
+    # `False` for every pane on every real run; without the geometry
+    # population, this detector would PASS unconditionally regardless of
+    # what actually laid out, which is exactly the "criterion satisfied by
+    # the absence of the thing it measures" defect this file's own header
+    # warns against. The geometry predicate's precondition (`hasWindow &&
+    # layoutPassCount > 0`) is a strict superset of `multi-pane-laid-out`'s
+    # REACH proof (which additionally requires non-zero size), so on every
+    # run this tool is allowed to report PASS, `geometry_panes_judged >= 2`
+    # — never a silently zero-judged detector (see
+    # `GeometryGateIsLiveOnEveryPassingRunTests`).
+    ok = not ev.collapsed_geometry_violations
+    # `notdrawable_violations` is a strict subset of `collapsed_geometry_
+    # violations` with an identical dedup key, so its length IS the overlap
+    # count — no string matching needed.
+    overlap = len(ev.notdrawable_violations)
     measured = (f"{ev.panes_scanned} pane observation(s) scanned, "
                 f"{ev.geometry_panes_judged} judged for geometry, "
-                f"{len(ev.notdrawable_violations)} content-gated violation(s), "
-                f"{len(ev.collapsed_geometry_violations)} collapsed-geometry violation(s)")
-    cause = "; ".join(combined[:3])
+                f"{len(ev.collapsed_geometry_violations)} collapsed-geometry "
+                f"violation(s) ({overlap} of which also tripped the "
+                f"content-gated audit mirror)")
+    cause = "; ".join(ev.collapsed_geometry_violations[:3])
     return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
                         observations=ev.panes_scanned)
 
@@ -589,12 +610,29 @@ def split_layout_agreement(rows):
     `ok=False` with cause "multi-pane layout not reached" — the same cause
     `multi-pane-laid-out` uses for an analogous absence.
 
-    Among rendered rows, a row's rendered shape is "valid" iff it is some
+    Among rendered rows, a row is "complete" iff `leavesRendered`,
+    `splitsLaidOut`, and `splitsRatiosApplied` are all present (not `None`)
+    — the f4 fix. Swift guards `splitNodesRendered`/`leavesRendered` and
+    `splitsLaidOut`/`splitsRatiosApplied` on two different conditions
+    (`TranscriptDiagnostics.snapshot`), so a row can have a real
+    `splitNodesRendered` while any of the other three is still absent. An
+    incomplete row is filtered out rather than treated as a shape mismatch
+    or an under-applied tree — `row.get(...) or 0` used to silently coerce
+    "the field is missing" into "the field is zero", which reports "rendered
+    layout shape did not match the fixture" or "not every rendered split
+    applied its ratios" for what is actually an absent-telemetry problem,
+    sending a debugger into the wrong subsystem. If NO rendered row is
+    complete, `ok=False` with cause "diagnostics row omitted the split shape
+    fields" — but only then: a stream with some complete rows and some
+    incomplete ones is graded on the complete ones, same as any other
+    filter here.
+
+    Among complete rows, a row's rendered shape is "valid" iff it is some
     integer number of copies of the fixture's own per-focus shape
     (`FIXTURE_SPLIT_NODES_PER_FOCUS`/`FIXTURE_LEAVES_PER_FOCUS`) — this is
     what catches "the outer split never rendered at all" (1 split, 2 leaves
     is not a whole multiple of 2 splits/3 leaves) rather than only "some
-    split rendered". If no rendered row has a valid shape, `ok=False` with
+    split rendered". If no complete row has a valid shape, `ok=False` with
     cause "rendered layout shape did not match the fixture".
 
     Among shape-valid rows, `ok=True` iff at least one has
@@ -611,41 +649,56 @@ def split_layout_agreement(rows):
                                     rendered_splits=0, rendered_leaves=0,
                                     laid_out=0, applied=0)
 
-    shape_valid_rows = [
+    complete_rows = [
         row for row in rendered_rows
-        if _is_whole_multiple_of_fixture_shape(
-            row["splitNodesRendered"], row.get("leavesRendered") or 0,
-        )
+        if row.get("leavesRendered") is not None
+        and row.get("splitsLaidOut") is not None
+        and row.get("splitsRatiosApplied") is not None
     ]
-    if not shape_valid_rows:
+    if not complete_rows:
         best = max(rendered_rows, key=lambda row: row["splitNodesRendered"])
         return SplitLayoutAgreement(
-            ok=False, cause="rendered layout shape did not match the fixture",
+            ok=False, cause="diagnostics row omitted the split shape fields",
             rendered_splits=best["splitNodesRendered"],
             rendered_leaves=best.get("leavesRendered") or 0,
             laid_out=best.get("splitsLaidOut") or 0,
             applied=best.get("splitsRatiosApplied") or 0,
         )
 
+    shape_valid_rows = [
+        row for row in complete_rows
+        if _is_whole_multiple_of_fixture_shape(
+            row["splitNodesRendered"], row["leavesRendered"],
+        )
+    ]
+    if not shape_valid_rows:
+        best = max(complete_rows, key=lambda row: row["splitNodesRendered"])
+        return SplitLayoutAgreement(
+            ok=False, cause="rendered layout shape did not match the fixture",
+            rendered_splits=best["splitNodesRendered"],
+            rendered_leaves=best["leavesRendered"],
+            laid_out=best["splitsLaidOut"],
+            applied=best["splitsRatiosApplied"],
+        )
+
     for row in shape_valid_rows:
         rendered = row["splitNodesRendered"]
-        laid_out = row.get("splitsLaidOut")
-        applied = row.get("splitsRatiosApplied")
-        if (laid_out is not None and laid_out >= rendered
-                and applied is not None and applied >= rendered):
+        laid_out = row["splitsLaidOut"]
+        applied = row["splitsRatiosApplied"]
+        if laid_out >= rendered and applied >= rendered:
             return SplitLayoutAgreement(
                 ok=True, cause=None, rendered_splits=rendered,
-                rendered_leaves=row.get("leavesRendered") or 0,
+                rendered_leaves=row["leavesRendered"],
                 laid_out=laid_out, applied=applied,
             )
 
-    best = max(shape_valid_rows, key=lambda row: row.get("splitsRatiosApplied") or -1)
+    best = max(shape_valid_rows, key=lambda row: row["splitsRatiosApplied"])
     return SplitLayoutAgreement(
         ok=False, cause="not every rendered split applied its ratios",
         rendered_splits=best["splitNodesRendered"],
-        rendered_leaves=best.get("leavesRendered") or 0,
-        laid_out=best.get("splitsLaidOut") or 0,
-        applied=best.get("splitsRatiosApplied") or 0,
+        rendered_leaves=best["leavesRendered"],
+        laid_out=best["splitsLaidOut"],
+        applied=best["splitsRatiosApplied"],
     )
 
 
@@ -662,12 +715,19 @@ def multi_launch_summary(observed_pids, attributed_pids):
     return len(observed_pids), len(set(observed_pids) & set(attributed_pids))
 
 
-def notdrawable_violations_from_rows(rows):
-    """Apply `PaneFirstPaintAudit.verdict`'s exact predicate
-    (macOS/Nostromo/UI/PaneFirstPaintAudit.swift) to every `panesMeasured`
-    entry across `rows`. Returns one summary string per DISTINCT violating
-    (paneId, boundsWidth, boundsHeight, layoutPassCount) tuple — the same
-    rate-limiting spirit as the Swift side's `lastLoggedViolationSummary`."""
+def _zero_size_violations_from_rows(rows, *, judged, verdict_label):
+    """Shared body behind `notdrawable_violations_from_rows` and
+    `collapsed_geometry_violations_from_rows` (the f5 extraction) — the two
+    differed only in their guard condition and their `verdict=` label, with
+    the `pane.get()` reads/defaults, the zero-size short-circuit, the dedup
+    key, the reasons list, and the summary f-string byte-identical between
+    them. `judged(has_content, is_loading, has_window, layout_passes)`
+    decides which panes are even in scope for this population — the one
+    place the two callers actually differ; `verdict_label` is the string
+    embedded in the summary (`notDrawable` or `collapsed`). Returns one
+    summary string per DISTINCT violating (paneId, boundsWidth, boundsHeight,
+    layoutPassCount) tuple — the same rate-limiting spirit as the Swift
+    side's `lastLoggedViolationSummary`."""
     seen = set()
     out = []
     for row in rows:
@@ -678,7 +738,7 @@ def notdrawable_violations_from_rows(rows):
             layout_passes = pane.get("layoutPassCount", 0)
             width = pane.get("boundsWidth", 0)
             height = pane.get("boundsHeight", 0)
-            if not (has_content and not is_loading and has_window and layout_passes > 0):
+            if not judged(has_content, is_loading, has_window, layout_passes):
                 continue
             if width > 0 and height > 0:
                 continue
@@ -695,9 +755,24 @@ def notdrawable_violations_from_rows(rows):
                 f"pane={pane.get('paneId')} hasContent={str(has_content).lower()} "
                 f"loading={str(is_loading).lower()} hasWindow={str(has_window).lower()} "
                 f"layoutPasses={layout_passes} bounds={width}x{height} "
-                f"verdict=notDrawable({','.join(reasons)})"
+                f"verdict={verdict_label}({','.join(reasons)})"
             )
     return tuple(out)
+
+
+def notdrawable_violations_from_rows(rows):
+    """Apply `PaneFirstPaintAudit.verdict`'s exact predicate
+    (macOS/Nostromo/UI/PaneFirstPaintAudit.swift) to every `panesMeasured`
+    entry across `rows`. Returns one summary string per DISTINCT violating
+    (paneId, boundsWidth, boundsHeight, layoutPassCount) tuple — the same
+    rate-limiting spirit as the Swift side's `lastLoggedViolationSummary`."""
+    return _zero_size_violations_from_rows(
+        rows,
+        judged=lambda has_content, is_loading, has_window, layout_passes: (
+            has_content and not is_loading and has_window and layout_passes > 0
+        ),
+        verdict_label="notDrawable",
+    )
 
 
 def collapsed_geometry_violations_from_rows(rows):
@@ -711,36 +786,13 @@ def collapsed_geometry_violations_from_rows(rows):
     Same distinct-tuple dedup key and summary-string shape as the audit
     mirror, but `verdict=collapsed(...)` rather than `verdict=notDrawable(...)`
     so the two populations are distinguishable in a report."""
-    seen = set()
-    out = []
-    for row in rows:
-        for pane in row.get("panesMeasured") or []:
-            has_content = pane.get("hasContent", False)
-            is_loading = pane.get("isLoading", False)
-            has_window = pane.get("hasWindow", False)
-            layout_passes = pane.get("layoutPassCount", 0)
-            width = pane.get("boundsWidth", 0)
-            height = pane.get("boundsHeight", 0)
-            if not (has_window and layout_passes > 0):
-                continue
-            if width > 0 and height > 0:
-                continue
-            key = (pane.get("paneId"), width, height, layout_passes)
-            if key in seen:
-                continue
-            seen.add(key)
-            reasons = []
-            if width <= 0:
-                reasons.append("zeroWidth")
-            if height <= 0:
-                reasons.append("zeroHeight")
-            out.append(
-                f"pane={pane.get('paneId')} hasContent={str(has_content).lower()} "
-                f"loading={str(is_loading).lower()} hasWindow={str(has_window).lower()} "
-                f"layoutPasses={layout_passes} bounds={width}x{height} "
-                f"verdict=collapsed({','.join(reasons)})"
-            )
-    return tuple(out)
+    return _zero_size_violations_from_rows(
+        rows,
+        judged=lambda has_content, is_loading, has_window, layout_passes: (
+            has_window and layout_passes > 0
+        ),
+        verdict_label="collapsed",
+    )
 
 
 def geometry_judged_pane_count(rows):
