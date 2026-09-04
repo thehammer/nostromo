@@ -287,7 +287,7 @@ unbinds it.**
 | `nostromo.set_pane_content` | **Unbinds** the pane — agent-authored content is authoritative from here on, or the next automatic push would silently overwrite it. |
 | `perri.load_pr` **with** `highlights` | Unbinds `diff` — highlights are final content. |
 | `perri.load_pr` **without** `highlights` | Binds `diff` to `perri.get_current_pr`. |
-| `perri.clear_current_pr` | Binds both `diff` (to `perri.get_current_pr` — its own empty state) and `queue` (to `perri.list_pr_queue`). |
+| `perri.clear_current_pr` | Resolves which of the focus's *live* panes currently hold PR-review content and which hold the queue from the tree and its existing bindings — any pane bound to `perri.get_current_pr`/`perri.get_pr_diff`/`perri.get_pr_conversation` counts as PR content, any pane bound to `perri.list_pr_queue` counts as the queue, and (the one legacy exception) an *unbound* pane literally named `diff`/`queue` counts too, since `perri.load_pr({highlights})` leaves `diff` unbound in a `perri-standard` focus. Only a pane that was unbound gets (re)bound here — a pane already bound to `perri.get_pr_diff`/`perri.get_pr_conversation` (a curated tab) is never repurposed onto a different source. |
 
 Bindings persist across a daemon restart, `params` included; a restarted
 daemon repaints every bound pane immediately, with no tool call. The one
@@ -488,20 +488,28 @@ Source: `src/mcp/tools/perri_mutators.rs`, `src/data/perri_current_pr.rs`
 
 ### `perri.clear_current_pr`
 
-Clear the currently-loaded PR from Perri's diff pane.
+Clear the currently-loaded PR from every pane that's showing it — whichever
+layout template built the focus, and whatever those panes happen to be named.
 
 - **Daemon**: removes `current-pr.json` (a no-op, not an error, if it's
   already absent), touches both `current-pr.dirty` and `queue.dirty`,
-  signals both native sources' refresh channels, pushes `"No PR loaded."`
-  to the `diff` pane, and pushes `Loading` (first paint only — same
-  suppression rule) then the current PR-queue list to the `queue` pane (via
-  the same fetcher `nostromo.apply_layout` uses).
+  signals both native sources' refresh channels, then closes every curated
+  review tab whose PR just stopped being under review (same teardown
+  `perri.load_pr` triggers on a PR change — a no-op for a focus with no
+  curated regions, e.g. one still driving `perri-standard`). It then resolves
+  the focus's *remaining* live panes into "holds PR content" vs. "holds the
+  queue" (see the bindings table above) and, for each: a PR-content pane gets
+  `"No PR loaded."` pushed (rebinding it to `perri.get_current_pr` first, but
+  only if it wasn't already bound to something else); a queue pane gets
+  `Loading` (first paint only — same suppression rule) then the current
+  PR-queue list (via the same fetcher `nostromo.apply_layout` uses), fetched
+  once and pushed to every queue pane found.
 - **Standalone TUI**: removes the file/touches the sentinel via `PerriView`
   only — no pane pushes.
 
 **Input**: `{ "view_id": "optional — daemon-hosted only" }`
 
-**Output**: `{ "ok": true }`, optionally with a `warnings` array (daemon).
+**Output**: `{ "ok": true, "cleared": ["<pane ids pushed the no-PR placeholder>"], "queue": ["<pane ids refreshed with the queue>"], "closed": ["<pane ids the curated teardown closed>"] }`, optionally with a `warnings` array (daemon).
 
 **Errors**: `not_supported` (daemon only), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only).
 

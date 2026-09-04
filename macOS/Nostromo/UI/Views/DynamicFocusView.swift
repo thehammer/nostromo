@@ -202,6 +202,20 @@ final class DynamicFocusView: NSView {
             renderLayout(model, clearRatios: clearRatios)
         }
         renderedTree = model.tree
+
+        // Launch-layout observability (W1 — launch-smoke-test). This is the
+        // documented sole choke point every structural repair funnels
+        // through — noted here and nowhere else. See
+        // `TranscriptDiagnostics.noteReconcile`'s doc comment for why this is
+        // a best-effort *hint* rather than the only path to
+        // `firstLayoutReconcileAt`: a real AppKit layout pass on the views
+        // this reconcile just built usually hasn't happened yet by the time
+        // this line runs.
+        TranscriptDiagnostics.noteReconcile(
+            tag: focus.sessionTag,
+            splitNodes: expected.splitPaths.count,
+            leaves: expected.paneIds.count
+        )
     }
 
     /// Whether the view hierarchy this instance actually holds matches
@@ -404,6 +418,11 @@ final class DynamicFocusView: NSView {
         let split = RatioSplitView()
         split.isVertical = (direction == .horizontal)
         split.dividerStyle = .thin
+        // Weakly registered (W1 — launch-smoke-test): lets the diagnostics
+        // snapshot report how many live splits have laid out and how many
+        // have successfully applied their ratios, without a second registry
+        // — see `TranscriptDiagnostics.registerSplit`.
+        TranscriptDiagnostics.registerSplit(split)
 
         for (i, child) in children.enumerated() {
             let childPath = "\(path).\(i)"
@@ -819,7 +838,7 @@ final class DynamicFocusView: NSView {
 /// leave a split with no real size for at least one turn. Overriding
 /// `layout()` instead means every layout pass gets another try until one
 /// actually lands.
-final class RatioSplitView: NSSplitView {
+final class RatioSplitView: NSSplitView, TranscriptDiagnostics.SplitReporting {
 
     /// Set once by `DynamicFocusView.makeSplitView`; cleared only once
     /// `applyRatios` actually succeeds (D3). `nil` means either "never
@@ -857,6 +876,20 @@ final class RatioSplitView: NSSplitView {
     /// is grabbed.
     private(set) var isDraggingDivider = false
 
+    // MARK: - TranscriptDiagnostics.SplitReporting (W1 — launch-smoke-test)
+
+    /// True once `layout()` has run at least once with a real (non-zero)
+    /// size — independent of whether ratios were ever asked for or applied,
+    /// so a split with no `desiredRatios` still reports that it laid out.
+    private(set) var hasLaidOut = false
+    /// True once `DynamicFocusView.applyRatios` has returned `true` for this
+    /// split — positive proof it reached `NSSplitView.setPosition` and
+    /// returned, the exact call that never returned in the 2026-09-03
+    /// defect. Never cleared once set.
+    private(set) var ratiosApplied = false
+    var splitBoundsWidth: Double { Double(bounds.width) }
+    var splitBoundsHeight: Double { Double(bounds.height) }
+
     override func mouseDown(with event: NSEvent) {
         isDraggingDivider = true
         defer { isDraggingDivider = false }
@@ -865,6 +898,9 @@ final class RatioSplitView: NSSplitView {
 
     override func layout() {
         super.layout()
+        if bounds.width > 0, bounds.height > 0 {
+            hasLaidOut = true
+        }
         // Reentrancy guard (2026-09-03 hotfix): `DynamicFocusView.applyRatios`
         // calls `NSSplitView.setPosition(_:ofDividerAtIndex:)`, which AppKit
         // answers by synchronously running another layout pass on this same
@@ -889,6 +925,7 @@ final class RatioSplitView: NSSplitView {
         isApplyingProgrammatically = false
         if applied {
             desiredRatios = nil
+            ratiosApplied = true
         }
     }
 }

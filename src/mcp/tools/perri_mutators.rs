@@ -32,6 +32,7 @@ use tokio::sync::{oneshot, watch};
 
 use crate::data::{perri_current_pr, perri_pr::PrSnapshot};
 use crate::event::AppEvent;
+use crate::ipc::pane_registry::PaneRegistry;
 use crate::ipc::protocol::{PaneContentWire, PaneFreshness};
 use crate::mcp::pane_sources::{broadcast_loading_if_first_paint, broadcast_pane_content};
 use crate::mcp::state::DaemonMcpBackend;
@@ -385,77 +386,157 @@ async fn clear_current_pr_daemon(
     // R8 (W5 — curated-agent-views): nothing is under review any more, so
     // every curated review tab closes and the detail region goes with its last
     // one. The queue is a singleton belonging to no PR and is never closed.
-    if let Some(t) = tag.as_deref() {
-        show::reset_for_pr_change(daemon, t, None);
-    }
+    // Must run *before* resolving targets below: this is what prunes closed
+    // panes (and their bindings) out of the tree, so the resolver never
+    // targets a pane that's about to disappear.
+    let closed: Vec<String> = tag
+        .as_deref()
+        .map(|t| show::reset_for_pr_change(daemon, t, None))
+        .unwrap_or_default();
 
     let mut warnings = Vec::new();
 
-    // D4: both panes bind (not unbind) to their live sources — the diff
+    // D1/D2: resolve which of the focus's *live* panes hold PR content and
+    // which hold the queue, from the freshly pruned tree/bindings — never
+    // from a fixed template vocabulary. A curated focus's surviving paramless
+    // PR pane (Context 2) and `perri-standard`'s fixed `diff`/`queue` panes
+    // both fall out of this for free.
+    let (pr_panes, queue_panes) = match tag.as_deref() {
+        Some(t) => {
+            let reg = daemon.pane_registry.lock().unwrap();
+            let targets = resolve_perri_targets(&reg, t);
+            (targets.pr, targets.queue)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+
+    // D4: a pane already bound to a PR-backed source stays bound to it — the
     // placeholder is that source's own empty state (the same string
-    // `fetch(SOURCE_CURRENT_PR, ..)` returns for a null snapshot), so diff
-    // should go live again the instant a PR loads; the queue refetch is
-    // exactly what apply_layout would have bound it to.
+    // `fetch(SOURCE_CURRENT_PR, ..)` returns for a no-PR snapshot), so the
+    // pane goes live again the instant a PR loads. Only an *unbound* survivor
+    // (D2's legacy `perri-standard` case, left behind by
+    // `perri.load_pr({highlights})`'s `unbind_source`) gets (re)bound here —
+    // never repurpose a pane already bound to `perri.get_pr_diff` /
+    // `perri.get_pr_conversation` onto a different source.
     if let Some(t) = tag.as_deref() {
         let mut reg = daemon.pane_registry.lock().unwrap();
-        reg.bind_source(t, "diff", SOURCE_CURRENT_PR);
-        reg.bind_source(t, "queue", SOURCE_PR_QUEUE);
+        for pane in &pr_panes {
+            if reg.source_for(t, pane).is_none() {
+                reg.bind_source(t, pane, SOURCE_CURRENT_PR);
+            }
+        }
+        for pane in &queue_panes {
+            reg.bind_source(t, pane, SOURCE_PR_QUEUE);
+        }
     }
 
-    push_pane_content(
-        daemon,
-        tag.as_deref(),
-        "diff",
-        PaneContentWire::Text {
-            text: apply_layout::NO_PR_LOADED_PLACEHOLDER.to_string(),
-        },
-        None,
-        &mut warnings,
-    );
+    for pane in &pr_panes {
+        push_pane_content(
+            daemon,
+            tag.as_deref(),
+            pane,
+            PaneContentWire::Text {
+                text: apply_layout::NO_PR_LOADED_PLACEHOLDER.to_string(),
+            },
+            None,
+            &mut warnings,
+        );
+    }
 
-    push_pane_content(
-        daemon,
-        tag.as_deref(),
-        "queue",
-        PaneContentWire::Loading,
-        None,
-        &mut warnings,
-    );
-    match apply_layout::fetch(SOURCE_PR_QUEUE, state, apply_layout::FetchArgs::default()) {
-        Ok(content) => {
-            let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state);
+    if !queue_panes.is_empty() {
+        for pane in &queue_panes {
             push_pane_content(
                 daemon,
                 tag.as_deref(),
-                "queue",
-                content,
-                Some(fr),
-                &mut warnings,
-            )
-        }
-        Err(e) => {
-            warnings.push(json!({ "pane_id": "queue", "error": e.code() }));
-            push_pane_content(
-                daemon,
-                tag.as_deref(),
-                "queue",
-                PaneContentWire::Error {
-                    message: format!(
-                        "perri.clear_current_pr: perri.list_pr_queue fetch failed ({})",
-                        e.code()
-                    ),
-                },
+                pane,
+                PaneContentWire::Loading,
                 None,
                 &mut warnings,
             );
         }
+        // Fetch once, push the same content to every queue pane — there is
+        // only ever one queue pane per focus today, but nothing here assumes
+        // that.
+        match apply_layout::fetch(SOURCE_PR_QUEUE, state, apply_layout::FetchArgs::default()) {
+            Ok(content) => {
+                let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state);
+                for pane in &queue_panes {
+                    push_pane_content(
+                        daemon,
+                        tag.as_deref(),
+                        pane,
+                        content.clone(),
+                        Some(fr.clone()),
+                        &mut warnings,
+                    );
+                }
+            }
+            Err(e) => {
+                for pane in &queue_panes {
+                    warnings.push(json!({ "pane_id": pane, "error": e.code() }));
+                    push_pane_content(
+                        daemon,
+                        tag.as_deref(),
+                        pane,
+                        PaneContentWire::Error {
+                            message: format!(
+                                "perri.clear_current_pr: perri.list_pr_queue fetch failed ({})",
+                                e.code()
+                            ),
+                        },
+                        None,
+                        &mut warnings,
+                    );
+                }
+            }
+        }
     }
 
-    if warnings.is_empty() {
-        json!({ "ok": true })
-    } else {
-        json!({ "ok": true, "warnings": warnings })
+    let mut result = json!({
+        "ok": true,
+        "cleared": pr_panes,
+        "queue": queue_panes,
+        "closed": closed,
+    });
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
     }
+    result
+}
+
+/// Which of `tag`'s live panes currently hold PR-review content, and which
+/// hold the review queue — resolved from the focus's actual tree and
+/// bindings (D1), so this is correct for any layout template, including one
+/// this code has never heard of: a schema-declared pane is bound by
+/// `apply_layout` and therefore resolves here for free.
+///
+/// The two literal ids in the `None` arms are the one narrow legacy bridge
+/// (D2), scoped to a pane with *no* binding at all: `perri.load_pr` with
+/// `highlights` deliberately severs the `diff` pane's binding
+/// (`unbind_source`, see `load_pr_daemon` above) so agent-authored highlights
+/// aren't clobbered by the live broadcaster, and a `clear_current_pr` right
+/// after that must still treat that pane as PR content. A curated focus never
+/// has a pane literally named `diff`/`queue` with no binding, so this can't
+/// fire there.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PerriTargets {
+    pr: Vec<String>,
+    queue: Vec<String>,
+}
+
+fn resolve_perri_targets(reg: &PaneRegistry, tag: &str) -> PerriTargets {
+    let mut out = PerriTargets::default();
+    for pane_id in reg.pane_ids(tag) {
+        match reg.source_for(tag, &pane_id) {
+            Some(s) if apply_layout::PR_BACKED_SOURCES.contains(&s) => out.pr.push(pane_id),
+            Some(s) if s == SOURCE_PR_QUEUE => out.queue.push(pane_id),
+            Some(_) => {} // file / ticket: not PR content
+            None if pane_id == "diff" => out.pr.push(pane_id),
+            None if pane_id == "queue" => out.queue.push(pane_id),
+            None => {} // repl, or an unbound agent-authored pane
+        }
+    }
+    out
 }
 
 // ── shared daemon helpers ───────────────────────────────────────────────────
@@ -553,7 +634,7 @@ mod tests {
     use crate::data::perri_pr::PrSnapshot;
     use crate::data::perri_queue::PrQueueSnapshot;
     use crate::ipc::pane_registry::PaneRegistry;
-    use crate::ipc::protocol::ServerMsg;
+    use crate::ipc::protocol::{PaneTree, ServerMsg, SplitDirection};
     use crate::ipc::SessionManager;
     use crate::mcp::{DaemonMcpBackend, PerriDaemonState};
     use std::sync::atomic::AtomicUsize;
@@ -561,13 +642,13 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::broadcast;
 
-    /// Build a daemon-hosted `McpSharedState` with `perri.state_dir` wired to
-    /// a temp dir (so no test ever touches `~/.claude/state/perri`), plus a
-    /// fresh broadcast receiver subscribed *after* the "perri" focus has been
-    /// seeded with the standard queue/diff/repl layout so pane-existence
-    /// checks (D7) pass by default.
-    async fn make_daemon_state() -> (McpSharedState, TempDir, broadcast::Receiver<ServerMsg>) {
-        let tmp = TempDir::new().unwrap();
+    /// The daemon-backed `McpSharedState` innards shared by every
+    /// `make_*_daemon_state` variant below: a real registry and session store
+    /// on a temp dir (so no test ever touches `~/.claude/state/perri`), and a
+    /// broadcast sender the caller subscribes to *after* seeding a layout —
+    /// otherwise the seeding call's own `FocusLayout`/`PaneContent`
+    /// broadcasts would show up in every test's first `recv()`.
+    fn build_daemon_state(tmp: &TempDir) -> (McpSharedState, broadcast::Sender<ServerMsg>) {
         let perri_state_dir = tmp.path().join("perri-state");
         let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
             tmp.path().join("panes.json"),
@@ -591,15 +672,98 @@ mod tests {
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
         };
-        let state = McpSharedState::for_daemon(backend);
+        (McpSharedState::for_daemon(backend), broadcast_tx)
+    }
 
-        // Seed the "perri" focus with the standard layout so diff/queue exist.
-        let _ =
-            apply_layout::apply_layout(&state, &json!({ "name": "perri-standard" }), Some("perri"))
-                .await;
+    /// Build a daemon-hosted `McpSharedState`, apply `layout_name` to the
+    /// "perri" focus, and subscribe to broadcasts *after* seeding — otherwise
+    /// the seeding call's own `FocusLayout`/`PaneContent` broadcasts would
+    /// show up in every test's first `recv()`.
+    async fn make_daemon_state_with_layout(
+        layout_name: &str,
+    ) -> (McpSharedState, TempDir, broadcast::Receiver<ServerMsg>) {
+        let tmp = TempDir::new().unwrap();
+        let (state, broadcast_tx) = build_daemon_state(&tmp);
+
+        let _ = apply_layout::apply_layout(&state, &json!({ "name": layout_name }), Some("perri"))
+            .await;
 
         let bcast = broadcast_tx.subscribe();
         (state, tmp, bcast)
+    }
+
+    /// Build a daemon-hosted `McpSharedState` seeded with the standard
+    /// queue/diff/repl layout ("perri-standard") so pane-existence checks
+    /// (D7) pass by default.
+    async fn make_daemon_state() -> (McpSharedState, TempDir, broadcast::Receiver<ServerMsg>) {
+        make_daemon_state_with_layout("perri-standard").await
+    }
+
+    /// Like [`make_daemon_state`], but seeded with `perri-curated`'s starting
+    /// layout (a bound `queue`, a `repl`, no detail region yet) — the W5
+    /// curated-agent-views focus shape `resolve_perri_targets` must resolve
+    /// correctly, instead of only the legacy fixed `diff`/`queue` names
+    /// `perri-standard` happens to also produce.
+    async fn make_curated_daemon_state() -> (McpSharedState, TempDir, broadcast::Receiver<ServerMsg>)
+    {
+        make_daemon_state_with_layout("perri-curated").await
+    }
+
+    /// Add a `detail` region to `tag`'s curated tree with two review tabs:
+    /// `detail.0` bound *paramless* to `perri.get_pr_diff` (the survivor case
+    /// — `derive::pr_identity` falls back to whatever is under review, so
+    /// once a clear makes that `None` too, the tab has no PR identity at all
+    /// and R8 doesn't recognise it as a stale review tab), and `detail.1`
+    /// bound *with params* naming a PR that a clear's `new_pr: None` can
+    /// never match (the stale case — see
+    /// `placement::reset_for_pr_change`/D5's `(repo, number) == new_pr`
+    /// check).
+    fn seed_curated_detail_tabs(state: &McpSharedState, tag: &str) {
+        let reg = state.daemon.as_ref().unwrap().pane_registry.clone();
+        let mut reg = reg.lock().unwrap();
+        reg.set_layout(
+            tag,
+            &json!({ "tree": PaneTree::Split {
+                direction: SplitDirection::Vertical,
+                children: vec![
+                    PaneTree::Leaf { pane_id: "queue".into() },
+                    PaneTree::Tabs {
+                        children: vec![
+                            PaneTree::Leaf { pane_id: "detail.0".into() },
+                            PaneTree::Leaf { pane_id: "detail.1".into() },
+                        ],
+                        labels: vec!["A".into(), "B".into()],
+                        active: 0,
+                        region: Some("detail".into()),
+                    },
+                    PaneTree::Leaf { pane_id: "repl".into() },
+                ],
+                ratios: vec![0.3, 0.4, 0.3],
+            }}),
+        )
+        .unwrap();
+        reg.bind_source(tag, "queue", SOURCE_PR_QUEUE);
+        reg.bind_source(tag, "detail.0", apply_layout::SOURCE_PR_DIFF);
+        reg.bind_source_with_params(
+            tag,
+            "detail.1",
+            apply_layout::SOURCE_PR_DIFF,
+            Some(json!({ "repo": "acme/other", "number": 7 })),
+        );
+    }
+
+    /// Every message currently sitting in `bcast`, without waiting.
+    /// `clear_current_pr_daemon`/`load_pr_daemon` never `.await` between a
+    /// broadcast send and returning, so by the time the handler's future
+    /// resolves, every message it sent is already in the channel — no need
+    /// to race a timeout against a background task the way `recv_pane_content`
+    /// does for the app's own event loop.
+    fn drain_broadcasts(bcast: &mut broadcast::Receiver<ServerMsg>) -> Vec<ServerMsg> {
+        let mut out = Vec::new();
+        while let Ok(msg) = bcast.try_recv() {
+            out.push(msg);
+        }
+        out
     }
 
     fn seed_queue(state: &mut McpSharedState, items: Value) {
@@ -1026,6 +1190,209 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_current_pr_rebinds_and_repaints_diff_after_load_pr_severed_its_binding() {
+        // perri-standard's legacy bridge: `perri.load_pr({ highlights })`
+        // deliberately unbinds "diff" so agent-authored highlights aren't
+        // clobbered by the live broadcaster. A `clear_current_pr` right after
+        // that must still find and treat "diff" as PR content (D2), even
+        // though it currently has no binding to classify by source.
+        let (state, _tmp, mut bcast) = make_daemon_state().await;
+
+        let load_args = json!({ "number": 42, "repo": "acme/web", "highlights": "check auth" });
+        let load_result = load_pr(&state, &load_args, Some("perri")).await;
+        assert_eq!(load_result["ok"], true);
+        if let Some(daemon) = &state.daemon {
+            assert_eq!(
+                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                None,
+                "sanity: highlights must have severed diff's binding first"
+            );
+        }
+        let _ = drain_broadcasts(&mut bcast); // load_pr's own broadcast, not under test
+
+        let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["cleared"], json!(["diff"]));
+
+        if let Some(daemon) = &state.daemon {
+            assert_eq!(
+                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                Some("perri.get_current_pr"),
+                "clear_current_pr must rebind an unbound legacy diff pane so it goes live \
+                 again the moment a PR loads"
+            );
+        }
+
+        let messages = drain_broadcasts(&mut bcast);
+        let got_placeholder = messages.iter().any(|m| {
+            matches!(
+                m,
+                ServerMsg::PaneContent { pane_id, content: PaneContentWire::Text { text }, .. }
+                if pane_id == "diff" && text == "No PR loaded."
+            )
+        });
+        assert!(got_placeholder, "expected diff to receive the placeholder; got {messages:?}");
+    }
+
+    #[tokio::test]
+    async fn clear_current_pr_closes_a_stale_params_bound_pr_diff_tab_in_curated_layout() {
+        let (state, _tmp, mut bcast) = make_curated_daemon_state().await;
+        seed_curated_detail_tabs(&state, "perri");
+
+        let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
+        assert_eq!(result["ok"], true);
+        assert!(result.get("warnings").is_none(), "unexpected warnings: {result}");
+        assert!(result["cleared"].is_array());
+        assert!(result["queue"].is_array());
+
+        let closed: Vec<String> = result["closed"]
+            .as_array()
+            .expect("closed array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            closed.contains(&"detail.1".to_string()),
+            "the params-bound tab naming a PR that can never equal `None` must close: {closed:?}"
+        );
+
+        if let Some(daemon) = &state.daemon {
+            let reg = daemon.pane_registry.lock().unwrap();
+            assert!(
+                !reg.pane_ids("perri").contains(&"detail.1".to_string()),
+                "the closed tab must actually be gone from the tree"
+            );
+            assert!(reg.source_for("perri", "detail.1").is_none());
+        }
+
+        let messages = drain_broadcasts(&mut bcast);
+        for msg in &messages {
+            if let ServerMsg::PaneContent { pane_id, .. } = msg {
+                assert_ne!(
+                    pane_id, "detail.1",
+                    "a tab that was just closed must never receive a content push"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_current_pr_pushes_placeholder_to_a_surviving_paramless_pr_diff_tab_in_curated_layout(
+    ) {
+        // This is the test that proves the actual fix: a curated focus's
+        // paramless PR pane is neither "diff" nor "queue" by name, so only
+        // resolving targets from the live tree/bindings (rather than the
+        // legacy hardcoded ids) finds it at all.
+        let (state, _tmp, mut bcast) = make_curated_daemon_state().await;
+        seed_curated_detail_tabs(&state, "perri");
+
+        let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
+        assert_eq!(result["ok"], true);
+
+        if let Some(daemon) = &state.daemon {
+            let reg = daemon.pane_registry.lock().unwrap();
+            assert!(
+                reg.pane_ids("perri").contains(&"detail.0".to_string()),
+                "the paramless survivor must not be closed by the teardown"
+            );
+        }
+
+        let cleared: Vec<String> = result["cleared"]
+            .as_array()
+            .expect("cleared array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            cleared.contains(&"detail.0".to_string()),
+            "detail.0 must be resolved as PR content: {cleared:?}"
+        );
+
+        let messages = drain_broadcasts(&mut bcast);
+        let got_placeholder = messages.iter().any(|m| {
+            matches!(
+                m,
+                ServerMsg::PaneContent { pane_id, content: PaneContentWire::Text { text }, .. }
+                if pane_id == "detail.0" && text == "No PR loaded."
+            )
+        });
+        assert!(
+            got_placeholder,
+            "expected detail.0 to receive the No PR loaded placeholder; got {messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_current_pr_refreshes_a_curated_focus_queue_pane() {
+        let (state, _tmp, mut bcast) = make_curated_daemon_state().await;
+        // perri-curated's starting tree: just a bound "queue" and a "repl",
+        // no detail region yet.
+
+        let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["queue"], json!(["queue"]));
+
+        if let Some(daemon) = &state.daemon {
+            assert_eq!(
+                daemon.pane_registry.lock().unwrap().source_for("perri", "queue"),
+                Some("perri.list_pr_queue")
+            );
+        }
+
+        let messages = drain_broadcasts(&mut bcast);
+        let got_queue_list = messages.iter().any(|m| {
+            matches!(
+                m,
+                ServerMsg::PaneContent { pane_id, content: PaneContentWire::PrList { .. }, .. }
+                if pane_id == "queue"
+            )
+        });
+        assert!(
+            got_queue_list,
+            "expected the curated focus's queue pane to be refreshed; got {messages:?}"
+        );
+    }
+
+    /// True when `result["warnings"]` (if present) contains an
+    /// `{"skipped":"unknown_pane"}` entry.
+    fn has_unknown_pane_warning(result: &Value) -> bool {
+        result
+            .get("warnings")
+            .and_then(|w| w.as_array())
+            .map(|warnings| {
+                warnings
+                    .iter()
+                    .any(|w| w.get("skipped").and_then(|s| s.as_str()) == Some("unknown_pane"))
+            })
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn clear_current_pr_never_reports_an_unknown_pane_warning_on_the_healthy_path() {
+        // Regression guard: before this fix, a curated focus's real panes
+        // were invisible to the hardcoded "diff"/"queue" pushes, which
+        // produced a `{"pane_id":"diff","skipped":"unknown_pane"}` warning on
+        // every clear. Once targets are resolved from the live tree, that
+        // warning is unreachable on any focus that actually applied a layout.
+        let (standard_state, _tmp1, _bcast1) = make_daemon_state().await;
+        let result = clear_current_pr(&standard_state, &json!({}), Some("perri")).await;
+        assert_eq!(result["ok"], true);
+        assert!(
+            !has_unknown_pane_warning(&result),
+            "perri-standard: unexpected unknown_pane warning in {result}"
+        );
+
+        let (curated_state, _tmp2, _bcast2) = make_curated_daemon_state().await;
+        seed_curated_detail_tabs(&curated_state, "perri");
+        let result = clear_current_pr(&curated_state, &json!({}), Some("perri")).await;
+        assert_eq!(result["ok"], true);
+        assert!(
+            !has_unknown_pane_warning(&result),
+            "perri-curated: unexpected unknown_pane warning in {result}"
+        );
+    }
+
+    #[tokio::test]
     async fn clear_current_pr_noop_when_no_pointer_file_is_success() {
         let (state, _tmp, _bcast) = make_daemon_state().await;
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
@@ -1112,5 +1479,109 @@ mod tests {
         let (state, _tmp, _bcast) = make_daemon_state().await;
         let result = set_selected_index(&state, &json!({}), None).await;
         assert_eq!(result["error"], "invalid_args");
+    }
+
+    // ── resolve_perri_targets ────────────────────────────────────────────────
+    //
+    // `resolve_perri_targets` is a pure function of `(&PaneRegistry, &str)` —
+    // exercised directly here, independent of the daemon harness above, since
+    // that's the cheapest way to pin every classification rule (D1/D2).
+
+    fn strs(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A tag registered against an in-memory registry with a flat tree of
+    /// `ids` plus a mandatory trailing `repl` leaf — every id in `ids` starts
+    /// out unbound; callers bind whichever ones their test cares about.
+    fn registry_with_panes(tag: &str, ids: &[&str]) -> PaneRegistry {
+        let mut children: Vec<PaneTree> = ids
+            .iter()
+            .map(|id| PaneTree::Leaf { pane_id: id.to_string() })
+            .collect();
+        children.push(PaneTree::Leaf { pane_id: "repl".into() });
+        let n = children.len();
+        let mut reg = PaneRegistry::in_memory();
+        reg.get_or_init(tag);
+        reg.set_layout(
+            tag,
+            &json!({ "tree": PaneTree::Split {
+                direction: SplitDirection::Vertical,
+                ratios: vec![1.0 / n as f32; n],
+                children,
+            }}),
+        )
+        .unwrap();
+        reg
+    }
+
+    #[test]
+    fn resolve_perri_targets_classifies_every_pr_backed_source_as_pr() {
+        let tag = "focus";
+        let mut reg = registry_with_panes(tag, &["cp", "pd", "pc"]);
+        reg.bind_source(tag, "cp", apply_layout::SOURCE_CURRENT_PR);
+        reg.bind_source(tag, "pd", apply_layout::SOURCE_PR_DIFF);
+        reg.bind_source(tag, "pc", apply_layout::SOURCE_PR_CONVERSATION);
+
+        let targets = resolve_perri_targets(&reg, tag);
+        assert_eq!(targets.pr, strs(&["cp", "pd", "pc"]));
+        assert!(targets.queue.is_empty());
+    }
+
+    #[test]
+    fn resolve_perri_targets_classifies_a_queue_bound_pane_as_queue() {
+        let tag = "focus";
+        let mut reg = registry_with_panes(tag, &["q"]);
+        reg.bind_source(tag, "q", SOURCE_PR_QUEUE);
+
+        let targets = resolve_perri_targets(&reg, tag);
+        assert_eq!(targets.queue, strs(&["q"]));
+        assert!(targets.pr.is_empty());
+    }
+
+    #[test]
+    fn resolve_perri_targets_classifies_file_and_ticket_bound_panes_as_neither() {
+        let tag = "focus";
+        let mut reg = registry_with_panes(tag, &["f", "tk"]);
+        reg.bind_source(tag, "f", apply_layout::SOURCE_FILE);
+        reg.bind_source(tag, "tk", apply_layout::SOURCE_TICKET);
+
+        let targets = resolve_perri_targets(&reg, tag);
+        assert!(targets.pr.is_empty());
+        assert!(targets.queue.is_empty());
+    }
+
+    #[test]
+    fn resolve_perri_targets_treats_unbound_legacy_diff_and_queue_ids_as_pr_and_queue() {
+        // D2's narrow legacy bridge: a pane literally named "diff"/"queue"
+        // with *no* binding at all — perri-standard's shape immediately after
+        // `perri.load_pr({ highlights })` severed diff's binding.
+        let tag = "focus";
+        let reg = registry_with_panes(tag, &["diff", "queue"]);
+        // deliberately left unbound
+
+        let targets = resolve_perri_targets(&reg, tag);
+        assert_eq!(targets.pr, strs(&["diff"]));
+        assert_eq!(targets.queue, strs(&["queue"]));
+    }
+
+    #[test]
+    fn resolve_perri_targets_treats_other_unbound_panes_as_neither() {
+        // Neither an agent-authored unbound pane nor the mandatory "repl"
+        // leaf (also unbound, and appended by `registry_with_panes`) is PR or
+        // queue content just because it exists.
+        let tag = "focus";
+        let reg = registry_with_panes(tag, &["notes"]);
+
+        let targets = resolve_perri_targets(&reg, tag);
+        assert!(targets.pr.is_empty());
+        assert!(targets.queue.is_empty());
+    }
+
+    #[test]
+    fn resolve_perri_targets_returns_empty_for_an_unregistered_tag() {
+        let reg = PaneRegistry::in_memory();
+        let targets = resolve_perri_targets(&reg, "no-such-focus");
+        assert_eq!(targets, PerriTargets::default());
     }
 }

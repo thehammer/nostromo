@@ -20,8 +20,39 @@ struct PaneSurfaceView: View {
     /// curated-agent-views). `pr_list` reads its `queue_row` anchor/emphasis
     /// to mark a row; the other kinds rendered here have no addressing yet.
     let address:   PaneAddress?
+    /// Save this surface's scroll-restore key (W6 — ios-curated-view-parity,
+    /// D5). Only the queue renderer has rows to be positioned among; the
+    /// honest stubs and the generic text/JSON renderers store nothing,
+    /// because there is nothing about their position worth restoring.
+    let saveScrollKey: (Int) -> Void
+    /// Decide whether to restore a saved position given what is currently
+    /// visible — `.none` when the saved row is already on screen, so a
+    /// width-class change that happened not to move this surface produces no
+    /// visible jump.
+    let restoreScroll: (ClosedRange<Int>?) -> ScrollRestore
+    /// `pr_diff`'s per-file scroll-restore (ios-curated-view-parity W8) —
+    /// `saveScrollKey`/`restoreScroll` above have exactly one slot per pane,
+    /// which isn't enough for a pane that can show different files at
+    /// different times. Only `DiffSurfaceView` calls these; every other
+    /// content kind ignores them.
+    let saveDiffFileScrollKey: (_ file: String, _ key: Int) -> Void
+    let restoreDiffFileScrollKey: (_ file: String, _ visibleRange: ClosedRange<Int>?) -> ScrollRestore
+    /// `pr_diff`'s selected-file slot (W8, D2) — which file the pane
+    /// currently has open, scoped by an identity string
+    /// (`"\(repo)#\(number)"`-shaped) `DiffSurfaceView` builds itself.
+    let saveSelectedDiffFile: (_ path: String, _ identity: String) -> Void
+    let restoreSelectedDiffFile: (_ identity: String) -> String?
 
     @EnvironmentObject var store: DaemonStore
+
+    /// Which queue-row indices are on screen. View-local and transient: this
+    /// is "what is in front of the operator right now", not durable state.
+    /// The durable half is the single key handed to `saveScrollKey` on
+    /// teardown.
+    @State private var visibleRowIndices: Set<Int> = []
+    /// Guards the one-shot restore so a later re-layout can't yank the
+    /// viewport after the operator has started scrolling again.
+    @State private var hasRestored = false
 
     /// Staged pending approval — set on first swipe tap; cleared on cancel or after
     /// the confirmation dialog fires. Mirrors the pattern in `PerriView`.
@@ -45,6 +76,13 @@ struct PaneSurfaceView: View {
                 ScrollView { jsonView(value) }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .prList(let items):
                 prListView(items)
+            case .code(let payload):
+                CodeSurfaceView(
+                    payload: payload,
+                    address: address,
+                    saveScrollKey: saveScrollKey,
+                    restoreScroll: restoreScroll
+                )
             case .loading:
                 ScrollView {
                     VStack(spacing: 8) {
@@ -71,23 +109,44 @@ struct PaneSurfaceView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .unknown(let raw):
                 ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            // `.code`/`.diff`/`.prConversation`/`.ticket` are honest deferrals,
-            // not half-built renderings — the PRD's organizing rule is that a
-            // surface may be absent or simplified but must never look
-            // complete when it isn't. `.code` used to dump its raw file
-            // contents into a monospaced Text here: no gutter, no
-            // scroll-to-anchor, no emphasis, discarding the path/revision/
-            // first-line fields entirely — exactly the half-rendering that
-            // rule forbids, and it is deleted rather than kept (W7 replaces
-            // it with a real renderer). Each stub below names the specific
-            // addressing it cannot show, not just that something is missing;
-            // `PaneSurfaceStub` (NostromoKit) is the single source of that
-            // wording so W7/W8/W9 delete a table entry instead of hunting a
-            // string in a view.
-            case .code, .diff, .prConversation, .ticket:
-                if let content, let message = PaneSurfaceStub.message(for: content) {
-                    stubView(headline: message.headline, detail: message.detail)
-                }
+            // `.diff`, `.prConversation` and `.ticket` were the last honest
+            // deferrals — the PRD's organizing rule is that a surface may be
+            // absent or simplified but must never look complete when it
+            // isn't. `.code` was a fourth member of this set until W7
+            // replaced its raw-dump rendering with `CodeSurfaceView`; W8
+            // gave `.diff` a real renderer (`DiffSurfaceView`); W9 gives
+            // `.prConversation`/`.ticket` theirs (`ProseSurfaceView`, shared
+            // by both — see that file). `PaneSurfaceStub`, NostromoKit's
+            // single source of stub wording for a deferred kind, has no
+            // entries left as of W9 and was deleted along with its test
+            // rather than kept as a vestigial empty table.
+            case .diff(let payload):
+                DiffSurfaceView(
+                    payload: payload,
+                    address: address,
+                    saveScrollKey: saveDiffFileScrollKey,
+                    restoreScroll: restoreDiffFileScrollKey,
+                    saveSelectedFile: saveSelectedDiffFile,
+                    restoreSelectedFile: restoreSelectedDiffFile
+                )
+            case .prConversation(let payload):
+                let plan = ConversationPlan(payload: payload)
+                ProseSurfaceView(
+                    rows: plan.rows,
+                    anchorResolution: plan.resolve(anchor: address?.anchor),
+                    emphasisResolution: plan.resolve(emphasis: address?.emphasis ?? []),
+                    saveScrollKey: saveScrollKey,
+                    restoreScroll: restoreScroll
+                )
+            case .ticket(let payload):
+                let plan = TicketPlan(payload: payload)
+                ProseSurfaceView(
+                    rows: plan.rows,
+                    anchorResolution: plan.resolve(anchor: address?.anchor),
+                    emphasisResolution: plan.resolve(emphasis: address?.emphasis ?? []),
+                    saveScrollKey: saveScrollKey,
+                    restoreScroll: restoreScroll
+                )
             }
         }
         // D11: a quiet as-of footnote when this pane's data hasn't refreshed in
@@ -141,6 +200,8 @@ struct PaneSurfaceView: View {
                 .frame(maxWidth: .infinity)
             }
         } else {
+            let ordered = orderedRows(items)
+            ScrollViewReader { proxy in
             List {
                 ForEach(bucketOrder, id: \.key) { bucket in
                     let group = items.filter { $0.bucket == bucket.key }
@@ -162,6 +223,8 @@ struct PaneSurfaceView: View {
                                     }
                                     .tint(.green)
                                 }
+                                .onAppear    { noteRowVisible(item, in: ordered, visible: true) }
+                                .onDisappear { noteRowVisible(item, in: ordered, visible: false) }
                             }
                         }
                     }
@@ -185,12 +248,59 @@ struct PaneSurfaceView: View {
                                 }
                                 .tint(.green)
                             }
+                            .onAppear    { noteRowVisible(item, in: ordered, visible: true) }
+                            .onDisappear { noteRowVisible(item, in: ordered, visible: false) }
                         }
                     }
                 }
             }
             .listStyle(.insetGrouped)
+            // The restore half of D5. Fires on the first layout that knows
+            // what it is showing, not in `onAppear` where nothing is
+            // measured yet and a saved key could only be obeyed blindly.
+            .onChange(of: visibleRowIndices) { _, indices in
+                guard !hasRestored, !indices.isEmpty else { return }
+                hasRestored = true
+                guard case .scrollTo(let target) = restoreScroll(visibleRowRange(indices)),
+                      ordered.indices.contains(target) else { return }
+                // No animation: this is putting the operator back where she
+                // already was, not taking her somewhere new.
+                proxy.scrollTo(ordered[target].id, anchor: .top)
+            }
+            .onDisappear {
+                // A width-class change gives no other warning that this
+                // hierarchy is about to be torn down and rebuilt.
+                if let topmost = visibleRowIndices.min() { saveScrollKey(topmost) }
+            }
+            }
         }
+    }
+
+    /// The queue's rows in the exact order they are rendered — the bucket
+    /// order above, then the "Other" overflow — so a saved row index means
+    /// the same thing on the way back in. A scroll key is an opaque `Int`
+    /// whose meaning belongs to the surface that saved it; this is that
+    /// meaning for the queue.
+    private func orderedRows(_ items: [PrListItemModel]) -> [PrListItemModel] {
+        let knownBuckets = Set(bucketOrder.map(\.key))
+        return bucketOrder.flatMap { bucket in items.filter { $0.bucket == bucket.key } }
+             + items.filter { !knownBuckets.contains($0.bucket) }
+    }
+
+    /// Record whether `item`'s row is on screen, by its position in the
+    /// rendered order. Transient bookkeeping only — nothing here reaches the
+    /// store until teardown.
+    private func noteRowVisible(_ item: PrListItemModel, in ordered: [PrListItemModel], visible: Bool) {
+        guard let index = ordered.firstIndex(where: { $0.id == item.id }) else { return }
+        if visible { visibleRowIndices.insert(index) } else { visibleRowIndices.remove(index) }
+    }
+
+    /// The contiguous span of row indices currently on screen. `nil` before
+    /// anything has been laid out, which `ScrollRestore` reads as a first
+    /// paint.
+    private func visibleRowRange(_ indices: Set<Int>) -> ClosedRange<Int>? {
+        guard let low = indices.min(), let high = indices.max() else { return nil }
+        return low...high
     }
 
     // MARK: - Staleness footnote
@@ -201,31 +311,6 @@ struct PaneSurfaceView: View {
         formatter.dateStyle = .none
         formatter.timeStyle = .short
         return "stale · as of \(formatter.string(from: asOf))"
-    }
-
-    // MARK: - Stub renderer (deferred content kinds)
-
-    /// Honest-deferral rendering for a content kind iOS doesn't have a real
-    /// renderer for yet. `detail` is required, not optional — a stub that
-    /// says only "isn't available" is an absence; naming the missing
-    /// addressing is what makes the deferral legible (see `PaneSurfaceStub`).
-    private func stubView(headline: String, detail: String) -> some View {
-        ScrollView {
-            VStack(spacing: 8) {
-                Spacer(minLength: 60)
-                Text(headline)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                Text(detail)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                Spacer()
-            }.frame(maxWidth: .infinity)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Text / JSON renderers

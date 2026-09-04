@@ -25,9 +25,31 @@ struct TranscriptView<Accessory: View>: View {
     /// instead of above it). Owned and injected by `DynamicFocusView`; this
     /// view knows nothing about `ActivityStreamModel`/`DaemonStore`.
     let bottomAccessory: () -> Accessory
+    /// Save this surface's scroll-restore key (W6 — ios-curated-view-parity,
+    /// D5): the index of the topmost turn currently on screen. Called on
+    /// teardown only, never mid-drag — see `DaemonStore.setScrollKey`.
+    let saveScrollKey: (Int) -> Void
+    /// Decide whether to restore a previously-saved position, given what is
+    /// currently visible. `.none` when the saved turn is already on screen,
+    /// which is what stops a restore producing a visible jump on a
+    /// transition that happened not to move anything.
+    let restoreScroll: (ClosedRange<Int>?) -> ScrollRestore
 
-    @StateObject private var store: TranscriptStore
+    /// The session's transcript. `@ObservedObject`, NOT `@StateObject`: the
+    /// store is owned by `DaemonStore` and outlives this view, so a
+    /// width-class change — which destroys and rebuilds this whole hierarchy
+    /// — no longer blanks the transcript and re-requests it from the daemon.
+    @ObservedObject private var store: TranscriptStore
     @State private var draft = ""
+
+    /// Which turn indices are currently on screen. View-local and transient
+    /// on purpose — this is "what is in front of the operator right now",
+    /// not durable state; the durable half is the single key handed to
+    /// `saveScrollKey` on teardown.
+    @State private var visibleTurnIndices: Set<Int> = []
+    /// Guards the one-shot restore, so a later re-layout can't yank the
+    /// viewport after the operator has started scrolling again.
+    @State private var hasRestored = false
 
     @State private var showStopConfirm        = false
     @State private var showRestartConfirm     = false
@@ -35,6 +57,9 @@ struct TranscriptView<Accessory: View>: View {
 
     init(
         tag: String, displayName: String, agentName: String, viewName: String, client: NetworkClient,
+        store: TranscriptStore,
+        saveScrollKey: @escaping (Int) -> Void,
+        restoreScroll: @escaping (ClosedRange<Int>?) -> ScrollRestore,
         @ViewBuilder bottomAccessory: @escaping () -> Accessory
     ) {
         self.tag = tag
@@ -43,15 +68,23 @@ struct TranscriptView<Accessory: View>: View {
         self.viewName = viewName
         self.client = client
         self.bottomAccessory = bottomAccessory
-        _store = StateObject(wrappedValue: TranscriptStore(client: client))
+        self.saveScrollKey = saveScrollKey
+        self.restoreScroll = restoreScroll
+        _store = ObservedObject(wrappedValue: store)
     }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(store.turns, id: \.id) { turn in
+                    ForEach(Array(store.turns.enumerated()), id: \.element.id) { index, turn in
                         TurnCard(turn: turn, onAnswer: { store.send($0) })
+                            // Turn rendering itself is untouched (W6 is not
+                            // allowed to assume a turn is one fixed-height
+                            // row, and doesn't): these only record which
+                            // indices are on screen.
+                            .onAppear    { visibleTurnIndices.insert(index) }
+                            .onDisappear { visibleTurnIndices.remove(index) }
                     }
                 }
                 .padding()
@@ -60,6 +93,18 @@ struct TranscriptView<Accessory: View>: View {
                 if let last = store.turns.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
+            }
+            // The restore half of D5. Fires on the first layout that knows
+            // what it is showing — not in `onAppear`, where nothing is
+            // measured yet and a saved key could only be obeyed blindly.
+            .onChange(of: visibleTurnIndices) { _, indices in
+                guard !hasRestored, !indices.isEmpty else { return }
+                hasRestored = true
+                guard case .scrollTo(let target) = restoreScroll(visibleRange(from: indices)),
+                      store.turns.indices.contains(target) else { return }
+                // No animation: this is putting the operator back where she
+                // already was, not taking her somewhere.
+                proxy.scrollTo(store.turns[target].id, anchor: .top)
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -114,7 +159,21 @@ struct TranscriptView<Accessory: View>: View {
             Text("Starts a fresh session in your home directory (not the project folder). The current transcript will be cleared.")
         }
         .onAppear { store.attach(tag: tag, agentName: agentName, viewName: viewName) }
-        .onDisappear { store.detach() }
+        .onDisappear {
+            // Save the topmost visible turn before this hierarchy goes away
+            // — a width-class change is the case that matters, and it gives
+            // no other warning.
+            if let topmost = visibleTurnIndices.min() { saveScrollKey(topmost) }
+            store.detach()
+        }
+    }
+
+    /// The contiguous span of turn indices currently on screen. `nil` before
+    /// anything has been laid out, which `ScrollRestore` reads as a first
+    /// paint.
+    private func visibleRange(from indices: Set<Int>) -> ClosedRange<Int>? {
+        guard let low = indices.min(), let high = indices.max() else { return nil }
+        return low...high
     }
 }
 

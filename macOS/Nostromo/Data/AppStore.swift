@@ -195,6 +195,15 @@ class AppStore: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    /// Verbatim `PaneFirstPaintAudit.Measurements` for every live
+    /// agent-authored pane, reusing the same `panes` registry
+    /// `paneDiagnosticsReport()` reads — no second registry. Consumed by
+    /// `TranscriptDiagnostics.snapshot()` (W1 — launch-smoke-test) and by
+    /// `reconcile`'s own launch-layout observability note.
+    func currentPaneMeasurements() -> [PaneFirstPaintAudit.Measurements] {
+        panes.allObjects.map { $0.currentMeasurements() }
+    }
+
     /// Start watching the app's own footprint. Called once, from `AppDelegate`.
     func startMemoryWatchdog() {
         // `done` is called once every pane has finished compacting, so the

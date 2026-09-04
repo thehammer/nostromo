@@ -11,9 +11,11 @@ landing as a comment explaining after the fact why a particular case was a
 stub — a target maintained by the compiler complaining, one incident at a
 time.
 
-That gap is what this doc is about, and why it's split into three layers
-rather than one. Run all three before considering an iOS change to pane
-rendering, addressing, or queue marking complete.
+That gap is what this doc is about, and why it's split into layers rather
+than one. Run L1–L3 before considering an iOS change to pane rendering,
+addressing, or queue marking complete. L4 (below) is macOS-only — it exists
+because the same "compiles" vs. "actually runs" gap this doc names for iOS
+turned out to have a macOS instance too, discovered the hard way.
 
 ## L1 — logic
 
@@ -21,8 +23,9 @@ rendering, addressing, or queue marking complete.
 covered by XCTest in `Shared/NostromoKit/Tests/NostromoKitTests/`.
 Everything the iOS *and* macOS clients share — wire decoding, the
 `DaemonStore` message-routing logic, `PerriPRRowModel`/`PaneAddress.marks`,
-`PaneSurfaceStub`'s stub-message table — lives here, not in either app
-target, specifically so it can be tested this way.
+and, as of W9, the platform-neutral `ProseRow` plan and its
+`ConversationPlan`/`TicketPlan`/`ProseAddressing` resolvers — lives here,
+not in either app target, specifically so it can be tested this way.
 
 **Run:**
 
@@ -128,6 +131,78 @@ exists separately from L2: this repo does not run iOS unit tests against a
 simulator, anywhere, ever (see below), so the only way to get L3's
 signal — "does this actually compile for the real target" — is against
 real hardware, which CI doesn't have.
+
+## L4 — does the thing actually run (macOS)
+
+**What:** `bin/nostromo-launch-smoke` — build the macOS app, launch it
+against a fixture daemon, and confirm from the running app's own reported
+measurements that it reached a real, laid-out multi-pane AppKit layout,
+survived a 15s observation window, produced no crash report, settled its
+CPU, and painted every pane at a real size.
+
+**Run:**
+
+```
+make mac-smoke
+```
+
+**Why this layer exists.** L3 (`xcodebuild build`) proves the Swift
+compiles. It cannot prove anything about live AppKit behavior — in
+particular, AppKit *reentrancy*: on 2026-09-03, every launch of the macOS
+app crashed with a stack overflow inside `RatioSplitView.layout()`
+(`.claude/bugs/resolved/2026-09-03-ratiosplitview-layout-infinite-recursion-crash-on-launch.md`
+in the primary repo checkout), while `make mac` built cleanly, `make
+mac-test` passed 535 tests, and CI was green on both jobs. `NostromoTests`
+is a host-less logic bundle — no `NSApplication`, no `NSWindow`, no AppKit
+layout loop — so this class of bug was not under-tested there, it was
+*structurally unreachable* there, the same way L1/L2 on the iOS side cannot
+observe anything that needs a real render pass. This is that gap's macOS
+instance, closed the same way: build the smallest thing that can actually
+exercise the live behavior, and make it fast enough to run before opening a
+PR.
+
+**What it can verify:** that the built app launches, that a focus reaches a
+tree containing a real split (not just a single leaf — the daemon-driven
+pane tree at a fresh launch, with no daemon answering, degrades to a
+single leaf that never constructs a split view at all, so this is not
+optional setup, it's the reproduction condition), that ≥2 panes actually
+laid out at a non-zero size, that at least one `RatioSplitView` reported its
+ratios successfully applied (positive proof it reached
+`NSSplitView.setPosition` and returned — the exact call that hung forever in
+the 2026-09-03 defect), that the app survived 15 real seconds without dying,
+spinning, or producing a crash report, and that no pane reports content in a
+window with zero width or height. Validated against the bug it exists to
+catch: `make mac-smoke-validate` reintroduces the exact 2026-09-03 defect in
+a scratch worktree and asserts the check reports FAIL, then reverts and
+asserts PASS.
+
+**What it cannot verify:** anything this file's "out of scope" list already
+names for the feature that built it — no UI driving (no clicks, no divider
+drags), no screenshot/visual-diff verification, and only four failure
+modes (process death, a crash report, unsettled CPU, a zero-size laid-out
+pane) — not constraint conflicts, layout warnings, wrong-but-alive layouts,
+or drawing artifacts. It also cannot verify multi-window or
+multi-display-specific layout: it opens exactly one window, on one screen,
+to avoid commandeering the operator's real displays, so a defect that only
+manifests with several windows or at a particular display geometry is
+outside what a green here means. A CI runner (from W2 on) is one virtual
+display of unstable size, while the operator has three real ones — the same
+environment-divergence caveat L2's "textual heuristic, not a control-flow
+proof" line carries, restated for geometry instead of source text. **A green
+here means "it launched and exercised a live multi-pane split for 15
+seconds," not "the GUI is fine."**
+
+**Why this one is not deferred the way L3's `xcodebuild` CI job is (for
+iOS).** The "why no simulator, anywhere" section below stops at one
+load-bearing argument: *a check nobody can run locally without attaching
+hardware is a check that silently stops being checked.* That argument does
+not apply to this check. It needs no simulator and no paired device — the
+identical command runs on the Mac a developer is already developing on and
+(from W2) on a stock GitHub-hosted macOS runner, because GitHub's macOS
+runner images auto-login into a real, live Aqua/WindowServer session. The
+incidental objection for iOS (a hand-edited test target, no committed
+scheme) is also not in play — this needs no test target at all, just a
+built `.app` and a socket.
 
 ## Worked example: ambient activity (W4)
 
@@ -252,6 +327,359 @@ position, that the unread dot doesn't reflow the strip when it appears, and
 that a show arriving while the operator is in an unrelated root tab (Fred)
 leaves them there. L1's transition-table tests prove the *decision* is
 correct in isolation; only a device shows the decision landing on screen.
+
+## Worked example: the iPad's regions (W6) — and the widest gap in this doc
+
+`ios-curated-view-parity` W6 (two presentations, selected by horizontal width
+class) is the wedge where the distance between **tested** and **verified** is
+largest, and the PRD says so itself:
+
+> The iPad layout is the one thing here nobody will be able to check… "Two
+> regions, correctly proportioned, that survive a rotation with their scroll
+> positions intact" is a claim about a live view hierarchy on a device that is
+> not in CI and has no test target. The mitigation is the pure-function
+> requirement — the layout *decision* is testable even when the layout
+> *rendering* isn't — but it is a partial mitigation, and the regular-width
+> presentation is the part of this PRD most likely to be quietly half-working.
+
+This section is the honest accounting of which half is which. Treat it as a
+warning about where to spend review attention, not as a formality.
+
+### Covered at L1 — decided by a value, proven with no device
+
+`layoutPlan(tree:width:)` is a pure function of a `PaneTree` and a
+`WidthClass`, with no view hierarchy, no `GeometryReader`, no environment and
+no device. That is not stylistic: extracting the layout *decision* is the only
+form in which any of this is checkable at all, so everything that can live
+there does.
+
+- **The plan shape**, for both widths: a single `repl` leaf as one bare
+  region; a two-way split as two regions with the direction preserved;
+  nested splits as regions *within* regions rather than a flattened row (the
+  assertion that catches a depth-one walk); two `tabs` nodes under a split as
+  two regions with distinct paths sharing no pane; a `tabs` node whose child
+  is a `split` as a region within a tab.
+- **Direction semantics** — that `horizontal` means a vertical divider
+  (left | right), asserted on the plan's own field, with the meaning stated in
+  the test's name. Getting this backwards produces a layout that looks
+  deliberate and is wrong.
+- **Ratio normalisation**, against every malformed shape a daemon could emit:
+  unnormalised, too short, too long, empty, zero, negative, `NaN`, `±inf`,
+  extreme skew. Every case asserts the invariant the view depends on — shares
+  sum to 1, every share strictly positive — because a plan whose shares don't
+  sum to 1 blanks a region on screen.
+- **Totality**: for a table of ~15 tree shapes (including one decoded through
+  the unknown-`kind` fallback), every leaf in `tree.paneIds` appears exactly
+  once in the plan, at **both** widths. No drops, no duplicates.
+- **Path stability**: a given node's `RegionPath` is identical whether the
+  plan was built compact or regular. This is the single most load-bearing
+  assertion in the wedge — it is what lets a frontmost tab, an unread mark or
+  a scroll key written in one presentation resolve in the other.
+- **The compact path is still W5's**, asserted by comparing the plan's entries
+  against `TabPlan.build` directly, so a future edit cannot quietly fork it.
+- **The state transitions** (`FocusRegionStateTests`): frontmost and unread
+  surviving a width-class change, the scroll-restore decision including its
+  already-visible-means-don't-move clause, and pruning of state for a region
+  the tree no longer contains.
+- **The store's per-region wiring** (`DaemonStoreTests`), driven through real
+  `focus_layout`/`pane_content` ingestion: a `focused_pane` landing in one
+  region leaves a sibling region's frontmost tab unmoved; unread is tracked
+  per region; the compact region keeps W5's behaviour alongside; a re-sent
+  identical tree still never fights the operator's per-region tab choice.
+
+### Covered at L2 — structural, checked by scanning source text
+
+- Nothing under `iOS/` references a device, screen, or orientation API
+  (`UIDevice`, `userInterfaceIdiom`, `UIScreen`, `UIInterfaceOrientation*`,
+  `orientation`, `willTransition(to:`). This is what keeps "the width test is
+  the only branch" true over time.
+- `@Environment(\.horizontalSizeClass)` is declared in exactly one file, and
+  `WidthClass` is named only by an **explicit allowlist** — the focus view,
+  the region container, and (from W8) the diff surface — so adding a consumer
+  requires editing the policy and therefore noticing.
+- No gesture in the region container and no persisted ratio key anywhere: the
+  operator cannot resize a region.
+- **No sheet is presented from inside a region view.** This is the structural
+  form of two preservation criteria (an open activity surface and a presented
+  decision surviving a width change), and asserting the structure is stronger
+  than asserting the outcome, because the outcome is only observable on a
+  device.
+- The region container references the plan's `shares` and contains no layout
+  fraction of its own — a heuristic over arithmetic, and one that will not
+  catch a fraction laundered through a named constant.
+- No durable scroll-restore key lives in view `@State`.
+
+### Checkable ONLY by hand, on an iPad
+
+These are not covered by L1, L2 or L3, and no amount of further test-writing
+would cover them. They are verified by running the manual pass in the wedge's
+plan on a real device and writing the observations into the PR body:
+
+| Criterion | Why nothing automated can see it |
+|---|---|
+| Two regions are **actually on screen at once**, visibly proportioned to the ratios the daemon sent | L1 proves the plan says `0.6/0.4`; only an eye confirms the pixels do |
+| The **live rotation transition** preserves both regions' frontmost tabs and both surfaces' scroll positions, with nothing reloading and nothing jumping to the top | A claim about a live view hierarchy mid-transition; there is no test target on this platform and no simulator in CI |
+| The same transition arriving by **dragging a Split View divider** rather than rotating | Same, by a second route that exercises different SwiftUI machinery |
+| **Per-region unread legibility** — that a mark in the region the operator is *not* looking at is noticeable from a normal viewing distance without hunting | An unread dot's existence is testable; its peripheral-vision legibility is a perceptual property |
+| The divider **does not look draggable** and nothing happens when you try | L2 proves no gesture is attached; only looking confirms it doesn't invite the attempt |
+| **Slide Over presents the compact layout**, identical to the phone | Requires an iPad in a multitasking configuration |
+| Every renderer and the ticker **look and behave identically at both widths** | The claim is about absence of difference across two live renderings |
+
+One row the PRD asks for is **not on that table, because it cannot be**: "a
+presented decision survives a width-class change." As of W6 the iOS app has no
+decision surface at all — W3 (`no_operator`/answer-once) landed on macOS only,
+and nothing under `iOS/` renders or answers an `ask_decision`. The structural
+half of the criterion is in place and enforced (no sheet is presented from
+inside a region, and the app root is where a decision would present, above the
+hierarchy a width change destroys), but the behavioural half is **vacuous on
+iOS today** and should be re-verified by hand by whichever wedge brings the
+decision surface to iOS. Recording it as passing would be exactly the
+false-confidence this doc exists to prevent.
+
+A build that passes L1, L2 and L3 is a **necessary but not sufficient** signal
+that W6 works. If you are reviewing this wedge and the PR body does not record
+what was actually seen on the device for each row above, the regular-width
+presentation has not been verified — it has only been argued for.
+
+### One thing W6 changed that is worth knowing about
+
+"Nothing reloads" could not be satisfied by scroll restoration alone. The
+transcript's turns used to live in a `@StateObject` inside `TranscriptView`,
+and a width-class change destroys and rebuilds that view — producing a fresh,
+empty store that re-requested the whole snapshot from the daemon, blanked the
+transcript, and let its autoscroll drag the operator to the bottom of a
+conversation she was reading the middle of. W6 hoists the `TranscriptStore`
+into `DaemonStore` (keyed by focus tag) and makes `attach`/`detach` idempotent
+and reference-counted, with teardown deferred one main-actor hop so it
+survives a rebuild whose `onAppear`/`onDisappear` can fire in either order.
+That ordering is not something L1 can observe either — it is on the manual
+list above, under the rotation row.
+
+## Worked example: the `code` surface (W7)
+
+`ios-curated-view-parity` W7 replaces the `code` stub with a real renderer
+(`CodeSurfaceView.swift`) and is the wedge the PRD names as the one that must
+not be softened: on a phone, "the agent points at line 412" is the entire
+value of showing a file at all. It is also a useful worked example because
+most of what makes it trustworthy is, unusually, provable with no device —
+the line arithmetic and the honesty rule are both pure functions ported into
+`Shared/NostromoKit`, and only the wrapping/scrolling/gutter *rendering* is
+UI-observable only.
+
+- **L1** (`CodeDocumentTests.swift`, `RowOffsetIndexTests.swift`,
+  `ScrollDecisionTests.swift`, `AnchorResolutionTests.swift`,
+  `RevisionLabelTests.swift`): the ported macOS suites passing unmodified —
+  line splitting, UTF-16 character-range arithmetic (including an emoji
+  case that diverges from `String.count`), out-of-document lookups
+  returning `nil` rather than a clamped range, and the scroll/no-scroll
+  decision table. `AnchorResolutionTests` is new: the three-state
+  `AnchorResolution`/`EmphasisResolution` resolvers, including the case
+  macOS's own `TicketContentView.resolveRows` gets wrong — an anchor kind
+  this surface can't use (`.comment`, `.section`, `.queueRow`) resolves to
+  `.unresolved` with a reason, where macOS silently drops it — and the
+  "partially in range clips to the intersecting rows, fully out of range is
+  `.matchedNothing`, never a clamped span" rule for emphasis.
+  `RevisionLabelTests` proves `working` and a 40-character SHA produce
+  different, non-hash-shaped, non-blank labels.
+- **L2** (`tests/ios_policy/test_ios_view_policy.py`): that the raw dump
+  cannot come back (`payload.text` referenced only inside a
+  `CodeDocument(` construction — the file-scanning analogue of the L1
+  proof), no truncation of any kind (no `prefix(`, no `lineLimit(` on the
+  content column, no numeric row cap — `PerriView.swift`'s own truncated
+  diff excluded by path as the deliberately different, deferred surface),
+  no horizontal scrolling, the `HStack(alignment: .top` gutter/wrap
+  mechanism, every `scrollTo(` gated by a `case .scrollTo` decision (ported
+  from macOS's `CodeContentViewTests`, broadened to accept `ScrollRestore`
+  alongside `ScrollDecision` — iOS's width-class rebuild has no macOS
+  analogue), no `.id(` keyed on `address`/`anchor`/`emphasis` (the
+  never-rebuilds-on-re-anchor property), every `AnchorResolution`/
+  `EmphasisResolution` case name referenced in the view (paired with L1's
+  exhaustive switches so an added case can't be silently ignored on either
+  end), and that `WidthClass`/`horizontalSizeClass` appear nowhere in this
+  file — a file view is the same file view at both widths.
+- **L3** (`make ios-build`): that `CodeSurfaceView.swift` compiles and is
+  wired into the app target's build phase, with no new warnings.
+
+What's left over — genuinely **UI-observable only** — is watching a real
+file render: that a soft-wrapped line's continuation actually shows a blank
+gutter cell rather than a repeated or advancing number, that a long line
+visibly wraps rather than requiring a horizontal pan, that an anchor already
+in the viewport really doesn't move the scroll position, that re-showing the
+same file at a new line really doesn't flash or rebuild before moving, and
+that an emoji-bearing file's gutter numbers stay visually aligned with the
+lines they label. L1 proves the arithmetic behind each of these; only a
+device shows the arithmetic landing on screen.
+
+## Worked example: `pr_diff` (W8)
+
+`ios-curated-view-parity` W8 replaces the `diff` stub with a real renderer
+that is also this PRD's only deliberate *structural* divergence from macOS
+(file-list-first on iOS, one flat document on macOS). That divergence is
+safe only because line resolution itself is NOT allowed to diverge — the
+same `path:line` must land on the same line on both clients — which is
+exactly the kind of claim a device can't check but a ported test suite can.
+
+- **L1** (`DiffDocumentTests.swift`, `DiffAddressingTests.swift`,
+  `FocusRegionStateTests.swift`'s new cases): `DiffDocumentTests` is macOS's
+  14-test suite ported and passing **unmodified** — flattening order, marker
+  restoration per kind (`.meta` verbatim), new-side-wins when a line is both
+  a removal and an addition, the removal-row fallback for an old-side-only
+  line, path-scoped vs. `nil`-path search, `rowIndices` empty-not-clamped,
+  the `tooLarge` notice's singular/plural wording, a rename header, and
+  `text == rows joined`. Any test that had needed a change to pass would
+  have been a reported cross-client divergence, not an adjustment — none
+  did. `DiffAddressingTests` covers the diff-flavoured resolvers: the
+  `tooLarge` gate taking priority over every anchor/emphasis-specific rule
+  (a gated diff has no rows to resolve against, so even an unusable anchor
+  kind must still report the gate), "this file isn't in the diff" and "this
+  line isn't in the diff" as two distinctly-worded, distinctly-assertable
+  reasons, and `matchedNothing` vs. `.rows([])` regression guards. The
+  `FocusRegionState` additions cover the selected-file slot (identity-scoped
+  so a changed PR silently stops resolving a stale filename, survives a
+  `.splitTopology` rebuild, pruned when its pane is no longer live) and the
+  per-file scroll-restore trio.
+- **L2** (`tests/ios_policy/test_ios_view_policy.py`): `WidthClass` named
+  only by the allowlist, now including `DiffSurfaceView.swift` (and *not*
+  `DiffFileListView.swift`/`DiffFileContentView.swift`, which take identical
+  parameters at both widths); no truncation and no horizontal panning across
+  the three new files; rows rendered through the SAME `CodeRowView` `code`
+  uses (asserted by reference, not by re-deriving the gutter/wrap rules a
+  second time); every scroll gated by a `case .scrollTo` decision; no
+  `newN`/`oldN` COMPARISON anywhere under `iOS/` (a plain nil-coalescing read
+  for gutter display is fine — resolving which row a line means is
+  `DiffDocument`/`DiffAddressing`'s job, never re-derived in a view); no
+  `@State` named `selectedFile`/`currentFile` (the selected file lives in
+  `FocusRegionState`); every `AnchorResolution`/`EmphasisResolution` case
+  name referenced in `DiffSurfaceView.swift`; and that `tooLarge` is named
+  in `DiffSurfaceView.swift` at all (an honest heuristic — it proves the
+  branch exists, not that it's structured to replace the whole surface;
+  that structural claim is why `tooLarge` is checked FIRST in this view's
+  `body`, before either width's arrangement, rather than trusted to a
+  regex).
+- **L3** (`make ios-build`): that the three new files and the extracted
+  `CodeRowView` compile and are wired into the app target's build phase,
+  with no new warnings, and that `.diff` leaving `PaneSurfaceStub`'s
+  deferred-kinds table doesn't break the switch's exhaustiveness anywhere.
+
+What's left over — genuinely **UI-observable only** — is everything the PRD
+actually cares about seeing: that the anchored bypass really opens straight
+into the file with **no list flash** first; that the regular-width
+arrangement really shows the list and the content **at the same time**,
+and that selecting a different file really doesn't lose the list; that a
+line this PR deletes really lands on the same visual line on both clients
+side by side; that added/removed/context/hunk-header rows are really
+distinguishable in dark mode and in a greyscale screenshot (colour is one of
+three signals, never the only one); and that a `tooLarge` diff really reads
+as gated rather than as an empty, unremarkable PR. L1 proves the resolution
+arithmetic agrees between clients; only a device shows the two clients
+agreeing on screen, side by side.
+
+## Worked example: the prose surface (W9)
+
+`ios-curated-view-parity` W9 replaces both remaining stubs (`pr_conversation`,
+`ticket`) with one renderer, and is the wedge where iOS deliberately renders
+**more** of the payload than macOS does — thread grouping, resolved state,
+and `conversation_error` are all on the wire and all discarded by macOS's
+`MarkdownBlockDocument`. That asymmetry is exactly why this wedge's L1 suite
+is unusually load-bearing: every one of those three facts, plus every
+unresolved-anchor reason, is a property of a row list, not of a rendered
+screen, so it is provable with no device at all.
+
+- **L1** (`ProsePlanTests.swift`, `ConversationPlanTests.swift`,
+  `TicketPlanTests.swift`, `ProseAddressingTests.swift`): every `MdBlock`/
+  `MdSpan` kind maps to a row/span, including nesting (increasing `indent`,
+  never flattening), `lang` surviving a fenced block, and a stable,
+  ascending row `id` sequence. `ConversationPlanTests` ports
+  `MarkdownBlockDocumentTests`'s ordering assertion as a row-index
+  assertion — thread order, then comment order, never interleaved — and
+  separately proves an inline thread's header carries `path`/`line` while a
+  general thread's does not, a resolved thread's header carries the flag, and
+  `conversation_error` produces a notice row when set and none when absent
+  (both directions asserted, so a permanent warning on a healthy PR would be
+  caught same as a missing one on a broken one). `TicketPlanTests` ports
+  `TicketBlockDocumentTests`'s header/nil-assignee assertions and proves the
+  display-name mapping matches macOS's `TicketBlockDocument.displayName(_:)`
+  by name in the test comment. `ProseAddressingTests` is the honesty suite:
+  every `Anchor`/`Emphasis` case this surface can't use resolves to
+  `.unresolved`/`.matchedNothing` with a reason naming what was asked for —
+  an absent comment id (naming the id and the actual comment count), an
+  anchor kind a conversation can't use (naming the kind — the exact case
+  macOS's `ConversationContentView` drops), a ticket section name that
+  cannot be matched (naming the requested name **and** falling back to the
+  description's row — both halves asserted in one test, because either half
+  alone reproduces a different macOS bug), a malformed or out-of-range
+  `"comment:<n>"` index (naming both the requested and actual counts), and
+  that re-emphasising is a pure function — calling `resolve(emphasis:)` a
+  second time carries no memory of the first call, which is what makes the
+  `TicketContentView.clearEmphasis` wipe-everything defect structurally
+  impossible here rather than merely avoided by care.
+- **L2** (`tests/ios_policy/test_ios_view_policy.py`): `ProseSurfaceView.swift`
+  reads no width class (a dedicated pin, on top of the generic allowlist
+  check `DiffSurfaceView.swift` alone remains on); no truncation (no
+  `prefix(`, no numeric row cap, no `lineLimit(` scoped to `codeBlockView`);
+  no horizontal panning; every `scrollTo(` gated by a `case .scrollTo`
+  decision; `thread.resolved`/`.path`/`.line` all referenced in the view (the
+  anti-`MarkdownBlockDocument` policy, named as such in its failure message);
+  `.conversationIncomplete` referenced (the client-side half of "the PRD's
+  forbidden state is pinned," paired with L1's "renders when set, not when
+  absent" pair); every `AnchorResolution`/`EmphasisResolution` case name
+  present (paired with L1's exhaustive switches); no client-side markdown
+  parsing anywhere under `iOS/` (no `AttributedString(markdown:`, no manual
+  backtick or `#`-prefix scan) — a standing prohibition, not a property of
+  one file; and `lang` is never discarded, banning both macOS's exact shape
+  (`_ = lang`) and its client-side equivalent (a `.codeBlock` pattern that
+  never binds `lang` at all). Every check from W2–W8 still passes unchanged,
+  and the `PaneSurfaceStub` table — empty as of this wedge — was deleted
+  along with its L1 test rather than kept as a vestigial table with no
+  entries and no explanation.
+- **L3** (`make ios-build`): that `ProseSurfaceView.swift` compiles and is
+  wired into the app target's build phase, with no new warnings, and that
+  `.prConversation`/`.ticket` leaving the stub table doesn't break the
+  `PaneContentWire` switch's exhaustiveness.
+
+What's left over — genuinely **UI-observable only** — is everything about
+*seeing* the divergence from macOS land correctly: that an inline review
+thread's `path:line` badge and a resolved thread's three-signal styling are
+actually legible (in dark mode and in greyscale); that a `conversation_error`
+notice actually sits above the partial threads rather than replacing them;
+that a fenced code block in a comment actually renders monospaced rather
+than as flattened prose; that re-emphasising a ticket section actually
+leaves the previous section's inline-code and code-block tints alone on
+screen (not just in the resolver's return value); and that the same PR,
+viewed on macOS and iOS side by side, visibly shows the divergence this PRD
+accepts as a risk — an inline comment and a general comment looking
+identical on one client and distinct on the other; an unmatched section
+anchor looking identical to a matched one on macOS and stating its own
+failure on iOS. L1 proves every one of these is a fact about the row list;
+only a device (two, side by side) shows the two clients disagreeing on
+screen exactly where this PRD says they're allowed to.
+
+## Coverage across all nine wedges
+
+Every wedge from `ios-curated-view-parity` is now shipped. This table is the
+honest summary: what is provable without a device (L1 pure-function logic,
+L2 source-scanning policy), and what remains checkable only by hand.
+
+| Wedge | Surface | L1 | L2 | Device-only |
+|---|---|---|---|---|
+| W1 | Tabs decoder correctness | ✅ | — | Tab strip rendering on a real tree |
+| W2 | Verification harness + `pr_list`/queue-row marking | ✅ | ✅ | — |
+| W3 | (macOS) PR conversation data/fetch | ✅ (macOS) | — | — |
+| W4 | Ambient activity ticker | ✅ | ✅ | No-visible-motion while scrolled; long-fan-out memory plateau |
+| W5 | Compact tab strip: focus, labels, `reason`, unread | ✅ | ✅ | Frontmost-on-arrival, scroll-position-on-switch, unread-dot reflow, background-tab isolation |
+| W6 | iPad two-presentation layout | ✅ (plan only) | ✅ | The entire regular-width presentation on screen: proportions, live rotation, Split View divider drag, per-region unread legibility, Slide Over |
+| W7 | `code` surface | ✅ | ✅ | Wrap/gutter rendering, anchor-in-viewport stability, re-show without flash, emoji gutter alignment |
+| W8 | `pr_diff` surface | ✅ | ✅ | Anchored bypass with no list flash, side-by-side file list, cross-client line agreement on screen, dark-mode/greyscale kind legibility |
+| W9 | `pr_conversation`/`ticket` prose surface | ✅ | ✅ | Thread/resolved-state/`conversation_error` legibility, fenced-code rendering, per-range emphasis surviving re-emphasis on screen, the macOS/iOS divergence seen side by side |
+
+The pattern holds across every wedge with a rendering surface: the
+**decision** (what should be shown, and what an anchor resolves to) is
+provable at L1 with no device; the **rendering** of that decision — wrapping,
+scrolling, colour, legibility, motion — is provable only by running the app
+on real hardware and looking. A green `make kit-test`/`make python-test`/
+`make ios-build` run is a necessary, not sufficient, signal for any wedge in
+this table; the device-only column is what a PR body must still report on
+by hand.
 
 ## Why no simulator, anywhere
 
