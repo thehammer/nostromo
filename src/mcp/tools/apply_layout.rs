@@ -353,10 +353,10 @@ pub(crate) fn fetch(
             })
         }
         SOURCE_FILE => {
-            let (request, root, revision) = file_request_context(state, args)?;
-            let text = file_source::read_at_revision(&root, &revision, &request.path)?;
-            file_source::validate_against(&text, &request)?;
-            Ok(code_content(request, revision, text))
+            let ctx = file_request_context(state, args)?;
+            let text = file_source::read_at_revision(&ctx.root, &ctx.revision, &ctx.request.path)?;
+            file_source::validate_against(&text, &ctx.request)?;
+            Ok(code_content(ctx.request, ctx.revision, text))
         }
         SOURCE_PR_CONVERSATION => {
             let snapshot = state.perri_pr_rx.borrow().clone();
@@ -557,22 +557,29 @@ pub(crate) async fn fetch_async(
         return fetch(source, state, args);
     }
 
-    let (request, root, revision) = file_request_context(state, args)?;
-    let text = match file_source::read_at_revision(&root, &revision, &request.path) {
+    let ctx = file_request_context(state, args)?;
+    let text = match file_source::read_at_revision(&ctx.root, &ctx.revision, &ctx.request.path) {
         Ok(text) => text,
-        Err(FileSourceError::UnresolvableRevision) => {
-            let repo = state
-                .perri_pr_rx
-                .borrow()
-                .as_ref()
-                .map(|s| s.repo.clone())
-                .unwrap_or_default();
-            file_source::read_from_github(&repo, &revision, &request.path).await?
-        }
+        Err(FileSourceError::UnresolvableRevision) => match &ctx.pin {
+            // A pin exists and the caller's own working directory really is
+            // that PR's repo — the legitimate case (a PR head from a fork
+            // that was never fetched locally). Unchanged from before W5.
+            Some(pin) if file_source::github_fallback_trusted(ctx.local_repo.as_deref(), &pin.repo) => {
+                file_source::read_from_github(&pin.repo, &ctx.revision, &ctx.request.path).await?
+            }
+            // A pin exists but names a repo the caller's working directory
+            // does not resolve to (or that couldn't be determined at all):
+            // refusing here is the whole point of W5 — the alternative is
+            // silently serving a foreign repo's content with `ok: true`.
+            Some(_) => return Err(FileSourceError::RevisionRepoMismatch.into()),
+            // No PR pinned at all — nothing to fall back to; unchanged from
+            // before W5 (an empty repo string simply fails to resolve).
+            None => file_source::read_from_github("", &ctx.revision, &ctx.request.path).await?,
+        },
         Err(e) => return Err(e.into()),
     };
-    file_source::validate_against(&text, &request)?;
-    Ok(code_content(request, revision, text))
+    file_source::validate_against(&text, &ctx.request)?;
+    Ok(code_content(ctx.request, ctx.revision, text))
 }
 
 /// [`SOURCE_TICKET`]'s real fetch path (D5): serve a still-fresh TTL-cached
@@ -613,18 +620,68 @@ async fn fetch_ticket_async(
     ticket_content(&ticket, params)
 }
 
-/// The `(request, root, revision)` a [`SOURCE_FILE`] fetch runs against,
-/// shared by [`fetch`] and [`fetch_async`] so the two can't resolve the same
-/// `params` to two different roots or revisions.
+/// The requesting focus's own pinned PR (W5 — current-pr-collision):
+/// `{repo, number, head_sha}`, or `None` when nothing is under review.
+///
+/// This is the single request-scoped accessor every pin-aware call site
+/// routes through — [`file_request_context`]'s repo-scoped revision
+/// resolution, `show.rs`'s `current_pin` error decoration, and
+/// `perri.get_state`'s `current_pin` field all call this rather than reading
+/// `state.perri_pr_rx` directly.
+///
+/// `tag` is accepted but **deliberately ignored** today: the pin is a single
+/// daemon-wide value with no per-focus isolation yet. Threading `tag` through
+/// now — rather than adding it later — is what makes a future per-focus pin
+/// (each focus reviewing its own PR) a change to this function's *body*
+/// alone, with every call site already correct for that world.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RequestPin {
+    pub repo: String,
+    pub number: u64,
+    pub head_sha: String,
+}
+
+pub(crate) fn pin_for_request(state: &McpSharedState, _tag: Option<&str>) -> Option<RequestPin> {
+    let snap = state.perri_pr_rx.borrow();
+    let snap = snap.as_ref()?;
+    Some(RequestPin {
+        repo: snap.repo.clone(),
+        number: snap.pr_number?,
+        head_sha: snap.head_sha.clone(),
+    })
+}
+
+/// The resolved inputs a [`SOURCE_FILE`] fetch runs against, shared by
+/// [`fetch`] and [`fetch_async`] so the two can't resolve the same `params`
+/// to two different roots, revisions, or repo-mismatch decisions.
+struct FileRequestContext {
+    request: FileRequest,
+    root: std::path::PathBuf,
+    revision: String,
+    /// The requesting focus's pinned PR, if any — carried alongside
+    /// `revision` so [`fetch_async`]'s GitHub-fallback decision doesn't need
+    /// to re-read `perri_pr_rx` a second time and risk a different answer.
+    pin: Option<RequestPin>,
+    /// The `owner/name` the request's root actually resolves to, when
+    /// determinable — see [`file_source::local_repo_slug`].
+    local_repo: Option<String>,
+}
+
 fn file_request_context(
     state: &McpSharedState,
     args: FetchArgs<'_>,
-) -> Result<(FileRequest, std::path::PathBuf, String), ApplyLayoutError> {
+) -> Result<FileRequestContext, ApplyLayoutError> {
     let params = args.params.ok_or(FileSourceError::InvalidParams)?;
     let request = FileRequest::from_params(params)?;
     let root = file_root(state, args.tag);
-    let revision = file_source::resolve_revision(&request, &head_sha(state));
-    Ok((request, root, revision))
+    let pin = pin_for_request(state, args.tag);
+    let local_repo = file_source::local_repo_slug(&root);
+    let revision = file_source::resolve_revision(
+        &request,
+        pin.as_ref().map(|p| (p.repo.as_str(), p.head_sha.as_str())),
+        local_repo.as_deref(),
+    );
+    Ok(FileRequestContext { request, root, revision, pin, local_repo })
 }
 
 /// The `PaneContentWire::Code` a resolved file read produces — pulled out
@@ -660,16 +717,6 @@ fn file_root(state: &McpSharedState, tag: Option<&str>) -> std::path::PathBuf {
             .and_then(|d| d.session_mgr.lock().ok()?.cwd_for(tag))
     });
     from_session.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
-}
-
-/// The PR-under-review's head SHA, or `""` when no PR is loaded.
-fn head_sha(state: &McpSharedState) -> String {
-    state
-        .perri_pr_rx
-        .borrow()
-        .as_ref()
-        .map(|s| s.head_sha.clone())
-        .unwrap_or_default()
 }
 
 /// The "no PR loaded" placeholder both PR-backed sources render.
@@ -1754,4 +1801,169 @@ mod tests {
         assert_eq!(err.code(), "unsupported_provider");
         assert!(err.detail().unwrap().contains("jira"));
     }
+
+    // ── RequestPin / pin_for_request (W5 — current-pr-collision) ─────────────
+    //
+    // `pin_for_request` is the single place that reads "what PR is pinned
+    // right now" for a request's purposes — a `RequestPin` names the repo,
+    // number, and head sha, or `None` when nothing is under review. `tag` is
+    // accepted but intentionally unused today (see the doc comment Cody
+    // writes on `pin_for_request`) so a later per-focus-isolation change is a
+    // body-only change with no call-site sweep.
+
+    #[test]
+    fn pin_for_request_reflects_the_pinned_prs_repo_number_and_head_sha() {
+        let mut snap = snapshot_with(Some(42), None);
+        snap.head_sha = "abc123".to_string();
+        let state = state_with_pr_snapshot(snap);
+
+        let pin = pin_for_request(&state, Some("perri"));
+        assert_eq!(
+            pin,
+            Some(RequestPin {
+                repo: "acme/web".into(),
+                number: 42,
+                head_sha: "abc123".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn pin_for_request_is_none_when_the_snapshot_describes_no_pr_under_review() {
+        let state = state_with_pr_snapshot(snapshot_with(None, None));
+        assert_eq!(pin_for_request(&state, Some("perri")), None);
+    }
+
+    #[test]
+    fn pin_for_request_is_none_with_no_snapshot_seeded_at_all() {
+        let (state, _bcast) = make_state();
+        assert_eq!(pin_for_request(&state, Some("perri")), None);
+    }
+
+    // ── SOURCE_FILE's async fetch: a pin for a different repo refuses rather
+    // than serving that foreign PR's content (W5 — current-pr-collision) ─────
+    //
+    // The bug this closes: a second session repins the PR (`perri.load_pr`)
+    // while this focus is reviewing something rooted in a different repo. An
+    // *implicit* revision never reaches this refusal at all — it degrades
+    // straight to the working tree (see `file_source.rs`'s own
+    // `resolve_revision` tests) and reads local content correctly. What must
+    // refuse is an *explicit* revision that only the foreign, mismatched
+    // pinned repo could resolve: without this check, the async GitHub
+    // fallback would serve it anyway, rendering the wrong repo's content.
+
+    #[tokio::test]
+    async fn fetch_async_source_file_refuses_when_the_pinned_repo_does_not_match_the_tags_session_cwd(
+    ) {
+        // 1. A real temp git repo as the tag's session cwd, with an origin
+        // remote this focus actually belongs to.
+        let repo = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .arg("-C").arg(repo.path())
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C").arg(repo.path())
+            .args(["remote", "add", "origin", "git@github.com:acme/root-repo.git"])
+            .status()
+            .unwrap();
+        std::fs::write(repo.path().join("src.rs"), b"root repo content\n").unwrap();
+        std::process::Command::new("git")
+            .arg("-C").arg(repo.path())
+            .args(["add", "src.rs"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C").arg(repo.path())
+            .args([
+                "-c", "user.email=redd@example.com",
+                "-c", "user.name=Redd Test",
+                "-c", "commit.gpgsign=false",
+                "commit", "-q", "-m", "initial",
+            ])
+            .status()
+            .unwrap();
+
+        let (state, _bcast) = make_state();
+
+        // Wire "perri"'s session cwd to this repo. `spawn_session` is the
+        // only way `SessionManager` records a tag's cwd; `CLAUDE_BIN_ENV`
+        // is pointed at `/bin/sh` so the real spawn never touches the
+        // real `claude` binary (mirrors `session_manager.rs`'s own
+        // `after_spawn_session_tag_for_session_id_resolves` fixture) — the
+        // child's behavior is irrelevant here, only the recorded cwd matters.
+        std::env::set_var(crate::ipc::session_manager::CLAUDE_BIN_ENV, "/bin/sh");
+        {
+            let daemon = state.daemon.as_ref().unwrap();
+            let mut mgr = daemon.session_mgr.lock().unwrap();
+            mgr.spawn_session(
+                "perri".into(),
+                "perri".into(),
+                "Perri".into(),
+                Some(repo.path().to_path_buf()),
+                None,
+                false,
+            )
+            .expect("spawn stub session");
+        }
+        std::env::remove_var(crate::ipc::session_manager::CLAUDE_BIN_ENV);
+
+        // 2. Seed perri_pr_rx with a PrSnapshot pinned to a DIFFERENT repo, at
+        // a plausible-but-nonexistent head sha (so a local git resolution
+        // would fail and fall through to the GitHub-fallback decision this
+        // test is actually about).
+        let mut state = state;
+        let (_tx, rx) = tokio::sync::watch::channel(Some(
+            serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(json!({
+                "pr_number": 99, "repo": "acme/other-repo", "title": "Unrelated",
+                "author": "bob", "url": "https://example.com", "diff": "",
+                "stale": false, "error": null,
+                "head_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            }))
+            .unwrap(),
+        ));
+        state.perri_pr_rx = rx;
+
+        // 3. Deliberately an EXPLICIT, git-unresolvable revision — not an
+        // implicit one. `resolve_revision`'s own pinned contract (see
+        // `file_source.rs`'s `resolve_revision_absent_with_a_pin_for_a_different_repo_...`
+        // test) already degrades an *implicit* mismatch straight to the
+        // working tree, which here would just successfully read "src.rs"
+        // off disk (it's committed, so it exists there too) — that's
+        // correct behavior, not what this test is about. This test is about
+        // the *other* refusal: an explicit revision only a foreign
+        // (mismatched) pinned repo could possibly serve, once the local
+        // clone can't resolve it.
+        let params = json!({
+            "path": "src.rs",
+            "revision": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        });
+        let result = fetch_async(
+            SOURCE_FILE,
+            &state,
+            FetchArgs { tag: Some("perri"), placeholder: None, params: Some(&params) },
+        )
+        .await;
+
+        // 4. Must refuse with RevisionRepoMismatch — never Ok, never a bare
+        // UnresolvableRevision (which would mean "we tried GitHub against the
+        // mismatched repo and it happened to fail", not "we refused to try").
+        assert_eq!(
+            result,
+            Err(ApplyLayoutError::FileRefused(FileSourceError::RevisionRepoMismatch)),
+            "an explicit revision that only a foreign pinned repo could serve must refuse \
+             rather than fetch against a repo the caller's own session cwd doesn't match"
+        );
+    }
+
+    // TODO(cody): the test above drives a real `spawn_session` (with
+    // `CLAUDE_BIN_ENV` pointed at `/bin/sh`) to give "perri" a session cwd —
+    // this is the confirmed fixture, mirroring `session_manager.rs`'s own
+    // `after_spawn_session_tag_for_session_id_resolves`/`after_restart_...`
+    // tests. If that spawn path ever proves too heavy/flaky in CI, the same
+    // scenario is also provable purely against `file_source::resolve_revision`
+    // + `file_source::github_fallback_trusted` composed together (see
+    // `file_source.rs`'s `a_path_shared_by_both_repos_always_resolves_to_the_local_repos_own_content`
+    // for that pure-function version of the identical scenario).
 }

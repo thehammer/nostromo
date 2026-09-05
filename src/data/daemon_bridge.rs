@@ -99,6 +99,10 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         // thin-client; the Rust TUI has no window to attach a sheet to.
         | ServerMsg::DecisionRequest { .. }
         | ServerMsg::DecisionResolved { .. }
+        // Daemon-originated notifications (W5 — current-pr-collision) are
+        // consumed by the macOS thin-client's toast banner; the Rust TUI has
+        // no equivalent surface (and no production caller sends one yet).
+        | ServerMsg::Notification { .. }
         // Ambient activity snapshot/health are consumed by the Swift ticker;
         // the TUI keeps its existing `AgentBus`-fed status-bar rendering via
         // `ServerMsg::Activity` above and is otherwise unchanged (D9).

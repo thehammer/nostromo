@@ -136,6 +136,17 @@ pub enum PermissionDecision {
     Deny,
 }
 
+/// Severity of a `ServerMsg::Notification` (W5 — current-pr-collision).
+/// Mirrors the macOS client's `ToastSeverity` case-for-case so decoding is a
+/// direct string match with no translation table to drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationLevel {
+    Info,
+    Warning,
+    Alert,
+}
+
 /// One choice offered by a `ServerMsg::DecisionRequest` (W6 decision modals).
 ///
 /// Deliberately just `id`/`label`/`detail` — there is no free-form content
@@ -1231,6 +1242,25 @@ pub enum ServerMsg {
         resolution: DecisionResolution,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         choice_id: Option<String>,
+    },
+
+    /// A daemon-originated, tag-addressed, operator-facing notification (W5
+    /// — current-pr-collision), modelled directly on `DecisionRequest`:
+    /// same broadcast-then-topic-gate shape, same "one daemon-side origin,
+    /// every window renders it" contract. Routed under `Topic::Layout`
+    /// rather than a new topic, so an older client that hasn't added a
+    /// dedicated subscription still receives it (it already subscribes to
+    /// `layout` for `FocusLayout`/`PaneContent`) instead of silently
+    /// dropping it on a version skew.
+    ///
+    /// Ships with **no production caller** — this wedge lands the transport
+    /// end to end (daemon variant, topic gate, client decode, toast
+    /// rendering) and proves it with a broadcast-path test; a later wedge
+    /// (the same-PR advisory) wires the first real trigger.
+    Notification {
+        tag: String,
+        level: NotificationLevel,
+        message: String,
     },
 
     // ── ambient activity (activity-path wedge) ───────────────────────────────
@@ -2557,6 +2587,51 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["type"], "decision_request");
+    }
+
+    // ── ServerMsg::Notification (W5 — current-pr-collision) ───────────────────
+    //
+    // Modeled directly on `ServerMsg::DecisionRequest` above: a same-PR
+    // advisory two wedges from now (a session learning "the PR you're
+    // reviewing was just reloaded by another session") needs a daemon → client
+    // transport that carries a tag, a severity, and a message. No production
+    // caller exists yet — this round-trips the wire shape so the transport is
+    // proven before anything sends through it.
+
+    #[test]
+    fn notification_round_trips_with_all_fields() {
+        round_trip_server(ServerMsg::Notification {
+            tag: "perri".into(),
+            level: NotificationLevel::Warning,
+            message: "PR #4526 was reloaded by another session.".into(),
+        });
+    }
+
+    #[test]
+    fn notification_type_tag_is_notification() {
+        let v = serde_json::to_value(ServerMsg::Notification {
+            tag: "perri".into(),
+            level: NotificationLevel::Warning,
+            message: "test".into(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "notification");
+    }
+
+    #[test]
+    fn notification_level_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_value(NotificationLevel::Info).unwrap(),
+            serde_json::json!("info")
+        );
+        assert_eq!(
+            serde_json::to_value(NotificationLevel::Warning).unwrap(),
+            serde_json::json!("warning")
+        );
+        assert_eq!(
+            serde_json::to_value(NotificationLevel::Alert).unwrap(),
+            serde_json::json!("alert")
+        );
     }
 
     #[test]

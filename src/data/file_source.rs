@@ -4,15 +4,26 @@
 //!
 //! ## Revision resolution (D5)
 //!
-//! - **absent** — the PR under review's head SHA when a PR is loaded, else the
-//!   working tree. This is the reading that matches what an agent means when it
-//!   says "show me this file" mid-review: the file as the PR has it, not as the
-//!   operator's dirty worktree has it.
+//! - **absent** — the requesting focus's pinned PR's head SHA when one is
+//!   loaded *and* the focus's own working directory is actually rooted in
+//!   that PR's repo, else the working tree. This is the reading that matches
+//!   what an agent means when it says "show me this file" mid-review: the
+//!   file as the PR has it, not as the operator's dirty worktree has it — but
+//!   only when "the PR" and "this working directory" are the same repo. A
+//!   second, unrelated session pinning a *different* repo's PR must never
+//!   make an implicit revision here resolve to that foreign PR's head SHA
+//!   (W5 — current-pr-collision); seeing that the repos don't match — or
+//!   being unable to tell — falls back to the working tree instead, same as
+//!   having no pin at all. See [`resolve_revision`]'s `local_repo` parameter
+//!   and [`github_fallback_trusted`].
 //! - **`"working"`** — read from disk, relative to the focus's session cwd.
 //! - **anything else** — a git revision: `git show <rev>:<path>` in the session
 //!   cwd, falling back to the GitHub contents API when git doesn't have the
 //!   object. That fallback is the common case, not the exotic one: a PR head
-//!   from a fork was very likely never fetched locally.
+//!   from a fork was very likely never fetched locally. That fallback is only
+//!   ever taken against a repo [`github_fallback_trusted`] says the caller's
+//!   own working directory actually is — never against a merely-pinned repo
+//!   the caller happens not to be rooted in.
 //!
 //! ## Why every failure is a refusal, not a best-effort render
 //!
@@ -48,6 +59,12 @@ pub enum FileSourceError {
     InvalidEmphasisRange,
     /// The revision could not be resolved by git or by the contents API.
     UnresolvableRevision,
+    /// An implicit ("absent") revision would only be servable by trusting a
+    /// PR pinned to a repo other than the one the caller's own working
+    /// directory is actually rooted in (W5 — current-pr-collision). Refused
+    /// rather than silently serving that foreign PR's content against the
+    /// wrong repo — see [`github_fallback_trusted`].
+    RevisionRepoMismatch,
 }
 
 impl FileSourceError {
@@ -61,6 +78,7 @@ impl FileSourceError {
             FileSourceError::AnchorBeyondEof => "anchor_beyond_eof",
             FileSourceError::InvalidEmphasisRange => "invalid_emphasis_range",
             FileSourceError::UnresolvableRevision => "unresolvable_revision",
+            FileSourceError::RevisionRepoMismatch => "revision_repo_mismatch",
         }
     }
 }
@@ -187,12 +205,84 @@ pub struct FileContent {
 
 /// Resolve `request.revision` to the concrete revision string to read at.
 ///
-/// `head_sha` is the PR-under-review's head SHA, empty when no PR is loaded.
-pub fn resolve_revision(request: &FileRequest, head_sha: &str) -> String {
-    match &request.revision {
-        Some(rev) => rev.clone(),
-        None if !head_sha.is_empty() => head_sha.to_string(),
-        None => WORKING_TREE.to_string(),
+/// `pin` is the requesting focus's own pinned PR — `Some((repo, head_sha))`
+/// — or `None` when nothing is pinned. `local_repo` is the `owner/name` the
+/// request's root actually resolves to, via [`local_repo_slug`], when
+/// determinable.
+///
+/// An explicit `request.revision` always wins verbatim — the caller named a
+/// literal revision, and this function makes no repo judgement about it
+/// (W5's fix is scoped to the *implicit* case only). "Absent" resolves to the
+/// pin's head SHA only when `local_repo` is known to be that same repo;
+/// otherwise — a genuine mismatch, or `local_repo` couldn't be determined at
+/// all — it falls back to the working tree exactly as if nothing were
+/// pinned. Resolving a foreign PR's head SHA against a different repo's root
+/// is exactly the silent-wrong-content bug this rule exists to close (see
+/// the module doc).
+pub fn resolve_revision(
+    request: &FileRequest,
+    pin: Option<(&str, &str)>,
+    local_repo: Option<&str>,
+) -> String {
+    if let Some(rev) = &request.revision {
+        return rev.clone();
+    }
+    if let Some((pin_repo, head_sha)) = pin {
+        if !head_sha.is_empty() && github_fallback_trusted(local_repo, pin_repo) {
+            return head_sha.to_string();
+        }
+    }
+    WORKING_TREE.to_string()
+}
+
+/// Whether it is safe to trust `fallback_repo` — the repo a PR is pinned
+/// to — as the repo a request's local root actually is, once a local read
+/// has failed and the only remaining options are "serve via GitHub against
+/// `fallback_repo`" or "refuse". True only when `local_repo` is positively
+/// known to be that same repo: an undeterminable `local_repo` (`None`) is
+/// treated the same as a mismatch, never as an implicit pass — this module's
+/// rule is "never silently serve wrong content," and an unprovable match is
+/// not a proven one.
+pub fn github_fallback_trusted(local_repo: Option<&str>, fallback_repo: &str) -> bool {
+    local_repo == Some(fallback_repo)
+}
+
+/// The `owner/name` repo slug the git repo rooted at `root` resolves to, via
+/// its `origin` remote — `None` when `root` isn't a git repo, has no
+/// `origin` remote, or that remote's URL doesn't parse into exactly one
+/// owner and one name. Supports both the SSH (`git@host:owner/name(.git)`)
+/// and HTTPS (`https://host/owner/name(.git)`) forms `git remote` commonly
+/// prints; the `.git` suffix is optional in either.
+pub fn local_repo_slug(root: &Path) -> Option<String> {
+    let output = git(root, &["remote", "get-url", "origin"]).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8(output.stdout).ok()?;
+    parse_repo_slug(url.trim())
+}
+
+/// Parse a git remote URL's `owner/name` out of either its SSH or HTTPS
+/// form. Private: [`local_repo_slug`] is the public entry point, so the two
+/// can't drift on what counts as a well-formed remote.
+fn parse_repo_slug(url: &str) -> Option<String> {
+    let stripped = url.strip_suffix(".git").unwrap_or(url);
+    let path = if let Some(rest) = stripped.strip_prefix("git@") {
+        // SSH scp-like form: git@host:owner/name
+        rest.split_once(':').map(|(_, path)| path)?
+    } else if let Some(idx) = stripped.find("://") {
+        // A URL with a scheme: scheme://host/owner/name
+        let after_scheme = &stripped[idx + 3..];
+        after_scheme.split_once('/').map(|(_, path)| path)?
+    } else {
+        return None;
+    };
+    let mut parts = path.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty() => {
+            Some(format!("{owner}/{name}"))
+        }
+        _ => None,
     }
 }
 
@@ -381,6 +471,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // ── FileSourceError::code() — stable snake_case wire codes ────────────────
+
+    #[test]
+    fn file_source_error_code_returns_stable_snake_case_strings() {
+        assert_eq!(
+            FileSourceError::RevisionRepoMismatch.code(),
+            "revision_repo_mismatch"
+        );
+    }
+
     // ── FileRequest::from_params — malformed shapes are refused ──────────────
 
     #[test]
@@ -493,46 +593,221 @@ mod tests {
     }
 
     // ── resolve_revision ───────────────────────────────────────────────────────
+    //
+    // W5 (current-pr-collision): `resolve_revision` grew a third parameter —
+    // `local_repo`, the repo slug the request's root actually resolves to —
+    // so an *implicit* revision can never resolve to a foreign PR's head SHA
+    // just because that PR happens to be pinned daemon-wide. The bug this
+    // guards: a second session repins the PR (`perri.load_pr`) while another
+    // is mid-review of a different one, and a subsequent implicit-revision
+    // file read must never silently fall back to the newly-pinned (wrong)
+    // repo's content.
 
-    #[test]
-    fn resolve_revision_absent_with_head_sha_resolves_to_head_sha() {
-        let req = FileRequest {
+    fn req_with_revision(revision: Option<&str>) -> FileRequest {
+        FileRequest {
             path: "a.rs".into(),
-            revision: None,
+            revision: revision.map(|s| s.to_string()),
             anchor_line: None,
             emphasis: vec![],
-        };
-        assert_eq!(resolve_revision(&req, "abc123"), "abc123");
+        }
     }
 
     #[test]
-    fn resolve_revision_absent_with_empty_head_sha_resolves_to_working() {
-        let req = FileRequest {
-            path: "a.rs".into(),
-            revision: None,
-            anchor_line: None,
-            emphasis: vec![],
-        };
-        assert_eq!(resolve_revision(&req, ""), WORKING_TREE);
+    fn resolve_revision_absent_with_a_pin_matching_the_local_repo_resolves_to_head_sha() {
+        // Rule 2: no regression when rooted in the same repo as the pin.
+        let req = req_with_revision(None);
+        assert_eq!(
+            resolve_revision(&req, Some(("acme/x", "abc123")), Some("acme/x")),
+            "abc123"
+        );
+    }
+
+    #[test]
+    fn resolve_revision_absent_with_a_pin_for_a_different_repo_resolves_to_working_not_the_foreign_sha(
+    ) {
+        // Rule 3: the critical fix. A mismatched local_repo must never let an
+        // implicit revision resolve to a foreign PR's head SHA.
+        let req = req_with_revision(None);
+        assert_eq!(
+            resolve_revision(&req, Some(("acme/x", "sha1")), Some("acme/y")),
+            WORKING_TREE
+        );
+    }
+
+    #[test]
+    fn resolve_revision_absent_with_a_pin_but_an_undeterminable_local_repo_resolves_to_working() {
+        // Rule 4: "can't verify" is treated the same as "mismatch" — never
+        // assume trust when the caller's own repo can't be established.
+        let req = req_with_revision(None);
+        assert_eq!(
+            resolve_revision(&req, Some(("acme/x", "sha1")), None),
+            WORKING_TREE
+        );
+    }
+
+    #[test]
+    fn resolve_revision_absent_with_no_pin_at_all_resolves_to_working() {
+        // Rule 5: unchanged pre-existing behavior — no PR loaded.
+        let req = req_with_revision(None);
+        assert_eq!(resolve_revision(&req, None, None), WORKING_TREE);
     }
 
     #[test]
     fn resolve_revision_explicit_revision_is_used_verbatim_even_when_literally_working() {
-        let req = FileRequest {
-            path: "a.rs".into(),
-            revision: Some("deadbeef".into()),
-            anchor_line: None,
-            emphasis: vec![],
-        };
-        assert_eq!(resolve_revision(&req, "abc123"), "deadbeef");
+        // Rule 1: an explicit revision always wins, regardless of pin/local_repo.
+        let req = req_with_revision(Some("deadbeef"));
+        assert_eq!(
+            resolve_revision(&req, Some(("acme/x", "abc123")), Some("acme/x")),
+            "deadbeef"
+        );
+        // Even a mismatched pin doesn't change an explicit revision's answer.
+        assert_eq!(
+            resolve_revision(&req, Some(("acme/x", "abc123")), Some("acme/y")),
+            "deadbeef"
+        );
 
-        let req_working = FileRequest {
-            path: "a.rs".into(),
-            revision: Some(WORKING_TREE.into()),
-            anchor_line: None,
-            emphasis: vec![],
-        };
-        assert_eq!(resolve_revision(&req_working, "abc123"), WORKING_TREE);
+        let req_working = req_with_revision(Some(WORKING_TREE));
+        assert_eq!(
+            resolve_revision(&req_working, Some(("acme/x", "abc123")), Some("acme/x")),
+            WORKING_TREE
+        );
+    }
+
+    // ── github_fallback_trusted ───────────────────────────────────────────────
+    //
+    // The pure boolean gate on whether the GitHub-contents fallback may trust
+    // the pinned repo once a local read fails: true only when the caller's
+    // own repo actually IS the fallback repo about to be queried.
+
+    #[test]
+    fn github_fallback_trusted_when_local_repo_matches_the_fallback_repo() {
+        assert!(github_fallback_trusted(Some("acme/widget"), "acme/widget"));
+    }
+
+    #[test]
+    fn github_fallback_trusted_is_false_for_a_mismatched_repo() {
+        assert!(!github_fallback_trusted(Some("acme/other"), "acme/widget"));
+    }
+
+    #[test]
+    fn github_fallback_trusted_is_false_when_local_repo_is_undeterminable() {
+        assert!(!github_fallback_trusted(None, "acme/widget"));
+    }
+
+    // ── local_repo_slug ────────────────────────────────────────────────────────
+
+    #[test]
+    fn local_repo_slug_parses_an_ssh_style_origin_url() {
+        let repo = init_repo();
+        git_ok(repo.path(), &["remote", "add", "origin", "git@github.com:acme/widget.git"]);
+        assert_eq!(local_repo_slug(repo.path()), Some("acme/widget".to_string()));
+    }
+
+    #[test]
+    fn local_repo_slug_parses_an_https_origin_url_with_dot_git_suffix() {
+        let repo = init_repo();
+        git_ok(
+            repo.path(),
+            &["remote", "add", "origin", "https://github.com/acme/widget.git"],
+        );
+        assert_eq!(local_repo_slug(repo.path()), Some("acme/widget".to_string()));
+    }
+
+    #[test]
+    fn local_repo_slug_parses_an_https_origin_url_with_no_dot_git_suffix() {
+        let repo = init_repo();
+        git_ok(
+            repo.path(),
+            &["remote", "add", "origin", "https://github.com/acme/widget"],
+        );
+        assert_eq!(local_repo_slug(repo.path()), Some("acme/widget".to_string()));
+    }
+
+    #[test]
+    fn local_repo_slug_is_none_when_there_is_no_origin_remote_configured() {
+        let repo = init_repo();
+        assert_eq!(local_repo_slug(repo.path()), None);
+    }
+
+    #[test]
+    fn local_repo_slug_is_none_for_a_directory_that_is_not_a_git_repo_at_all() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(local_repo_slug(tmp.path()), None);
+    }
+
+    // ── the single most important test in this file ───────────────────────────
+    //
+    // "A path that exists in both repos must resolve to the local one, never
+    // the foreign one's content." This is the whole pipeline, exercised end
+    // to end: a PR pinned to a *different* repo than the one this focus is
+    // actually rooted in must never leak that foreign repo's content into a
+    // local file read that happens to share the same repo-relative path.
+
+    #[test]
+    fn a_path_shared_by_both_repos_always_resolves_to_the_local_repos_own_content() {
+        // Two independent repos, each committing the SAME repo-relative path
+        // with DIFFERENT content.
+        let local_repo_dir = init_repo();
+        commit_file(local_repo_dir.path(), "src/lib.rs", b"local version\n");
+        // No origin remote on the local repo — local_repo_slug is None,
+        // which per rule 4 must be treated the same as a mismatch.
+
+        let foreign_repo_dir = init_repo();
+        let foreign_sha = commit_file(foreign_repo_dir.path(), "src/lib.rs", b"foreign version\n");
+
+        // The pin: some other session loaded a PR against a different repo
+        // entirely. `local_repo_slug` doesn't need to actually resolve
+        // `foreign_repo_dir`'s remote for this test — the pin is simulated
+        // directly as a fake slug, since the assertion is about what gets
+        // read off `local_repo_dir`, never about fetching `foreign_repo_dir`.
+        let pin_repo = "acme/foreign";
+        let pin = Some((pin_repo, foreign_sha.as_str()));
+
+        let local_slug = local_repo_slug(local_repo_dir.path());
+        assert_eq!(
+            local_slug, None,
+            "no origin remote configured on the local repo"
+        );
+
+        let req = req_with_revision(None);
+        let resolved = resolve_revision(&req, pin, local_slug.as_deref());
+        assert_eq!(
+            resolved, WORKING_TREE,
+            "an implicit revision must never resolve to a foreign PR's head SHA"
+        );
+
+        let text = read_at_revision(local_repo_dir.path(), &resolved, "src/lib.rs").unwrap();
+        assert_eq!(
+            text, "local version\n",
+            "the whole pipeline must never touch the foreign repo's content"
+        );
+    }
+
+    /// Same scenario, but the local repo DOES have its own real origin
+    /// remote — proving the mismatch (not just "no remote at all") is what
+    /// drives the fallback to `WORKING_TREE`.
+    #[test]
+    fn a_local_repo_with_its_own_real_origin_still_refuses_a_mismatched_pin() {
+        let local_repo_dir = init_repo();
+        git_ok(
+            local_repo_dir.path(),
+            &["remote", "add", "origin", "git@github.com:acme/local.git"],
+        );
+        commit_file(local_repo_dir.path(), "src/lib.rs", b"local version\n");
+
+        let foreign_repo_dir = init_repo();
+        let foreign_sha = commit_file(foreign_repo_dir.path(), "src/lib.rs", b"foreign version\n");
+
+        let local_slug = local_repo_slug(local_repo_dir.path());
+        assert_eq!(local_slug, Some("acme/local".to_string()));
+
+        let pin = Some(("acme/foreign", foreign_sha.as_str()));
+        let req = req_with_revision(None);
+        let resolved = resolve_revision(&req, pin, local_slug.as_deref());
+        assert_eq!(resolved, WORKING_TREE);
+
+        let text = read_at_revision(local_repo_dir.path(), &resolved, "src/lib.rs").unwrap();
+        assert_eq!(text, "local version\n");
     }
 
     // ── resolve_within_root ────────────────────────────────────────────────────

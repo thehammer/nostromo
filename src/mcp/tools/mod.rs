@@ -589,7 +589,7 @@ async fn dispatch_inner(
         // ── Phase 2: Perri ────────────────────────────────────────────────
         "perri.list_pr_queue" => perri::list_pr_queue(state),
         "perri.get_current_pr" => perri::get_current_pr(state),
-        "perri.get_state" => perri::get_state(state),
+        "perri.get_state" => perri::get_state(state, pty_id),
 
         // ── Phase 2: Fred ─────────────────────────────────────────────────
         "fred.list_unread_emails" => fred::list_unread_emails(state),
