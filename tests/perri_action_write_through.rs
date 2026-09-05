@@ -493,3 +493,103 @@ async fn a_daemon_created_focus_recreated_under_a_reused_tag_inherits_no_pin() {
         "a recreated focus reusing a dead focus's tag must start with no PR under review"
     );
 }
+
+// ── W7 — D8a: the empty push, and the backstop that must respect it ──────────
+
+/// An empty push is what a client sends before it has loaded anything — the
+/// D8a reconnect guarantee is that it evicts nothing. That guarantee has to
+/// hold for the `retain_pins` backstop as well as for the departure loop,
+/// and the case that separates the two is an agent-created focus outstanding
+/// at the moment the Mac reconnects.
+///
+/// After an empty push the daemon's registry is empty, so the only tag it can
+/// still name is the unacknowledged daemon-created one. If the backstop is
+/// willing to reconcile against that, it is handed a "live" set of exactly one
+/// tag and deletes every Mac-created focus's pin — the reconnect hazard the
+/// whole two-push rule exists to prevent, arriving through the back door.
+#[tokio::test]
+async fn an_empty_push_leaves_every_pin_on_disk_while_a_daemon_created_focus_is_outstanding() {
+    let (socket_path, state_dir, _tmp, _server, session_mgr) = serve_with_session_mgr().await;
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    handshake(&mut stream, vec![Topic::Perri, Topic::Focuses]).await;
+
+    let agent_tag = "cody-core-1234";
+
+    // Two ordinary, agreeing pushes: the daemon now has a complete picture and
+    // the backstop is armed.
+    for _ in 0..2 {
+        send(
+            &mut stream,
+            &ClientMsg::FocusRegistryPush {
+                focuses: vec![focus_meta("perri"), focus_meta("cody")],
+            },
+        )
+        .await;
+    }
+
+    // Both Mac-created focuses pick up a PR to review.
+    for (tag, number) in [("perri", 4526u64), ("cody", 42)] {
+        send(
+            &mut stream,
+            &ClientMsg::PerriAction {
+                action: "load_pr".into(),
+                pr_number: Some(number),
+                repo: Some("acme/anvil".into()),
+                tag: Some(tag.into()),
+            },
+        )
+        .await;
+    }
+    assert!(
+        wait_until(|| pin_of(&state_dir, "perri").exists() && pin_of(&state_dir, "cody").exists())
+            .await,
+        "both Mac-created focuses must have a pin before there is anything to lose"
+    );
+
+    // An agent calls `nostromo.create_focus`. The Mac has not pushed this tag
+    // back yet, so it is still carrying its eviction exemption.
+    session_mgr
+        .lock()
+        .unwrap()
+        .add_or_update_focus(focus_meta(agent_tag));
+    send(
+        &mut stream,
+        &ClientMsg::PerriAction {
+            action: "load_pr".into(),
+            pr_number: Some(7),
+            repo: Some("Carefeed/admin-portal".into()),
+            tag: Some(agent_tag.into()),
+        },
+    )
+    .await;
+    assert!(
+        wait_until(|| pin_of(&state_dir, agent_tag).exists()).await,
+        "the agent-created focus must have a pin too"
+    );
+
+    // The Mac reconnects and pushes before it has loaded anything.
+    send(
+        &mut stream,
+        &ClientMsg::FocusRegistryPush { focuses: vec![] },
+    )
+    .await;
+
+    // Give the daemon the same window a real eviction gets, so this asserts
+    // "nothing was deleted" rather than "we looked too early".
+    let tags = ["perri", "cody", agent_tag];
+    assert!(
+        !wait_until(|| tags.iter().any(|t| !pin_of(&state_dir, t).exists())).await,
+        "an empty push must evict nothing: pins on disk after it were \
+         perri={}, cody={}, {agent_tag}={}",
+        pin_of(&state_dir, "perri").exists(),
+        pin_of(&state_dir, "cody").exists(),
+        pin_of(&state_dir, agent_tag).exists()
+    );
+    for tag in tags {
+        assert!(
+            pin_of(&state_dir, tag).exists(),
+            "{tag}'s pin must survive an empty push — the operator's review is \
+             still in progress and the client has said nothing about it"
+        );
+    }
+}

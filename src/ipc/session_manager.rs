@@ -270,12 +270,13 @@ pub struct SessionManager {
     /// single push would make a routine reconnect destroy a focus's pin.
     /// Departure therefore requires two consecutive pushes to agree.
     pending_departures: HashSet<String>,
-    /// How many *non-empty* focus registry pushes this daemon has processed
+    /// How many non-empty focus registry pushes this daemon has processed
+    /// *since it last had a picture of the registry worth vouching for*
     /// (W7 — D8 backstop). Saturates; only "at least two" is ever asked.
     ///
-    /// Gates [`SessionManager::reconcilable_focus_tags`]. An empty push
-    /// carries no information and does not count, exactly as
-    /// `set_focus_registry` already treats it.
+    /// Gates [`SessionManager::reconcilable_focus_tags`]. An empty push does
+    /// not merely fail to count — it resets this to zero; see that method's
+    /// doc for why.
     non_empty_pushes_seen: u8,
     /// Per-focus pane-tree registry. Set by the daemon via
     /// [`SessionManager::configure_mcp_bridge`]; `None` in tests / non-daemon use.
@@ -1182,9 +1183,16 @@ impl SessionManager {
         // what a client sends before it has loaded anything. Take it as the
         // registry (unchanged from pre-W7 behaviour) but never as evidence that
         // every focus was deleted.
+        //
+        // It does erase the evidence the backstop needs, though: this branch
+        // drops both the registry and `pending_departures`, so the daemon
+        // knows no more than it did at startup and `non_empty_pushes_seen`
+        // must reset to match — see `reconcilable_focus_tags` for what goes
+        // wrong if it doesn't.
         if focuses.is_empty() {
             self.focus_registry = focuses;
             self.pending_departures.clear();
+            self.non_empty_pushes_seen = 0;
             return (self.focus_registry.clone(), Vec::new());
         }
 
@@ -1290,13 +1298,22 @@ impl SessionManager {
     ///   primary eviction path is willing to, which is D8a's guarantee
     ///   inverted.
     /// - **`None` until two non-empty pushes have landed.** A reconnecting
-    ///   client can push a partial list before it has finished loading. The
-    ///   empty-push case is already no-information; a *partial* one is not
-    ///   distinguishable from a complete one in isolation, and on the first
-    ///   push there is no previous registry to notice the omission against —
-    ///   so a real focus omitted from a partial first push would have its pin
-    ///   collected. From the second push on, an omitted tag is in
-    ///   `pending_departures` and protected by the bullet above.
+    ///   client can push a partial list before it has finished loading. A
+    ///   partial push is not distinguishable from a complete one in isolation,
+    ///   and on the first push there is no previous registry to notice the
+    ///   omission against — so a real focus omitted from a partial first push
+    ///   would have its pin collected. From the second push on, an omitted tag
+    ///   is in `pending_departures` and protected by the bullet above.
+    /// - **An empty push resets that count to zero.** It is tempting to read
+    ///   the empty case as merely "no information", but `set_focus_registry`
+    ///   *acts* on it: the registry becomes empty and `pending_departures` is
+    ///   cleared, so every previously-known tag is now in neither. Were the
+    ///   count left standing, an outstanding daemon-created tag would be the
+    ///   only thing `live_focus_tags` still reported, this would answer `Some`
+    ///   with that tag alone, and `retain_pins` would delete every other
+    ///   focus's pin — on a push whose entire contract is that it evicts
+    ///   nothing. Resetting puts the backstop back where it was at startup,
+    ///   which is the only honest description of what the daemon now knows.
     ///
     /// Two consecutive pushes agreeing is exactly the evidence standard D8a
     /// already demands before deleting anything, which is the point: the
@@ -2282,6 +2299,75 @@ mod tests {
         assert!(
             departed.is_empty(),
             "and it must not have armed a departure for the next push to confirm"
+        );
+    }
+
+    /// The same D8a guarantee, asked of the *backstop* rather than the
+    /// departure loop. `retain_pins` deletes every pin outside the set it is
+    /// handed, so the daemon must only answer this question while it can
+    /// vouch for a complete picture of what exists.
+    ///
+    /// An empty push throws that picture away — it replaces the registry with
+    /// nothing and clears the pending departures — so afterwards the only tag
+    /// the daemon can still name is an unacknowledged daemon-created one.
+    /// Reconciling against *that* hands the backstop a one-tag "live" set and
+    /// deletes every Mac-created focus's pin, which is the reconnect hazard
+    /// the two-push rule exists to prevent.
+    #[test]
+    fn an_empty_push_leaves_nothing_reconcilable_even_after_two_agreeing_pushes() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        assert!(
+            mgr.reconcilable_focus_tags().is_some(),
+            "two agreeing non-empty pushes are the evidence standard the \
+             backstop is allowed to act on"
+        );
+
+        // An agent creates a focus; the client has not acknowledged it yet, so
+        // its eviction exemption is still live.
+        mgr.add_or_update_focus(focus("cody-core-1234"));
+
+        // The client reconnects and pushes before it has loaded anything.
+        mgr.set_focus_registry(vec![]);
+
+        assert_eq!(
+            mgr.reconcilable_focus_tags(),
+            None,
+            "an empty push discards every record of which tags exist, so the \
+             daemon can no longer vouch for a complete picture; answering \
+             otherwise reconciles every pin on disk against the daemon-created \
+             tag alone"
+        );
+    }
+
+    /// ...and the withdrawal is temporary, not a one-way latch: an empty push
+    /// puts the daemon back where it was before any client had spoken, so it
+    /// re-earns the right to reconcile the same way it earned it the first
+    /// time — one push is a partial push until a second agrees.
+    #[test]
+    fn the_backstop_re_arms_once_the_client_has_pushed_twice_again() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        mgr.set_focus_registry(vec![]);
+
+        mgr.set_focus_registry(vec![focus("perri")]);
+        assert_eq!(
+            mgr.reconcilable_focus_tags(),
+            None,
+            "the first push after a reconnect may be a partial one, and there \
+             is no previous registry left to notice the omission against"
+        );
+
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        let tags = mgr
+            .reconcilable_focus_tags()
+            .expect("two agreeing pushes restore the daemon's picture");
+        assert!(tags.contains("perri"));
+        assert!(
+            tags.contains("cody"),
+            "and the restored picture is the client's, not a stale fragment"
         );
     }
 
