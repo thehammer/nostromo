@@ -40,7 +40,9 @@ fn make_daemon_state() -> Harness {
         session_mgr,
         broadcast_tx: broadcast_tx.clone(),
         perri: nostromo::mcp::PerriDaemonState::default(),
-        decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+        decisions: Arc::new(Mutex::new(
+            nostromo::ipc::decisions::DecisionRegistry::default(),
+        )),
         tickets: Default::default(),
     };
     Harness {
@@ -66,7 +68,10 @@ async fn read_frame<R: tokio::io::AsyncRead + Unpin>(r: &mut BufReader<R>) -> Va
 async fn connect(
     socket_path: &std::path::Path,
     tag: &str,
-) -> (BufReader<tokio::net::unix::OwnedReadHalf>, tokio::net::unix::OwnedWriteHalf) {
+) -> (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+) {
     let stream = UnixStream::connect(socket_path).await.unwrap();
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -176,7 +181,14 @@ async fn daemon_create_pane_then_reset_round_trip() {
     }
 
     // reset_panes returns to a single repl.
-    let res = call_tool(&mut reader, &mut writer, 4, "nostromo.reset_panes", json!({})).await;
+    let res = call_tool(
+        &mut reader,
+        &mut writer,
+        4,
+        "nostromo.reset_panes",
+        json!({}),
+    )
+    .await;
     assert_eq!(res["ok"], true);
     let info = call_tool(&mut reader, &mut writer, 5, "nostromo.get_self", json!({})).await;
     assert_eq!(pane_ids(&info), vec!["repl"]);

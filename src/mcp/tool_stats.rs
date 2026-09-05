@@ -101,7 +101,8 @@ impl ToolStats {
 
     /// RFC 3339 wall-clock timestamp of when this store was created.
     pub fn started_at_rfc3339(&self) -> String {
-        self.started_at_wall.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        self.started_at_wall
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     }
 
     /// Snapshot the `tools` array plus totals, matching the shape documented

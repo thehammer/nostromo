@@ -151,14 +151,14 @@ pub fn place(
                 .is_some_and(|pr| pr != requested_pr)
         });
         if displaced {
-            let (kept, closed): (Vec<LiveView>, Vec<LiveView>) = tabs
-                .into_iter()
-                .partition(|t| match t.view.as_ref().map(|v| &v.identity) {
-                    Some(id) => id.pr() == Some(requested_pr),
-                    // A tab the curated layer doesn't recognise is not part of
-                    // any review context, so a PR change leaves it alone.
-                    None => true,
-                });
+            let (kept, closed): (Vec<LiveView>, Vec<LiveView>) =
+                tabs.into_iter()
+                    .partition(|t| match t.view.as_ref().map(|v| &v.identity) {
+                        Some(id) => id.pr() == Some(requested_pr),
+                        // A tab the curated layer doesn't recognise is not part of
+                        // any review context, so a PR change leaves it alone.
+                        None => true,
+                    });
             reset_closed = closed.into_iter().map(|t| t.pane_id).collect();
             tabs = kept;
         }
@@ -362,11 +362,7 @@ fn insertion_index(cfg: &ViewPlacementConfig, tabs: &[LiveView], req: &ShowReque
 ///
 /// `None` when every tab is pinned or frontmost — a cap must never turn a show
 /// into a failure, so the region is simply allowed to run one over.
-fn pick_victim(
-    tabs: &[LiveView],
-    frontmost: Option<&str>,
-    policy: EvictPolicy,
-) -> Option<String> {
+fn pick_victim(tabs: &[LiveView], frontmost: Option<&str>, policy: EvictPolicy) -> Option<String> {
     let EvictPolicy::LeastRecentlyFocusedUnpinned = policy;
     tabs.iter()
         .enumerate()
@@ -501,7 +497,12 @@ mod tests {
         regions.insert(
             "queue".to_string(),
             RegionState {
-                tabs: vec![tab("queue", ViewType::ReviewQueue, ViewIdentity::Singleton, 0)],
+                tabs: vec![tab(
+                    "queue",
+                    ViewType::ReviewQueue,
+                    ViewIdentity::Singleton,
+                    0,
+                )],
                 active: Some(0),
             },
         );
@@ -536,9 +537,13 @@ mod tests {
     fn review_queue_lands_in_the_queue_region_and_the_others_land_in_detail() {
         let state = curated_start();
         assert_eq!(
-            place(&cfg(), &state, &show(ViewType::ReviewQueue, ViewIdentity::Singleton))
-                .unwrap()
-                .region,
+            place(
+                &cfg(),
+                &state,
+                &show(ViewType::ReviewQueue, ViewIdentity::Singleton)
+            )
+            .unwrap()
+            .region,
             "queue"
         );
         for (t, id) in [
@@ -547,7 +552,10 @@ mod tests {
             (ViewType::Ticket, ticket("CORE-1")),
             (ViewType::File, file("a.rs")),
         ] {
-            assert_eq!(place(&cfg(), &state, &show(t, id)).unwrap().region, "detail");
+            assert_eq!(
+                place(&cfg(), &state, &show(t, id)).unwrap().region,
+                "detail"
+            );
         }
     }
 
@@ -580,7 +588,12 @@ mod tests {
     #[test]
     fn showing_the_same_type_and_identity_twice_produces_one_tab_not_two() {
         let cfg = cfg();
-        let first = place(&cfg, &curated_start(), &show(ViewType::File, file("src/a.rs"))).unwrap();
+        let first = place(
+            &cfg,
+            &curated_start(),
+            &show(ViewType::File, file("src/a.rs")),
+        )
+        .unwrap();
         assert!(!first.reused);
 
         let state = with_detail(
@@ -723,7 +736,11 @@ mod tests {
         let state = with_detail(curated_start(), six_tabs(), 5);
         let p = place(&cfg(), &state, &show(ViewType::File, file("src/d.rs"))).unwrap();
         assert_eq!(p.evicted.as_deref(), Some("detail.3"), "lowest lru_rank");
-        assert_eq!(p.tab_order.len(), 6, "still at the cap, exactly one evicted");
+        assert_eq!(
+            p.tab_order.len(),
+            6,
+            "still at the cap, exactly one evicted"
+        );
         assert!(!p.tab_order.contains(&"detail.3".to_string()));
     }
 
@@ -770,7 +787,11 @@ mod tests {
         let state = with_detail(curated_start(), tabs, 5);
         let p = place(&cfg(), &state, &show(ViewType::File, file("src/d.rs"))).unwrap();
         assert_eq!(p.evicted, None);
-        assert_eq!(p.tab_order.len(), 7, "a cap must not turn a show into a failure");
+        assert_eq!(
+            p.tab_order.len(),
+            7,
+            "a cap must not turn a show into a failure"
+        );
     }
 
     #[test]
@@ -812,7 +833,11 @@ mod tests {
         tabs[4].lru_rank = 1;
         let state = with_detail(curated_start(), tabs, 5);
         let p = place(&cfg(), &state, &show(ViewType::File, file("src/d.rs"))).unwrap();
-        assert_eq!(p.evicted.as_deref(), Some("detail.2"), "leftmost of the tie");
+        assert_eq!(
+            p.evicted.as_deref(),
+            Some("detail.2"),
+            "leftmost of the tie"
+        );
     }
 
     // ── 5. R5 — focus asymmetry ───────────────────────────────────────────────
@@ -913,10 +938,7 @@ mod tests {
         // which tabs go. `pr(94)` is what those two tabs are bound to *now*,
         // and the new PR is 95, so both are stale.
         let closed = reset_for_pr_change(&cfg(), &state, Some(("thehammer/nostromo", 95)));
-        assert_eq!(
-            closed,
-            vec!["detail.0", "detail.1", "detail.2", "detail.3"]
-        );
+        assert_eq!(closed, vec!["detail.0", "detail.1", "detail.2", "detail.3"]);
     }
 
     #[test]
@@ -961,10 +983,7 @@ mod tests {
             vec![tab("detail.0", ViewType::PrDiff, pr(94), 4), unknown],
             0,
         );
-        assert_eq!(
-            reset_for_pr_change(&cfg(), &state, None),
-            vec!["detail.0"]
-        );
+        assert_eq!(reset_for_pr_change(&cfg(), &state, None), vec!["detail.0"]);
         let p = place(&cfg(), &state, &show(ViewType::PrDiff, pr(95))).unwrap();
         assert_eq!(p.reset_closed, vec!["detail.0"]);
         assert!(p.tab_order.contains(&"detail.9".to_string()));
@@ -974,12 +993,7 @@ mod tests {
 
     #[test]
     fn the_detail_region_is_created_by_splitting_the_queue_when_it_does_not_exist() {
-        let p = place(
-            &cfg(),
-            &curated_start(),
-            &show(ViewType::PrDiff, pr(94)),
-        )
-        .unwrap();
+        let p = place(&cfg(), &curated_start(), &show(ViewType::PrDiff, pr(94))).unwrap();
         assert_eq!(
             p.create_region,
             Some(RegionCreation {
@@ -1027,7 +1041,10 @@ mod tests {
         // second creation candidate rather than refusing.
         let detail = place(&cfg(), &bare, &show(ViewType::PrDiff, pr(94))).unwrap();
         assert_eq!(
-            detail.create_region.as_ref().map(|c| c.relative_to.as_str()),
+            detail
+                .create_region
+                .as_ref()
+                .map(|c| c.relative_to.as_str()),
             Some("repl")
         );
     }

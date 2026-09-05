@@ -112,7 +112,9 @@ pub async fn handle(state: &McpSharedState, args: &Value, pty_id: Option<&str>) 
     }
 
     match tokio::time::timeout(Duration::from_secs(timeout_secs), rx).await {
-        Ok(Ok(DecisionOutcome::Answered(choice_id))) => json!({ "ok": true, "choice_id": choice_id }),
+        Ok(Ok(DecisionOutcome::Answered(choice_id))) => {
+            json!({ "ok": true, "choice_id": choice_id })
+        }
         Ok(Ok(DecisionOutcome::Dismissed)) => json!({ "ok": true, "outcome": "dismissed" }),
         Ok(Ok(DecisionOutcome::Cancelled)) => json!({ "error": "cancelled" }),
         // The oneshot resolving with TimedOut before our own timeout fired is
@@ -122,7 +124,11 @@ pub async fn handle(state: &McpSharedState, args: &Value, pty_id: Option<&str>) 
         Ok(Ok(DecisionOutcome::TimedOut)) => json!({ "error": "timeout" }),
         Ok(Err(_)) => json!({ "error": "reply_channel_dropped" }),
         Err(_) => {
-            let promoted = daemon.decisions.lock().unwrap().timeout_request(&request_id);
+            let promoted = daemon
+                .decisions
+                .lock()
+                .unwrap()
+                .timeout_request(&request_id);
             if let Some(msg) = promoted {
                 let _ = daemon.broadcast_tx.send(msg);
             }

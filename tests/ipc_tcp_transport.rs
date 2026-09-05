@@ -43,10 +43,7 @@ async fn spawn_server() -> (Server, u16, TempDir) {
     let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind tcp listener");
-    let port = tcp_listener
-        .local_addr()
-        .expect("local addr")
-        .port();
+    let port = tcp_listener.local_addr().expect("local addr").port();
 
     server.bind_tcp(
         tcp_listener,
@@ -75,14 +72,19 @@ async fn do_handshake(mut stream: &mut TcpStream) {
     let welcome_bytes = read_frame(&mut stream).await.unwrap();
     let welcome: ServerMsg = serde_json::from_slice(&welcome_bytes).unwrap();
     match welcome {
-        ServerMsg::Welcome { protocol_version, .. } => {
+        ServerMsg::Welcome {
+            protocol_version, ..
+        } => {
             assert_eq!(protocol_version, PROTOCOL_VERSION);
         }
         other => panic!("expected Welcome, got {other:?}"),
     }
 
     // → Subscribe (no topics — we only care about targeted responses)
-    let sub = ClientMsg::Subscribe { topics: vec![], renders_decisions: false };
+    let sub = ClientMsg::Subscribe {
+        topics: vec![],
+        renders_decisions: false,
+    };
     write_frame(&mut stream, &serde_json::to_vec(&sub).unwrap())
         .await
         .unwrap();

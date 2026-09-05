@@ -50,7 +50,14 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     )
     .await;
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
-    send(stream, &ClientMsg::Subscribe { topics, renders_decisions: false }).await;
+    send(
+        stream,
+        &ClientMsg::Subscribe {
+            topics,
+            renders_decisions: false,
+        },
+    )
+    .await;
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -75,7 +82,9 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
         );
     }
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
@@ -122,8 +131,7 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
         if saw_layout && saw_queue_content && saw_diff_content {
             break;
         }
-        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
-        {
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await {
             Ok(m) => m,
             Err(_) => break,
         };
@@ -200,7 +208,9 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
         );
     }
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
@@ -245,7 +255,10 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
         Some("perri"),
     )
     .await;
-    assert_eq!(refresh_result["ok"], true, "binding the diff pane to get_file must succeed: {refresh_result:?}");
+    assert_eq!(
+        refresh_result["ok"], true,
+        "binding the diff pane to get_file must succeed: {refresh_result:?}"
+    );
 
     // A client connecting after that binding exists is exactly the path that
     // used to deadlock: attach-replay calls bound_pane_contents() while
@@ -259,16 +272,18 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
         if saw_layout && saw_code_content {
             break;
         }
-        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
-        {
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await {
             Ok(m) => m,
             Err(_) => break, // a deadlocked server never writes another frame
         };
         match msg {
             ServerMsg::FocusLayout { tag, .. } if tag == "perri" => saw_layout = true,
-            ServerMsg::PaneContent { tag, pane_id, content, .. }
-                if tag == "perri" && pane_id == "diff" =>
-            {
+            ServerMsg::PaneContent {
+                tag,
+                pane_id,
+                content,
+                ..
+            } if tag == "perri" && pane_id == "diff" => {
                 assert!(matches!(content, PaneContentWire::Code { .. }));
                 saw_code_content = true;
             }
@@ -317,7 +332,9 @@ async fn fresh_registry_after_simulated_restart_has_bound_pane_content_ready_wit
         session_mgr,
         broadcast_tx,
         perri: PerriDaemonState::default(),
-        decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+        decisions: Arc::new(Mutex::new(
+            nostromo::ipc::decisions::DecisionRegistry::default(),
+        )),
         tickets: Default::default(),
     };
     let state = McpSharedState::for_daemon(backend);

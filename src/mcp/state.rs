@@ -22,7 +22,10 @@ use crate::{
         tickets::{TicketCache, TicketRegistry},
     },
     event::AppEvent,
-    ipc::{decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
+    ipc::{
+        decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg,
+        SessionManager,
+    },
     mcp::tool_stats::ToolStats,
     mother::{MotherJob, MotherStatus},
 };
@@ -302,12 +305,10 @@ impl McpSharedState {
     }
 
     fn publish(&self, edit: impl FnOnce(&mut HashMap<String, Arc<PrSnapshot>>)) {
-        let tx = self
-            .perri_pr_tx
-            .as_ref()
-            .expect("set_pr_for/clear_pr_for is test-only; the daemon's PR source owns the channel");
-        let mut map: HashMap<String, Arc<PrSnapshot>> =
-            (**self.perri_pr_rx.borrow()).clone();
+        let tx = self.perri_pr_tx.as_ref().expect(
+            "set_pr_for/clear_pr_for is test-only; the daemon's PR source owns the channel",
+        );
+        let mut map: HashMap<String, Arc<PrSnapshot>> = (**self.perri_pr_rx.borrow()).clone();
         edit(&mut map);
         let _ = tx.send(Arc::new(map));
     }

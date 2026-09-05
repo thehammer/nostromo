@@ -24,9 +24,7 @@ use tokio::sync::watch;
 
 use crate::{
     config::Config,
-    data::{
-        fred_calendar::CalendarEvent, fred_mailbox::MailboxSnapshot,
-    },
+    data::{fred_calendar::CalendarEvent, fred_mailbox::MailboxSnapshot},
     event::AppEvent,
     pty::{PtyBackend, PtyWidget},
     transcript::TranscriptPane,
@@ -36,10 +34,7 @@ use crate::{
         theme::{self, Sweater},
         widgets::{relative_time::format_relative_now, truncate::truncate},
     },
-    views::{
-        fred_calendar_image::render_calendar_to_image,
-        EventOutcome, View, ViewCtx,
-    },
+    views::{fred_calendar_image::render_calendar_to_image, EventOutcome, View, ViewCtx},
 };
 
 /// Tag used to identify Fred's PTY in the daemon registry.

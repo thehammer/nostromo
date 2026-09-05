@@ -35,7 +35,14 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     )
     .await;
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
-    send(stream, &ClientMsg::Subscribe { topics, renders_decisions: false }).await;
+    send(
+        stream,
+        &ClientMsg::Subscribe {
+            topics,
+            renders_decisions: false,
+        },
+    )
+    .await;
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -52,7 +59,9 @@ async fn activity_snapshot_request_yields_an_activity_snapshot() {
         tmp.path().join("sessions.json"),
     )));
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
@@ -70,11 +79,16 @@ async fn activity_snapshot_request_yields_an_activity_snapshot() {
     // focus (none here) followed by one ActivityHealth — drain those first so
     // the explicit request's reply isn't confused with the replay.
     let health = recv(&mut stream).await;
-    assert!(matches!(health, ServerMsg::ActivityHealth { .. }), "{health:?}");
+    assert!(
+        matches!(health, ServerMsg::ActivityHealth { .. }),
+        "{health:?}"
+    );
 
     send(
         &mut stream,
-        &ClientMsg::ActivitySnapshotRequest { tag: "cody-1".into() },
+        &ClientMsg::ActivitySnapshotRequest {
+            tag: "cody-1".into(),
+        },
     )
     .await;
 

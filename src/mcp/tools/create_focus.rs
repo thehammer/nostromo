@@ -17,7 +17,13 @@ use crate::mcp::state::McpSharedState;
 fn derive_tag(agent: &str, title: &str) -> String {
     let slug: String = title
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     // Collapse runs of '-' and trim.
     let mut collapsed = String::with_capacity(slug.len());

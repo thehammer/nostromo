@@ -99,7 +99,7 @@ pub fn validate_tag(tag: &str) -> Result<(), String> {
 }
 
 /// One focus's PR under review, as stored.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Pin {
     pub number: u64,
     pub repo: String,
@@ -324,27 +324,32 @@ pub fn touch_queue_dirty(state_dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::perri_pr_native::CurrentPrPointer;
     use tempfile::TempDir;
 
-    #[test]
-    fn write_pointer_produces_current_pr_pointer_compatible_json() {
-        let dir = TempDir::new().unwrap();
-        write_pointer(dir.path(), 42, "acme/widget", Some("check auth")).unwrap();
+    const TAG: &str = "perri";
 
-        let content = std::fs::read_to_string(dir.path().join("current-pr.json")).unwrap();
-        let pointer: CurrentPrPointer =
-            serde_json::from_str(&content).expect("must deserialize as CurrentPrPointer");
-        assert_eq!(pointer.number, 42);
-        assert_eq!(pointer.repo, "acme/widget");
+    fn pin_file(dir: &Path, tag: &str) -> PathBuf {
+        pin_path(dir, tag).expect("test tags are valid")
+    }
+
+    #[test]
+    fn write_pointer_produces_a_pin_compatible_json() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), TAG, 42, "acme/widget", Some("check auth")).unwrap();
+
+        let content = std::fs::read_to_string(pin_file(dir.path(), TAG)).unwrap();
+        let pin: Pin = serde_json::from_str(&content).expect("must deserialize as Pin");
+        assert_eq!(pin.number, 42);
+        assert_eq!(pin.repo, "acme/widget");
+        assert_eq!(pin.highlights.as_deref(), Some("check auth"));
     }
 
     #[test]
     fn write_pointer_without_highlights_writes_null() {
         let dir = TempDir::new().unwrap();
-        write_pointer(dir.path(), 7, "acme/anvil", None).unwrap();
+        write_pointer(dir.path(), TAG, 7, "acme/anvil", None).unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join("current-pr.json")).unwrap();
+        let content = std::fs::read_to_string(pin_file(dir.path(), TAG)).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(parsed["highlights"].is_null());
     }
@@ -352,26 +357,25 @@ mod tests {
     #[test]
     fn write_pointer_touches_dirty_sentinel() {
         let dir = TempDir::new().unwrap();
-        write_pointer(dir.path(), 1, "acme/widget", None).unwrap();
+        write_pointer(dir.path(), TAG, 1, "acme/widget", None).unwrap();
         assert!(dir.path().join("current-pr.dirty").exists());
     }
 
     #[test]
     fn clear_pointer_on_missing_file_is_a_noop() {
         let dir = TempDir::new().unwrap();
-        // No current-pr.json exists yet.
-        clear_pointer(dir.path()).expect("clearing an absent pointer must not error");
+        clear_pointer(dir.path(), TAG).expect("clearing an absent pointer must not error");
         assert!(dir.path().join("current-pr.dirty").exists());
     }
 
     #[test]
     fn clear_pointer_removes_existing_file_and_touches_dirty() {
         let dir = TempDir::new().unwrap();
-        write_pointer(dir.path(), 5, "acme/foo", None).unwrap();
-        assert!(dir.path().join("current-pr.json").exists());
+        write_pointer(dir.path(), TAG, 5, "acme/foo", None).unwrap();
+        assert!(pin_file(dir.path(), TAG).exists());
 
-        clear_pointer(dir.path()).unwrap();
-        assert!(!dir.path().join("current-pr.json").exists());
+        clear_pointer(dir.path(), TAG).unwrap();
+        assert!(!pin_file(dir.path(), TAG).exists());
         assert!(dir.path().join("current-pr.dirty").exists());
     }
 
@@ -415,8 +419,8 @@ mod tests {
     #[test]
     fn write_pointer_rejects_unsafe_repo_and_writes_no_file() {
         let dir = TempDir::new().unwrap();
-        let result = write_pointer(dir.path(), 1, "org/repo;rm -rf /", None);
+        let result = write_pointer(dir.path(), TAG, 1, "org/repo;rm -rf /", None);
         assert!(result.is_err());
-        assert!(!dir.path().join("current-pr.json").exists());
+        assert!(!pin_file(dir.path(), TAG).exists());
     }
 }

@@ -48,7 +48,10 @@ fn path_field(tool_input: &serde_json::Value) -> Option<String> {
 }
 
 fn str_field(tool_input: &serde_json::Value, key: &str) -> Option<String> {
-    tool_input.get(key).and_then(|v| v.as_str()).map(str::to_string)
+    tool_input
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 fn grep_summary(tool_input: &serde_json::Value) -> String {
@@ -78,9 +81,9 @@ fn web_fetch_host(tool_input: &serde_json::Value) -> String {
 /// Unknown tool: the tool name plus a clipped first string field found in
 /// `tool_input` — never the raw JSON object.
 fn fallback_summary(tool_name: &str, tool_input: &serde_json::Value) -> String {
-    let first_string = tool_input.as_object().and_then(|obj| {
-        obj.values().find_map(|v| v.as_str().map(str::to_string))
-    });
+    let first_string = tool_input
+        .as_object()
+        .and_then(|obj| obj.values().find_map(|v| v.as_str().map(str::to_string)));
     match first_string {
         Some(s) => format!("{tool_name}: {s}"),
         None => tool_name.to_string(),
@@ -108,7 +111,10 @@ mod tests {
     #[test]
     fn read_write_edit_summaries_use_the_file_path_field() {
         for tool in ["Read", "Write", "Edit"] {
-            let out = summarize(tool, &json!({"file_path": "/Users/hammer/Code/nostromo/src/main.rs"}));
+            let out = summarize(
+                tool,
+                &json!({"file_path": "/Users/hammer/Code/nostromo/src/main.rs"}),
+            );
             assert!(
                 out.contains("/Users/hammer/Code/nostromo/src/main.rs"),
                 "{tool} summary must include the file_path: {out}"
@@ -119,7 +125,10 @@ mod tests {
     #[test]
     fn read_write_edit_summaries_fall_back_to_the_path_field() {
         let out = summarize("Read", &json!({"path": "/tmp/notes.md"}));
-        assert!(out.contains("/tmp/notes.md"), "must fall back to `path`: {out}");
+        assert!(
+            out.contains("/tmp/notes.md"),
+            "must fall back to `path`: {out}"
+        );
     }
 
     // ── 2. Grep / Glob ─────────────────────────────────────────────────────────
@@ -171,10 +180,22 @@ mod tests {
             "WebFetch",
             &json!({"url": "https://api.example.com/data?token=abcdef1234567890&other=1"}),
         );
-        assert!(out.contains("api.example.com"), "must include the host: {out}");
-        assert!(!out.contains("token="), "path/query must be dropped entirely: {out}");
-        assert!(!out.contains("abcdef1234567890"), "query secret must never leak: {out}");
-        assert!(!out.contains("/data"), "path must be dropped entirely: {out}");
+        assert!(
+            out.contains("api.example.com"),
+            "must include the host: {out}"
+        );
+        assert!(
+            !out.contains("token="),
+            "path/query must be dropped entirely: {out}"
+        );
+        assert!(
+            !out.contains("abcdef1234567890"),
+            "query secret must never leak: {out}"
+        );
+        assert!(
+            !out.contains("/data"),
+            "path must be dropped entirely: {out}"
+        );
     }
 
     // ── 6. unknown tool fallback ───────────────────────────────────────────────
@@ -205,12 +226,21 @@ mod tests {
     #[test]
     fn no_raw_tool_input_leaks_into_any_summary() {
         let calls: Vec<(&str, serde_json::Value)> = vec![
-            ("Read", json!({"file_path": "/tmp/a.rs", "extra": {"nested": "value"}})),
+            (
+                "Read",
+                json!({"file_path": "/tmp/a.rs", "extra": {"nested": "value"}}),
+            ),
             ("Grep", json!({"pattern": "TODO", "path": "/tmp"})),
             ("Glob", json!({"pattern": "**/*.rs"})),
             ("Bash", json!({"command": "ls -la", "timeout": 5000})),
-            ("Task", json!({"subagent_type": "cody", "description": "do a thing", "prompt": "full prompt text"})),
-            ("WebFetch", json!({"url": "https://example.com/x?y=1", "prompt": "summarize"})),
+            (
+                "Task",
+                json!({"subagent_type": "cody", "description": "do a thing", "prompt": "full prompt text"}),
+            ),
+            (
+                "WebFetch",
+                json!({"url": "https://example.com/x?y=1", "prompt": "summarize"}),
+            ),
             ("SomethingElse", json!({"note": "n", "detail": {"a": 1}})),
         ];
         for (tool, input) in calls {

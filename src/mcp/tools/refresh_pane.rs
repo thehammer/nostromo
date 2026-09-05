@@ -141,6 +141,7 @@ pub async fn refresh_pane_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::perri_pr::one_pr;
     use crate::ipc::pane_registry::PaneRegistry;
     use crate::ipc::protocol::ServerMsg;
     use crate::ipc::SessionManager;
@@ -163,7 +164,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: crate::mcp::PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         (McpSharedState::for_daemon(backend), rx)
@@ -186,7 +189,8 @@ mod tests {
     }
 
     fn seeded_pr_state(state: McpSharedState) -> McpSharedState {
-        let (_ptx, pr_rx) = watch::channel(Some(
+        let (_ptx, pr_rx) = watch::channel(one_pr(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
                 "pr_number": 42, "repo": "acme/web", "title": "Add widget",
                 "author": "alice", "url": "https://example.com/42", "diff": "",
@@ -427,7 +431,8 @@ mod tests {
         diff_too_large: bool,
         changed_files: u64,
     ) -> McpSharedState {
-        let (_ptx, pr_rx) = watch::channel(Some(
+        let (_ptx, pr_rx) = watch::channel(one_pr(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
                 "pr_number": 42, "repo": "acme/web", "title": "Add widget",
                 "author": "alice", "url": "https://example.com/42", "diff": diff,
@@ -447,8 +452,7 @@ mod tests {
         let (state, mut bcast) = make_state();
         let state = seeded_pr_diff_state(state, SAMPLE_UNIFIED_DIFF, false, 1);
 
-        let args =
-            json!({ "view_id": "perri", "pane_id": "diff", "source": "perri.get_pr_diff" });
+        let args = json!({ "view_id": "perri", "pane_id": "diff", "source": "perri.get_pr_diff" });
         let result = refresh_pane_content(&state, &args, None).await;
         assert_eq!(result["ok"], true);
 
@@ -502,8 +506,7 @@ mod tests {
         let (state, mut bcast) = make_state();
         let state = seeded_pr_diff_state(state, "", true, 137);
 
-        let args =
-            json!({ "view_id": "perri", "pane_id": "diff", "source": "perri.get_pr_diff" });
+        let args = json!({ "view_id": "perri", "pane_id": "diff", "source": "perri.get_pr_diff" });
         let result = refresh_pane_content(&state, &args, None).await;
         assert_eq!(result["ok"], true);
 
@@ -516,7 +519,10 @@ mod tests {
                     changed_files,
                     ..
                 } => {
-                    assert!(too_large, "a diff_too_large snapshot must broadcast too_large: true");
+                    assert!(
+                        too_large,
+                        "a diff_too_large snapshot must broadcast too_large: true"
+                    );
                     assert!(files.is_empty(), "a too_large diff must carry no files");
                     assert_eq!(changed_files, 137);
                 }
@@ -531,8 +537,7 @@ mod tests {
         let (state, mut bcast) = make_state();
         // perri_pr_rx left at its default (None) — no PR loaded.
 
-        let args =
-            json!({ "view_id": "perri", "pane_id": "diff", "source": "perri.get_pr_diff" });
+        let args = json!({ "view_id": "perri", "pane_id": "diff", "source": "perri.get_pr_diff" });
         let result = refresh_pane_content(&state, &args, None).await;
         assert_eq!(result["ok"], true);
 
@@ -661,7 +666,8 @@ mod tests {
     // ── perri.get_pr_conversation (W3 — curated-agent-views) ──────────────────
 
     fn seeded_conversation_state(state: McpSharedState) -> McpSharedState {
-        let (_ptx, pr_rx) = watch::channel(Some(
+        let (_ptx, pr_rx) = watch::channel(one_pr(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
                 "pr_number": 42, "repo": "acme/web", "title": "Add widget",
                 "author": "alice", "url": "https://example.com/42", "diff": "",
@@ -691,8 +697,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pr_conversation_source_broadcasts_loading_then_parsed_conversation_with_no_focus_layout()
-    {
+    async fn pr_conversation_source_broadcasts_loading_then_parsed_conversation_with_no_focus_layout(
+    ) {
         let (state, mut bcast) = make_state();
         let state = seeded_conversation_state(state);
 
@@ -761,7 +767,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pr_conversation_source_with_no_pr_loaded_broadcasts_placeholder_text_not_conversation() {
+    async fn pr_conversation_source_with_no_pr_loaded_broadcasts_placeholder_text_not_conversation()
+    {
         let (state, mut bcast) = make_state();
         // perri_pr_rx left at its default (None) — no PR loaded.
 
@@ -782,8 +789,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pr_conversation_source_refuses_an_unknown_comment_id_and_leaves_a_painted_pane_untouched()
-    {
+    async fn pr_conversation_source_refuses_an_unknown_comment_id_and_leaves_a_painted_pane_untouched(
+    ) {
         let (state, mut bcast) = make_state();
         let state = seeded_conversation_state(state);
 

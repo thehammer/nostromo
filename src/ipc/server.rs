@@ -84,7 +84,16 @@ impl Server {
         let path = socket_path.to_path_buf();
 
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr, perri_state_dir, decisions).await {
+            if let Err(e) = accept_loop(
+                listener,
+                tx_clone,
+                pty_mgr,
+                session_mgr,
+                perri_state_dir,
+                decisions,
+            )
+            .await
+            {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -120,7 +129,16 @@ impl Server {
     ) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr, perri_state_dir, decisions).await {
+            if let Err(e) = accept_loop_tcp(
+                listener,
+                tx,
+                pty_mgr,
+                session_mgr,
+                perri_state_dir,
+                decisions,
+            )
+            .await
+            {
                 warn!("TCP IPC accept loop exited: {e:#}");
             }
         });
@@ -153,7 +171,17 @@ async fn accept_loop(
                 let psd = perri_state_dir.clone();
                 let decisions = Arc::clone(&decisions);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions).await {
+                    if let Err(e) = handle_client(
+                        stream,
+                        rx,
+                        broadcast_tx,
+                        pty_mgr,
+                        session_mgr,
+                        psd,
+                        decisions,
+                    )
+                    .await
+                    {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -184,7 +212,17 @@ async fn accept_loop_tcp(
                 let psd = perri_state_dir.clone();
                 let decisions = Arc::clone(&decisions);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions).await {
+                    if let Err(e) = handle_client(
+                        stream,
+                        rx,
+                        broadcast_tx,
+                        pty_mgr,
+                        session_mgr,
+                        psd,
+                        decisions,
+                    )
+                    .await
+                    {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -267,7 +305,10 @@ where
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
     let (topics, renders_decisions): (Vec<Topic>, bool) = match sub {
-        ClientMsg::Subscribe { topics, renders_decisions } => (topics, renders_decisions),
+        ClientMsg::Subscribe {
+            topics,
+            renders_decisions,
+        } => (topics, renders_decisions),
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
             (vec![], false)
@@ -277,7 +318,13 @@ where
         }
     };
 
-    info!(claimed_id, conn_key, ?topics, renders_decisions, "client subscribed");
+    info!(
+        claimed_id,
+        conn_key,
+        ?topics,
+        renders_decisions,
+        "client subscribed"
+    );
 
     // ── Decision-modal operator accounting (W6) ───────────────────────────────
     // An empty `topics` list still means "deliver everything" for routing (see
@@ -325,7 +372,8 @@ where
         let mut snapshots: Vec<ServerMsg> = {
             let mgr = session_mgr.lock().unwrap();
             if let Some(reg) = mgr.pane_registry() {
-                reg.lock().unwrap()
+                reg.lock()
+                    .unwrap()
                     .all_layouts()
                     .into_iter()
                     .map(|(tag, tree, focused)| ServerMsg::FocusLayout {
@@ -399,7 +447,11 @@ where
             };
             (snapshots, health_msg)
         };
-        replay_messages(&mut writer, snapshots.into_iter().chain(std::iter::once(health_msg))).await;
+        replay_messages(
+            &mut writer,
+            snapshots.into_iter().chain(std::iter::once(health_msg)),
+        )
+        .await;
     }
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
@@ -467,8 +519,7 @@ where
 
     debug!(
         claimed_id,
-        conn_key,
-        "client handler exiting; detaching PTYs + sessions"
+        conn_key, "client handler exiting; detaching PTYs + sessions"
     );
     {
         let mut mgr = pty_mgr.lock().unwrap();
@@ -715,10 +766,10 @@ fn handle_client_msg(
             let conn = conn_key.to_string();
             tokio::spawn(async move {
                 let res = match action {
-                    MotherActionKind::Cancel     => crate::mother::cancel(&job_id).await,
-                    MotherActionKind::Retry      => crate::mother::retry(&job_id).await,
+                    MotherActionKind::Cancel => crate::mother::cancel(&job_id).await,
+                    MotherActionKind::Retry => crate::mother::retry(&job_id).await,
                     MotherActionKind::ForceStart => crate::mother::force_start(&job_id).await,
-                    MotherActionKind::Archive    => crate::mother::archive(&job_id).await,
+                    MotherActionKind::Archive => crate::mother::archive(&job_id).await,
                 };
                 if let Err(e) = res {
                     tracing::warn!(conn, %job_id, ?action, "MotherAction failed: {e:#}");
@@ -748,18 +799,30 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::PerriAction { action, pr_number, repo, tag } => {
+        ClientMsg::PerriAction {
+            action,
+            pr_number,
+            repo,
+            tag,
+        } => {
             let conn = conn_key.to_string();
             let psd = perri_state_dir.to_path_buf();
             // W7: the PR under review belongs to a focus. A client that names
             // one drives that focus; one that doesn't (a pre-W7 build) drives
             // the built-in `perri` focus, which is where its single PR surface
             // was.
-            let tag = tag.unwrap_or_else(|| {
-                crate::data::perri_current_pr::BUILTIN_PERRI_TAG.to_owned()
-            });
+            let tag =
+                tag.unwrap_or_else(|| crate::data::perri_current_pr::BUILTIN_PERRI_TAG.to_owned());
             tokio::spawn(async move {
-                if let Err(e) = crate::perri_cli::run_perri_action(&action, pr_number, repo.as_deref(), &tag, &psd).await {
+                if let Err(e) = crate::perri_cli::run_perri_action(
+                    &action,
+                    pr_number,
+                    repo.as_deref(),
+                    &tag,
+                    &psd,
+                )
+                .await
+                {
                     tracing::warn!(conn, %action, "PerriAction failed: {e:#}");
                 }
                 // The native Perri sources watch dirty-file sentinels; all
@@ -771,7 +834,10 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::DecisionAnswer { request_id, choice_id } => {
+        ClientMsg::DecisionAnswer {
+            request_id,
+            choice_id,
+        } => {
             let outcome = decisions.lock().unwrap().answer(&request_id, choice_id);
             match outcome {
                 AnswerOutcome::Answered { promoted } => {

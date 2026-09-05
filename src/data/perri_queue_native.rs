@@ -2983,8 +2983,8 @@ mod tests {
         )
         .unwrap();
         std::env::remove_var("GITHUB_TOKEN");
-        let client =
-            GithubClient::new(Some(&hosts_path)).expect("client should build from hosts.yml fixture");
+        let client = GithubClient::new(Some(&hosts_path))
+            .expect("client should build from hosts.yml fixture");
         std::mem::forget(dir);
         client
     }

@@ -382,7 +382,9 @@ impl Walker {
             self.image_alt.push_str(s);
             return;
         }
-        self.push_span(MdSpan::Text { text: s.to_string() });
+        self.push_span(MdSpan::Text {
+            text: s.to_string(),
+        });
     }
 
     fn inline_code(&mut self, s: &str) {
@@ -390,7 +392,9 @@ impl Walker {
             self.image_alt.push_str(s);
             return;
         }
-        self.push_span(MdSpan::Code { text: s.to_string() });
+        self.push_span(MdSpan::Code {
+            text: s.to_string(),
+        });
     }
 
     /// HTML — block-level (`Event::Html`) or inline (`Event::InlineHtml`) — is
@@ -406,12 +410,16 @@ impl Walker {
             return;
         }
         if !self.root_spans.is_empty() || !self.inline_stack.is_empty() {
-            self.push_span(MdSpan::Text { text: s.to_string() });
+            self.push_span(MdSpan::Text {
+                text: s.to_string(),
+            });
         } else {
             // A standalone HTML block with no enclosing paragraph — wrap it
             // as its own paragraph so it isn't silently dropped.
             self.push_block(MdBlock::Paragraph {
-                spans: vec![MdSpan::Text { text: s.to_string() }],
+                spans: vec![MdSpan::Text {
+                    text: s.to_string(),
+                }],
             });
         }
     }
@@ -422,7 +430,9 @@ impl Walker {
         } else if self.in_image {
             self.image_alt.push(' ');
         } else {
-            self.push_span(MdSpan::Text { text: " ".to_string() });
+            self.push_span(MdSpan::Text {
+                text: " ".to_string(),
+            });
         }
     }
 
@@ -430,7 +440,9 @@ impl Walker {
         if self.in_code_block {
             self.code_buf.push('\n');
         } else {
-            self.push_span(MdSpan::Text { text: "\n".to_string() });
+            self.push_span(MdSpan::Text {
+                text: "\n".to_string(),
+            });
         }
     }
 
@@ -520,7 +532,6 @@ fn heading_level_u8(level: HeadingLevel) -> u8 {
     }
 }
 
-
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -585,8 +596,8 @@ mod tests {
     }
 
     #[test]
-    fn a_fenced_code_block_indented_inside_a_list_item_produces_a_dedented_code_block_nested_in_the_item()
-    {
+    fn a_fenced_code_block_indented_inside_a_list_item_produces_a_dedented_code_block_nested_in_the_item(
+    ) {
         let md = "- item one\n  ```rust\n  fn f() {}\n  ```\n";
         let blocks = markdown_to_blocks(md);
         match &blocks[0] {
@@ -622,7 +633,9 @@ mod tests {
                 assert!(!ordered);
                 assert_eq!(items.len(), 1, "one outer item");
                 let outer_item = &items[0];
-                assert!(matches!(&outer_item[0], MdBlock::Paragraph { spans } if spans == &vec![MdSpan::Text { text: "outer".into() }]));
+                assert!(
+                    matches!(&outer_item[0], MdBlock::Paragraph { spans } if spans == &vec![MdSpan::Text { text: "outer".into() }])
+                );
                 match &outer_item[1] {
                     MdBlock::List {
                         ordered: inner_ordered,
@@ -673,10 +686,15 @@ mod tests {
                 assert!(
                     matches!(&outer_item[0], MdBlock::Paragraph { spans } if spans == &vec![MdSpan::Text { text: "outer".into() }]),
                     "the outer item's own text must survive as its own paragraph, not be \
-                     merged into the nested list's first item: {:?}", outer_item[0]
+                     merged into the nested list's first item: {:?}",
+                    outer_item[0]
                 );
                 match &outer_item[1] {
-                    MdBlock::List { ordered: inner_ordered, items: inner_items, .. } => {
+                    MdBlock::List {
+                        ordered: inner_ordered,
+                        items: inner_items,
+                        ..
+                    } => {
                         assert!(!inner_ordered);
                         assert_eq!(inner_items.len(), 2, "two inner items");
                         assert!(matches!(
@@ -787,7 +805,9 @@ mod tests {
             blocks,
             vec![MdBlock::Paragraph {
                 spans: vec![MdSpan::Link {
-                    spans: vec![MdSpan::Text { text: "text".into() }],
+                    spans: vec![MdSpan::Text {
+                        text: "text".into()
+                    }],
                     url: "http://example.com".into(),
                 }],
             }]
@@ -840,7 +860,9 @@ mod tests {
             vec![MdBlock::Paragraph {
                 spans: vec![MdSpan::Link {
                     spans: vec![MdSpan::Emph {
-                        spans: vec![MdSpan::Text { text: "em link".into() }],
+                        spans: vec![MdSpan::Text {
+                            text: "em link".into()
+                        }],
                     }],
                     url: "http://example.com".into(),
                 }],
@@ -858,9 +880,13 @@ mod tests {
             blocks,
             vec![MdBlock::Paragraph {
                 spans: vec![
-                    MdSpan::Text { text: "line one".into() },
+                    MdSpan::Text {
+                        text: "line one".into()
+                    },
                     MdSpan::Text { text: "\n".into() },
-                    MdSpan::Text { text: "line two".into() },
+                    MdSpan::Text {
+                        text: "line two".into()
+                    },
                 ],
             }]
         );
@@ -901,11 +927,19 @@ mod tests {
             blocks,
             vec![MdBlock::Paragraph {
                 spans: vec![
-                    MdSpan::Text { text: "Some text with ".into() },
+                    MdSpan::Text {
+                        text: "Some text with ".into()
+                    },
                     MdSpan::Text { text: "<b>".into() },
-                    MdSpan::Text { text: "inline".into() },
-                    MdSpan::Text { text: "</b>".into() },
-                    MdSpan::Text { text: " html.".into() },
+                    MdSpan::Text {
+                        text: "inline".into()
+                    },
+                    MdSpan::Text {
+                        text: "</b>".into()
+                    },
+                    MdSpan::Text {
+                        text: " html.".into()
+                    },
                 ],
             }]
         );
@@ -922,9 +956,13 @@ mod tests {
             vec![MdBlock::Quote {
                 blocks: vec![MdBlock::Paragraph {
                     spans: vec![
-                        MdSpan::Text { text: "quoted text".into() },
+                        MdSpan::Text {
+                            text: "quoted text".into()
+                        },
                         MdSpan::Text { text: " ".into() },
-                        MdSpan::Text { text: "more".into() },
+                        MdSpan::Text {
+                            text: "more".into()
+                        },
                     ],
                 }],
             }]
