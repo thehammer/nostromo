@@ -1,4 +1,5 @@
 import Foundation
+import NostromoKit
 
 // MARK: - NavRow
 
@@ -16,7 +17,10 @@ enum NavRow: Equatable {
     ///
     /// - Parameters:
     ///   - label:     Resolved primary label (may differ from `focus.displayName`).
-    ///   - secondary: Optional disambiguation line (short focus id or Phase-2 summary).
+    ///   - secondary: Disambiguation line — the focus's PR under review (W8),
+    ///     a session summary, or a short focus id. `buildNavRows` never
+    ///     actually produces `nil` here (see its doc comment, D6); the type
+    ///     stays optional only because `NavRow` predates that guarantee.
     ///   - indented:  True when nested under a `repoHeader`.
     case focus(Focus, label: String, secondary: String?, indented: Bool)
 }
@@ -33,11 +37,28 @@ enum NavRow: Equatable {
 /// - Repo groups follow, sorted alphabetically by `repoName`.
 /// - A repo with exactly one focus emits a single `.focus` row (no repo header);
 ///   a repo with ≥2 focuses emits `.repoHeader` + indented `.focus` rows.
-/// - Disambiguation (`secondary`): use `sessionSummary` when non-nil/empty; else
-///   use the first 8 chars of `id` only when two focuses in the same repo share an
-///   `agentTag` (Phase 1 fallback); otherwise `nil`.
-func buildNavRows(_ focuses: [Focus]) -> [NavRow] {
+/// - Disambiguation (`secondary`): the PR under review (via `prFor`) always wins
+///   when present (W8, D5 — identity beats narration); otherwise use `sessionSummary`
+///   when non-nil/empty; else use the first 8 chars of `id` only when two focuses in
+///   the same repo share an `agentTag` (Phase 1 fallback); otherwise an explicit
+///   "no PR" string (`FocusPRLabel.noPR`) — never `nil` (W8, D6: a row's height must
+///   not change when a PR loads or clears, so every row always has a secondary line).
+///
+/// - Parameter prFor: Resolves a focus's `sessionTag` to its PR under review
+///   (`repo`, `number`), both `nil` when it has none. Defaults to "no focus has a
+///   PR" so every existing caller keeps compiling unchanged.
+func buildNavRows(
+    _ focuses: [Focus],
+    prFor: (String) -> (repo: String?, number: Int?) = { _ in (nil, nil) }
+) -> [NavRow] {
     var rows: [NavRow] = []
+
+    // The PR under review always wins over any other candidate for the
+    // secondary line (D5); the result is never nil (D6).
+    func secondaryLine(forTag tag: String, fallback: String?) -> String {
+        let (repo, number) = prFor(tag)
+        return FocusPRLabel.secondary(repo: repo, number: number, fallback: fallback)
+    }
 
     // 1. Bucket by effectiveOrg
     let byOrg = Dictionary(grouping: focuses) { $0.effectiveOrg }
@@ -57,7 +78,8 @@ func buildNavRows(_ focuses: [Focus]) -> [NavRow] {
         // a. Org-level (pathless) focuses — canonical built-in order, then alpha
         let pathless = orgFocuses.filter { $0.projectPath == nil }
         for f in sortedPathlessFocuses(pathless) {
-            rows.append(.focus(f, label: f.agentTag.capitalized, secondary: nil, indented: false))
+            rows.append(.focus(f, label: f.agentTag.capitalized,
+                               secondary: secondaryLine(forTag: f.sessionTag, fallback: nil), indented: false))
         }
 
         // b. Repo groups — alphabetical by repoName
@@ -75,7 +97,8 @@ func buildNavRows(_ focuses: [Focus]) -> [NavRow] {
                 let label = f.agentTag.lowercased() == "claudia"
                     ? repoName
                     : "\(f.agentTag.capitalized) in \(repoName)"
-                rows.append(.focus(f, label: label, secondary: nil, indented: false))
+                rows.append(.focus(f, label: label,
+                                   secondary: secondaryLine(forTag: f.sessionTag, fallback: nil), indented: false))
             } else {
                 rows.append(.repoHeader(repoName))
 
@@ -84,15 +107,16 @@ func buildNavRows(_ focuses: [Focus]) -> [NavRow] {
                 for f in group { tagCount[f.agentTag, default: 0] += 1 }
 
                 for f in group {
-                    let secondary: String?
+                    let fallback: String?
                     if let summary = f.sessionSummary, !summary.isEmpty {
-                        secondary = summary
+                        fallback = summary
                     } else if (tagCount[f.agentTag] ?? 0) > 1 {
-                        secondary = String(f.id.prefix(8))
+                        fallback = String(f.id.prefix(8))
                     } else {
-                        secondary = nil
+                        fallback = nil
                     }
-                    rows.append(.focus(f, label: f.agentTag.capitalized, secondary: secondary, indented: true))
+                    rows.append(.focus(f, label: f.agentTag.capitalized,
+                                       secondary: secondaryLine(forTag: f.sessionTag, fallback: fallback), indented: true))
                 }
             }
         }

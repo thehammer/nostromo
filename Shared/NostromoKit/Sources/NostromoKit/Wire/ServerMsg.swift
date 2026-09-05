@@ -49,8 +49,14 @@ public enum ServerMsg {
     /// An empty `todos` array signals that the job left the active set (terminal clear).
     case motherPeek(MotherPeekSnapshot)
 
-    /// Broadcast snapshot of Perri's PR review queue + current-PR detail.
-    case perriState(queue: [PrQueueItem], current: PrSnapshot?)
+    /// Broadcast snapshot of one focus's PR review state (W7/W8).
+    ///
+    /// `queue` is fleet-wide — byte-identical in every frame regardless of
+    /// `tag` — because there is one set of open PRs and every focus sees the
+    /// same one. `current` is per-focus: the PR **`tag`'s focus** has under
+    /// review, or `nil` when it has none. Callers must key `current` by
+    /// `tag` and never let one focus's frame overwrite another's.
+    case perriState(tag: String, queue: [PrQueueItem], current: PrSnapshot?)
 
     /// Broadcast snapshot of Fred's mailbox + calendar state.
     case fredState(mailbox: MailboxSnapshot, calendar: CalendarSnapshot)
@@ -408,7 +414,7 @@ extension ServerMsg {
     private struct SessionExitedWrapper:     Decodable { let tag: String; let exit_code: Int? }
     private struct FocusListWrapper:         Decodable { let focuses: [FocusMeta] }
     private struct MotherJobsWrapper:        Decodable { let jobs: [MotherJob] }
-    private struct PerriStateWrapper:        Decodable { let queue: [PrQueueItem]; let current: PrSnapshot? }
+    private struct PerriStateWrapper:        Decodable { let tag: String; let queue: [PrQueueItem]; let current: PrSnapshot? }
     private struct FredStateWrapper:         Decodable { let mailbox: MailboxSnapshot; let calendar: CalendarSnapshot }
     private struct TeriStateWrapper:         Decodable { let todos: TeriTodosSnapshot }
     private struct FocusLayoutWrapper:       Decodable { let tag: String; let tree: PaneTree; let focused_pane: String? }
@@ -525,7 +531,7 @@ extension ServerMsg {
 
         case "perri_state":
             if let m = try? dec.decode(PerriStateWrapper.self, from: data) {
-                return .perriState(queue: m.queue, current: m.current)
+                return .perriState(tag: m.tag, queue: m.queue, current: m.current)
             }
 
         case "fred_state":
