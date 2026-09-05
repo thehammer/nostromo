@@ -91,8 +91,8 @@ the verdict is `healthy`. Given both, these terms are checked:
 | `text container used width is <= 0` | `containerUsedWidth <= 0` | a collapsed text container |
 | `document view width is <= the gutter's rule thickness` | `documentViewWidth <= ruleThickness` | a document view no wider than its own gutter |
 | `clip view width is <= 0` | `clipViewWidth <= 0` | a scroll view with no viewport |
-| `the gutter filled a rect wider than its own rule thickness` | `gutterFillWidth > ruleThickness` | **the confirmed W3 cause** — the ruler painting over the body and the tab strip above it |
-| `document view height is less than the clip view's height` | `documentViewHeight + 1 < clipViewHeight` (and `clipViewHeight > 0`) | a document view collapsed vertically |
+| `the gutter filled a rect wider than its own rule thickness` | `gutterFillWidth > ruleThickness` | a tautological safety net now that the fill is clipped at the source (`rect.intersection(bounds)` plus `clipsToBounds = true`) — `gutterFillWidth` can never exceed `ruleThickness` in the shipped app. The real regression guard for **the confirmed W3 cause** (a gutter painting over the body and the tab strip above it) is `CodeContentViewTests.testDrawHashMarksAndLabelsFillsOnlyItsOwnBoundsNeverTheRawDirtyRect`, a source-scraping test that fails if the unclipped fill ever comes back. |
+| `document view height is less than the height of the text it laid out` | `documentViewHeight + 1 < containerUsedHeight` (and `containerUsedHeight > 0`) | a document view too short to paint the text it actually laid out — **not** a document view shorter than its viewport, which is the ordinary case for a short file or diff hunk in a tall pane (an earlier version of this term compared against the clip view and was a confirmed false positive on every healthy short document) |
 | `text storage is too short to hold even one character per row` | `rowCount > 1 && textStorageLength <= rowCount - 1` | an all-blank-lines document that reads healthy on every geometry term |
 
 `gutterFillWidth` is the width the ruler *actually filled*

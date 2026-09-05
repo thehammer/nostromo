@@ -623,6 +623,14 @@ final class LineNumberRulerView: NSRulerView {
         // painting what this ruler just proved was there (see
         // `CodePaneRenderAudit`). Pure observation: nothing below this line
         // can change what was already drawn above.
+        // The height of the text layoutManager actually laid out, insets
+        // folded in here (not in CodePaneRenderAudit, which stays
+        // Foundation-only, D3) — the sibling measurement to
+        // containerUsedWidth just above, and what
+        // documentViewShorterThanItsText actually compares the document
+        // view's frame against, never the viewport.
+        let containerUsedHeight = Double(layoutManager.usedRect(for: container).height)
+            + Double(inset.height) * 2
         let measurements = CodePaneRenderAudit.Measurements(
             labelsPainted: painted,
             labelCount: labels.count,
@@ -631,6 +639,7 @@ final class LineNumberRulerView: NSRulerView {
             documentViewWidth: Double(textView.frame.width),
             clipViewWidth: Double(scrollView.contentView.bounds.width),
             containerUsedWidth: Double(layoutManager.usedRect(for: container).width),
+            containerUsedHeight: containerUsedHeight,
             ruleThickness: Double(ruleThickness),
             gutterFillWidth: Double(fill.width),
             documentViewHeight: Double(textView.frame.height),

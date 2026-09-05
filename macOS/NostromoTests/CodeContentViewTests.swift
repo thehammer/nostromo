@@ -181,11 +181,18 @@ final class CodeContentViewTests: XCTestCase {
                 """)
             XCTAssertTrue(call.contains("documentViewHeight:"), """
                 the Measurements(...) construction must pass documentViewHeight:, or G1's \
-                documentViewShorterThanViewport guard has nothing to compare against: \(call)
+                documentViewShorterThanItsText guard has nothing to compare against: \(call)
                 """)
             XCTAssertTrue(call.contains("clipViewHeight:"), """
-                the Measurements(...) construction must pass clipViewHeight:, or G1's \
-                documentViewShorterThanViewport guard has nothing to compare against: \(call)
+                the Measurements(...) construction must pass clipViewHeight: — no longer consulted \
+                by any verdict term, but still required for the diagnostic report an operator \
+                pastes into a bug report: \(call)
+                """)
+            XCTAssertTrue(call.contains("containerUsedHeight:"), """
+                the Measurements(...) construction must pass containerUsedHeight: — the height of \
+                the text layoutManager actually laid out (usedRect plus insets) — or G1's \
+                documentViewShorterThanItsText guard has nothing to compare the document view \
+                against: \(call)
                 """)
             XCTAssertTrue(call.contains("gutterFillWidth: Double(fill.width)"), """
                 gutterFillWidth must be fed from the clipped fill rect — `fill.width`, where \
@@ -237,17 +244,38 @@ final class CodeContentViewTests: XCTestCase {
 
     // MARK: 32. G2 — textKitDowngraded is logged unconditionally, not only measured
 
+    /// The previous version of this test only asserted that the substring "textKitDowngraded"
+    /// appeared more than once anywhere in the file — which passes even if both real log call
+    /// sites were deleted, because the doc comments above them (`logDocumentPush`'s and
+    /// `auditAfterDraw`'s) also contain that spelling. This version scopes the check to the two
+    /// function bodies that must actually log it, and requires the identifier to sit inside a
+    /// real `codePaneLog.info(...)` call within each body — not merely a comment above it.
     func testTextKitDowngradedIsActuallyLoggedSomewhereNotOnlyMeasured() throws {
         let source = try Self.codeContentViewSource()
-        let occurrenceCount = source.components(separatedBy: "textKitDowngraded").count - 1
-        XCTAssertGreaterThan(occurrenceCount, 1, """
-            textKitDowngraded must be referenced somewhere in CodeContentView.swift besides its \
-            own CodePaneRenderAudit.Measurements(...) construction (G2) — it must be logged \
-            unconditionally (once per document push and once per change of the flag), not only \
-            on a .blankBody verdict. A flag that is written into a struct and never read again \
-            is not evidence of anything; today it has exactly one occurrence in this file (the \
-            Measurements( construction itself), so this fails until it is actually logged.
-            """)
+
+        let pushBody = try XCTUnwrap(
+            Self.functionBody(signature: "private func logDocumentPush(kind: String) {", in: source),
+            "logDocumentPush(kind:) not found — did it move or rename?"
+        )
+        let auditBody = try XCTUnwrap(
+            Self.functionBody(
+                signature: "private func auditAfterDraw(_ measurements: CodePaneRenderAudit.Measurements) {",
+                in: source
+            ),
+            "auditAfterDraw(_:) not found — did it move or rename?"
+        )
+
+        for (name, body) in [("logDocumentPush", pushBody), ("auditAfterDraw", auditBody)] {
+            let logCalls = Self.balancedCalls(startingAt: "codePaneLog.info(", in: body)
+            let mentionsTextKitDowngraded = logCalls.contains { $0.contains("textKitDowngraded") }
+            XCTAssertTrue(mentionsTextKitDowngraded, """
+                \(name) must contain a codePaneLog.info(...) call whose logged string interpolates \
+                textKitDowngraded (G2) — a flag that is only ever written into a Measurements \
+                struct and never logged is not evidence of anything. A doc comment mentioning the \
+                identifier does not satisfy this: only an actual codePaneLog.info( call site \
+                counts. codePaneLog.info(...) calls found in \(name): \(logCalls)
+                """)
+        }
     }
 
     // MARK: - Helpers

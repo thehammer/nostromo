@@ -30,10 +30,16 @@ import XCTest
 /// catches it: it compares what the ruler *filled* this pass
 /// (`rect.intersection(bounds).width`) against its own `ruleThickness`.
 ///
-/// `documentViewShorterThanViewport` and `textStorageImplausiblyShortForRowCount`
+/// `documentViewShorterThanItsText` and `textStorageImplausiblyShortForRowCount`
 /// are two more guards from the same investigation, aimed at hypotheses that
 /// turned out not to be this bug but are cheap, low-false-positive tripwires
-/// worth keeping.
+/// worth keeping. The height guard compares the document view against the
+/// height of the text it actually laid out (`containerUsedHeight`), never
+/// against its clip view — an earlier version compared against the clip
+/// view's height and was a confirmed false positive (W3.1): AppKit does not
+/// guarantee a document view's frame tracks its clip view's height, and a
+/// short, healthy document routinely reads shorter than a tall viewport with
+/// room to spare.
 final class CodePaneRenderAuditTests: XCTestCase {
 
     // MARK: - Fixtures
@@ -41,8 +47,10 @@ final class CodePaneRenderAuditTests: XCTestCase {
     /// A pane with plenty of room in every dimension and content painted —
     /// the case the audit must never flag. `gutterFillWidth` equals
     /// `ruleThickness` (the ruler filled exactly its own bounds, the healthy
-    /// case post-fix) and the document view is taller than the clip view (an
-    /// ordinary scrollable document).
+    /// case post-fix), `containerUsedHeight` sits comfortably below
+    /// `documentViewHeight` (the text fits with room to spare), and the
+    /// document view is taller than the clip view (an ordinary scrollable
+    /// document).
     private static func healthyMeasurements() -> CodePaneRenderAudit.Measurements {
         CodePaneRenderAudit.Measurements(
             labelsPainted: 24,
@@ -52,6 +60,7 @@ final class CodePaneRenderAuditTests: XCTestCase {
             documentViewWidth: 640,
             clipViewWidth: 840,
             containerUsedWidth: 600,
+            containerUsedHeight: 750,
             ruleThickness: 48,
             gutterFillWidth: 48,
             documentViewHeight: 800,
@@ -63,7 +72,7 @@ final class CodePaneRenderAuditTests: XCTestCase {
     /// The exact measurements read off the screenshot that motivated this
     /// diagnostics job: gutter fully painted, body collapsed to zero width.
     /// `gutterFillWidth`/heights are healthy here — this fixture is about the
-    /// two *width* terms only, not the W3 gutter-fill term.
+    /// two *width* terms only, not the W3 gutter-fill term or the height term.
     private static func screenshotSignature() -> CodePaneRenderAudit.Measurements {
         CodePaneRenderAudit.Measurements(
             labelsPainted: 24,
@@ -73,6 +82,7 @@ final class CodePaneRenderAuditTests: XCTestCase {
             documentViewWidth: 0,
             clipViewWidth: 840,
             containerUsedWidth: 0,
+            containerUsedHeight: 750,
             ruleThickness: 48,
             gutterFillWidth: 48,
             documentViewHeight: 800,
@@ -88,7 +98,15 @@ final class CodePaneRenderAuditTests: XCTestCase {
     /// AppKit-supplied dirty rect) was never intersected with the ruler's own
     /// `bounds`. Every width and height term here is deliberately healthy:
     /// this is the fixture that proves those six terms are not sufficient on
-    /// their own.
+    /// their own. `containerUsedHeight: 202` is not a stand-in value — it's
+    /// derived the same way the ruler derives it: 10 lines of 13pt mono text
+    /// (`usedRect` height) plus `textContainerInset.height * 2`, i.e.
+    /// `10 × 19 + 2 × 6 = 202`, exactly equal to `documentViewHeight`. That
+    /// equality is the clearest in-repo evidence that a document view's
+    /// height is content-driven, not viewport-driven: this pane's
+    /// `clipViewHeight` (200) is two points *shorter* than its document view,
+    /// yet the document view is not shrunk to match it — it's sized to hold
+    /// exactly the text laid out inside it.
     private static func w3GutterOverpaintSignature() -> CodePaneRenderAudit.Measurements {
         CodePaneRenderAudit.Measurements(
             labelsPainted: 10,
@@ -98,6 +116,7 @@ final class CodePaneRenderAuditTests: XCTestCase {
             documentViewWidth: 840,
             clipViewWidth: 880,
             containerUsedWidth: 394,
+            containerUsedHeight: 202,
             ruleThickness: 40,
             gutterFillWidth: 880,
             documentViewHeight: 202,
@@ -138,6 +157,7 @@ final class CodePaneRenderAuditTests: XCTestCase {
             documentViewWidth: 0,
             clipViewWidth: 0,
             containerUsedWidth: 0,
+            containerUsedHeight: 0,
             ruleThickness: 48,
             gutterFillWidth: 0,
             documentViewHeight: 0,
@@ -162,6 +182,7 @@ final class CodePaneRenderAuditTests: XCTestCase {
             documentViewWidth: 0,
             clipViewWidth: 0,
             containerUsedWidth: 0,
+            containerUsedHeight: 0,
             ruleThickness: 48,
             gutterFillWidth: 0,
             documentViewHeight: 0,
@@ -280,68 +301,143 @@ final class CodePaneRenderAuditTests: XCTestCase {
             """)
     }
 
-    // MARK: 11. G1 — document view shorter than the viewport
+    // MARK: 11. W3.1 — headline: a healthy short document must never trip the wire
+    //
+    // This is the fix's whole reason to exist. These are the empirically measured
+    // numbers for a real 2-line document in a 600pt-tall clip view, taken from an
+    // AppKit harness copying CodeContentView's exact text-view init: documentViewHeight
+    // 594, clipViewHeight 600, containerUsedHeight 50 (a usedRect height of 38 plus
+    // 2×6pt of text-container inset). AppKit's own scroll-view tiling floors a
+    // vertically-resizable document view's height at roughly the clip view's height
+    // once window-attached — so documentViewHeight tracks clipViewHeight (594 vs 600)
+    // by coincidence of that tiling, not because the text needs that much room; the
+    // text only ever needed 50pt. Against the OLD, pre-fix term (documentViewHeight +
+    // 1 < clipViewHeight, i.e. 595 < 600), this is a false-positive .blankBody on a
+    // perfectly healthy short document — the exact bug this fix exists to remove.
+    // Against the fixed term (documentViewHeight + 1 < containerUsedHeight, i.e.
+    // 595 < 50), it is unambiguously healthy.
 
-    func testDocumentViewShorterThanClipViewTripsTheHeightTerm() {
+    func testHealthyShortDocumentIsHealthyEvenThoughItReadsShorterThanItsClipView() {
+        let measurements = CodePaneRenderAudit.Measurements(
+            labelsPainted: 2,
+            labelCount: 2,
+            textStorageLength: 40,
+            rowCount: 2,
+            documentViewWidth: 640,
+            clipViewWidth: 840,
+            containerUsedWidth: 600,
+            containerUsedHeight: 50,
+            ruleThickness: 48,
+            gutterFillWidth: 48,
+            documentViewHeight: 594,
+            clipViewHeight: 600,
+            textKitDowngraded: false
+        )
+        XCTAssertEqual(CodePaneRenderAudit.verdict(measurements), .healthy, """
+            this is the ordinary case for this pane, not an edge case: a short file or a small \
+            diff hunk in a clip view taller than the text needs. documentViewHeight (594) reads \
+            shorter than clipViewHeight (600) here purely as a side effect of AppKit's own \
+            scroll-view tiling, not because anything is collapsed — the text only ever needed \
+            containerUsedHeight (50). A term that compares against the clip view instead of the \
+            laid-out text would flag this healthy, everyday pane as .blankBody.
+            """)
+    }
+
+    // MARK: 12. G1 (fixed) — document view shorter than the text it laid out
+
+    /// The one genuine failure this term must still catch: a document view whose frame is
+    /// actually too short to hold the text `layoutManager` laid out for it, independent of
+    /// whatever the clip view happens to read. Deleting this term entirely (or its firing
+    /// condition) would not break any other test in this file — this is deliberately the only
+    /// assertion in the suite that depends on `.documentViewShorterThanItsText` actually firing.
+    func testDocumentViewShorterThanItsLaidOutTextTripsTheHeightTerm() {
         var measurements = Self.healthyMeasurements()
-        measurements.documentViewHeight = 0
-        measurements.clipViewHeight = 200
+        measurements.documentViewHeight = 40     // frame only offers 40pt
+        measurements.containerUsedHeight = 202   // content needs 202pt
         let verdict = CodePaneRenderAudit.verdict(measurements)
         guard case .blankBody(let reasons) = verdict else {
-            return XCTFail("expected .blankBody when the document view collapsed under the viewport, got \(verdict)")
+            return XCTFail("expected .blankBody when the document view is shorter than the text it laid out, got \(verdict)")
         }
-        XCTAssertTrue(reasons.contains(.documentViewShorterThanViewport), """
-            a document view shorter than the clip view showing it means the text view could not \
-            possibly have painted its full content — this is a second, independent way a \
-            "correct gutter, blank body" render can happen, and must be caught the same as the \
-            gutter-fill term.
+        XCTAssertEqual(reasons, [.documentViewShorterThanItsText], """
+            a document view whose frame (40pt) is shorter than the text it actually laid out \
+            (202pt) cannot possibly have painted all of it — this is exactly the "correct \
+            gutter, blank body" failure mode this term exists to catch, and it must fire \
+            regardless of what the clip view reads.
             """)
     }
 
-    // MARK: 12. G1 negative — the ordinary cases must never trip it
+    // MARK: 13. G1 boundary — > not >=
 
-    func testDocumentViewTallerThanClipViewByMoreThanOnePointIsHealthy() {
+    func testDocumentViewHeightExactlyEqualToContainerUsedHeightIsHealthy() {
         var measurements = Self.healthyMeasurements()
-        measurements.documentViewHeight = 202
-        measurements.clipViewHeight = 200
+        measurements.documentViewHeight = 300
+        measurements.containerUsedHeight = 300
         XCTAssertEqual(CodePaneRenderAudit.verdict(measurements), .healthy, """
-            a document taller than its viewport is the normal, scrollable case and must never \
-            be flagged.
+            the guard must be a strict `>` on the shortfall (documentViewHeight + 1 < \
+            containerUsedHeight), not `>=` — a document view exactly as tall as the text it laid \
+            out is the ordinary, fully-painted case and must never be flagged. Mirrors \
+            gutterFillWiderThanGutter's own `>` discipline.
             """)
     }
 
+    // MARK: 14. G1 negative — a tall document in a short viewport (ordinary scrolling) stays healthy
+    //
+    // This guards against ever reintroducing a clip-view/viewport comparison into this term, in
+    // either direction: a document taller OR shorter than its clip view is unremarkable on its
+    // own — only its relationship to containerUsedHeight matters.
+
+    func testTallDocumentInAShortViewportStaysHealthyRegardlessOfClipViewHeight() {
+        var measurements = Self.healthyMeasurements()
+        measurements.documentViewHeight = 800
+        measurements.clipViewHeight = 200      // much shorter than the document view
+        measurements.containerUsedHeight = 750 // the text still fits inside the document view
+        XCTAssertEqual(CodePaneRenderAudit.verdict(measurements), .healthy, """
+            a document view much taller than its clip view is the normal, scrollable case — the \
+            clip view merely shows a window onto it. This must stay healthy purely because the \
+            text (750pt) fits inside the document view's frame (800pt); clipViewHeight being far \
+            smaller (200) must be irrelevant to this term.
+            """)
+    }
+
+    /// Rationale rewrite: the old comment here justified this case by claiming "AppKit sizes the
+    /// text view against the clip view to within rounding" and called the coincidence "ordinary
+    /// floating-point layout noise." That theory is refuted — see `w3GutterOverpaintSignature`'s
+    /// doc comment and the 594/600/50 headline fixture above: AppKit does not reliably size the
+    /// document view to the clip view at all. This case is healthy for an unrelated reason: the
+    /// laid-out text (`containerUsedHeight`, set below the shared height) fits inside the
+    /// document view. The documentViewHeight == clipViewHeight coincidence is incidental.
     func testDocumentViewExactlyEqualToClipViewHeightIsHealthy() {
         var measurements = Self.healthyMeasurements()
         measurements.documentViewHeight = 200
         measurements.clipViewHeight = 200
+        measurements.containerUsedHeight = 150 // the text fits well inside 200pt; the clip-view match is incidental
         XCTAssertEqual(CodePaneRenderAudit.verdict(measurements), .healthy, """
-            a document exactly filling its viewport (no scrollable overflow) is healthy — the \
-            deliberate 1pt tolerance in the guard exists precisely so this common case, and \
-            ordinary floating-point layout noise around it, is never mistaken for a collapsed \
-            document view.
+            healthy because the laid-out text (150pt) fits inside the document view (200pt) — \
+            not because the document view happens to equal the clip view's height. That equality \
+            must be irrelevant to this term.
             """)
     }
 
-    func testZeroClipViewHeightNeverTripsTheHeightTermRegardlessOfDocumentHeight() {
+    func testZeroContainerUsedHeightNeverTripsTheHeightTermRegardlessOfDocumentHeight() {
         var midLayout = Self.healthyMeasurements()
-        midLayout.clipViewHeight = 0
+        midLayout.containerUsedHeight = 0
         midLayout.documentViewHeight = 0
         XCTAssertEqual(CodePaneRenderAudit.verdict(midLayout), .healthy, """
-            clipViewHeight == 0 means the scroll view itself hasn't been laid out yet (mid-layout) \
-            — there is no viewport to be shorter than, so this must never fire no matter what \
-            documentViewHeight reads, including 0.
+            containerUsedHeight == 0 means layoutManager hasn't laid out any glyphs yet \
+            (mid-layout) — there is no laid-out text to be shorter than, so this must never fire \
+            no matter what documentViewHeight reads, including 0.
             """)
 
         var midLayoutTallDocument = Self.healthyMeasurements()
-        midLayoutTallDocument.clipViewHeight = 0
+        midLayoutTallDocument.containerUsedHeight = 0
         midLayoutTallDocument.documentViewHeight = 900
         XCTAssertEqual(CodePaneRenderAudit.verdict(midLayoutTallDocument), .healthy, """
-            same guard, with a non-zero document height — clipViewHeight == 0 alone must suppress \
-            the term.
+            same guard, with a non-zero document height — containerUsedHeight == 0 alone must \
+            suppress the term.
             """)
     }
 
-    // MARK: 13. G3 — text storage implausibly short for the row count
+    // MARK: 15. G3 — text storage implausibly short for the row count
 
     func testTextStorageOneShorterThanRowCountTripsThePlausibilityTerm() {
         var measurements = Self.healthyMeasurements()
@@ -358,7 +454,7 @@ final class CodePaneRenderAuditTests: XCTestCase {
             """)
     }
 
-    // MARK: 14. G3 negative — a legitimately blank-line-heavy document must not trip it
+    // MARK: 16. G3 negative — a legitimately blank-line-heavy document must not trip it
 
     func testLegitimatelyBlankLineHeavyDocumentDoesNotTripThePlausibilityTerm() {
         var measurements = Self.healthyMeasurements()
@@ -392,6 +488,7 @@ final class CodePaneRenderAuditTests: XCTestCase {
             documentViewWidth: 640,
             clipViewWidth: 840,
             containerUsedWidth: 600,
+            containerUsedHeight: 750,
             ruleThickness: 48,
             gutterFillWidth: 48,
             documentViewHeight: 800,
@@ -405,7 +502,7 @@ final class CodePaneRenderAuditTests: XCTestCase {
             """)
     }
 
-    // MARK: 15. Multiple reasons compose, in the declared order
+    // MARK: 17. Multiple reasons compose, in the declared order
 
     func testAGutterFillFailureAndAWidthFailureBothReportInDeclaredOrder() {
         var measurements = Self.healthyMeasurements()
@@ -418,12 +515,12 @@ final class CodePaneRenderAuditTests: XCTestCase {
         XCTAssertEqual(reasons, [.documentViewNarrowerThanGutter, .gutterFillWiderThanGutter], """
             verdict(_:) must report every failing term, in the declared order (the three \
             pre-existing width terms, then gutterFillWiderThanGutter, then \
-            documentViewShorterThanViewport, then textStorageImplausiblyShortForRowCount) — an \
+            documentViewShorterThanItsText, then textStorageImplausiblyShortForRowCount) — an \
             operator debugging a real recurrence needs all the evidence, not just the first hit.
             """)
     }
 
-    // MARK: 16. summary(of:)/report(of:) surface every new field
+    // MARK: 18. summary(of:)/report(of:) surface every new field
 
     func testReportReflectsGutterFillWidth() {
         var wide = Self.healthyMeasurements()
@@ -468,6 +565,22 @@ final class CodePaneRenderAuditTests: XCTestCase {
         XCTAssertNotEqual(CodePaneRenderAudit.report(of: zero), CodePaneRenderAudit.report(of: healthy), """
             report(of:) must mention clipViewHeight, or the field is invisible in the pasted \
             report.
+            """)
+    }
+
+    func testReportReflectsContainerUsedHeight() {
+        var zero = Self.healthyMeasurements()
+        zero.containerUsedHeight = 0
+        let healthy = Self.healthyMeasurements()
+
+        XCTAssertNotEqual(CodePaneRenderAudit.summary(of: zero), CodePaneRenderAudit.summary(of: healthy), """
+            summary(of:) must mention containerUsedHeight — flipping only that field (and \
+            therefore, in this case, the verdict) must change the log line, since the fixed \
+            height term depends on it.
+            """)
+        XCTAssertNotEqual(CodePaneRenderAudit.report(of: zero), CodePaneRenderAudit.report(of: healthy), """
+            report(of:) must mention containerUsedHeight, or an operator's pasted report can't \
+            tell whether the height term had anything to compare the document view against.
             """)
     }
 }
