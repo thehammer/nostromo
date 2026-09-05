@@ -167,13 +167,12 @@ enum CodePaneRenderAudit {
         // filling exactly the gutter is the healthy case, and this term must
         // be silent for it.
         if m.gutterFillWidth > m.ruleThickness { reasons.append(.gutterFillWiderThanGutter) }
-        // A document view shorter than the text it actually laid out can
-        // only paint part of what the ruler numbered — the invariant is
-        // about the view's own content, not the viewport showing it.
-        //
-        // The viewport is the wrong reference: a short document in a tall
-        // viewport is the ordinary case for this pane (a short file or a
-        // small diff hunk), and AppKit's own scroll-view tiling floors a
+        // `containerUsedHeight`'s doc comment above states what this term
+        // compares against and why (the view's own content, not the
+        // viewport). The wrinkle that makes the viewport the wrong
+        // reference: a short document in a tall viewport is the ordinary
+        // case for this pane (a short file or a small diff hunk), and
+        // AppKit's own scroll-view tiling floors a
         // vertically-resizable document view's height at roughly the clip
         // view's own height once the pane is window-attached — measured
         // live here, copying this exact text-view configuration, at
