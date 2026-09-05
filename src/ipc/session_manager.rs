@@ -270,6 +270,13 @@ pub struct SessionManager {
     /// single push would make a routine reconnect destroy a focus's pin.
     /// Departure therefore requires two consecutive pushes to agree.
     pending_departures: HashSet<String>,
+    /// How many *non-empty* focus registry pushes this daemon has processed
+    /// (W7 — D8 backstop). Saturates; only "at least two" is ever asked.
+    ///
+    /// Gates [`SessionManager::reconcilable_focus_tags`]. An empty push
+    /// carries no information and does not count, exactly as
+    /// `set_focus_registry` already treats it.
+    non_empty_pushes_seen: u8,
     /// Per-focus pane-tree registry. Set by the daemon via
     /// [`SessionManager::configure_mcp_bridge`]; `None` in tests / non-daemon use.
     /// A fresh (non-resume) spawn initialises the focus's tree to a single REPL
@@ -316,6 +323,7 @@ impl SessionManager {
             focus_registry: Vec::new(),
             daemon_created_tags: HashSet::new(),
             pending_departures: HashSet::new(),
+            non_empty_pushes_seen: 0,
             pane_registry: None,
             mcp_socket: None,
             mcp_config: None,
@@ -1180,6 +1188,8 @@ impl SessionManager {
             return (self.focus_registry.clone(), Vec::new());
         }
 
+        self.non_empty_pushes_seen = self.non_empty_pushes_seen.saturating_add(1);
+
         let new_tags: HashSet<String> = focuses.iter().map(|f| f.tag.clone()).collect();
 
         // A daemon-created tag that this push *names* has been acknowledged:
@@ -1256,6 +1266,45 @@ impl SessionManager {
         } else {
             Some(tags)
         }
+    }
+
+    /// The set of tags every pin on disk may be reconciled against — the
+    /// backstop half of D8 — or `None` when this daemon cannot yet vouch for a
+    /// complete picture of what exists.
+    ///
+    /// [`live_focus_tags`] answers "what is live right now" and is the right
+    /// question for *serving* a pin. This answers the strictly harder question
+    /// "what may I **delete** a pin for", and it is deliberately more
+    /// conservative on both counts that D8a is conservative about, because
+    /// deletion is irreversible and a pin is an operator's review in progress:
+    ///
+    /// - **`pending_departures` count as live.** A tag one push claimed was
+    ///   gone has not departed until a second push agrees. Reconciling against
+    ///   `live_focus_tags` alone would delete its pin a whole push before the
+    ///   primary eviction path is willing to, which is D8a's guarantee
+    ///   inverted.
+    /// - **`None` until two non-empty pushes have landed.** A reconnecting
+    ///   client can push a partial list before it has finished loading. The
+    ///   empty-push case is already no-information; a *partial* one is not
+    ///   distinguishable from a complete one in isolation, and on the first
+    ///   push there is no previous registry to notice the omission against —
+    ///   so a real focus omitted from a partial first push would have its pin
+    ///   collected. From the second push on, an omitted tag is in
+    ///   `pending_departures` and protected by the bullet above.
+    ///
+    /// Two consecutive pushes agreeing is exactly the evidence standard D8a
+    /// already demands before deleting anything, which is the point: the
+    /// backstop must not be able to destroy something the primary path would
+    /// have spared.
+    ///
+    /// [`live_focus_tags`]: SessionManager::live_focus_tags
+    pub fn reconcilable_focus_tags(&self) -> Option<HashSet<String>> {
+        if self.non_empty_pushes_seen < 2 {
+            return None;
+        }
+        let mut tags = self.live_focus_tags()?;
+        tags.extend(self.pending_departures.iter().cloned());
+        Some(tags)
     }
 
     /// Current focus registry snapshot.

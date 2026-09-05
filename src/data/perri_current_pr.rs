@@ -506,6 +506,116 @@ mod tests {
         );
     }
 
+    // ── retain_pins: the backstop against a zombie pin (W7 — D8) ─────────────
+    //
+    // Eviction on focus removal is the primary mechanism; this is what catches
+    // the removal the daemon was not running to see. It is a sweep over the
+    // whole pins directory, so its restraint matters as much as its reach.
+
+    fn live(tags: &[&str]) -> HashSet<String> {
+        tags.iter().map(|t| (*t).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_pin_whose_focus_no_longer_exists_is_dropped_and_named() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        write_pointer(dir.path(), "cody-core-1234", 42, "Carefeed/operations", None).unwrap();
+
+        let dropped = retain_pins(dir.path(), &live(&["perri"]));
+
+        assert_eq!(
+            dropped,
+            vec!["cody-core-1234".to_owned()],
+            "the caller is told which focuses it just forgot, so the removal is \
+             auditable rather than a silent unlink"
+        );
+        assert!(
+            !pin_file(dir.path(), "cody-core-1234").exists(),
+            "a pin for a focus that no longer exists must be gone from disk, or it \
+             resurfaces the moment the tag is reused"
+        );
+    }
+
+    #[test]
+    fn a_pin_whose_focus_is_still_live_is_left_alone() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
+
+        let dropped = retain_pins(dir.path(), &live(&["perri", "operations"]));
+
+        assert!(
+            dropped.is_empty(),
+            "a sweep with every focus accounted for must drop nothing: {dropped:?}"
+        );
+        assert_eq!(
+            read_pin(dir.path(), "perri").map(|p| p.number),
+            Some(4526),
+            "a live focus keeps the PR it was reviewing across the sweep"
+        );
+        assert_eq!(
+            read_pin(dir.path(), "operations").map(|p| p.number),
+            Some(42)
+        );
+    }
+
+    /// D8a, at the backstop. An empty live set is "nobody has told us which
+    /// focuses exist yet", not "no focus exists" — the shape a startup that
+    /// races the Mac's first registry push takes. Treating the two the same
+    /// discards every pin on the machine, and the discard is irreversible.
+    #[test]
+    fn a_sweep_that_does_not_know_which_focuses_exist_drops_nothing() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
+
+        let dropped = retain_pins(dir.path(), &HashSet::new());
+
+        assert!(
+            dropped.is_empty(),
+            "an unknown registry is not evidence that every focus was deleted"
+        );
+        assert_eq!(
+            read_pins(dir.path()).len(),
+            2,
+            "every pin must survive a sweep run before the registry is known"
+        );
+    }
+
+    #[test]
+    fn a_sweep_that_dropped_a_pin_wakes_the_watcher() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        write_pointer(dir.path(), "cody-core-1234", 42, "Carefeed/operations", None).unwrap();
+        // The writes above touched the sentinel; clear it so this observes the
+        // sweep's own signal and not theirs.
+        std::fs::remove_file(dir.path().join("current-pr.dirty")).unwrap();
+
+        retain_pins(dir.path(), &live(&["perri"]));
+
+        assert!(
+            dir.path().join("current-pr.dirty").exists(),
+            "a focus whose pin vanished must see that within a poll interval, not \
+             at the next unrelated write"
+        );
+    }
+
+    #[test]
+    fn a_sweep_that_dropped_nothing_does_not_wake_the_watcher() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        std::fs::remove_file(dir.path().join("current-pr.dirty")).unwrap();
+
+        retain_pins(dir.path(), &live(&["perri"]));
+
+        assert!(
+            !dir.path().join("current-pr.dirty").exists(),
+            "a sweep that changed nothing must not wake every Perri surface on the \
+             machine — this runs on a schedule, and a false wake is a rescan"
+        );
+    }
+
     // ── the pre-W7 global pointer is discarded, never adopted ────────────────
 
     #[test]

@@ -539,7 +539,8 @@ behavior:
   no PR under review rather than inheriting the dead focus's. This holds for
   agent-created focuses too: their eviction exemption lasts only until the
   first registry push that names them, after which they depart on the same
-  two-consecutive-push rule as any other focus.
+  two-consecutive-push rule as any other focus. A sweep on each push also
+  collects pins whose focus disappeared while the daemon was not running.
 
 - **Standalone TUI**: writes the same file/sentinel through `PerriView`, no
   pane-push/settle/pending behavior (the TUI's own render loop already

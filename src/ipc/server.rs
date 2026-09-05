@@ -745,10 +745,15 @@ fn handle_client_msg(
         }
 
         ClientMsg::FocusRegistryPush { focuses } => {
-            let (updated, departed, pane_registry) = {
+            let (updated, departed, reconcilable, pane_registry) = {
                 let mut mgr = session_mgr.lock().unwrap();
                 let (updated, departed) = mgr.set_focus_registry(focuses);
-                (updated, departed, mgr.pane_registry())
+                (
+                    updated,
+                    departed,
+                    mgr.reconcilable_focus_tags(),
+                    mgr.pane_registry(),
+                )
             };
 
             // W7 — D8: a focus that is gone takes its per-focus state with it.
@@ -778,6 +783,27 @@ fn handle_client_msg(
                     if reg.lock().unwrap().remove_focus(tag) {
                         tracing::info!(tag = %tag, "focus removed — discarded its pane tree and bindings");
                     }
+                }
+            }
+
+            // W7 — D8 backstop. The loop above is the primary mechanism, and it
+            // only ever sees removals this daemon was running to witness. A
+            // focus removed while the daemon was down, or whose push was never
+            // delivered, leaves a pin on disk that no departure will ever name
+            // — and `nostromo.create_focus`'s deterministic tag means the next
+            // focus of the same name would be handed it.
+            //
+            // `reconcilable_focus_tags` is `None` until this daemon can vouch
+            // for a complete picture (see its doc comment), which is what keeps
+            // this from weakening D8a: it can never collect a pin the loop
+            // above would have spared.
+            if let Some(live) = reconcilable {
+                let dropped = crate::data::perri_current_pr::retain_pins(perri_state_dir, &live);
+                if !dropped.is_empty() {
+                    tracing::info!(
+                        tags = ?dropped,
+                        "discarded PR pins for focuses that no longer exist"
+                    );
                 }
             }
 
