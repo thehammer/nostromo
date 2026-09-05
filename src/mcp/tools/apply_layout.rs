@@ -560,26 +560,35 @@ pub(crate) async fn fetch_async(
     let ctx = file_request_context(state, args)?;
     let text = match file_source::read_at_revision(&ctx.root, &ctx.revision, &ctx.request.path) {
         Ok(text) => text,
-        Err(FileSourceError::UnresolvableRevision) => match &ctx.pin {
-            // A pin exists and the caller's own working directory really is
-            // that PR's repo — the legitimate case (a PR head from a fork
-            // that was never fetched locally). Unchanged from before W5.
-            Some(pin) if file_source::github_fallback_trusted(ctx.local_repo.as_deref(), &pin.repo) => {
-                file_source::read_from_github(&pin.repo, &ctx.revision, &ctx.request.path).await?
-            }
-            // A pin exists but names a repo the caller's working directory
-            // does not resolve to (or that couldn't be determined at all):
-            // refusing here is the whole point of W5 — the alternative is
-            // silently serving a foreign repo's content with `ok: true`.
-            Some(_) => return Err(FileSourceError::RevisionRepoMismatch.into()),
-            // No PR pinned at all — nothing to fall back to; unchanged from
-            // before W5 (an empty repo string simply fails to resolve).
-            None => file_source::read_from_github("", &ctx.revision, &ctx.request.path).await?,
-        },
+        Err(FileSourceError::UnresolvableRevision) => resolve_via_github_fallback(&ctx).await?,
         Err(e) => return Err(e.into()),
     };
     file_source::validate_against(&text, &ctx.request)?;
     Ok(code_content(ctx.request, ctx.revision, text))
+}
+
+/// [`SOURCE_FILE`]'s GitHub-contents fallback, reached only once the local
+/// clone can't resolve `ctx.revision` at all — the common case being a PR
+/// head from a fork that was never fetched. Three outcomes, gated on whether
+/// `ctx.pin` names the repo `ctx.local_repo` actually is (W5 —
+/// current-pr-collision):
+///
+/// - a pin exists and matches: the legitimate case, unchanged from before
+///   W5 — fetch from that repo.
+/// - a pin exists but doesn't match (or `local_repo` couldn't be
+///   determined): refuse with `RevisionRepoMismatch` — the whole point of
+///   W5 is that the alternative is silently serving a foreign repo's
+///   content with `ok: true`.
+/// - no pin at all: nothing to fall back to; unchanged from before W5 (an
+///   empty repo string simply fails to resolve).
+async fn resolve_via_github_fallback(ctx: &FileRequestContext) -> Result<String, ApplyLayoutError> {
+    match &ctx.pin {
+        Some(pin) if file_source::github_fallback_trusted(ctx.local_repo.as_deref(), &pin.repo) => {
+            Ok(file_source::read_from_github(&pin.repo, &ctx.revision, &ctx.request.path).await?)
+        }
+        Some(_) => Err(FileSourceError::RevisionRepoMismatch.into()),
+        None => Ok(file_source::read_from_github("", &ctx.revision, &ctx.request.path).await?),
+    }
 }
 
 /// [`SOURCE_TICKET`]'s real fetch path (D5): serve a still-fresh TTL-cached
@@ -639,6 +648,17 @@ pub(crate) struct RequestPin {
     pub repo: String,
     pub number: u64,
     pub head_sha: String,
+}
+
+impl RequestPin {
+    /// The `current_pin` wire shape both `show.rs`'s error decoration and
+    /// `perri.get_state` render — `{repo, number}`, deliberately omitting
+    /// `head_sha` (an internal resolution detail, never sent to a caller).
+    /// The single place this shape is spelled, so the two call sites can't
+    /// drift on what "current_pin" contains.
+    pub(crate) fn wire(&self) -> Value {
+        json!({ "repo": self.repo, "number": self.number })
+    }
 }
 
 pub(crate) fn pin_for_request(state: &McpSharedState, _tag: Option<&str>) -> Option<RequestPin> {

@@ -154,7 +154,7 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
                 && params.get("revision").and_then(Value::as_str).is_none()
             {
                 if let Some(pin) = pin_for_request(state, Some(tag.as_str())) {
-                    payload["current_pin"] = json!({ "repo": pin.repo, "number": pin.number });
+                    payload["current_pin"] = pin.wire();
                 }
             }
             return payload;

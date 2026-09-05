@@ -68,8 +68,8 @@ pub fn get_state(state: &McpSharedState, tag: Option<&str>) -> Value {
         .as_ref()
         .map(|s| s.stale)
         .unwrap_or(false);
-    let current_pin = crate::mcp::tools::apply_layout::pin_for_request(state, tag)
-        .map(|p| json!({ "repo": p.repo, "number": p.number }));
+    let current_pin =
+        crate::mcp::tools::apply_layout::pin_for_request(state, tag).map(|p| p.wire());
     json!({
         "queue": queue,
         "current_pr": current_pr,
