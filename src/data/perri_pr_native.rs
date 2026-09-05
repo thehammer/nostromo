@@ -1861,6 +1861,161 @@ mod tests {
         server.verify().await;
     }
 
+    // ── the two expensive calls are conditional (W7 — D5.1) ─────────────────
+    //
+    // The rate-limit regression guard. Before W7 the raw diff (up to
+    // MAX_DIFF_BYTES) and check-runs went out uncached on every poll, so a
+    // cycle cost >=3 uncached requests per PR and there was exactly one PR.
+    // Per-focus isolation multiplies that by the number of focuses holding a
+    // pin, against a 5000/hr limit the queue source is already spending from —
+    // this repo has three separate documented fixes for that exact failure
+    // (docs/perri-rl-fix-1.md, -2.md, -3.md).
+    //
+    // A refactor that drops either `etag_get_as` call is silent: everything
+    // still works, and the only symptom is rate-limit exhaustion in
+    // production. Hence a test that asserts on what actually goes out on the
+    // wire.
+
+    /// The diff and check-runs requests of a second poll against unchanged
+    /// data must carry `If-None-Match`, and the 304 must still yield the
+    /// cached content rather than a blanked snapshot.
+    #[tokio::test]
+    async fn a_second_poll_sends_conditional_gets_for_the_diff_and_the_check_runs() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        const HEAD: &str = "abc123";
+        const DIFF: &str = "diff --git a/src/main.rs b/src/main.rs\n+hello\n";
+
+        // The raw diff — same path as the metadata call, distinguished by its
+        // Accept header, which is also what keys the ETag cache.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42"))
+            .and(header("accept", GITHUB_DIFF_ACCEPT))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"diff-etag-1\"")
+                    .set_body_string(DIFF),
+            )
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42"))
+            .and(header("accept", GITHUB_DIFF_ACCEPT))
+            .and(header("if-none-match", "\"diff-etag-1\""))
+            .respond_with(ResponseTemplate::new(304))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // check-runs for the head SHA.
+        let checks = serde_json::json!({
+            "total_count": 1,
+            "check_runs": [
+                { "id": 7, "name": "build", "status": "completed",
+                  "conclusion": "success",
+                  "app": { "slug": "circleci" } }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/acme/web/commits/{HEAD}/check-runs")))
+            .and(query_param("per_page", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"checks-etag-1\"")
+                    .set_body_json(checks),
+            )
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/acme/web/commits/{HEAD}/check-runs")))
+            .and(query_param("per_page", "100"))
+            .and(header("if-none-match", "\"checks-etag-1\""))
+            .respond_with(ResponseTemplate::new(304))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        mount_conversation_mocks(&server, "acme", "web", 42).await;
+
+        // PR metadata — octocrab, unconditional by design, and mounted *last*
+        // so it acts as the fallback for `/pulls/42`. The diff shares that
+        // path and is distinguished only by its `Accept` header (which is
+        // also what keys its ETag cache), so the specific diff mocks above
+        // must be offered the request first.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "url": "https://api.github.com/repos/acme/web/pulls/42",
+                "id": 1001, "node_id": "PR_1001",
+                "number": 42, "title": "Add widget", "state": "open",
+                "user": {
+                    "login": "alice", "id": 1, "node_id": "U_1",
+                    "avatar_url": "https://example.com/a.png",
+                    "gravatar_id": "", "url": "https://api.github.com/users/alice",
+                    "html_url": "https://github.com/alice",
+                    "followers_url": "https://api.github.com/users/alice/followers",
+                    "following_url": "https://api.github.com/users/alice/following{/other_user}",
+                    "gists_url": "https://api.github.com/users/alice/gists{/gist_id}",
+                    "starred_url": "https://api.github.com/users/alice/starred{/owner}{/repo}",
+                    "subscriptions_url": "https://api.github.com/users/alice/subscriptions",
+                    "organizations_url": "https://api.github.com/users/alice/orgs",
+                    "repos_url": "https://api.github.com/users/alice/repos",
+                    "events_url": "https://api.github.com/users/alice/events{/privacy}",
+                    "received_events_url": "https://api.github.com/users/alice/received_events",
+                    "type": "User", "site_admin": false
+                },
+                "html_url": "https://github.com/acme/web/pull/42",
+                "additions": 10, "deletions": 2, "changed_files": 3,
+                "head": { "sha": HEAD, "label": "acme:feature", "ref": "feature" },
+                "base": { "sha": "def456", "label": "acme:main", "ref": "main" },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_pointed_at(&server.uri());
+        // The *same* source across both passes — its ETag cache is what makes
+        // the second pass conditional.
+        let source = test_source();
+
+        let first = source.fetch_pr(&client, "acme/web", 42).await.unwrap();
+        assert_eq!(first.diff, DIFF);
+        assert_eq!(
+            first.ci_checks.len(),
+            1,
+            "the first pass must see the check"
+        );
+
+        let second = source.fetch_pr(&client, "acme/web", 42).await.unwrap();
+        assert_eq!(
+            second.diff, DIFF,
+            "a 304 must serve the cached diff body, not blank it — a pane \
+             rendering an empty diff because nothing changed is the failure \
+             this whole path exists to avoid"
+        );
+        assert_eq!(
+            second.ci_checks.len(),
+            1,
+            "a 304 must serve the cached check-runs, not drop them"
+        );
+
+        // Each `.expect(1)` is verified on teardown: if either conditional GET
+        // had not fired — an uncached request going out instead — its mock
+        // would be unmatched and the unconditional mock would have been hit
+        // twice, failing both counts.
+        server.verify().await;
+    }
+
     // ── the poll dedupes by (repo, number), not by focus (W7 — D5) ───────────
     //
     // Two focuses reviewing the same PR is an ordinary state after W7 (the
