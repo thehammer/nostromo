@@ -638,6 +638,68 @@ async fn a_ticket_show_refuses_with_a_fetch_level_error_not_a_placement_or_vocab
     assert_eq!(before, after);
 }
 
+// ── W3 — a single show still materializes the detail region as a tabs node ───
+
+// Not a duplicate: `src/mcp/views/tree.rs`'s own in-file tests (`build_tabs`,
+// `insert_beside`, etc.) already cover the pure-tree half of this at the
+// engine altitude, and none of the tests above this one inspect the daemon's
+// broadcast `PaneTree` shape at all — the closest, `a_bare_focus_can_show_the_review_queue_...`,
+// only asserts on `region`/`pane_id`/`reused` fields, never on the tree's own
+// node type. W3 (`fix-detail-region-materialization`) is a macOS-side
+// AppKit-clipping bug, not a daemon-side one — this test is a preventive
+// regression guard from the daemon side of the same feature: it pins that a
+// one-tab detail region is a real `PaneTree::Tabs` node with one child, not a
+// bare `Leaf`, so a future "optimise away a single-child tabs node" change on
+// this side of the fence can never reintroduce a strip-less detail region.
+#[tokio::test]
+async fn a_single_show_into_an_empty_curated_focus_materializes_the_detail_region_as_a_tabs_node_not_a_bare_leaf(
+) {
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    let mut bcast = harness.broadcast_tx.subscribe();
+    let socket_path = harness.dir.path().join("mcp-daemon.sock");
+    let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
+        .await
+        .unwrap();
+    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+
+    let root = temp_file_root();
+    let path = write_rel_file(root.path(), "solo.rs", "fn main() {}\n");
+    let res = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.show",
+        json!({ "type": "file", "target": { "path": path } }),
+    )
+    .await;
+    assert_eq!(res["ok"], true, "{res}");
+
+    // FocusLayout (carrying the tree), then PaneContent — same sequence
+    // `a_bare_focus_can_show_the_review_queue_...` asserts for the queue region.
+    let first = bcast.recv().await.unwrap();
+    let ServerMsg::FocusLayout { tree, .. } = &first else {
+        panic!("expected FocusLayout, got {first:?}")
+    };
+
+    let detail = nostromo::mcp::views::tree::tabs_region(tree, "detail")
+        .unwrap_or_else(|| panic!("no \"detail\" region in the broadcast tree: {tree:?}"));
+    match detail {
+        nostromo::ipc::protocol::PaneTree::Tabs { children, .. } => {
+            assert_eq!(
+                children.len(),
+                1,
+                "a single show must produce exactly one tab in the detail region: {tree:?}"
+            );
+        }
+        other => panic!(
+            "the detail region must materialize as PaneTree::Tabs even with only one tab — a \
+             bare Leaf here would mean a one-tab detail region has no tab strip and no caption, \
+             the same symptom W3 chased on the rendering side: got {other:?}"
+        ),
+    }
+}
+
 // ── 6. R4 — cap and eviction ───────────────────────────────────────────────────
 
 #[tokio::test]

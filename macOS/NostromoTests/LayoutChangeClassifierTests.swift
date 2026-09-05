@@ -97,6 +97,45 @@ final class LayoutChangeClassifierTests: XCTestCase {
         XCTAssertEqual(LayoutChangeClassifier.classify(old: old, new: new), .splitTopology)
     }
 
+    // MARK: - W3 — a detail region (a tabs node) appearing/disappearing at a fixed
+    // position is .splitTopology, never repairable in place. This pins an invariant the W3
+    // investigation *used* but did not itself break — the empirically confirmed root cause of
+    // "correct gutter, blank body" was an unclipped ruler fill in CodeContentView.swift, not a
+    // tree divergence — so both tests below are expected to pass immediately against `main`.
+    // They exist so a future change to this classifier can't silently start treating "the detail
+    // region just appeared" as a repairable content-only change, which is the one thing that
+    // would make a freshly materialized tabs region arrive with no chrome around it.
+
+    func testADetailRegionAppearingWhereALeafUsedToBeIsSplitTopology() {
+        let old = split(.horizontal, [leaf("queue"), leaf("repl")], [0.5, 0.5])
+        let new = split(
+            .horizontal,
+            [leaf("queue"), tabs([leaf("detail.0")], ["Conversation"], active: 0)],
+            [0.5, 0.5]
+        )
+        XCTAssertEqual(LayoutChangeClassifier.classify(old: old, new: new), .splitTopology, """
+            a detail region materializing where a bare leaf used to be is a structural change — \
+            DynamicFocusView must rebuild that slot from scratch (and, per the ratio-preservation \
+            invariant this classifier exists for, may clear saved ratios) rather than attempt an \
+            in-place repair that could leave a tabs node partially wired.
+            """)
+    }
+
+    func testADetailRegionDisappearingBackToALeafIsSplitTopology() {
+        let old = split(
+            .horizontal,
+            [leaf("queue"), tabs([leaf("detail.0")], ["Conversation"], active: 0)],
+            [0.5, 0.5]
+        )
+        let new = split(.horizontal, [leaf("queue"), leaf("repl")], [0.5, 0.5])
+        XCTAssertEqual(LayoutChangeClassifier.classify(old: old, new: new), .splitTopology, """
+            the symmetrical removal — a detail region's last tab closing and the region \
+            collapsing back to a bare leaf (see PaneTree/tree.rs's remove_tabs_region on the \
+            daemon side) — must be classified the same as its appearance: a full rebuild, not a \
+            repair.
+            """)
+    }
+
     // MARK: - .activeTabOnly (no teardown)
 
     func testActiveTabChangeAloneIsClassifiedAsActiveTabOnly() {
@@ -115,6 +154,12 @@ final class LayoutChangeClassifierTests: XCTestCase {
     }
 
     // MARK: - .tabMembership (opening/closing/reordering/relabeling a tab)
+
+    // W3 note: "a tabs node gaining a child while the split shape is unchanged is
+    // .tabMembership, never .splitTopology" is already covered exactly by
+    // testOpeningANewTabIsClassifiedAsTabMembershipNotSplitTopology immediately below (and its
+    // sibling testClosingATabIsClassifiedAsTabMembership for the removal direction) — not
+    // duplicated here.
 
     func testOpeningANewTabIsClassifiedAsTabMembershipNotSplitTopology() {
         let old = split(.horizontal, [leaf("repl"), tabs([leaf("ticket")], ["Ticket"], active: 0)], [0.5, 0.5])
