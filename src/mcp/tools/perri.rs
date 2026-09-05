@@ -111,28 +111,30 @@ pub fn get_state(state: &McpSharedState, tag: Option<&str>) -> Value {
 
 // ── tests ────────────────────────────────────────────────────────────────────
 //
-// W5 (current-pr-collision): `get_state` grows a `tag` parameter (unused by
-// today's implementation — plumbing for a later per-focus-isolation change)
-// and a `current_pin` key, present-and-explicit-null when nothing is pinned
-// so a caller can tell "checked, nothing pinned" from "this daemon predates
-// the field" (a future regression to omitting the key entirely is caught by
-// asserting `.get("current_pin").is_some()` in addition to the value).
+// W5 (current-pr-collision) gave `get_state` a `tag` parameter and a
+// `current_pin` key, present-and-explicit-null when nothing is pinned so a
+// caller can tell "checked, nothing pinned" from "this daemon predates the
+// field" (a regression to omitting the key entirely is caught by asserting
+// `.get("current_pin").is_some()` in addition to the value). W7 made that
+// `tag` load-bearing: the pin these tests seed belongs to one named focus.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::watch;
 
     /// A minimal `McpSharedState` for `perri.rs`'s handlers — these only ever
     /// read `perri_pr_rx`/`perri_queue_rx`, so `McpSharedState::for_test`
     /// (no daemon backend, no pane registry) is enough; no need for the
     /// heavier `make_state()` other tool modules build for the full
     /// pane-registry machinery.
+    /// `snap` is published as **`"perri"`'s** PR under review (W7): the pin is
+    /// per-focus, so every assertion below reads it back with the same tag.
     fn state_with_pr(snap: Option<crate::data::perri_pr::PrSnapshot>) -> McpSharedState {
         let (event_tx, _dropped_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = McpSharedState::for_test(event_tx);
-        let (_tx, rx) = watch::channel(snap);
-        state.perri_pr_rx = rx;
+        let state = McpSharedState::for_test(event_tx);
+        if let Some(snap) = snap {
+            state.set_pr_for("perri", snap);
+        }
         state
     }
 

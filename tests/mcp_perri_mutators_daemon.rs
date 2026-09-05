@@ -768,6 +768,31 @@ fn incident_revisions() -> &'static IncidentRevisions {
     })
 }
 
+/// The `owner/name` the process cwd — the root every integration test's file
+/// reads are rooted at — actually resolves to.
+///
+/// Load-bearing since W5 (current-pr-collision): an *implicit* revision only
+/// resolves at the pinned PR's head when the root is provably that PR's repo,
+/// and otherwise degrades to the working tree rather than serve one repo's
+/// content at another's SHA. So a focus reviewing a PR in a repo its checkout
+/// isn't is no longer a representable state, and the fixtures below pin to
+/// this slug rather than to a fictional one. What still differs per focus —
+/// and is the whole of what W7 changed — is the *revision*.
+fn ambient_repo_slug() -> &'static str {
+    static SLUG: OnceLock<String> = OnceLock::new();
+    SLUG.get_or_init(|| {
+        let root = std::env::current_dir().expect("a cwd");
+        nostromo::data::file_source::local_repo_slug(&root).unwrap_or_else(|| {
+            panic!(
+                "these fixtures need the test root ({}) to be a git repo with an \
+                 `origin` remote — W5's implicit-revision rule cannot be satisfied \
+                 without one",
+                root.display()
+            )
+        })
+    })
+}
+
 /// `git -C <dir> <args>`, panicking with git's stderr on failure. Test setup
 /// only — the code under test never uses this.
 fn git_ok(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
@@ -843,17 +868,21 @@ async fn the_2026_09_04_incident_a_file_request_in_focus_a_resolves_in_admin_por
     let harness = make_daemon_state();
     let (_server, socket) = serve(&harness, "incident").await;
 
+    // Both pins name `ambient_repo_slug()` — see that helper. The incident is
+    // reproduced by the two focuses' *revisions*, which is the seam W7 changed;
+    // the repo labels in the narrative above ("admin-portal", "operations")
+    // survive as the two distinct PR numbers and head SHAs.
     publish_pr(
         &harness.state,
         "focus-a",
-        "Carefeed/admin-portal",
+        ambient_repo_slug(),
         4526,
         &revs.admin_portal,
     );
     publish_pr(
         &harness.state,
         "focus-b",
-        "Carefeed/operations",
+        ambient_repo_slug(),
         42,
         &revs.operations,
     );
@@ -939,7 +968,7 @@ async fn a_focus_with_no_pr_under_review_reads_the_working_tree_while_another_fo
     publish_pr(
         &harness.state,
         "focus-a",
-        "Carefeed/admin-portal",
+        ambient_repo_slug(),
         4526,
         &revs.admin_portal,
     );

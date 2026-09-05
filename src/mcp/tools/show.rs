@@ -1599,26 +1599,24 @@ mod tests {
     // already knows exactly what it's asking for, and every other view type
     // has nothing to do with revision resolution at all.
 
-    /// A minimal `PrSnapshot` seeded the same way `apply_layout.rs`'s tests
-    /// do (`snapshot_with`/`state_with_pr_snapshot`) — `perri_pr_rx` is a
-    /// crate-visible field on `McpSharedState`, so any tool module's tests
-    /// can seed it directly.
-    fn seed_pin(state: &mut McpSharedState, repo: &str, number: u64) {
+    /// A minimal `PrSnapshot` published as **`tag`'s** PR under review. Since
+    /// W7 the pin is per-focus, so seeding it means naming the focus it
+    /// belongs to — `set_pr_for` is the one test-side publisher.
+    fn seed_pin(state: &McpSharedState, tag: &str, repo: &str, number: u64) {
         let snap: crate::data::perri_pr::PrSnapshot = serde_json::from_value(json!({
             "pr_number": number, "repo": repo, "title": "Some PR",
             "author": "alice", "url": "https://example.com", "diff": "",
             "stale": false, "error": null, "head_sha": "abc123"
         }))
         .unwrap();
-        let (_tx, rx) = tokio::sync::watch::channel(Some(snap));
-        state.perri_pr_rx = rx;
+        state.set_pr_for(tag, snap);
     }
 
     #[tokio::test]
     async fn a_failing_file_show_with_an_implicit_revision_carries_the_current_pin_when_one_exists() {
-        let (mut state, _rx) = make_state();
+        let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        seed_pin(&mut state, "acme/web", 42);
+        seed_pin(&state, "perri", "acme/web", 42);
 
         let out = show(
             &state,
@@ -1658,9 +1656,9 @@ mod tests {
     #[tokio::test]
     async fn a_failing_file_show_with_an_explicit_revision_carries_no_current_pin_even_when_one_is_pinned(
     ) {
-        let (mut state, _rx) = make_state();
+        let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        seed_pin(&mut state, "acme/web", 42);
+        seed_pin(&state, "perri", "acme/web", 42);
 
         // "HEAD" resolves locally (this test runs inside a real git checkout),
         // so the missing path fails with a plain `UnknownPath` — never
@@ -1695,14 +1693,14 @@ mod tests {
     #[tokio::test]
     async fn a_revision_repo_mismatch_refusal_carries_the_current_pin_even_with_an_explicit_revision(
     ) {
-        let (mut state, _rx) = make_state();
+        let (state, _rx) = make_state();
         seed_curated(&state, "perri");
         // Pinned repo can't possibly match this checkout's own remote, and
         // "deadbeef" isn't a resolvable revision here — so the local read
         // fails as `UnresolvableRevision`, `resolve_via_github_fallback` sees
         // a pin whose repo doesn't match this checkout, and refuses with
         // `RevisionRepoMismatch` instead of fetching foreign content.
-        seed_pin(&mut state, "acme/web", 42);
+        seed_pin(&state, "perri", "acme/web", 42);
 
         let out = show(
             &state,
@@ -1730,9 +1728,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_non_file_show_never_carries_current_pin_even_when_a_pr_is_pinned() {
-        let (mut state, _rx) = make_state();
+        let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        seed_pin(&mut state, "acme/web", 42);
+        seed_pin(&state, "perri", "acme/web", 42);
 
         // `TicketRegistryState::default()` registers no providers, so this
         // fetch fails with `unsupported_provider` — a real, non-file fetch

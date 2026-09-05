@@ -2057,8 +2057,12 @@ mod tests {
         // a plausible-but-nonexistent head sha (so a local git resolution
         // would fail and fall through to the GitHub-fallback decision this
         // test is actually about).
-        let mut state = state;
-        let (_tx, rx) = tokio::sync::watch::channel(Some(
+        // Pinned to **this focus** (W7): the pin `fetch_async` reads is keyed
+        // on the tag the request carries, so a snapshot published under any
+        // other tag would leave this focus unpinned and never reach the
+        // repo-mismatch refusal the test is about.
+        state.set_pr_for(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(json!({
                 "pr_number": 99, "repo": "acme/other-repo", "title": "Unrelated",
                 "author": "bob", "url": "https://example.com", "diff": "",
@@ -2066,8 +2070,7 @@ mod tests {
                 "head_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
             }))
             .unwrap(),
-        ));
-        state.perri_pr_rx = rx;
+        );
 
         // 3. Deliberately an EXPLICIT, git-unresolvable revision — not an
         // implicit one. `resolve_revision`'s own pinned contract (see

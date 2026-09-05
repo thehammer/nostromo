@@ -1238,9 +1238,14 @@ mod tests {
             }
         }
 
-        let content =
-            std::fs::read_to_string(tmp.path().join("perri-state").join("current-pr.json"))
-                .unwrap();
+        // The pin still lands — under **this focus's** tag (W7), not the old
+        // machine-wide `current-pr.json`.
+        let pin = crate::data::perri_current_pr::pin_path(
+            &tmp.path().join("perri-state"),
+            "perri",
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(pin).unwrap();
         let parsed: Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["number"], 42);
         assert_eq!(parsed["repo"], "acme/web");
@@ -1250,7 +1255,7 @@ mod tests {
     async fn load_pr_on_curated_focus_signals_pr_refresh_even_when_no_pane_is_targeted() {
         let (mut state, _tmp, _bcast) = make_curated_daemon_state().await;
         seed_curated_detail_tabs(&state, "perri");
-        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
         if let Some(daemon) = &mut state.daemon {
             daemon.perri.pr_refresh_tx = Some(refresh_tx);
         }
@@ -1259,9 +1264,12 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        assert!(
-            refresh_rx.try_recv().is_ok(),
-            "the PR-refresh signal must still fire even when no pane can be targeted"
+        // W7 — D2: the signal names the focus whose pin moved, so no other
+        // focus's PR is refetched for a pickup that wasn't theirs.
+        assert_eq!(
+            refresh_rx.try_recv().ok(),
+            Some(Some("perri".to_string())),
+            "the PR-refresh signal must still fire for this focus even when no pane can be targeted"
         );
     }
 
