@@ -234,7 +234,10 @@ mod tests {
         let policy = perri_policy();
         for agent in ["mother", "fred", "teri", "cody"] {
             assert!(policy.denied_for(Some(agent)).is_empty(), "{agent}");
-            assert!(!policy.denies(Some(agent), "nostromo.apply_layout"), "{agent}");
+            assert!(
+                !policy.denies(Some(agent), "nostromo.apply_layout"),
+                "{agent}"
+            );
         }
     }
 

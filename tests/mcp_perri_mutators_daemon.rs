@@ -59,7 +59,9 @@ fn make_daemon_state() -> Harness {
             // fetch happens) resolves quickly instead of waiting 12s.
             settle_timeout: Duration::from_millis(100),
         },
-        decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+        decisions: Arc::new(Mutex::new(
+            nostromo::ipc::decisions::DecisionRegistry::default(),
+        )),
         tickets: Default::default(),
     };
     Harness {
@@ -188,10 +190,13 @@ async fn all_four_perri_mutators_never_hit_the_event_loop_timeout_path() {
     .await;
     assert_eq!(res["ok"], true);
 
-    let pointer_path = harness.perri_state_dir.join("current-pr.json");
+    // W7: the pin is sharded per focus. This caller connected with pty_id
+    // "perri", so its pin is that focus's — not a machine-wide file.
+    let pointer_path =
+        nostromo::data::perri_current_pr::pin_path(&harness.perri_state_dir, "perri").unwrap();
     assert!(
         pointer_path.exists(),
-        "perri.load_pr must write current-pr.json into the daemon's Perri state dir"
+        "perri.load_pr must write the calling focus's pin into the daemon's Perri state dir"
     );
     let pointer: Value =
         serde_json::from_str(&std::fs::read_to_string(&pointer_path).unwrap()).unwrap();
@@ -311,7 +316,10 @@ async fn clear_current_pr_over_the_real_socket_closes_a_curated_pr_diff_tab() {
         bound,
     )
     .await;
-    assert_eq!(res["ok"], true, "nostromo.show should open the pr_diff tab: {res}");
+    assert_eq!(
+        res["ok"], true,
+        "nostromo.show should open the pr_diff tab: {res}"
+    );
 
     let res = call_tool_bounded(
         &mut reader,

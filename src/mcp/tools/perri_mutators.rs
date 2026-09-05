@@ -237,7 +237,11 @@ async fn load_pr_daemon(
     if let Err(e) = perri_current_pr::write_pointer(&state_dir, &tag, number, repo, highlights) {
         // A tag that isn't a safe filename is the caller's error, not an I/O
         // one — say which.
-        let code = if e.starts_with("invalid_tag") { "invalid_args" } else { "io_error" };
+        let code = if e.starts_with("invalid_tag") {
+            "invalid_args"
+        } else {
+            "io_error"
+        };
         return json!({ "error": code, "detail": e });
     }
 
@@ -410,7 +414,11 @@ async fn clear_current_pr_daemon(
     };
 
     if let Err(e) = perri_current_pr::clear_pointer(&state_dir, &tag) {
-        let code = if e.starts_with("invalid_tag") { "invalid_args" } else { "io_error" };
+        let code = if e.starts_with("invalid_tag") {
+            "invalid_args"
+        } else {
+            "io_error"
+        };
         return json!({ "error": code, "detail": e });
     }
     if let Err(e) = perri_current_pr::touch_queue_dirty(&state_dir) {
@@ -672,7 +680,7 @@ async fn wait_for_matching_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::perri_pr::PrSnapshot;
+    use crate::data::perri_pr::{no_prs, one_pr, PrSnapshot};
     use crate::data::perri_queue::PrQueueSnapshot;
     use crate::ipc::pane_registry::PaneRegistry;
     use crate::ipc::protocol::{PaneTree, ServerMsg, SplitDirection};
@@ -710,7 +718,9 @@ mod tests {
                 selected_index: Arc::new(AtomicUsize::new(0)),
                 settle_timeout: Duration::from_millis(50),
             },
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         (McpSharedState::for_daemon(backend), broadcast_tx)
@@ -852,9 +862,10 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
 
-        let content =
-            std::fs::read_to_string(tmp.path().join("perri-state").join("current-pr.json"))
-                .unwrap();
+        let content = std::fs::read_to_string(
+            perri_current_pr::pin_path(&tmp.path().join("perri-state"), "perri").unwrap(),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["number"], 42);
         assert_eq!(parsed["repo"], "acme/web");
@@ -878,7 +889,7 @@ mod tests {
     #[tokio::test]
     async fn load_pr_signals_pr_refresh_exactly_once() {
         let (mut state, _tmp, _bcast) = make_daemon_state().await;
-        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
         if let Some(daemon) = &mut state.daemon {
             daemon.perri.pr_refresh_tx = Some(refresh_tx);
         }
@@ -898,7 +909,8 @@ mod tests {
     async fn load_pr_no_highlights_with_snapshot_already_published() {
         let (mut state, _tmp, mut bcast) = make_daemon_state().await;
 
-        let (_tx, pr_rx) = watch::channel(Some(pr_snapshot("acme/web", 42, "Add widget")));
+        let (_tx, pr_rx) =
+            watch::channel(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")));
         state.perri_pr_rx = pr_rx;
 
         let args = json!({ "number": 42, "repo": "acme/web" });
@@ -924,7 +936,7 @@ mod tests {
     async fn load_pr_no_highlights_snapshot_arrives_during_wait() {
         let (mut state, _tmp, mut bcast) = make_daemon_state().await;
 
-        let (tx, pr_rx) = watch::channel(None);
+        let (tx, pr_rx) = watch::channel(no_prs());
         state.perri_pr_rx = pr_rx;
         // Increase settle_timeout for this test so the delayed send lands
         // well inside the window.
@@ -934,7 +946,7 @@ mod tests {
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = tx.send(Some(pr_snapshot("acme/web", 42, "Add widget")));
+            let _ = tx.send(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")));
         });
 
         let args = json!({ "number": 42, "repo": "acme/web" });
@@ -1004,7 +1016,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         let mut state = McpSharedState::for_daemon(backend);
@@ -1057,10 +1071,20 @@ mod tests {
     #[tokio::test]
     async fn load_pr_diff_text_matches_apply_layout_fetch_output() {
         let (mut state, _tmp, mut bcast) = make_daemon_state().await;
-        let (_tx, pr_rx) = watch::channel(Some(pr_snapshot("acme/web", 42, "Add widget")));
+        let (_tx, pr_rx) =
+            watch::channel(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")));
         state.perri_pr_rx = pr_rx;
 
-        let expected = match apply_layout::fetch("perri.get_current_pr", &state, apply_layout::FetchArgs::default()).unwrap() {
+        let expected = match apply_layout::fetch(
+            "perri.get_current_pr",
+            &state,
+            apply_layout::FetchArgs {
+                tag: Some("perri"),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        {
             PaneContentWire::Text { text } => text,
             other => panic!("expected Text, got {other:?}"),
         };
@@ -1098,39 +1122,56 @@ mod tests {
             .iter()
             .any(|w| w["pane_id"] == "diff" && w["skipped"] == "unknown_pane"));
         assert!(
-            tmp.path().join("perri-state/current-pr.json").exists(),
+            perri_current_pr::pin_path(&tmp.path().join("perri-state"), "no-diff-here")
+                .unwrap()
+                .exists(),
             "state mutation must still happen even when the pane is missing"
         );
     }
 
+    /// W7 — D4. Pre-W7 an unattributable `load_pr` still moved the one
+    /// machine-wide slot, so returning `ok: true` was survivable. Now the pin
+    /// *is* a focus's, so a caller that names no focus would pin something no
+    /// surface will ever show while reporting success — "reports success,
+    /// paints nothing". The PRD makes the honest refusal a hard criterion.
     #[tokio::test]
-    async fn load_pr_unidentified_caller_still_mutates_state_and_warns_once() {
+    async fn load_pr_without_a_resolvable_focus_is_refused_and_writes_nothing() {
         let (state, tmp, _bcast) = make_daemon_state().await;
+        let state_dir = tmp.path().join("perri-state");
 
-        // No highlights + no matching snapshot means the diff pane is pushed
-        // to twice (Loading, then the timed-out placeholder) — this proves
-        // the "no resolvable tag" warning is deduplicated across pushes,
-        // not appended once per attempted push.
         let args = json!({ "number": 42, "repo": "acme/web" });
         let result = load_pr(&state, &args, None).await;
-        assert_eq!(result["ok"], true);
-        assert_eq!(result["pending"], true);
-        let warnings = result["warnings"].as_array().expect("warnings array");
+
         assert_eq!(
-            warnings
-                .iter()
-                .filter(|w| w["pane_push"] == "unidentified_caller")
-                .count(),
-            1,
-            "no resolvable tag must warn exactly once, not once per pane push"
+            result["error"], "unidentified_caller",
+            "a pickup that names no focus must be refused, not silently pinned"
         );
         assert!(
-            tmp.path().join("perri-state/current-pr.json").exists(),
-            "state mutation must still happen even with no resolvable tag"
+            result["ok"].as_bool() != Some(true),
+            "a refused pickup must not also report ok"
+        );
+        assert!(
+            !perri_current_pr::pins_dir(&state_dir).exists()
+                || std::fs::read_dir(perri_current_pr::pins_dir(&state_dir))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "a refused pickup must leave no pin behind"
         );
     }
 
-    // ── load_pr / diff binding ────────────────────────────────────────────────
+    /// An empty-string `pty_id` counts as *absent*, not as a focus named "".
+    /// Coercing it to a valid tag is the same "reports success, paints
+    /// nothing" family (W7 — D4).
+    #[tokio::test]
+    async fn load_pr_with_an_empty_pty_id_is_refused_like_an_absent_one() {
+        let (state, _tmp, _bcast) = make_daemon_state().await;
+
+        let args = json!({ "number": 42, "repo": "acme/web" });
+        let result = load_pr(&state, &args, Some("")).await;
+
+        assert_eq!(result["error"], "unidentified_caller");
+    }
 
     #[tokio::test]
     async fn load_pr_with_highlights_severs_the_diff_pane_s_live_binding() {
@@ -1139,7 +1180,11 @@ mod tests {
         // perri.get_current_pr — confirm the starting point before mutating.
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 Some("perri.get_current_pr")
             );
         }
@@ -1150,7 +1195,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 None,
                 "agent-authored highlights are final content — the diff pane must no \
                  longer be considered live, or the broadcaster would clobber them on \
@@ -1169,7 +1218,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 Some("perri.get_current_pr"),
                 "no-highlights load_pr must keep (or re-establish) the diff pane's \
                  live binding, since its rendered content came from that source"
@@ -1183,13 +1236,17 @@ mod tests {
     async fn clear_current_pr_removes_file_signals_and_pushes_content() {
         let (state, tmp, mut bcast) = make_daemon_state().await;
         let state_dir = tmp.path().join("perri-state");
-        perri_current_pr::write_pointer(&state_dir, 1, "acme/web", None).unwrap();
-        assert!(state_dir.join("current-pr.json").exists());
+        perri_current_pr::write_pointer(&state_dir, "perri", 1, "acme/web", None).unwrap();
+        assert!(perri_current_pr::pin_path(&state_dir, "perri")
+            .unwrap()
+            .exists());
 
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        assert!(!state_dir.join("current-pr.json").exists());
+        assert!(!perri_current_pr::pin_path(&state_dir, "perri")
+            .unwrap()
+            .exists());
         assert!(state_dir.join("current-pr.dirty").exists());
         assert!(state_dir.join("queue.dirty").exists());
 
@@ -1244,7 +1301,11 @@ mod tests {
         assert_eq!(load_result["ok"], true);
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 None,
                 "sanity: highlights must have severed diff's binding first"
             );
@@ -1257,7 +1318,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 Some("perri.get_current_pr"),
                 "clear_current_pr must rebind an unbound legacy diff pane so it goes live \
                  again the moment a PR loads"
@@ -1272,7 +1337,10 @@ mod tests {
                 if pane_id == "diff" && text == "No PR loaded."
             )
         });
-        assert!(got_placeholder, "expected diff to receive the placeholder; got {messages:?}");
+        assert!(
+            got_placeholder,
+            "expected diff to receive the placeholder; got {messages:?}"
+        );
     }
 
     #[tokio::test]
@@ -1282,7 +1350,10 @@ mod tests {
 
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["ok"], true);
-        assert!(result.get("warnings").is_none(), "unexpected warnings: {result}");
+        assert!(
+            result.get("warnings").is_none(),
+            "unexpected warnings: {result}"
+        );
         assert!(result["cleared"].is_array());
         assert!(result["queue"].is_array());
 
@@ -1375,7 +1446,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "queue"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "queue"),
                 Some("perri.list_pr_queue")
             );
         }
@@ -1455,7 +1530,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         let state = McpSharedState::for_daemon(backend);
@@ -1538,9 +1615,13 @@ mod tests {
     fn registry_with_panes(tag: &str, ids: &[&str]) -> PaneRegistry {
         let mut children: Vec<PaneTree> = ids
             .iter()
-            .map(|id| PaneTree::Leaf { pane_id: id.to_string() })
+            .map(|id| PaneTree::Leaf {
+                pane_id: id.to_string(),
+            })
             .collect();
-        children.push(PaneTree::Leaf { pane_id: "repl".into() });
+        children.push(PaneTree::Leaf {
+            pane_id: "repl".into(),
+        });
         let n = children.len();
         let mut reg = PaneRegistry::in_memory();
         reg.get_or_init(tag);

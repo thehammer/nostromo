@@ -248,7 +248,12 @@ impl SuppressStore {
                         "perri suppress: recording approval {}/{}@{}",
                         approval.repo, approval.number, approval.head_sha
                     );
-                    self.record(&approval.repo, approval.number, &approval.head_sha, now_secs);
+                    self.record(
+                        &approval.repo,
+                        approval.number,
+                        &approval.head_sha,
+                        now_secs,
+                    );
                     count += 1;
                 }
                 Err(e) => warn!("perri suppress: bad approval line {line:?}: {e:#}"),
@@ -298,7 +303,8 @@ mod tests {
 
     fn make_store(ttl_secs: u64) -> (SuppressStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = SuppressStore::new(dir.path().join("state.json"), Duration::from_secs(ttl_secs));
+        let store =
+            SuppressStore::new(dir.path().join("state.json"), Duration::from_secs(ttl_secs));
         (store, dir) // return dir so it isn't dropped (and the temp dir deleted) prematurely
     }
 
@@ -431,7 +437,10 @@ mod tests {
         assert!(store.is_suppressed("acme/web", 7, "abc123", t + 1));
         assert!(store.is_suppressed("acme/web", 8, "def456", t + 1));
         // File should be gone after consumption.
-        assert!(!approvals_path.exists(), "approvals file should be removed after consumption");
+        assert!(
+            !approvals_path.exists(),
+            "approvals file should be removed after consumption"
+        );
     }
 
     #[test]

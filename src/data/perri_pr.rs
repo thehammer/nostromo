@@ -35,7 +35,8 @@ use crate::{config::Config, data::dirty_file, data::perri_queue::CiState};
 /// A tag absent from the map has no PR under review. That is a normal state,
 /// not an error, and it is what makes a focus with no pin resolve files
 /// against its working tree.
-pub type PrSnapshots = std::sync::Arc<std::collections::HashMap<String, std::sync::Arc<PrSnapshot>>>;
+pub type PrSnapshots =
+    std::sync::Arc<std::collections::HashMap<String, std::sync::Arc<PrSnapshot>>>;
 
 /// An empty [`PrSnapshots`] — no focus has a PR under review.
 pub fn no_prs() -> PrSnapshots {
@@ -300,8 +301,14 @@ mod tests {
         let snap: PrSnapshot = serde_json::from_value(json).expect(
             "a pre-W3 PrSnapshot JSON literal (no body/threads/conversation_error) must still deserialize",
         );
-        assert_eq!(snap.body, "", "missing body must default to an empty string");
-        assert!(snap.threads.is_empty(), "missing threads must default to an empty vec");
+        assert_eq!(
+            snap.body, "",
+            "missing body must default to an empty string"
+        );
+        assert!(
+            snap.threads.is_empty(),
+            "missing threads must default to an empty vec"
+        );
         assert_eq!(
             snap.conversation_error, None,
             "missing conversation_error must default to None"

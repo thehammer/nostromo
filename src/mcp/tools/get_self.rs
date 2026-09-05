@@ -197,7 +197,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: crate::mcp::PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         McpSharedState::for_daemon(backend)

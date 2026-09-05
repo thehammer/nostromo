@@ -497,7 +497,10 @@ pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) 
         return tool_descriptors();
     }
     let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id).await;
-    crate::mcp::tool_policy::filter_descriptors(tool_descriptors(), policy.denied_for(agent.as_deref()))
+    crate::mcp::tool_policy::filter_descriptors(
+        tool_descriptors(),
+        policy.denied_for(agent.as_deref()),
+    )
 }
 
 // ── tool dispatch ─────────────────────────────────────────────────────────────
@@ -773,7 +776,10 @@ mod tests {
             .iter()
             .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(str::to_string))
             .collect();
-        assert!(!names.is_empty(), "sanity: the tool registry must not be empty");
+        assert!(
+            !names.is_empty(),
+            "sanity: the tool registry must not be empty"
+        );
         for name in &names {
             assert!(
                 !name.to_lowercase().contains("activity"),

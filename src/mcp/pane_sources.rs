@@ -33,7 +33,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::debug;
 
-use crate::data::perri_pr::{changed_tags, PrSnapshots};
+use crate::data::perri_pr::{changed_tags, no_prs, PrSnapshots};
 use crate::data::perri_queue::PrQueueSnapshot;
 use crate::ipc::pane_registry::PaneContentProvider;
 use crate::ipc::protocol::{PaneAddress, PaneContentWire, PaneFreshness, ServerMsg};
@@ -243,7 +243,15 @@ pub async fn run_pane_source_broadcaster(
     mut pr_rx: watch::Receiver<PrSnapshots>,
 ) {
     let mut last_sent: LastSent = HashMap::new();
-    let mut previous_prs: PrSnapshots = pr_rx.borrow().clone();
+    // Deliberately *not* seeded from the channel's current value. This task is
+    // spawned, so a snapshot can land between the spawn and this line; seeding
+    // from the channel would make that snapshot its own baseline, `changed_tags`
+    // would report nothing moved, and the tag's first paint would be dropped on
+    // the floor. The honest baseline is "this broadcaster has sent nothing yet",
+    // which is what `last_sent` says too. The cost of starting empty is at most
+    // one redundant fetch on the first change — `push_for_source` still dedupes
+    // against `last_sent`, so it cannot produce a duplicate visible push.
+    let mut previous_prs: PrSnapshots = no_prs();
 
     let mut ticker = tokio::time::interval(STALENESS_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -310,9 +318,7 @@ fn push_for_source(
         .unwrap()
         .all_bindings()
         .into_iter()
-        .filter(|(tag, _, b)| {
-            b.source == source && only_tags.is_none_or(|tags| tags.contains(tag))
-        })
+        .filter(|(tag, _, b)| b.source == source && only_tags.is_none_or(|tags| tags.contains(tag)))
         .map(|(tag, pane_id, b)| (tag, pane_id, b.params))
         .collect();
 
@@ -374,7 +380,7 @@ mod tests {
     use serde_json::{json, Value};
     use tokio::sync::{broadcast, watch};
 
-    use crate::data::perri_pr::{changed_tags, PrSnapshots};
+    use crate::data::perri_pr::{no_prs, one_pr, PrSnapshot, PrSnapshots};
     use crate::data::perri_queue::PrQueueSnapshot;
     use crate::ipc::pane_registry::{PaneRegistry, SplitPosition, REPL_PANE_ID};
     use crate::ipc::protocol::{PaneContentWire, PaneFreshness, ServerMsg};
@@ -389,7 +395,7 @@ mod tests {
         McpSharedState,
         broadcast::Receiver<ServerMsg>,
         watch::Sender<Option<PrQueueSnapshot>>,
-        watch::Sender<Option<PrSnapshot>>,
+        watch::Sender<PrSnapshots>,
     );
 
     /// Build a daemon-hosted `McpSharedState` with fresh, test-owned
@@ -412,13 +418,15 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: crate::mcp::PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         let mut state = McpSharedState::for_daemon(backend);
 
         let (queue_tx, queue_rx) = watch::channel(None::<PrQueueSnapshot>);
-        let (pr_tx, pr_rx) = watch::channel(None::<PrSnapshot>);
+        let (pr_tx, pr_rx) = watch::channel(no_prs());
         state.perri_queue_rx = queue_rx;
         state.perri_pr_rx = pr_rx;
 
@@ -516,7 +524,10 @@ mod tests {
                 assert_eq!(pane_id, "queue");
                 assert!(matches!(content, PaneContentWire::Text { text } if text == "hi"));
                 assert!(freshness.is_none());
-                assert!(address.is_none(), "broadcast_pane_content must default address to None");
+                assert!(
+                    address.is_none(),
+                    "broadcast_pane_content must default address to None"
+                );
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -578,7 +589,9 @@ mod tests {
             daemon,
             "perri",
             "ticket",
-            PaneContentWire::Text { text: "CORE-1234".into() },
+            PaneContentWire::Text {
+                text: "CORE-1234".into(),
+            },
             None,
             Some(address.clone()),
         );
@@ -947,7 +960,8 @@ mod tests {
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
-                let freshness = freshness.expect("freshness must be attached once data is known-stale");
+                let freshness =
+                    freshness.expect("freshness must be attached once data is known-stale");
                 assert!(freshness.badly_stale);
             }
             other => panic!("expected PaneContent, got {other:?}"),
@@ -1083,8 +1097,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
 
         let mut saw_any = false;
-        while let Ok(Ok(msg)) =
-            tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
+        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
         {
             saw_any = true;
             if let ServerMsg::PaneContent {
@@ -1123,7 +1136,7 @@ mod tests {
             )))
             .unwrap();
         pr_tx
-            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .send(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")))
             .unwrap();
         tokio::time::advance(Duration::from_secs(31)).await;
 
@@ -1137,8 +1150,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(61)).await;
 
         let mut checked_any = false;
-        while let Ok(Ok(msg)) =
-            tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
+        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
         {
             if let ServerMsg::PaneContent { content, .. } = msg {
                 checked_any = true;
@@ -1159,7 +1171,8 @@ mod tests {
     // ── perri.get_pr_conversation (W3 — curated-agent-views) ─────────────────
 
     #[tokio::test]
-    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation() {
+    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation()
+    {
         let (state, mut bcast, _qtx, pr_tx) = make_state();
         bind_pane(&state, "perri", "conversation", SOURCE_PR_CONVERSATION);
 
@@ -1170,7 +1183,7 @@ mod tests {
         ));
 
         pr_tx
-            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .send(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")))
             .unwrap();
 
         let msg = tokio::time::timeout(Duration::from_millis(200), bcast.recv())
@@ -1195,7 +1208,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound() {
+    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound()
+    {
         let (state, mut bcast, _qtx, pr_tx) = make_state();
         bind_pane(&state, "perri", "diff_text", SOURCE_CURRENT_PR);
         bind_pane(&state, "perri", "diff_structured", SOURCE_PR_DIFF);
@@ -1208,7 +1222,7 @@ mod tests {
         ));
 
         pr_tx
-            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .send(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")))
             .unwrap();
 
         let mut seen_panes = std::collections::HashSet::new();
@@ -1227,9 +1241,13 @@ mod tests {
         }
         assert_eq!(
             seen_panes,
-            ["diff_text".to_string(), "diff_structured".to_string(), "conversation".to_string()]
-                .into_iter()
-                .collect(),
+            [
+                "diff_text".to_string(),
+                "diff_structured".to_string(),
+                "conversation".to_string()
+            ]
+            .into_iter()
+            .collect(),
             "one PR-watch change must push all three PR-backed sources, each exactly once"
         );
 
@@ -1264,8 +1282,12 @@ mod tests {
             state.perri_pr_rx.clone(),
         ));
 
+        // Seeded for `cody`, the focus both panes belong to. After W7 a PR is a
+        // property of a focus, so seeding some *other* focus here would leave
+        // the control pane correctly unpainted and the test could no longer
+        // tell "get_file was excluded" from "the broadcaster never ran".
         pr_tx
-            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .send(one_pr("cody", pr_snapshot("acme/web", 42, "Add widget")))
             .unwrap();
 
         // The control pane gets its push...

@@ -883,10 +883,10 @@ impl View for PerriView {
                     self.diff_override = Some(s.clone());
                     Ok(())
                 }
-                PaneContent::JsonSnapshot(_) | PaneContent::PrList(_)
-                | PaneContent::Loading | PaneContent::Error(_) => {
-                    Err("unsupported_payload".into())
-                }
+                PaneContent::JsonSnapshot(_)
+                | PaneContent::PrList(_)
+                | PaneContent::Loading
+                | PaneContent::Error(_) => Err("unsupported_payload".into()),
             },
             "repl" => {
                 // PTY-owned pane; reject mutations.

@@ -312,7 +312,15 @@ pub fn read_git_revision(
 
 /// Whether the local clone can resolve `rev` to a commit.
 fn revision_exists(root: &Path, rev: &str) -> Result<bool, FileSourceError> {
-    let output = git(root, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")])?;
+    let output = git(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )?;
     Ok(output.status.success())
 }
 
@@ -334,7 +342,11 @@ fn git(root: &Path, args: &[&str]) -> Result<std::process::Output, FileSourceErr
 /// object", which is the caller's signal to try [`read_from_github`] — not a
 /// terminal answer. Kept next to [`read_working_tree`]/[`read_git_revision`]
 /// since it is just their dispatch, with no daemon state involved.
-pub fn read_at_revision(root: &Path, revision: &str, path: &str) -> Result<String, FileSourceError> {
+pub fn read_at_revision(
+    root: &Path,
+    revision: &str,
+    path: &str,
+) -> Result<String, FileSourceError> {
     if revision == WORKING_TREE {
         return read_working_tree(root, path);
     }

@@ -460,7 +460,8 @@ impl SessionManager {
             Some(id) => (id, true),
             None => (Uuid::new_v4().to_string(), false),
         };
-        self.session_reverse.insert(effective_id.clone(), tag.clone());
+        self.session_reverse
+            .insert(effective_id.clone(), tag.clone());
 
         let program = resolve_claude()?;
         let args = build_claude_args(
@@ -549,12 +550,12 @@ impl SessionManager {
                 cmd.arg("--mcp-config").arg(config);
             }
         }
-                                     // Child working directory. When the focus carries no project dir, default
-                                     // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
-                                     // is `/` (filesystem root). Running an agent at `/` has no git context, so
-                                     // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
-                                     // in ways they never do when launched from a real dir. $HOME matches what a
-                                     // terminal-launched agent would typically see.
+        // Child working directory. When the focus carries no project dir, default
+        // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
+        // is `/` (filesystem root). Running an agent at `/` has no git context, so
+        // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
+        // in ways they never do when launched from a real dir. $HOME matches what a
+        // terminal-launched agent would typically see.
         let dir = cwd
             .clone()
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
@@ -653,12 +654,7 @@ impl SessionManager {
 
     /// Enqueue a user message. Writes immediately to stdin if the session is
     /// idle, otherwise queues it to drain after the current turn completes.
-    pub fn send_user_message(
-        &mut self,
-        tag: &str,
-        text: &str,
-        images: &[String],
-    ) -> Result<()> {
+    pub fn send_user_message(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
         let session = self
             .sessions
             .get(tag)
@@ -884,7 +880,8 @@ impl SessionManager {
             // Test stub / fixed program: replay it verbatim.
             Some((program, args)) => {
                 let effective_id = sid.unwrap_or_else(|| Uuid::new_v4().to_string());
-                self.session_reverse.insert(effective_id.clone(), tag.to_string());
+                self.session_reverse
+                    .insert(effective_id.clone(), tag.to_string());
                 let managed = self.spawn_managed(
                     tag.to_string(),
                     agent,
@@ -1649,7 +1646,10 @@ mod tests {
     fn derive_summary_41_chars_gets_ellipsis() {
         let input = "a".repeat(41);
         let result = derive_summary(&input).unwrap();
-        assert!(result.ends_with('\u{2026}'), "should end with ellipsis: {result:?}");
+        assert!(
+            result.ends_with('\u{2026}'),
+            "should end with ellipsis: {result:?}"
+        );
         // The truncated part is 40 chars + 1 ellipsis codepoint
         assert_eq!(result.chars().count(), 41);
     }
@@ -1830,7 +1830,14 @@ mod tests {
         std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
         let mut mgr = SessionManager::with_store_path(tmp_store());
         let effective_id = mgr
-            .spawn_session("cody-1".into(), "cody".into(), "Cody".into(), None, None, false)
+            .spawn_session(
+                "cody-1".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                None,
+                false,
+            )
             .unwrap()
             .expect("a fresh session id is always resolved");
         assert_eq!(
@@ -1845,7 +1852,14 @@ mod tests {
         std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
         let mut mgr = SessionManager::with_store_path(tmp_store());
         let effective_id = mgr
-            .spawn_session("cody-2".into(), "cody".into(), "Cody".into(), None, None, false)
+            .spawn_session(
+                "cody-2".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                None,
+                false,
+            )
             .unwrap()
             .expect("a fresh session id is always resolved");
 
@@ -1888,7 +1902,10 @@ mod tests {
 
     // ── activity attribution resolution (activity-path wedge D2) ──────────────
 
-    fn raw_activity_event(focus_tag: Option<&str>, session_id: Option<&str>) -> crate::agent_bus::ActivityEvent {
+    fn raw_activity_event(
+        focus_tag: Option<&str>,
+        session_id: Option<&str>,
+    ) -> crate::agent_bus::ActivityEvent {
         crate::agent_bus::ActivityEvent {
             ts: chrono::Utc::now(),
             agent: "claude".into(),
@@ -1921,7 +1938,11 @@ mod tests {
 
         let finalized = mgr.ingest_activity_event(raw_activity_event(Some("fred"), None));
         assert_eq!(finalized.focus_tag.as_deref(), Some("fred"));
-        assert_eq!(finalized.seq, Some(0), "an attributed event must be seq-assigned");
+        assert_eq!(
+            finalized.seq,
+            Some(0),
+            "an attributed event must be seq-assigned"
+        );
         assert_eq!(mgr.activity_streams_for_focus("fred").len(), 1);
     }
 
@@ -1932,8 +1953,13 @@ mod tests {
 
         // "cody-1" is not in the registry/sessions map, but the session id
         // resolves via the reverse index — the fallback must still find it.
-        let finalized = mgr.ingest_activity_event(raw_activity_event(Some("cody-1"), Some("sess-1")));
-        assert_eq!(mgr.activity_streams_for_focus("cody-1").len(), 1, "{finalized:?}");
+        let finalized =
+            mgr.ingest_activity_event(raw_activity_event(Some("cody-1"), Some("sess-1")));
+        assert_eq!(
+            mgr.activity_streams_for_focus("cody-1").len(),
+            1,
+            "{finalized:?}"
+        );
     }
 
     #[test]

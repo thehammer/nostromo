@@ -45,7 +45,10 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
     send(
         stream,
-        &ClientMsg::Subscribe { topics, renders_decisions: false },
+        &ClientMsg::Subscribe {
+            topics,
+            renders_decisions: false,
+        },
     )
     .await;
 }
@@ -80,7 +83,9 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
         tmp.path().join("sessions.json"),
     )));
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
@@ -100,11 +105,16 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
             action: "load_pr".into(),
             pr_number: Some(7),
             repo: Some("acme/anvil".into()),
+            tag: None,
         },
     )
     .await;
 
-    let pointer_path = perri_state_dir.join("current-pr.json");
+    let pointer_path = nostromo::data::perri_current_pr::pin_path(
+        &perri_state_dir,
+        nostromo::data::perri_current_pr::BUILTIN_PERRI_TAG,
+    )
+    .unwrap();
     let appeared = wait_until(|| pointer_path.exists()).await;
     assert!(
         appeared,
@@ -136,7 +146,9 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
         tmp.path().join("sessions.json"),
     )));
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
@@ -150,7 +162,11 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
     handshake(&mut stream, vec![Topic::Perri]).await;
 
-    let pointer_path = perri_state_dir.join("current-pr.json");
+    let pointer_path = nostromo::data::perri_current_pr::pin_path(
+        &perri_state_dir,
+        nostromo::data::perri_current_pr::BUILTIN_PERRI_TAG,
+    )
+    .unwrap();
     let queue_dirty_path = perri_state_dir.join("queue.dirty");
 
     send(
@@ -159,6 +175,7 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
             action: "load_pr".into(),
             pr_number: Some(7),
             repo: Some("acme/anvil".into()),
+            tag: None,
         },
     )
     .await;
@@ -173,6 +190,7 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
             action: "clear".into(),
             pr_number: None,
             repo: None,
+            tag: None,
         },
     )
     .await;

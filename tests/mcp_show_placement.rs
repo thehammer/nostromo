@@ -26,7 +26,9 @@ use nostromo::ipc::SessionManager;
 use nostromo::mcp::server::TOOL_FORBIDDEN_CODE;
 use nostromo::mcp::tool_policy::INTENDED_PERRI_POLICY;
 use nostromo::mcp::tools::tool_descriptors;
-use nostromo::mcp::{DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState, TicketRegistryState};
+use nostromo::mcp::{
+    DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState, TicketRegistryState,
+};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -79,8 +81,11 @@ impl HomeOverride {
     }
 
     fn write_tool_policy(&self, yaml: &str) {
-        std::fs::write(self.dir.path().join(".nostromo").join("tool-policy.yaml"), yaml)
-            .expect("write tool-policy.yaml");
+        std::fs::write(
+            self.dir.path().join(".nostromo").join("tool-policy.yaml"),
+            yaml,
+        )
+        .expect("write tool-policy.yaml");
     }
 }
 
@@ -147,7 +152,11 @@ fn register_focuses(harness: &Harness, tags: &[&str]) {
             session_summary: None,
         })
         .collect();
-    harness.session_mgr.lock().unwrap().set_focus_registry(metas);
+    harness
+        .session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(metas);
 }
 
 // ── wire helpers ──────────────────────────────────────────────────────────────
@@ -323,7 +332,13 @@ async fn nostromo_show_is_listed_with_exactly_the_five_v1_types_and_no_activity(
         .collect();
     assert_eq!(
         types,
-        vec!["review_queue", "pr_conversation", "pr_diff", "file", "ticket"]
+        vec![
+            "review_queue",
+            "pr_conversation",
+            "pr_diff",
+            "file",
+            "ticket"
+        ]
     );
     assert!(!types.contains(&"activity"), "activity is not showable");
 }
@@ -433,12 +448,18 @@ async fn showing_the_same_file_at_a_different_line_reuses_one_tab_and_re_anchors
     )
     .await;
     assert_eq!(second["ok"], true);
-    assert_eq!(second["reused"], true, "the same file is the same view (R2)");
+    assert_eq!(
+        second["reused"], true,
+        "the same file is the same view (R2)"
+    );
     assert_eq!(second["pane_id"], pane_id, "reused onto the same pane");
 
     // Still one tab, not two.
     let info = get_self(&mut reader, &mut writer, 4).await;
-    let count = pane_ids(&info).iter().filter(|p| p.starts_with("detail.")).count();
+    let count = pane_ids(&info)
+        .iter()
+        .filter(|p| p.starts_with("detail."))
+        .count();
     assert_eq!(count, 1, "one tab, not two: {info}");
 
     // The re-anchor reached the wire.
@@ -446,10 +467,15 @@ async fn showing_the_same_file_at_a_different_line_reuses_one_tab_and_re_anchors
     let ServerMsg::PaneContent { address, .. } = bcast.recv().await.unwrap() else {
         panic!("expected PaneContent")
     };
-    let anchor = address.expect("a re-anchored show still addresses the pane").anchor;
+    let anchor = address
+        .expect("a re-anchored show still addresses the pane")
+        .anchor;
     assert_eq!(
         anchor,
-        Some(nostromo::ipc::protocol::Anchor::Line { path: None, line: 3 })
+        Some(nostromo::ipc::protocol::Anchor::Line {
+            path: None,
+            line: 3
+        })
     );
 }
 
@@ -477,7 +503,13 @@ async fn a_type_outside_the_vocabulary_is_refused_and_leaves_the_tree_untouched(
     )
     .await;
     assert_eq!(res["error"], "unknown_view_type");
-    for t in ["review_queue", "pr_conversation", "pr_diff", "file", "ticket"] {
+    for t in [
+        "review_queue",
+        "pr_conversation",
+        "pr_diff",
+        "file",
+        "ticket",
+    ] {
         assert!(res["detail"].as_str().unwrap().contains(t));
     }
 
@@ -667,13 +699,20 @@ async fn the_seventh_tab_in_the_detail_region_evicts_the_least_recently_focused_
         )
         .await;
         assert_eq!(res["ok"], true, "f{n}: {res}");
-        assert_eq!(res["evicted"], Value::Null, "no eviction until the cap is hit");
+        assert_eq!(
+            res["evicted"],
+            Value::Null,
+            "no eviction until the cap is hit"
+        );
         pane_id_of.push(res["pane_id"].as_str().unwrap().to_string());
     }
 
     let info = get_self(&mut reader, &mut writer, 20).await;
     assert_eq!(
-        pane_ids(&info).iter().filter(|p| p.starts_with("detail.")).count(),
+        pane_ids(&info)
+            .iter()
+            .filter(|p| p.starts_with("detail."))
+            .count(),
         6
     );
 
@@ -879,7 +918,10 @@ async fn a_policy_denying_perri_removes_the_seven_raw_tools_from_her_list_and_re
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     for denied in RAW_PANE_TOOLS {
-        assert!(!names.contains(&denied), "{denied} must not be listed for perri");
+        assert!(
+            !names.contains(&denied),
+            "{denied} must not be listed for perri"
+        );
     }
     assert!(
         names.contains(&"nostromo.show"),
@@ -895,7 +937,10 @@ async fn a_policy_denying_perri_removes_the_seven_raw_tools_from_her_list_and_re
         let resp = call_tool_raw(&mut reader, &mut writer, 10 + i as i64, denied, json!({})).await;
         let code = resp["error"]["code"].as_i64().expect("a JSON-RPC error");
         assert_eq!(code, TOOL_FORBIDDEN_CODE, "{denied}: {resp}");
-        assert_ne!(code, -32601, "{denied}: must not look like Method not found");
+        assert_ne!(
+            code, -32601,
+            "{denied}: must not look like Method not found"
+        );
         let message = resp["error"]["message"].as_str().unwrap_or("");
         assert!(
             !message.to_lowercase().contains("method not found"),
@@ -905,7 +950,14 @@ async fn a_policy_denying_perri_removes_the_seven_raw_tools_from_her_list_and_re
 
     // An unknown tool name still gets the ordinary -32601, so the two really
     // are distinguishable at the wire.
-    let resp = call_tool_raw(&mut reader, &mut writer, 99, "nostromo.not_a_real_tool", json!({})).await;
+    let resp = call_tool_raw(
+        &mut reader,
+        &mut writer,
+        99,
+        "nostromo.not_a_real_tool",
+        json!({}),
+    )
+    .await;
     assert_eq!(resp["error"]["code"], -32601);
     assert_ne!(resp["error"]["code"], TOOL_FORBIDDEN_CODE);
 }
@@ -930,7 +982,10 @@ async fn the_same_policy_that_denies_perri_leaves_mother_fred_and_teris_tool_lis
     for agent in ["mother", "fred", "teri"] {
         let (mut reader, mut writer) = connect(&socket_path, agent).await;
         let tools = list_tools(&mut reader, &mut writer, 2).await;
-        assert_eq!(tools, unfiltered, "{agent}'s list must be byte-for-byte unchanged");
+        assert_eq!(
+            tools, unfiltered,
+            "{agent}'s list must be byte-for-byte unchanged"
+        );
 
         // And the raw tools they were never denied still work.
         let res = call_tool(
@@ -941,7 +996,10 @@ async fn the_same_policy_that_denies_perri_leaves_mother_fred_and_teris_tool_lis
             json!({ "name": "perri-standard" }),
         )
         .await;
-        assert_eq!(res["ok"], true, "{agent} must still be able to call it: {res}");
+        assert_eq!(
+            res["ok"], true,
+            "{agent} must still be able to call it: {res}"
+        );
     }
 }
 
@@ -966,6 +1024,9 @@ async fn a_caller_whose_agent_name_cannot_be_resolved_is_never_filtered() {
         let (mut reader, mut writer) = connect(&socket_path, "").await;
         let tools = list_tools(&mut reader, &mut writer, 2).await;
         assert_eq!(tools, unfiltered, "an empty pty_id must fail open");
+        // `call_tool` itself asserts the response carries no JSON-RPC error,
+        // which is what "the policy did not withdraw this tool" means — a
+        // withdrawal is a -32000..-32099 error, never a tool result.
         let res = call_tool(
             &mut reader,
             &mut writer,
@@ -974,7 +1035,14 @@ async fn a_caller_whose_agent_name_cannot_be_resolved_is_never_filtered() {
             json!({ "name": "perri-standard" }),
         )
         .await;
-        assert_eq!(res["ok"], true, "and must not be refused: {res}");
+        // W7 — D4: an empty `pty_id` names no focus, and a layout applied to no
+        // focus paints nothing, so the tool refuses it on its own terms. That
+        // refusal is not the policy filtering this caller, which is what this
+        // test is about — assert it is the honest one and not a withdrawal.
+        assert_eq!(
+            res["error"], "unidentified_caller",
+            "an empty pty_id must be refused for want of a focus, not filtered: {res}"
+        );
     }
 
     // A tag with no focus-registry entry at all.
@@ -1018,6 +1086,9 @@ async fn with_no_policy_file_present_every_caller_including_perri_sees_the_unfil
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&tool), "{tool} must still be listed for perri");
+        assert!(
+            names.contains(&tool),
+            "{tool} must still be listed for perri"
+        );
     }
 }
