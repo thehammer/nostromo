@@ -207,7 +207,7 @@ struct PaneSurfaceView: View {
                     let group = items.filter { $0.bucket == bucket.key }
                     if !group.isEmpty {
                         Section(bucket.label) {
-                            ForEach(group) { item in
+                            ForEach(group, id: \.bucketScopedId) { item in
                                 NostromoKit.PerriPRRow(
                                     model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                     onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
@@ -234,7 +234,7 @@ struct PaneSurfaceView: View {
                 let overflow = items.filter { !knownBuckets.contains($0.bucket) }
                 if !overflow.isEmpty {
                     Section("Other") {
-                        ForEach(overflow) { item in
+                        ForEach(overflow, id: \.bucketScopedId) { item in
                             NostromoKit.PerriPRRow(
                                 model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                 onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
@@ -264,8 +264,10 @@ struct PaneSurfaceView: View {
                 guard case .scrollTo(let target) = restoreScroll(visibleRowRange(indices)),
                       ordered.indices.contains(target) else { return }
                 // No animation: this is putting the operator back where she
-                // already was, not taking her somewhere new.
-                proxy.scrollTo(ordered[target].id, anchor: .top)
+                // already was, not taking her somewhere new. Target
+                // `bucketScopedId`, not `id` — that's the identity the rows
+                // above are actually keyed by.
+                proxy.scrollTo(ordered[target].bucketScopedId, anchor: .top)
             }
             .onDisappear {
                 // A width-class change gives no other warning that this

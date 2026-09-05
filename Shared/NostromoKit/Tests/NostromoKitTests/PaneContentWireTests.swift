@@ -745,6 +745,63 @@ final class PaneContentWireTests: XCTestCase {
         XCTAssertNotEqual(makeItem(), makeItem(headSha: "def456"))
     }
 
+    // MARK: - PrListItemModel.bucketScopedId (SwiftUI row identity, never a domain identity)
+    //
+    // Regression coverage for the stale-badge bug: `id` is `"\(repo)#\(number)"`
+    // and deliberately excludes `bucket`, so when a PR moves between buckets
+    // its `id` (and therefore its default SwiftUI `Identifiable` row identity)
+    // doesn't change — SwiftUI can then recycle the old row under the new
+    // section header, rendering the previous bucket's badge. `bucketScopedId`
+    // is a second, view-identity-only property that folds `bucket` in so a
+    // bucket move always looks like a new row to `ForEach(items, id:
+    // \.bucketScopedId)`. It must never replace `id` itself, since `id` is
+    // documented as matching `PrQueueItem.id` and is relied on elsewhere as a
+    // cross-cutting domain identity.
+
+    func testBucketScopedIdDiffersWhenOnlyBucketDiffers() {
+        let requested   = makeItem(bucket: "requested")
+        let needsReview = makeItem(bucket: "needs_review")
+
+        XCTAssertNotEqual(
+            requested.bucketScopedId, needsReview.bucketScopedId,
+            "a PR moving from one bucket to another must be treated as a distinct SwiftUI row identity, " +
+            "or a moved row can be recycled and render the stale bucket's badge"
+        )
+    }
+
+    func testIdIsUnaffectedByBucketEvenWhenBucketScopedIdDiffers() {
+        let requested   = makeItem(bucket: "requested")
+        let needsReview = makeItem(bucket: "needs_review")
+
+        XCTAssertEqual(
+            requested.id, needsReview.id,
+            "id must stay \"\\(repo)#\\(number)\" and never fold in bucket — id is a cross-cutting domain " +
+            "identity documented as matching PrQueueItem.id; only bucketScopedId may vary with bucket"
+        )
+    }
+
+    func testBucketScopedIdIsDeterministicForTheSameInputs() {
+        let first  = makeItem(repo: "acme/web", number: 42, bucket: "requested")
+        let second = makeItem(repo: "acme/web", number: 42, bucket: "requested")
+
+        XCTAssertEqual(
+            first.bucketScopedId, second.bucketScopedId,
+            "bucketScopedId must be a pure function of its inputs — the same repo/number/bucket must " +
+            "always produce the same row identity"
+        )
+    }
+
+    func testBucketScopedIdDistinguishesDifferentPrsInTheSameBucket() {
+        let prOne = makeItem(repo: "acme/web", number: 42, bucket: "requested")
+        let prTwo = makeItem(repo: "acme/other", number: 7, bucket: "requested")
+
+        XCTAssertNotEqual(
+            prOne.bucketScopedId, prTwo.bucketScopedId,
+            "two distinct PRs in the same bucket must never collapse onto the same row identity — that " +
+            "would drop one of them from the rendered list entirely, which is worse than the stale-badge bug"
+        )
+    }
+
     // MARK: - PaneContentWire.Equatable — .text / .loading / .error
 
     func testTextCasesWithSameStringAreEqual() {

@@ -128,7 +128,7 @@ struct PaneContentView: View {
                         let group = items.filter { $0.bucket == bucket.key }
                         if !group.isEmpty {
                             sectionHeader(bucket.label, count: group.count)
-                            ForEach(group) { item in
+                            ForEach(group, id: \.bucketScopedId) { item in
                                 NostromoKit.PerriPRRow(
                                     model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                     onLoad: { onLoadPR(item.repo, item.number) },
@@ -146,7 +146,7 @@ struct PaneContentView: View {
                     let overflow = items.filter { !knownBuckets.contains($0.bucket) }
                     if !overflow.isEmpty {
                         sectionHeader("OTHER", count: overflow.count)
-                        ForEach(overflow) { item in
+                        ForEach(overflow, id: \.bucketScopedId) { item in
                             NostromoKit.PerriPRRow(
                                 model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                 onLoad: { onLoadPR(item.repo, item.number) },

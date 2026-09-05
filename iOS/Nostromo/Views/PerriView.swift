@@ -81,7 +81,7 @@ struct PerriView: View {
             let items = store.perriQueue.filter { $0.bucket == bucket.key }
             if !items.isEmpty {
                 Section(bucket.label) {
-                    ForEach(items) { item in
+                    ForEach(items, id: \.bucketScopedId) { item in
                         NostromoKit.PerriPRRow(
                             model:   rowModel(for: item),
                             onLoad:  { store.perriLoadPr(number: item.number, repo: item.repo) },
