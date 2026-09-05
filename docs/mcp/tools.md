@@ -24,9 +24,16 @@ Returns identity information about the calling Nostromo PTY session.
   "view_title": "Perri — PR Review",
   "pane_ids":   ["queue", "diff", "repl"],
   "session_id": "uuid-string",
-  "spawned_at": "2026-05-14T17:00:00Z"
+  "spawned_at": "2026-05-14T17:00:00Z",
+  "pr_under_review": { "repo": "Carefeed/admin-portal", "number": 4526 }
 }
 ```
+
+`pr_under_review` is **this focus's** PR, never whichever focus picked one up
+most recently (W7). It is always present on the daemon path and `null` when
+this focus has no PR under review — an absent key and a null key are different
+on the wire, and an agent can only act on one of them. It is omitted entirely
+on the TUI path, which has no focus registry to answer for.
 
 Source: `src/mcp/tools/get_self.rs`
 
@@ -136,11 +143,16 @@ Source: `src/mcp/tools/perri.rs`
 
 ### `perri.get_current_pr`
 
-Returns the PR currently loaded in Perri's diff pane, or `null` if none.
+Returns **the calling focus's** PR under review, or `null` if it has none.
 
-**Input**: *(none)*
+**Input**: `{ "view_id": "..." }` *(optional)*
 
 **Output**: `{ "number", "repo", "title", "author", "url", "stale" }` or `null`.
+
+The PR under review is a property of a focus, not of the machine (W7). Which
+focus this answers for follows the daemon's usual addressing rule: an explicit
+`view_id` wins, otherwise the caller's `pty_id`. A caller that names no focus
+and cannot be placed in one gets `null` — never some other focus's PR.
 
 Source: `src/mcp/tools/perri.rs`
 
@@ -148,17 +160,26 @@ Source: `src/mcp/tools/perri.rs`
 
 ### `perri.get_state`
 
-Returns `{ queue, current_pr, stale, current_pin }`.
+Returns `{ queue, current_pr, other_focuses, stale, current_pin }`.
 
-`current_pin` (W5 — current-pr-collision) is `{ repo, number }` when a PR is
-loaded, else an explicit `null` — always a present key, never omitted, so a
-caller can tell "checked, nothing pinned" from "this daemon predates the
-field." Today it names the single daemon-wide pin; it is exposed through the
-same request-scoped accessor (`pin_for_request`, keyed on the caller's own
-focus tag) `nostromo.show`'s `current_pin` error field uses, so both read
-identically once per-focus isolation lands.
+`current_pin` (W5 — current-pr-collision) is `{ repo, number }` when this
+focus has a PR loaded, else an explicit `null` — always a present key, never
+omitted, so a caller can tell "checked, nothing pinned" from "this daemon
+predates the field." It is exposed through the same request-scoped accessor
+(`pin_for_request`, keyed on the caller's own focus tag) `nostromo.show`'s
+`current_pin` error field uses, so the two can never name different PRs.
 
-**Input**: *(none)*
+**Input**: `{ "view_id": "..." }` *(optional)*
+
+- `current_pr` — this focus's PR under review, or `null`.
+- `other_focuses` — `[{ "tag", "repo", "number" }]` for every *other* focus
+  that has one, so an agent can see what the rest of the fleet is reviewing
+  without being able to mistake it for its own. Never includes the caller.
+- `queue` — the PR review queue, which is **fleet-wide**: every focus sees the
+  same queue. Only `current_pr` is per-focus.
+
+`current_pr` and `other_focuses` are always present, as `null` and `[]`
+respectively when empty.
 
 Source: `src/mcp/tools/perri.rs`
 
@@ -466,13 +487,13 @@ Source: `src/mcp/tools/switch_view.rs`
 Load a pull request into Perri's current-PR pane(s). Two hosts, different
 behavior:
 
-- **Daemon (`nostromd`)**: writes `<perri_state_dir>/current-pr.json` +
+- **Daemon (`nostromd`)**: writes `<perri_state_dir>/current-pr/<tag>.json` +
   touches `current-pr.dirty` (the same file contract `PerriView` writes —
   see `src/data/perri_current_pr.rs`), signals the native PR source's
-  refresh channel, and pushes to every one of the focus's resolved
-  **current-PR target(s)** (see the live-pane-sources bindings section above
-  — only a pane bound to `perri.get_current_pr`, plus the narrow
-  unbound-legacy-`diff` bridge; never a `perri.get_pr_diff`/
+  refresh channel for that focus, and pushes to every one of the focus's
+  resolved **current-PR target(s)** (see the live-pane-sources bindings
+  section above — only a pane bound to `perri.get_current_pr`, plus the
+  narrow unbound-legacy-`diff` bridge; never a `perri.get_pr_diff`/
   `perri.get_pr_conversation`-bound tab):
   - `highlights` given → that text is pushed as each target's final content —
     it is never overwritten by a server-rendered summary.
@@ -497,10 +518,25 @@ behavior:
   refresh, but pushes no pane content and reports no `unknown_pane`
   warning — there is nowhere for the summary to go on that focus today
   (a product question, not covered by this tool). A pane push that can't be
-  delivered because the resolved focus has *no* PR-content pane of any kind,
-  or the caller has no resolvable focus at all, degrades to a `warnings`
-  entry rather than failing the call — the file write and the refresh
-  signal still happen either way.
+  delivered because the resolved focus has *no* PR-content pane of any kind
+  degrades to a `warnings` entry rather than failing the call — the file
+  write and the refresh signal still happen either way.
+
+  **The PR under review is a property of the focus (W7).** The pin is written
+  under the resolved focus's tag, and nothing this call does changes what any
+  other focus reports. There is no gate: a pickup succeeds even when another
+  focus is already reviewing the same PR — no prompt, no confirmation, no
+  block, no wait.
+
+  A caller that names no focus and cannot be placed in one is **refused** with
+  `unidentified_caller` rather than succeeding, because a pin belonging to no
+  focus is one no surface will ever show. An empty-string `pty_id` counts as
+  absent, not as a focus named `""`.
+
+  A focus's pin dies with the focus: when a focus is removed, its pin is
+  deleted outright. `nostromo.create_focus` derives its tag deterministically
+  from `(agent, title)`, so a focus recreated under a reused tag starts with
+  no PR under review rather than inheriting the dead focus's.
 
 - **Standalone TUI**: writes the same file/sentinel through `PerriView`, no
   pane-push/settle/pending behavior (the TUI's own render loop already
@@ -522,7 +558,7 @@ true, "pending": true, "detail": "..." }` (daemon, settle timeout), optionally
 with a `warnings` array. The standalone TUI path returns `{ "ok": true }`
 with no `pane_ids`.
 
-**Errors**: `invalid_args` (missing/zero `number`, missing/empty `repo`, or a repo slug outside `owner/repo` form / `[A-Za-z0-9._-]`), `not_supported` (daemon only — Perri's state dir isn't configured), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only — the daemon path never hits these; that's the bug this tool used to have).
+**Errors**: `invalid_args` (missing/zero `number`, missing/empty `repo`, a repo slug outside `owner/repo` form / `[A-Za-z0-9._-]`, or a focus tag that is not a safe filename), `unidentified_caller` (daemon only — no `view_id` and no usable `pty_id`), `not_supported` (daemon only — Perri's state dir isn't configured), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only — the daemon path never hits these; that's the bug this tool used to have).
 
 Source: `src/mcp/tools/perri_mutators.rs`, `src/data/perri_current_pr.rs`
 
@@ -533,8 +569,9 @@ Source: `src/mcp/tools/perri_mutators.rs`, `src/data/perri_current_pr.rs`
 Clear the currently-loaded PR from every pane that's showing it — whichever
 layout template built the focus, and whatever those panes happen to be named.
 
-- **Daemon**: removes `current-pr.json` (a no-op, not an error, if it's
-  already absent), touches both `current-pr.dirty` and `queue.dirty`,
+- **Daemon**: removes the calling focus's `current-pr/<tag>.json` (a no-op,
+  not an error, if it's already absent) and only that focus's — no other
+  focus's PR changes. Touches both `current-pr.dirty` and `queue.dirty`,
   signals both native sources' refresh channels, then closes every curated
   review tab whose PR just stopped being under review (same teardown
   `perri.load_pr` triggers on a PR change — a no-op for a focus with no
