@@ -955,12 +955,18 @@ downstream, as its own fetch-level error (`unknown_comment_id`,
 `current_pin: { repo, number }` on the error payload when the request's
 `revision` was omitted (an implicit revision) *and* a PR is currently pinned
 — e.g. `{"error": "unknown_path", "detail": "...", "current_pin": {"repo":
-"acme/ops", "number": 42}}`. This is scoped narrowly: an explicit `revision`
-never carries it (the caller already named exactly what it asked for), no
-other view type ever carries it, and with no PR pinned the key is absent
-entirely (never `null`) — a bare refusal is unchanged from before W5. The
-point is telling an agent *why* an otherwise-ordinary-looking refusal just
-happened: a second, independent session pinning a different PR mid-review.
+"acme/ops", "number": 42}}`. This is scoped narrowly: for most codes, an
+explicit `revision` doesn't carry it (the caller already named exactly what
+it asked for), no other view type ever carries it, and with no PR pinned the
+key is absent entirely (never `null`) — a bare refusal is unchanged from
+before W5. **`revision_repo_mismatch` is the one exception** — it is *only*
+ever produced with an explicit `revision` (an implicit one degrades to the
+working tree and fails as `unknown_path` instead, never reaching this code),
+so it carries `current_pin` unconditionally; otherwise the one refusal whose
+entire reason for existing is a pin mismatch would be the one refusal that
+doesn't name the pin. The point is telling an agent *why* an
+otherwise-ordinary-looking refusal just happened: a second, independent
+session pinning a different PR mid-review.
 
 Every refusal from `unknown_view_type` through `invalid_views_config` happens
 **before** the fetch and leaves the focus's layout byte-identical, broadcasting

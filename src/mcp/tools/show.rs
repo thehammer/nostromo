@@ -36,6 +36,7 @@
 
 use serde_json::{json, Value};
 
+use crate::data::file_source::FileSourceError;
 use crate::ipc::pane_registry::SplitPosition;
 use crate::ipc::protocol::{Anchor, Emphasis, ServerMsg};
 use crate::mcp::pane_sources::broadcast_pane_content_with_address;
@@ -146,12 +147,30 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
             // hitting `unknown_path` with no idea a second session had
             // repinned the PR out from under it. Scoped strictly to that
             // path (never "every error, whenever a PR happens to be
-            // pinned" — noise devalues the signal) and strictly to an
-            // *implicit* revision — an explicit one means the caller
-            // already knows exactly what it asked for.
+            // pinned" — noise devalues the signal) and, for most refusals,
+            // strictly to an *implicit* revision — an explicit one means the
+            // caller already knows exactly what it asked for.
+            //
+            // `RevisionRepoMismatch` is the one exception to the
+            // implicit-only rule, and deliberately so: it is *only ever*
+            // produced when the revision was explicit (an implicit revision
+            // with a mismatched pin degrades to the working tree and fails
+            // as `UnknownPath` instead, never reaching this error at all —
+            // see `resolve_via_github_fallback`). If this error stayed
+            // gated on "implicit revision only", it could never carry the
+            // pin — the one refusal whose entire reason for existing is a
+            // pin mismatch would be the one refusal that doesn't name the
+            // pin. The caller naming a revision here doesn't mean it knows
+            // a *foreign PR pin* is why it was refused, so decorate this
+            // variant unconditionally.
+            let is_revision_repo_mismatch = matches!(
+                e,
+                ApplyLayoutError::FileRefused(FileSourceError::RevisionRepoMismatch)
+            );
             if source == SOURCE_FILE
                 && matches!(e, ApplyLayoutError::FileRefused(_))
-                && params.get("revision").and_then(Value::as_str).is_none()
+                && (is_revision_repo_mismatch
+                    || params.get("revision").and_then(Value::as_str).is_none())
             {
                 if let Some(pin) = pin_for_request(state, Some(tag.as_str())) {
                     payload["current_pin"] = pin.wire();
@@ -1559,6 +1578,48 @@ mod tests {
         seed_curated(&state, "perri");
         seed_pin(&mut state, "acme/web", 42);
 
+        // "HEAD" resolves locally (this test runs inside a real git checkout),
+        // so the missing path fails with a plain `UnknownPath` — never
+        // reaching `resolve_via_github_fallback`/`RevisionRepoMismatch` at
+        // all. That keeps this test on the "ordinary explicit-revision
+        // refusal" case the "caller already knows what it asked for" rule is
+        // actually about, distinct from `revision_repo_mismatch` below.
+        let out = show(
+            &state,
+            &json!({
+                "type": "file",
+                "target": { "path": "does/not/exist.rs", "revision": "HEAD" }
+            }),
+            Some("perri"),
+        )
+        .await;
+
+        assert!(out.get("error").is_some(), "expected a refusal, got {out}");
+        assert_eq!(
+            out.get("error"),
+            Some(&json!("unknown_path")),
+            "expected this scenario to hit the plain not-found case, not a repo \
+             mismatch, so it actually exercises the rule under test: {out}"
+        );
+        assert!(
+            out.get("current_pin").is_none(),
+            "an explicit revision means the caller already knows what it asked for; \
+             current_pin must not be attached: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revision_repo_mismatch_refusal_carries_the_current_pin_even_with_an_explicit_revision(
+    ) {
+        let (mut state, _rx) = make_state();
+        seed_curated(&state, "perri");
+        // Pinned repo can't possibly match this checkout's own remote, and
+        // "deadbeef" isn't a resolvable revision here — so the local read
+        // fails as `UnresolvableRevision`, `resolve_via_github_fallback` sees
+        // a pin whose repo doesn't match this checkout, and refuses with
+        // `RevisionRepoMismatch` instead of fetching foreign content.
+        seed_pin(&mut state, "acme/web", 42);
+
         let out = show(
             &state,
             &json!({
@@ -1569,11 +1630,17 @@ mod tests {
         )
         .await;
 
-        assert!(out.get("error").is_some(), "expected a refusal, got {out}");
-        assert!(
-            out.get("current_pin").is_none(),
-            "an explicit revision means the caller already knows what it asked for; \
-             current_pin must not be attached: {out}"
+        assert_eq!(
+            out.get("error"),
+            Some(&json!("revision_repo_mismatch")),
+            "expected the repo-mismatch refusal, got {out}"
+        );
+        assert_eq!(
+            out.get("current_pin"),
+            Some(&json!({ "repo": "acme/web", "number": 42 })),
+            "revision_repo_mismatch's entire reason for existing is a pin \
+             mismatch, so — unlike other explicit-revision refusals — it must \
+             carry the pin: {out}"
         );
     }
 

@@ -713,9 +713,13 @@ would be the GitHub-contents fallback against a PR pinned to a *different*
 repo than the one the caller's own working directory actually is. Refused
 rather than fetched — the alternative is silently rendering a foreign repo's
 content with `ok: true`, which is worse than an error. `nostromo.show`'s
-`file` type carries `current_pin: {repo, number}` on this and every other
-fetch-level refusal from this path when the request's `revision` was omitted
-and a PR is pinned (see `docs/mcp/tools.md`'s `nostromo.show` error table).
+`file` type carries `current_pin: {repo, number}` on this refusal
+*unconditionally* — a `revision` was named, but that doesn't mean the caller
+knew a foreign PR pin was the actual reason it was refused, and this is the
+one error whose entire reason for existing is a pin mismatch. Every other
+fetch-level refusal from this path carries `current_pin` only when the
+request's `revision` was omitted and a PR is pinned (see `docs/mcp/tools.md`'s
+`nostromo.show` error table).
 
 ### `diff` — a PR's change, per file
 
