@@ -21,6 +21,20 @@ import Foundation
 /// real numbers is exactly "ruler right, body blank" — the bug this
 /// diagnostics job exists to catch with no operator present and no repro.
 ///
+/// ## What the width terms alone could not see (W3)
+///
+/// Those three terms were written against a *theory* — a collapsed container
+/// or clip view — and the confirmed root cause turned out to be none of them:
+/// the ruler itself filled the raw dirty rect AppKit handed it (the whole
+/// enclosing scroll view; `NSView.clipsToBounds` has defaulted to `false`
+/// since macOS 14) instead of clipping to its own bounds, painting black over
+/// a text body whose every width read perfectly healthy. `gutterFillWidth` /
+/// `gutterFillWiderThanGutter` is the term that catches *that*: it compares
+/// what the ruler actually filled against how wide the ruler is allowed to
+/// be. The two remaining new terms — a document view shorter than its
+/// viewport, and a text storage too short to hold one character per row —
+/// close the other two blind spots the same investigation found.
+///
 /// Absent either half of that premise — no labels painted, or no text at all
 /// — there is no evidence either way, and the verdict is `.healthy`
 /// regardless of what the widths read. A pane before its first push, a pane
@@ -48,9 +62,21 @@ enum CodePaneRenderAudit {
         var containerUsedWidth: Double
         /// The ruler's current `ruleThickness`.
         var ruleThickness: Double
+        /// The width the ruler actually *filled* this pass —
+        /// `rect.intersection(bounds).width`, not the raw `rect.width`. Fed
+        /// from the clipped rect on purpose: reporting the AppKit-supplied
+        /// dirty rect here would make the guard below blind to exactly the
+        /// unclipped fill it exists to catch.
+        var gutterFillWidth: Double
+        /// `textView.frame.height` — the document view's own frame.
+        var documentViewHeight: Double
+        /// `scrollView.contentView.bounds.height`.
+        var clipViewHeight: Double
         /// `textView.textLayoutManager == nil` — a TextKit 2 → TextKit 1
-        /// downgrade (H2). Evidence for a hypothesis about *why*, never
-        /// itself a verdict term.
+        /// downgrade. Evidence for a hypothesis about *why*, never itself a
+        /// verdict term. (W3 refuted the hypothesis it was added for: the
+        /// downgrade is real and harmless — an identical pane with the ruler
+        /// removed is downgraded too and paints fine.)
         var textKitDowngraded: Bool
 
         /// The "no draw pass has happened yet" state — every field zeroed.
@@ -61,7 +87,8 @@ enum CodePaneRenderAudit {
         static let empty = Measurements(
             labelsPainted: 0, labelCount: 0, textStorageLength: 0, rowCount: 0,
             documentViewWidth: 0, clipViewWidth: 0, containerUsedWidth: 0,
-            ruleThickness: 0, textKitDowngraded: false
+            ruleThickness: 0, gutterFillWidth: 0, documentViewHeight: 0,
+            clipViewHeight: 0, textKitDowngraded: false
         )
     }
 
@@ -70,6 +97,9 @@ enum CodePaneRenderAudit {
         case textContainerHasNoUsableWidth  = "text container used width is <= 0"
         case documentViewNarrowerThanGutter = "document view width is <= the gutter's rule thickness"
         case clipViewHasNoWidth             = "clip view width is <= 0"
+        case gutterFillWiderThanGutter      = "the gutter filled a rect wider than its own rule thickness (it paints over the body)"
+        case documentViewShorterThanViewport = "document view height is less than the clip view's height"
+        case textStorageImplausiblyShortForRowCount = "text storage is too short to hold even one character per row"
     }
 
     enum Verdict: Equatable {
@@ -87,6 +117,27 @@ enum CodePaneRenderAudit {
         if m.containerUsedWidth <= 0 { reasons.append(.textContainerHasNoUsableWidth) }
         if m.documentViewWidth <= m.ruleThickness { reasons.append(.documentViewNarrowerThanGutter) }
         if m.clipViewWidth <= 0 { reasons.append(.clipViewHasNoWidth) }
+        // W3's actual root cause. A gutter that filled more than its own rule
+        // thickness painted over something — on the sighting this was written
+        // from, 880pt of fill from a 40pt-wide ruler, which is the entire
+        // scroll view. `>`, not `>=`: filling exactly the gutter is the
+        // healthy case, and this term must be silent for it.
+        if m.gutterFillWidth > m.ruleThickness { reasons.append(.gutterFillWiderThanGutter) }
+        // A document view shorter than the viewport showing it can only paint
+        // part of what the ruler numbered. The 1pt tolerance is deliberate:
+        // AppKit sizes the text view against the clip view to within rounding,
+        // and a tripwire that fires on a healthy pane is worse than no
+        // tripwire. `clipViewHeight > 0` keeps a mid-layout pane out of it.
+        if m.clipViewHeight > 0, m.documentViewHeight + 1 < m.clipViewHeight {
+            reasons.append(.documentViewShorterThanViewport)
+        }
+        // `rowCount` rows joined by newlines are always at least
+        // `rowCount - 1` characters long, and exactly that only when every
+        // single row is empty. A merely blank-line-heavy document is well
+        // clear of this and must never trip it.
+        if m.rowCount > 1, m.textStorageLength <= m.rowCount - 1 {
+            reasons.append(.textStorageImplausiblyShortForRowCount)
+        }
         return reasons.isEmpty ? .healthy : .blankBody(reasons: reasons)
     }
 
@@ -105,7 +156,8 @@ enum CodePaneRenderAudit {
                "textStorageLength=\(m.textStorageLength) rowCount=\(m.rowCount) " +
                "documentViewWidth=\(m.documentViewWidth) clipViewWidth=\(m.clipViewWidth) " +
                "containerUsedWidth=\(m.containerUsedWidth) ruleThickness=\(m.ruleThickness) " +
-               "textKitDowngraded=\(m.textKitDowngraded)"
+               "gutterFillWidth=\(m.gutterFillWidth) documentViewHeight=\(m.documentViewHeight) " +
+               "clipViewHeight=\(m.clipViewHeight) textKitDowngraded=\(m.textKitDowngraded)"
     }
 
     /// Multi-line report for Debug ▸ Copy code-pane diagnostics.
@@ -119,6 +171,9 @@ enum CodePaneRenderAudit {
         clip view width: \(m.clipViewWidth)
         container used width: \(m.containerUsedWidth)
         rule thickness: \(m.ruleThickness)
+        gutter fill width: \(m.gutterFillWidth)
+        document view height: \(m.documentViewHeight)
+        clip view height: \(m.clipViewHeight)
         TextKit 1 downgrade: \(m.textKitDowngraded)
         """
     }

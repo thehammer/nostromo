@@ -73,14 +73,35 @@ as agreement" rule.
 ## Code-pane render audit
 
 `CodeContentView`'s gutter (`LineNumberRulerView.drawHashMarksAndLabels`)
-measures itself on every draw pass — label count, text-storage length, row
-count, and the document view/clip view/text-container widths — and judges
-whether the pass was healthy (`CodePaneRenderAudit`, in
-`macOS/Nostromo/UI/CodePaneRenderAudit.swift`). This exists to catch a rare,
-previously-unreproducible bug where the gutter paints correct line numbers
-over a completely blank text body; see
-`.claude/plans/instrument-code-pane-render-diagnostics.md` for the full
-investigation.
+measures itself on every draw pass and judges whether the pass was healthy
+(`CodePaneRenderAudit`, in `macOS/Nostromo/UI/CodePaneRenderAudit.swift`). This
+exists to catch a bug where the gutter paints correct line numbers over a
+completely blank text body; see
+`.claude/plans/instrument-code-pane-render-diagnostics.md` for the original
+investigation and
+`.claude/wip/w3-detail-region-ruler-overdraw-root-cause/index.md` for the one
+that finally caught it.
+
+The audit never fires unless the ruler painted at least one label **and** the
+text storage is non-empty — absent either, there is no evidence either way and
+the verdict is `healthy`. Given both, these terms are checked:
+
+| Term | Fires when | Catches |
+| --- | --- | --- |
+| `text container used width is <= 0` | `containerUsedWidth <= 0` | a collapsed text container |
+| `document view width is <= the gutter's rule thickness` | `documentViewWidth <= ruleThickness` | a document view no wider than its own gutter |
+| `clip view width is <= 0` | `clipViewWidth <= 0` | a scroll view with no viewport |
+| `the gutter filled a rect wider than its own rule thickness` | `gutterFillWidth > ruleThickness` | **the confirmed W3 cause** — the ruler painting over the body and the tab strip above it |
+| `document view height is less than the clip view's height` | `documentViewHeight + 1 < clipViewHeight` (and `clipViewHeight > 0`) | a document view collapsed vertically |
+| `text storage is too short to hold even one character per row` | `rowCount > 1 && textStorageLength <= rowCount - 1` | an all-blank-lines document that reads healthy on every geometry term |
+
+`gutterFillWidth` is the width the ruler *actually filled*
+(`rect.intersection(bounds).width`), never the raw dirty rect AppKit supplies —
+that rect legitimately spans the whole scroll view, so reporting it would make
+this term fire on every healthy pane and catch nothing. The 1pt tolerance on the
+height term and the `rowCount > 1` guard on the plausibility term are there for
+the same reason: a tripwire that fires on a healthy pane is worse than no
+tripwire.
 
 If a pass looks unhealthy (real content, real gutter, but the text view
 wasn't capable of painting it), the app:
@@ -88,9 +109,21 @@ wasn't capable of painting it), the app:
 1. Logs one line to the `codepane` log category (subsystem
    `com.hammer.nostromo`), rate-limited to once per distinct verdict per
    pane.
-2. Attempts a one-shot recovery (re-asserts the text container's size, forces
-   layout, requests a redisplay) — a mitigation for an unconfirmed cause, not
-   a fix. Whether the pane recovers is itself diagnostic evidence.
+2. Attempts a one-shot recovery (re-asserts the text container's width and the
+   text view's minimum height from the clip view, forces layout, requests a
+   redisplay). Whether the pane recovers is itself diagnostic evidence about
+   which geometry hypothesis is in play.
+
+Two lines are emitted **unconditionally**, not only on an unhealthy verdict,
+because a field that is only logged when something is already known to be wrong
+is useless for telling apart hypotheses about *why*:
+
+- one per document push — `code pane document pushed kind=… rows=…
+  textStorageLength=… textKitDowngraded=…`
+- one whenever `textKitDowngraded` changes — at most once per pane, when the
+  ruler's first `layoutManager` access downgrades the text view to TextKit 1.
+
+Counts, flags and geometry only; never pane content.
 
 **Copy code-pane diagnostics** (⌘⇧K) samples the same measurements on demand,
 without needing to catch a live failure — useful for confirming a pane is
