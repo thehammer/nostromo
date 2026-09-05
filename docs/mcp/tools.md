@@ -55,7 +55,9 @@ Returns the full live state snapshot for a named view.
 { "view_id": "perri" }
 ```
 
-**Output**: view-specific JSON blob (see per-view sections below).
+**Output**: view-specific JSON blob (see per-view sections below), plus a
+`render_state` section on every response — see "Render-state visibility
+(W1)" below.
 
 Source: `src/mcp/tools/get_view_state.rs`
 
@@ -293,9 +295,25 @@ unbinds it.**
 | `nostromo.apply_layout` | Binds every pane whose schema entry declares a `source`. Never binds `repl`. |
 | `nostromo.refresh_pane_content` | Binds `pane_id` to `source` **and its `params`** (same as `apply_layout`, which binds with no params) — a pane not yet in the tree is silently not bound. |
 | `nostromo.set_pane_content` | **Unbinds** the pane — agent-authored content is authoritative from here on, or the next automatic push would silently overwrite it. |
-| `perri.load_pr` **with** `highlights` | Unbinds `diff` — highlights are final content. |
-| `perri.load_pr` **without** `highlights` | Binds `diff` to `perri.get_current_pr`. |
+| `perri.load_pr` **with** `highlights` | Resolves the focus's live *current-PR* target(s) (see below) and unbinds each — highlights are final content. |
+| `perri.load_pr` **without** `highlights` | Resolves the focus's live *current-PR* target(s) (see below) and binds each to `perri.get_current_pr`. |
 | `perri.clear_current_pr` | Resolves which of the focus's *live* panes currently hold PR-review content and which hold the queue from the tree and its existing bindings — any pane bound to `perri.get_current_pr`/`perri.get_pr_diff`/`perri.get_pr_conversation` counts as PR content, any pane bound to `perri.list_pr_queue` counts as the queue, and (the one legacy exception) an *unbound* pane literally named `diff`/`queue` counts too, since `perri.load_pr({highlights})` leaves `diff` unbound in a `perri-standard` focus. Only a pane that was unbound gets (re)bound here — a pane already bound to `perri.get_pr_diff`/`perri.get_pr_conversation` (a curated tab) is never repurposed onto a different source. |
+
+`perri.load_pr`'s **current-PR target(s)** are a *narrower* resolution than
+`perri.clear_current_pr`'s PR-content set above: only a pane bound to
+`perri.get_current_pr` itself (plus the same unbound-legacy-`diff` bridge)
+qualifies. A pane bound to `perri.get_pr_diff`/`perri.get_pr_conversation`
+renders structured Diff/Conversation content — `load_pr`'s plain-text
+summary/highlights is never pushed there, since that would be a content-kind
+mismatch the source's own broadcaster would just clobber again moments later.
+On a curated focus with real PR-content panes but none of them bound to
+`perri.get_current_pr`, this resolves to **zero** targets: `load_pr` still
+writes `current-pr.json` and signals the refresh, but pushes no pane content
+and reports no `unknown_pane` warning — there is honestly nowhere for the
+summary to go on that focus today. (A focus with *no* PR-content pane of any
+kind — one that never applied a real layout — is a different, degenerate
+case, and still falls back to attempting the legacy `diff` name, so a
+genuinely broken caller still gets a visible `warnings` entry.)
 
 Bindings persist across a daemon restart, `params` included; a restarted
 daemon repaints every bound pane immediately, with no tool call. The one
@@ -445,19 +463,24 @@ Source: `src/mcp/tools/switch_view.rs`
 
 ### `perri.load_pr`
 
-Load a pull request into Perri's diff pane. Two hosts, different behavior:
+Load a pull request into Perri's current-PR pane(s). Two hosts, different
+behavior:
 
 - **Daemon (`nostromd`)**: writes `<perri_state_dir>/current-pr.json` +
   touches `current-pr.dirty` (the same file contract `PerriView` writes —
   see `src/data/perri_current_pr.rs`), signals the native PR source's
-  refresh channel, and pushes the resolved focus's `diff` pane itself:
-  - `highlights` given → that text is pushed as the pane's final content —
+  refresh channel, and pushes to every one of the focus's resolved
+  **current-PR target(s)** (see the live-pane-sources bindings section above
+  — only a pane bound to `perri.get_current_pr`, plus the narrow
+  unbound-legacy-`diff` bridge; never a `perri.get_pr_diff`/
+  `perri.get_pr_conversation`-bound tab):
+  - `highlights` given → that text is pushed as each target's final content —
     it is never overwritten by a server-rendered summary.
-  - `highlights` omitted → pushes `Loading` (first paint only — suppressed if
-    `diff` already has content, per the live-pane-sources `Loading` rule
-    above), then waits (bounded by a per-daemon settle timeout, default 12s)
-    for the refetched snapshot to
-    match `(repo, number)`, then pushes the same `Text` summary
+  - `highlights` omitted → pushes `Loading` to each target (first paint
+    only — suppressed if it already has content, per the live-pane-sources
+    `Loading` rule above), then waits (bounded by a per-daemon settle
+    timeout, default 12s) for the refetched snapshot to match `(repo,
+    number)`, then pushes the same `Text` summary
     `nostromo.apply_layout`/`nostromo.refresh_pane_content` would render for
     `perri.get_current_pr`. If the wait times out, pushes a
     `"Fetching <repo>#<n>… (still loading)"` placeholder and returns
@@ -468,10 +491,16 @@ Load a pull request into Perri's diff pane. Two hosts, different behavior:
   `perri.set_selected_index`) to this PR's position in the current queue,
   if it's there.
 
-  A pane push that can't be delivered (the resolved focus has no `diff`
-  pane, or the caller has no resolvable focus at all) degrades to a
-  `warnings` entry rather than failing the call — the file write and the
-  refresh signal still happen either way.
+  On a curated focus whose only PR-content panes are `perri.get_pr_diff`/
+  `perri.get_pr_conversation`-bound tabs, this resolves to **zero** targets:
+  the call still succeeds, still writes the pointer file and signals the
+  refresh, but pushes no pane content and reports no `unknown_pane`
+  warning — there is nowhere for the summary to go on that focus today
+  (a product question, not covered by this tool). A pane push that can't be
+  delivered because the resolved focus has *no* PR-content pane of any kind,
+  or the caller has no resolvable focus at all, degrades to a `warnings`
+  entry rather than failing the call — the file write and the refresh
+  signal still happen either way.
 
 - **Standalone TUI**: writes the same file/sentinel through `PerriView`, no
   pane-push/settle/pending behavior (the TUI's own render loop already
@@ -487,7 +516,11 @@ Load a pull request into Perri's diff pane. Two hosts, different behavior:
 }
 ```
 
-**Output**: `{ "ok": true }`, or `{ "ok": true, "pending": true, "detail": "..." }` (daemon, settle timeout), optionally with a `warnings` array.
+**Output**: `{ "ok": true, "pane_ids": [...] }` (daemon — the resolved
+current-PR target pane ids actually pushed to, possibly empty), or `{ "ok":
+true, "pending": true, "detail": "..." }` (daemon, settle timeout), optionally
+with a `warnings` array. The standalone TUI path returns `{ "ok": true }`
+with no `pane_ids`.
 
 **Errors**: `invalid_args` (missing/zero `number`, missing/empty `repo`, or a repo slug outside `owner/repo` form / `[A-Za-z0-9._-]`), `not_supported` (daemon only — Perri's state dir isn't configured), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only — the daemon path never hits these; that's the bug this tool used to have).
 
@@ -1022,6 +1055,72 @@ second tab (R2):
 ```
 
 Source: `src/mcp/tools/show.rs`, `src/mcp/views/`.
+
+---
+
+## Phase 6 — Render-state visibility (W1)
+
+`nostromo.show` and every other layout-mutating tool return success the
+moment the **daemon** accepts and registers the call — `PaneRegistry` only
+ever stores the tree it was told to build, never what any window actually
+painted. Closing that gap needs a fact the daemon doesn't have: what a
+client's view hierarchy actually materialised. The macOS app reports that
+fact once per window at the end of its own reconcile pass
+(`ClientMsg::RenderedShape`); this tool (and the `render_state` section
+`nostromo.get_view_state` gained alongside it) serves it back, diffed
+against the daemon's own expected tree.
+
+### `nostromo.get_render_state`
+
+Reports, per attached window, whether what a focus's client actually
+rendered agrees with what the daemon expects.
+
+**Input**: `{ "view_id": "optional — defaults to the caller's own focus" }`
+
+**Output**:
+```json
+{
+  "tag": "perri",
+  "expected": ["detail.0", "detail.1", "detail.2", "queue", "repl"],
+  "windows": [
+    { "window_id": "0",
+      "rendered": ["detail.0", "detail.1", "detail.2", "queue", "repl"],
+      "missing": [], "extra": [],
+      "reported_at": "2026-09-04T20:55:01Z", "age_ms": 1200, "agrees": true },
+    { "window_id": "2",
+      "rendered": ["queue", "repl"],
+      "missing": ["detail.0", "detail.1", "detail.2"], "extra": [],
+      "reported_at": "2026-09-04T20:48:11Z", "age_ms": 412000, "agrees": false }
+  ],
+  "windows_reporting": 2,
+  "agrees_everywhere": false
+}
+```
+
+A tag no window has ever reported for returns `"windows": []` and
+`"agrees_everywhere": null` — **never** `true`. Absence of a report is not
+evidence of agreement: a client that crashed, never connected, or hasn't
+caught up to the daemon's latest broadcast yet must not read the same as a
+client that checked in and confirmed. `missing` is expected-but-not-rendered
+(what the caller most likely wants to fix); `extra` is
+rendered-but-not-expected (a stale pane the client hasn't torn down yet).
+
+`reported_at` is the *client's* timestamp, not the daemon's receipt time —
+`age_ms` is how long ago that window last checked in, which is what tells a
+caller whether a report is even worth trusting for the show it just issued.
+
+**Errors**: `unidentified_caller` (no `view_id` and no caller `pty_id` to
+target), `not_supported` (non-daemon-hosted MCP server).
+
+Source: `src/mcp/tools/render_state.rs`
+
+### `nostromo.get_view_state`'s `render_state` section
+
+Every `nostromo.get_view_state` response now carries the same information
+under a `render_state` key, keyed on the requested `view_id` — this is the
+tool an agent already reaches for, so the comparison is discoverable there
+without a second tool name. Same shape as `nostromo.get_render_state`'s
+output above.
 
 ---
 

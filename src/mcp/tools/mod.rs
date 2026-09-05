@@ -22,6 +22,7 @@ pub mod notify;
 pub mod perri;
 pub mod perri_mutators;
 pub mod refresh_pane;
+pub mod render_state;
 pub mod set_pane;
 pub mod show;
 pub mod status_segment;
@@ -475,6 +476,18 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         // ── the curated view surface (W5 — curated-agent-views) ──────────────
         show::descriptor(),
+        // ── render-state visibility (W1) ──────────────────────────────────────
+        json!({
+            "name": "nostromo.get_render_state",
+            "description": "Reports, per attached window, whether what a focus's client actually rendered matches what the daemon expects (its PaneRegistry tree) — the daemon only ever knows the structure it was told to build, never what any window actually painted, so this is the answer to 'did what I asked for actually show up' without a screenshot. A tag no window has ever reported for returns windows: [] and agrees_everywhere: null — never true; a missing report must never be mistaken for agreement. Also available as the render_state section of nostromo.get_view_state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string", "description": "Focus/view id to inspect; omit to target the caller's own focus" }
+                },
+                "required": []
+            }
+        }),
         // ── diagnostics ──────────────────────────────────────────────────────
         json!({
             "name": "nostromo.get_daemon_diagnostics",
@@ -724,6 +737,12 @@ async fn dispatch_inner(
         "nostromo.show" => {
             let args = arguments.cloned().unwrap_or_default();
             show::show(state, &args, pty_id).await
+        }
+
+        // ── render-state visibility (W1) ──────────────────────────────────────
+        "nostromo.get_render_state" => {
+            let args = arguments.cloned().unwrap_or_default();
+            render_state::handle(state, &args, pty_id).await
         }
 
         // ── diagnostics ──────────────────────────────────────────────────────

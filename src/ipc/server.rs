@@ -789,6 +789,19 @@ fn handle_client_msg(
             let _ = targeted_tx.send(ServerMsg::ActivitySnapshot { tag, streams });
         }
 
+        ClientMsg::RenderedShape {
+            tag,
+            window_id,
+            pane_ids,
+            rendered_at,
+        } => {
+            let mgr = session_mgr.lock().unwrap();
+            if let Some(reg) = mgr.pane_registry() {
+                reg.lock().unwrap()
+                    .record_rendered_shape(conn_key, &window_id, &tag, pane_ids, rendered_at);
+            }
+        }
+
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
     }

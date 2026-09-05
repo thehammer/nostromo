@@ -13,8 +13,10 @@
 //! - **Daemon-hosted** (`nostromd`): `load_pr`/`clear_current_pr` write
 //!   through [`crate::data::perri_current_pr`] — the same file contract
 //!   `PerriView` (TUI) writes — signal the native sources' refresh channels,
-//!   and push `ServerMsg::PaneContent` broadcasts for the caller's `diff`
-//!   (and, for `clear_current_pr`, `queue`) pane via
+//!   and push `ServerMsg::PaneContent` broadcasts for the caller's live
+//!   PR-content pane(s) (and, for `clear_current_pr`, its queue pane),
+//!   resolved from the focus's actual pane tree rather than a fixed
+//!   `diff`/`queue` vocabulary (see [`resolve_perri_targets`]), via
 //!   [`super::apply_layout::fetch`], so rendering can never disagree with
 //!   `apply_layout`/`refresh_pane_content`. `set_selected_index`/
 //!   `get_selected_index` read/write an agent-scoped
@@ -234,22 +236,40 @@ async fn load_pr_daemon(
         show::reset_for_pr_change(daemon, t, Some((repo, number)));
     }
 
+    // D1/D2: resolve which of the focus's *live* panes load_pr may push its
+    // plain-text summary/highlights to, from the freshly pruned tree/bindings
+    // — never a fixed template vocabulary. Must run after the reset above, so
+    // resolution sees the pruned tree, not one about to be torn down. A tag
+    // with no resolvable focus falls back to a single inert placeholder id:
+    // with no tag, `push_pane_content` degrades straight to the
+    // "unidentified_caller" warning before ever consulting the pane id.
+    let targets: Vec<String> = match tag.as_deref() {
+        Some(t) => {
+            let reg = daemon.pane_registry.lock().unwrap();
+            load_pr_targets(&reg, t)
+        }
+        None => vec![String::new()],
+    };
+
     let mut warnings = Vec::new();
     let mut pending = false;
 
     match highlights {
         Some(text) => {
-            // D4: highlights are agent-authored final content — sever the
-            // diff pane's live binding, or the broadcaster would clobber them
-            // with the plain rendered summary within seconds.
+            // D4: highlights are agent-authored final content — sever each
+            // target pane's live binding, or the broadcaster would clobber
+            // them with the plain rendered summary within seconds.
             if let Some(t) = tag.as_deref() {
-                daemon.pane_registry.lock().unwrap().unbind_source(t, "diff");
+                let mut reg = daemon.pane_registry.lock().unwrap();
+                for pane in &targets {
+                    reg.unbind_source(t, pane);
+                }
             }
             // D3: highlights are the pane's final content — no fetch, no wait.
-            push_pane_content(
+            push_content_to_all(
                 daemon,
                 tag.as_deref(),
-                "diff",
+                &targets,
                 PaneContentWire::Text {
                     text: text.to_string(),
                 },
@@ -258,19 +278,18 @@ async fn load_pr_daemon(
             );
         }
         None => {
-            // D4: no highlights — diff renders straight from
+            // D4: no highlights — each target renders straight from
             // perri.get_current_pr, so keep (or re-establish) that binding.
             if let Some(t) = tag.as_deref() {
-                daemon
-                    .pane_registry
-                    .lock()
-                    .unwrap()
-                    .bind_source(t, "diff", SOURCE_CURRENT_PR);
+                let mut reg = daemon.pane_registry.lock().unwrap();
+                for pane in &targets {
+                    reg.bind_source(t, pane, SOURCE_CURRENT_PR);
+                }
             }
-            push_pane_content(
+            push_content_to_all(
                 daemon,
                 tag.as_deref(),
-                "diff",
+                &targets,
                 PaneContentWire::Loading,
                 None,
                 &mut warnings,
@@ -285,21 +304,23 @@ async fn load_pr_daemon(
                 match apply_layout::fetch(SOURCE_CURRENT_PR, state, apply_layout::FetchArgs::default()) {
                     Ok(content) => {
                         let fr = apply_layout::freshness(SOURCE_CURRENT_PR, state);
-                        push_pane_content(
+                        push_content_to_all(
                             daemon,
                             tag.as_deref(),
-                            "diff",
+                            &targets,
                             content,
                             Some(fr),
                             &mut warnings,
-                        )
+                        );
                     }
                     Err(e) => {
-                        warnings.push(json!({ "pane_id": "diff", "error": e.code() }));
-                        push_pane_content(
+                        for pane in &targets {
+                            warnings.push(json!({ "pane_id": pane, "error": e.code() }));
+                        }
+                        push_content_to_all(
                             daemon,
                             tag.as_deref(),
-                            "diff",
+                            &targets,
                             PaneContentWire::Error {
                                 message: format!(
                                     "perri.load_pr: perri.get_current_pr fetch failed ({})",
@@ -313,10 +334,10 @@ async fn load_pr_daemon(
                 }
             } else {
                 pending = true;
-                push_pane_content(
+                push_content_to_all(
                     daemon,
                     tag.as_deref(),
-                    "diff",
+                    &targets,
                     PaneContentWire::Text {
                         text: format!("Fetching {repo}#{number}\u{2026} (still loading)"),
                     },
@@ -339,7 +360,13 @@ async fn load_pr_daemon(
         }
     }
 
-    let mut result = json!({ "ok": true });
+    // D3: report which panes were actually targeted — empty when this focus
+    // has real PR-content panes but none of them a valid load_pr destination
+    // (D2's curated-focus consequence, not an error), and also empty when
+    // there was no resolvable tag at all (the `targets` placeholder used
+    // above to drive that degrade path isn't a real pane id).
+    let reported_pane_ids: &[String] = if tag.is_some() { &targets } else { &[] };
+    let mut result = json!({ "ok": true, "pane_ids": reported_pane_ids });
     if pending {
         result["pending"] = json!(true);
         result["detail"] = json!(format!(
@@ -430,46 +457,40 @@ async fn clear_current_pr_daemon(
         }
     }
 
-    for pane in &pr_panes {
-        push_pane_content(
+    push_content_to_all(
+        daemon,
+        tag.as_deref(),
+        &pr_panes,
+        PaneContentWire::Text {
+            text: apply_layout::NO_PR_LOADED_PLACEHOLDER.to_string(),
+        },
+        None,
+        &mut warnings,
+    );
+
+    if !queue_panes.is_empty() {
+        push_content_to_all(
             daemon,
             tag.as_deref(),
-            pane,
-            PaneContentWire::Text {
-                text: apply_layout::NO_PR_LOADED_PLACEHOLDER.to_string(),
-            },
+            &queue_panes,
+            PaneContentWire::Loading,
             None,
             &mut warnings,
         );
-    }
-
-    if !queue_panes.is_empty() {
-        for pane in &queue_panes {
-            push_pane_content(
-                daemon,
-                tag.as_deref(),
-                pane,
-                PaneContentWire::Loading,
-                None,
-                &mut warnings,
-            );
-        }
         // Fetch once, push the same content to every queue pane — there is
         // only ever one queue pane per focus today, but nothing here assumes
         // that.
         match apply_layout::fetch(SOURCE_PR_QUEUE, state, apply_layout::FetchArgs::default()) {
             Ok(content) => {
                 let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state);
-                for pane in &queue_panes {
-                    push_pane_content(
-                        daemon,
-                        tag.as_deref(),
-                        pane,
-                        content.clone(),
-                        Some(fr.clone()),
-                        &mut warnings,
-                    );
-                }
+                push_content_to_all(
+                    daemon,
+                    tag.as_deref(),
+                    &queue_panes,
+                    content,
+                    Some(fr),
+                    &mut warnings,
+                );
             }
             Err(e) => {
                 for pane in &queue_panes {
@@ -518,9 +539,20 @@ async fn clear_current_pr_daemon(
 /// after that must still treat that pane as PR content. A curated focus never
 /// has a pane literally named `diff`/`queue` with no binding, so this can't
 /// fire there.
+///
+/// `current_pr` is the narrower subset of `pr` that `perri.load_pr` may
+/// target: only a pane bound to `SOURCE_CURRENT_PR` itself (plus the same
+/// unbound-legacy-`diff` bridge). A pane bound to `perri.get_pr_diff` /
+/// `perri.get_pr_conversation` is real PR content — it belongs in `pr`, which
+/// `clear_current_pr` uses to decide what to blank out — but it renders
+/// structured Diff/Conversation content, so `load_pr`'s plain-text
+/// summary/highlights must never be pushed there: that would be a
+/// content-kind mismatch, and the source's own broadcaster would clobber the
+/// pushed text again within seconds anyway (see `perri_pr_diff_poll_secs`).
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PerriTargets {
     pr: Vec<String>,
+    current_pr: Vec<String>,
     queue: Vec<String>,
 }
 
@@ -528,15 +560,50 @@ fn resolve_perri_targets(reg: &PaneRegistry, tag: &str) -> PerriTargets {
     let mut out = PerriTargets::default();
     for pane_id in reg.pane_ids(tag) {
         match reg.source_for(tag, &pane_id) {
+            Some(s) if s == SOURCE_CURRENT_PR => {
+                out.pr.push(pane_id.clone());
+                out.current_pr.push(pane_id);
+            }
             Some(s) if apply_layout::PR_BACKED_SOURCES.contains(&s) => out.pr.push(pane_id),
             Some(s) if s == SOURCE_PR_QUEUE => out.queue.push(pane_id),
             Some(_) => {} // file / ticket: not PR content
-            None if pane_id == "diff" => out.pr.push(pane_id),
+            None if pane_id == "diff" => {
+                out.pr.push(pane_id.clone());
+                out.current_pr.push(pane_id);
+            }
             None if pane_id == "queue" => out.queue.push(pane_id),
             None => {} // repl, or an unbound agent-authored pane
         }
     }
     out
+}
+
+/// Which of `tag`'s live panes `perri.load_pr` should push its plain-text
+/// summary/highlights to (D2): [`PerriTargets::current_pr`] — see that
+/// field's doc comment for why it's narrower than `pr`.
+///
+/// When `current_pr` is empty there are two different reasons, and they
+/// degrade differently:
+///
+/// - The focus has *other* live PR-content panes (`pr` is non-empty) — a
+///   genuinely curated focus whose diff/conversation tabs just aren't bound
+///   to `SOURCE_CURRENT_PR`. There is honestly nowhere for the summary to go
+///   (Q2, unanswered here), so the correct behavior is silence: return no
+///   targets, and `load_pr_daemon` pushes nothing and warns nothing.
+/// - The focus has *no* PR-content pane of any kind (`pr` is also empty) — a
+///   bare/pre-layout focus, not a deliberately curated one. Falling back to
+///   the legacy canonical `"diff"` name here preserves the existing
+///   `unknown_pane` warning for a genuinely broken caller instead of going
+///   silent on it too.
+fn load_pr_targets(reg: &PaneRegistry, tag: &str) -> Vec<String> {
+    let targets = resolve_perri_targets(reg, tag);
+    if !targets.current_pr.is_empty() {
+        targets.current_pr
+    } else if targets.pr.is_empty() {
+        vec!["diff".to_string()]
+    } else {
+        Vec::new()
+    }
 }
 
 // ── shared daemon helpers ───────────────────────────────────────────────────
@@ -584,6 +651,30 @@ fn push_pane_content(
         .any(|w| w.get("pane_id").and_then(|v| v.as_str()) == Some(pane_id))
     {
         warnings.push(json!({ "pane_id": pane_id, "skipped": "unknown_pane" }));
+    }
+}
+
+/// [`push_pane_content`], broadcast to every pane in `targets` — the
+/// "one fetched/composed value, N destination panes" shape shared by
+/// `load_pr_daemon`'s highlights/loading/fetched/pending pushes and
+/// `clear_current_pr_daemon`'s placeholder/queue pushes.
+fn push_content_to_all(
+    daemon: &DaemonMcpBackend,
+    tag: Option<&str>,
+    targets: &[String],
+    content: PaneContentWire,
+    freshness: Option<PaneFreshness>,
+    warnings: &mut Vec<Value>,
+) {
+    for pane in targets {
+        push_pane_content(
+            daemon,
+            tag,
+            pane,
+            content.clone(),
+            freshness.clone(),
+            warnings,
+        );
     }
 }
 
@@ -1035,6 +1126,194 @@ mod tests {
             PaneContentWire::Text { text } => assert_eq!(text, expected),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    // ── load_pr / curated-focus pane resolution ─────────────────────────────
+    //
+    // These mirror the `clear_current_pr` curated tests above (D1/D2's
+    // resolver-based fix), but for `load_pr`'s narrower `current_pr` target
+    // set: a curated focus's structured `perri.get_pr_diff`/
+    // `perri.get_pr_conversation` tabs are real PR content, but they are
+    // never a valid destination for load_pr's plain-text summary/highlights.
+
+    #[tokio::test]
+    async fn load_pr_on_curated_focus_with_no_current_pr_pane_is_silent_and_still_mutates_state() {
+        // The actual fix this suite targets: a genuinely curated focus with
+        // real PR-content panes (detail.0/detail.1, both perri.get_pr_diff-
+        // backed), but none of them bound to perri.get_current_pr. Before
+        // this fix, load_pr blindly pushed to a literal "diff" pane that
+        // doesn't exist here, producing a false unknown_pane warning. The
+        // correct behavior is silence — there is nowhere for the summary to
+        // go, and pushing into a structured diff/conversation pane would be
+        // a content-kind mismatch anyway.
+        let (state, tmp, mut bcast) = make_curated_daemon_state().await;
+        seed_curated_detail_tabs(&state, "perri");
+
+        let args = json!({ "number": 42, "repo": "acme/web", "highlights": "check auth" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+        assert_eq!(result["ok"], true);
+        assert!(
+            !has_unknown_pane_warning(&result),
+            "a curated focus with real PR panes must never warn unknown_pane: {result}"
+        );
+        assert_eq!(
+            result["pane_ids"],
+            json!([]),
+            "no pane is a valid load_pr target here, so none should be reported resolved"
+        );
+
+        let messages = drain_broadcasts(&mut bcast);
+        for msg in &messages {
+            if let ServerMsg::PaneContent { pane_id, .. } = msg {
+                assert_ne!(
+                    pane_id, "detail.0",
+                    "detail.0 is bound to perri.get_pr_diff — load_pr's summary must never land there"
+                );
+                assert_ne!(
+                    pane_id, "detail.1",
+                    "detail.1 is bound to perri.get_pr_diff — load_pr's summary must never land there"
+                );
+            }
+        }
+
+        let content =
+            std::fs::read_to_string(tmp.path().join("perri-state").join("current-pr.json"))
+                .unwrap();
+        let parsed: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["number"], 42);
+        assert_eq!(parsed["repo"], "acme/web");
+    }
+
+    #[tokio::test]
+    async fn load_pr_on_curated_focus_signals_pr_refresh_even_when_no_pane_is_targeted() {
+        let (mut state, _tmp, _bcast) = make_curated_daemon_state().await;
+        seed_curated_detail_tabs(&state, "perri");
+        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        if let Some(daemon) = &mut state.daemon {
+            daemon.perri.pr_refresh_tx = Some(refresh_tx);
+        }
+
+        let args = json!({ "number": 42, "repo": "acme/web", "highlights": "check auth" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+        assert_eq!(result["ok"], true);
+
+        assert!(
+            refresh_rx.try_recv().is_ok(),
+            "the PR-refresh signal must still fire even when no pane can be targeted"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_pr_on_curated_focus_pushes_highlights_to_the_current_pr_bound_pane() {
+        let (state, _tmp, mut bcast) = make_curated_daemon_state().await;
+        seed_curated_detail_tabs(&state, "perri");
+        // Simulate a curated layout whose detail.0 tab is bound to
+        // perri.get_current_pr rather than perri.get_pr_diff — the one pane
+        // shape load_pr's summary is actually allowed to target. detail.1
+        // stays bound to perri.get_pr_diff (with params) and must not
+        // receive anything.
+        if let Some(daemon) = &state.daemon {
+            daemon
+                .pane_registry
+                .lock()
+                .unwrap()
+                .bind_source("perri", "detail.0", SOURCE_CURRENT_PR);
+        }
+
+        let args = json!({ "number": 42, "repo": "acme/web", "highlights": "check auth" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+        assert_eq!(result["ok"], true);
+        assert!(!has_unknown_pane_warning(&result));
+
+        // reset_for_pr_change also closes detail.1 (its params name a PR
+        // that isn't the one just loaded), which broadcasts its own
+        // FocusLayout ahead of the content push below — drain everything and
+        // find the PaneContent by pane id rather than assuming ordering.
+        let messages = drain_broadcasts(&mut bcast);
+        let got_detail_0 = messages.iter().any(|m| {
+            matches!(
+                m,
+                ServerMsg::PaneContent { pane_id, content: PaneContentWire::Text { text }, .. }
+                if pane_id == "detail.0" && text == "check auth"
+            )
+        });
+        assert!(
+            got_detail_0,
+            "expected detail.0 to receive the highlights text; got {messages:?}"
+        );
+
+        // detail.1 (perri.get_pr_diff-with-params) must never receive a
+        // content push.
+        for msg in &messages {
+            if let ServerMsg::PaneContent { pane_id, .. } = msg {
+                assert_ne!(
+                    pane_id, "detail.1",
+                    "detail.1 is perri.get_pr_diff-bound — load_pr must never push to it"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn load_pr_unbound_legacy_diff_pane_survives_a_second_highlights_call() {
+        // The easiest place for a resolver-based rewrite to regress: the
+        // unbound-legacy-"diff" arm (D2) must still resolve as a load_pr
+        // target on a *second* call, not just the first.
+        let (state, _tmp, mut bcast) = make_daemon_state().await;
+
+        let first = load_pr(
+            &state,
+            &json!({ "number": 42, "repo": "acme/web", "highlights": "A" }),
+            Some("perri"),
+        )
+        .await;
+        assert_eq!(first["ok"], true);
+        if let Some(daemon) = &state.daemon {
+            assert_eq!(
+                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                None,
+                "sanity: the first call must sever diff's binding"
+            );
+        }
+        let _ = drain_broadcasts(&mut bcast); // first call's own broadcast, not under test
+
+        let second = load_pr(
+            &state,
+            &json!({ "number": 42, "repo": "acme/web", "highlights": "B" }),
+            Some("perri"),
+        )
+        .await;
+        assert_eq!(second["ok"], true);
+        assert!(
+            !has_unknown_pane_warning(&second),
+            "the unbound legacy diff pane must still resolve as a load_pr target on a \
+             second call: {second}"
+        );
+
+        let (pane_id, content) = recv_pane_content(&mut bcast).await;
+        assert_eq!(pane_id, "diff");
+        match content {
+            PaneContentWire::Text { text } => assert_eq!(text, "B"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+
+        if let Some(daemon) = &state.daemon {
+            assert_eq!(
+                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                None,
+                "diff must remain unbound after a second highlights call"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn load_pr_result_reports_the_resolved_pane_ids() {
+        let (state, _tmp, _bcast) = make_daemon_state().await;
+
+        let args = json!({ "number": 42, "repo": "acme/web", "highlights": "notes" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["pane_ids"], json!(["diff"]));
     }
 
     #[tokio::test]
@@ -1526,6 +1805,45 @@ mod tests {
         let targets = resolve_perri_targets(&reg, tag);
         assert_eq!(targets.pr, strs(&["cp", "pd", "pc"]));
         assert!(targets.queue.is_empty());
+        // Of the three PR-backed sources, only the one bound to
+        // perri.get_current_pr is a valid load_pr target — see the dedicated
+        // crux test below for why pd/pc must be excluded.
+        assert_eq!(targets.current_pr, strs(&["cp"]));
+    }
+
+    #[test]
+    fn resolve_perri_targets_classifies_a_current_pr_bound_pane_as_pr_and_current_pr() {
+        let tag = "focus";
+        let mut reg = registry_with_panes(tag, &["cp"]);
+        reg.bind_source(tag, "cp", apply_layout::SOURCE_CURRENT_PR);
+
+        let targets = resolve_perri_targets(&reg, tag);
+        assert_eq!(targets.pr, strs(&["cp"]));
+        assert_eq!(targets.current_pr, strs(&["cp"]));
+    }
+
+    #[test]
+    fn resolve_perri_targets_excludes_pr_diff_and_pr_conversation_bound_panes_from_current_pr() {
+        // The crux classification this fix depends on. A pane bound to
+        // perri.get_pr_diff/perri.get_pr_conversation renders structured
+        // Diff/Conversation content — it remains `pr` content for
+        // clear_current_pr's purposes, but `load_pr`'s plain-text
+        // summary/highlights must never target it: that would be a
+        // content-kind mismatch, and the source's own broadcaster would just
+        // clobber the pushed text again within 30s anyway.
+        let tag = "focus";
+        let mut reg = registry_with_panes(tag, &["pd", "pc"]);
+        reg.bind_source(tag, "pd", apply_layout::SOURCE_PR_DIFF);
+        reg.bind_source(tag, "pc", apply_layout::SOURCE_PR_CONVERSATION);
+
+        let targets = resolve_perri_targets(&reg, tag);
+        assert_eq!(targets.pr, strs(&["pd", "pc"]), "both remain PR content");
+        assert!(
+            targets.current_pr.is_empty(),
+            "pr_diff/pr_conversation-bound panes must never be a load_pr \
+             target: {:?}",
+            targets.current_pr
+        );
     }
 
     #[test]
@@ -1537,6 +1855,7 @@ mod tests {
         let targets = resolve_perri_targets(&reg, tag);
         assert_eq!(targets.queue, strs(&["q"]));
         assert!(targets.pr.is_empty());
+        assert!(targets.current_pr.is_empty());
     }
 
     #[test]
@@ -1549,6 +1868,7 @@ mod tests {
         let targets = resolve_perri_targets(&reg, tag);
         assert!(targets.pr.is_empty());
         assert!(targets.queue.is_empty());
+        assert!(targets.current_pr.is_empty());
     }
 
     #[test]
@@ -1563,6 +1883,11 @@ mod tests {
         let targets = resolve_perri_targets(&reg, tag);
         assert_eq!(targets.pr, strs(&["diff"]));
         assert_eq!(targets.queue, strs(&["queue"]));
+        // The unbound legacy "diff" pane is the same state load_pr's own
+        // highlights push leaves behind (via unbind_source) — it must remain
+        // a valid load_pr target, or a second load_pr call after the first
+        // severed the binding would regress to the unknown_pane warning.
+        assert_eq!(targets.current_pr, strs(&["diff"]));
     }
 
     #[test]
@@ -1576,6 +1901,7 @@ mod tests {
         let targets = resolve_perri_targets(&reg, tag);
         assert!(targets.pr.is_empty());
         assert!(targets.queue.is_empty());
+        assert!(targets.current_pr.is_empty());
     }
 
     #[test]

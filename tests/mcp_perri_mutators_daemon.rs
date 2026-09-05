@@ -335,3 +335,69 @@ async fn clear_current_pr_over_the_real_socket_closes_a_curated_pr_diff_tab() {
         "the pr_diff tab nostromo.show just opened must have been closed: {res}"
     );
 }
+
+/// End-to-end: `perri.load_pr` on a **curated** focus that already has an
+/// open `pr_diff` review tab (via `nostromo.show`) must not warn
+/// `unknown_pane`. Before this fix, `load_pr`'s daemon branch only ever
+/// pushed to a pane literally named `"diff"` — which doesn't exist on this
+/// layout — producing a false `{"pane_id":"diff","skipped":"unknown_pane"}`
+/// warning on every load even though the call otherwise succeeded (`ok:
+/// true`) and correctly mutated `current-pr.json`.
+#[tokio::test]
+async fn load_pr_over_the_real_socket_on_a_curated_focus_with_an_open_pr_diff_tab_warns_nothing() {
+    let harness = make_daemon_state();
+    let socket_path = harness._dir.path().join("mcp-daemon4.sock");
+    let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
+        .await
+        .expect("server should bind");
+
+    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let bound = Duration::from_millis(1500);
+
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.apply_layout",
+        json!({ "name": "perri-curated" }),
+        Duration::from_secs(1),
+    )
+    .await;
+    assert_eq!(res["ok"], true);
+
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        3,
+        "nostromo.show",
+        json!({ "type": "pr_diff", "target": { "repo": "acme/web", "number": 42 } }),
+        bound,
+    )
+    .await;
+    assert_eq!(res["ok"], true, "nostromo.show should open the pr_diff tab: {res}");
+
+    // Load the *same* PR the open tab is showing — a realistic flow (the
+    // agent reviews the diff it already opened, then calls load_pr with the
+    // highlights it wrote). Loading a *different* PR would make
+    // `reset_for_pr_change` close the stale tab first (correct, unrelated
+    // R8 behavior), which would leave this focus with no PR-content pane at
+    // all and isn't what this test is checking. With the *same* PR, the
+    // pr_diff tab survives and is the focus's only PR-content pane — never a
+    // valid load_pr target (D2) — so the correct behavior is a successful,
+    // silent no-op on pane pushes, not an unknown_pane warning.
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        4,
+        "perri.load_pr",
+        json!({ "number": 42, "repo": "acme/web", "highlights": "check auth" }),
+        bound,
+    )
+    .await;
+    assert_eq!(res["ok"], true);
+    assert!(
+        res.get("warnings").is_none(),
+        "a curated focus's real pr_diff tab must never produce an unknown_pane warning \
+         on load_pr: {res}"
+    );
+}
