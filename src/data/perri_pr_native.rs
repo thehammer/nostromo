@@ -329,14 +329,6 @@ impl PerriPrNativeSource {
         }
     }
 
-    /// One polling pass over every focus's pin.
-    ///
-    /// `previous` is the last published generation; `only` restricts the
-    /// *fetching* to those tags (everything else is carried over unchanged).
-    /// Tags whose pin has disappeared are dropped from the result regardless
-    /// of `only` — that is how a cleared or evicted pin stops being published.
-    ///
-    /// Fetches are deduplicated by `(repo, number)`: two focuses reviewing the
     /// Every pin on disk whose focus still exists (W7 — D8).
     ///
     /// With no `live_focuses` provider, or before any client has pushed a
@@ -358,6 +350,14 @@ impl PerriPrNativeSource {
         pins
     }
 
+    /// One polling pass over every focus's pin.
+    ///
+    /// `previous` is the last published generation; `only` restricts the
+    /// *fetching* to those tags (everything else is carried over unchanged).
+    /// Tags whose pin has disappeared are dropped from the result regardless
+    /// of `only` — that is how a cleared or evicted pin stops being published.
+    ///
+    /// Fetches are deduplicated by `(repo, number)`: two focuses reviewing the
     /// same PR cost one round trip, not two, and share one snapshot `Arc`.
     async fn fetch_all(
         &self,
