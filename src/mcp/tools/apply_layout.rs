@@ -205,12 +205,24 @@ pub(crate) fn source_content_kind(source: &str) -> Option<&'static str> {
     }
 }
 
-/// Resolve the focus tag a layout tool targets: an explicit `view_id`, else the
-/// caller's own focus (`pty_id` from the Hello frame). Mirrors
-/// `create_pane.rs::target_tag`. `pub(crate)` — also used by
-/// `refresh_pane::refresh_pane_content`.
+/// Resolve the focus a call targets: an explicit `view_id`, else the caller's
+/// own focus (`pty_id` from the Hello frame, which in the daemon *is* the focus
+/// tag). `None` when neither is available — an unattributable caller.
+///
+/// **The daemon's one addressing rule.** Every focus-scoped tool resolves its
+/// target here and nowhere else; W7 made this load-bearing by putting "which
+/// PR does this request resolve against" behind it, and a second copy of the
+/// rule is the one way that could drift. (`create_pane` used to keep its own.)
+///
+/// An empty string is treated as absent, not as a valid tag. An empty `pty_id`
+/// would otherwise name a focus that cannot exist, and the call would report
+/// success for a pin nothing will ever show — the "reports success, paints
+/// nothing" failure this project keeps rediscovering.
 pub(crate) fn target_tag<'a>(args: &'a Value, pty_id: Option<&'a str>) -> Option<&'a str> {
-    args.get("view_id").and_then(|v| v.as_str()).or(pty_id)
+    args.get("view_id")
+        .and_then(|v| v.as_str())
+        .or(pty_id)
+        .filter(|s| !s.is_empty())
 }
 
 /// Build a [`LayoutSchema`] from an inline `{ tree, panes }` payload.
@@ -287,7 +299,7 @@ pub(crate) fn fetch(
             Ok(PaneContentWire::PrList { items })
         }
         SOURCE_CURRENT_PR => {
-            let snapshot = crate::mcp::tools::perri::get_current_pr(state);
+            let snapshot = crate::mcp::tools::perri::get_current_pr(state, args.tag);
             if snapshot.is_null() {
                 return Ok(no_pr_loaded(args.placeholder));
             }
@@ -305,8 +317,9 @@ pub(crate) fn fetch(
             }
         }
         SOURCE_PR_DIFF => {
-            let snapshot = state.perri_pr_rx.borrow().clone();
-            let Some(snap) = snapshot else {
+            // `args.tag`, not the daemon: a diff pane renders *its own focus's*
+            // PR (W7 — D3).
+            let Some(snap) = state.pr_for(args.tag) else {
                 return Ok(no_pr_loaded(args.placeholder));
             };
             if describes_no_pr(snap.pr_number, &snap.error) {
@@ -345,7 +358,7 @@ pub(crate) fn fetch(
                 "apply_layout: built Diff pane content"
             );
             Ok(PaneContentWire::Diff {
-                repo: snap.repo,
+                repo: snap.repo.clone(),
                 number: snap.pr_number,
                 files,
                 too_large: snap.diff_too_large,
@@ -359,8 +372,7 @@ pub(crate) fn fetch(
             Ok(code_content(ctx.request, ctx.revision, text))
         }
         SOURCE_PR_CONVERSATION => {
-            let snapshot = state.perri_pr_rx.borrow().clone();
-            let Some(snap) = snapshot else {
+            let Some(snap) = state.pr_for(args.tag) else {
                 return Ok(no_pr_loaded(args.placeholder));
             };
             if describes_no_pr(snap.pr_number, &snap.error) {
@@ -371,14 +383,14 @@ pub(crate) fn fetch(
                 validate_comment_ids(params, &threads)?;
             }
             Ok(PaneContentWire::PrConversation {
-                repo: snap.repo,
+                repo: snap.repo.clone(),
                 number: snap.pr_number,
-                title: snap.title,
-                author: snap.author,
-                url: snap.url,
+                title: snap.title.clone(),
+                author: snap.author.clone(),
+                url: snap.url.clone(),
                 body: crate::markdown_blocks::markdown_to_blocks(&snap.body),
                 threads,
-                conversation_error: snap.conversation_error,
+                conversation_error: snap.conversation_error.clone(),
             })
         }
         SOURCE_TICKET => {
@@ -638,11 +650,11 @@ async fn fetch_ticket_async(
 /// `perri.get_state`'s `current_pin` field all call this rather than reading
 /// `state.perri_pr_rx` directly.
 ///
-/// `tag` is accepted but **deliberately ignored** today: the pin is a single
-/// daemon-wide value with no per-focus isolation yet. Threading `tag` through
-/// now — rather than adding it later — is what makes a future per-focus pin
-/// (each focus reviewing its own PR) a change to this function's *body*
-/// alone, with every call site already correct for that world.
+/// `tag` is what the pin is keyed on (W7 — D3). W5 threaded it through every
+/// call site against exactly this change; the per-focus pin landed it in this
+/// function's body, as promised. `None` — a caller Nostromo can't place —
+/// resolves to no pin at all, rather than to whichever focus happened to pick
+/// up a PR most recently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RequestPin {
     pub repo: String,
@@ -661,9 +673,8 @@ impl RequestPin {
     }
 }
 
-pub(crate) fn pin_for_request(state: &McpSharedState, _tag: Option<&str>) -> Option<RequestPin> {
-    let snap = state.perri_pr_rx.borrow();
-    let snap = snap.as_ref()?;
+pub(crate) fn pin_for_request(state: &McpSharedState, tag: Option<&str>) -> Option<RequestPin> {
+    let snap = state.pr_for(tag)?;
     Some(RequestPin {
         repo: snap.repo.clone(),
         number: snap.pr_number?,
@@ -828,21 +839,19 @@ pub(crate) fn address(source: &str, params: Option<&Value>) -> Option<PaneAddres
 ///
 /// A `None` snapshot (source has no data at all yet — e.g. no PR loaded) is
 /// deliberately *not* treated as a staleness condition: `PaneFreshness::default()`.
-pub(crate) fn freshness(source: &str, state: &McpSharedState) -> PaneFreshness {
+pub(crate) fn freshness(source: &str, state: &McpSharedState, tag: Option<&str>) -> PaneFreshness {
     match source {
+        // The queue is fleet-wide (W7 — D9), so its freshness ignores `tag`.
         SOURCE_PR_QUEUE => match state.perri_queue_rx.borrow().as_ref() {
             Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
             None => PaneFreshness::default(),
         },
-        // All three read the identical perri_pr_rx snapshot (SOURCE_PR_DIFF's
+        // All three render the identical per-focus snapshot (SOURCE_PR_DIFF's
         // and SOURCE_PR_CONVERSATION's fetches above do too) — they must share
         // this arm, not just happen to agree, or these panes' staleness could
-        // silently drift apart.
-        SOURCE_CURRENT_PR | SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION => match state
-            .perri_pr_rx
-            .borrow()
-            .as_ref()
-        {
+        // silently drift apart. `tag` is load-bearing: a pane must never be
+        // labelled fresh because *some other* focus's PR just refetched.
+        SOURCE_CURRENT_PR | SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION => match state.pr_for(tag) {
             Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
             None => PaneFreshness::default(),
         },
@@ -982,7 +991,7 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
             params: None,
         };
         let (content, msg_freshness) = match fetch_async(source, state, args).await {
-            Ok(c) => (c, Some(freshness(source, state))),
+            Ok(c) => (c, Some(freshness(source, state, args.tag))),
             Err(e) => {
                 warnings.push(json!({ "pane_id": pane_id, "error": e.code(), "detail": e.detail() }));
                 let message = match e.detail() {

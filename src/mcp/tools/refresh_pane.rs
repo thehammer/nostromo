@@ -96,7 +96,7 @@ pub async fn refresh_pane_content(
     };
     match fetch_async(&source, state, fetch_args).await {
         Ok(content) => {
-            let fr = freshness(&source, state);
+            let fr = freshness(&source, state, Some(&tag));
             broadcast_pane_content_with_address(
                 daemon,
                 &tag,

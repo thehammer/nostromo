@@ -2,8 +2,12 @@
 //!
 //! ## Tools
 //! - `perri.list_pr_queue()` — items from `perri_queue_rx`
-//! - `perri.get_current_pr()` — snapshot from `perri_pr_rx`
-//! - `perri.get_state()` — composite `{ queue, current_pr, stale }`
+//! - `perri.get_current_pr({ view_id? })` — the *calling focus's* PR snapshot
+//! - `perri.get_state({ view_id? })` — composite
+//!   `{ queue, current_pr, other_focuses, stale }`
+//!
+//! `list_pr_queue` takes no focus: the queue is fleet-wide and every focus
+//! sees the same one (W7 — D9). Only "the PR under review" is per-focus.
 //!
 //! `selected_index` is intentionally not a field of `get_state()` — see the
 //! doc comment on [`get_state`]. It's exposed through the dedicated
@@ -27,23 +31,37 @@ pub fn list_pr_queue(state: &McpSharedState) -> Value {
         .unwrap_or(Value::Array(vec![]))
 }
 
-/// Handle `perri.get_current_pr()`.
+/// Handle `perri.get_current_pr({ view_id? })`.
 ///
-/// Returns the current `PrSnapshot` as JSON, or `null` when no PR is loaded.
-pub fn get_current_pr(state: &McpSharedState) -> Value {
-    let borrow = state.perri_pr_rx.borrow();
-    match borrow.as_ref() {
-        Some(snap) => serde_json::to_value(snap).unwrap_or_else(
+/// Returns the calling focus's `PrSnapshot` as JSON, or `null` when that
+/// focus has no PR under review (W7 — D3). Never another focus's: before W7
+/// there was one machine-wide answer, and a focus that had picked up nothing
+/// still got whatever some other focus was reviewing.
+pub fn get_current_pr(state: &McpSharedState, tag: Option<&str>) -> Value {
+    match state.pr_for(tag) {
+        Some(snap) => serde_json::to_value(&*snap).unwrap_or_else(
             |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
         ),
         None => Value::Null,
     }
 }
 
-/// Handle `perri.get_state()`.
+/// Handle `perri.get_state({ view_id? })`.
 ///
-/// Returns `{ queue: [...], current_pr: {...}|null, stale: bool, current_pin:
-/// {repo, number}|null }`.
+/// Returns `{ queue: [...], current_pr: {...}|null, other_focuses: [...],
+/// stale: bool, current_pin: {repo, number}|null }`.
+///
+/// - `current_pr` is **this focus's** PR under review.
+/// - `other_focuses` is every *other* focus that has one, as
+///   `{ tag, repo, number }`. Isolation would otherwise lose the one thing the
+///   old global slot did well: always knowing what the machine as a whole was
+///   reviewing. Sorted by tag so the answer is stable between calls.
+/// - `queue` stays fleet-wide and identical for every focus (D9). One set of
+///   open PRs exists; splitting it per focus would be a different product.
+///
+/// Both `current_pr` and `other_focuses` are **always present**, explicitly
+/// empty (`null` / `[]`) rather than absent — an absent key reads as "this
+/// daemon doesn't support it", which is a different and wrong answer.
 ///
 /// `selected_index` is deliberately not included here: this handler is
 /// synchronous, and on the TUI host reading the selected index means an
@@ -51,17 +69,28 @@ pub fn get_current_pr(state: &McpSharedState) -> Value {
 /// response shape differ by host, which is worse for callers than not having
 /// it. Use `perri.get_selected_index` instead.
 ///
-/// `current_pin` (W5 — current-pr-collision) is this same daemon-wide pin,
-/// via the same [`crate::mcp::tools::apply_layout::pin_for_request`]
-/// accessor `nostromo.show`'s error decoration uses — already what an agent
-/// reaches for here, so it costs nothing to make the answer complete without
-/// needing to know to ask separately. Always a present key, explicit `null`
-/// rather than omitted, when nothing is pinned. `tag` is accepted but
-/// unused today for the same forward-compatibility reason `pin_for_request`
-/// itself ignores it (see its doc comment).
+/// `current_pin` (W5 — current-pr-collision) is this focus's same pin in the
+/// terse `{repo, number}` shape, via the same
+/// [`crate::mcp::tools::apply_layout::pin_for_request`] accessor
+/// `nostromo.show`'s error decoration uses — already what an agent reaches
+/// for here, so it costs nothing to make the answer complete without needing
+/// to know to ask separately. Always a present key, explicit `null` rather
+/// than omitted, when this focus has nothing pinned. Since W7 it is keyed on
+/// `tag`, so it and `current_pr` can never name two different PRs.
 pub fn get_state(state: &McpSharedState, tag: Option<&str>) -> Value {
     let queue = list_pr_queue(state);
-    let current_pr = get_current_pr(state);
+    let current_pr = get_current_pr(state, tag);
+    let other_focuses: Vec<Value> = state
+        .all_prs()
+        .into_iter()
+        .filter(|(other, _)| Some(other.as_str()) != tag)
+        .filter_map(|(other, snap)| {
+            // A snapshot mid-fetch can carry a repo with no number yet, and
+            // half a PR identity is not one to report to another focus.
+            let number = snap.pr_number?;
+            Some(json!({ "tag": other, "repo": snap.repo, "number": number }))
+        })
+        .collect();
     let stale = state
         .perri_queue_rx
         .borrow()
@@ -73,6 +102,7 @@ pub fn get_state(state: &McpSharedState, tag: Option<&str>) -> Value {
     json!({
         "queue": queue,
         "current_pr": current_pr,
+        "other_focuses": other_focuses,
         "stale": stale,
         "current_pin": current_pin,
         // selected_index omitted until Phase 3 (view-state plumbing)

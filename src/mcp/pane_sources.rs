@@ -27,13 +27,13 @@
 //! fetch/freshness dispatch so the two can never disagree about content. See
 //! `docs/mcp/panes.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::debug;
 
-use crate::data::perri_pr::PrSnapshot;
+use crate::data::perri_pr::{changed_tags, PrSnapshots};
 use crate::data::perri_queue::PrQueueSnapshot;
 use crate::ipc::pane_registry::PaneContentProvider;
 use crate::ipc::protocol::{PaneAddress, PaneContentWire, PaneFreshness, ServerMsg};
@@ -174,7 +174,7 @@ pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
         .filter_map(|(tag, pane_id, binding)| {
             let (content, address) =
                 fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())?;
-            let fr = apply_layout::freshness(&binding.source, state);
+            let fr = apply_layout::freshness(&binding.source, state, Some(&tag));
             Some(ServerMsg::PaneContent {
                 tag,
                 pane_id,
@@ -204,7 +204,7 @@ pub fn repaint_bound_panes(state: &McpSharedState) {
         else {
             continue;
         };
-        let fr = apply_layout::freshness(&binding.source, state);
+        let fr = apply_layout::freshness(&binding.source, state, Some(&tag));
         broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }
 }
@@ -240,9 +240,10 @@ type LastSent = HashMap<(String, String), (PaneContentWire, PaneFreshness, Optio
 pub async fn run_pane_source_broadcaster(
     state: McpSharedState,
     mut queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
-    mut pr_rx: watch::Receiver<Option<PrSnapshot>>,
+    mut pr_rx: watch::Receiver<PrSnapshots>,
 ) {
     let mut last_sent: LastSent = HashMap::new();
+    let mut previous_prs: PrSnapshots = pr_rx.borrow().clone();
 
     let mut ticker = tokio::time::interval(STALENESS_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -251,17 +252,30 @@ pub async fn run_pane_source_broadcaster(
         tokio::select! {
             result = queue_rx.changed() => {
                 if result.is_err() { break; } // sender dropped — clean exit
-                push_for_source(&state, SOURCE_PR_QUEUE, &mut last_sent);
+                // The queue is fleet-wide (W7 — D9): every focus's queue pane
+                // repaints.
+                push_for_source(&state, SOURCE_PR_QUEUE, None, &mut last_sent);
             }
             result = pr_rx.changed() => {
                 if result.is_err() { break; }
-                // All three PR-backed sources read the same snapshot, so one
-                // watch change feeds all of them. `nostromo.get_file` is
-                // deliberately absent here: a file pane is a snapshot of a
-                // revision, and there is no channel that could tell it
-                // otherwise (W2 — D2).
-                for source in apply_layout::PR_BACKED_SOURCES {
-                    push_for_source(&state, source, &mut last_sent);
+                // W7 — D7: repaint only the focuses whose PR actually moved.
+                // The channel now carries every focus's PR, so a pickup in one
+                // focus would otherwise re-fetch and re-diff every focus's
+                // panes — and `PrSnapshot` holds a diff of up to 500 KB, so
+                // "did this tag change?" is a pointer comparison on the inner
+                // `Arc`, never a deep `PartialEq`.
+                let current: PrSnapshots = pr_rx.borrow_and_update().clone();
+                let changed = changed_tags(&previous_prs, &current);
+                previous_prs = current;
+                if !changed.is_empty() {
+                    // All three PR-backed sources read the same snapshot, so one
+                    // watch change feeds all of them. `nostromo.get_file` is
+                    // deliberately absent here: a file pane is a snapshot of a
+                    // revision, and there is no channel that could tell it
+                    // otherwise (W2 — D2).
+                    for source in apply_layout::PR_BACKED_SOURCES {
+                        push_for_source(&state, source, Some(&changed), &mut last_sent);
+                    }
                 }
             }
             _ = ticker.tick() => {
@@ -277,7 +291,16 @@ pub async fn run_pane_source_broadcaster(
 /// skipping any pane whose `(content, freshness)` is unchanged since the last
 /// push (the daemon-side half of "an idempotent push is invisible") and any
 /// pane whose fetch fails (the automatic path never surfaces `Error`).
-fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSent) {
+///
+/// `only_tags` restricts the repaint to those focuses. `None` means every
+/// focus, which is right for the fleet-wide queue and wrong for the per-focus
+/// PR (W7 — D7).
+fn push_for_source(
+    state: &McpSharedState,
+    source: &str,
+    only_tags: Option<&HashSet<String>>,
+    last_sent: &mut LastSent,
+) {
     let Some(daemon) = &state.daemon else {
         return;
     };
@@ -287,7 +310,9 @@ fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSen
         .unwrap()
         .all_bindings()
         .into_iter()
-        .filter(|(_, _, b)| b.source == source)
+        .filter(|(tag, _, b)| {
+            b.source == source && only_tags.is_none_or(|tags| tags.contains(tag))
+        })
         .map(|(tag, pane_id, b)| (tag, pane_id, b.params))
         .collect();
 
@@ -296,7 +321,7 @@ fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSen
         else {
             continue;
         };
-        let fr = apply_layout::freshness(source, state);
+        let fr = apply_layout::freshness(source, state, Some(&tag));
         let key = (tag.clone(), pane_id.clone());
         if last_sent.get(&key) == Some(&(content.clone(), fr.clone(), address.clone())) {
             continue;
@@ -324,7 +349,7 @@ fn reevaluate_staleness(state: &McpSharedState, last_sent: &mut LastSent) {
             continue;
         };
         let source = binding.source;
-        let fr = apply_layout::freshness(&source, state);
+        let fr = apply_layout::freshness(&source, state, Some(&tag));
         if prev_fr.badly_stale == fr.badly_stale {
             continue;
         }
@@ -349,7 +374,7 @@ mod tests {
     use serde_json::{json, Value};
     use tokio::sync::{broadcast, watch};
 
-    use crate::data::perri_pr::PrSnapshot;
+    use crate::data::perri_pr::{changed_tags, PrSnapshots};
     use crate::data::perri_queue::PrQueueSnapshot;
     use crate::ipc::pane_registry::{PaneRegistry, SplitPosition, REPL_PANE_ID};
     use crate::ipc::protocol::{PaneContentWire, PaneFreshness, ServerMsg};
