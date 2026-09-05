@@ -139,6 +139,32 @@ Note this is a **separate** log category from `panes` above — `codepane` is
 specific to the code/diff render path's own internal audit; `panes` covers
 the broader daemon-to-view pipeline every pane kind goes through.
 
+## The `wire` log category
+
+A third category on the same subsystem, for the wire decoders in
+`macOS/Nostromo/Data/Models.swift` and
+`Shared/NostromoKit/Sources/NostromoKit/Wire/PaneLayout.swift`.
+
+```sh
+log show --predicate 'subsystem == "com.hammer.nostromo" AND category == "wire"' \
+  --last 1h --info
+```
+
+These decoders are deliberately lenient — a `PaneTree` node kind, an `Anchor`
+kind or an `Emphasis` kind newer than the running client must not throw out of
+a decoder and take the whole `pane_content` message down with it. Leniency that
+is also *silent*, though, leaves the operator unable to tell "the daemon sent
+nothing" from "this client threw away what it was sent". So whenever a lenient
+decoder drops something, it says so here:
+
+```
+pane address dropped 1 of 2 emphasis element(s) it could not decode
+```
+
+Counts only, never content. Rare by construction — it fires only against a
+daemon shipping a vocabulary this client build predates, which in practice
+means "you forgot to rebuild the app after changing the wire protocol."
+
 ## `NOSTROMO_PANE_DUMP`
 
 ```sh
