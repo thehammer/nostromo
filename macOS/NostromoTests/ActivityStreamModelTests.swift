@@ -128,15 +128,198 @@ final class ActivityStreamModelTests: XCTestCase {
                        "exactly 40 chars is the boundary and must not be truncated")
     }
 
+    // REWRITTEN for D3 ("subagents running" line must show the newest event,
+    // not just a static count): the original version of this test ingested
+    // three events (one main, two subagent_start) all via the factory's
+    // default `ts: Date()`, essentially back-to-back — under D3, whichever of
+    // the three is chronologically newest wins the display, so that version
+    // was timing-dependent and no longer meaningfully pinned "perri must
+    // appear". This version explicitly controls `ts` so the main-stream
+    // event is deterministically the newest, making the assertions
+    // reproducible under the new behavior.
     func testTickerSummaryNamesTheAgentAndRunningCountWhenSubagentsAreRunning() {
         var model = ActivityStreamModel()
-        model.ingest(makeEvent(agent: "perri", summary: "reviewing"))
-        model.ingest(makeEvent(agent: "perri", kind: "subagent_start", agentId: "sub-1"))
-        model.ingest(makeEvent(agent: "perri", kind: "subagent_start", agentId: "sub-2"))
+        let mainTs = Date(timeIntervalSince1970: 3000) // deliberately the newest
+        let sub1Ts = Date(timeIntervalSince1970: 1000)
+        let sub2Ts = Date(timeIntervalSince1970: 2000)
+
+        model.ingest(makeEvent(agent: "perri", summary: "reviewing", ts: mainTs))
+        model.ingest(makeEvent(agent: "perri", kind: "subagent_start", agentId: "sub-1", ts: sub1Ts))
+        model.ingest(makeEvent(agent: "perri", kind: "subagent_start", agentId: "sub-2", ts: sub2Ts))
 
         let summary = model.tickerSummary
         XCTAssertTrue(summary.contains("perri"), "must name the base agent")
+        XCTAssertTrue(summary.contains("reviewing"),
+                      "the main stream's event is deterministically the newest here, so it must win under D3's newest-event rule")
         XCTAssertTrue(summary.contains("2"), "must surface the running count")
+    }
+
+    // MARK: - D3: the "subagents running" line shows the newest event across
+    // main + all running subagent streams, not a static count
+    //
+    // Today, when runningSubagentCount > 0, tickerSummary returns a STATIC
+    // string that never changes no matter what tool events arrive while the
+    // subagent runs. The fix: show the MOST RECENT event across the main
+    // stream and every currently-running (unfinished) subagent stream,
+    // prefixed by whichever agent produced it, with the running count still
+    // appended.
+
+    func testTickerSummaryShowsRunningSubagentsEventSummaryNotABareCount() {
+        var model = ActivityStreamModel()
+        model.ingest(makeEvent(agent: "code-reviewer", kind: "subagent_start", summary: "starting review", agentId: "sub-1"))
+        model.ingest(makeEvent(agent: "code-reviewer", kind: "tool_use", summary: "Read ContactRecipientService.php", agentId: "sub-1"))
+
+        let summary = model.tickerSummary
+        XCTAssertTrue(summary.contains("Read ContactRecipientService.php"),
+                      "a running subagent with events must surface its most recent event's summary, not just a static count")
+        XCTAssertTrue(summary.contains("1"), "the running count must still be present")
+    }
+
+    func testTickerSummaryNewestEventWinsWhenTheSubagentsEventIsNewerThanTheMainStreams() {
+        var model = ActivityStreamModel()
+        let older = Date(timeIntervalSince1970: 1000)
+        let newer = Date(timeIntervalSince1970: 2000)
+
+        model.ingest(makeEvent(agent: "perri", summary: "main-event-summary", agentId: nil, ts: older))
+        model.ingest(makeEvent(agent: "perri", kind: "subagent_start", summary: "sub-event-summary", agentId: "sub-1", ts: newer))
+
+        let summary = model.tickerSummary
+        XCTAssertTrue(summary.contains("sub-event-summary"),
+                      "the subagent's event is strictly newer and must win")
+        XCTAssertFalse(summary.contains("main-event-summary"),
+                       "the older main-stream event must not be shown once a newer subagent event exists")
+    }
+
+    func testTickerSummaryNewestEventWinsWhenTheMainStreamsEventIsNewerThanTheSubagents() {
+        var model = ActivityStreamModel()
+        let older = Date(timeIntervalSince1970: 1000)
+        let newer = Date(timeIntervalSince1970: 2000)
+
+        model.ingest(makeEvent(agent: "perri", kind: "subagent_start", summary: "sub-event-summary", agentId: "sub-1", ts: older))
+        model.ingest(makeEvent(agent: "perri", summary: "main-event-summary", agentId: nil, ts: newer))
+
+        let summary = model.tickerSummary
+        XCTAssertTrue(summary.contains("main-event-summary"),
+                      "the main stream's event is strictly newer and must win — 'newest wins' is symmetric, not 'subagent always wins'")
+        XCTAssertFalse(summary.contains("sub-event-summary"),
+                       "the older subagent event must not be shown once a newer main-stream event exists")
+    }
+
+    func testTickerSummaryWithMultipleRunningSubagentsShowsCorrectCountAndTheTrueNewestEvent() {
+        var model = ActivityStreamModel()
+        let t1 = Date(timeIntervalSince1970: 1000)
+        let t2 = Date(timeIntervalSince1970: 2000)
+        let t3 = Date(timeIntervalSince1970: 3000) // truly the newest of the three
+
+        model.ingest(makeEvent(kind: "subagent_start", summary: "sub-a-summary", agentId: "sub-a", ts: t1))
+        model.ingest(makeEvent(kind: "subagent_start", summary: "sub-b-summary", agentId: "sub-b", ts: t2))
+        model.ingest(makeEvent(kind: "subagent_start", summary: "sub-c-newest-summary", agentId: "sub-c", ts: t3))
+
+        XCTAssertEqual(model.runningSubagentCount, 3)
+        let summary = model.tickerSummary
+        XCTAssertTrue(summary.contains("3"), "must surface the running count of 3")
+        XCTAssertTrue(summary.contains("sub-c-newest-summary"),
+                      "must show the truly newest event among all three running subagents")
+        XCTAssertFalse(summary.contains("sub-a-summary"))
+        XCTAssertFalse(summary.contains("sub-b-summary"))
+    }
+
+    // Robustness: a stream is only ever created lazily on its first event
+    // (see `ingest`), so a "running subagent with zero events" cannot be
+    // constructed through the public API — every running-subagent scenario
+    // below necessarily has at least one event per stream by construction.
+    // This test instead pins the general non-crash/non-empty invariant
+    // across the running-subagent shapes that ARE constructible, including
+    // the case where no main-stream event has ever arrived at all.
+    func testTickerSummaryNeverCrashesAndIsNeverEmptyAcrossRunningSubagentScenarios() {
+        var noMainStreamModel = ActivityStreamModel()
+        noMainStreamModel.ingest(makeEvent(kind: "subagent_start", agentId: "sub-1"))
+        XCTAssertFalse(noMainStreamModel.tickerSummary.isEmpty,
+                        "no main-stream event has ever arrived, only a running subagent — must not crash or blank out")
+
+        var manySubagentsModel = ActivityStreamModel()
+        for i in 0..<5 {
+            manySubagentsModel.ingest(makeEvent(kind: "subagent_start", agentId: "sub-\(i)"))
+        }
+        XCTAssertFalse(manySubagentsModel.tickerSummary.isEmpty)
+
+        var mainAndSubagentModel = ActivityStreamModel()
+        mainAndSubagentModel.ingest(makeEvent(agentId: nil))
+        mainAndSubagentModel.ingest(makeEvent(kind: "subagent_start", agentId: "sub-1"))
+        XCTAssertFalse(mainAndSubagentModel.tickerSummary.isEmpty)
+    }
+
+    // MARK: - D4: the ticker must display the real agent, not the tool name
+    //
+    // The MAIN stream is created with `agentType: nil` hardcoded today, even
+    // though a real main-stream event can carry a non-nil `agentType` (e.g.
+    // "perri") identifying the named agent — distinct from `agent`, which on
+    // a tool_use event is just the tool's name (e.g. "SendMessage"). The fix
+    // captures `event.agentType` on the main stream and prefers it for
+    // display, mirroring how subagent streams already work, and using this
+    // codebase's existing `.capitalized` display convention (see
+    // `Focus.displayName` in Models.swift).
+
+    func testTickerSummaryUsesAgentTypeNotRawToolNameWhenMainStreamEventCarriesAgentType() {
+        var model = ActivityStreamModel()
+        model.ingest(makeEvent(agent: "SendMessage", summary: "Pulled it up — file tab", agentId: nil, agentType: "perri"))
+
+        let summary = model.tickerSummary
+        XCTAssertTrue(summary.contains("Perri"),
+                      "must display the real named agent, capitalized to match this codebase's existing display convention (Focus.displayName's agentTag.capitalized)")
+        XCTAssertFalse(summary.contains("SendMessage"),
+                       "the raw tool name must not leak into the ticker once a real agentType is known — this is what caused both the bare 'Agent' fallback and the doubled 'SendMessage: SendMessage: …' bug")
+    }
+
+    func testTickerSummaryFallsBackToRawAgentFieldWhenMainStreamEventHasNoAgentType() {
+        var model = ActivityStreamModel()
+        model.ingest(makeEvent(agent: "SendMessage", summary: "did a thing", agentId: nil, agentType: nil))
+
+        let summary = model.tickerSummary
+        XCTAssertFalse(summary.isEmpty)
+        XCTAssertTrue(summary.contains("SendMessage"),
+                      "with no agentType known, falling back to the raw agent/tool-name field is a reasonable identity rather than blanking out or crashing")
+    }
+
+    func testTickerSummaryUsesAgentTypeNotRawToolNameWhenTheNewestEventIsFromTheMainStreamWithSubagentsRunning() {
+        // Pins the D3/D4 interaction explicitly: D4's agentType preference
+        // must also apply when the main stream's event happens to be the one
+        // D3's "newest wins" rule selects while subagents are running.
+        var model = ActivityStreamModel()
+        let older = Date(timeIntervalSince1970: 1000)
+        let newer = Date(timeIntervalSince1970: 2000)
+
+        model.ingest(makeEvent(kind: "subagent_start", summary: "sub-event-summary", agentId: "sub-1", ts: older))
+        model.ingest(makeEvent(agent: "SendMessage", summary: "Pulled it up — file tab", agentId: nil, agentType: "perri", ts: newer))
+
+        let summary = model.tickerSummary
+        XCTAssertTrue(summary.contains("Perri"))
+        XCTAssertFalse(summary.contains("SendMessage"))
+    }
+
+    // MARK: - Health-precedence through the new D3 running-subagent branch
+    //
+    // testDisplayTextAlwaysShowsHealthTextWhenNotIngestingEvenWithCachedLastEventText
+    // (above) already pins that non-ingesting health always overrides
+    // tickerSummary — but it was written before D3 existed and only
+    // exercises the "no subagents running" branch. This variant exercises
+    // the same invariant specifically THROUGH D3's new running-subagent
+    // branch, to guard against a health-precedence regression there.
+
+    func testDisplayTextShowsHealthTextNotD3sNewestEventSummaryWhenNotIngestingWithRunningSubagents() {
+        var model = ActivityStreamModel()
+        model.ingest(makeEvent(agent: "perri", summary: "main baseline", agentId: nil))
+        model.ingest(makeEvent(kind: "subagent_start", summary: "cached subagent event that must never leak through", agentId: "sub-1"))
+        XCTAssertGreaterThan(model.runningSubagentCount, 0,
+                             "test setup must actually exercise the running-subagent branch of tickerSummary")
+
+        let health = ActivityHealthState(ingesting: false, reason: "socket closed", hookInstalled: true)
+        let shown = model.displayText(health: health)
+        let expectedHealthText = ActivityStreamModel.healthText(for: health)
+
+        XCTAssertEqual(shown, expectedHealthText)
+        XCTAssertFalse(shown.contains("cached subagent event that must never leak through"),
+                        "a non-ingesting health state must override tickerSummary even through D3's new running-subagent branch")
     }
 
     // MARK: - Health-to-text mapping

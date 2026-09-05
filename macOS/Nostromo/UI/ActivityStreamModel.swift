@@ -141,7 +141,15 @@ struct ActivityStreamModel {
             evictOverEntryCapIfPossible()
         } else {
             if main == nil {
-                main = ActivityAgentStream(agentId: nil, agentType: nil, parentAgentId: nil, events: [], finished: false)
+                // D4: capture the main stream's agentType (the real named
+                // agent, e.g. "perri") on creation, mirroring how subagent
+                // streams already do this above — it was previously
+                // hardcoded to nil, discarding an identity the wire
+                // actually carries and forcing the ticker to fall back to
+                // `agent` (a tool_use event's tool name, e.g. "SendMessage"),
+                // which produced both a bare "Agent" fallback and a doubled
+                // "SendMessage: SendMessage: …" display (see tickerSummary).
+                main = ActivityAgentStream(agentId: nil, agentType: event.agentType, parentAgentId: nil, events: [], finished: false)
             }
             main?.events.append(event)
             if let count = main?.events.count, count > Self.maxEventsPerStream {
@@ -270,6 +278,46 @@ struct ActivityStreamModel {
 
     // MARK: - Ticker summary
 
+    /// One recent event paired with the display name of whichever stream
+    /// produced it — see `mostRecentRunningActivity`.
+    private struct RecentActivity {
+        let agentLabel: String
+        let event:      ActivityEvent
+    }
+
+    /// D3: the most recent event across the main stream and every currently
+    /// *running* (unfinished) subagent stream, so `tickerSummary`'s
+    /// subagents-running branch can show what's actually happening instead
+    /// of a static count. `nil` only when there is nothing to show at all —
+    /// in practice unreachable whenever `runningSubagentCount > 0`, since a
+    /// subagent stream is only ever created (and only ever counts as
+    /// running) once it has logged at least one event, but `tickerSummary`
+    /// still handles it defensively rather than assuming the invariant.
+    private var mostRecentRunningActivity: RecentActivity? {
+        var candidates: [RecentActivity] = []
+        if let last = main?.events.last {
+            candidates.append(RecentActivity(agentLabel: Self.mainAgentLabel(agentType: main?.agentType, fallback: last.agent), event: last))
+        }
+        for sub in subagentStreams where !sub.finished {
+            guard let last = sub.events.last else { continue }
+            candidates.append(RecentActivity(agentLabel: sub.agentType ?? "subagent", event: last))
+        }
+        return candidates.max { $0.event.ts < $1.event.ts }
+    }
+
+    /// D4: the main stream's display name. Prefers `agentType` (the real
+    /// named agent, e.g. "perri") — capitalized to match this codebase's
+    /// existing display convention for turning a stored-lowercase agent
+    /// identifier into display text (`Focus.displayName`'s
+    /// `agentTag.capitalized`) — over `fallback` (the raw `agent` field,
+    /// which on a `tool_use` event is only ever the tool's name, e.g.
+    /// "SendMessage"). Falls back to `fallback` unmodified when `agentType`
+    /// is `nil` or empty, rather than blanking out.
+    private static func mainAgentLabel(agentType: String?, fallback: String) -> String {
+        guard let agentType, !agentType.isEmpty else { return fallback }
+        return agentType.capitalized
+    }
+
     /// The single line the always-visible ticker shows for this focus,
     /// independent of health. Three distinct states:
     ///
@@ -281,18 +329,23 @@ struct ActivityStreamModel {
     ///   `"⚙ <agent>: <summary>"`, with `summary` truncated to 37 characters
     ///   plus `"…"` when longer than 40 (mirrors the removed
     ///   `StatusBarView.buildLeft()` activity segment's truncation rule).
-    /// - One or more subagents running → names the base agent and the
-    ///   running count, e.g. `"<agent> · N agents active"`.
+    /// - One or more subagents running → the most recent event across the
+    ///   main stream and every running subagent stream (D3), formatted
+    ///   `"<agent>: <summary> · N agents active"`, so the longest-running,
+    ///   most opaque operation is exactly when the operator learns the most,
+    ///   not the least. Falls back to the bare count when there is truly
+    ///   nothing yet to show (see `mostRecentRunningActivity`).
     var tickerSummary: String {
         let running = runningSubagentCount
         if running > 0 {
-            let agentName = main?.events.last?.agent ?? subagentStreams.first?.agentType ?? "Agent"
-            return "\(agentName) · \(running) agent\(running == 1 ? "" : "s") active"
+            let suffix = "\(running) agent\(running == 1 ? "" : "s") active"
+            guard let recent = mostRecentRunningActivity else { return suffix }
+            return "\(recent.agentLabel): \(Self.clip(recent.event.summary)) · \(suffix)"
         }
         guard let lastMainEvent = main?.events.last else {
             return "⚙ —"
         }
-        return "⚙ \(lastMainEvent.agent): \(Self.clip(lastMainEvent.summary))"
+        return "⚙ \(Self.mainAgentLabel(agentType: main?.agentType, fallback: lastMainEvent.agent)): \(Self.clip(lastMainEvent.summary))"
     }
 
     /// The exact text the ticker shows once health is folded in. A

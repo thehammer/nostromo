@@ -29,10 +29,19 @@ class ActivityTickerView: NSView {
 
     // MARK: - Constants
 
-    private static let lineHeight: CGFloat = 22
+    /// Height of the always-visible line. Not `private` — `MainLayout`
+    /// reads this to reserve the ticker its own strip above the status bar
+    /// (D1), rather than letting the ticker overlay draw over the bottom of
+    /// the pace bars.
+    static let lineHeight: CGFloat = 22
 
     // MARK: - Subviews
 
+    /// Hairline separator marking the top edge of the ticker's own strip —
+    /// distinguishes it from the pace bars now sitting directly above it
+    /// (D1/D2): before D1, the two visually overlapped, and this separator
+    /// would have looked like it was cutting through the pace bars.
+    private let separator = NSView()
     private let line = NSTextField(labelWithString: "")
     private var expandedPanel: NSStackView?
 
@@ -61,19 +70,34 @@ class ActivityTickerView: NSView {
         // Fully transparent except for the line/panel subviews — only they
         // are visible, matching ToastBannerView's own container.
 
+        // D2: fg (not fgMuted) so the line is actually legible against the
+        // app background — fgMuted-on-bgBar-on-bg was low enough contrast
+        // that a live QA pass hunting for this exact line, with a written
+        // checklist, missed it four times.
         line.font = Theme.statusFont
-        line.textColor = Theme.fgMuted
+        line.textColor = Theme.fg
         line.lineBreakMode = .byTruncatingTail
         line.wantsLayer = true
         line.layer?.backgroundColor = Theme.bgBar.cgColor
         line.translatesAutoresizingMaskIntoConstraints = false
         addSubview(line)
 
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = Theme.borderInactive.cgColor
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(separator)
+
         NSLayoutConstraint.activate([
             line.leadingAnchor.constraint(equalTo: leadingAnchor),
             line.trailingAnchor.constraint(equalTo: trailingAnchor),
             line.bottomAnchor.constraint(equalTo: bottomAnchor),
             line.heightAnchor.constraint(equalToConstant: Self.lineHeight),
+
+            // Hairline marking the top edge of the ticker's own strip (D2).
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: line.topAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1),
         ])
 
         let click = NSClickGestureRecognizer(target: self, action: #selector(toggleExpanded))
@@ -81,7 +105,13 @@ class ActivityTickerView: NSView {
 
         // Re-render on every focus switch (a different tag's stream), on
         // every activity ingest, and on every health update.
-        AppStore.shared.$activeFocusAgentTag
+        //
+        // D5/F4: keyed by the active focus's SESSION tag, not its agent tag
+        // — Focus.agentTag == Focus.sessionTag for built-in focuses, which
+        // is why this worked by coincidence before; a project-scoped focus's
+        // sessionTag differs, and that's what the daemon actually stamps
+        // every activity event's focus_tag with.
+        AppStore.shared.$activeFocusSessionTag
             .receive(on: DispatchQueue.main)
             .sink { [weak self] tag in
                 self?.currentFocusTag = tag
@@ -117,7 +147,11 @@ class ActivityTickerView: NSView {
     private func render() {
         let store = AppStore.shared
         let model = store.activityModel(for: focusTagForRendering)
-        line.stringValue = "  " + model.displayText(health: store.activityHealth)
+        // D2: a disclosure glyph so the click-to-expand behavior below is
+        // actually discoverable, rather than a plain line that happens to
+        // react to clicks with no visual hint that it does.
+        let glyph = isExpanded ? "▾" : "▸"
+        line.stringValue = "\(glyph)  " + model.displayText(health: store.activityHealth)
         renderExpandedPanel(using: model)
     }
 
@@ -127,7 +161,7 @@ class ActivityTickerView: NSView {
 
     @objc private func toggleExpanded() {
         isExpanded.toggle()
-        renderExpandedPanel(using: AppStore.shared.activityModel(for: focusTagForRendering))
+        render()
     }
 
     /// A taller panel with one row per agent (main + every subagent, running
