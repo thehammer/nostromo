@@ -400,7 +400,26 @@ impl PerriPrNativeSource {
                     // — a stale snapshot of the focus's previous PR is a wrong
                     // answer, not an old one.
                     if prev.repo == pin.repo && prev.pr_number == Some(pin.number) {
-                        fetched.insert(key, Arc::clone(prev));
+                        // Deliberately *not* seeded into `fetched`. That map
+                        // means "already fetched on this pass", and a
+                        // carried-over snapshot was not fetched on this pass.
+                        // Seeding it let a targeted refresh be answered with
+                        // stale data: with two focuses on one PR and
+                        // `only = {A}`, `pins` is a `HashMap` and iteration
+                        // order is arbitrary — reach B first and it seeds the
+                        // key, then A's `fetched.get` short-circuits above and
+                        // A is served B's carried-over snapshot having issued
+                        // no request at all. `wait_for_matching_snapshot` sees
+                        // a matching `(repo, number)` and settles, so
+                        // `perri.load_pr` reports success on data up to a poll
+                        // interval old — and if B's snapshot carried an error,
+                        // A paints that error having never tried.
+                        //
+                        // The D5 dedupe guarantee is unaffected: it is the
+                        // insert on the real-fetch path below that makes two
+                        // focuses on one PR cost one round trip and share one
+                        // `Arc`. The only cost here is that two focuses that
+                        // both carry over hold two `Arc`s instead of one.
                         next.insert(tag, Arc::clone(prev));
                         continue;
                     }
@@ -645,7 +664,7 @@ async fn fetch_diff(
         .map_err(|e| anyhow::anyhow!("diff fetch {e}"))
 }
 
-/// The URL a PR's raw diff is read from. Shared with [`live_urls_for`] so the
+/// The URL a PR's raw diff is read from. Shared with [`live_url_prefixes`] so the
 /// cache-pruning set can't drift from what the fetch actually keys on.
 fn diff_url(owner: &str, repo: &str, number: u64) -> String {
     format!("{}/repos/{owner}/{repo}/pulls/{number}", api_base())
@@ -2065,9 +2084,34 @@ mod tests {
     /// keying while keeping the test hermetic, and the request count stays a
     /// faithful measure of how many round trips a pass costs.
     async fn poll_once(pins: &[(&str, &str, u64)]) -> (PrSnapshots, usize) {
+        let (snaps, requests) =
+            poll_once_with(pins, &crate::data::perri_pr::no_prs(), None, &[]).await;
+        (snaps, requests.len())
+    }
+
+    /// [`poll_once`] with the two inputs it holds fixed opened up: `previous`,
+    /// the last published generation, and `only`, the tags a targeted refresh
+    /// restricts the *fetching* to. `fetchable` names the `(repo, number,
+    /// title)`s whose fetch should actually succeed; anything not listed 404s
+    /// and degrades to a stale snapshot exactly as in [`poll_once`].
+    ///
+    /// Returns the published snapshots and every request that reached the mock
+    /// GitHub — not just how much traffic a pass cost but which PR it was
+    /// spent on, which is the only honest way to ask "was this focus really
+    /// fetched?".
+    async fn poll_once_with(
+        pins: &[(&str, &str, u64)],
+        previous: &PrSnapshots,
+        only: Option<&[&str]>,
+        fetchable: &[(&str, u64, &str)],
+    ) -> (PrSnapshots, Vec<wiremock::Request>) {
         let server = wiremock::MockServer::start().await;
         crate::data::perri_queue_native::API_BASE_OVERRIDE
             .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        for (repo, number, title) in fetchable {
+            mount_fetchable_pr(&server, repo, *number, title).await;
+        }
 
         let dir = tempfile::TempDir::new().unwrap();
         for (tag, repo, number) in pins {
@@ -2076,10 +2120,10 @@ mod tests {
 
         let source = source_pinned_at(dir.path());
         let client = client_pointed_at(&server.uri());
-        let snaps = source
-            .fetch_all(&client, &crate::data::perri_pr::no_prs(), None)
-            .await;
-        let requests = server.received_requests().await.unwrap_or_default().len();
+        let only: Option<HashSet<String>> =
+            only.map(|tags| tags.iter().map(|t| (*t).to_owned()).collect());
+        let snaps = source.fetch_all(&client, previous, only.as_ref()).await;
+        let requests = server.received_requests().await.unwrap_or_default();
         (snaps, requests)
     }
 
@@ -2149,5 +2193,340 @@ mod tests {
         );
         assert_eq!(different_repo["perri"].repo, "Carefeed/admin-portal");
         assert_eq!(different_repo["operations"].repo, "Carefeed/operations");
+    }
+
+    // ── a targeted refresh is never answered from the carry-over (W7 — D5) ───
+    //
+    // `only = Some({tag})` — what `perri.load_pr` produces when one focus
+    // picks up a PR — restricts *fetching* to that tag; every other live pin is
+    // carried over from `previous` untouched. The two paths meet when two
+    // focuses are pinned to the same PR, and the carried-over focus must not be
+    // allowed to answer the refreshed focus's question. `pins` is a `HashMap`,
+    // so which of the two `fetch_all` reaches first is arbitrary; seed the
+    // dedupe map from a carry-over and the refreshed focus is served stale data
+    // with no request going out at all. `wait_for_matching_snapshot` only looks
+    // for a matching `(repo, number)`, so `load_pr` then reports success on
+    // data up to a poll interval old — and paints the other focus's error if it
+    // had one.
+
+    const FOCUS_A: &str = "perri";
+    const FOCUS_B: &str = "operations";
+    const SHARED_REPO: &str = "Carefeed/admin-portal";
+    const SHARED_PR: u64 = 4526;
+    /// Only a snapshot that came off the wire on *this* pass carries this.
+    const FRESH_TITLE: &str = "the title this pass fetched";
+    /// Only a snapshot the previous generation left behind carries this.
+    const CARRIED_TITLE: &str = "the title the previous pass left behind";
+
+    /// A snapshot as a previous generation would hold it: stale, and titled so
+    /// that a carry-over is never mistakable for a fetch.
+    fn carried_over_snapshot(repo: &str, number: u64, error: Option<&str>) -> PrSnapshot {
+        PrSnapshot {
+            pr_number: Some(number),
+            repo: repo.to_owned(),
+            title: CARRIED_TITLE.to_owned(),
+            stale: true,
+            error: error.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    /// A published generation — the `previous` argument `fetch_all` carries
+    /// forward from. Each snapshot gets its own `Arc` so a test can tell a
+    /// carried-over pointer from a fetched one.
+    fn generation(entries: Vec<(&str, PrSnapshot)>) -> PrSnapshots {
+        Arc::new(
+            entries
+                .into_iter()
+                .map(|(tag, snap)| (tag.to_owned(), Arc::new(snap)))
+                .collect(),
+        )
+    }
+
+    /// Mount the two calls a successful `fetch_pr` cannot do without: the PR
+    /// metadata (octocrab) and the raw diff.
+    ///
+    /// Check-runs and the conversation are deliberately left unmounted — they
+    /// 404, which `fetch_pr` tolerates by design — so what this produces is a
+    /// real, successful fetch whose `title` is its fingerprint.
+    async fn mount_fetchable_pr(
+        server: &wiremock::MockServer,
+        repo: &str,
+        number: u64,
+        title: &str,
+    ) {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let pr_path = format!("/repos/{repo}/pulls/{number}");
+
+        // The raw diff shares the metadata path and is told apart only by its
+        // `Accept` header, so it must be offered the request first.
+        Mock::given(method("GET"))
+            .and(path(pr_path.clone()))
+            .and(header("accept", GITHUB_DIFF_ACCEPT))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("diff --git a/src/main.rs b/src/main.rs\n+fresh\n"),
+            )
+            .mount(server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(pr_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "url": format!("https://api.github.com/repos/{repo}/pulls/{number}"),
+                "id": 1001, "node_id": "PR_1001",
+                "number": number, "title": title, "state": "open",
+                "user": {
+                    "login": "alice", "id": 1, "node_id": "U_1",
+                    "avatar_url": "https://example.com/a.png",
+                    "gravatar_id": "", "url": "https://api.github.com/users/alice",
+                    "html_url": "https://github.com/alice",
+                    "followers_url": "https://api.github.com/users/alice/followers",
+                    "following_url": "https://api.github.com/users/alice/following{/other_user}",
+                    "gists_url": "https://api.github.com/users/alice/gists{/gist_id}",
+                    "starred_url": "https://api.github.com/users/alice/starred{/owner}{/repo}",
+                    "subscriptions_url": "https://api.github.com/users/alice/subscriptions",
+                    "organizations_url": "https://api.github.com/users/alice/orgs",
+                    "repos_url": "https://api.github.com/users/alice/repos",
+                    "events_url": "https://api.github.com/users/alice/events{/privacy}",
+                    "received_events_url": "https://api.github.com/users/alice/received_events",
+                    "type": "User", "site_admin": false
+                },
+                "html_url": format!("https://github.com/{repo}/pull/{number}"),
+                "additions": 10, "deletions": 2, "changed_files": 3,
+                "head": { "sha": "abc123", "label": "acme:feature", "ref": "feature" },
+                "base": { "sha": "def456", "label": "acme:main", "ref": "main" },
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// The path a PR's metadata and raw diff are both fetched from — the one
+    /// request whose presence proves a pin was really fetched on a pass.
+    fn pr_request_path(repo: &str, number: u64) -> String {
+        format!("/repos/{repo}/pulls/{number}")
+    }
+
+    /// Which order `fetch_all` happened to walk the two pins in on a pass.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    enum PinOrder {
+        RefreshedFirst,
+        CarriedOverFirst,
+    }
+
+    /// Drive the two-focuses-one-PR targeted refresh until *both* pin orders
+    /// have actually occurred, running `check` on every pass.
+    ///
+    /// The order cannot be forced from a test: `fetch_all` walks the pins as a
+    /// `HashMap`, whose iteration order is randomised per instance and is not
+    /// reachable from here without changing production code. Rather than
+    /// assert on whichever order chance supplied — a test that passes because
+    /// the pins happened to favour the refreshed focus guards nothing — this
+    /// *observes* which order happened and refuses to return until it has seen
+    /// each at least once. The tell is the carried-over focus: it holds the
+    /// refreshed focus's freshly fetched `Arc` only when the refreshed focus
+    /// was reached first (the `(repo, number)` dedupe then serves it), and its
+    /// own previous `Arc` only when it was reached first and carried over.
+    async fn for_both_pin_orders(
+        previous: &PrSnapshots,
+        mut check: impl FnMut(&PrSnapshots, &[wiremock::Request], PinOrder),
+    ) {
+        let mut seen: HashSet<PinOrder> = HashSet::new();
+
+        for _ in 0..64 {
+            let (snaps, requests) = poll_once_with(
+                &[
+                    (FOCUS_A, SHARED_REPO, SHARED_PR),
+                    (FOCUS_B, SHARED_REPO, SHARED_PR),
+                ],
+                previous,
+                Some(&[FOCUS_A]),
+                &[(SHARED_REPO, SHARED_PR, FRESH_TITLE)],
+            )
+            .await;
+
+            let order = if Arc::ptr_eq(&snaps[FOCUS_B], &previous[FOCUS_B]) {
+                PinOrder::CarriedOverFirst
+            } else {
+                PinOrder::RefreshedFirst
+            };
+            check(&snaps, &requests, order);
+            seen.insert(order);
+            if seen.len() == 2 {
+                return;
+            }
+        }
+
+        panic!(
+            "64 passes over two pins never produced both iteration orders (saw only {seen:?}) — \
+             the scenario this guards is the one where the carried-over focus is reached first, \
+             so a run that only ever sees {seen:?} has not tested it"
+        );
+    }
+
+    /// The headline: a focus refreshed on purpose is served this pass's fetch,
+    /// never the snapshot a co-pinned focus carried over.
+    #[tokio::test]
+    async fn a_targeted_refresh_fetches_its_focus_even_when_another_carries_over_the_same_pr() {
+        let previous = generation(vec![
+            (FOCUS_A, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+            (FOCUS_B, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+        ]);
+
+        for_both_pin_orders(&previous, |snaps, requests, order| {
+            let refreshed = &snaps[FOCUS_A];
+            assert_eq!(
+                refreshed.title, FRESH_TITLE,
+                "{order:?}: the refreshed focus must be served the snapshot this pass fetched, \
+                 not the one a co-pinned focus carried over — `load_pr` settles the moment a \
+                 snapshot with a matching (repo, number) appears, so a carried-over answer here \
+                 is a pickup that reports success on data up to a poll interval old"
+            );
+            assert!(
+                !refreshed.stale,
+                "{order:?}: a focus that was just refreshed on purpose, and whose fetch \
+                 succeeded, must not be published stale"
+            );
+
+            let pr_path = pr_request_path(SHARED_REPO, SHARED_PR);
+            assert!(
+                requests.iter().any(|r| r.url.path() == pr_path.as_str()),
+                "{order:?}: a targeted refresh must put a real request on the wire for its \
+                 focus's PR; {} request(s) went out and none of them was for {pr_path}",
+                requests.len()
+            );
+        })
+        .await;
+    }
+
+    /// The user-visible harm: another focus's failure must not be repainted as
+    /// this focus's, on a pass this focus asked for and succeeded at.
+    #[tokio::test]
+    async fn a_refreshed_focus_never_inherits_another_focuss_carried_over_error() {
+        const CARRIED_ERROR: &str = "GitHub returned 502 on the previous pass";
+
+        let previous = generation(vec![
+            (FOCUS_A, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+            (
+                FOCUS_B,
+                carried_over_snapshot(SHARED_REPO, SHARED_PR, Some(CARRIED_ERROR)),
+            ),
+        ]);
+
+        for_both_pin_orders(&previous, |snaps, _requests, order| {
+            let refreshed = &snaps[FOCUS_A];
+            assert_eq!(
+                refreshed.error, None,
+                "{order:?}: the refreshed focus's own fetch succeeded, so it must publish no \
+                 error — inheriting a co-pinned focus's stale failure paints a red pane for a \
+                 fetch that in fact went out and worked"
+            );
+            assert!(
+                !refreshed.stale,
+                "{order:?}: the refreshed focus must not inherit a co-pinned focus's staleness \
+                 either — `stale` is what the pane badges as out-of-date"
+            );
+        })
+        .await;
+    }
+
+    /// The dedupe guarantee (D5) is a property of the *fetch* path, so a
+    /// non-empty `previous` must not change it: a fleet-wide pass still costs
+    /// one round trip for two focuses on one PR, and still shares one `Arc`.
+    #[tokio::test]
+    async fn a_fleet_wide_refresh_over_a_previous_generation_still_costs_one_round_trip() {
+        let previous = generation(vec![
+            (FOCUS_A, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+            (FOCUS_B, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+        ]);
+        let fetchable = [(SHARED_REPO, SHARED_PR, FRESH_TITLE)];
+
+        let (_, one_focus) = poll_once_with(
+            &[(FOCUS_A, SHARED_REPO, SHARED_PR)],
+            &previous,
+            None,
+            &fetchable,
+        )
+        .await;
+        assert!(
+            !one_focus.is_empty(),
+            "the baseline pass must actually have hit GitHub, or the comparison below is vacuous"
+        );
+
+        let (snaps, two_focuses) = poll_once_with(
+            &[
+                (FOCUS_A, SHARED_REPO, SHARED_PR),
+                (FOCUS_B, SHARED_REPO, SHARED_PR),
+            ],
+            &previous,
+            None,
+            &fetchable,
+        )
+        .await;
+
+        assert_eq!(
+            two_focuses.len(),
+            one_focus.len(),
+            "a second focus pinned to the same PR must add no GitHub traffic, previous \
+             generation or not"
+        );
+        assert!(
+            Arc::ptr_eq(&snaps[FOCUS_A], &snaps[FOCUS_B]),
+            "two focuses on one PR must share the one fetched snapshot, not two copies of it"
+        );
+        assert_eq!(
+            snaps[FOCUS_A].title, FRESH_TITLE,
+            "a fleet-wide pass carries nothing over: both focuses must hold this pass's fetch"
+        );
+    }
+
+    /// The other direction, and the property the carry-over exists for: a
+    /// focus outside the refresh set keeps its previous snapshot and costs
+    /// nothing. Both PRs are mounted as fetchable, so a stray request would
+    /// *succeed* — this has to be caught on the wire, not by a 404 accident.
+    #[tokio::test]
+    async fn a_focus_outside_the_refresh_set_is_carried_over_without_a_request() {
+        const OTHER_PR: u64 = 4527;
+
+        let previous = generation(vec![
+            (FOCUS_A, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+            (FOCUS_B, carried_over_snapshot(SHARED_REPO, OTHER_PR, None)),
+        ]);
+
+        let (snaps, requests) = poll_once_with(
+            &[
+                (FOCUS_A, SHARED_REPO, SHARED_PR),
+                (FOCUS_B, SHARED_REPO, OTHER_PR),
+            ],
+            &previous,
+            Some(&[FOCUS_A]),
+            &[
+                (SHARED_REPO, SHARED_PR, FRESH_TITLE),
+                (SHARED_REPO, OTHER_PR, FRESH_TITLE),
+            ],
+        )
+        .await;
+
+        assert!(
+            Arc::ptr_eq(&snaps[FOCUS_B], &previous[FOCUS_B]),
+            "a focus outside the refresh set must carry its previous snapshot forward unchanged \
+             — republishing a new pointer for it makes every downstream `changed_tags` reader \
+             refetch a focus nothing happened to"
+        );
+
+        let other_path = pr_request_path(SHARED_REPO, OTHER_PR);
+        assert!(
+            !requests.iter().any(|r| r.url.path() == other_path.as_str()),
+            "a targeted refresh must spend no GitHub traffic on the focuses it did not target; \
+             {other_path} was requested anyway"
+        );
+
+        assert_eq!(
+            snaps[FOCUS_A].title, FRESH_TITLE,
+            "the targeted focus must still be fetched — carrying over its neighbour must not \
+             cost it its own refresh"
+        );
     }
 }
