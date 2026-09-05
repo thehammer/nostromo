@@ -947,6 +947,14 @@ pub enum ClientMsg {
         pr_number: Option<u64>,
         /// `owner/name` repo slug for `load_pr` and `approve`; `None` for `clear`.
         repo: Option<String>,
+        /// The focus whose PR under review `load_pr`/`clear` moves (W7).
+        ///
+        /// The PR under review is a property of the focus, so an affordance in
+        /// focus X must move X's pin and nobody else's. Optional and defaulted
+        /// so a client built before W7 still round-trips: it addresses the
+        /// built-in `perri` focus, which is where its one PR surface lived.
+        #[serde(default)]
+        tag: Option<String>,
     },
 
     /// Answer a `ServerMsg::DecisionRequest` (W6 decision modals).
@@ -994,9 +1002,28 @@ pub enum ServerMsg {
     /// (clippy::large_enum_variant).
     MotherAwaitDetected(Box<MotherJob>),
 
-    /// Broadcast snapshot of Perri's PR review state. Re-sent whenever the
-    /// native queue or current-PR watch channel changes.
+    /// Broadcast snapshot of one focus's PR review state (W7).
+    ///
+    /// **The two fields have deliberately different scopes, and this is the
+    /// asymmetry to remember when reading this variant:**
+    ///
+    /// - `current` — the PR **`tag`'s focus** has under review, or `None` when
+    ///   it has none. Per-focus, because "the PR under review" is a property
+    ///   of the focus: two focuses reviewing two PRs is the ordinary case, and
+    ///   before W7 the machine had one slot that whichever focus picked up a
+    ///   PR most recently silently owned.
+    /// - `queue` — the **fleet-wide** review queue, byte-identical in every
+    ///   frame regardless of `tag`. There is one set of open PRs and every
+    ///   focus sees the same one; splitting it per focus would be a different
+    ///   and worse product (PRD: "only the PR under review is scoped").
+    ///
+    /// One frame per focus rather than one frame carrying a map, matching
+    /// every other per-focus broadcast here (`FocusLayout`, `PaneContent`,
+    /// `Activity`): a PR change re-sends only the focuses whose PR moved, and
+    /// `PrSnapshot` carries a diff of up to 500 KB.
     PerriState {
+        /// The focus this frame describes.
+        tag: String,
         queue: Vec<PrQueueItem>,
         current: Option<Box<PrSnapshot>>,
     },

@@ -30,7 +30,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, watch};
 
-use crate::data::{perri_current_pr, perri_pr::PrSnapshot};
+use crate::data::{perri_current_pr, perri_pr::PrSnapshots};
 use crate::event::AppEvent;
 use crate::ipc::pane_registry::PaneRegistry;
 use crate::ipc::protocol::{PaneContentWire, PaneFreshness};
@@ -214,15 +214,37 @@ async fn load_pr_daemon(
         });
     };
 
-    if let Err(e) = perri_current_pr::write_pointer(&state_dir, number, repo, highlights) {
-        return json!({ "error": "io_error", "detail": e });
+    // W7 — D4. The tag is resolved *before* anything is written, and a caller
+    // that names no focus and can't be placed in one is refused outright.
+    //
+    // Pre-W7 this write came first and the tag was resolved afterwards, which
+    // was survivable only because the pin was machine-wide: an unattributable
+    // caller still moved the one slot everybody read. Now the pin *is* the
+    // focus's, so a pickup with no focus would pin nothing any surface will
+    // ever show while returning a plain `ok: true` — the "reports success,
+    // paints nothing" failure this project keeps rediscovering. The PRD makes
+    // the honest refusal a hard criterion.
+    //
+    // `unidentified_caller` is the established code at every other
+    // `target_tag` site; this is not a new one.
+    let Some(tag) = apply_layout::target_tag(args, pty_id).map(|s| s.to_string()) else {
+        return json!({
+            "error": "unidentified_caller",
+            "detail": "perri.load_pr pins the PR under review to a focus; pass `view_id` or connect with a pty_id",
+        });
+    };
+
+    if let Err(e) = perri_current_pr::write_pointer(&state_dir, &tag, number, repo, highlights) {
+        // A tag that isn't a safe filename is the caller's error, not an I/O
+        // one — say which.
+        let code = if e.starts_with("invalid_tag") { "invalid_args" } else { "io_error" };
+        return json!({ "error": code, "detail": e });
     }
 
+    // Refetch exactly this focus's pin (D2) — no other focus's PR changed.
     if let Some(tx) = &daemon.perri.pr_refresh_tx {
-        let _ = tx.send(());
+        let _ = tx.send(Some(tag.clone()));
     }
-
-    let tag = apply_layout::target_tag(args, pty_id).map(|s| s.to_string());
 
     // R8 (W5 — curated-agent-views): the PR under review just moved, so the
     // previous review's `file`/`ticket` tabs and any other PR's
@@ -230,9 +252,7 @@ async fn load_pr_daemon(
     // operator never sees the new PR's content sitting beside the old PR's
     // evidence. A no-op for a focus with no curated regions, which is every
     // focus still driving `perri-standard` through the raw tools.
-    if let Some(t) = tag.as_deref() {
-        show::reset_for_pr_change(daemon, t, Some((repo, number)));
-    }
+    show::reset_for_pr_change(daemon, &tag, Some((repo, number)));
 
     let mut warnings = Vec::new();
     let mut pending = false;
@@ -242,13 +262,15 @@ async fn load_pr_daemon(
             // D4: highlights are agent-authored final content — sever the
             // diff pane's live binding, or the broadcaster would clobber them
             // with the plain rendered summary within seconds.
-            if let Some(t) = tag.as_deref() {
-                daemon.pane_registry.lock().unwrap().unbind_source(t, "diff");
-            }
+            daemon
+                .pane_registry
+                .lock()
+                .unwrap()
+                .unbind_source(&tag, "diff");
             // D3: highlights are the pane's final content — no fetch, no wait.
             push_pane_content(
                 daemon,
-                tag.as_deref(),
+                Some(&tag),
                 "diff",
                 PaneContentWire::Text {
                     text: text.to_string(),
@@ -260,16 +282,14 @@ async fn load_pr_daemon(
         None => {
             // D4: no highlights — diff renders straight from
             // perri.get_current_pr, so keep (or re-establish) that binding.
-            if let Some(t) = tag.as_deref() {
-                daemon
-                    .pane_registry
-                    .lock()
-                    .unwrap()
-                    .bind_source(t, "diff", SOURCE_CURRENT_PR);
-            }
+            daemon
+                .pane_registry
+                .lock()
+                .unwrap()
+                .bind_source(&tag, "diff", SOURCE_CURRENT_PR);
             push_pane_content(
                 daemon,
-                tag.as_deref(),
+                Some(&tag),
                 "diff",
                 PaneContentWire::Loading,
                 None,
@@ -277,17 +297,29 @@ async fn load_pr_daemon(
             );
 
             let mut pr_rx = state.perri_pr_rx.clone();
-            let matched =
-                wait_for_matching_snapshot(&mut pr_rx, repo, number, daemon.perri.settle_timeout)
-                    .await;
+            let matched = wait_for_matching_snapshot(
+                &mut pr_rx,
+                &tag,
+                repo,
+                number,
+                daemon.perri.settle_timeout,
+            )
+            .await;
 
             if matched {
-                match apply_layout::fetch(SOURCE_CURRENT_PR, state, apply_layout::FetchArgs::default()) {
+                match apply_layout::fetch(
+                    SOURCE_CURRENT_PR,
+                    state,
+                    apply_layout::FetchArgs {
+                        tag: Some(&tag),
+                        ..Default::default()
+                    },
+                ) {
                     Ok(content) => {
-                        let fr = apply_layout::freshness(SOURCE_CURRENT_PR, state);
+                        let fr = apply_layout::freshness(SOURCE_CURRENT_PR, state, Some(&tag));
                         push_pane_content(
                             daemon,
-                            tag.as_deref(),
+                            Some(&tag),
                             "diff",
                             content,
                             Some(fr),
@@ -298,7 +330,7 @@ async fn load_pr_daemon(
                         warnings.push(json!({ "pane_id": "diff", "error": e.code() }));
                         push_pane_content(
                             daemon,
-                            tag.as_deref(),
+                            Some(&tag),
                             "diff",
                             PaneContentWire::Error {
                                 message: format!(
@@ -315,7 +347,7 @@ async fn load_pr_daemon(
                 pending = true;
                 push_pane_content(
                     daemon,
-                    tag.as_deref(),
+                    Some(&tag),
                     "diff",
                     PaneContentWire::Text {
                         text: format!("Fetching {repo}#{number}\u{2026} (still loading)"),
@@ -367,21 +399,30 @@ async fn clear_current_pr_daemon(
         });
     };
 
-    if let Err(e) = perri_current_pr::clear_pointer(&state_dir) {
-        return json!({ "error": "io_error", "detail": e });
+    // W7 — D4, same as `load_pr`: resolve the focus before touching anything.
+    // Clearing "the PR under review" with no focus to clear it *for* would,
+    // pre-W7, have wiped whichever focus happened to hold the global slot.
+    let Some(tag) = apply_layout::target_tag(args, pty_id).map(|s| s.to_string()) else {
+        return json!({
+            "error": "unidentified_caller",
+            "detail": "perri.clear_current_pr clears one focus's PR under review; pass `view_id` or connect with a pty_id",
+        });
+    };
+
+    if let Err(e) = perri_current_pr::clear_pointer(&state_dir, &tag) {
+        let code = if e.starts_with("invalid_tag") { "invalid_args" } else { "io_error" };
+        return json!({ "error": code, "detail": e });
     }
     if let Err(e) = perri_current_pr::touch_queue_dirty(&state_dir) {
         return json!({ "error": "io_error", "detail": e });
     }
 
     if let Some(tx) = &daemon.perri.pr_refresh_tx {
-        let _ = tx.send(());
+        let _ = tx.send(Some(tag.clone()));
     }
     if let Some(tx) = &daemon.perri.queue_refresh_tx {
         let _ = tx.send(());
     }
-
-    let tag = apply_layout::target_tag(args, pty_id).map(|s| s.to_string());
 
     // R8 (W5 — curated-agent-views): nothing is under review any more, so
     // every curated review tab closes and the detail region goes with its last
@@ -389,10 +430,7 @@ async fn clear_current_pr_daemon(
     // Must run *before* resolving targets below: this is what prunes closed
     // panes (and their bindings) out of the tree, so the resolver never
     // targets a pane that's about to disappear.
-    let closed: Vec<String> = tag
-        .as_deref()
-        .map(|t| show::reset_for_pr_change(daemon, t, None))
-        .unwrap_or_default();
+    let closed: Vec<String> = show::reset_for_pr_change(daemon, &tag, None);
 
     let mut warnings = Vec::new();
 
@@ -401,13 +439,10 @@ async fn clear_current_pr_daemon(
     // from a fixed template vocabulary. A curated focus's surviving paramless
     // PR pane (Context 2) and `perri-standard`'s fixed `diff`/`queue` panes
     // both fall out of this for free.
-    let (pr_panes, queue_panes) = match tag.as_deref() {
-        Some(t) => {
-            let reg = daemon.pane_registry.lock().unwrap();
-            let targets = resolve_perri_targets(&reg, t);
-            (targets.pr, targets.queue)
-        }
-        None => (Vec::new(), Vec::new()),
+    let (pr_panes, queue_panes) = {
+        let reg = daemon.pane_registry.lock().unwrap();
+        let targets = resolve_perri_targets(&reg, &tag);
+        (targets.pr, targets.queue)
     };
 
     // D4: a pane already bound to a PR-backed source stays bound to it — the
@@ -418,22 +453,22 @@ async fn clear_current_pr_daemon(
     // `perri.load_pr({highlights})`'s `unbind_source`) gets (re)bound here —
     // never repurpose a pane already bound to `perri.get_pr_diff` /
     // `perri.get_pr_conversation` onto a different source.
-    if let Some(t) = tag.as_deref() {
+    {
         let mut reg = daemon.pane_registry.lock().unwrap();
         for pane in &pr_panes {
-            if reg.source_for(t, pane).is_none() {
-                reg.bind_source(t, pane, SOURCE_CURRENT_PR);
+            if reg.source_for(&tag, pane).is_none() {
+                reg.bind_source(&tag, pane, SOURCE_CURRENT_PR);
             }
         }
         for pane in &queue_panes {
-            reg.bind_source(t, pane, SOURCE_PR_QUEUE);
+            reg.bind_source(&tag, pane, SOURCE_PR_QUEUE);
         }
     }
 
     for pane in &pr_panes {
         push_pane_content(
             daemon,
-            tag.as_deref(),
+            Some(&tag),
             pane,
             PaneContentWire::Text {
                 text: apply_layout::NO_PR_LOADED_PLACEHOLDER.to_string(),
@@ -447,7 +482,7 @@ async fn clear_current_pr_daemon(
         for pane in &queue_panes {
             push_pane_content(
                 daemon,
-                tag.as_deref(),
+                Some(&tag),
                 pane,
                 PaneContentWire::Loading,
                 None,
@@ -459,11 +494,11 @@ async fn clear_current_pr_daemon(
         // that.
         match apply_layout::fetch(SOURCE_PR_QUEUE, state, apply_layout::FetchArgs::default()) {
             Ok(content) => {
-                let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state);
+                let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state, Some(&tag));
                 for pane in &queue_panes {
                     push_pane_content(
                         daemon,
-                        tag.as_deref(),
+                        Some(&tag),
                         pane,
                         content.clone(),
                         Some(fr.clone()),
@@ -476,7 +511,7 @@ async fn clear_current_pr_daemon(
                     warnings.push(json!({ "pane_id": pane, "error": e.code() }));
                     push_pane_content(
                         daemon,
-                        tag.as_deref(),
+                        Some(&tag),
                         pane,
                         PaneContentWire::Error {
                             message: format!(
@@ -587,24 +622,30 @@ fn push_pane_content(
     }
 }
 
-/// Poll `rx` (a clone of `McpSharedState::perri_pr_rx`) until it publishes a
-/// snapshot whose `(repo, pr_number)` matches the request, or `timeout`
+/// Poll `rx` (a clone of `McpSharedState::perri_pr_rx`) until **`tag`'s**
+/// snapshot has a `(repo, pr_number)` matching the request, or `timeout`
 /// elapses. Checks the already-published value first, so a snapshot for the
 /// right PR that's already sitting in the channel resolves immediately
 /// without waiting for a change. A snapshot for the right PR that carries an
 /// `error` still counts as a match — that's a real (if unhappy) answer, not
 /// something to keep waiting past.
+///
+/// Keyed on `tag` (W7 — D3): the channel now carries every focus's PR, so
+/// "some snapshot in there matches" would let focus A's `load_pr` settle the
+/// instant focus B happened to be reviewing the same PR — reporting a fetch
+/// complete that hadn't started.
 async fn wait_for_matching_snapshot(
-    rx: &mut watch::Receiver<Option<PrSnapshot>>,
+    rx: &mut watch::Receiver<PrSnapshots>,
+    tag: &str,
     repo: &str,
     number: u64,
     timeout: Duration,
 ) -> bool {
-    fn matches(snap: &Option<PrSnapshot>, repo: &str, number: u64) -> bool {
-        matches!(snap, Some(s) if s.repo == repo && s.pr_number == Some(number))
+    fn matches(snaps: &PrSnapshots, tag: &str, repo: &str, number: u64) -> bool {
+        matches!(snaps.get(tag), Some(s) if s.repo == repo && s.pr_number == Some(number))
     }
 
-    if matches(&rx.borrow(), repo, number) {
+    if matches(&rx.borrow(), tag, repo, number) {
         return true;
     }
 
@@ -616,7 +657,7 @@ async fn wait_for_matching_snapshot(
         }
         match tokio::time::timeout(remaining, rx.changed()).await {
             Ok(Ok(())) => {
-                if matches(&rx.borrow(), repo, number) {
+                if matches(&rx.borrow(), tag, repo, number) {
                     return true;
                 }
             }

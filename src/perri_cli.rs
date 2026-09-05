@@ -39,7 +39,12 @@ fn validate_repo(repo: &str) -> Result<()> {
 
 /// Execute the appropriate write-through or `gh` invocation for the given `action`.
 ///
-/// - `"load_pr"` → writes `current-pr.json` + touches `current-pr.dirty` via
+/// `tag` is the focus whose PR under review this action moves (W7 — D1). The
+/// IPC `PerriAction` message carries it when the client knows which focus the
+/// affordance was in; a client that doesn't name one addresses the built-in
+/// `perri` focus ([`perri_current_pr::BUILTIN_PERRI_TAG`]).
+///
+/// - `"load_pr"` → writes `current-pr/<tag>.json` + touches `current-pr.dirty` via
 ///   `crate::data::perri_current_pr::write_pointer` (no `highlights` — that's
 ///   the MCP tool's agent-authored-content feature, with no client affordance
 ///   here).
@@ -55,6 +60,7 @@ pub async fn run_perri_action(
     action: &str,
     pr_number: Option<u64>,
     repo: Option<&str>,
+    tag: &str,
     perri_state_dir: &Path,
 ) -> Result<()> {
     match action {
@@ -66,13 +72,13 @@ pub async fn run_perri_action(
 
             // `highlights: None` — agent-authored highlights are the MCP
             // tool's feature; `ClientMsg::PerriAction` carries no such field.
-            perri_current_pr::write_pointer(perri_state_dir, number, repo, None)
+            perri_current_pr::write_pointer(perri_state_dir, tag, number, repo, None)
                 .map_err(|e| anyhow::anyhow!(e))
                 .with_context(|| "load_pr: writing current-pr pointer")?;
         }
 
         "clear" => {
-            perri_current_pr::clear_pointer(perri_state_dir)
+            perri_current_pr::clear_pointer(perri_state_dir, tag)
                 .map_err(|e| anyhow::anyhow!(e))
                 .with_context(|| "clear: removing current-pr pointer")?;
             perri_current_pr::touch_queue_dirty(perri_state_dir)

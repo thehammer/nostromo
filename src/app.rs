@@ -217,7 +217,7 @@ pub struct AppState {
     /// Direct-push refresh sender for `PerriPrNativeSource` (Phase 4).
     /// Sending `()` triggers an immediate re-fetch, bypassing the dirty-file
     /// sentinel.  `None` when running in bash-fallback mode.
-    pub perri_pr_refresh_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    pub perri_pr_refresh_tx: Option<crate::data::perri_pr_native::RefreshTx>,
 }
 
 impl AppState {
@@ -1483,7 +1483,10 @@ async fn handle_mcp_command(
                 // Phase 4: also trigger the direct-push refresh so the data
                 // source re-fetches immediately without needing the dirty file.
                 if let Some(tx) = &state.perri_pr_refresh_tx {
-                    let _ = tx.send(());
+                    // The TUI has one Perri surface (W7 — D2).
+                    let _ = tx.send(Some(
+                        crate::data::perri_current_pr::BUILTIN_PERRI_TAG.to_owned(),
+                    ));
                 }
                 let _ = reply.send(result);
             } else {

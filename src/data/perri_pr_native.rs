@@ -1,16 +1,31 @@
-//! Perri current-PR native data source.
+//! Perri PR-under-review native data source — **multi-tenant** since W7.
 //!
-//! Reads `~/.claude/state/perri/current-pr.json` to find which PR to display,
-//! then fetches metadata via `octocrab` and the raw diff via a reqwest GET with
-//! `Accept: application/vnd.github.diff`.
+//! Reads every focus's pin from `~/.claude/state/perri/current-pr/<tag>.json`
+//! (see [`crate::data::perri_current_pr`]), fetches each PR's metadata via
+//! `octocrab`, its raw diff, its check-runs and its conversation, and
+//! publishes the lot as one [`PrSnapshots`] map keyed by focus tag.
 //!
-//! Phase 4: `PerriPrNativeSource::spawn` now returns a `refresh_tx` alongside
-//! the `watch::Receiver`.  Callers (e.g. `perri.load_pr` MCP tool) can send
-//! `()` on the sender to trigger an immediate re-fetch without touching the
-//! dirty-file sentinel.  The sentinel watcher is kept as a fallback for the
-//! deprecation window.
+//! ## One task for N focuses
+//!
+//! There is exactly one of these tasks no matter how many focuses have a PR
+//! under review. It fetches sequentially and deduplicates by `(repo, number)`,
+//! so two focuses reviewing one PR cost one round trip and share one snapshot.
+//! See [`PerriPrNativeSource::spawn`] for why not one task per focus.
+//!
+//! ## Rate limits
+//!
+//! Per PR per cycle this makes: one `pulls().get()` (octocrab, uncached), one
+//! raw-diff GET, one check-runs GET, and three conversation GETs — all five of
+//! the non-octocrab calls conditional (`If-None-Match`). A steady-state cycle
+//! against an unchanged PR therefore costs ~1 uncached request rather than the
+//! >=3 it cost before W7, which is what makes running this for N focuses
+//! affordable against a shared 5000/hr primary limit.
+//!
+//! `refresh_tx` carries `Some(tag)` to refetch one focus's pin and `None` for
+//! all of them; the `current-pr.dirty` sentinel remains as the "something in
+//! the pin directory changed, rescan" fallback.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -25,9 +40,12 @@ use crate::{
     data::{
         dirty_file,
         github_client::GithubClient,
-        perri_pr::{CiCheck, PrComment, PrSnapshot, PrThread, PrThreadKind},
+        perri_current_pr,
+        perri_pr::{CiCheck, PrComment, PrSnapshot, PrSnapshots, PrThread, PrThreadKind},
         perri_queue::CiState,
-        perri_queue_native::{api_base, etag_get},
+        perri_queue_native::{
+            api_base, etag_get, etag_get_as, GITHUB_DIFF_ACCEPT, GITHUB_JSON_ACCEPT,
+        },
     },
 };
 
@@ -44,6 +62,9 @@ pub fn diff_is_too_large(diff: &str, changed_files: u64) -> bool {
         || diff.len() > MAX_DIFF_BYTES
         || diff.lines().count() > MAX_DIFF_LINES
 }
+
+/// Ask the PR source to refetch: `Some(tag)` for one focus, `None` for all.
+pub type RefreshTx = mpsc::UnboundedSender<Option<String>>;
 
 // ── Per-PR cache path ─────────────────────────────────────────────────────────
 
@@ -118,31 +139,35 @@ struct PrCheckRunOutput {
     text: Option<String>,
 }
 
-// ── current-pr.json shape ─────────────────────────────────────────────────────
-
-/// Matches the format written by `perri-diff-pane` and the real Perri state.
-#[derive(Debug, Deserialize)]
-pub struct CurrentPrPointer {
-    pub number: u64,
-    pub repo: String, // "owner/repo"
-    pub title: Option<String>,
-    pub author: Option<String>,
-    pub url: Option<String>,
-}
-
 // ── Source ────────────────────────────────────────────────────────────────────
 
 pub struct PerriPrNativeSource {
     config: Config,
-    /// ETag caches for the conversation fetches (W3 — curated-agent-views),
-    /// so a refetch against unchanged data costs one 304 instead of a full
-    /// GitHub response. `Arc`-shared rather than owned so every construction
-    /// site (`spawn`, `prefetch_into_cache`, `fetch_for_cache`) can hand out a
-    /// cheap clone; only the long-lived instance `spawn` keeps alive across
-    /// polling cycles actually benefits from cache hits, and a fresh one-shot
-    /// instance simply starts cold (a full fetch, no correctness issue).
-    conversation_etags: Arc<Mutex<HashMap<String, String>>>,
-    conversation_body_cache: Arc<Mutex<HashMap<String, String>>>,
+    /// ETag caches for every conditional GET this source makes: the three
+    /// conversation reads (W3 — curated-agent-views) and, since W7, the two
+    /// expensive ones — the raw diff and the head SHA's check-runs — so a
+    /// refetch against unchanged data costs one 304 instead of a full GitHub
+    /// response.
+    ///
+    /// This is what makes per-focus isolation affordable. Before W7 a poll
+    /// cycle cost >=3 *uncached* requests per PR (metadata, the up-to-500 KB
+    /// raw diff, check-runs), and there was exactly one PR. Isolation
+    /// multiplies that by the number of focuses holding a pin, against a
+    /// 5000/hr primary limit the queue source is already spending from. With
+    /// these two conditional, a steady-state cycle costs ~0-1 uncached
+    /// requests per PR instead.
+    ///
+    /// Keyed by `(accept, url)` — see [`etag_get_as`] — and pruned each cycle
+    /// to the set of URLs the live pins actually need, so a long-lived daemon
+    /// working a queue doesn't accumulate every diff it ever fetched.
+    ///
+    /// `Arc`-shared rather than owned so every construction site (`spawn`,
+    /// `prefetch_into_cache`, `fetch_for_cache`) can hand out a cheap clone;
+    /// only the long-lived instance `spawn` keeps alive across polling cycles
+    /// actually benefits from cache hits, and a fresh one-shot instance simply
+    /// starts cold (a full fetch, no correctness issue).
+    etags: Arc<Mutex<HashMap<String, String>>>,
+    body_cache: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl PerriPrNativeSource {
@@ -150,31 +175,43 @@ impl PerriPrNativeSource {
     fn new(config: Config) -> Self {
         PerriPrNativeSource {
             config,
-            conversation_etags: Arc::new(Mutex::new(HashMap::new())),
-            conversation_body_cache: Arc::new(Mutex::new(HashMap::new())),
+            etags: Arc::new(Mutex::new(HashMap::new())),
+            body_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Spawn the data source.
     ///
-    /// Returns `(snapshot_rx, refresh_tx)`.
+    /// Returns `(snapshots_rx, refresh_tx)`.
     ///
-    /// - `snapshot_rx` — watch receiver for the latest `PrSnapshot`.
-    /// - `refresh_tx`  — send `()` to trigger an immediate re-fetch (direct
-    ///   MCP push path introduced in Phase 4).  The dirty-file watcher remains
-    ///   active as a fallback for the shell-script deprecation window.
-    pub fn spawn(
-        config: Config,
-    ) -> (
-        watch::Receiver<Option<PrSnapshot>>,
-        mpsc::UnboundedSender<()>,
-    ) {
-        let (tx, rx) = watch::channel(None);
+    /// - `snapshots_rx` — watch receiver for the current [`PrSnapshots`]:
+    ///   every focus's PR under review, keyed by focus tag.
+    /// - `refresh_tx`  — `Some(tag)` triggers an immediate re-fetch of that
+    ///   focus's pin, `None` of every pinned focus. `perri.load_pr` sends the
+    ///   former; with N focuses pinned, refetching all of them because one
+    ///   picked something up would be N-1 wasted GitHub requests.
+    ///
+    /// **One task, not one per focus** (W7 — D5.2). A task per focus would
+    /// mean N `Octocrab`/`reqwest` clients with N connection pools, N ETag
+    /// caches that can't share a fetch between two focuses reviewing the same
+    /// PR, and N concurrent bursts every poll interval — straight into
+    /// GitHub's secondary rate limits. One task fetching sequentially spreads
+    /// the same work out, and the accidental serialisation is a feature.
+    pub fn spawn(config: Config) -> (watch::Receiver<PrSnapshots>, RefreshTx) {
+        let (tx, rx) = watch::channel(crate::data::perri_pr::no_prs());
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
-        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<Option<String>>();
 
-        let dirty_path = config.perri_state_dir().join("current-pr.dirty");
-        dirty_file::spawn_watcher(dirty_path, dirty_tx);
+        let state_dir = config.perri_state_dir();
+        // One sentinel for the whole pin directory, watched once (D2). The
+        // watcher is a 500 ms `exists()` poll; one per focus would be N tasks
+        // at 2 Hz for a signal that is always "rescan the directory" anyway.
+        dirty_file::spawn_watcher(state_dir.join("current-pr.dirty"), dirty_tx);
+
+        // A pre-W7 global `current-pr.json` is read, logged and deleted here —
+        // never adopted. It records what was under review and not who was
+        // reviewing it, and guessing an owner is worse than starting empty.
+        perri_current_pr::discard_legacy_pointer(&state_dir);
 
         let interval_secs = config.pr_diff_poll_secs;
 
@@ -190,49 +227,63 @@ impl PerriPrNativeSource {
 
     async fn run(
         &self,
-        tx: watch::Sender<Option<PrSnapshot>>,
+        tx: watch::Sender<PrSnapshots>,
         dirty_rx: &mut mpsc::UnboundedReceiver<()>,
-        refresh_rx: &mut mpsc::UnboundedReceiver<()>,
+        refresh_rx: &mut mpsc::UnboundedReceiver<Option<String>>,
         interval_secs: u64,
     ) {
         let client = match self.build_client() {
             Ok(c) => c,
             Err(e) => {
+                // Terminal, and deliberately still fleet-wide: without a
+                // GitHub client no focus can have a PR under review, and
+                // turning this into a per-focus failure would mean N copies of
+                // one message and a recovery path per tag for a condition that
+                // never recovers. The source publishes one error snapshot and
+                // stops (unchanged from pre-W7).
                 warn!("github client init failed for perri pr: {e:#}");
-                let _ = tx.send(Some(PrSnapshot {
+                let error = Arc::new(PrSnapshot {
                     error: Some(format!("GitHub client init failed: {e:#}")),
                     stale: true,
                     ..Default::default()
-                }));
+                });
+                let pins = perri_current_pr::read_pins(&self.config.perri_state_dir());
+                let map: HashMap<String, Arc<PrSnapshot>> = pins
+                    .into_keys()
+                    .map(|tag| (tag, Arc::clone(&error)))
+                    .collect();
+                let _ = tx.send(Arc::new(map));
                 return;
             }
         };
 
-        loop {
-            match self.fetch(&client).await {
-                Ok(snap) => {
-                    debug!(pr = ?snap.pr_number, "perri diff refreshed");
-                    let _ = tx.send(Some(snap));
-                }
-                Err(e) => {
-                    warn!("perri diff fetch failed: {e:#}");
-                    let mut snap = tx.borrow().clone().unwrap_or_default();
-                    snap.stale = true;
-                    snap.error = Some(e.to_string());
-                    let _ = tx.send(Some(snap));
-                }
-            }
+        // Which tags to refetch on this pass. `None` means "all of them" —
+        // the timer, the dirty sentinel, and startup.
+        let mut only: Option<HashSet<String>> = None;
 
+        loop {
+            // Clone the current generation out of the watch borrow *before*
+            // awaiting: holding a `watch::Ref` across an await makes the whole
+            // future non-`Send` (and would block every reader for the length of
+            // a GitHub round trip).
+            let previous = tx.borrow().clone();
+            let next = self.fetch_all(&client, &previous, only.as_ref()).await;
+            let _ = tx.send(next);
+
+            only = None;
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
                 // `Some(_) = recv()` disables the branch on a closed channel.
                 // The plain `_ =` form matches None and fires every poll once
                 // the sender is dropped, producing a hot loop.
                 Some(_) = dirty_rx.recv() => {
+                    // The sentinel says "the pin directory changed" and not
+                    // which file, so this is always a full rescan.
                     debug!("perri diff dirty-file signal");
                 }
-                Some(_) = refresh_rx.recv() => {
-                    debug!("perri diff direct-push refresh signal (MCP)");
+                Some(tag) = refresh_rx.recv() => {
+                    debug!(?tag, "perri diff direct-push refresh signal (MCP)");
+                    only = tag.map(|t| HashSet::from([t]));
                 }
             }
 
@@ -240,51 +291,133 @@ impl PerriPrNativeSource {
             // *and* send on `refresh_tx` for the same logical change — drain
             // whichever channel(s) didn't win the select above so a single
             // change collapses into exactly one fetch cycle instead of two.
-            while dirty_rx.try_recv().is_ok() {}
-            while refresh_rx.try_recv().is_ok() {}
+            // Any drained *targeted* refresh widens this pass rather than
+            // being dropped: collapsing two focuses' pickups into one fetch of
+            // one of them would leave the other stale until the next tick.
+            while dirty_rx.try_recv().is_ok() {
+                only = None;
+            }
+            while let Ok(tag) = refresh_rx.try_recv() {
+                match (tag, &mut only) {
+                    (None, _) => only = None,
+                    (Some(_), None) => {}
+                    (Some(t), Some(set)) => {
+                        set.insert(t);
+                    }
+                }
+            }
         }
     }
 
-    /// Main fetch: reads `current-pr.json`, fetches the PR, writes BOTH
-    /// `current-pr-detail.json` and the per-PR cache file.
-    async fn fetch(&self, client: &GithubClient) -> Result<PrSnapshot> {
-        let pointer_path = self.current_pr_path();
-
-        if !pointer_path.exists() {
-            return Ok(PrSnapshot {
-                title: "(no PR loaded)".to_owned(),
-                ..Default::default()
-            });
-        }
-
-        let raw = tokio::fs::read_to_string(&pointer_path)
-            .await
-            .with_context(|| format!("reading {}", pointer_path.display()))?;
-
-        let pointer: CurrentPrPointer =
-            serde_json::from_str(&raw).context("parsing current-pr.json")?;
-
-        let snap = self.fetch_pr(client, &pointer.repo, pointer.number).await?;
-
-        // Write both files; log and swallow errors (the watch channel still feeds the TUI).
+    /// One polling pass over every focus's pin.
+    ///
+    /// `previous` is the last published generation; `only` restricts the
+    /// *fetching* to those tags (everything else is carried over unchanged).
+    /// Tags whose pin has disappeared are dropped from the result regardless
+    /// of `only` — that is how a cleared or evicted pin stops being published.
+    ///
+    /// Fetches are deduplicated by `(repo, number)`: two focuses reviewing the
+    /// same PR cost one round trip, not two, and share one snapshot `Arc`.
+    async fn fetch_all(
+        &self,
+        client: &GithubClient,
+        previous: &PrSnapshots,
+        only: Option<&HashSet<String>>,
+    ) -> PrSnapshots {
         let state_dir = self.config.perri_state_dir();
-        match serde_json::to_string(&snap) {
-            Ok(json) => {
-                // Single-slot selected-PR file.
-                let detail_path = state_dir.join("current-pr-detail.json");
-                if let Err(e) = write_json_atomic(&detail_path, &json) {
-                    warn!("perri detail write (current-pr-detail.json) failed: {e:#}");
-                }
-                // Per-PR cache file.
-                let cache = pr_cache_path(&state_dir, &pointer.repo, pointer.number);
-                if let Err(e) = write_json_atomic(&cache, &json) {
-                    warn!("perri detail write (pr-cache) failed: {e:#}");
+        let pins = perri_current_pr::read_pins(&state_dir);
+
+        // Keep the ETag/body caches to what the live pins can actually ask
+        // for. Without this a daemon working a queue accumulates every diff
+        // body it has ever fetched, at up to 500 KB each.
+        let live_prefixes: Vec<String> = pins
+            .values()
+            .flat_map(|pin| live_url_prefixes(&pin.repo, pin.number, previous))
+            .collect();
+        crate::data::perri_queue_native::prune_etag_caches(
+            &self.etags,
+            &self.body_cache,
+            &live_prefixes,
+        );
+
+        let mut next: HashMap<String, Arc<PrSnapshot>> = HashMap::new();
+        // `(repo, number)` already fetched on this pass — the dedupe (D5).
+        let mut fetched: HashMap<(String, u64), Arc<PrSnapshot>> = HashMap::new();
+
+        for (tag, pin) in pins {
+            let key = (pin.repo.clone(), pin.number);
+
+            if let Some(shared) = fetched.get(&key) {
+                next.insert(tag, Arc::clone(shared));
+                continue;
+            }
+
+            let carry_over = only.is_some_and(|set| !set.contains(&tag));
+            if carry_over {
+                if let Some(prev) = previous.get(&tag) {
+                    // Only carry over a snapshot that is actually *this* pin's
+                    // — a stale snapshot of the focus's previous PR is a wrong
+                    // answer, not an old one.
+                    if prev.repo == pin.repo && prev.pr_number == Some(pin.number) {
+                        fetched.insert(key, Arc::clone(prev));
+                        next.insert(tag, Arc::clone(prev));
+                        continue;
+                    }
                 }
             }
-            Err(e) => warn!("perri detail serialize failed: {e:#}"),
+
+            let snap = match self.fetch_pr(client, &pin.repo, pin.number).await {
+                Ok(snap) => {
+                    debug!(%tag, repo = %pin.repo, pr = pin.number, "perri diff refreshed");
+                    self.persist(&state_dir, &pin.repo, pin.number, &snap);
+                    Arc::new(snap)
+                }
+                Err(e) => {
+                    // One focus's PR failing must not disturb any other's —
+                    // degrade *this* tag to a stale snapshot and keep going.
+                    warn!(%tag, repo = %pin.repo, pr = pin.number, "perri diff fetch failed: {e:#}");
+                    let mut snap = previous
+                        .get(&tag)
+                        .filter(|prev| prev.repo == pin.repo && prev.pr_number == Some(pin.number))
+                        .map(|prev| (**prev).clone())
+                        .unwrap_or_else(|| PrSnapshot {
+                            pr_number: Some(pin.number),
+                            repo: pin.repo.clone(),
+                            ..Default::default()
+                        });
+                    snap.stale = true;
+                    snap.error = Some(e.to_string());
+                    Arc::new(snap)
+                }
+            };
+
+            fetched.insert(key, Arc::clone(&snap));
+            next.insert(tag, snap);
         }
 
-        Ok(snap)
+        Arc::new(next)
+    }
+
+    /// Write the fetched snapshot to the per-PR cache file.
+    ///
+    /// The pre-W7 single-slot `current-pr-detail.json` is written too, but
+    /// only for the *first* pin of a pass and purely as a compatibility
+    /// courtesy: a single file cannot describe N focuses, and nothing in this
+    /// repo reads it. The per-PR cache (`pr-cache/<repo>-<n>.json`), which
+    /// `perri_queue_native`'s prefetch shares, was already per-PR and needs no
+    /// change.
+    fn persist(&self, state_dir: &Path, repo: &str, number: u64, snap: &PrSnapshot) {
+        let json = match serde_json::to_string(snap) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!("perri detail serialize failed: {e:#}");
+                return;
+            }
+        };
+        let cache = pr_cache_path(state_dir, repo, number);
+        if let Err(e) = write_json_atomic(&cache, &json) {
+            warn!("perri detail write (pr-cache) failed: {e:#}");
+        }
     }
 
     /// Fetch `(repo, number)` via GitHub API and return a `PrSnapshot`.
@@ -319,7 +452,15 @@ impl PerriPrNativeSource {
         let head_sha = pr_meta.head.sha.clone();
 
         // Fetch the raw diff.
-        let raw_diff = fetch_diff(client, &owner, &repo_name, number).await?;
+        let raw_diff = fetch_diff(
+            client,
+            &owner,
+            &repo_name,
+            number,
+            &self.etags,
+            &self.body_cache,
+        )
+        .await?;
 
         // Apply large-diff threshold: blank the diff and set the flag.
         let (diff, diff_too_large) = if diff_is_too_large(&raw_diff, changed_files) {
@@ -329,7 +470,15 @@ impl PerriPrNativeSource {
         };
 
         // D2/D3: fetch check-runs for the PR head SHA and build CiCheck list.
-        let ci_checks = fetch_ci_checks(client, &owner, &repo_name, &head_sha).await;
+        let ci_checks = fetch_ci_checks(
+            client,
+            &owner,
+            &repo_name,
+            &head_sha,
+            &self.etags,
+            &self.body_cache,
+        )
+        .await;
 
         // W3 — curated-agent-views: the PR description, plus its comment and
         // review threads. A conversation-fetch failure must not fail the
@@ -380,8 +529,8 @@ impl PerriPrNativeSource {
             owner,
             repo,
             number,
-            &self.conversation_etags,
-            &self.conversation_body_cache,
+            &self.etags,
+            &self.body_cache,
         )
         .await;
         let review_comments = fetch_review_comments(
@@ -389,8 +538,8 @@ impl PerriPrNativeSource {
             owner,
             repo,
             number,
-            &self.conversation_etags,
-            &self.conversation_body_cache,
+            &self.etags,
+            &self.body_cache,
         )
         .await;
         let reviews = fetch_reviews(
@@ -398,8 +547,8 @@ impl PerriPrNativeSource {
             owner,
             repo,
             number,
-            &self.conversation_etags,
-            &self.conversation_body_cache,
+            &self.etags,
+            &self.body_cache,
         )
         .await;
 
@@ -448,10 +597,6 @@ impl PerriPrNativeSource {
         Ok(())
     }
 
-    fn current_pr_path(&self) -> PathBuf {
-        self.config.perri_state_dir().join("current-pr.json")
-    }
-
     fn build_client(&self) -> Result<GithubClient> {
         GithubClient::new(self.config.github_token_path.as_deref())
     }
@@ -459,26 +604,70 @@ impl PerriPrNativeSource {
 
 // ── Raw diff fetch ────────────────────────────────────────────────────────────
 
-async fn fetch_diff(client: &GithubClient, owner: &str, repo: &str, number: u64) -> Result<String> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
-
-    let resp = client
-        .http
-        .get(&url)
-        .header(ACCEPT, "application/vnd.github.diff")
-        .header(AUTHORIZATION, format!("Bearer {}", client.token()))
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
+/// Fetch the PR's raw unified diff — conditionally (W7/D5.1).
+///
+/// This is the single most expensive request in a poll cycle: an uncached
+/// response is the whole diff body, up to [`MAX_DIFF_BYTES`]. Sending
+/// `If-None-Match` turns the steady state (a PR nobody has pushed to since the
+/// last poll) into a 304 with no body at all, which is what makes running one
+/// of these per focus affordable rather than reckless.
+async fn fetch_diff(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Result<String> {
+    let url = diff_url(owner, repo, number);
+    etag_get_as(client, &url, GITHUB_DIFF_ACCEPT, etags, body_cache)
         .await
-        .context("fetching PR diff")?;
+        .map_err(|e| anyhow::anyhow!("diff fetch {e}"))
+}
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("diff fetch {url} -> {status}: {body}");
+/// The URL a PR's raw diff is read from. Shared with [`live_urls_for`] so the
+/// cache-pruning set can't drift from what the fetch actually keys on.
+fn diff_url(owner: &str, repo: &str, number: u64) -> String {
+    format!("{}/repos/{owner}/{repo}/pulls/{number}", api_base())
+}
+
+/// The URL a head SHA's check-runs are read from.
+fn check_runs_url(owner: &str, repo: &str, head_sha: &str) -> String {
+    format!(
+        "{}/repos/{owner}/{repo}/commits/{head_sha}/check-runs?per_page=100",
+        api_base()
+    )
+}
+
+/// The URL prefixes a live pin's conditional GETs fall under, for
+/// [`crate::data::perri_queue_native::prune_etag_caches`].
+///
+/// Prefixes, not exact URLs: `/pulls/{n}` covers the raw diff, the review
+/// comments and the reviews; `/issues/{n}/` covers the issue comments. A
+/// future endpoint added under either is cached correctly without this
+/// function being touched.
+///
+/// The check-runs prefix needs the head SHA, which only a fetched snapshot
+/// knows — so it comes from `previous`. A pin whose PR has never been fetched
+/// simply contributes no check-runs prefix, which prunes nothing that exists.
+fn live_url_prefixes(repo: &str, number: u64, previous: &PrSnapshots) -> Vec<String> {
+    let Ok((owner, name)) = split_repo(repo) else {
+        return Vec::new();
+    };
+    let base = api_base();
+    let mut prefixes = vec![
+        format!("{base}/repos/{owner}/{name}/pulls/{number}"),
+        format!("{base}/repos/{owner}/{name}/issues/{number}/"),
+    ];
+    for snap in previous.values() {
+        if snap.repo == repo && snap.pr_number == Some(number) && !snap.head_sha.is_empty() {
+            prefixes.push(format!(
+                "{base}/repos/{owner}/{name}/commits/{}/",
+                snap.head_sha
+            ));
+        }
     }
-
-    resp.text().await.context("reading diff body")
+    prefixes
 }
 
 // ── CI check-runs fetch ───────────────────────────────────────────────────────
@@ -490,34 +679,23 @@ async fn fetch_ci_checks(
     owner: &str,
     repo: &str,
     head_sha: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Vec<CiCheck> {
-    let url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs?per_page=100"
-    );
+    let url = check_runs_url(owner, repo, head_sha);
 
-    let resp = client
-        .http
-        .get(&url)
-        .header(ACCEPT, "application/vnd.github+json")
-        .header(AUTHORIZATION, format!("Bearer {}", client.token()))
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await;
-
-    let resp = match resp {
-        Ok(r) => r,
+    // Conditional (W7/D5.1): `?per_page=100` of check-runs is the second
+    // biggest response in the cycle and it is unchanged on most polls — a
+    // finished CI run's check-runs list never changes again.
+    let raw = match etag_get_as(client, &url, GITHUB_JSON_ACCEPT, etags, body_cache).await {
+        Ok(body) => body,
         Err(e) => {
-            warn!("check-runs fetch failed: {e:#}");
+            warn!("check-runs fetch failed: {e}");
             return vec![];
         }
     };
 
-    if !resp.status().is_success() {
-        warn!("check-runs fetch non-2xx: {}", resp.status());
-        return vec![];
-    }
-
-    let body: CheckRunsResponse = match resp.json().await {
+    let body: CheckRunsResponse = match serde_json::from_str(&raw) {
         Ok(b) => b,
         Err(e) => {
             warn!("check-runs parse failed: {e:#}");

@@ -194,7 +194,7 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
         &tag,
         &placement.pane_id,
         content,
-        Some(freshness(source, state)),
+        Some(freshness(source, state, Some(&tag))),
         address(source, Some(&params)),
     );
 
@@ -640,8 +640,10 @@ fn current_view_state(
     let bindings = bindings_for(reg, tag);
     let live = tree.pane_ids();
     let order = reg.view_focus_order(tag, &live);
-    let snapshot = state.perri_pr_rx.borrow().clone();
-    let current_pr = current_pr_of(snapshot.as_ref());
+    // W7 — D3: the focus's own PR under review, never the daemon's. This is
+    // what decides which curated review tabs a focus shows.
+    let snapshot = state.pr_for(Some(tag));
+    let current_pr = current_pr_of(snapshot.as_deref());
     derive::view_state(cfg, &tree, &bindings, current_pr, &order)
 }
 

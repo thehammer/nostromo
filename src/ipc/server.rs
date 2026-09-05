@@ -748,11 +748,18 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::PerriAction { action, pr_number, repo } => {
+        ClientMsg::PerriAction { action, pr_number, repo, tag } => {
             let conn = conn_key.to_string();
             let psd = perri_state_dir.to_path_buf();
+            // W7: the PR under review belongs to a focus. A client that names
+            // one drives that focus; one that doesn't (a pre-W7 build) drives
+            // the built-in `perri` focus, which is where its single PR surface
+            // was.
+            let tag = tag.unwrap_or_else(|| {
+                crate::data::perri_current_pr::BUILTIN_PERRI_TAG.to_owned()
+            });
             tokio::spawn(async move {
-                if let Err(e) = crate::perri_cli::run_perri_action(&action, pr_number, repo.as_deref(), &psd).await {
+                if let Err(e) = crate::perri_cli::run_perri_action(&action, pr_number, repo.as_deref(), &tag, &psd).await {
                     tracing::warn!(conn, %action, "PerriAction failed: {e:#}");
                 }
                 // The native Perri sources watch dirty-file sentinels; all

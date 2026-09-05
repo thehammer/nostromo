@@ -573,7 +573,7 @@ async fn dispatch_inner(
         "nostromo.get_view_state" => {
             let input = parse_args::<get_view_state::GetViewStateInput>(arguments);
             match input {
-                Ok(inp) => get_view_state::handle(state, &inp).await,
+                Ok(inp) => get_view_state::handle(state, &inp, pty_id).await,
                 Err(e) => e,
             }
         }
@@ -588,8 +588,17 @@ async fn dispatch_inner(
 
         // ── Phase 2: Perri ────────────────────────────────────────────────
         "perri.list_pr_queue" => perri::list_pr_queue(state),
-        "perri.get_current_pr" => perri::get_current_pr(state),
-        "perri.get_state" => perri::get_state(state),
+        // W7 — D3: both resolve the *caller's* focus (or an explicit
+        // `view_id`), like every other focus-scoped tool. `perri.get_selected_index`
+        // below is the precedent for the shape.
+        "perri.get_current_pr" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri::get_current_pr(state, apply_layout::target_tag(&args, pty_id))
+        }
+        "perri.get_state" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri::get_state(state, apply_layout::target_tag(&args, pty_id))
+        }
 
         // ── Phase 2: Fred ─────────────────────────────────────────────────
         "fred.list_unread_emails" => fred::list_unread_emails(state),

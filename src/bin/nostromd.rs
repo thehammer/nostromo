@@ -13,7 +13,7 @@
 //! - Owns PTY processes on behalf of TUI clients so they survive TUI restarts.
 //! - Removes the socket file on clean exit (SIGTERM / SIGINT).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +33,7 @@ use nostromo::{
         fred_calendar_native::FredCalendarNativeSource,
         fred_mailbox::MailboxSnapshot,
         fred_mailbox_native::FredMailboxNativeSource,
-        perri_pr::PrSnapshot,
+        perri_pr::{PrSnapshot, PrSnapshots},
         perri_pr_native::PerriPrNativeSource,
         perri_queue::PrQueueSnapshot,
         perri_queue_native::PerriQueueNativeSource,
@@ -318,6 +318,7 @@ async fn main() -> Result<()> {
     // (Sources were spawned earlier so the MCP state could get live receivers.)
     tokio::spawn(run_perri_broadcaster(
         broadcast_tx.clone(),
+        Arc::clone(&session_mgr),
         perri_queue_rx,
         perri_pr_rx,
     ));
@@ -544,14 +545,16 @@ async fn run_peek_poller(
 
 // ── perri broadcaster ─────────────────────────────────────────────────────────
 
-/// Build a `ServerMsg::PerriState` from the current watch-channel snapshots.
+/// Build one focus's `ServerMsg::PerriState`.
 ///
 /// Extracted as a free function so it can be unit-tested without a running daemon.
 fn build_perri_state(
+    tag: &str,
     queue_snap: Option<&PrQueueSnapshot>,
     pr_snap: Option<&PrSnapshot>,
 ) -> ServerMsg {
     ServerMsg::PerriState {
+        tag: tag.to_owned(),
         queue: queue_snap
             .map(|s| s.items.clone())
             .unwrap_or_default(),
@@ -559,21 +562,55 @@ fn build_perri_state(
     }
 }
 
-/// Watch the Perri native sources and broadcast `PerriState` on every change.
+/// Every focus a `PerriState` frame could be addressed to: those with a PR
+/// under review, plus every focus the daemon knows about, so a focus with no
+/// PR is told *that* rather than being left with whatever it last heard.
+fn perri_state_tags(session_mgr: &Arc<Mutex<SessionManager>>, prs: &PrSnapshots) -> Vec<String> {
+    let mut tags: BTreeSet<String> = prs.keys().cloned().collect();
+    if let Ok(mgr) = session_mgr.lock() {
+        tags.extend(mgr.focus_registry().into_iter().map(|f| f.tag));
+    }
+    tags.into_iter().collect()
+}
+
+/// Watch the Perri native sources and broadcast `PerriState` per focus (W7 — D7).
 ///
 /// Sends one initial broadcast immediately (so clients that connect after the
 /// first fetch still see current state), then loops on `tokio::select!` over
 /// both channels.
+///
+/// A queue change re-sends every focus — the queue is fleet-wide (D9). A PR
+/// change re-sends only the focuses whose PR actually moved, because with N
+/// focuses pinned, one pickup otherwise puts N copies of a possibly-500 KB
+/// snapshot on the wire.
 async fn run_perri_broadcaster(
     tx: broadcast::Sender<ServerMsg>,
+    session_mgr: Arc<Mutex<SessionManager>>,
     mut queue_rx: tokio::sync::watch::Receiver<Option<PrQueueSnapshot>>,
-    mut pr_rx: tokio::sync::watch::Receiver<Option<PrSnapshot>>,
+    mut pr_rx: tokio::sync::watch::Receiver<PrSnapshots>,
 ) {
+    fn broadcast(
+        tx: &broadcast::Sender<ServerMsg>,
+        tags: &[String],
+        queue: Option<&PrQueueSnapshot>,
+        prs: &PrSnapshots,
+    ) {
+        for tag in tags {
+            let _ = tx.send(build_perri_state(
+                tag,
+                queue,
+                prs.get(tag).map(|s| &**s),
+            ));
+        }
+    }
+
+    let mut previous: PrSnapshots = pr_rx.borrow().clone();
+
     // Initial broadcast — borrow briefly, clone data, drop borrow before send.
     {
         let queue = queue_rx.borrow().clone();
-        let pr    = pr_rx.borrow().clone();
-        let _ = tx.send(build_perri_state(queue.as_ref(), pr.as_ref()));
+        let tags = perri_state_tags(&session_mgr, &previous);
+        broadcast(&tx, &tags, queue.as_ref(), &previous);
     }
 
     loop {
@@ -581,14 +618,24 @@ async fn run_perri_broadcaster(
             result = queue_rx.changed() => {
                 if result.is_err() { break; } // sender dropped — clean exit
                 let queue = queue_rx.borrow_and_update().clone();
-                let pr    = pr_rx.borrow().clone();
-                let _ = tx.send(build_perri_state(queue.as_ref(), pr.as_ref()));
+                let prs   = pr_rx.borrow().clone();
+                let tags  = perri_state_tags(&session_mgr, &prs);
+                broadcast(&tx, &tags, queue.as_ref(), &prs);
             }
             result = pr_rx.changed() => {
                 if result.is_err() { break; }
                 let queue = queue_rx.borrow().clone();
-                let pr    = pr_rx.borrow_and_update().clone();
-                let _ = tx.send(build_perri_state(queue.as_ref(), pr.as_ref()));
+                let prs   = pr_rx.borrow_and_update().clone();
+                let changed: Vec<String> = {
+                    let mut v: Vec<String> =
+                        nostromo::data::perri_pr::changed_tags(&previous, &prs)
+                            .into_iter()
+                            .collect();
+                    v.sort();
+                    v
+                };
+                previous = prs.clone();
+                broadcast(&tx, &changed, queue.as_ref(), &prs);
             }
         }
     }
