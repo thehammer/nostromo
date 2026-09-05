@@ -65,6 +65,7 @@ final class PerriWireTests: XCTestCase {
         let json = """
         {
             "type": "perri_state",
+            "tag": "perri",
             "queue": [
                 {
                     "repo": "acme/web",
@@ -99,10 +100,11 @@ final class PerriWireTests: XCTestCase {
         """.data(using: .utf8)!
 
         let msg = ServerMsg.decode(from: json)
-        guard case .perriState(let queue, let current) = msg else {
+        guard case .perriState(let tag, let queue, let current) = msg else {
             XCTFail("Expected .perriState, got \(msg)")
             return
         }
+        XCTAssertEqual(tag, "perri")
 
         // Queue item assertions
         XCTAssertEqual(queue.count, 1)
@@ -140,16 +142,18 @@ final class PerriWireTests: XCTestCase {
         let json = """
         {
             "type": "perri_state",
+            "tag": "perri",
             "queue": [],
             "current": null
         }
         """.data(using: .utf8)!
 
         let msg = ServerMsg.decode(from: json)
-        guard case .perriState(let queue, let current) = msg else {
+        guard case .perriState(let tag, let queue, let current) = msg else {
             XCTFail("Expected .perriState, got \(msg)")
             return
         }
+        XCTAssertEqual(tag, "perri")
         XCTAssertTrue(queue.isEmpty)
         XCTAssertNil(current)
     }
@@ -234,6 +238,7 @@ final class PerriWireTests: XCTestCase {
         let json = """
         {
             "type": "perri_state",
+            "tag": "perri",
             "queue": [
                 {
                     "repo": "Carefeed/admin-portal",
@@ -253,10 +258,11 @@ final class PerriWireTests: XCTestCase {
         """.data(using: .utf8)!
 
         let msg = ServerMsg.decode(from: json)
-        guard case .perriState(let queue, let current) = msg else {
+        guard case .perriState(let tag, let queue, let current) = msg else {
             XCTFail("Expected .perriState, got \(msg)")
             return
         }
+        XCTAssertEqual(tag, "perri")
         XCTAssertNil(current)
         XCTAssertEqual(queue.count, 1)
         let item = queue[0]

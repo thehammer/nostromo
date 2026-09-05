@@ -62,6 +62,16 @@ class AppStore: ObservableObject {
     @Published private(set) var perriDetail:         PRDetail?      = nil
     @Published private(set) var perriDetailLoading:  Bool           = false
 
+    // Per-focus PR under review (W7/W8) — keyed by focus session tag, fed by
+    // `perri_state` broadcasts now that they carry a `tag` (see `handle(_:)`).
+    // This is deliberately separate from `perriDetail` above: `perriDetail`
+    // is the single Perri-built-in-focus's own selection (driven by
+    // `selectPR`/FileWatchers, unrelated to isolation), while this dictionary
+    // is what the sidebar's per-focus label (SidenavGrouping) reads. An
+    // entry's lifetime matches its focus's — evicted in `evictPerFocusState`,
+    // the same invariant `focusLayouts`/`sessionHealth` already follow.
+    @Published private(set) var perriDetailByTag: [String: PRDetail] = [:]
+
     // Fred mailbox + calendar — updated from fred_state IPC broadcasts.
     @Published private(set) var fredMailbox:  MailboxSnapshot?  = nil
     @Published private(set) var fredCalendar: CalendarSnapshot? = nil
@@ -410,7 +420,9 @@ class AppStore: ObservableObject {
     /// event (`start()`), never on any other schedule. Evicts `focusLayouts`,
     /// `sessionRegistry` (detached, not merely dropped — that is what stops
     /// the daemon-side session from being respawned on the next reconnect),
-    /// and `sessionHealth`.
+    /// `sessionHealth`, and `perriDetailByTag` (W8 — the per-focus PR pin the
+    /// sidebar label reads; without this it leaks one entry per closed focus
+    /// forever, the same class of bug this hook already exists to close).
     ///
     /// Deliberately does NOT touch `activityStreams`: `ActivityStreamStore`
     /// bounds its own tag count internally (LRU eviction over
@@ -434,6 +446,7 @@ class AppStore: ObservableObject {
         focusLayouts.removeValue(forKey: tag)
         sessionRegistry.removeValue(forKey: tag)?.detach()
         sessionHealth.removeValue(forKey: tag)
+        perriDetailByTag.removeValue(forKey: tag)
         TranscriptDiagnostics.forgetTag(tag)
     }
 
@@ -971,7 +984,7 @@ class AppStore: ObservableObject {
         case .sessionSummaryUpdate(let tag, let summary):
             FocusStore.shared.updateSummary(tag: tag, summary: summary)
 
-        case .perriState(let queue, let current):
+        case .perriState(let tag, let queue, let current):
             // Daemon push is an additive, lower-latency source feeding the same
             // publishers the file-watchers already drive.  The file-watcher path
             // is preserved (not removed) in this wedge.
@@ -980,6 +993,15 @@ class AppStore: ObservableObject {
             perriQueueError = nil
             // `current` is already decoded as PRDetail? from the wire shape.
             if let current { perriDetail = current }
+
+            // Per-focus PR under review (W8) — a frame for one focus must
+            // never clobber another's entry, and clearing a focus's PR must
+            // be reflected rather than leaving its last-known PR stuck.
+            if let current {
+                perriDetailByTag[tag] = current
+            } else {
+                perriDetailByTag.removeValue(forKey: tag)
+            }
 
         case .fredState(let mailbox, let calendar):
             fredMailbox  = mailbox

@@ -181,11 +181,64 @@ final class PerFocusEvictionWiringTests: XCTestCase {
             """)
     }
 
+    // MARK: - W8 (per-focus-pr-indicator): evictPerFocusState also evicts perriDetailByTag
+
+    /// `perriDetailByTag` is the per-focus PR pin this wedge surfaces on
+    /// screen — a new `@Published private(set) var perriDetailByTag:
+    /// [String: PRDetail]` on `AppStore`, mirroring `focusLayouts`/
+    /// `sessionHealth`. Per this file's established invariant (see
+    /// `testEvictPerFocusStateRemovesFromBothFocusLayoutsAndSessionRegistry`
+    /// and `testEvictPerFocusStateEvictsSessionHealth` above), any per-focus
+    /// dictionary not pruned on eviction leaks one entry per closed focus
+    /// forever.
+    func testEvictPerFocusStateRemovesFromPerriDetailByTag() throws {
+        let source = try Self.appStoreSource()
+        let body = try Self.isolatedFunctionBody(named: "func evictPerFocusState", in: source, sourceFile: "AppStore.swift")
+        XCTAssertTrue(body.contains("perriDetailByTag.removeValue"), """
+            evictPerFocusState must remove the closed focus's entry from perriDetailByTag — without \
+            this, the per-focus PR pin is the one per-focus dictionary this wedge adds that never \
+            gets pruned, so it grows by one entry per closed focus for the lifetime of the process.
+            """)
+    }
+
+    // MARK: - W8: the per-focus PR label must never derive from the machine-wide activeFocusAgentTag global
+
+    /// The single most important regression guard in this whole wedge (see
+    /// this file's own header comment on why `AppStore.swift`/
+    /// `SidenavGrouping.swift`/`TabBarView.swift` are textual-scan-only
+    /// targets here). `activeFocusAgentTag` is written by whichever macOS
+    /// window last switched focus — `StatusBarView`, `PaceBarsView`, and
+    /// `ActivityTickerView` already key off it incorrectly, causing window
+    /// B's focus switch to silently retarget window A's display. Any new
+    /// code for the per-focus PR label must never read or depend on it, or
+    /// it inherits that bug on day one.
+    func testSidenavGroupingAndTabBarViewNeverReferenceActiveFocusAgentTag() throws {
+        let sidenav = try Self.sidenavGroupingSource()
+        XCTAssertFalse(sidenav.contains("activeFocusAgentTag"), """
+            SidenavGrouping.swift must never read AppStore.activeFocusAgentTag — that property is a \
+            single global clobbered by whichever window last switched focus (see MainLayout.swift's \
+            setActiveFocusAgentTag calls), and the whole point of the per-focus PR label is that it \
+            must read identically in every window; keying off that global would silently retarget \
+            one window's label to another window's active focus.
+            """)
+
+        let tabBar = try Self.tabBarViewSource()
+        XCTAssertFalse(tabBar.contains("activeFocusAgentTag"), """
+            TabBarView.swift must never read AppStore.activeFocusAgentTag — that property is a \
+            single global clobbered by whichever window last switched focus (see MainLayout.swift's \
+            setActiveFocusAgentTag calls), and the whole point of the per-focus PR label is that it \
+            must read identically in every window; keying off that global would silently retarget \
+            one window's label to another window's active focus.
+            """)
+    }
+
     // MARK: - Source helpers
 
     private static func appStoreSource() throws -> String { try sourceFile("Nostromo/Data/AppStore.swift") }
     private static func focusStoreSource() throws -> String { try sourceFile("Nostromo/Data/FocusStore.swift") }
     private static func mainLayoutSource() throws -> String { try sourceFile("Nostromo/UI/MainLayout.swift") }
+    private static func sidenavGroupingSource() throws -> String { try sourceFile("Nostromo/UI/SidenavGrouping.swift") }
+    private static func tabBarViewSource() throws -> String { try sourceFile("Nostromo/UI/TabBarView.swift") }
 
     private static func sourceFile(_ relativePath: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)     // …/macOS/NostromoTests/PerFocusEvictionWiringTests.swift

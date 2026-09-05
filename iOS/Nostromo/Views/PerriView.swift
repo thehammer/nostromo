@@ -4,6 +4,13 @@
 // current-PR detail (below), driven by the daemon's `perri_state` broadcast
 // via `DaemonStore.perriQueue` and `DaemonStore.perriCurrentPr`.
 //
+// `perriCurrentPr` is per-focus (W7/W8) — this tab is the built-in "perri"
+// focus's own global view (not a per-focus DynamicFocusView), so it reads
+// that one focus's entry (`store.perriCurrentPr(for: "perri")`) rather than
+// picking one arbitrarily out of the per-tag dictionary. Redesigning this
+// tab for isolation (e.g. so it shows every focus's PR) is a separate
+// question the W8 plan explicitly leaves alone (D8).
+//
 // Modelled after MotherQueueView.
 
 import SwiftUI
@@ -11,6 +18,10 @@ import NostromoKit
 
 struct PerriView: View {
     @EnvironmentObject var store: DaemonStore
+
+    /// The built-in Perri focus's session tag — this tab's one, hardcoded
+    /// identity (D8). See this file's top doc comment for why.
+    private static let builtInTag = "perri"
 
     /// Staged pending approval — set on first swipe tap; cleared on cancel or
     /// after the confirmation's "Approve" button fires the actual request.
@@ -21,7 +32,7 @@ struct PerriView: View {
         Group {
             if !store.connected {
                 disconnectedView
-            } else if store.perriQueue.isEmpty && store.perriCurrentPr == nil {
+            } else if store.perriQueue.isEmpty && store.perriCurrentPr(for: Self.builtInTag) == nil {
                 emptyView
             } else {
                 contentList
@@ -60,7 +71,7 @@ struct PerriView: View {
                 queueSection
             }
 
-            if let pr = store.perriCurrentPr {
+            if let pr = store.perriCurrentPr(for: Self.builtInTag) {
                 currentPrSection(pr)
             }
         }

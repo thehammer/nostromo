@@ -18,6 +18,17 @@ class TabBarView: NSView {
     private var cancellables = Set<AnyCancellable>()
     private var items: [String: NavTabItem] = [:]   // keyed by focus.id
 
+    /// The focuses last passed to `setFocuses` — remembered so a
+    /// `perriDetailByTag` change (a PR loading/clearing in some focus) can
+    /// rebuild the same rows with fresh labels, without waiting for
+    /// `FocusStore` to also publish. Deliberately NOT sourced from the
+    /// single per-window "which focus is active" global `AppStore` exposes
+    /// elsewhere (see `MainLayout.swift`'s `setActiveFocusAgentTag` calls) —
+    /// this is a plain, per-window-agnostic list rebuild keyed by
+    /// `AppStore.shared.perriDetailByTag`, which is app-wide and therefore
+    /// reads identically in every window by construction.
+    private var currentFocuses: [Focus] = []
+
     /// Set by MainLayout when the active focus changes. Drives highlight state.
     var activeFocus: Focus? { didSet { updateStates() } }
 
@@ -115,17 +126,37 @@ class TabBarView: NSView {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateSweaters() }
             .store(in: &cancellables)
+
+        // Per-focus PR under review (W8) — rebuild the rows with fresh
+        // labels whenever any focus's pin loads or clears. `perriDetailByTag`
+        // is app-wide (not per-window), so every window's sidebar reacts to
+        // the same change and shows the same label — see `currentFocuses`'s
+        // doc comment for why this deliberately does not route through the
+        // single per-window active-focus global instead.
+        AppStore.shared.$perriDetailByTag
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.setFocuses(self.currentFocuses)
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Focus list management
 
     /// Tears down and rebuilds the grouped item list from a new focuses array.
     func setFocuses(_ focuses: [Focus]) {
+        currentFocuses = focuses
+
         // Clear previous content
         documentView.subviews.forEach { $0.removeFromSuperview() }
         items = [:]
 
-        let rows = buildNavRows(focuses)
+        let perriDetailByTag = AppStore.shared.perriDetailByTag
+        let rows = buildNavRows(focuses) { tag in
+            let detail = perriDetailByTag[tag]
+            return (detail?.repo, detail?.prNumber)
+        }
         var prev: NSView? = nil
         var isFirstOrg = true
 
