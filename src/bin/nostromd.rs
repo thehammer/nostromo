@@ -190,7 +190,17 @@ async fn main() -> Result<()> {
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
     let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx) =
         PerriQueueNativeSource::spawn(config.clone());
-    let (perri_pr_rx, perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
+    // W7 — D8 backstop. The PR source serves a pin only while its focus still
+    // exists, so a missed eviction cannot resurrect one. `None` until a client
+    // has actually pushed a registry: an empty registry means "nobody has told
+    // us yet", and treating it as "no focus exists" would blank every focus's
+    // PR for the window between daemon start and the first push.
+    let live_focuses: nostromo::data::perri_pr_native::LiveFocuses = {
+        let session_mgr = Arc::clone(&session_mgr);
+        Arc::new(move || session_mgr.lock().unwrap().live_focus_tags())
+    };
+    let (perri_pr_rx, perri_pr_refresh_tx) =
+        PerriPrNativeSource::spawn(config.clone(), Some(live_focuses));
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
     let perri_pr_rx_for_mcp = perri_pr_rx.clone();
     let perri_pr_refresh_tx_for_mcp = perri_pr_refresh_tx.clone();

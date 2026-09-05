@@ -56,6 +56,23 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
                 .map(|f| (f.display_name, Some(f.agent_name)))
                 .unwrap_or_else(|| (tag.to_string(), None))
         };
+        // W7 — D12. "Which PR am I reviewing?" is now a fact about *this*
+        // focus, so it belongs in the tool whose whole job is telling an agent
+        // about itself — and an agent that can read it without a second call
+        // has no reason to assume the last PR it heard about is still its own.
+        //
+        // Always present, `null` when this focus has no PR under review. An
+        // absent key and a null key are different on the wire, and only one of
+        // them is answerable.
+        let pr_under_review = match state.pr_for(Some(tag)) {
+            Some(snap) => match snap.pr_number {
+                // A snapshot mid-fetch can carry a repo with no number yet;
+                // half a PR identity is not one to report.
+                Some(number) => json!({ "repo": snap.repo, "number": number }),
+                None => Value::Null,
+            },
+            None => Value::Null,
+        };
         return json!({
             "view_id": tag,
             "view_title": view_title,
@@ -64,6 +81,7 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
             "session_id": tag,
             "pane_ids": pane_ids,
             "layout_applied": layout_applied,
+            "pr_under_review": pr_under_review,
             "nostromo_version": env!("CARGO_PKG_VERSION"),
         });
     }
@@ -89,6 +107,9 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
         .unwrap_or_else(|| (view_id.to_string(), vec![]));
     drop(views);
 
+    // No `pr_under_review` on the TUI path: it has no focus registry, so it
+    // has no focus to answer for. Degrading by omission is what `create_focus`
+    // and `show` already do here.
     json!({
         "view_id": view_id,
         "view_title": view_title,

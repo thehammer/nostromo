@@ -745,10 +745,42 @@ fn handle_client_msg(
         }
 
         ClientMsg::FocusRegistryPush { focuses } => {
-            let updated = {
+            let (updated, departed, pane_registry) = {
                 let mut mgr = session_mgr.lock().unwrap();
-                mgr.set_focus_registry(focuses)
+                let (updated, departed) = mgr.set_focus_registry(focuses);
+                (updated, departed, mgr.pane_registry())
             };
+
+            // W7 — D8: a focus that is gone takes its per-focus state with it.
+            // This is the daemon's only signal that a focus was removed — the
+            // Mac detaches rather than stopping the session, so nothing else
+            // ever says so. `set_focus_registry` has already applied the
+            // reconnect and daemon-created guards, so anything here is a
+            // genuine departure.
+            //
+            // The pin is deleted outright rather than tombstoned, because
+            // `nostromo.create_focus` derives its tag deterministically from
+            // `(agent, title)` — close and recreate the same focus and the tag
+            // comes back. Anything less than deletion would hand the new focus
+            // the dead one's PR, which is the PRD's "a removed focus's pin
+            // never resurfaces" criterion failing.
+            for tag in &departed {
+                match crate::data::perri_current_pr::remove_pin(perri_state_dir, tag) {
+                    Ok(true) => {
+                        tracing::info!(tag = %tag, "focus removed — discarded its PR pin")
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(tag = %tag, "focus removed but its PR pin could not be discarded: {e}")
+                    }
+                }
+                if let Some(reg) = &pane_registry {
+                    if reg.lock().unwrap().remove_focus(tag) {
+                        tracing::info!(tag = %tag, "focus removed — discarded its pane tree and bindings");
+                    }
+                }
+            }
+
             // Fan out to every connected, Focuses-subscribed client (incl. this one).
             let _ = broadcast_tx.send(ServerMsg::FocusRegistryUpdated { focuses: updated });
         }

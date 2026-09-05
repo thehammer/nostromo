@@ -234,6 +234,21 @@ pub struct SessionManager {
     store_path: PathBuf,
     /// Mac-pushed focus registry; served to all clients and broadcast on change.
     focus_registry: Vec<FocusMeta>,
+    /// Tags this daemon created itself, via `nostromo.create_focus` (W7 — D8b).
+    ///
+    /// The Mac's `focuses.json` has never heard of these, so every
+    /// `FocusRegistryPush` omits them. Without this exemption a naive
+    /// "in the old list, not in the new one" diff would evict an
+    /// agent-created focus the moment the Mac pushed anything at all.
+    daemon_created_tags: HashSet<String>,
+    /// Tags one push claimed were gone, awaiting a second push that agrees
+    /// (W7 — D8a).
+    ///
+    /// `set_focus_registry` runs on every reconnect, and a reconnecting client
+    /// can push a partial list before it has finished loading. Evicting on a
+    /// single push would make a routine reconnect destroy a focus's pin.
+    /// Departure therefore requires two consecutive pushes to agree.
+    pending_departures: HashSet<String>,
     /// Per-focus pane-tree registry. Set by the daemon via
     /// [`SessionManager::configure_mcp_bridge`]; `None` in tests / non-daemon use.
     /// A fresh (non-resume) spawn initialises the focus's tree to a single REPL
@@ -278,6 +293,8 @@ impl SessionManager {
             client_senders: Arc::new(Mutex::new(HashMap::new())),
             store_path,
             focus_registry: Vec::new(),
+            daemon_created_tags: HashSet::new(),
+            pending_departures: HashSet::new(),
             pane_registry: None,
             mcp_socket: None,
             mcp_config: None,
@@ -1123,10 +1140,84 @@ impl SessionManager {
     }
 
     /// Replace the focus registry with the Mac-pushed snapshot. Returns the new
-    /// registry so the caller can broadcast it.
-    pub fn set_focus_registry(&mut self, focuses: Vec<FocusMeta>) -> Vec<FocusMeta> {
+    /// registry so the caller can broadcast it, and the tags that have now
+    /// *departed* so the caller can evict their per-focus state (W7 — D8).
+    ///
+    /// A tag is reported departed only when it is absent from two consecutive
+    /// pushes and was not created by this daemon. Both guards exist because
+    /// this runs on every reconnect, where an empty or partial push is normal
+    /// and eviction is irreversible — see `pending_departures` and
+    /// `daemon_created_tags`.
+    pub fn set_focus_registry(&mut self, focuses: Vec<FocusMeta>) -> (Vec<FocusMeta>, Vec<String>) {
+        // An empty push carries no information about what still exists — it is
+        // what a client sends before it has loaded anything. Take it as the
+        // registry (unchanged from pre-W7 behaviour) but never as evidence that
+        // every focus was deleted.
+        if focuses.is_empty() {
+            self.focus_registry = focuses;
+            self.pending_departures.clear();
+            return (self.focus_registry.clone(), Vec::new());
+        }
+
+        let new_tags: HashSet<String> = focuses.iter().map(|f| f.tag.clone()).collect();
+        let known: HashSet<String> = self
+            .focus_registry
+            .iter()
+            .map(|f| f.tag.clone())
+            .chain(self.pending_departures.iter().cloned())
+            .collect();
+
+        let missing: HashSet<String> = known
+            .difference(&new_tags)
+            .filter(|t| !self.daemon_created_tags.contains(*t))
+            .cloned()
+            .collect();
+
+        // Missing for the second consecutive push → genuinely gone.
+        let mut departed: Vec<String> = missing
+            .intersection(&self.pending_departures)
+            .cloned()
+            .collect();
+        departed.sort();
+
+        self.pending_departures = missing
+            .iter()
+            .filter(|t| !departed.contains(t))
+            .cloned()
+            .collect();
         self.focus_registry = focuses;
-        self.focus_registry.clone()
+        (self.focus_registry.clone(), departed)
+    }
+
+    /// Whether `tag` was created by this daemon rather than pushed by the Mac.
+    pub fn is_daemon_created(&self, tag: &str) -> bool {
+        self.daemon_created_tags.contains(tag)
+    }
+
+    /// Every focus tag that currently exists, or `None` if no client has
+    /// pushed a registry yet (W7 — D8).
+    ///
+    /// The union of the pushed registry and this daemon's own creations, not
+    /// just the registry: `set_focus_registry` replaces the registry wholesale
+    /// with the Mac's view, and the Mac's `focuses.json` has never heard of a
+    /// `nostromo.create_focus` tag. Reading the registry alone would report an
+    /// agent-created focus as non-existent the moment the Mac pushed anything.
+    ///
+    /// `None` rather than an empty set is the point: "nobody has told us which
+    /// focuses exist" and "no focus exists" must not be the same value, or
+    /// every caller has to remember to special-case the difference.
+    pub fn live_focus_tags(&self) -> Option<HashSet<String>> {
+        let tags: HashSet<String> = self
+            .focus_registry
+            .iter()
+            .map(|f| f.tag.clone())
+            .chain(self.daemon_created_tags.iter().cloned())
+            .collect();
+        if tags.is_empty() {
+            None
+        } else {
+            Some(tags)
+        }
     }
 
     /// Current focus registry snapshot.
@@ -1154,6 +1245,11 @@ impl SessionManager {
     /// `create_focus` MCP tool, which adds an agent-spawned focus to the
     /// daemon-owned registry.
     pub fn add_or_update_focus(&mut self, meta: FocusMeta) -> Vec<FocusMeta> {
+        // This is the only way a focus enters the registry other than a Mac
+        // push, so it is where a daemon-created tag earns its eviction
+        // exemption (W7 — D8b).
+        self.daemon_created_tags.insert(meta.tag.clone());
+        self.pending_departures.remove(&meta.tag);
         if let Some(existing) = self.focus_registry.iter_mut().find(|f| f.tag == meta.tag) {
             *existing = meta;
         } else {
