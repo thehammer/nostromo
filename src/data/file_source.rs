@@ -270,12 +270,11 @@ fn parse_repo_slug(url: &str) -> Option<String> {
     let path = if let Some(rest) = stripped.strip_prefix("git@") {
         // SSH scp-like form: git@host:owner/name
         rest.split_once(':').map(|(_, path)| path)?
-    } else if let Some(idx) = stripped.find("://") {
+    } else {
+        let idx = stripped.find("://")?;
         // A URL with a scheme: scheme://host/owner/name
         let after_scheme = &stripped[idx + 3..];
         after_scheme.split_once('/').map(|(_, path)| path)?
-    } else {
-        return None;
     };
     let mut parts = path.split('/');
     match (parts.next(), parts.next(), parts.next()) {
