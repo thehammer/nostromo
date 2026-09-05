@@ -49,6 +49,36 @@ final class PaneContentViewForEachIdentityTests: XCTestCase {
             """)
     }
 
+    // MARK: The iOS Perri tab's queue ForEach keys off bucketScopedId too
+    //
+    // Same defect, second independent rendering path: PerriView renders
+    // `PrQueueItem` (not `PrListItemModel`), and its queue `ForEach` is a
+    // second, wholly separate call site from PaneContentView's. This is
+    // deliberately added to the *same* fitness function (not a new file) so
+    // there is one test that knows about every bucket-partitioned `ForEach`
+    // in the app.
+
+    func testPerriViewQueueForEachIsKeyedByBucketScopedId() throws {
+        let source = try Self.perriViewSource()
+
+        XCTAssertTrue(source.contains("id: \\.bucketScopedId"), """
+            expected `ForEach(items, id: \\.bucketScopedId)` in PerriView's queue section — without an \
+            explicit bucket-scoped identity, a PR moving between buckets keeps its default `id` \
+            (`PrQueueItem.id`, which excludes `bucket`) and SwiftUI can recycle the old row, rendering a \
+            stale bucket badge.
+            """)
+    }
+
+    func testPerriViewQueueForEachNeverFallsBackToDefaultIdentity() throws {
+        let source = try Self.perriViewSource()
+
+        XCTAssertFalse(source.contains("ForEach(items) {"), """
+            `ForEach(items) { ... }` (no explicit `id:`) reintroduces the stale-badge bug: it falls back \
+            to PrQueueItem's default Identifiable id, which excludes `bucket`, so a PR that changes \
+            bucket keeps its old row identity and can render the previous bucket's badge.
+            """)
+    }
+
     // MARK: - Helpers
 
     /// `PaneContentView.swift` is not compiled into this target, so it has to
@@ -62,6 +92,20 @@ final class PaneContentViewForEachIdentityTests: XCTestCase {
             .deletingLastPathComponent()          // …/macOS/NostromoTests
             .deletingLastPathComponent()          // …/macOS
             .appendingPathComponent("Nostromo")
+    }
+
+    /// `PerriView.swift` (iOS target) is not compiled into this macOS test
+    /// target either, so it's read as raw text, same idiom as
+    /// `paneContentViewSource()` above.
+    private static func perriViewSource() throws -> String {
+        try String(contentsOf: repoRoot.appendingPathComponent("iOS/Nostromo/Views/PerriView.swift"), encoding: .utf8)
+    }
+
+    private static var repoRoot: URL {
+        URL(fileURLWithPath: #filePath)          // …/macOS/NostromoTests/PaneContentViewForEachIdentityTests.swift
+            .deletingLastPathComponent()          // …/macOS/NostromoTests
+            .deletingLastPathComponent()          // …/macOS
+            .deletingLastPathComponent()          // repo root
     }
 
     /// Number of non-overlapping occurrences of `needle` in `source`.

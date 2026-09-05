@@ -418,4 +418,80 @@ final class PerriWireTests: XCTestCase {
 
         XCTAssertEqual(decoded, original)
     }
+
+    // MARK: - PrQueueItem.bucketScopedId (SwiftUI row identity, never a domain identity)
+    //
+    // Same defect as `PrListItemModel.bucketScopedId` (see PaneContentWireTests),
+    // second file: `PrQueueItem.id` is `"\(repo)#\(number)"` and deliberately
+    // excludes `bucket`, so when a PR moves between review buckets its `id`
+    // (and therefore its default SwiftUI `Identifiable` row identity) doesn't
+    // change — SwiftUI can then recycle the old row under the new section
+    // header, rendering the previous bucket's badge. `bucketScopedId` is a
+    // second, view-identity-only property that folds `bucket` in so a bucket
+    // move always looks like a new row to `ForEach(items, id: \.bucketScopedId)`.
+    // It must never replace `id` itself, since `id` is relied on elsewhere as
+    // a cross-cutting domain identity (e.g. `rowModel(for:)` in PerriView).
+
+    private func makeQueueItem(
+        repo:        String  = "acme/web",
+        number:      Int     = 42,
+        title:       String  = "feat: auth",
+        author:      String  = "alice",
+        bucket:      String  = "requested",
+        newActivity: Bool    = true,
+        url:         String  = "https://github.com/acme/web/pull/42",
+        ciState:     CiState = .success,
+        headSha:     String  = "abc123",
+        isBot:       Bool    = false
+    ) -> PrQueueItem {
+        PrQueueItem(
+            repo: repo, number: number, title: title, author: author,
+            bucket: bucket, newActivity: newActivity, url: url,
+            ciState: ciState, headSha: headSha, isBot: isBot
+        )
+    }
+
+    func testBucketScopedIdDiffersWhenOnlyBucketDiffers() {
+        let requested   = makeQueueItem(bucket: "requested")
+        let needsReview = makeQueueItem(bucket: "needs_review")
+
+        XCTAssertNotEqual(
+            requested.bucketScopedId, needsReview.bucketScopedId,
+            "a PR moving from one bucket to another must be treated as a distinct SwiftUI row identity, " +
+            "or a moved row can be recycled and render the stale bucket's badge"
+        )
+    }
+
+    func testIdIsUnaffectedByBucketEvenWhenBucketScopedIdDiffers() {
+        let requested   = makeQueueItem(bucket: "requested")
+        let needsReview = makeQueueItem(bucket: "needs_review")
+
+        XCTAssertEqual(
+            requested.id, needsReview.id,
+            "id must stay \"\\(repo)#\\(number)\" and never fold in bucket — id is a cross-cutting domain " +
+            "identity used elsewhere (e.g. PerriView.rowModel(for:)); only bucketScopedId may vary with bucket"
+        )
+    }
+
+    func testBucketScopedIdIsDeterministicForTheSameInputs() {
+        let first  = makeQueueItem(repo: "acme/web", number: 42, bucket: "requested")
+        let second = makeQueueItem(repo: "acme/web", number: 42, bucket: "requested")
+
+        XCTAssertEqual(
+            first.bucketScopedId, second.bucketScopedId,
+            "bucketScopedId must be a pure function of its inputs — the same repo/number/bucket must " +
+            "always produce the same row identity"
+        )
+    }
+
+    func testBucketScopedIdDistinguishesDifferentPrsInTheSameBucket() {
+        let prOne = makeQueueItem(repo: "acme/web", number: 42, bucket: "requested")
+        let prTwo = makeQueueItem(repo: "acme/other", number: 7, bucket: "requested")
+
+        XCTAssertNotEqual(
+            prOne.bucketScopedId, prTwo.bucketScopedId,
+            "two distinct PRs in the same bucket must never collapse onto the same row identity — that " +
+            "would drop one of them from the rendered list entirely, which is worse than the stale-badge bug"
+        )
+    }
 }
