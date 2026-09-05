@@ -147,7 +147,33 @@ pub struct PaneRegistry {
     /// would be a third fact about every pane bought for a marginal
     /// improvement to one rule.
     view_focus_lru: HashMap<String, Vec<String>>,
+    /// `(window_id, tag)` → the most recent client report of what that window
+    /// actually materialised for that focus (W1 — render-state-visibility).
+    ///
+    /// NOT persisted — same reasoning as `painted` and `view_focus_lru`: this
+    /// is process-lifetime observability about what a *client* did, not part
+    /// of what a pane *is*. A report surviving a daemon restart would claim a
+    /// client-side fact the daemon has no way to still vouch for.
+    rendered_shapes: HashMap<(String, String), RenderedShapeReport>,
     store_path: Option<PathBuf>,
+}
+
+/// A client's report of what it actually rendered for one `(window_id, tag)`
+/// pair, as recorded by [`PaneRegistry::record_rendered_shape`].
+#[derive(Debug, Clone)]
+pub struct RenderedShapeReport {
+    /// Pane ids the reporting window's view hierarchy held for this tag, as
+    /// of `reported_at`.
+    pub pane_ids: Vec<String>,
+    /// The client's own wall-clock timestamp for this shape (not the
+    /// daemon's receipt time) — the basis for the age a caller sees back.
+    pub reported_at: chrono::DateTime<chrono::Utc>,
+    /// The connection this report arrived on. Never surfaced to a tool
+    /// caller — it exists solely so [`PaneRegistry::prune_rendered_shapes_for_conn`]
+    /// can remove exactly the entries a dropped connection contributed,
+    /// without clobbering a fresher report a reconnect already sent under a
+    /// new connection for the same window id.
+    conn_key: String,
 }
 
 impl Default for PaneRegistry {
@@ -170,6 +196,7 @@ impl PaneRegistry {
             bindings,
             painted: HashMap::new(),
             view_focus_lru: HashMap::new(),
+            rendered_shapes: HashMap::new(),
             store_path: Some(store_path),
         }
     }
@@ -182,6 +209,7 @@ impl PaneRegistry {
             bindings: HashMap::new(),
             painted: HashMap::new(),
             view_focus_lru: HashMap::new(),
+            rendered_shapes: HashMap::new(),
             store_path: None,
         }
     }
@@ -344,6 +372,56 @@ impl PaneRegistry {
     pub fn touch_view_focus(&mut self, tag: &str, live: &[String], pane_id: &str) {
         let order = self.view_focus_lru.entry(tag.to_string()).or_default();
         crate::mcp::views::derive::touch(order, live, pane_id);
+    }
+
+    // ── rendered-shape reports (W1 — render-state-visibility) ─────────────────
+
+    /// Record a client's report of what `window_id` actually rendered for
+    /// `tag`. Overwrites any prior report for the same `(window_id, tag)` —
+    /// only the most recent shape is ever meaningful. Not persisted.
+    pub fn record_rendered_shape(
+        &mut self,
+        conn_key: &str,
+        window_id: &str,
+        tag: &str,
+        pane_ids: Vec<String>,
+        reported_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        self.rendered_shapes.insert(
+            (window_id.to_string(), tag.to_string()),
+            RenderedShapeReport {
+                pane_ids,
+                reported_at,
+                conn_key: conn_key.to_string(),
+            },
+        );
+    }
+
+    /// Every window's rendered-shape report for `tag`, as `(window_id,
+    /// report)`, sorted by `window_id` for a deterministic response. Empty
+    /// when no window has ever reported for this tag — callers must treat
+    /// that as "unknown", never as "agrees" (see the `nostromo.get_render_state`
+    /// handler).
+    pub fn rendered_shapes_for_tag(&self, tag: &str) -> Vec<(String, &RenderedShapeReport)> {
+        let mut out: Vec<(String, &RenderedShapeReport)> = self
+            .rendered_shapes
+            .iter()
+            .filter(|((_, t), _)| t == tag)
+            .map(|((window_id, _), report)| (window_id.clone(), report))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Drop every rendered-shape report that arrived on `conn_key` — called
+    /// when that connection disconnects, so a closed window's report
+    /// disappears from subsequent tool responses instead of outliving the
+    /// window it describes. Scoped to `conn_key` (not `window_id` alone) so
+    /// pruning an old connection can never clobber a fresher report a
+    /// reconnect already sent under a new connection for the same window id.
+    pub fn prune_rendered_shapes_for_conn(&mut self, conn_key: &str) {
+        self.rendered_shapes
+            .retain(|_, report| report.conn_key != conn_key);
     }
 
     // ── mutations ──────────────────────────────────────────────────────────────
@@ -2111,5 +2189,86 @@ mod tests {
         assert_eq!(binding.source, "nostromo.get_file");
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── 27. rendered-shape reports (W1 — render-state-visibility) ────────────
+
+    #[test]
+    fn rendered_shapes_for_tag_is_empty_when_nothing_has_reported() {
+        let reg = PaneRegistry::in_memory();
+        assert!(reg.rendered_shapes_for_tag("perri").is_empty());
+    }
+
+    #[test]
+    fn rendered_shapes_for_tag_returns_every_window_sorted_by_window_id() {
+        let mut reg = PaneRegistry::in_memory();
+        let now = chrono::Utc::now();
+        reg.record_rendered_shape("conn-a", "2", "perri", vec!["queue".into()], now);
+        reg.record_rendered_shape("conn-b", "0", "perri", vec!["queue".into(), "repl".into()], now);
+
+        let reports = reg.rendered_shapes_for_tag("perri");
+        let window_ids: Vec<&str> = reports.iter().map(|(w, _)| w.as_str()).collect();
+        assert_eq!(window_ids, vec!["0", "2"]);
+    }
+
+    #[test]
+    fn rendered_shapes_for_tag_ignores_other_tags() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.record_rendered_shape("conn-a", "0", "mother", vec!["repl".into()], chrono::Utc::now());
+        assert!(reg.rendered_shapes_for_tag("perri").is_empty());
+    }
+
+    #[test]
+    fn a_second_report_for_the_same_window_and_tag_replaces_the_first() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.record_rendered_shape("conn-a", "0", "perri", vec!["repl".into()], chrono::Utc::now());
+        reg.record_rendered_shape(
+            "conn-a",
+            "0",
+            "perri",
+            vec!["repl".into(), "queue".into()],
+            chrono::Utc::now(),
+        );
+
+        let reports = reg.rendered_shapes_for_tag("perri");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].1.pane_ids, vec!["repl", "queue"]);
+    }
+
+    #[test]
+    fn dropping_a_connection_prunes_only_the_windows_it_reported() {
+        let mut reg = PaneRegistry::in_memory();
+        let now = chrono::Utc::now();
+        reg.record_rendered_shape("conn-a", "0", "perri", vec!["repl".into()], now);
+        reg.record_rendered_shape("conn-b", "1", "perri", vec!["repl".into()], now);
+
+        reg.prune_rendered_shapes_for_conn("conn-a");
+
+        let reports = reg.rendered_shapes_for_tag("perri");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].0, "1");
+    }
+
+    #[test]
+    fn a_reconnect_report_survives_the_old_connections_disconnect_prune() {
+        // Window "0" reconnects under a new conn_key and reports before the
+        // old connection's disconnect cleanup runs. The prune must key off
+        // which connection actually produced the stored report, not the
+        // window id alone — otherwise this race deletes the fresher report.
+        let mut reg = PaneRegistry::in_memory();
+        reg.record_rendered_shape("conn-old", "0", "perri", vec!["repl".into()], chrono::Utc::now());
+        reg.record_rendered_shape(
+            "conn-new",
+            "0",
+            "perri",
+            vec!["repl".into(), "queue".into()],
+            chrono::Utc::now(),
+        );
+
+        reg.prune_rendered_shapes_for_conn("conn-old");
+
+        let reports = reg.rendered_shapes_for_tag("perri");
+        assert_eq!(reports.len(), 1, "the reconnect's fresher report must survive");
+        assert_eq!(reports[0].1.pane_ids, vec!["repl", "queue"]);
     }
 }

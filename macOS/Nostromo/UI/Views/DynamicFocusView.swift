@@ -28,6 +28,13 @@ final class DynamicFocusView: NSView {
     // MARK: - Init
 
     private let focus: Focus
+    /// Stable per-window identifier (the screen index `MainLayout` was built
+    /// with) — carried on every `RenderedShape` report so the daemon can tell
+    /// "display 2 is missing the detail region" apart from "display 0 is
+    /// fine" (W1 — render-state-visibility, D2). Every focus on the same
+    /// window shares this id; `tag` is what distinguishes which focus a given
+    /// report is about.
+    private let windowId: String
     private var cancellables = Set<AnyCancellable>()
 
     /// Leaf views keyed by pane_id (ReplView or PaneContentNSView wrappers).
@@ -65,8 +72,9 @@ final class DynamicFocusView: NSView {
     /// all instead of leaking one observer per split per rebuild (D7).
     private var splitObserverTokens: [NSObjectProtocol] = []
 
-    init(focus: Focus) {
+    init(focus: Focus, windowId: String) {
         self.focus = focus
+        self.windowId = windowId
         super.init(frame: .zero)
         setup()
     }
@@ -202,6 +210,23 @@ final class DynamicFocusView: NSView {
             renderLayout(model, clearRatios: clearRatios)
         }
         renderedTree = model.tree
+
+        // Render-state visibility (W1 — render-state-visibility): report the
+        // pane ids this view hierarchy *actually holds* right now — i.e.
+        // `Array(leafViews.keys)`, the same value the `updateContent` MISS-log
+        // line above calls "rendered" — never `expected.paneIds`. `expected`
+        // is what this reconcile *attempted* to build; after `renderLayout`
+        // runs it usually matches, but a materialisation failure (a leaf that
+        // silently never made it into `leafViews` — exactly the class of bug
+        // W3 investigates) is precisely the divergence this report exists to
+        // catch. Reporting `expected` here would make the tool agree with
+        // itself by construction and hide the very failures it was built to
+        // surface.
+        AppStore.shared.client.reportRenderedShape(
+            tag: focus.sessionTag,
+            windowId: windowId,
+            paneIds: Array(leafViews.keys).sorted()
+        )
 
         // Launch-layout observability (W1 — launch-smoke-test). This is the
         // documented sole choke point every structural repair funnels

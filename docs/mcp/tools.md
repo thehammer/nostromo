@@ -55,7 +55,9 @@ Returns the full live state snapshot for a named view.
 { "view_id": "perri" }
 ```
 
-**Output**: view-specific JSON blob (see per-view sections below).
+**Output**: view-specific JSON blob (see per-view sections below), plus a
+`render_state` section on every response — see "Render-state visibility
+(W1)" below.
 
 Source: `src/mcp/tools/get_view_state.rs`
 
@@ -982,6 +984,72 @@ second tab (R2):
 ```
 
 Source: `src/mcp/tools/show.rs`, `src/mcp/views/`.
+
+---
+
+## Phase 6 — Render-state visibility (W1)
+
+`nostromo.show` and every other layout-mutating tool return success the
+moment the **daemon** accepts and registers the call — `PaneRegistry` only
+ever stores the tree it was told to build, never what any window actually
+painted. Closing that gap needs a fact the daemon doesn't have: what a
+client's view hierarchy actually materialised. The macOS app reports that
+fact once per window at the end of its own reconcile pass
+(`ClientMsg::RenderedShape`); this tool (and the `render_state` section
+`nostromo.get_view_state` gained alongside it) serves it back, diffed
+against the daemon's own expected tree.
+
+### `nostromo.get_render_state`
+
+Reports, per attached window, whether what a focus's client actually
+rendered agrees with what the daemon expects.
+
+**Input**: `{ "view_id": "optional — defaults to the caller's own focus" }`
+
+**Output**:
+```json
+{
+  "tag": "perri",
+  "expected": ["detail.0", "detail.1", "detail.2", "queue", "repl"],
+  "windows": [
+    { "window_id": "0",
+      "rendered": ["detail.0", "detail.1", "detail.2", "queue", "repl"],
+      "missing": [], "extra": [],
+      "reported_at": "2026-09-04T20:55:01Z", "age_ms": 1200, "agrees": true },
+    { "window_id": "2",
+      "rendered": ["queue", "repl"],
+      "missing": ["detail.0", "detail.1", "detail.2"], "extra": [],
+      "reported_at": "2026-09-04T20:48:11Z", "age_ms": 412000, "agrees": false }
+  ],
+  "windows_reporting": 2,
+  "agrees_everywhere": false
+}
+```
+
+A tag no window has ever reported for returns `"windows": []` and
+`"agrees_everywhere": null` — **never** `true`. Absence of a report is not
+evidence of agreement: a client that crashed, never connected, or hasn't
+caught up to the daemon's latest broadcast yet must not read the same as a
+client that checked in and confirmed. `missing` is expected-but-not-rendered
+(what the caller most likely wants to fix); `extra` is
+rendered-but-not-expected (a stale pane the client hasn't torn down yet).
+
+`reported_at` is the *client's* timestamp, not the daemon's receipt time —
+`age_ms` is how long ago that window last checked in, which is what tells a
+caller whether a report is even worth trusting for the show it just issued.
+
+**Errors**: `unidentified_caller` (no `view_id` and no caller `pty_id` to
+target), `not_supported` (non-daemon-hosted MCP server).
+
+Source: `src/mcp/tools/render_state.rs`
+
+### `nostromo.get_view_state`'s `render_state` section
+
+Every `nostromo.get_view_state` response now carries the same information
+under a `render_state` key, keyed on the requested `view_id` — this is the
+tool an agent already reaches for, so the comparison is discoverable there
+without a second tool name. Same shape as `nostromo.get_render_state`'s
+output above.
 
 ---
 

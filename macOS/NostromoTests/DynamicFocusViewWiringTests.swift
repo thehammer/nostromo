@@ -435,6 +435,57 @@ final class DynamicFocusViewWiringTests: XCTestCase {
         XCTAssertTrue(source.contains("final class RatioSplitView"), sequencingGuardMessage)
     }
 
+    // MARK: l. W1 — render-state-visibility: reconcile reports what it just rendered
+
+    /// Pins the W1 render-state-visibility wiring: `reconcile` must report
+    /// the pane ids the view hierarchy *actually holds* to the daemon (via
+    /// `AppStore.shared.client.reportRenderedShape`), sourced from
+    /// `leafViews.keys` — the same value the `updateContent` MISS-log line
+    /// calls "rendered" — never from `expected` (== `PaneRenderPlan.build(from:
+    /// model.tree)`), which is merely what this reconcile *attempted* to
+    /// build. Reporting `expected` would make the tool agree with itself by
+    /// construction and hide exactly the materialisation failures (a leaf
+    /// that silently never made it into `leafViews`) it exists to catch. And
+    /// critically: the sole `renderedTree = ` assignment site (test a. above)
+    /// must still be exactly one — this feature must not need a second one.
+    func testReconcileReportsRenderedShapeFromActualLeafViewsNotExpected() throws {
+        let source = try Self.dynamicFocusViewSource()
+        let body = try Self.functionBody(named: "reconcile", in: source, signaturePrefix: "private func reconcile(")
+
+        XCTAssertTrue(body.contains("reportRenderedShape("), """
+            W1: DynamicFocusView.reconcile must call reportRenderedShape (on AppStore.shared.client) so the \
+            daemon learns what this window actually materialised — without it, nostromo.get_render_state has \
+            nothing to compare its expected tree against for this window.
+            """)
+
+        // The report's pane ids must come from what the hierarchy actually
+        // holds (leafViews.keys) — not from `expected`, which is only what
+        // this reconcile attempted to build and would trivially "agree" even
+        // when a leaf silently failed to materialise.
+        XCTAssertTrue(body.contains("paneIds: Array(leafViews.keys)"), """
+            W1: the RenderedShape report must be built from `leafViews.keys` — the view hierarchy's actual, \
+            current state — not from `expected` (what reconcile attempted to build). Reporting `expected` makes \
+            the divergence this tool exists to catch unreportable by construction.
+            """)
+        XCTAssertFalse(body.contains("paneIds: expected.paneIds"), """
+            W1: the RenderedShape report must not be built from `expected` — that is what was *requested*, not \
+            what was actually rendered, and reporting it would make nostromo.get_render_state agree with itself \
+            by construction instead of catching real materialisation failures.
+            """)
+
+        // The single-assignment-site invariant from test (a) must survive
+        // this addition — asserted again here, directly in this test's own
+        // failure message, so a regression that adds a second assignment
+        // site while wiring the report through is attributed to this
+        // feature rather than surfacing only as test (a)'s unrelated-looking
+        // failure.
+        let assignmentLines = Self.lines(containing: "renderedTree = ", in: source)
+        XCTAssertEqual(assignmentLines.count, 1, """
+            W1: adding the RenderedShape report must not introduce a second renderedTree assignment site. Found \
+            \(assignmentLines.count): \(assignmentLines.joined(separator: "\n"))
+            """)
+    }
+
     // MARK: - Helpers
 
     private static func dynamicFocusViewSource() throws -> String {

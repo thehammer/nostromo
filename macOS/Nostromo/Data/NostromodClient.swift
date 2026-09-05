@@ -608,6 +608,48 @@ class NostromodClient {
         send(ActivitySnapshotRequestMsg(tag: tag), type: "activity_snapshot_request", tag: tag)
     }
 
+    // MARK: - Render-state visibility (W1)
+
+    private struct RenderedShapeMsg: Encodable {
+        let type_ = "rendered_shape"
+        let tag: String
+        let windowId: String
+        let paneIds: [String]
+        /// RFC3339 with fractional seconds, matching `decoder`'s `fmtFrac`
+        /// strategy above and the `chrono::DateTime<Utc>` the daemon decodes
+        /// this into — encoded as a plain string (not a `Date` field) since
+        /// `encoder` has no `dateEncodingStrategy` configured and every other
+        /// outgoing message on this connection is timestamp-free.
+        let renderedAt: String
+        enum CodingKeys: String, CodingKey {
+            case type_ = "type", tag
+            case windowId = "window_id"
+            case paneIds = "pane_ids"
+            case renderedAt = "rendered_at"
+        }
+    }
+
+    private static let renderedAtFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// Report which pane ids `windowId` actually materialised for `tag`, as
+    /// of right now — sent once per window at the end of
+    /// `DynamicFocusView.reconcile`. The daemon stores the most recent report
+    /// per `(window_id, tag)` and serves it back through
+    /// `nostromo.get_render_state` / `nostromo.get_view_state`'s
+    /// `render_state` section, diffed against its own `PaneRegistry` tree.
+    func reportRenderedShape(tag: String, windowId: String, paneIds: [String]) {
+        let renderedAt = Self.renderedAtFormatter.string(from: Date())
+        send(
+            RenderedShapeMsg(tag: tag, windowId: windowId, paneIds: paneIds, renderedAt: renderedAt),
+            type: "rendered_shape",
+            tag: tag
+        )
+    }
+
     /// Encode and send `msg`. `type`/`tag` identify the frame for
     /// `IPCLatencyStats` correlation — they must match the wire `type` field
     /// (and, where present, the `tag` field) the `Encodable` struct itself

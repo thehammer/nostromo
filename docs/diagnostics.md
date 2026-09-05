@@ -55,6 +55,21 @@ log show --predicate 'subsystem == "com.hammer.nostromo" AND category == "panes"
 Drop `--debug` (or use `--info`) to see only the `.error`-level tripwire
 hits and dropped pushes, without the per-frame trace.
 
+## `nostromo.get_render_state` — the non-screenshot way to check a render
+
+Reading `expected=[…] rendered=[…]` out of the `panes` log above (or asking a
+human for a screenshot) used to be the only way to answer "did what I asked
+for actually show up on screen" — `nostromo.show` and every other
+layout-mutating tool only ever report that the **daemon** accepted the call,
+not that anything painted. `nostromo.get_render_state` (and the
+`render_state` section on `nostromo.get_view_state`) answers that question as
+a query instead: it diffs the daemon's expected pane tree against a
+per-window report the macOS client sends at the end of every
+`DynamicFocusView.reconcile`, and returns `missing`/`extra`/`agrees` per
+attached window. See `docs/mcp/tools.md`'s "Render-state visibility (W1)"
+section for the full shape, error codes, and the "no report is not the same
+as agreement" rule.
+
 ## Code-pane render audit
 
 `CodeContentView`'s gutter (`LineNumberRulerView.drawHashMarksAndLabels`)
