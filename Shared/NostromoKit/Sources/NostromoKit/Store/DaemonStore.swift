@@ -39,8 +39,17 @@ public final class DaemonStore: ObservableObject {
     /// Perri PR review queue. Updated by `perri_state` broadcasts.
     @Published public private(set) var perriQueue: [PrQueueItem] = []
 
-    /// Perri current-PR detail snapshot. Updated by `perri_state` broadcasts.
-    @Published public private(set) var perriCurrentPr: PrSnapshot? = nil
+    /// Perri current-PR detail snapshot, per focus (W7/W8). Updated by
+    /// `perri_state` broadcasts, keyed by the frame's `tag` — a frame for one
+    /// focus never overwrites another's entry. An entry's lifetime matches
+    /// its focus's: pruned to the live focus set whenever `focuses` changes
+    /// (see `handle(_:)`'s `.focusListResp`/`.focusRegistryUpdated` arm).
+    @Published public private(set) var perriCurrentPr: [String: PrSnapshot] = [:]
+
+    /// The PR under review for `tag`, or `nil` when that focus has none.
+    public func perriCurrentPr(for tag: String) -> PrSnapshot? {
+        perriCurrentPr[tag]
+    }
 
     /// Fred mailbox snapshot. Updated by `fred_state` broadcasts; nil until first broadcast.
     @Published public private(set) var fredMailbox: MailboxSnapshot? = nil
@@ -74,8 +83,15 @@ public final class DaemonStore: ObservableObject {
     private var transcriptStores: [String: TranscriptStore] = [:]
     private var scrollKeys: [String: [String: Int]] = [:]
 
-    /// Focuses grouped + ordered for list rendering.
-    public var focusRows: [FocusRow] { buildFocusRows(Array(focuses.values)) }
+    /// Focuses grouped + ordered for list rendering. Each row's secondary
+    /// line is the focus's PR under review (W8) when it has one — see
+    /// `FocusPRLabel`.
+    public var focusRows: [FocusRow] {
+        buildFocusRows(Array(focuses.values)) { tag in
+            let pr = self.perriCurrentPr[tag]
+            return (pr?.repo, pr?.prNumber)
+        }
+    }
 
     /// Whether the daemon connection is currently alive.
     @Published public private(set) var connected: Bool = false
@@ -237,7 +253,7 @@ public final class DaemonStore: ObservableObject {
                     self?.motherJobs     = []
                     self?.motherPeeks    = [:]
                     self?.perriQueue     = []
-                    self?.perriCurrentPr = nil
+                    self?.perriCurrentPr = [:]
                     self?.fredMailbox    = nil
                     self?.fredCalendar   = nil
                     self?.teriTodos      = nil
@@ -339,6 +355,11 @@ public final class DaemonStore: ObservableObject {
 
         case .focusListResp(let list), .focusRegistryUpdated(let list):
             focuses = Dictionary(uniqueKeysWithValues: list.map { ($0.tag, $0) })
+            // Per-focus PR pin dies with its focus (W8, D3): a tag no longer
+            // in the registry can never be shown on screen again, so its
+            // entry must not linger in perriCurrentPr forever.
+            let liveTags = Set(focuses.keys)
+            perriCurrentPr = perriCurrentPr.filter { liveTags.contains($0.key) }
 
         case .motherJobs(let jobs):
             motherJobs = jobs
@@ -350,9 +371,13 @@ public final class DaemonStore: ObservableObject {
                 motherPeeks[snap.jobId] = snap
             }
 
-        case .perriState(let queue, let current):
-            perriQueue     = queue
-            perriCurrentPr = current
+        case .perriState(let tag, let queue, let current):
+            perriQueue = queue   // fleet-wide, unchanged regardless of tag
+            if let current {
+                perriCurrentPr[tag] = current
+            } else {
+                perriCurrentPr.removeValue(forKey: tag)
+            }
 
         case .fredState(let mailbox, let calendar):
             fredMailbox  = mailbox

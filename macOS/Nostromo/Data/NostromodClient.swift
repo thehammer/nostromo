@@ -119,8 +119,10 @@ enum ServerMsg {
     /// Auto-generated one-line summary derived from the first user message.
     /// Sent once per session lifetime by the daemon.
     case sessionSummaryUpdate(tag: String, summary: String)
-    /// Broadcast snapshot of Perri's PR review queue + current-PR detail.
-    case perriState(queue: [PRQueueItem], current: PRDetail?)
+    /// Broadcast snapshot of one focus's PR review state (W7/W8). `queue` is
+    /// fleet-wide (identical regardless of `tag`); `current` is per-focus —
+    /// the PR `tag`'s focus has under review, or `nil` when it has none.
+    case perriState(tag: String, queue: [PRQueueItem], current: PRDetail?)
     /// Broadcast snapshot of Fred's mailbox + calendar state.
     case fredState(mailbox: MailboxSnapshot, calendar: CalendarSnapshot)
     /// Broadcast snapshot of Teri's active todos.
@@ -793,7 +795,7 @@ class NostromodClient {
 
         case "perri_state":
             if let m = try? decoder.decode(PerriStateResp.self, from: raw) {
-                return .perriState(queue: m.queue.map(\.asPRQueueItem), current: m.current)
+                return .perriState(tag: m.tag, queue: m.queue.map(\.asPRQueueItem), current: m.current)
             }
 
         case "fred_state":
@@ -932,6 +934,7 @@ private struct SessionSummaryUpdateResp: Decodable { let tag: String; let summar
 /// Decodes the daemon wire shape and converts the queue items to the macOS
 /// `PRQueueItem` model (which is not `Decodable` itself).
 private struct PerriStateResp: Decodable {
+    let tag:     String
     let queue:   [PRQueueItemWire]
     let current: PRDetail?
 
