@@ -2019,6 +2019,118 @@ mod tests {
         }
     }
 
+    // ── W7 — D8: which focuses have departed ─────────────────────────────────
+    //
+    // Eviction is irreversible and this runs on every reconnect, so these
+    // guard the two ways a naive diff destroys live state.
+
+    fn focus(tag: &str) -> FocusMeta {
+        FocusMeta {
+            tag: tag.into(),
+            display_name: tag.into(),
+            agent_name: tag.into(),
+            project_name: None,
+            org: None,
+            is_built_in: false,
+            session_summary: None,
+        }
+    }
+
+    #[test]
+    fn a_tag_absent_from_two_consecutive_pushes_is_reported_departed() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            departed.is_empty(),
+            "one push is not enough to conclude a focus is gone"
+        );
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert_eq!(departed, vec!["cody".to_string()]);
+    }
+
+    #[test]
+    fn a_tag_that_comes_back_before_the_second_push_is_never_departed() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+
+        // A partial push — the shape a reconnecting client sends before it has
+        // finished loading.
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(departed.is_empty());
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        assert!(
+            departed.is_empty(),
+            "a focus that reappears must not be evicted"
+        );
+
+        // ...and the pending departure is genuinely cleared, not merely
+        // deferred: a later push that still has it must stay silent.
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        assert!(departed.is_empty());
+    }
+
+    /// D8a. `set_focus_registry` runs on every reconnect, and an empty push is
+    /// what a client sends before it has loaded anything — never a claim that
+    /// every focus was deleted.
+    #[test]
+    fn an_empty_push_evicts_nothing() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+
+        let (_, departed) = mgr.set_focus_registry(vec![]);
+        assert!(departed.is_empty(), "an empty push must evict nothing");
+
+        // And it must not have armed a departure that the next push confirms.
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            departed.is_empty(),
+            "an empty push must not arm a departure either"
+        );
+    }
+
+    /// D8b. `nostromo.create_focus` tags are absent from every Mac push,
+    /// because the Mac's `focuses.json` has never heard of them.
+    #[test]
+    fn a_daemon_created_focus_survives_any_number_of_mac_pushes() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.add_or_update_focus(focus("cody-core-1234"));
+
+        for _ in 0..3 {
+            let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+            assert!(
+                departed.is_empty(),
+                "a daemon-created focus must never be evicted by a Mac push"
+            );
+        }
+        assert!(mgr.is_daemon_created("cody-core-1234"));
+    }
+
+    #[test]
+    fn live_focus_tags_unions_daemon_creations_over_the_pushed_registry() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        assert_eq!(
+            mgr.live_focus_tags(),
+            None,
+            "before any push the daemon does not know which focuses exist, \
+             which is not the same as knowing none do"
+        );
+
+        mgr.add_or_update_focus(focus("cody-core-1234"));
+        mgr.set_focus_registry(vec![focus("perri")]);
+
+        let live = mgr.live_focus_tags().expect("a pushed registry is known");
+        assert!(live.contains("perri"));
+        assert!(
+            live.contains("cody-core-1234"),
+            "set_focus_registry replaces the registry with the Mac's view, so a \
+             daemon-created focus must be unioned back in or it reads as gone"
+        );
+    }
+
     #[test]
     fn an_event_with_a_focus_tag_the_daemon_knows_is_attributed_to_that_focus() {
         let mut mgr = SessionManager::with_store_path(tmp_store());
