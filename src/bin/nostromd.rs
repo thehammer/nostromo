@@ -593,6 +593,18 @@ fn perri_state_tags(session_mgr: &Arc<Mutex<SessionManager>>, prs: &PrSnapshots)
     if let Ok(mgr) = session_mgr.lock() {
         tags.extend(mgr.focus_registry().into_iter().map(|f| f.tag));
     }
+    // The `queue` half of every `PerriState` frame is fleet-wide (D9), but
+    // after W7 it can only travel *on* a per-focus frame. With no focus to
+    // address — before a client has pushed a registry, or briefly after one
+    // pushes an empty list on reconnect — the fleet would otherwise stop
+    // hearing about the queue entirely until the next non-empty push.
+    //
+    // The built-in `perri` focus exists in every deployment and cannot be
+    // removed (`FocusStore.remove` refuses it), so addressing it here is the
+    // honest floor rather than an invented recipient.
+    if tags.is_empty() {
+        tags.insert(nostromo::data::perri_current_pr::BUILTIN_PERRI_TAG.to_owned());
+    }
     tags.into_iter().collect()
 }
 
