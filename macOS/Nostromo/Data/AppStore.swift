@@ -69,6 +69,18 @@ class AppStore: ObservableObject {
     // Active focus agent tag — set by MainLayout on every focus switch.
     @Published private(set) var activeFocusAgentTag: String?      = nil
 
+    // Active focus SESSION tag — distinct from activeFocusAgentTag above.
+    // Built-in focuses have agentTag == sessionTag (Focus.sessionTag), which
+    // is why ActivityTickerView keying off activeFocusAgentTag looked fine
+    // by coincidence; a project-scoped focus's sessionTag is
+    // "\(agentTag)-\(id.prefix(8))", and that's what the daemon actually
+    // stamps every activity event's focus_tag with (NOSTROMO_FOCUS_TAG, see
+    // session_manager.rs), so the ticker must key off THIS, not the agent
+    // tag. Set by MainLayout alongside activeFocusAgentTag, not instead of
+    // it — PaceBarsView/StatusBarView are unrelated consumers of the agent
+    // tag and must not regress.
+    @Published private(set) var activeFocusSessionTag: String?    = nil
+
     // Agent-authored pane layout (Phase 1).
     // Keyed by focus tag; updated from FocusLayout / PaneContent broadcasts.
     // An entry's lifetime now exactly matches its focus's: `evictPerFocusState`
@@ -250,6 +262,7 @@ class AppStore: ObservableObject {
     // MARK: - Active focus
 
     func setActiveFocusAgentTag(_ tag: String?) { activeFocusAgentTag = tag }
+    func setActiveFocusSessionTag(_ tag: String?) { activeFocusSessionTag = tag }
 
     // MARK: - Decision modal (multi-window decision-sheet fix)
 

@@ -74,8 +74,12 @@ class MainLayout: NSView {
             statusBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             statusBar.heightAnchor.constraint(equalToConstant: Theme.statusBarHeight),
 
-            // Pace bars — above status bar, right column
-            paceBars.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+            // Pace bars — above status bar, right column. Offset by the
+            // ticker's own line height (not just statusBar.topAnchor) so the
+            // always-visible activity ticker gets its own reserved strip
+            // between pace bars and the status bar, instead of its 22pt line
+            // drawing on top of the bottom of the pace bars (F1 / D1).
+            paceBars.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -ActivityTickerView.lineHeight),
             paceBars.leadingAnchor.constraint(equalTo: tabBar.trailingAnchor),
             paceBars.trailingAnchor.constraint(equalTo: trailingAnchor),
             paceBars.heightAnchor.constraint(equalToConstant: Theme.paceBarsHeight),
@@ -166,6 +170,7 @@ class MainLayout: NSView {
 
         // Publish the initial active focus so StatusBarView has a tag from the start.
         AppStore.shared.setActiveFocusAgentTag(activeFocus.agentTag)
+        AppStore.shared.setActiveFocusSessionTag(activeFocus.sessionTag)
 
         showContent(for: activeFocus)
     }
@@ -178,6 +183,7 @@ class MainLayout: NSView {
         UserDefaults.standard.set(focus.id, forKey: udKey)
         UserDefaults.standard.synchronize()
         AppStore.shared.setActiveFocusAgentTag(focus.agentTag)
+        AppStore.shared.setActiveFocusSessionTag(focus.sessionTag)
         showContent(for: focus)
     }
 

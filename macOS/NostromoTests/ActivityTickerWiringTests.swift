@@ -62,6 +62,30 @@ final class ActivityTickerWiringTests: XCTestCase {
             "ActivityTickerView.swift exists but does not define an ActivityTickerView type — wrong file?")
     }
 
+    // MARK: - F4: keyed by session tag, not agent tag
+    //
+    // Focus.sessionTag (Models.swift) is `isBuiltIn ? agentTag :
+    // "\(agentTag)-\(id.prefix(8))"` — for built-in focuses (perri, mother,
+    // fred, teri) agentTag == sessionTag, so a ticker keyed by agentTag
+    // looked fine by coincidence; for a project-scoped focus they differ
+    // (e.g. sessionTag "claudia-C9D6B773" vs agentTag "claudia"), and the
+    // daemon stamps every activity event's focus_tag with the per-session
+    // tag (src/ipc/session_manager.rs's spawn_session), so an agentTag-keyed
+    // ticker looks up an empty/wrong model forever for any such focus.
+    func testSubscribesToActiveFocusSessionTagNotActiveFocusAgentTag() throws {
+        let source = try Self.tickerViewSource()
+        XCTAssertTrue(source.contains("$activeFocusSessionTag"), """
+            ActivityTickerView must subscribe to $activeFocusSessionTag — keying off \
+            $activeFocusAgentTag looks up the wrong (or an empty) model for any \
+            project-scoped focus, where Focus.agentTag != Focus.sessionTag.
+            """)
+        XCTAssertFalse(source.contains("$activeFocusAgentTag"), """
+            must not still subscribe to $activeFocusAgentTag — PaceBarsView and \
+            StatusBarView are the intended consumers of that key, on purpose; \
+            ActivityTickerView must not share it.
+            """)
+    }
+
     // MARK: - Helpers
 
     /// `ActivityTickerView.swift` is not compiled into this target, so it has
@@ -95,5 +119,59 @@ final class MainLayoutActivityTickerWiringTests: XCTestCase {
             MainLayout.swift must construct an ActivityTickerView — otherwise the \
             ticker exists but is never shown to the operator.
             """)
+    }
+
+    // MARK: - F4: MainLayout must also stamp the session tag
+    //
+    // MainLayout today only calls `AppStore.shared.setActiveFocusAgentTag(...)`
+    // at its two focus-switch call sites. It must additionally (not instead)
+    // call a session-tag setter with `focus.sessionTag` /
+    // `activeFocus.sessionTag` at those same sites, so ActivityTickerView (see
+    // ActivityTickerWiringTests above) has a correct key to subscribe to.
+    // `setActiveFocusAgentTag` has its own unrelated consumers (PaceBarsView,
+    // StatusBarView) keyed by agent tag on purpose, and must be left alone —
+    // this is an ADDITIONAL call, not a replacement.
+    func testMainLayoutCallsSetActiveFocusSessionTagWithFocusSessionTag() throws {
+        let source = try Self.mainLayoutSource()
+
+        // Tolerant proximity check, not an exact-line match — formatting
+        // (line breaks, `focus.sessionTag` vs `activeFocus.sessionTag`) may
+        // vary once this is actually implemented.
+        let pattern = "setActiveFocusSessionTag\\([^)]{0,80}\\.sessionTag\\)"
+        let regex = try NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators])
+        let range = NSRange(source.startIndex..., in: source)
+        XCTAssertGreaterThanOrEqual(regex.numberOfMatches(in: source, range: range), 1, """
+            MainLayout.swift must call setActiveFocusSessionTag(...) with a \
+            `.sessionTag` argument (e.g. `focus.sessionTag` or \
+            `activeFocus.sessionTag`) at its focus-switch call sites — otherwise \
+            ActivityTickerView has nothing correct to subscribe to, and the \
+            ticker keeps looking up the wrong (or an empty) model for any \
+            project-scoped focus.
+            """)
+    }
+
+    func testMainLayoutStillCallsSetActiveFocusAgentTagAtLeastTwice() throws {
+        // Guards against the setActiveFocusSessionTag call site ACCIDENTALLY
+        // replacing the existing setActiveFocusAgentTag calls rather than
+        // being added alongside them — PaceBarsView and StatusBarView still
+        // depend on activeFocusAgentTag and must not regress.
+        let source = try Self.mainLayoutSource()
+        let occurrences = source.components(separatedBy: "setActiveFocusAgentTag(").count - 1
+        XCTAssertGreaterThanOrEqual(occurrences, 2, """
+            MainLayout.swift must keep calling setActiveFocusAgentTag(...) at both \
+            existing focus-switch call sites — PaceBarsView and StatusBarView are \
+            unrelated consumers keyed by agent tag on purpose and must not regress \
+            when the new session-tag setter is added.
+            """)
+    }
+
+    // MARK: - Helpers
+
+    private static func mainLayoutSource() throws -> String {
+        let url = URL(fileURLWithPath: #filePath)     // …/macOS/NostromoTests/ActivityTickerWiringTests.swift
+            .deletingLastPathComponent()                // …/macOS/NostromoTests
+            .deletingLastPathComponent()                // …/macOS
+            .appendingPathComponent("Nostromo/UI/MainLayout.swift")
+        return try String(contentsOf: url, encoding: .utf8)
     }
 }
