@@ -98,7 +98,7 @@ pub async fn prefetch_into_cache(
     repo: &str,
     number: u64,
 ) -> Result<()> {
-    let source = PerriPrNativeSource::new(config.clone());
+    let source = PerriPrNativeSource::new(config.clone(), None);
     let snap = source.fetch_pr(client, repo, number).await?;
     let json = serde_json::to_string(&snap).context("serializing prefetch snapshot")?;
     let cache = pr_cache_path(&config.perri_state_dir(), repo, number);
@@ -141,8 +141,24 @@ struct PrCheckRunOutput {
 
 // ── Source ────────────────────────────────────────────────────────────────────
 
+/// Supplies the set of focus tags that currently exist, or `None` when the
+/// daemon does not yet know (no client has pushed a focus registry).
+///
+/// A closure rather than a handle to the session manager so this module stays
+/// free of `ipc` types — and so the "we don't know yet" case has to be spelled
+/// out by whoever wires it, rather than being an empty set that silently means
+/// "every focus is gone".
+pub type LiveFocuses = Arc<dyn Fn() -> Option<HashSet<String>> + Send + Sync>;
+
 pub struct PerriPrNativeSource {
     config: Config,
+    /// Backstop for a missed eviction (W7 — D8). Pins are *filtered* here, not
+    /// deleted: this runs on every poll, including while a client is
+    /// reconnecting and its registry is briefly partial, and a filter that
+    /// guesses wrong costs one cycle of a hidden PR while a delete that
+    /// guesses wrong is unrecoverable. Genuine deletion happens once, at the
+    /// focus-removal hook in `ipc::server`, behind the two-push guard.
+    live_focuses: Option<LiveFocuses>,
     /// ETag caches for every conditional GET this source makes: the three
     /// conversation reads (W3 — curated-agent-views) and, since W7, the two
     /// expensive ones — the raw diff and the head SHA's check-runs — so a
@@ -172,9 +188,10 @@ pub struct PerriPrNativeSource {
 
 impl PerriPrNativeSource {
     /// Build a source instance with fresh, empty conversation caches.
-    fn new(config: Config) -> Self {
+    fn new(config: Config, live_focuses: Option<LiveFocuses>) -> Self {
         PerriPrNativeSource {
             config,
+            live_focuses,
             etags: Arc::new(Mutex::new(HashMap::new())),
             body_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -197,7 +214,10 @@ impl PerriPrNativeSource {
     /// PR, and N concurrent bursts every poll interval — straight into
     /// GitHub's secondary rate limits. One task fetching sequentially spreads
     /// the same work out, and the accidental serialisation is a feature.
-    pub fn spawn(config: Config) -> (watch::Receiver<PrSnapshots>, RefreshTx) {
+    pub fn spawn(
+        config: Config,
+        live_focuses: Option<LiveFocuses>,
+    ) -> (watch::Receiver<PrSnapshots>, RefreshTx) {
         let (tx, rx) = watch::channel(crate::data::perri_pr::no_prs());
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
         let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<Option<String>>();
@@ -216,7 +236,7 @@ impl PerriPrNativeSource {
         let interval_secs = config.pr_diff_poll_secs;
 
         tokio::spawn(async move {
-            let source = PerriPrNativeSource::new(config);
+            let source = PerriPrNativeSource::new(config, live_focuses);
             source
                 .run(tx, &mut dirty_rx, &mut refresh_rx, interval_secs)
                 .await;
@@ -247,7 +267,7 @@ impl PerriPrNativeSource {
                     stale: true,
                     ..Default::default()
                 });
-                let pins = perri_current_pr::read_pins(&self.config.perri_state_dir());
+                let pins = self.live_pins(&self.config.perri_state_dir());
                 let map: HashMap<String, Arc<PrSnapshot>> = pins
                     .into_keys()
                     .map(|tag| (tag, Arc::clone(&error)))
@@ -317,6 +337,27 @@ impl PerriPrNativeSource {
     /// of `only` — that is how a cleared or evicted pin stops being published.
     ///
     /// Fetches are deduplicated by `(repo, number)`: two focuses reviewing the
+    /// Every pin on disk whose focus still exists (W7 — D8).
+    ///
+    /// With no `live_focuses` provider, or before any client has pushed a
+    /// focus registry, every pin is served: "the daemon does not know which
+    /// focuses exist" must not read as "no focus exists", which would blank
+    /// every focus's PR on a restart before the first push.
+    fn live_pins(&self, state_dir: &std::path::Path) -> HashMap<String, perri_current_pr::Pin> {
+        let mut pins = perri_current_pr::read_pins(state_dir);
+        let Some(live) = self.live_focuses.as_ref().and_then(|f| f()) else {
+            return pins;
+        };
+        pins.retain(|tag, _| {
+            let keep = live.contains(tag);
+            if !keep {
+                debug!(tag = %tag, "ignoring a pin whose focus no longer exists");
+            }
+            keep
+        });
+        pins
+    }
+
     /// same PR cost one round trip, not two, and share one snapshot `Arc`.
     async fn fetch_all(
         &self,
@@ -325,7 +366,7 @@ impl PerriPrNativeSource {
         only: Option<&HashSet<String>>,
     ) -> PrSnapshots {
         let state_dir = self.config.perri_state_dir();
-        let pins = perri_current_pr::read_pins(&state_dir);
+        let pins = self.live_pins(&state_dir);
 
         // Keep the ETag/body caches to what the live pins can actually ask
         // for. Without this a daemon working a queue accumulates every diff
@@ -1555,7 +1596,7 @@ mod tests {
     }
 
     fn test_source() -> PerriPrNativeSource {
-        PerriPrNativeSource::new(Config::default())
+        PerriPrNativeSource::new(Config::default(), None)
     }
 
     async fn mount_conversation_mocks(
@@ -1818,5 +1859,140 @@ mod tests {
         // fresh, uncached request went out instead), the "second call" mocks
         // would never have been hit and this would panic on drop.
         server.verify().await;
+    }
+
+    // ── the poll dedupes by (repo, number), not by focus (W7 — D5) ───────────
+    //
+    // Two focuses reviewing the same PR is an ordinary state after W7 (the
+    // pickup is never gated), and the PRD's queue/traffic story only holds if
+    // N focuses on one PR cost the fetch of one. These tests drive the real
+    // `fetch_all` against a `wiremock` GitHub and count what actually went out
+    // on the wire — never a wall-clock or a timing window.
+
+    /// A `GithubClient` whose *every* path — octocrab's typed calls and the
+    /// raw ETag'd ones — lands on `base`. `API_BASE_OVERRIDE` only redirects
+    /// the latter, so a client built the production way would still send the
+    /// PR-metadata call to api.github.com.
+    fn client_pointed_at(base: &str) -> GithubClient {
+        let octocrab = octocrab::Octocrab::builder()
+            .base_uri(base)
+            .expect("wiremock's uri is a valid base uri")
+            .personal_token("test-token".to_string())
+            .build()
+            .expect("octocrab client should build");
+        GithubClient {
+            octocrab,
+            http: reqwest::Client::new(),
+            token: "test-token".to_string(),
+        }
+    }
+
+    /// A source whose pins live in `dir`, with fresh (empty) ETag/body caches
+    /// so every scenario below starts from the same cold state and their
+    /// request counts are comparable.
+    fn source_pinned_at(dir: &Path) -> PerriPrNativeSource {
+        PerriPrNativeSource::new(
+            Config {
+                perri_state: Some(dir.to_path_buf()),
+                ..Config::default()
+            },
+            None,
+        )
+    }
+
+    /// Run one polling pass over `pins` (`(tag, repo, number)`) against a
+    /// throwaway mock GitHub, returning the published snapshots and how many
+    /// requests reached the server.
+    ///
+    /// Nothing is mounted: every call 404s, so `fetch_pr` fails and each pin
+    /// degrades to a stale snapshot. That is deliberate — the dedupe happens
+    /// *before* the fetch, so a failing fetch exercises exactly the same
+    /// keying while keeping the test hermetic, and the request count stays a
+    /// faithful measure of how many round trips a pass costs.
+    async fn poll_once(pins: &[(&str, &str, u64)]) -> (PrSnapshots, usize) {
+        let server = wiremock::MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        for (tag, repo, number) in pins {
+            perri_current_pr::write_pointer(dir.path(), tag, *number, repo, None).unwrap();
+        }
+
+        let source = source_pinned_at(dir.path());
+        let client = client_pointed_at(&server.uri());
+        let snaps = source
+            .fetch_all(&client, &crate::data::perri_pr::no_prs(), None)
+            .await;
+        let requests = server.received_requests().await.unwrap_or_default().len();
+        (snaps, requests)
+    }
+
+    #[tokio::test]
+    async fn two_focuses_pinned_to_the_same_pr_cost_the_same_github_traffic_as_one() {
+        let (_, one_focus) = poll_once(&[("perri", "Carefeed/admin-portal", 4526)]).await;
+        assert!(
+            one_focus > 0,
+            "the baseline pass must actually have hit GitHub, or the comparison below is vacuous"
+        );
+
+        let (snaps, two_focuses) = poll_once(&[
+            ("perri", "Carefeed/admin-portal", 4526),
+            ("operations", "Carefeed/admin-portal", 4526),
+        ])
+        .await;
+
+        assert_eq!(
+            two_focuses, one_focus,
+            "a second focus pinned to the same PR must add no GitHub traffic at all"
+        );
+        assert_eq!(
+            snaps.len(),
+            2,
+            "both focuses must still be published, deduped fetch or not"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&snaps["perri"], &snaps["operations"]),
+            "the two focuses must share the one fetched snapshot, not two copies of it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_dedupe_is_keyed_on_repo_and_number_so_two_different_prs_are_two_fetches() {
+        let (_, one_focus) = poll_once(&[("perri", "Carefeed/admin-portal", 4526)]).await;
+
+        // Same repo, different number — the case a repo-keyed dedupe would
+        // wrongly collapse into one fetch, silently serving focus B focus A's
+        // PR. This is the same line the PRD draws against repo-scoping.
+        let (same_repo, same_repo_requests) = poll_once(&[
+            ("perri", "Carefeed/admin-portal", 4526),
+            ("operations", "Carefeed/admin-portal", 4527),
+        ])
+        .await;
+        assert!(
+            same_repo_requests > one_focus,
+            "two PRs in one repo are two PRs: {same_repo_requests} requests must exceed the \
+             {one_focus} a single pin costs"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&same_repo["perri"], &same_repo["operations"]),
+            "two different PRs must never share a snapshot, however close their repos"
+        );
+        assert_eq!(same_repo["perri"].pr_number, Some(4526));
+        assert_eq!(same_repo["operations"].pr_number, Some(4527));
+
+        // Different repo, same number — the mirror case, which a
+        // number-keyed dedupe would collapse.
+        let (different_repo, different_repo_requests) = poll_once(&[
+            ("perri", "Carefeed/admin-portal", 42),
+            ("operations", "Carefeed/operations", 42),
+        ])
+        .await;
+        assert!(
+            different_repo_requests > one_focus,
+            "the same number in two repos is two PRs"
+        );
+        assert_eq!(different_repo["perri"].repo, "Carefeed/admin-portal");
+        assert_eq!(different_repo["operations"].repo, "Carefeed/operations");
     }
 }

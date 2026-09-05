@@ -316,7 +316,9 @@ pub async fn run(
     let (pr_rx, perri_pr_refresh_tx_opt) = if bash_fallback {
         (PerriPrSource::spawn(config.clone()), None)
     } else {
-        let (rx, tx) = PerriPrNativeSource::spawn(config.clone());
+        // The TUI is a single-surface host with no focus registry to filter
+        // against — it only ever has the built-in Perri focus's pin.
+        let (rx, tx) = PerriPrNativeSource::spawn(config.clone(), None);
         (rx, Some(tx))
     };
 

@@ -417,6 +417,28 @@ impl PaneRegistry {
         Ok(tree)
     }
 
+    /// Forget everything the registry knows about `tag`, because the focus
+    /// itself is gone (W7 — D8). Returns whether there was anything to forget.
+    ///
+    /// Every per-focus map is dropped, not just the tree: a focus that no
+    /// longer exists must not leave bindings that the broadcasters would keep
+    /// fetching for, nor a `painted` set that would suppress the first paint of
+    /// a *later* focus that reuses the tag. Tag reuse is not hypothetical —
+    /// `nostromo.create_focus` derives its tag deterministically from
+    /// `(agent, title)`, so create/close/recreate yields the same tag, and
+    /// `get_or_init` would otherwise resurrect the dead focus's tree under it.
+    pub fn remove_focus(&mut self, tag: &str) -> bool {
+        let had_tree = self.trees.remove(tag).is_some();
+        let had_bindings = self.bindings.remove(tag).is_some();
+        self.painted.remove(tag);
+        self.view_focus_lru.remove(tag);
+        let removed = had_tree || had_bindings;
+        if removed {
+            self.persist();
+        }
+        removed
+    }
+
     /// `set_pane_layout`: re-declare the layout for `tag`.
     ///
     /// Accepts two payload shapes (B3):
