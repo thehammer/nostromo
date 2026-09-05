@@ -41,6 +41,10 @@ struct Focus: Codable, Hashable, Identifiable {
     var org: String? = nil
     /// Phase 2: auto-generated session summary for disambiguation. Nil until Phase 2 ships.
     var sessionSummary: String? = nil
+    /// The tag the *daemon* knows this focus by, for a focus the daemon created
+    /// itself (`nostromo.create_focus`). Nil for every focus this app created,
+    /// which is the overwhelming majority — see `sessionTag`.
+    var daemonTag: String? = nil
 
     /// Repo display name derived from the last path component of `projectPath`,
     /// converting kebab-case to Title Case (e.g. "admin-portal" → "Admin Portal").
@@ -55,8 +59,24 @@ struct Focus: Codable, Hashable, Identifiable {
         return "\(agentTag.capitalized) in \(repo)"
     }
 
+    /// The tag the daemon addresses this focus by — the key for pane content,
+    /// layouts, session routing and the registry push.
+    ///
+    /// A daemon-created focus arrives already *having* a tag, so `daemonTag`
+    /// is returned verbatim and the derivation below is skipped. That
+    /// derivation is only meaningful for a focus this app minted, whose `id`
+    /// is a UUID: applied to a daemon focus it mangles the tag rather than
+    /// deriving one, because `NostromodClient.FocusMetaWire.toFocus()` stores
+    /// the wire tag in `id`. `cody-core-1234` (agent `cody`) came back out as
+    /// `cody-` + `cody-cor` = `cody-cody-cor`, a tag naming nothing, which
+    /// broke two things at once: the Mac pushed that phantom into the daemon's
+    /// focus registry as a brand-new focus, and every client-side lookup
+    /// (`focusLayouts`, `session(for:)`, per-focus eviction) missed the real
+    /// tag the daemon broadcasts under, so a daemon-created focus's panes
+    /// never painted.
     var sessionTag: String {
-        isBuiltIn ? agentTag : "\(agentTag)-\(id.prefix(8))"
+        if let daemonTag, !daemonTag.isEmpty { return daemonTag }
+        return isBuiltIn ? agentTag : "\(agentTag)-\(id.prefix(8))"
     }
 
     /// Resolved org bucket for sidebar grouping. Legacy focuses (saved before the `org`
@@ -115,6 +135,11 @@ extension Focus {
         quickActions   = try c.decodeIfPresent([QuickAction].self, forKey: .quickActions) ?? []
         org            = try c.decodeIfPresent(String.self, forKey: .org)
         sessionSummary = try c.decodeIfPresent(String.self, forKey: .sessionSummary)
+        // Additive and optional: a `focuses.json` written before this field
+        // existed decodes it as nil and keeps exactly the `sessionTag` it had.
+        // Persisted daemon-created focuses therefore keep their mangled tag —
+        // the status quo for those entries, and deliberately not rewritten.
+        daemonTag      = try c.decodeIfPresent(String.self, forKey: .daemonTag)
     }
 }
 

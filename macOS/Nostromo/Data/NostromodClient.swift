@@ -84,6 +84,13 @@ struct FocusCreatedMeta: Decodable {
     }
 
     /// Convert to a `Focus` model for insertion into `FocusStore`.
+    ///
+    /// `tag` goes into **both** `id` and `daemonTag`. `id` alone is not enough:
+    /// `Focus.sessionTag` — the tag every client-side lookup and the registry
+    /// push are keyed on — derives from `id` for an app-minted focus, and that
+    /// derivation mangles a tag that is already a tag. `daemonTag` is what
+    /// makes `sessionTag` return the daemon's own tag verbatim, so the focus
+    /// the daemon created and the focus this app renders are the same focus.
     func toFocus() -> Focus {
         Focus(
             id:          tag,
@@ -91,7 +98,8 @@ struct FocusCreatedMeta: Decodable {
             projectPath: nil,   // daemon-spawned focuses carry no absolute path
             isBuiltIn:   isBuiltIn,
             org:         org,
-            sessionSummary: sessionSummary
+            sessionSummary: sessionSummary,
+            daemonTag:   tag
         )
     }
 }
