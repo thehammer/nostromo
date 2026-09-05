@@ -1247,13 +1247,19 @@ impl SessionManager {
     /// It is the *unexpired* exemptions specifically, for the same reason the
     /// exemption expires at all: a tag the client has acknowledged now lives
     /// or dies by the registry. Chaining the whole set unconditionally would
-    /// report a departed daemon-created focus as live forever, and
-    /// `retain_pins` — which asks exactly this question — could never collect
-    /// its pin.
+    /// report a departed daemon-created focus as live forever — and since
+    /// [`reconcilable_focus_tags`] is this set plus `pending_departures`, it
+    /// would inherit the same permanent membership, so `retain_pins` could
+    /// never collect that focus's pin.
     ///
     /// `None` rather than an empty set is the point: "nobody has told us which
     /// focuses exist" and "no focus exists" must not be the same value, or
     /// every caller has to remember to special-case the difference.
+    ///
+    /// See [`reconcilable_focus_tags`] for the sibling question this one is
+    /// deliberately *not* answering: whether a tag's pin may be deleted.
+    ///
+    /// [`reconcilable_focus_tags`]: SessionManager::reconcilable_focus_tags
     pub fn live_focus_tags(&self) -> Option<HashSet<String>> {
         let tags: HashSet<String> = self
             .focus_registry

@@ -223,25 +223,13 @@ fn focus_meta(tag: &str) -> nostromo::ipc::protocol::FocusMeta {
 
 /// Stand up a server and return `(socket_path, perri_state_dir, tmp, server)`.
 /// The server and tempdir are returned so the caller keeps them alive.
+///
+/// Thin wrapper over [`serve_with_session_mgr`] that drops the shared
+/// `SessionManager` handle: every test in this file except the D8b one below
+/// reaches a focus the way the Mac does (`FocusRegistryPush`) and never needs
+/// it directly.
 async fn serve() -> (std::path::PathBuf, std::path::PathBuf, TempDir, Server) {
-    let tmp = TempDir::new().unwrap();
-    let socket_path = tmp.path().join("nostromd.sock");
-    let perri_state_dir = tmp.path().join("perri-state");
-    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
-        tmp.path().join("sessions.json"),
-    )));
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(
-        nostromo::ipc::decisions::DecisionRegistry::default(),
-    ));
-    let server = Server::bind(
-        &socket_path,
-        Arc::clone(&pty_mgr),
-        Arc::clone(&session_mgr),
-        perri_state_dir.clone(),
-        Arc::clone(&decisions),
-    )
-    .unwrap();
+    let (socket_path, perri_state_dir, tmp, server, _session_mgr) = serve_with_session_mgr().await;
     (socket_path, perri_state_dir, tmp, server)
 }
 
