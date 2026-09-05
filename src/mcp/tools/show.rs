@@ -45,8 +45,8 @@ use crate::mcp::tools::apply_layout::{
     SOURCE_PR_DIFF, SOURCE_PR_QUEUE, SOURCE_TICKET,
 };
 use crate::mcp::views::{
-    self, config as views_config, derive, placement, tree as view_tree, PlacementError, ShowRequest,
-    ViewIdentity, ViewType,
+    self, config as views_config, derive, placement, tree as view_tree, PlacementError,
+    ShowRequest, ViewIdentity, ViewType,
 };
 
 /// Handle `nostromo.show`.
@@ -194,7 +194,7 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
         &tag,
         &placement.pane_id,
         content,
-        Some(freshness(source, state)),
+        Some(freshness(source, state, Some(&tag))),
         address(source, Some(&params)),
     );
 
@@ -230,7 +230,11 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
 /// Returns the pane ids that were closed, empty when this was a no-op (no
 /// curated regions for `tag`, or nothing stale) — so a caller like
 /// `perri.clear_current_pr` can report truthfully what it tore down.
-pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<(&str, u64)>) -> Vec<String> {
+pub fn reset_for_pr_change(
+    daemon: &DaemonMcpBackend,
+    tag: &str,
+    new_pr: Option<(&str, u64)>,
+) -> Vec<String> {
     let Ok(cfg) = views_config::load() else {
         return Vec::new();
     };
@@ -329,10 +333,7 @@ fn identity_from_target(
     target: Option<&Value>,
 ) -> Result<ViewIdentity, PlacementError> {
     let bad = |what: &str| {
-        PlacementError::InvalidTarget(format!(
-            "`{}` needs target {what}",
-            view_type.as_str()
-        ))
+        PlacementError::InvalidTarget(format!("`{}` needs target {what}", view_type.as_str()))
     };
 
     if view_type == ViewType::ReviewQueue {
@@ -362,7 +363,9 @@ fn identity_from_target(
                 .get("number")
                 .and_then(|v| v.as_u64())
                 .filter(|n| *n > 0)
-                .ok_or_else(|| bad("`{repo, number}`; `number` is missing or not a positive integer"))?;
+                .ok_or_else(|| {
+                    bad("`{repo, number}`; `number` is missing or not a positive integer")
+                })?;
             Ok(ViewIdentity::Pr {
                 repo: repo.to_string(),
                 number,
@@ -447,11 +450,9 @@ fn source_params(
     }
 
     let anchor = match args.get("anchor").filter(|v| !v.is_null()) {
-        Some(v) => Some(
-            serde_json::from_value::<Anchor>(v.clone()).map_err(|e| {
-                PlacementError::InvalidAnchor(format!("`anchor` is not a valid anchor: {e}"))
-            })?,
-        ),
+        Some(v) => Some(serde_json::from_value::<Anchor>(v.clone()).map_err(|e| {
+            PlacementError::InvalidAnchor(format!("`anchor` is not a valid anchor: {e}"))
+        })?),
         None => None,
     };
 
@@ -634,14 +635,17 @@ fn current_view_state(
     cfg: &views::ViewPlacementConfig,
     tag: &str,
 ) -> views::ViewState {
-    let tree = reg.get(tag).cloned().unwrap_or_else(|| {
-        crate::ipc::protocol::PaneTree::repl_leaf()
-    });
+    let tree = reg
+        .get(tag)
+        .cloned()
+        .unwrap_or_else(crate::ipc::protocol::PaneTree::repl_leaf);
     let bindings = bindings_for(reg, tag);
     let live = tree.pane_ids();
     let order = reg.view_focus_order(tag, &live);
-    let snapshot = state.perri_pr_rx.borrow().clone();
-    let current_pr = current_pr_of(snapshot.as_ref());
+    // W7 — D3: the focus's own PR under review, never the daemon's. This is
+    // what decides which curated review tabs a focus shows.
+    let snapshot = state.pr_for(Some(tag));
+    let current_pr = current_pr_of(snapshot.as_deref());
     derive::view_state(cfg, &tree, &bindings, current_pr, &order)
 }
 
@@ -670,20 +674,20 @@ pub fn descriptor() -> Value {
     json!({
         "name": "nostromo.show",
         "description": "\
-Show one curated view in the operator's window and bring it to front. This is the \
-deliberate attention-directing surface: name a view type from the closed vocabulary, \
-say which one, optionally say where to look and why, and the placement engine decides \
-where it lands. Returns where it landed so you can refer to it in conversation \
-(\"the File tab\") rather than guessing.\n\n\
-Types and their targets:\n\
-  review_queue    — the PR review queue. No target. anchor/emphasis: a queue row.\n\
-  pr_conversation — a PR's description and comment threads. target {repo, number}.\n\
-  pr_diff         — a PR's change, line-addressable. target {repo, number}.\n\
-  file            — a file at a revision, line-addressable. target {path, revision?}.\n\
-  ticket          — an issue-tracker ticket. target {provider, key}.\n\n\
-Showing the same (type, target) twice reuses one tab and re-anchors it — showing the \
-same file at a different line is the same view, not a second tab. `activity` is not \
-showable: the ambient activity stream is populated only by what actually happened.",
+    Show one curated view in the operator's window and bring it to front. This is the \
+    deliberate attention-directing surface: name a view type from the closed vocabulary, \
+    say which one, optionally say where to look and why, and the placement engine decides \
+    where it lands. Returns where it landed so you can refer to it in conversation \
+    (\"the File tab\") rather than guessing.\n\n\
+    Types and their targets:\n\
+    review_queue    — the PR review queue. No target. anchor/emphasis: a queue row.\n\
+    pr_conversation — a PR's description and comment threads. target {repo, number}.\n\
+    pr_diff         — a PR's change, line-addressable. target {repo, number}.\n\
+    file            — a file at a revision, line-addressable. target {path, revision?}.\n\
+    ticket          — an issue-tracker ticket. target {provider, key}.\n\n\
+    Showing the same (type, target) twice reuses one tab and re-anchors it — showing the \
+    same file at a different line is the same view, not a second tab. `activity` is not \
+    showable: the ambient activity stream is populated only by what actually happened.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -780,7 +784,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: TicketRegistryState::default(),
         };
         (McpSharedState::for_daemon(backend), rx)
@@ -939,7 +945,10 @@ mod tests {
         assert_eq!(out["pane_id"], "queue");
         assert_eq!(out["label"], "Queue");
         assert_eq!(out["tab_index"], 0);
-        assert_eq!(out["reused"], true, "the queue pane was already the queue view");
+        assert_eq!(
+            out["reused"], true,
+            "the queue pane was already the queue view"
+        );
         assert_eq!(out["frontmost"], true);
         assert_eq!(out["evicted"], Value::Null);
 
@@ -1026,10 +1035,34 @@ mod tests {
         );
 
         for (view_type, identity) in [
-            (ViewType::PrDiff, ViewIdentity::Pr { repo: "o/r".into(), number: 1 }),
-            (ViewType::PrConversation, ViewIdentity::Pr { repo: "o/r".into(), number: 1 }),
-            (ViewType::File, ViewIdentity::File { path: "a.rs".into(), revision: None }),
-            (ViewType::Ticket, ViewIdentity::Ticket { provider: "jira".into(), key: "C-1".into() }),
+            (
+                ViewType::PrDiff,
+                ViewIdentity::Pr {
+                    repo: "o/r".into(),
+                    number: 1,
+                },
+            ),
+            (
+                ViewType::PrConversation,
+                ViewIdentity::Pr {
+                    repo: "o/r".into(),
+                    number: 1,
+                },
+            ),
+            (
+                ViewType::File,
+                ViewIdentity::File {
+                    path: "a.rs".into(),
+                    revision: None,
+                },
+            ),
+            (
+                ViewType::Ticket,
+                ViewIdentity::Ticket {
+                    provider: "jira".into(),
+                    key: "C-1".into(),
+                },
+            ),
         ] {
             let params =
                 source_params(view_type, &identity, &json!({ "reason": "because" })).unwrap();
@@ -1205,7 +1238,11 @@ mod tests {
         seed_curated(&state, "perri");
         assert!(view_tree::tabs_region(&tree_of(&state, "perri").unwrap(), "detail").is_none());
 
-        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
         assert!(view_tree::tabs_region(&tree_of(&state, "perri").unwrap(), "detail").is_some());
     }
 
@@ -1215,7 +1252,11 @@ mod tests {
         seed_curated(&state, "perri");
         let before = tree_of(&state, "perri").unwrap();
 
-        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
         show_ok(
             &state,
             json!({ "type": "pr_conversation", "target": pr_target(94) }),
@@ -1231,14 +1272,21 @@ mod tests {
         let after = tree_of(&state, "perri").unwrap();
         assert!(view_tree::tabs_region(&after, "detail").is_none());
         assert_eq!(after, before, "back to exactly the pre-show tree");
-        assert_eq!(after.pane_ids().iter().filter(|id| *id == "repl").count(), 1);
+        assert_eq!(
+            after.pane_ids().iter().filter(|id| *id == "repl").count(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn changing_the_pr_under_review_closes_the_previous_prs_tabs() {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
         show_ok(
             &state,
             json!({ "type": "pr_conversation", "target": pr_target(94) }),
@@ -1261,7 +1309,10 @@ mod tests {
         let reg = registry(&state);
         let reg = reg.lock().unwrap();
         for gone in old_ids.iter().filter(|id| id.starts_with("detail.")) {
-            assert!(reg.binding_for("perri", gone).is_none(), "{gone} still bound");
+            assert!(
+                reg.binding_for("perri", gone).is_none(),
+                "{gone} still bound"
+            );
         }
     }
 
@@ -1306,7 +1357,10 @@ mod tests {
         {
             let reg = registry(&state);
             let reg = reg.lock().unwrap();
-            assert!(reg.binding_for("perri", "diff").is_some(), "the diff pane keeps its binding");
+            assert!(
+                reg.binding_for("perri", "diff").is_some(),
+                "the diff pane keeps its binding"
+            );
             assert!(reg.binding_for("perri", "queue").is_some());
         }
         assert!(
@@ -1321,7 +1375,11 @@ mod tests {
     async fn showing_the_same_view_twice_reuses_one_tab_and_re_addresses_it() {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        let first = show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        let first = show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
         let second = show_ok(
             &state,
             json!({
@@ -1335,8 +1393,12 @@ mod tests {
         assert_eq!(second["pane_id"], first["pane_id"]);
         assert_eq!(second["reused"], true);
         assert_eq!(
-            tree_of(&state, "perri").unwrap().pane_ids().iter()
-                .filter(|id| id.starts_with("detail.")).count(),
+            tree_of(&state, "perri")
+                .unwrap()
+                .pane_ids()
+                .iter()
+                .filter(|id| id.starts_with("detail."))
+                .count(),
             1,
             "one tab, not two"
         );
@@ -1346,7 +1408,11 @@ mod tests {
     async fn a_reused_show_re_binds_the_pane_with_the_new_address_params() {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
         let out = show_ok(
             &state,
             json!({
@@ -1390,7 +1456,9 @@ mod tests {
     #[test]
     fn tree_changed_since_decide_is_false_for_two_equal_trees_including_none_and_none() {
         assert!(!tree_changed_since_decide(None, &None));
-        let t = PaneTree::Leaf { pane_id: "repl".into() };
+        let t = PaneTree::Leaf {
+            pane_id: "repl".into(),
+        };
         assert!(!tree_changed_since_decide(Some(&t), &Some(t.clone())));
     }
 
@@ -1406,9 +1474,15 @@ mod tests {
             direction: SplitDirection::Vertical,
             children: vec![PaneTree::Tabs {
                 children: vec![
-                    PaneTree::Leaf { pane_id: "detail.0".into() },
-                    PaneTree::Leaf { pane_id: "detail.1".into() },
-                    PaneTree::Leaf { pane_id: "detail.2".into() },
+                    PaneTree::Leaf {
+                        pane_id: "detail.0".into(),
+                    },
+                    PaneTree::Leaf {
+                        pane_id: "detail.1".into(),
+                    },
+                    PaneTree::Leaf {
+                        pane_id: "detail.2".into(),
+                    },
                 ],
                 labels: vec!["A".into(), "B".into(), "C".into()],
                 active: 0,
@@ -1420,8 +1494,12 @@ mod tests {
             direction: SplitDirection::Vertical,
             children: vec![PaneTree::Tabs {
                 children: vec![
-                    PaneTree::Leaf { pane_id: "detail.0".into() },
-                    PaneTree::Leaf { pane_id: "detail.2".into() },
+                    PaneTree::Leaf {
+                        pane_id: "detail.0".into(),
+                    },
+                    PaneTree::Leaf {
+                        pane_id: "detail.2".into(),
+                    },
                 ],
                 labels: vec!["A".into(), "C".into()],
                 active: 0,
@@ -1429,7 +1507,10 @@ mod tests {
             }],
             ratios: vec![1.0],
         };
-        assert!(tree_changed_since_decide(Some(&two_tabs), &Some(three_tabs)));
+        assert!(tree_changed_since_decide(
+            Some(&two_tabs),
+            &Some(three_tabs)
+        ));
     }
 
     #[test]
@@ -1462,7 +1543,10 @@ mod tests {
         // channel and the vocabulary has stopped being closed.
         let props = descriptor()["inputSchema"]["properties"].clone();
         for forbidden in ["content", "text", "html", "body", "modal", "payload"] {
-            assert!(props.get(forbidden).is_none(), "`{forbidden}` must not exist");
+            assert!(
+                props.get(forbidden).is_none(),
+                "`{forbidden}` must not exist"
+            );
         }
         assert!(!descriptor().to_string().contains("\"modal\""));
     }

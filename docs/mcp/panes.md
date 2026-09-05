@@ -1116,8 +1116,8 @@ Two things a client must do to stay correct under recycling:
 
 | Tool | Effect |
 |------|--------|
-| `perri.load_pr({ number, repo, highlights? })` | Writes `current-pr.json` + touches `.dirty` → native watcher fetches PR diff |
-| `perri.clear_current_pr()` | Removes `current-pr.json` + touches `.dirty` → closes stale curated tabs (R8) and pushes the no-PR placeholder to whatever live pane holds PR content, wherever the layout template put it |
+| `perri.load_pr({ number, repo, highlights?, view_id? })` | Writes the resolved focus's `current-pr/<tag>.json` + touches `.dirty` → native watcher fetches that focus's PR diff. Refused with `unidentified_caller` if no focus can be resolved (W7) |
+| `perri.clear_current_pr({ view_id? })` | Removes the calling focus's `current-pr/<tag>.json`, and only that focus's, + touches `.dirty` → closes stale curated tabs (R8) and pushes the no-PR placeholder to whatever live pane holds PR content, wherever the layout template put it |
 | `perri.set_selected_index({ index })` | Moves the queue selection cursor |
 
 ---
@@ -1293,7 +1293,20 @@ change, not arbitrary code execution:
 | `source` | reads | produces |
 |---|---|---|
 | `perri.list_pr_queue` | `perri_queue_rx` | `PrList` — the live PR queue |
-| `perri.get_current_pr` | `perri_pr_rx` | `Text` — a plain-text summary (title, `owner/repo#number`, author, `+adds/-dels`, changed files), or the pane's `placeholder` when no PR is loaded |
+| `perri.get_current_pr` | `perri_pr_rx` | `Text` — a plain-text summary (title, `owner/repo#number`, author, `+adds/-dels`, changed files), or the pane's `placeholder` when this focus has no PR under review |
+
+**Every PR-backed fetch resolves against the pane's own focus (W7).**
+`perri_pr_rx` carries one snapshot per focus, not one for the machine, and a
+fetch reads the entry for the focus the pane belongs to. A pane in a focus with
+no PR renders its `placeholder` — it never falls through to whichever focus
+picked one up most recently. That fall-through was the 2026-09-04 incident: a
+focus reviewing `admin-portal#4526` had a file re-anchor resolve against
+`operations#42`, a PR a *different* focus had just picked up, and come back
+`unknown_path` with nothing on screen. The pane's *root* was already per-focus;
+only its *revision* was global.
+
+The queue (`perri.list_pr_queue`) is deliberately **not** per-focus — every
+focus sees the same queue. Only the PR under review is scoped.
 
 `perri.get_current_pr`'s fetcher is intentionally a plain snapshot summary —
 rendering agent "highlights" requires the LLM and cannot happen server-side.

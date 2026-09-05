@@ -27,13 +27,13 @@
 //! fetch/freshness dispatch so the two can never disagree about content. See
 //! `docs/mcp/panes.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::debug;
 
-use crate::data::perri_pr::PrSnapshot;
+use crate::data::perri_pr::{changed_tags, no_prs, PrSnapshots};
 use crate::data::perri_queue::PrQueueSnapshot;
 use crate::ipc::pane_registry::PaneContentProvider;
 use crate::ipc::protocol::{PaneAddress, PaneContentWire, PaneFreshness, ServerMsg};
@@ -174,7 +174,7 @@ pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
         .filter_map(|(tag, pane_id, binding)| {
             let (content, address) =
                 fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())?;
-            let fr = apply_layout::freshness(&binding.source, state);
+            let fr = apply_layout::freshness(&binding.source, state, Some(&tag));
             Some(ServerMsg::PaneContent {
                 tag,
                 pane_id,
@@ -204,7 +204,7 @@ pub fn repaint_bound_panes(state: &McpSharedState) {
         else {
             continue;
         };
-        let fr = apply_layout::freshness(&binding.source, state);
+        let fr = apply_layout::freshness(&binding.source, state, Some(&tag));
         broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }
 }
@@ -240,9 +240,18 @@ type LastSent = HashMap<(String, String), (PaneContentWire, PaneFreshness, Optio
 pub async fn run_pane_source_broadcaster(
     state: McpSharedState,
     mut queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
-    mut pr_rx: watch::Receiver<Option<PrSnapshot>>,
+    mut pr_rx: watch::Receiver<PrSnapshots>,
 ) {
     let mut last_sent: LastSent = HashMap::new();
+    // Deliberately *not* seeded from the channel's current value. This task is
+    // spawned, so a snapshot can land between the spawn and this line; seeding
+    // from the channel would make that snapshot its own baseline, `changed_tags`
+    // would report nothing moved, and the tag's first paint would be dropped on
+    // the floor. The honest baseline is "this broadcaster has sent nothing yet",
+    // which is what `last_sent` says too. The cost of starting empty is at most
+    // one redundant fetch on the first change — `push_for_source` still dedupes
+    // against `last_sent`, so it cannot produce a duplicate visible push.
+    let mut previous_prs: PrSnapshots = no_prs();
 
     let mut ticker = tokio::time::interval(STALENESS_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -251,17 +260,30 @@ pub async fn run_pane_source_broadcaster(
         tokio::select! {
             result = queue_rx.changed() => {
                 if result.is_err() { break; } // sender dropped — clean exit
-                push_for_source(&state, SOURCE_PR_QUEUE, &mut last_sent);
+                // The queue is fleet-wide (W7 — D9): every focus's queue pane
+                // repaints.
+                push_for_source(&state, SOURCE_PR_QUEUE, None, &mut last_sent);
             }
             result = pr_rx.changed() => {
                 if result.is_err() { break; }
-                // All three PR-backed sources read the same snapshot, so one
-                // watch change feeds all of them. `nostromo.get_file` is
-                // deliberately absent here: a file pane is a snapshot of a
-                // revision, and there is no channel that could tell it
-                // otherwise (W2 — D2).
-                for source in apply_layout::PR_BACKED_SOURCES {
-                    push_for_source(&state, source, &mut last_sent);
+                // W7 — D7: repaint only the focuses whose PR actually moved.
+                // The channel now carries every focus's PR, so a pickup in one
+                // focus would otherwise re-fetch and re-diff every focus's
+                // panes — and `PrSnapshot` holds a diff of up to 500 KB, so
+                // "did this tag change?" is a pointer comparison on the inner
+                // `Arc`, never a deep `PartialEq`.
+                let current: PrSnapshots = pr_rx.borrow_and_update().clone();
+                let changed = changed_tags(&previous_prs, &current);
+                previous_prs = current;
+                if !changed.is_empty() {
+                    // All three PR-backed sources read the same snapshot, so one
+                    // watch change feeds all of them. `nostromo.get_file` is
+                    // deliberately absent here: a file pane is a snapshot of a
+                    // revision, and there is no channel that could tell it
+                    // otherwise (W2 — D2).
+                    for source in apply_layout::PR_BACKED_SOURCES {
+                        push_for_source(&state, source, Some(&changed), &mut last_sent);
+                    }
                 }
             }
             _ = ticker.tick() => {
@@ -277,7 +299,16 @@ pub async fn run_pane_source_broadcaster(
 /// skipping any pane whose `(content, freshness)` is unchanged since the last
 /// push (the daemon-side half of "an idempotent push is invisible") and any
 /// pane whose fetch fails (the automatic path never surfaces `Error`).
-fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSent) {
+///
+/// `only_tags` restricts the repaint to those focuses. `None` means every
+/// focus, which is right for the fleet-wide queue and wrong for the per-focus
+/// PR (W7 — D7).
+fn push_for_source(
+    state: &McpSharedState,
+    source: &str,
+    only_tags: Option<&HashSet<String>>,
+    last_sent: &mut LastSent,
+) {
     let Some(daemon) = &state.daemon else {
         return;
     };
@@ -287,7 +318,7 @@ fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSen
         .unwrap()
         .all_bindings()
         .into_iter()
-        .filter(|(_, _, b)| b.source == source)
+        .filter(|(tag, _, b)| b.source == source && only_tags.is_none_or(|tags| tags.contains(tag)))
         .map(|(tag, pane_id, b)| (tag, pane_id, b.params))
         .collect();
 
@@ -296,7 +327,7 @@ fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSen
         else {
             continue;
         };
-        let fr = apply_layout::freshness(source, state);
+        let fr = apply_layout::freshness(source, state, Some(&tag));
         let key = (tag.clone(), pane_id.clone());
         if last_sent.get(&key) == Some(&(content.clone(), fr.clone(), address.clone())) {
             continue;
@@ -324,7 +355,7 @@ fn reevaluate_staleness(state: &McpSharedState, last_sent: &mut LastSent) {
             continue;
         };
         let source = binding.source;
-        let fr = apply_layout::freshness(&source, state);
+        let fr = apply_layout::freshness(&source, state, Some(&tag));
         if prev_fr.badly_stale == fr.badly_stale {
             continue;
         }
@@ -349,7 +380,7 @@ mod tests {
     use serde_json::{json, Value};
     use tokio::sync::{broadcast, watch};
 
-    use crate::data::perri_pr::PrSnapshot;
+    use crate::data::perri_pr::{no_prs, one_pr, PrSnapshot, PrSnapshots};
     use crate::data::perri_queue::PrQueueSnapshot;
     use crate::ipc::pane_registry::{PaneRegistry, SplitPosition, REPL_PANE_ID};
     use crate::ipc::protocol::{PaneContentWire, PaneFreshness, ServerMsg};
@@ -364,7 +395,7 @@ mod tests {
         McpSharedState,
         broadcast::Receiver<ServerMsg>,
         watch::Sender<Option<PrQueueSnapshot>>,
-        watch::Sender<Option<PrSnapshot>>,
+        watch::Sender<PrSnapshots>,
     );
 
     /// Build a daemon-hosted `McpSharedState` with fresh, test-owned
@@ -387,13 +418,15 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: crate::mcp::PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         let mut state = McpSharedState::for_daemon(backend);
 
         let (queue_tx, queue_rx) = watch::channel(None::<PrQueueSnapshot>);
-        let (pr_tx, pr_rx) = watch::channel(None::<PrSnapshot>);
+        let (pr_tx, pr_rx) = watch::channel(no_prs());
         state.perri_queue_rx = queue_rx;
         state.perri_pr_rx = pr_rx;
 
@@ -491,7 +524,10 @@ mod tests {
                 assert_eq!(pane_id, "queue");
                 assert!(matches!(content, PaneContentWire::Text { text } if text == "hi"));
                 assert!(freshness.is_none());
-                assert!(address.is_none(), "broadcast_pane_content must default address to None");
+                assert!(
+                    address.is_none(),
+                    "broadcast_pane_content must default address to None"
+                );
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -553,7 +589,9 @@ mod tests {
             daemon,
             "perri",
             "ticket",
-            PaneContentWire::Text { text: "CORE-1234".into() },
+            PaneContentWire::Text {
+                text: "CORE-1234".into(),
+            },
             None,
             Some(address.clone()),
         );
@@ -922,7 +960,8 @@ mod tests {
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
-                let freshness = freshness.expect("freshness must be attached once data is known-stale");
+                let freshness =
+                    freshness.expect("freshness must be attached once data is known-stale");
                 assert!(freshness.badly_stale);
             }
             other => panic!("expected PaneContent, got {other:?}"),
@@ -1058,8 +1097,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
 
         let mut saw_any = false;
-        while let Ok(Ok(msg)) =
-            tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
+        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
         {
             saw_any = true;
             if let ServerMsg::PaneContent {
@@ -1098,7 +1136,7 @@ mod tests {
             )))
             .unwrap();
         pr_tx
-            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .send(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")))
             .unwrap();
         tokio::time::advance(Duration::from_secs(31)).await;
 
@@ -1112,8 +1150,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(61)).await;
 
         let mut checked_any = false;
-        while let Ok(Ok(msg)) =
-            tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
+        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
         {
             if let ServerMsg::PaneContent { content, .. } = msg {
                 checked_any = true;
@@ -1134,7 +1171,8 @@ mod tests {
     // ── perri.get_pr_conversation (W3 — curated-agent-views) ─────────────────
 
     #[tokio::test]
-    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation() {
+    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation()
+    {
         let (state, mut bcast, _qtx, pr_tx) = make_state();
         bind_pane(&state, "perri", "conversation", SOURCE_PR_CONVERSATION);
 
@@ -1145,7 +1183,7 @@ mod tests {
         ));
 
         pr_tx
-            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .send(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")))
             .unwrap();
 
         let msg = tokio::time::timeout(Duration::from_millis(200), bcast.recv())
@@ -1170,7 +1208,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound() {
+    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound()
+    {
         let (state, mut bcast, _qtx, pr_tx) = make_state();
         bind_pane(&state, "perri", "diff_text", SOURCE_CURRENT_PR);
         bind_pane(&state, "perri", "diff_structured", SOURCE_PR_DIFF);
@@ -1183,7 +1222,7 @@ mod tests {
         ));
 
         pr_tx
-            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .send(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")))
             .unwrap();
 
         let mut seen_panes = std::collections::HashSet::new();
@@ -1202,9 +1241,13 @@ mod tests {
         }
         assert_eq!(
             seen_panes,
-            ["diff_text".to_string(), "diff_structured".to_string(), "conversation".to_string()]
-                .into_iter()
-                .collect(),
+            [
+                "diff_text".to_string(),
+                "diff_structured".to_string(),
+                "conversation".to_string()
+            ]
+            .into_iter()
+            .collect(),
             "one PR-watch change must push all three PR-backed sources, each exactly once"
         );
 
@@ -1239,8 +1282,12 @@ mod tests {
             state.perri_pr_rx.clone(),
         ));
 
+        // Seeded for `cody`, the focus both panes belong to. After W7 a PR is a
+        // property of a focus, so seeding some *other* focus here would leave
+        // the control pane correctly unpainted and the test could no longer
+        // tell "get_file was excluded" from "the broadcaster never ran".
         pr_tx
-            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .send(one_pr("cody", pr_snapshot("acme/web", 42, "Add widget")))
             .unwrap();
 
         // The control pane gets its push...

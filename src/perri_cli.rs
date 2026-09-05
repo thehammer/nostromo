@@ -39,7 +39,12 @@ fn validate_repo(repo: &str) -> Result<()> {
 
 /// Execute the appropriate write-through or `gh` invocation for the given `action`.
 ///
-/// - `"load_pr"` → writes `current-pr.json` + touches `current-pr.dirty` via
+/// `tag` is the focus whose PR under review this action moves (W7 — D1). The
+/// IPC `PerriAction` message carries it when the client knows which focus the
+/// affordance was in; a client that doesn't name one addresses the built-in
+/// `perri` focus ([`perri_current_pr::BUILTIN_PERRI_TAG`]).
+///
+/// - `"load_pr"` → writes `current-pr/<tag>.json` + touches `current-pr.dirty` via
 ///   `crate::data::perri_current_pr::write_pointer` (no `highlights` — that's
 ///   the MCP tool's agent-authored-content feature, with no client affordance
 ///   here).
@@ -55,6 +60,7 @@ pub async fn run_perri_action(
     action: &str,
     pr_number: Option<u64>,
     repo: Option<&str>,
+    tag: &str,
     perri_state_dir: &Path,
 ) -> Result<()> {
     match action {
@@ -66,13 +72,13 @@ pub async fn run_perri_action(
 
             // `highlights: None` — agent-authored highlights are the MCP
             // tool's feature; `ClientMsg::PerriAction` carries no such field.
-            perri_current_pr::write_pointer(perri_state_dir, number, repo, None)
+            perri_current_pr::write_pointer(perri_state_dir, tag, number, repo, None)
                 .map_err(|e| anyhow::anyhow!(e))
                 .with_context(|| "load_pr: writing current-pr pointer")?;
         }
 
         "clear" => {
-            perri_current_pr::clear_pointer(perri_state_dir)
+            perri_current_pr::clear_pointer(perri_state_dir, tag)
                 .map_err(|e| anyhow::anyhow!(e))
                 .with_context(|| "clear: removing current-pr pointer")?;
             perri_current_pr::touch_queue_dirty(perri_state_dir)
@@ -93,11 +99,15 @@ pub async fn run_perri_action(
             //    write the exact commit-scoped suppression entry Phase 1 uses.
             let sha_output = tokio::process::Command::new(&gh)
                 .args([
-                    "pr", "view",
+                    "pr",
+                    "view",
                     &number.to_string(),
-                    "--repo", repo,
-                    "--json", "headRefOid",
-                    "-q", ".headRefOid",
+                    "--repo",
+                    repo,
+                    "--json",
+                    "headRefOid",
+                    "-q",
+                    ".headRefOid",
                 ])
                 .output()
                 .await
@@ -123,17 +133,17 @@ pub async fn run_perri_action(
             // leaking verbatim into approvals.jsonl.  A valid SHA is hex-only and
             // at least 7 chars; anything else is treated as a gh failure.
             if head_sha.len() < 7 || !head_sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                bail!(
-                    "gh pr view returned an unexpected head sha for PR #{number}: {head_sha:?}"
-                );
+                bail!("gh pr view returned an unexpected head sha for PR #{number}: {head_sha:?}");
             }
 
             // 2. Post the approval — no comment body (iOS approve is comment-free).
             let approve_status = tokio::process::Command::new(&gh)
                 .args([
-                    "pr", "review",
+                    "pr",
+                    "review",
                     &number.to_string(),
-                    "--repo", repo,
+                    "--repo",
+                    repo,
                     "--approve",
                 ])
                 .status()
@@ -209,6 +219,15 @@ pub(crate) fn write_approval_signal(
 mod tests {
     use super::*;
 
+    /// The focus these CLI tests act as. `perri_cli` is a single-surface host,
+    /// so it writes the built-in Perri focus's pin — see `BUILTIN_PERRI_TAG`.
+    const TAG: &str = crate::data::perri_current_pr::BUILTIN_PERRI_TAG;
+
+    /// Where `TAG`'s pin lives under `state_dir` after W7's sharding.
+    fn pin_file(state_dir: &std::path::Path) -> std::path::PathBuf {
+        crate::data::perri_current_pr::pin_path(state_dir, TAG).expect("BUILTIN_PERRI_TAG is valid")
+    }
+
     #[test]
     fn validate_repo_accepts_normal_slugs() {
         assert!(validate_repo("acme/web-app").is_ok());
@@ -234,7 +253,7 @@ mod tests {
     #[tokio::test]
     async fn approve_rejects_empty_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let err = run_perri_action("approve", Some(1), Some(""), dir.path())
+        let err = run_perri_action("approve", Some(1), Some(""), TAG, dir.path())
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -247,9 +266,15 @@ mod tests {
     #[tokio::test]
     async fn approve_rejects_unsafe_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let err = run_perri_action("approve", Some(1), Some("org/repo;rm -rf /"), dir.path())
-            .await
-            .unwrap_err();
+        let err = run_perri_action(
+            "approve",
+            Some(1),
+            Some("org/repo;rm -rf /"),
+            TAG,
+            dir.path(),
+        )
+        .await
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("unsafe"),
@@ -260,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn approve_requires_nonzero_pr_number() {
         let dir = tempfile::tempdir().unwrap();
-        let err = run_perri_action("approve", Some(0), Some("org/repo"), dir.path())
+        let err = run_perri_action("approve", Some(0), Some("org/repo"), TAG, dir.path())
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -273,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn approve_requires_pr_number() {
         let dir = tempfile::tempdir().unwrap();
-        let err = run_perri_action("approve", None, Some("org/repo"), dir.path())
+        let err = run_perri_action("approve", None, Some("org/repo"), TAG, dir.path())
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -294,12 +319,13 @@ mod tests {
     async fn load_pr_writes_a_current_pr_pointer() {
         let dir = tempfile::tempdir().unwrap();
 
-        let result = run_perri_action("load_pr", Some(42), Some("acme/widget"), dir.path()).await;
+        let result =
+            run_perri_action("load_pr", Some(42), Some("acme/widget"), TAG, dir.path()).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
-        let content = std::fs::read_to_string(dir.path().join("current-pr.json"))
+        let content = std::fs::read_to_string(pin_file(dir.path()))
             .expect("current-pr.json must exist after load_pr");
-        let pointer: crate::data::perri_pr_native::CurrentPrPointer =
+        let pointer: crate::data::perri_current_pr::Pin =
             serde_json::from_str(&content).expect("must deserialize as CurrentPrPointer");
         assert_eq!(pointer.number, 42);
         assert_eq!(pointer.repo, "acme/widget");
@@ -314,16 +340,16 @@ mod tests {
     async fn clear_removes_the_pointer_and_touches_both_sentinels() {
         let dir = tempfile::tempdir().unwrap();
 
-        run_perri_action("load_pr", Some(1), Some("acme/widget"), dir.path())
+        run_perri_action("load_pr", Some(1), Some("acme/widget"), TAG, dir.path())
             .await
             .expect("load_pr must succeed before clear");
-        assert!(dir.path().join("current-pr.json").exists());
+        assert!(pin_file(dir.path()).exists());
 
-        let result = run_perri_action("clear", None, None, dir.path()).await;
+        let result = run_perri_action("clear", None, None, TAG, dir.path()).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
         assert!(
-            !dir.path().join("current-pr.json").exists(),
+            !pin_file(dir.path()).exists(),
             "clear must remove the current-pr pointer"
         );
         assert!(
@@ -341,7 +367,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // No prior load_pr — current-pr.json never existed.
 
-        let result = run_perri_action("clear", None, None, dir.path()).await;
+        let result = run_perri_action("clear", None, None, TAG, dir.path()).await;
         assert!(result.is_ok(), "clearing an absent pointer must not error");
 
         assert!(dir.path().join("current-pr.dirty").exists());
@@ -354,11 +380,11 @@ mod tests {
         let nested = dir.path().join("nested");
         assert!(!nested.exists());
 
-        let result = run_perri_action("load_pr", Some(9), Some("acme/widget"), &nested).await;
+        let result = run_perri_action("load_pr", Some(9), Some("acme/widget"), TAG, &nested).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
         assert!(
-            nested.join("current-pr.json").exists(),
+            pin_file(&nested).exists(),
             "load_pr must create the state dir and write into it"
         );
     }
@@ -367,19 +393,26 @@ mod tests {
     async fn load_pr_rejects_a_slugless_repo() {
         let dir = tempfile::tempdir().unwrap();
 
-        let result = run_perri_action("load_pr", Some(1), Some("acmewidget"), dir.path()).await;
+        let result =
+            run_perri_action("load_pr", Some(1), Some("acmewidget"), TAG, dir.path()).await;
         assert!(result.is_err());
-        assert!(!dir.path().join("current-pr.json").exists());
+        assert!(!pin_file(dir.path()).exists());
     }
 
     #[tokio::test]
     async fn load_pr_rejects_a_multi_segment_repo() {
         let dir = tempfile::tempdir().unwrap();
 
-        let result =
-            run_perri_action("load_pr", Some(1), Some("acme/widget/extra"), dir.path()).await;
+        let result = run_perri_action(
+            "load_pr",
+            Some(1),
+            Some("acme/widget/extra"),
+            TAG,
+            dir.path(),
+        )
+        .await;
         assert!(result.is_err());
-        assert!(!dir.path().join("current-pr.json").exists());
+        assert!(!pin_file(dir.path()).exists());
     }
 
     #[tokio::test]
@@ -390,24 +423,26 @@ mod tests {
             "load_pr",
             Some(1),
             Some("org/repo;rm -rf /"),
+            TAG,
             dir.path(),
         )
         .await;
         assert!(result.is_err());
-        assert!(!dir.path().join("current-pr.json").exists());
+        assert!(!pin_file(dir.path()).exists());
     }
 
     #[tokio::test]
     async fn load_pr_still_requires_a_nonzero_pr_number() {
         let dir = tempfile::tempdir().unwrap();
 
-        let result = run_perri_action("load_pr", Some(0), Some("acme/widget"), dir.path()).await;
+        let result =
+            run_perri_action("load_pr", Some(0), Some("acme/widget"), TAG, dir.path()).await;
         assert!(result.is_err(), "pr_number: Some(0) must be rejected");
-        assert!(!dir.path().join("current-pr.json").exists());
+        assert!(!pin_file(dir.path()).exists());
 
-        let result = run_perri_action("load_pr", None, Some("acme/widget"), dir.path()).await;
+        let result = run_perri_action("load_pr", None, Some("acme/widget"), TAG, dir.path()).await;
         assert!(result.is_err(), "pr_number: None must be rejected");
-        assert!(!dir.path().join("current-pr.json").exists());
+        assert!(!pin_file(dir.path()).exists());
     }
 
     /// Heuristic textual guard, not a control-flow proof — same spirit as the

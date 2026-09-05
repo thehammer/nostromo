@@ -52,11 +52,11 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
     // message that carries no ratios, so an operator's drag-resize survives.
     if let Some(daemon) = &state.daemon {
         let wire = match content {
-            PaneContent::Text(t)          => PaneContentWire::Text { text: t },
-            PaneContent::JsonSnapshot(v)  => PaneContentWire::JsonSnapshot { value: v },
-            PaneContent::PrList(items)    => PaneContentWire::PrList { items },
-            PaneContent::Loading          => PaneContentWire::Loading,
-            PaneContent::Error(msg)       => PaneContentWire::Error { message: msg },
+            PaneContent::Text(t) => PaneContentWire::Text { text: t },
+            PaneContent::JsonSnapshot(v) => PaneContentWire::JsonSnapshot { value: v },
+            PaneContent::PrList(items) => PaneContentWire::PrList { items },
+            PaneContent::Loading => PaneContentWire::Loading,
+            PaneContent::Error(msg) => PaneContentWire::Error { message: msg },
         };
         // D4: agent-authored content is authoritative from here on — sever any
         // live-source binding, or the next automatic broadcast would silently
@@ -196,7 +196,8 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
 
     // Accept both "type" (MCP input convention) and "kind" (wire convention) so
     // agents can use either discriminator key without knowing the internal split.
-    let type_str = v.get("type")
+    let type_str = v
+        .get("type")
         .or_else(|| v.get("kind"))
         .and_then(|t| t.as_str())
         .unwrap_or("text");
@@ -253,7 +254,8 @@ fn parse_pane_content(v: Option<&Value>) -> Result<PaneContent, String> {
         }
         "loading" => Ok(PaneContent::Loading),
         "error" => {
-            let msg = v.get("message")
+            let msg = v
+                .get("message")
                 .or_else(|| v.get("text"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("An error occurred")
@@ -295,7 +297,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: crate::mcp::PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         (McpSharedState::for_daemon(backend), pane_registry)

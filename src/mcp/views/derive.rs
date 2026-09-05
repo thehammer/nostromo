@@ -280,7 +280,10 @@ mod tests {
     #[test]
     fn a_file_binding_recovers_its_path_and_revision_as_the_identity() {
         let v = view_of_binding(
-            &binding(SOURCE_FILE, Some(json!({"path": "src/a.rs", "revision": "abc"}))),
+            &binding(
+                SOURCE_FILE,
+                Some(json!({"path": "src/a.rs", "revision": "abc"})),
+            ),
             None,
         )
         .unwrap();
@@ -297,7 +300,10 @@ mod tests {
     #[test]
     fn a_file_binding_with_an_empty_revision_is_the_resolve_it_for_me_identity() {
         let v = view_of_binding(
-            &binding(SOURCE_FILE, Some(json!({"path": "src/a.rs", "revision": ""}))),
+            &binding(
+                SOURCE_FILE,
+                Some(json!({"path": "src/a.rs", "revision": ""})),
+            ),
             None,
         )
         .unwrap();
@@ -313,7 +319,10 @@ mod tests {
     #[test]
     fn a_ticket_binding_recovers_its_provider_and_key() {
         let v = view_of_binding(
-            &binding(SOURCE_TICKET, Some(json!({"provider": "jira", "key": "CORE-1"}))),
+            &binding(
+                SOURCE_TICKET,
+                Some(json!({"provider": "jira", "key": "CORE-1"})),
+            ),
             None,
         )
         .unwrap();
@@ -345,17 +354,20 @@ mod tests {
 
     #[test]
     fn perri_standards_current_pr_pane_is_not_a_curated_view() {
-        assert!(view_of_binding(&binding("perri.get_current_pr", None), Some(("o/r", 94))).is_none());
+        assert!(
+            view_of_binding(&binding("perri.get_current_pr", None), Some(("o/r", 94))).is_none()
+        );
     }
 
     #[test]
     fn a_malformed_binding_is_unrecognised_rather_than_a_wrong_identity() {
         assert!(view_of_binding(&binding(SOURCE_FILE, Some(json!({}))), None).is_none());
         assert!(view_of_binding(&binding(SOURCE_FILE, None), None).is_none());
-        assert!(
-            view_of_binding(&binding(SOURCE_TICKET, Some(json!({"provider": "jira"}))), None)
-                .is_none()
-        );
+        assert!(view_of_binding(
+            &binding(SOURCE_TICKET, Some(json!({"provider": "jira"}))),
+            None
+        )
+        .is_none());
     }
 
     // ── 2. state derivation ───────────────────────────────────────────────────
@@ -390,7 +402,11 @@ mod tests {
         let state = view_state(&cfg(), &tree, &bindings, Some(("o/r", 94)), &[]);
         let detail = state.region("detail").unwrap();
         assert_eq!(
-            detail.tabs.iter().map(|t| t.pane_id.as_str()).collect::<Vec<_>>(),
+            detail
+                .tabs
+                .iter()
+                .map(|t| t.pane_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["detail.0", "detail.1"]
         );
         assert_eq!(detail.active, Some(1));
@@ -413,7 +429,10 @@ mod tests {
         let mut bindings = BTreeMap::new();
         bindings.insert(
             "detail.0".to_string(),
-            binding(SOURCE_TICKET, Some(json!({"provider": "jira", "key": "CORE-1"}))),
+            binding(
+                SOURCE_TICKET,
+                Some(json!({"provider": "jira", "key": "CORE-1"})),
+            ),
         );
         bindings.insert(
             "detail.1".to_string(),
@@ -445,7 +464,10 @@ mod tests {
         let mut bindings = BTreeMap::new();
         bindings.insert(
             "detail.0".to_string(),
-            binding(SOURCE_PR_CONVERSATION, Some(json!({"repo": "o/r", "number": 94}))),
+            binding(
+                SOURCE_PR_CONVERSATION,
+                Some(json!({"repo": "o/r", "number": 94})),
+            ),
         );
         bindings.insert(
             "detail.1".to_string(),

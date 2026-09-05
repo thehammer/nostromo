@@ -55,7 +55,11 @@ impl JiraCredentials {
     /// construct credentials without reaching into a private field directly.
     #[cfg(test)]
     pub(crate) fn for_test(site: &str, email: &str, token: &str) -> Self {
-        Self { site: site.to_string(), email: email.to_string(), token: token.to_string() }
+        Self {
+            site: site.to_string(),
+            email: email.to_string(),
+            token: token.to_string(),
+        }
     }
 }
 
@@ -273,7 +277,9 @@ impl JiraProvider {
                     .and_then(|v| v.as_str())
                     .and_then(|s| {
                         chrono::DateTime::parse_from_rfc3339(s)
-                            .or_else(|_| chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%z"))
+                            .or_else(|_| {
+                                chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%z")
+                            })
                             .ok()
                     })
                     .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -281,11 +287,20 @@ impl JiraProvider {
                         chrono::DateTime::from_timestamp(0, 0).expect("epoch is always valid")
                     });
                 let blocks = adf_to_blocks(c.get("body").unwrap_or(&Value::Null));
-                TicketComment { index: (i + 1) as u32, author, created_at, blocks }
+                TicketComment {
+                    index: (i + 1) as u32,
+                    author,
+                    created_at,
+                    blocks,
+                }
             })
             .collect();
 
-        let site = self.credentials.as_ref().map(|c| c.site.clone()).unwrap_or_default();
+        let site = self
+            .credentials
+            .as_ref()
+            .map(|c| c.site.clone())
+            .unwrap_or_default();
         Ticket {
             provider: "jira".to_string(),
             key: key.to_string(),
@@ -314,9 +329,12 @@ impl TicketProvider for JiraProvider {
     }
 
     async fn fetch(&self, key: &str) -> Result<Ticket, super::TicketError> {
-        let creds = self.credentials.as_ref().ok_or_else(|| {
-            super::TicketError::ProviderUnconfigured { message: self.unconfigured_message.clone() }
-        })?;
+        let creds =
+            self.credentials
+                .as_ref()
+                .ok_or_else(|| super::TicketError::ProviderUnconfigured {
+                    message: self.unconfigured_message.clone(),
+                })?;
 
         // `key` is spliced unescaped into the request path below. A real
         // Jira issue key is always `<PROJECT>-<number>` (letters/digits for
@@ -392,14 +410,19 @@ fn node_type(node: &Value) -> &str {
 
 fn node_to_block(node: &Value) -> MdBlock {
     match node_type(node) {
-        "paragraph" => MdBlock::Paragraph { spans: inline_spans(node) },
+        "paragraph" => MdBlock::Paragraph {
+            spans: inline_spans(node),
+        },
         "heading" => {
             let level = node
                 .get("attrs")
                 .and_then(|a| a.get("level"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1) as u8;
-            MdBlock::Heading { level, spans: inline_spans(node) }
+            MdBlock::Heading {
+                level,
+                spans: inline_spans(node),
+            }
         }
         "codeBlock" => {
             let lang = node
@@ -407,20 +430,40 @@ fn node_to_block(node: &Value) -> MdBlock {
                 .and_then(|a| a.get("language"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            MdBlock::CodeBlock { lang, text: code_text(node) }
+            MdBlock::CodeBlock {
+                lang,
+                text: code_text(node),
+            }
         }
-        "bulletList" => MdBlock::List { ordered: false, start: None, items: list_items(node) },
+        "bulletList" => MdBlock::List {
+            ordered: false,
+            start: None,
+            items: list_items(node),
+        },
         "orderedList" => {
-            let start = node.get("attrs").and_then(|a| a.get("order")).and_then(|v| v.as_u64());
-            MdBlock::List { ordered: true, start, items: list_items(node) }
+            let start = node
+                .get("attrs")
+                .and_then(|a| a.get("order"))
+                .and_then(|v| v.as_u64());
+            MdBlock::List {
+                ordered: true,
+                start,
+                items: list_items(node),
+            }
         }
-        "blockquote" => MdBlock::Quote { blocks: child_blocks(node) },
+        "blockquote" => MdBlock::Quote {
+            blocks: child_blocks(node),
+        },
         "rule" => MdBlock::Rule,
         "table" => table_block(node),
         // Unknown node type — never dropped: fold its recursively-extracted
         // text into a plain paragraph rather than silently omitting part of
         // the ticket (D2/module doc).
-        _ => MdBlock::Paragraph { spans: vec![MdSpan::Text { text: extract_text(node) }] },
+        _ => MdBlock::Paragraph {
+            spans: vec![MdSpan::Text {
+                text: extract_text(node),
+            }],
+        },
     }
 }
 
@@ -435,7 +478,11 @@ fn list_items(node: &Value) -> Vec<Vec<MdBlock>> {
 fn code_text(node: &Value) -> String {
     children(node)
         .iter()
-        .filter_map(|n| n.get("text").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter_map(|n| {
+            n.get("text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect::<Vec<_>>()
         .join("")
 }
@@ -475,17 +522,31 @@ fn text_node_to_span(node: &Value) -> MdSpan {
     if node_type(node) != "text" {
         // An inline node type this mapper doesn't recognise — fold its text
         // in rather than drop it (same rule as `node_to_block`'s fallback).
-        return MdSpan::Text { text: extract_text(node) };
+        return MdSpan::Text {
+            text: extract_text(node),
+        };
     }
 
-    let text = node.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let marks = node.get("marks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let mark_types: Vec<&str> =
-        marks.iter().filter_map(|m| m.get("type").and_then(|t| t.as_str())).collect();
+    let text = node
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let marks = node
+        .get("marks")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mark_types: Vec<&str> = marks
+        .iter()
+        .filter_map(|m| m.get("type").and_then(|t| t.as_str()))
+        .collect();
 
     let mut span = if mark_types.contains(&"code") {
         MdSpan::Code { text: text.clone() }
-    } else if let Some(link_mark) = marks.iter().find(|m| m.get("type").and_then(|t| t.as_str()) == Some("link"))
+    } else if let Some(link_mark) = marks
+        .iter()
+        .find(|m| m.get("type").and_then(|t| t.as_str()) == Some("link"))
     {
         let url = link_mark
             .get("attrs")
@@ -493,7 +554,10 @@ fn text_node_to_span(node: &Value) -> MdSpan {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        MdSpan::Link { spans: vec![MdSpan::Text { text: text.clone() }], url }
+        MdSpan::Link {
+            spans: vec![MdSpan::Text { text: text.clone() }],
+            url,
+        }
     } else {
         MdSpan::Text { text: text.clone() }
     };
@@ -515,7 +579,11 @@ fn text_node_to_span(node: &Value) -> MdSpan {
 /// doesn't recognise.
 fn extract_text(node: &Value) -> String {
     if node_type(node) == "text" {
-        return node.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        return node
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
     }
     children(node)
         .iter()
@@ -570,8 +638,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let config = config_with_no_credentials_file(tmp.path());
-        let creds =
-            resolve_credentials(&config).expect("env vars alone must resolve credentials");
+        let creds = resolve_credentials(&config).expect("env vars alone must resolve credentials");
         assert_eq!(creds.site, "acme.atlassian.net");
         assert_eq!(creds.email, "hammer@acme.com");
         assert_eq!(creds.token, "tok-from-env");
@@ -595,9 +662,11 @@ mod tests {
         )
         .unwrap();
 
-        let config = Config { jira_credentials_path: Some(path), ..Config::default() };
-        let creds =
-            resolve_credentials(&config).expect("file-sourced credentials must resolve");
+        let config = Config {
+            jira_credentials_path: Some(path),
+            ..Config::default()
+        };
+        let creds = resolve_credentials(&config).expect("file-sourced credentials must resolve");
         assert_eq!(creds.site, "file.atlassian.net");
         assert_eq!(creds.email, "file@acme.com");
         assert_eq!(creds.token, "tok-from-file");
@@ -622,7 +691,10 @@ mod tests {
         )
         .unwrap();
 
-        let config = Config { jira_credentials_path: Some(path), ..Config::default() };
+        let config = Config {
+            jira_credentials_path: Some(path),
+            ..Config::default()
+        };
         assert!(
             resolve_credentials(&config).is_none(),
             "a blank token value must resolve to unconfigured, not Some(\"\")"
@@ -673,8 +745,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let cred_path = tmp.path().join("does-not-exist.env");
-        let config =
-            Config { jira_credentials_path: Some(cred_path.clone()), ..Config::default() };
+        let config = Config {
+            jira_credentials_path: Some(cred_path.clone()),
+            ..Config::default()
+        };
 
         assert!(resolve_credentials(&config).is_none());
 
@@ -769,32 +843,52 @@ mod tests {
         assert_eq!(
             blocks,
             vec![
-                MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "hello".into() }] },
-                MdBlock::Heading { level: 2, spans: vec![MdSpan::Text { text: "AC".into() }] },
-                MdBlock::CodeBlock { lang: Some("rust".into()), text: "fn f() {}".into() },
+                MdBlock::Paragraph {
+                    spans: vec![MdSpan::Text {
+                        text: "hello".into()
+                    }]
+                },
+                MdBlock::Heading {
+                    level: 2,
+                    spans: vec![MdSpan::Text { text: "AC".into() }]
+                },
+                MdBlock::CodeBlock {
+                    lang: Some("rust".into()),
+                    text: "fn f() {}".into()
+                },
                 MdBlock::List {
                     ordered: false,
                     start: None,
                     items: vec![vec![MdBlock::Paragraph {
-                        spans: vec![MdSpan::Text { text: "item1".into() }]
+                        spans: vec![MdSpan::Text {
+                            text: "item1".into()
+                        }]
                     }]],
                 },
                 MdBlock::List {
                     ordered: true,
                     start: Some(3),
                     items: vec![vec![MdBlock::Paragraph {
-                        spans: vec![MdSpan::Text { text: "item".into() }]
+                        spans: vec![MdSpan::Text {
+                            text: "item".into()
+                        }]
                     }]],
                 },
                 MdBlock::Quote {
                     blocks: vec![MdBlock::Paragraph {
-                        spans: vec![MdSpan::Text { text: "quoted".into() }]
+                        spans: vec![MdSpan::Text {
+                            text: "quoted".into()
+                        }]
                     }],
                 },
                 MdBlock::Rule,
                 MdBlock::Table {
-                    header: vec![vec![MdSpan::Text { text: "Col1".into() }]],
-                    rows: vec![vec![vec![MdSpan::Text { text: "Val1".into() }]]],
+                    header: vec![vec![MdSpan::Text {
+                        text: "Col1".into()
+                    }]],
+                    rows: vec![vec![vec![MdSpan::Text {
+                        text: "Val1".into()
+                    }]]],
                 },
             ]
         );
@@ -804,25 +898,34 @@ mod tests {
     //    nesting order for a run with multiple marks.
     #[test]
     fn text_node_marks_map_to_the_corresponding_mdspan_variant() {
-        let strong = serde_json::json!({ "type": "text", "text": "b", "marks": [{ "type": "strong" }] });
+        let strong =
+            serde_json::json!({ "type": "text", "text": "b", "marks": [{ "type": "strong" }] });
         assert_eq!(
             text_node_to_span(&strong),
-            MdSpan::Strong { spans: vec![MdSpan::Text { text: "b".into() }] }
+            MdSpan::Strong {
+                spans: vec![MdSpan::Text { text: "b".into() }]
+            }
         );
 
         let em = serde_json::json!({ "type": "text", "text": "i", "marks": [{ "type": "em" }] });
         assert_eq!(
             text_node_to_span(&em),
-            MdSpan::Emph { spans: vec![MdSpan::Text { text: "i".into() }] }
+            MdSpan::Emph {
+                spans: vec![MdSpan::Text { text: "i".into() }]
+            }
         );
 
-        let code = serde_json::json!({ "type": "text", "text": "c", "marks": [{ "type": "code" }] });
+        let code =
+            serde_json::json!({ "type": "text", "text": "c", "marks": [{ "type": "code" }] });
         assert_eq!(text_node_to_span(&code), MdSpan::Code { text: "c".into() });
 
-        let strike = serde_json::json!({ "type": "text", "text": "s", "marks": [{ "type": "strike" }] });
+        let strike =
+            serde_json::json!({ "type": "text", "text": "s", "marks": [{ "type": "strike" }] });
         assert_eq!(
             text_node_to_span(&strike),
-            MdSpan::Strike { spans: vec![MdSpan::Text { text: "s".into() }] }
+            MdSpan::Strike {
+                spans: vec![MdSpan::Text { text: "s".into() }]
+            }
         );
 
         let link = serde_json::json!({
@@ -851,7 +954,9 @@ mod tests {
             span,
             MdSpan::Strong {
                 spans: vec![MdSpan::Emph {
-                    spans: vec![MdSpan::Strike { spans: vec![MdSpan::Text { text: "x".into() }] }]
+                    spans: vec![MdSpan::Strike {
+                        spans: vec![MdSpan::Text { text: "x".into() }]
+                    }]
                 }]
             }
         );
@@ -867,7 +972,11 @@ mod tests {
         });
         assert_eq!(
             node_to_block(&node),
-            MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "caption".into() }] }
+            MdBlock::Paragraph {
+                spans: vec![MdSpan::Text {
+                    text: "caption".into()
+                }]
+            }
         );
     }
 
@@ -880,7 +989,11 @@ mod tests {
         let para = serde_json::json!({ "type": "paragraph", "content": [emoji] });
         assert_eq!(
             node_to_block(&para),
-            MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "smile".into() }] }
+            MdBlock::Paragraph {
+                spans: vec![MdSpan::Text {
+                    text: "smile".into()
+                }]
+            }
         );
     }
 
@@ -928,14 +1041,21 @@ mod tests {
             .await;
 
         let provider = JiraProvider::for_test(Some(jira_creds()), server.uri());
-        let ticket = provider.fetch("TEST-1").await.expect("happy path fetch must succeed");
+        let ticket = provider
+            .fetch("TEST-1")
+            .await
+            .expect("happy path fetch must succeed");
 
         assert_eq!(ticket.provider, "jira");
         assert_eq!(ticket.key, "TEST-1");
         assert_eq!(ticket.summary, "Fix the thing");
         assert_eq!(ticket.status, "In Progress");
         assert_eq!(ticket.assignee, Some("Alice".to_string()));
-        assert_eq!(ticket.sections.len(), 2, "one description section plus one AC section");
+        assert_eq!(
+            ticket.sections.len(),
+            2,
+            "one description section plus one AC section"
+        );
         assert_eq!(ticket.sections[0].name, "description");
         assert_eq!(ticket.sections[1].name, "acceptance_criteria");
         assert_eq!(ticket.comments.len(), 1);
@@ -979,7 +1099,10 @@ mod tests {
             .mount(&server)
             .await;
         let provider = JiraProvider::for_test(Some(jira_creds()), server.uri());
-        let ticket = provider.fetch("PROJ-1").await.expect("fetch must succeed despite the bad timestamp");
+        let ticket = provider
+            .fetch("PROJ-1")
+            .await
+            .expect("fetch must succeed despite the bad timestamp");
         assert_eq!(
             ticket.comments[0].created_at,
             chrono::DateTime::from_timestamp(0, 0).unwrap()
@@ -1014,10 +1137,20 @@ mod tests {
         let server = MockServer::start().await;
         let provider = JiraProvider::for_test(Some(jira_creds()), server.uri());
 
-        for bad_key in ["../secrets", "TEST-1/../other", "TEST-1?x=1", "TEST-1#frag", "not-a-key", ""]
-        {
+        for bad_key in [
+            "../secrets",
+            "TEST-1/../other",
+            "TEST-1?x=1",
+            "TEST-1#frag",
+            "not-a-key",
+            "",
+        ] {
             let err = provider.fetch(bad_key).await.unwrap_err();
-            assert_eq!(err, TicketError::UnknownTicket, "key {bad_key:?} must be rejected");
+            assert_eq!(
+                err,
+                TicketError::UnknownTicket,
+                "key {bad_key:?} must be rejected"
+            );
         }
 
         let requests = server.received_requests().await.unwrap_or_default();

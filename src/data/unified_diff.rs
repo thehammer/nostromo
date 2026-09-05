@@ -691,7 +691,11 @@ index 1111111..2222222 100644
 +fixed
 "#;
         let files = parse_unified_diff(diff);
-        assert_eq!(files.len(), 1, "commit-message preamble must not produce a phantom file");
+        assert_eq!(
+            files.len(),
+            1,
+            "commit-message preamble must not produce a phantom file"
+        );
         assert_eq!(files[0].path, "src/thing.rs");
         assert_eq!(files[0].additions, 1);
         assert_eq!(files[0].deletions, 1);
@@ -717,7 +721,11 @@ index 1111111..2222222 100644
         let diff = "diff --git a/src/blank.rs b/src/blank.rs\nindex 1111111..2222222 100644\n--- a/src/blank.rs\n+++ b/src/blank.rs\n@@ -1,3 +1,3 @@\n line1\n\n line3\n";
         let files = parse_unified_diff(diff);
         let hunk = &files[0].hunks[0];
-        assert_eq!(hunk.lines.len(), 3, "the bare blank line must not be dropped");
+        assert_eq!(
+            hunk.lines.len(),
+            3,
+            "the bare blank line must not be dropped"
+        );
         assert_eq!(
             hunk.lines[1],
             DiffLine {
@@ -790,9 +798,17 @@ index 1111111..2222222 100644
             .lines
             .iter()
             .filter(|l| l.kind != DiffLineKind::Meta)
-            .map(|l| l.new_n.or(l.old_n).expect("every non-meta line has a number on some side"))
+            .map(|l| {
+                l.new_n
+                    .or(l.old_n)
+                    .expect("every non-meta line has a number on some side")
+            })
             .collect();
-        assert_eq!(seq, vec![1, 2, 3, 4, 5, 3, 4], "sanity: the exact gutter sequence git would show");
+        assert_eq!(
+            seq,
+            vec![1, 2, 3, 4, 5, 3, 4],
+            "sanity: the exact gutter sequence git would show"
+        );
         assert!(
             !seq.windows(2).all(|w| w[0] <= w[1]),
             "the gutter sequence must contain a decrease (5 -> 3) — that decrease is correct behaviour, \

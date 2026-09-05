@@ -497,7 +497,10 @@ pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) 
         return tool_descriptors();
     }
     let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id).await;
-    crate::mcp::tool_policy::filter_descriptors(tool_descriptors(), policy.denied_for(agent.as_deref()))
+    crate::mcp::tool_policy::filter_descriptors(
+        tool_descriptors(),
+        policy.denied_for(agent.as_deref()),
+    )
 }
 
 // ── tool dispatch ─────────────────────────────────────────────────────────────
@@ -573,7 +576,7 @@ async fn dispatch_inner(
         "nostromo.get_view_state" => {
             let input = parse_args::<get_view_state::GetViewStateInput>(arguments);
             match input {
-                Ok(inp) => get_view_state::handle(state, &inp).await,
+                Ok(inp) => get_view_state::handle(state, &inp, pty_id).await,
                 Err(e) => e,
             }
         }
@@ -588,8 +591,17 @@ async fn dispatch_inner(
 
         // ── Phase 2: Perri ────────────────────────────────────────────────
         "perri.list_pr_queue" => perri::list_pr_queue(state),
-        "perri.get_current_pr" => perri::get_current_pr(state),
-        "perri.get_state" => perri::get_state(state),
+        // W7 — D3: both resolve the *caller's* focus (or an explicit
+        // `view_id`), like every other focus-scoped tool. `perri.get_selected_index`
+        // below is the precedent for the shape.
+        "perri.get_current_pr" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri::get_current_pr(state, apply_layout::target_tag(&args, pty_id))
+        }
+        "perri.get_state" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri::get_state(state, apply_layout::target_tag(&args, pty_id))
+        }
 
         // ── Phase 2: Fred ─────────────────────────────────────────────────
         "fred.list_unread_emails" => fred::list_unread_emails(state),
@@ -764,7 +776,10 @@ mod tests {
             .iter()
             .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(str::to_string))
             .collect();
-        assert!(!names.is_empty(), "sanity: the tool registry must not be empty");
+        assert!(
+            !names.is_empty(),
+            "sanity: the tool registry must not be empty"
+        );
         for name in &names {
             assert!(
                 !name.to_lowercase().contains("activity"),

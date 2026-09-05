@@ -56,6 +56,23 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
                 .map(|f| (f.display_name, Some(f.agent_name)))
                 .unwrap_or_else(|| (tag.to_string(), None))
         };
+        // W7 — D12. "Which PR am I reviewing?" is now a fact about *this*
+        // focus, so it belongs in the tool whose whole job is telling an agent
+        // about itself — and an agent that can read it without a second call
+        // has no reason to assume the last PR it heard about is still its own.
+        //
+        // Always present, `null` when this focus has no PR under review. An
+        // absent key and a null key are different on the wire, and only one of
+        // them is answerable.
+        let pr_under_review = match state.pr_for(Some(tag)) {
+            Some(snap) => match snap.pr_number {
+                // A snapshot mid-fetch can carry a repo with no number yet;
+                // half a PR identity is not one to report.
+                Some(number) => json!({ "repo": snap.repo, "number": number }),
+                None => Value::Null,
+            },
+            None => Value::Null,
+        };
         return json!({
             "view_id": tag,
             "view_title": view_title,
@@ -64,6 +81,7 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
             "session_id": tag,
             "pane_ids": pane_ids,
             "layout_applied": layout_applied,
+            "pr_under_review": pr_under_review,
             "nostromo_version": env!("CARGO_PKG_VERSION"),
         });
     }
@@ -89,6 +107,9 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
         .unwrap_or_else(|| (view_id.to_string(), vec![]));
     drop(views);
 
+    // No `pr_under_review` on the TUI path: it has no focus registry, so it
+    // has no focus to answer for. Degrading by omission is what `create_focus`
+    // and `show` already do here.
     json!({
         "view_id": view_id,
         "view_title": view_title,
@@ -150,6 +171,95 @@ mod tests {
         assert_eq!(pane_ids, vec!["pr_queue", "diff", "repl"]);
     }
 
+    // ── W7 — D12: an agent can read its own PR under review ──────────────────
+
+    fn daemon_state(tmp: &tempfile::TempDir) -> McpSharedState {
+        use crate::ipc::{pane_registry::PaneRegistry, SessionManager};
+        use crate::mcp::state::{DaemonMcpBackend, PerriDaemonState};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{Arc, Mutex};
+        use tokio::sync::broadcast;
+
+        let (broadcast_tx, _rx) = broadcast::channel(64);
+        McpSharedState::for_daemon(DaemonMcpBackend {
+            pane_registry: Arc::new(Mutex::new(PaneRegistry::with_store_path(
+                tmp.path().join("panes.json"),
+            ))),
+            session_mgr: Arc::new(Mutex::new(SessionManager::with_store_path(
+                tmp.path().join("sessions.json"),
+            ))),
+            broadcast_tx,
+            perri: PerriDaemonState {
+                state_dir: Some(tmp.path().join("perri-state")),
+                pr_refresh_tx: None,
+                queue_refresh_tx: None,
+                selected_index: Arc::new(AtomicUsize::new(0)),
+                settle_timeout: std::time::Duration::from_millis(50),
+            },
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
+            tickets: Default::default(),
+        })
+    }
+
+    fn snapshot(repo: &str, number: u64) -> crate::data::perri_pr::PrSnapshot {
+        crate::data::perri_pr::PrSnapshot {
+            pr_number: Some(number),
+            repo: repo.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn get_self_reports_this_focus_s_pr_under_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = daemon_state(&tmp);
+        state.set_pr_for("perri", snapshot("Carefeed/admin-portal", 4526));
+
+        let result = handle(&state, Some("perri")).await;
+
+        assert_eq!(result["pr_under_review"]["repo"], "Carefeed/admin-portal");
+        assert_eq!(result["pr_under_review"]["number"], 4526);
+    }
+
+    /// The key is always present. An absent key and a null key are different
+    /// on the wire, and an agent can only act on one of them.
+    #[tokio::test]
+    async fn get_self_reports_a_present_null_when_this_focus_has_no_pr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = daemon_state(&tmp);
+
+        let result = handle(&state, Some("perri")).await;
+
+        assert!(
+            result.get("pr_under_review").is_some(),
+            "pr_under_review must be present even when there is no PR"
+        );
+        assert!(result["pr_under_review"].is_null());
+    }
+
+    /// The whole point of the wedge: what `get_self` reports is *this* focus's
+    /// PR, never whichever focus picked one up most recently.
+    #[tokio::test]
+    async fn get_self_never_reports_another_focus_s_pr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = daemon_state(&tmp);
+        state.set_pr_for("perri", snapshot("Carefeed/admin-portal", 4526));
+        state.set_pr_for("cody", snapshot("Carefeed/operations", 42));
+
+        let perri = handle(&state, Some("perri")).await;
+        let cody = handle(&state, Some("cody")).await;
+        let bystander = handle(&state, Some("fred")).await;
+
+        assert_eq!(perri["pr_under_review"]["number"], 4526);
+        assert_eq!(cody["pr_under_review"]["number"], 42);
+        assert!(
+            bystander["pr_under_review"].is_null(),
+            "a focus with no PR must report none, not the busiest focus's"
+        );
+    }
+
     #[tokio::test]
     async fn returns_error_for_unknown_pty() {
         let state = make_state().await;
@@ -197,7 +307,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: crate::mcp::PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         McpSharedState::for_daemon(backend)

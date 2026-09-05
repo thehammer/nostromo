@@ -45,7 +45,10 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
     send(
         stream,
-        &ClientMsg::Subscribe { topics, renders_decisions: false },
+        &ClientMsg::Subscribe {
+            topics,
+            renders_decisions: false,
+        },
     )
     .await;
 }
@@ -80,7 +83,9 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
         tmp.path().join("sessions.json"),
     )));
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
@@ -100,11 +105,16 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
             action: "load_pr".into(),
             pr_number: Some(7),
             repo: Some("acme/anvil".into()),
+            tag: None,
         },
     )
     .await;
 
-    let pointer_path = perri_state_dir.join("current-pr.json");
+    let pointer_path = nostromo::data::perri_current_pr::pin_path(
+        &perri_state_dir,
+        nostromo::data::perri_current_pr::BUILTIN_PERRI_TAG,
+    )
+    .unwrap();
     let appeared = wait_until(|| pointer_path.exists()).await;
     assert!(
         appeared,
@@ -136,7 +146,9 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
         tmp.path().join("sessions.json"),
     )));
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
@@ -150,7 +162,11 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
     handshake(&mut stream, vec![Topic::Perri]).await;
 
-    let pointer_path = perri_state_dir.join("current-pr.json");
+    let pointer_path = nostromo::data::perri_current_pr::pin_path(
+        &perri_state_dir,
+        nostromo::data::perri_current_pr::BUILTIN_PERRI_TAG,
+    )
+    .unwrap();
     let queue_dirty_path = perri_state_dir.join("queue.dirty");
 
     send(
@@ -159,6 +175,7 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
             action: "load_pr".into(),
             pr_number: Some(7),
             repo: Some("acme/anvil".into()),
+            tag: None,
         },
     )
     .await;
@@ -173,6 +190,7 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
             action: "clear".into(),
             pr_number: None,
             repo: None,
+            tag: None,
         },
     )
     .await;
@@ -187,4 +205,174 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
     );
 
     drop(server);
+}
+
+// ── W7 — D8/D10: a removed focus's pin is gone from disk ─────────────────────
+
+fn focus_meta(tag: &str) -> nostromo::ipc::protocol::FocusMeta {
+    nostromo::ipc::protocol::FocusMeta {
+        tag: tag.into(),
+        display_name: tag.into(),
+        agent_name: tag.into(),
+        project_name: None,
+        org: None,
+        is_built_in: false,
+        session_summary: None,
+    }
+}
+
+/// Stand up a server and return `(socket_path, perri_state_dir, tmp, server)`.
+/// The server and tempdir are returned so the caller keeps them alive.
+async fn serve() -> (std::path::PathBuf, std::path::PathBuf, TempDir, Server) {
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("nostromd.sock");
+    let perri_state_dir = tmp.path().join("perri-state");
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        tmp.path().join("sessions.json"),
+    )));
+    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
+    let server = Server::bind(
+        &socket_path,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        perri_state_dir.clone(),
+        Arc::clone(&decisions),
+    )
+    .unwrap();
+    (socket_path, perri_state_dir, tmp, server)
+}
+
+fn pin_of(state_dir: &std::path::Path, tag: &str) -> std::path::PathBuf {
+    nostromo::data::perri_current_pr::pin_path(state_dir, tag).unwrap()
+}
+
+/// The daemon's only signal that a focus was removed is the next
+/// `FocusRegistryPush` carrying a shorter list — the Mac detaches rather than
+/// stopping the session, so nothing else ever says so. When that removal is
+/// confirmed, the focus's pin must be gone from disk and no other focus's pin
+/// may move.
+#[tokio::test]
+async fn a_removed_focus_loses_its_pin_and_no_other_focus_is_touched() {
+    let (socket_path, state_dir, _tmp, _server) = serve().await;
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    handshake(&mut stream, vec![Topic::Perri, Topic::Focuses]).await;
+
+    send(
+        &mut stream,
+        &ClientMsg::FocusRegistryPush {
+            focuses: vec![focus_meta("perri"), focus_meta("cody")],
+        },
+    )
+    .await;
+
+    for (tag, number) in [("perri", 4526u64), ("cody", 42)] {
+        send(
+            &mut stream,
+            &ClientMsg::PerriAction {
+                action: "load_pr".into(),
+                pr_number: Some(number),
+                repo: Some("acme/anvil".into()),
+                tag: Some(tag.into()),
+            },
+        )
+        .await;
+    }
+    assert!(
+        wait_until(|| pin_of(&state_dir, "perri").exists() && pin_of(&state_dir, "cody").exists())
+            .await,
+        "both focuses must have a pin before the removal"
+    );
+
+    // Two consecutive pushes without "cody" — one is a partial push, which
+    // must not evict (D8a).
+    send(
+        &mut stream,
+        &ClientMsg::FocusRegistryPush {
+            focuses: vec![focus_meta("perri")],
+        },
+    )
+    .await;
+    assert!(
+        !wait_until(|| !pin_of(&state_dir, "cody").exists()).await,
+        "a single push must not evict — that is what a reconnect looks like"
+    );
+
+    send(
+        &mut stream,
+        &ClientMsg::FocusRegistryPush {
+            focuses: vec![focus_meta("perri")],
+        },
+    )
+    .await;
+    assert!(
+        wait_until(|| !pin_of(&state_dir, "cody").exists()).await,
+        "a focus absent from two consecutive pushes must lose its pin"
+    );
+    assert!(
+        pin_of(&state_dir, "perri").exists(),
+        "removing one focus must not disturb another focus's pin"
+    );
+}
+
+/// D10, and the case the plan flags as the one that actually breaks.
+/// `nostromo.create_focus` derives its tag deterministically from
+/// `(agent, title)`, so close-and-recreate yields the *same* tag. The pin must
+/// be genuinely deleted, not tombstoned, or the new focus inherits the dead
+/// one's PR.
+#[tokio::test]
+async fn a_focus_recreated_under_a_reused_tag_inherits_no_pin() {
+    let (socket_path, state_dir, _tmp, _server) = serve().await;
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    handshake(&mut stream, vec![Topic::Perri, Topic::Focuses]).await;
+
+    let reused = "cody-core-1234";
+    send(
+        &mut stream,
+        &ClientMsg::FocusRegistryPush {
+            focuses: vec![focus_meta("perri"), focus_meta(reused)],
+        },
+    )
+    .await;
+    send(
+        &mut stream,
+        &ClientMsg::PerriAction {
+            action: "load_pr".into(),
+            pr_number: Some(4526),
+            repo: Some("Carefeed/admin-portal".into()),
+            tag: Some(reused.into()),
+        },
+    )
+    .await;
+    assert!(wait_until(|| pin_of(&state_dir, reused).exists()).await);
+
+    // Closed, and confirmed closed.
+    for _ in 0..2 {
+        send(
+            &mut stream,
+            &ClientMsg::FocusRegistryPush {
+                focuses: vec![focus_meta("perri")],
+            },
+        )
+        .await;
+    }
+    assert!(wait_until(|| !pin_of(&state_dir, reused).exists()).await);
+
+    // Recreated under the very same tag.
+    send(
+        &mut stream,
+        &ClientMsg::FocusRegistryPush {
+            focuses: vec![focus_meta("perri"), focus_meta(reused)],
+        },
+    )
+    .await;
+
+    // Give the daemon the same window the eviction got, so this asserts
+    // "no pin appeared" rather than "we looked too early".
+    assert!(
+        !wait_until(|| pin_of(&state_dir, reused).exists()).await,
+        "a recreated focus reusing a dead focus's tag must start with no PR under review"
+    );
 }

@@ -15,14 +15,17 @@ use crate::{
     data::{
         fred_calendar::CalendarSnapshot,
         fred_mailbox::MailboxSnapshot,
-        perri_pr::PrSnapshot,
+        perri_pr::{no_prs, PrSnapshot, PrSnapshots},
         perri_queue::PrQueueSnapshot,
         rate_limits::{BudgetPosture, RateLimits},
         teri_todos::TeriTodosSnapshot,
         tickets::{TicketCache, TicketRegistry},
     },
     event::AppEvent,
-    ipc::{decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
+    ipc::{
+        decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg,
+        SessionManager,
+    },
     mcp::tool_stats::ToolStats,
     mother::{MotherJob, MotherStatus},
 };
@@ -69,8 +72,13 @@ pub struct ViewMeta {
 pub struct PerriDaemonState {
     /// Perri's state directory (holds `current-pr.json`, `queue.dirty`, etc).
     pub state_dir: Option<PathBuf>,
-    /// Send `()` to trigger an immediate current-PR re-fetch.
-    pub pr_refresh_tx: Option<mpsc::UnboundedSender<()>>,
+    /// Trigger an immediate current-PR re-fetch.
+    ///
+    /// `Some(tag)` refetches exactly that focus's pin; `None` refetches every
+    /// pinned focus. A pickup in one focus has no reason to spend a GitHub
+    /// request on any other focus's PR (D2), and with N focuses pinned that
+    /// distinction is the difference between one request and N.
+    pub pr_refresh_tx: Option<mpsc::UnboundedSender<Option<String>>>,
     /// Send `()` to trigger an immediate PR-queue re-fetch.
     pub queue_refresh_tx: Option<mpsc::UnboundedSender<()>>,
     /// Agent-scoped selected-queue-row index (see `perri_mutators` D5 — moves
@@ -164,8 +172,20 @@ pub struct McpSharedState {
     /// Live Perri PR queue snapshot.
     pub perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
 
-    /// Live Perri current-PR snapshot.
-    pub perri_pr_rx: watch::Receiver<Option<PrSnapshot>>,
+    /// Live per-focus PR-under-review snapshots (W7 — D6).
+    ///
+    /// Read it through [`McpSharedState::pr_for`], never by indexing directly:
+    /// resolving the tag in one place is what keeps "which PR does this
+    /// request resolve against" from drifting between the ten sites that ask.
+    pub perri_pr_rx: watch::Receiver<PrSnapshots>,
+
+    /// The sender behind [`Self::perri_pr_rx`], when this process owns it.
+    ///
+    /// `Some` for a test-constructed state (so [`Self::set_pr_for`] can
+    /// publish, and so `changed()` doesn't fire instantly on a dropped
+    /// sender); `None` in the daemon, where the PR source owns the sender and
+    /// nothing else may publish.
+    perri_pr_tx: Option<Arc<watch::Sender<PrSnapshots>>>,
 
     /// Live Fred mailbox snapshot.
     pub fred_mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
@@ -208,7 +228,7 @@ impl McpSharedState {
     pub fn new(
         event_tx: mpsc::UnboundedSender<AppEvent>,
         perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
-        perri_pr_rx: watch::Receiver<Option<PrSnapshot>>,
+        perri_pr_rx: watch::Receiver<PrSnapshots>,
         fred_mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
         fred_calendar_rx: watch::Receiver<Option<CalendarSnapshot>>,
         teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
@@ -224,6 +244,7 @@ impl McpSharedState {
             ptys: Arc::new(RwLock::new(HashMap::new())),
             perri_queue_rx,
             perri_pr_rx,
+            perri_pr_tx: None,
             fred_mailbox_rx,
             fred_calendar_rx,
             teri_todos_rx,
@@ -233,6 +254,63 @@ impl McpSharedState {
             budget_posture_rx,
             tool_stats: Arc::new(ToolStats::new()),
         }
+    }
+
+    /// The PR under review **for `tag`** (W7 — D3).
+    ///
+    /// `None` when the caller named no focus, or when that focus has no PR
+    /// under review. Both mean the same thing to every caller: resolve against
+    /// the working tree, render the no-PR placeholder — never fall through to
+    /// some other focus's PR. Falling through is the recorded 2026-09-04
+    /// incident, where focus A's file request resolved against focus B's
+    /// revision and came back `unknown_path`.
+    pub fn pr_for(&self, tag: Option<&str>) -> Option<Arc<PrSnapshot>> {
+        let tag = tag?;
+        self.perri_pr_rx.borrow().get(tag).cloned()
+    }
+
+    /// Every focus with a PR under review, as `(tag, snapshot)` pairs.
+    /// Backs `perri.get_state`'s `other_focuses` — the fleet-level read the
+    /// singleton used to give for free.
+    pub fn all_prs(&self) -> Vec<(String, Arc<PrSnapshot>)> {
+        let mut out: Vec<(String, Arc<PrSnapshot>)> = self
+            .perri_pr_rx
+            .borrow()
+            .iter()
+            .map(|(tag, snap)| (tag.clone(), Arc::clone(snap)))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Publish `snap` as `tag`'s PR under review.
+    ///
+    /// **Test-only.** In the daemon the PR source owns the channel and this
+    /// panics, which is the point: a second publisher would reintroduce the
+    /// exact ambiguity about who decides what a focus is reviewing that this
+    /// wedge removes. It exists so the (many) test sites that used to swap a
+    /// whole `watch::Receiver` in can express what they mean in one line.
+    pub fn set_pr_for(&self, tag: &str, snap: PrSnapshot) {
+        self.publish(|map| {
+            map.insert(tag.to_owned(), Arc::new(snap));
+        });
+    }
+
+    /// Remove `tag`'s PR under review. Test-only, same contract as
+    /// [`Self::set_pr_for`].
+    pub fn clear_pr_for(&self, tag: &str) {
+        self.publish(|map| {
+            map.remove(tag);
+        });
+    }
+
+    fn publish(&self, edit: impl FnOnce(&mut HashMap<String, Arc<PrSnapshot>>)) {
+        let tx = self.perri_pr_tx.as_ref().expect(
+            "set_pr_for/clear_pr_for is test-only; the daemon's PR source owns the channel",
+        );
+        let mut map: HashMap<String, Arc<PrSnapshot>> = (**self.perri_pr_rx.borrow()).clone();
+        edit(&mut map);
+        let _ = tx.send(Arc::new(map));
     }
 
     /// Register a spawned PTY.
@@ -256,7 +334,7 @@ impl McpSharedState {
     /// without `--cfg test` in scope.
     pub fn for_test(event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let (_, perri_queue_rx) = watch::channel(None);
-        let (_, perri_pr_rx) = watch::channel(None);
+        let (perri_pr_tx, perri_pr_rx) = watch::channel(no_prs());
         let (_, fred_mailbox_rx) = watch::channel(None);
         let (_, fred_calendar_rx) = watch::channel(None);
         let (_, teri_todos_rx) = watch::channel(None);
@@ -264,7 +342,7 @@ impl McpSharedState {
         let (_, mother_status_rx) = watch::channel(None);
         let (_, rate_limits_rx) = watch::channel(None);
         let (_, budget_posture_rx) = watch::channel(None);
-        Self::new(
+        let mut state = Self::new(
             event_tx,
             perri_queue_rx,
             perri_pr_rx,
@@ -275,7 +353,9 @@ impl McpSharedState {
             mother_status_rx,
             rate_limits_rx,
             budget_posture_rx,
-        )
+        );
+        state.perri_pr_tx = Some(Arc::new(perri_pr_tx));
+        state
     }
 
     /// Construct an `McpSharedState` for an MCP server hosted inside `nostromd`,
@@ -298,7 +378,7 @@ impl McpSharedState {
     pub fn for_daemon_with_sources(
         daemon: DaemonMcpBackend,
         perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
-        perri_pr_rx: watch::Receiver<Option<PrSnapshot>>,
+        perri_pr_rx: watch::Receiver<PrSnapshots>,
         mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
     ) -> Self {
         let (event_tx, _dropped_rx) = mpsc::unbounded_channel();
@@ -306,6 +386,9 @@ impl McpSharedState {
         state.daemon = Some(daemon);
         state.perri_queue_rx = perri_queue_rx;
         state.perri_pr_rx = perri_pr_rx;
+        // The PR source owns the real sender; drop the test one so nothing in
+        // the daemon can publish a snapshot behind the source's back.
+        state.perri_pr_tx = None;
         state.mother_jobs_rx = mother_jobs_rx;
         state
     }

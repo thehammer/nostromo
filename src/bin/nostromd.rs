@@ -13,15 +13,15 @@
 //! - Owns PTY processes on behalf of TUI clients so they survive TUI restarts.
 //! - Removes the socket file on clean exit (SIGTERM / SIGINT).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use nostromo::mdns;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
-use nostromo::mdns;
 use tracing_appender::rolling;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -33,7 +33,7 @@ use nostromo::{
         fred_calendar_native::FredCalendarNativeSource,
         fred_mailbox::MailboxSnapshot,
         fred_mailbox_native::FredMailboxNativeSource,
-        perri_pr::PrSnapshot,
+        perri_pr::{PrSnapshot, PrSnapshots},
         perri_pr_native::PerriPrNativeSource,
         perri_queue::PrQueueSnapshot,
         perri_queue_native::PerriQueueNativeSource,
@@ -44,7 +44,9 @@ use nostromo::{
         decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, PtyManager,
         Server, SessionManager,
     },
-    mcp::{daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState},
+    mcp::{
+        daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState,
+    },
     mother::{self, statusline_cache_path, MotherStatus},
 };
 
@@ -146,7 +148,10 @@ async fn main() -> Result<()> {
     // environments block multicast.  The guard MUST outlive the select! below.
     let _mdns_guard = match mdns::advertise(bound_tcp_addr.port()) {
         Ok(guard) => {
-            info!(port = bound_tcp_addr.port(), "mDNS advertising started (_nostromo._tcp.local.)");
+            info!(
+                port = bound_tcp_addr.port(),
+                "mDNS advertising started (_nostromo._tcp.local.)"
+            );
             Some(guard)
         }
         Err(e) => {
@@ -176,13 +181,26 @@ async fn main() -> Result<()> {
     // not just the one the operator actually used — learns a request is done
     // (multi-window decision-sheet fix). Must happen here, after `server.tx`
     // exists, not in the registry-construction block above.
-    decisions.lock().unwrap().configure_broadcast(broadcast_tx.clone());
+    decisions
+        .lock()
+        .unwrap()
+        .configure_broadcast(broadcast_tx.clone());
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
     let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx) =
         PerriQueueNativeSource::spawn(config.clone());
-    let (perri_pr_rx, perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
+    // W7 — D8 backstop. The PR source serves a pin only while its focus still
+    // exists, so a missed eviction cannot resurrect one. `None` until a client
+    // has actually pushed a registry: an empty registry means "nobody has told
+    // us yet", and treating it as "no focus exists" would blank every focus's
+    // PR for the window between daemon start and the first push.
+    let live_focuses: nostromo::data::perri_pr_native::LiveFocuses = {
+        let session_mgr = Arc::clone(&session_mgr);
+        Arc::new(move || session_mgr.lock().unwrap().live_focus_tags())
+    };
+    let (perri_pr_rx, perri_pr_refresh_tx) =
+        PerriPrNativeSource::spawn(config.clone(), Some(live_focuses));
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
     let perri_pr_rx_for_mcp = perri_pr_rx.clone();
     let perri_pr_refresh_tx_for_mcp = perri_pr_refresh_tx.clone();
@@ -213,7 +231,10 @@ async fn main() -> Result<()> {
             // ATLASSIAN_* can tell why `ticket` shows are refused, without
             // ever logging the token itself.
             let jira_provider = Arc::new(nostromo::data::tickets::jira::JiraProvider::new(&config));
-            info!(configured = jira_provider.is_configured(), "jira ticket provider");
+            info!(
+                configured = jira_provider.is_configured(),
+                "jira ticket provider"
+            );
             let mut ticket_registry = nostromo::data::tickets::TicketRegistry::new();
             ticket_registry.register(jira_provider);
             let tickets = nostromo::mcp::TicketRegistryState {
@@ -318,12 +339,13 @@ async fn main() -> Result<()> {
     // (Sources were spawned earlier so the MCP state could get live receivers.)
     tokio::spawn(run_perri_broadcaster(
         broadcast_tx.clone(),
+        Arc::clone(&session_mgr),
         perri_queue_rx,
         perri_pr_rx,
     ));
 
     // ── Fred background sources ───────────────────────────────────────────────
-    let fred_mailbox_rx  = FredMailboxNativeSource::spawn(config.clone());
+    let fred_mailbox_rx = FredMailboxNativeSource::spawn(config.clone());
     let fred_calendar_rx = FredCalendarNativeSource::spawn(config.clone());
 
     // ── Teri todos source + broadcaster ───────────────────────────────────────
@@ -342,7 +364,11 @@ async fn main() -> Result<()> {
 
     // ── Fred broadcaster ──────────────────────────────────────────────────────
     let btx_fred = broadcast_tx.clone();
-    tokio::spawn(run_fred_broadcaster(btx_fred, fred_mailbox_rx, fred_calendar_rx));
+    tokio::spawn(run_fred_broadcaster(
+        btx_fred,
+        fred_mailbox_rx,
+        fred_calendar_rx,
+    ));
 
     // ── SIGTERM / SIGINT ──────────────────────────────────────────────────────
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -514,10 +540,10 @@ async fn run_peek_poller(
         // Send a terminal-clear for jobs that just left the active set.
         for id in active.difference(&currently_active) {
             let _ = tx.send(ServerMsg::MotherPeek {
-                job_id:     id.clone(),
-                todos:      vec![],
+                job_id: id.clone(),
+                todos: vec![],
                 tool_trail: vec![],
-                last_text:  String::new(),
+                last_text: String::new(),
             });
         }
 
@@ -528,10 +554,10 @@ async fn run_peek_poller(
             match mother::peek(id).await {
                 Ok(snap) => {
                     let _ = tx.send(ServerMsg::MotherPeek {
-                        job_id:     id.clone(),
-                        todos:      snap.todos,
+                        job_id: id.clone(),
+                        todos: snap.todos,
                         tool_trail: snap.tool_trail,
-                        last_text:  snap.last_text.chars().take(200).collect(),
+                        last_text: snap.last_text.chars().take(200).collect(),
                     });
                 }
                 Err(e) => {
@@ -544,36 +570,78 @@ async fn run_peek_poller(
 
 // ── perri broadcaster ─────────────────────────────────────────────────────────
 
-/// Build a `ServerMsg::PerriState` from the current watch-channel snapshots.
+/// Build one focus's `ServerMsg::PerriState`.
 ///
 /// Extracted as a free function so it can be unit-tested without a running daemon.
 fn build_perri_state(
+    tag: &str,
     queue_snap: Option<&PrQueueSnapshot>,
     pr_snap: Option<&PrSnapshot>,
 ) -> ServerMsg {
     ServerMsg::PerriState {
-        queue: queue_snap
-            .map(|s| s.items.clone())
-            .unwrap_or_default(),
+        tag: tag.to_owned(),
+        queue: queue_snap.map(|s| s.items.clone()).unwrap_or_default(),
         current: pr_snap.cloned().map(Box::new),
     }
 }
 
-/// Watch the Perri native sources and broadcast `PerriState` on every change.
+/// Every focus a `PerriState` frame could be addressed to: those with a PR
+/// under review, plus every focus the daemon knows about, so a focus with no
+/// PR is told *that* rather than being left with whatever it last heard.
+fn perri_state_tags(session_mgr: &Arc<Mutex<SessionManager>>, prs: &PrSnapshots) -> Vec<String> {
+    let mut tags: BTreeSet<String> = prs.keys().cloned().collect();
+    if let Ok(mgr) = session_mgr.lock() {
+        tags.extend(mgr.focus_registry().into_iter().map(|f| f.tag));
+    }
+    // The `queue` half of every `PerriState` frame is fleet-wide (D9), but
+    // after W7 it can only travel *on* a per-focus frame. With no focus to
+    // address — before a client has pushed a registry, or briefly after one
+    // pushes an empty list on reconnect — the fleet would otherwise stop
+    // hearing about the queue entirely until the next non-empty push.
+    //
+    // The built-in `perri` focus exists in every deployment and cannot be
+    // removed (`FocusStore.remove` refuses it), so addressing it here is the
+    // honest floor rather than an invented recipient.
+    if tags.is_empty() {
+        tags.insert(nostromo::data::perri_current_pr::BUILTIN_PERRI_TAG.to_owned());
+    }
+    tags.into_iter().collect()
+}
+
+/// Watch the Perri native sources and broadcast `PerriState` per focus (W7 — D7).
 ///
 /// Sends one initial broadcast immediately (so clients that connect after the
 /// first fetch still see current state), then loops on `tokio::select!` over
 /// both channels.
+///
+/// A queue change re-sends every focus — the queue is fleet-wide (D9). A PR
+/// change re-sends only the focuses whose PR actually moved, because with N
+/// focuses pinned, one pickup otherwise puts N copies of a possibly-500 KB
+/// snapshot on the wire.
 async fn run_perri_broadcaster(
     tx: broadcast::Sender<ServerMsg>,
+    session_mgr: Arc<Mutex<SessionManager>>,
     mut queue_rx: tokio::sync::watch::Receiver<Option<PrQueueSnapshot>>,
-    mut pr_rx: tokio::sync::watch::Receiver<Option<PrSnapshot>>,
+    mut pr_rx: tokio::sync::watch::Receiver<PrSnapshots>,
 ) {
+    fn broadcast(
+        tx: &broadcast::Sender<ServerMsg>,
+        tags: &[String],
+        queue: Option<&PrQueueSnapshot>,
+        prs: &PrSnapshots,
+    ) {
+        for tag in tags {
+            let _ = tx.send(build_perri_state(tag, queue, prs.get(tag).map(|s| &**s)));
+        }
+    }
+
+    let mut previous: PrSnapshots = pr_rx.borrow().clone();
+
     // Initial broadcast — borrow briefly, clone data, drop borrow before send.
     {
         let queue = queue_rx.borrow().clone();
-        let pr    = pr_rx.borrow().clone();
-        let _ = tx.send(build_perri_state(queue.as_ref(), pr.as_ref()));
+        let tags = perri_state_tags(&session_mgr, &previous);
+        broadcast(&tx, &tags, queue.as_ref(), &previous);
     }
 
     loop {
@@ -581,14 +649,24 @@ async fn run_perri_broadcaster(
             result = queue_rx.changed() => {
                 if result.is_err() { break; } // sender dropped — clean exit
                 let queue = queue_rx.borrow_and_update().clone();
-                let pr    = pr_rx.borrow().clone();
-                let _ = tx.send(build_perri_state(queue.as_ref(), pr.as_ref()));
+                let prs   = pr_rx.borrow().clone();
+                let tags  = perri_state_tags(&session_mgr, &prs);
+                broadcast(&tx, &tags, queue.as_ref(), &prs);
             }
             result = pr_rx.changed() => {
                 if result.is_err() { break; }
                 let queue = queue_rx.borrow().clone();
-                let pr    = pr_rx.borrow_and_update().clone();
-                let _ = tx.send(build_perri_state(queue.as_ref(), pr.as_ref()));
+                let prs   = pr_rx.borrow_and_update().clone();
+                let changed: Vec<String> = {
+                    let mut v: Vec<String> =
+                        nostromo::data::perri_pr::changed_tags(&previous, &prs)
+                            .into_iter()
+                            .collect();
+                    v.sort();
+                    v
+                };
+                previous = prs.clone();
+                broadcast(&tx, &changed, queue.as_ref(), &prs);
             }
         }
     }
@@ -624,7 +702,7 @@ fn build_fred_state(
     mailbox_rx: &tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
     calendar_rx: &tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
 ) -> ServerMsg {
-    let mailbox  = mailbox_rx.borrow().clone().unwrap_or_default();
+    let mailbox = mailbox_rx.borrow().clone().unwrap_or_default();
     let calendar = calendar_rx.borrow().clone().unwrap_or_default();
     ServerMsg::FredState { mailbox, calendar }
 }

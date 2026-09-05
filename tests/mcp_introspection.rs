@@ -12,7 +12,8 @@ use nostromo::{
     data::{
         fred_calendar::{CalendarEvent, CalendarSnapshot},
         fred_mailbox::MailboxSnapshot,
-        perri_pr::PrSnapshot,
+        perri_current_pr::BUILTIN_PERRI_TAG,
+        perri_pr::{no_prs, one_pr, PrSnapshot},
         perri_queue::PrQueueSnapshot,
         rate_limits::{BudgetPosture, RateLimits},
         teri_todos::{TeriTodo, TeriTodosSnapshot},
@@ -55,7 +56,8 @@ fn seeded_state(
 ) -> McpSharedState {
     let (tx, _rx) = mpsc::unbounded_channel();
     let (_, perri_queue_rx) = watch::channel(perri_queue);
-    let (_, perri_pr_rx) = watch::channel(perri_pr);
+    let (_, perri_pr_rx) =
+        watch::channel(perri_pr.map_or_else(no_prs, |snap| one_pr(BUILTIN_PERRI_TAG, snap)));
     let (_, mailbox_rx) = watch::channel(mailbox);
     let (_, calendar_rx) = watch::channel(calendar);
     let (_, teri_todos_rx) = watch::channel(teri_todos);
@@ -349,7 +351,7 @@ async fn perri_list_pr_queue_fields_match() {
 #[tokio::test]
 async fn perri_get_current_pr_returns_null_when_none() {
     let state = empty_state();
-    let result = perri::get_current_pr(&state);
+    let result = perri::get_current_pr(&state, Some(BUILTIN_PERRI_TAG));
     assert!(
         result.is_null(),
         "get_current_pr should return null when channel holds None"
@@ -378,7 +380,7 @@ async fn perri_get_current_pr_returns_snapshot() {
     };
     let state = seeded_state(None, Some(snap), None, None, None, vec![], None, None, None);
 
-    let result = perri::get_current_pr(&state);
+    let result = perri::get_current_pr(&state, Some(BUILTIN_PERRI_TAG));
     assert!(
         !result.is_null(),
         "get_current_pr should not be null when snapshot is set"
@@ -421,7 +423,7 @@ async fn perri_get_state_composite() {
         None,
     );
 
-    let result = perri::get_state(&state);
+    let result = perri::get_state(&state, Some(BUILTIN_PERRI_TAG));
     let queue_arr = result["queue"]
         .as_array()
         .expect("queue should be an array");
@@ -857,7 +859,7 @@ async fn get_view_state_dispatches_perri() {
     let input = get_view_state::GetViewStateInput {
         view_id: "perri".to_string(),
     };
-    let result = get_view_state::handle(&state, &input).await;
+    let result = get_view_state::handle(&state, &input, Some(BUILTIN_PERRI_TAG)).await;
 
     // get_view_state("perri") returns perri::get_state — must have queue, current_pr, stale.
     assert!(
@@ -892,7 +894,7 @@ async fn get_view_state_dispatches_fred() {
     let input = get_view_state::GetViewStateInput {
         view_id: "fred".to_string(),
     };
-    let result = get_view_state::handle(&state, &input).await;
+    let result = get_view_state::handle(&state, &input, Some(BUILTIN_PERRI_TAG)).await;
 
     // get_view_state("fred") returns fred::get_state.
     assert!(result.get("unread_count").is_some());
@@ -909,7 +911,7 @@ async fn get_view_state_unknown_view_returns_error() {
     let input = get_view_state::GetViewStateInput {
         view_id: "no-such-view".to_string(),
     };
-    let result = get_view_state::handle(&state, &input).await;
+    let result = get_view_state::handle(&state, &input, Some(BUILTIN_PERRI_TAG)).await;
     assert_eq!(result["error"], "unknown_view");
 }
 

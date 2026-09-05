@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent_bus::ActivityEvent,
-    data::{perri_pr::PrSnapshot, perri_queue::{CiState, PrQueueItem}},
+    data::{
+        perri_pr::PrSnapshot,
+        perri_queue::{CiState, PrQueueItem},
+    },
     ipc::{
         session_manager::StopReason,
         stream_json::{SessionState, Turn, TurnDelta},
@@ -947,6 +950,14 @@ pub enum ClientMsg {
         pr_number: Option<u64>,
         /// `owner/name` repo slug for `load_pr` and `approve`; `None` for `clear`.
         repo: Option<String>,
+        /// The focus whose PR under review `load_pr`/`clear` moves (W7).
+        ///
+        /// The PR under review is a property of the focus, so an affordance in
+        /// focus X must move X's pin and nobody else's. Optional and defaulted
+        /// so a client built before W7 still round-trips: it addresses the
+        /// built-in `perri` focus, which is where its one PR surface lived.
+        #[serde(default)]
+        tag: Option<String>,
     },
 
     /// Answer a `ServerMsg::DecisionRequest` (W6 decision modals).
@@ -994,9 +1005,28 @@ pub enum ServerMsg {
     /// (clippy::large_enum_variant).
     MotherAwaitDetected(Box<MotherJob>),
 
-    /// Broadcast snapshot of Perri's PR review state. Re-sent whenever the
-    /// native queue or current-PR watch channel changes.
+    /// Broadcast snapshot of one focus's PR review state (W7).
+    ///
+    /// **The two fields have deliberately different scopes, and this is the
+    /// asymmetry to remember when reading this variant:**
+    ///
+    /// - `current` — the PR **`tag`'s focus** has under review, or `None` when
+    ///   it has none. Per-focus, because "the PR under review" is a property
+    ///   of the focus: two focuses reviewing two PRs is the ordinary case, and
+    ///   before W7 the machine had one slot that whichever focus picked up a
+    ///   PR most recently silently owned.
+    /// - `queue` — the **fleet-wide** review queue, byte-identical in every
+    ///   frame regardless of `tag`. There is one set of open PRs and every
+    ///   focus sees the same one; splitting it per focus would be a different
+    ///   and worse product (PRD: "only the PR under review is scoped").
+    ///
+    /// One frame per focus rather than one frame carrying a map, matching
+    /// every other per-focus broadcast here (`FocusLayout`, `PaneContent`,
+    /// `Activity`): a PR change re-sends only the focuses whose PR moved, and
+    /// `PrSnapshot` carries a diff of up to 500 KB.
     PerriState {
+        /// The focus this frame describes.
+        tag: String,
         queue: Vec<PrQueueItem>,
         current: Option<Box<PrSnapshot>>,
     },
@@ -1408,10 +1438,12 @@ mod tests {
     /// old/unaware client be miscounted as an operator.
     #[test]
     fn subscribe_without_a_renders_decisions_key_decodes_as_false() {
-        let msg: ClientMsg =
-            serde_json::from_str(r#"{"type":"subscribe","topics":[]}"#).unwrap();
+        let msg: ClientMsg = serde_json::from_str(r#"{"type":"subscribe","topics":[]}"#).unwrap();
         match msg {
-            ClientMsg::Subscribe { topics, renders_decisions } => {
+            ClientMsg::Subscribe {
+                topics,
+                renders_decisions,
+            } => {
                 assert_eq!(topics, vec![]);
                 assert!(
                     !renders_decisions,
@@ -1428,10 +1460,12 @@ mod tests {
     #[test]
     fn subscribe_with_topics_and_no_renders_decisions_key_still_decodes_successfully() {
         let msg: ClientMsg =
-            serde_json::from_str(r#"{"type":"subscribe","topics":["decision","layout"]}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"type":"subscribe","topics":["decision","layout"]}"#).unwrap();
         match msg {
-            ClientMsg::Subscribe { topics, renders_decisions } => {
+            ClientMsg::Subscribe {
+                topics,
+                renders_decisions,
+            } => {
                 assert_eq!(topics, vec![Topic::Decision, Topic::Layout]);
                 assert!(!renders_decisions);
             }
@@ -1441,24 +1475,26 @@ mod tests {
 
     #[test]
     fn subscribe_with_renders_decisions_true_decodes_true() {
-        let msg: ClientMsg = serde_json::from_str(
-            r#"{"type":"subscribe","topics":[],"renders_decisions":true}"#,
-        )
-        .unwrap();
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_decisions":true}"#)
+                .unwrap();
         match msg {
-            ClientMsg::Subscribe { renders_decisions, .. } => assert!(renders_decisions),
+            ClientMsg::Subscribe {
+                renders_decisions, ..
+            } => assert!(renders_decisions),
             other => panic!("expected Subscribe, got {other:?}"),
         }
     }
 
     #[test]
     fn subscribe_with_renders_decisions_false_decodes_false() {
-        let msg: ClientMsg = serde_json::from_str(
-            r#"{"type":"subscribe","topics":[],"renders_decisions":false}"#,
-        )
-        .unwrap();
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_decisions":false}"#)
+                .unwrap();
         match msg {
-            ClientMsg::Subscribe { renders_decisions, .. } => assert!(!renders_decisions),
+            ClientMsg::Subscribe {
+                renders_decisions, ..
+            } => assert!(!renders_decisions),
             other => panic!("expected Subscribe, got {other:?}"),
         }
     }
@@ -1470,10 +1506,16 @@ mod tests {
     /// just "some boolean survives a round trip."
     #[test]
     fn encoding_subscribe_includes_an_explicit_renders_decisions_false_key() {
-        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: false });
+        round_trip_client(ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: false,
+        });
 
-        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: false })
-            .unwrap();
+        let v = serde_json::to_value(ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: false,
+        })
+        .unwrap();
         assert_eq!(v["type"], "subscribe");
         assert_eq!(v["topics"], serde_json::json!([]));
         assert_eq!(
@@ -1484,10 +1526,16 @@ mod tests {
 
     #[test]
     fn encoding_subscribe_includes_an_explicit_renders_decisions_true_key() {
-        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: true });
+        round_trip_client(ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: true,
+        });
 
-        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: true })
-            .unwrap();
+        let v = serde_json::to_value(ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: true,
+        })
+        .unwrap();
         assert_eq!(v["renders_decisions"], true);
     }
 
@@ -1555,22 +1603,19 @@ mod tests {
 
     #[test]
     fn topic_teri_serializes_to_teri() {
-        assert_eq!(
-            serde_json::to_string(&Topic::Teri).unwrap(),
-            "\"teri\""
-        );
+        assert_eq!(serde_json::to_string(&Topic::Teri).unwrap(), "\"teri\"");
     }
 
     #[test]
     fn focus_meta_round_trips() {
         // All optionals Some
         let full = FocusMeta {
-            tag:             "cody-abc12345".into(),
-            display_name:    "Cody in Admin Portal".into(),
-            agent_name:      "cody".into(),
-            project_name:    Some("Admin Portal".into()),
-            org:             Some("Carefeed".into()),
-            is_built_in:     false,
+            tag: "cody-abc12345".into(),
+            display_name: "Cody in Admin Portal".into(),
+            agent_name: "cody".into(),
+            project_name: Some("Admin Portal".into()),
+            org: Some("Carefeed".into()),
+            is_built_in: false,
             session_summary: Some("Build the auth flow".into()),
         };
         let json = serde_json::to_string(&full).unwrap();
@@ -1579,12 +1624,12 @@ mod tests {
 
         // All optionals None
         let minimal = FocusMeta {
-            tag:             "fred".into(),
-            display_name:    "Fred".into(),
-            agent_name:      "fred".into(),
-            project_name:    None,
-            org:             None,
-            is_built_in:     true,
+            tag: "fred".into(),
+            display_name: "Fred".into(),
+            agent_name: "fred".into(),
+            project_name: None,
+            org: None,
+            is_built_in: true,
             session_summary: None,
         };
         let json = serde_json::to_string(&minimal).unwrap();
@@ -1646,13 +1691,28 @@ mod tests {
         round_trip_server(ServerMsg::MotherPeek {
             job_id: "job-abc123".into(),
             todos: vec![
-                PeekTodo { status: "completed".into(), content: "Add Rust protocol variant".into() },
-                PeekTodo { status: "in_progress".into(), content: "Add NostromoKit wire types".into() },
-                PeekTodo { status: "pending".into(), content: "Add iOS tab".into() },
+                PeekTodo {
+                    status: "completed".into(),
+                    content: "Add Rust protocol variant".into(),
+                },
+                PeekTodo {
+                    status: "in_progress".into(),
+                    content: "Add NostromoKit wire types".into(),
+                },
+                PeekTodo {
+                    status: "pending".into(),
+                    content: "Add iOS tab".into(),
+                },
             ],
             tool_trail: vec![
-                PeekToolCall { tool: "Read".into(), brief: "src/ipc/protocol.rs".into() },
-                PeekToolCall { tool: "Edit".into(), brief: "add MotherPeek variant".into() },
+                PeekToolCall {
+                    tool: "Read".into(),
+                    brief: "src/ipc/protocol.rs".into(),
+                },
+                PeekToolCall {
+                    tool: "Edit".into(),
+                    brief: "add MotherPeek variant".into(),
+                },
             ],
             last_text: "Implementing the MotherPeek broadcast".into(),
         });
@@ -1680,12 +1740,12 @@ mod tests {
     #[test]
     fn focus_registry_messages_round_trip() {
         let meta = FocusMeta {
-            tag:             "fred".into(),
-            display_name:    "Fred".into(),
-            agent_name:      "fred".into(),
-            project_name:    None,
-            org:             Some("Carefeed".into()),
-            is_built_in:     true,
+            tag: "fred".into(),
+            display_name: "Fred".into(),
+            agent_name: "fred".into(),
+            project_name: None,
+            org: Some("Carefeed".into()),
+            is_built_in: true,
             session_summary: None,
         };
 
@@ -1789,7 +1849,9 @@ mod tests {
         round_trip_server(ServerMsg::PaneContent {
             tag: "perri".into(),
             pane_id: "queue".into(),
-            content: PaneContentWire::Text { text: "fresh".into() },
+            content: PaneContentWire::Text {
+                text: "fresh".into(),
+            },
             freshness: None,
             address: None,
         });
@@ -1818,9 +1880,17 @@ mod tests {
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
-                assert!(matches!(content, PaneContentWire::Text { text } if text == "from an old daemon"));
-                assert_eq!(freshness, None, "an absent \"freshness\" key must deserialize to None");
-                assert_eq!(address, None, "an absent \"address\" key must deserialize to None");
+                assert!(
+                    matches!(content, PaneContentWire::Text { text } if text == "from an old daemon")
+                );
+                assert_eq!(
+                    freshness, None,
+                    "an absent \"freshness\" key must deserialize to None"
+                );
+                assert_eq!(
+                    address, None,
+                    "an absent \"address\" key must deserialize to None"
+                );
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -2058,7 +2128,10 @@ mod tests {
         let msg: ServerMsg = serde_json::from_str(raw).expect("old-shaped frame must still parse");
         match msg {
             ServerMsg::PaneContent { address, .. } => {
-                assert_eq!(address, None, "an absent \"address\" key must deserialize to None");
+                assert_eq!(
+                    address, None,
+                    "an absent \"address\" key must deserialize to None"
+                );
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -2111,18 +2184,21 @@ mod tests {
             action: "load_pr".into(),
             pr_number: Some(42),
             repo: Some("acme/web".into()),
+            tag: Some("perri".into()),
         });
         // clear — pr_number and repo are None
         round_trip_client(ClientMsg::PerriAction {
             action: "clear".into(),
             pr_number: None,
             repo: None,
+            tag: Some("perri".into()),
         });
         // approve — pr_number and repo required
         round_trip_client(ClientMsg::PerriAction {
             action: "approve".into(),
             pr_number: Some(7),
             repo: Some("acme/web".into()),
+            tag: Some("perri".into()),
         });
     }
 
@@ -2132,6 +2208,7 @@ mod tests {
             action: "approve".into(),
             pr_number: Some(7),
             repo: Some("acme/web".into()),
+            tag: Some("perri".into()),
         })
         .unwrap();
         assert_eq!(v["type"], "perri_action");
@@ -2146,6 +2223,7 @@ mod tests {
             action: "load_pr".into(),
             pr_number: Some(1),
             repo: Some("org/repo".into()),
+            tag: Some("perri".into()),
         })
         .unwrap();
         assert_eq!(v["type"], "perri_action");
@@ -2156,6 +2234,7 @@ mod tests {
             action: "clear".into(),
             pr_number: None,
             repo: None,
+            tag: Some("perri".into()),
         })
         .unwrap();
         assert_eq!(v2["type"], "perri_action");
@@ -2166,6 +2245,7 @@ mod tests {
     #[test]
     fn perri_state_round_trip_empty() {
         round_trip_server(ServerMsg::PerriState {
+            tag: "perri".into(),
             queue: vec![],
             current: None,
         });
@@ -2214,6 +2294,7 @@ mod tests {
         };
 
         round_trip_server(ServerMsg::PerriState {
+            tag: "perri".into(),
             queue: vec![item],
             current: Some(Box::new(snap)),
         });
@@ -2222,6 +2303,7 @@ mod tests {
     #[test]
     fn perri_state_type_tag_is_perri_state() {
         let v = serde_json::to_value(ServerMsg::PerriState {
+            tag: "perri".into(),
             queue: vec![],
             current: None,
         })
@@ -2231,10 +2313,7 @@ mod tests {
 
     #[test]
     fn topic_perri_serializes_to_perri() {
-        assert_eq!(
-            serde_json::to_string(&Topic::Perri).unwrap(),
-            "\"perri\""
-        );
+        assert_eq!(serde_json::to_string(&Topic::Perri).unwrap(), "\"perri\"");
         let decoded: Topic = serde_json::from_str("\"perri\"").unwrap();
         assert_eq!(decoded, Topic::Perri);
     }
@@ -2250,7 +2329,7 @@ mod tests {
 
         // (a) Empty snapshots
         round_trip_server(ServerMsg::FredState {
-            mailbox:  MailboxSnapshot::default(),
+            mailbox: MailboxSnapshot::default(),
             calendar: CalendarSnapshot::default(),
         });
 
@@ -2260,36 +2339,36 @@ mod tests {
             generated_at: None,
             unread_count: 1,
             items: vec![MailboxItem {
-                from:        "Alice <alice@example.com>".into(),
-                subject:     "Important: Meeting Tomorrow".into(),
+                from: "Alice <alice@example.com>".into(),
+                subject: "Important: Meeting Tomorrow".into(),
                 received_at: Some(chrono::Utc::now()),
-                vip:         true,
-                is_invite:   false,
-                is_read:     false,
+                vip: true,
+                is_invite: false,
+                is_read: false,
             }],
-            stale:       false,
-            error:       None,
+            stale: false,
+            error: None,
             auth_prompt: Some(DeviceFlowPrompt {
                 verification_uri: "https://microsoft.com/devicelogin".into(),
-                user_code:        "ABCD-1234".into(),
-                expires_at:       chrono::Utc::now(),
+                user_code: "ABCD-1234".into(),
+                expires_at: chrono::Utc::now(),
             }),
         };
         let calendar = CalendarSnapshot {
             events: vec![CalendarEvent {
-                start:  Some(chrono::Utc::now()),
-                end:    Some(chrono::Utc::now()),
-                title:  "Daily standup".into(),
+                start: Some(chrono::Utc::now()),
+                end: Some(chrono::Utc::now()),
+                title: "Daily standup".into(),
                 status: "accepted".into(),
                 is_now: true,
             }],
             next: Some(NextEvent {
-                title:      "Lunch".into(),
+                title: "Lunch".into(),
                 in_minutes: 45,
             }),
             sweater: "amber".into(),
-            stale:   false,
-            error:   None,
+            stale: false,
+            error: None,
         };
         round_trip_server(ServerMsg::FredState { mailbox, calendar });
     }
@@ -2297,7 +2376,7 @@ mod tests {
     #[test]
     fn fred_state_type_tag_is_fred_state() {
         let v = serde_json::to_value(ServerMsg::FredState {
-            mailbox:  crate::data::fred_mailbox::MailboxSnapshot::default(),
+            mailbox: crate::data::fred_mailbox::MailboxSnapshot::default(),
             calendar: crate::data::fred_calendar::CalendarSnapshot::default(),
         })
         .unwrap();
@@ -2314,15 +2393,15 @@ mod tests {
             pane_id: "queue".into(),
             content: PaneContentWire::PrList {
                 items: vec![PrListItem {
-                    repo:         "acme/web".into(),
-                    number:       42,
-                    title:        "feat: auth".into(),
-                    author:       "alice".into(),
-                    bucket:       "requested".into(),
-                    ci_state:     CiState::Success,
+                    repo: "acme/web".into(),
+                    number: 42,
+                    title: "feat: auth".into(),
+                    author: "alice".into(),
+                    bucket: "requested".into(),
+                    ci_state: CiState::Success,
                     new_activity: false,
-                    url:          "https://github.com/acme/web/pull/42".into(),
-                    head_sha:     "abc123".into(),
+                    url: "https://github.com/acme/web/pull/42".into(),
+                    head_sha: "abc123".into(),
                 }],
             },
             freshness: None,
@@ -2404,7 +2483,9 @@ mod tests {
 
     #[test]
     fn activity_snapshot_request_round_trips() {
-        round_trip_client(ClientMsg::ActivitySnapshotRequest { tag: "cody-1".into() });
+        round_trip_client(ClientMsg::ActivitySnapshotRequest {
+            tag: "cody-1".into(),
+        });
     }
 
     /// An old daemon build (pre-schema-growth) emits the original 4-field
@@ -2420,7 +2501,8 @@ mod tests {
             "kind": "tool_use",
             "summary": "reading a file"
         }"#;
-        let msg: ServerMsg = serde_json::from_str(raw).expect("old 4-field Activity shape must still parse");
+        let msg: ServerMsg =
+            serde_json::from_str(raw).expect("old 4-field Activity shape must still parse");
         match msg {
             ServerMsg::Activity(ev) => {
                 assert_eq!(ev.agent, "perri");
@@ -2432,7 +2514,6 @@ mod tests {
             other => panic!("expected Activity, got {other:?}"),
         }
     }
-
 
     // ── decision modals (W6) ──────────────────────────────────────────────────
 
@@ -2498,7 +2579,10 @@ mod tests {
             v.as_object().unwrap().contains_key("choice_id"),
             "choice_id must be present on the wire even when dismissed"
         );
-        assert!(v["choice_id"].is_null(), "a dismissed answer must serialize choice_id as null");
+        assert!(
+            v["choice_id"].is_null(),
+            "a dismissed answer must serialize choice_id as null"
+        );
     }
 
     #[test]
@@ -2614,7 +2698,10 @@ mod tests {
         ];
         for (variant, wire) in cases {
             let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, wire, "DecisionResolution::{variant:?} must serialize as {wire}");
+            assert_eq!(
+                json, wire,
+                "DecisionResolution::{variant:?} must serialize as {wire}"
+            );
             let back: DecisionResolution = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant);
         }
@@ -2703,7 +2790,10 @@ mod tests {
         ];
         for (variant, wire) in cases {
             let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, wire, "DiffStatus::{variant:?} must serialize as {wire}");
+            assert_eq!(
+                json, wire,
+                "DiffStatus::{variant:?} must serialize as {wire}"
+            );
             let back: DiffStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant);
         }
@@ -2719,7 +2809,10 @@ mod tests {
         ];
         for (variant, wire) in cases {
             let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, wire, "DiffLineKind::{variant:?} must serialize as {wire}");
+            assert_eq!(
+                json, wire,
+                "DiffLineKind::{variant:?} must serialize as {wire}"
+            );
             let back: DiffLineKind = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant);
         }
@@ -2906,7 +2999,9 @@ mod tests {
             },
             MdBlock::Heading {
                 level: 2,
-                spans: vec![MdSpan::Text { text: "title".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "title".into(),
+                }],
             },
             MdBlock::CodeBlock {
                 lang: Some("rust".into()),
@@ -2920,7 +3015,9 @@ mod tests {
                 ordered: false,
                 start: None,
                 items: vec![vec![MdBlock::Paragraph {
-                    spans: vec![MdSpan::Text { text: "item".into() }],
+                    spans: vec![MdSpan::Text {
+                        text: "item".into(),
+                    }],
                 }]],
             },
             MdBlock::List {
@@ -2937,7 +3034,9 @@ mod tests {
             },
             MdBlock::Quote {
                 blocks: vec![MdBlock::Paragraph {
-                    spans: vec![MdSpan::Text { text: "quoted".into() }],
+                    spans: vec![MdSpan::Text {
+                        text: "quoted".into(),
+                    }],
                 }],
             },
             MdBlock::Table {
@@ -2979,18 +3078,26 @@ mod tests {
     fn every_md_span_variant_round_trips() {
         let cases = vec![
             MdSpan::Text { text: "hi".into() },
-            MdSpan::Code { text: "x = 1".into() },
+            MdSpan::Code {
+                text: "x = 1".into(),
+            },
             MdSpan::Emph {
                 spans: vec![MdSpan::Text { text: "em".into() }],
             },
             MdSpan::Strong {
-                spans: vec![MdSpan::Text { text: "strong".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "strong".into(),
+                }],
             },
             MdSpan::Strike {
-                spans: vec![MdSpan::Text { text: "struck".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "struck".into(),
+                }],
             },
             MdSpan::Link {
-                spans: vec![MdSpan::Text { text: "text".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "text".into(),
+                }],
                 url: "http://example.com".into(),
             },
             MdSpan::Image {
@@ -3042,7 +3149,10 @@ mod tests {
         };
         let json = serde_json::to_string(&comment).unwrap();
         let back: ConversationComment = serde_json::from_str(&json).unwrap();
-        assert_eq!(comment, back, "ConversationComment round trip mismatch: {json}");
+        assert_eq!(
+            comment, back,
+            "ConversationComment round trip mismatch: {json}"
+        );
     }
 
     #[test]
@@ -3178,7 +3288,10 @@ mod tests {
             conversation_error: Some("conversation fetch partially failed: reviews".into()),
         };
         let json = serde_json::to_value(&content).unwrap();
-        assert_eq!(json["conversation_error"], "conversation fetch partially failed: reviews");
+        assert_eq!(
+            json["conversation_error"],
+            "conversation fetch partially failed: reviews"
+        );
         let back: PaneContentWire = serde_json::from_value(json).unwrap();
         assert_eq!(back, content);
     }
@@ -3190,7 +3303,9 @@ mod tests {
         let section = TicketSection {
             name: "description".into(),
             heading: None,
-            blocks: vec![MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "hi".into() }] }],
+            blocks: vec![MdBlock::Paragraph {
+                spans: vec![MdSpan::Text { text: "hi".into() }],
+            }],
         };
         let json = serde_json::to_value(&section).unwrap();
         assert!(
@@ -3209,7 +3324,10 @@ mod tests {
             blocks: vec![],
         };
         let json = serde_json::to_value(&section).unwrap();
-        assert_eq!(json["heading"], serde_json::json!([{ "kind": "text", "text": "AC" }]));
+        assert_eq!(
+            json["heading"],
+            serde_json::json!([{ "kind": "text", "text": "AC" }])
+        );
         let back: TicketSection = serde_json::from_value(json).unwrap();
         assert_eq!(back, section);
     }
@@ -3223,7 +3341,9 @@ mod tests {
                 .unwrap()
                 .with_timezone(&chrono::Utc),
             blocks: vec![MdBlock::Paragraph {
-                spans: vec![MdSpan::Text { text: "a comment".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "a comment".into(),
+                }],
             }],
         };
         let json = serde_json::to_string(&comment).unwrap();
@@ -3238,7 +3358,9 @@ mod tests {
             name: "acceptance_criteria".into(),
             heading: Some(vec![MdSpan::Text { text: "AC".into() }]),
             blocks: vec![MdBlock::Paragraph {
-                spans: vec![MdSpan::Text { text: "Must work.".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "Must work.".into(),
+                }],
             }],
         }
     }
@@ -3249,7 +3371,9 @@ mod tests {
             author: "bob".into(),
             created_at: chrono::Utc::now(),
             blocks: vec![MdBlock::Paragraph {
-                spans: vec![MdSpan::Text { text: "a comment".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "a comment".into(),
+                }],
             }],
         }
     }

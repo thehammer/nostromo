@@ -17,9 +17,20 @@ pub struct GetViewStateInput {
 }
 
 /// Handle `nostromo.get_view_state({ view_id })`.
-pub async fn handle(state: &McpSharedState, input: &GetViewStateInput) -> Value {
+///
+/// `view_id` here names a *view kind* (`"perri"`, `"fred"`, ...), which is not
+/// the same thing as the focus tag the daemon's addressing rule resolves —
+/// several focuses can be running the `perri` view. So `pty_id` is threaded in
+/// separately and is what Perri's state resolves its PR under review against
+/// (W7 — D3); a caller Nostromo can't place gets `current_pr: null` rather
+/// than whichever focus happened to pick up a PR most recently.
+pub async fn handle(
+    state: &McpSharedState,
+    input: &GetViewStateInput,
+    pty_id: Option<&str>,
+) -> Value {
     match input.view_id.as_str() {
-        "perri" => perri::get_state(state),
+        "perri" => perri::get_state(state, pty_id.filter(|s| !s.is_empty())),
         "fred" => fred::get_state(state),
         "mother" => mother::get_status(state),
         "teri" => teri::list_todos(state),

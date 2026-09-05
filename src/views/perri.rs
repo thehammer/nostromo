@@ -16,7 +16,8 @@ use tokio::sync::watch;
 use crate::{
     config::Config,
     data::{
-        perri_pr::PrSnapshot,
+        perri_current_pr,
+        perri_pr::PrSnapshots,
         perri_queue::{CiState, PrQueueSnapshot},
     },
     event::AppEvent,
@@ -34,7 +35,7 @@ const PERRI_PTY_TAG: &str = "perri";
 
 pub struct PerriView {
     queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
-    pr_rx: watch::Receiver<Option<PrSnapshot>>,
+    pr_rx: watch::Receiver<PrSnapshots>,
     selected_pr: usize,
     config: Config,
     ctx: ViewCtx,
@@ -77,7 +78,7 @@ pub struct PerriView {
 impl PerriView {
     pub fn new(
         queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
-        pr_rx: watch::Receiver<Option<PrSnapshot>>,
+        pr_rx: watch::Receiver<PrSnapshots>,
         config: Config,
         ctx: ViewCtx,
         syntect: Arc<SyntectCache>,
@@ -200,8 +201,9 @@ impl PerriView {
         highlights: Option<String>,
     ) -> Result<(), String> {
         let state_dir = self.config.perri_state_dir();
-        crate::data::perri_current_pr::write_pointer(
+        perri_current_pr::write_pointer(
             &state_dir,
+            perri_current_pr::BUILTIN_PERRI_TAG,
             number,
             &repo,
             highlights.as_deref(),
@@ -216,7 +218,7 @@ impl PerriView {
     /// Remove `current-pr.json` and touch the dirty sentinel to clear Perri's diff pane.
     pub fn clear_current_pr(&mut self) -> Result<(), String> {
         let state_dir = self.config.perri_state_dir();
-        crate::data::perri_current_pr::clear_pointer(&state_dir)?;
+        perri_current_pr::clear_pointer(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG)?;
 
         self.diff_override = None;
         Ok(())
@@ -356,8 +358,10 @@ impl PerriView {
             return;
         }
 
+        // The TUI is a single-Perri host; it reads the built-in focus's PR
+        // out of the per-focus map (W7 — D6).
         let snap = self.pr_rx.borrow();
-        let snap = snap.as_ref();
+        let snap = snap.get(perri_current_pr::BUILTIN_PERRI_TAG).map(|s| &**s);
 
         let stale = snap.map(|s| s.stale).unwrap_or(false);
         let stale_suffix = if stale { " (stale)" } else { "" };
@@ -537,7 +541,11 @@ impl View for PerriView {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        let pr_error = self.pr_rx.borrow().as_ref().and_then(|s| s.error.clone());
+        let pr_error = self
+            .pr_rx
+            .borrow()
+            .get(perri_current_pr::BUILTIN_PERRI_TAG)
+            .and_then(|s| s.error.clone());
         let queue_error = self
             .queue_rx
             .borrow()
@@ -875,10 +883,10 @@ impl View for PerriView {
                     self.diff_override = Some(s.clone());
                     Ok(())
                 }
-                PaneContent::JsonSnapshot(_) | PaneContent::PrList(_)
-                | PaneContent::Loading | PaneContent::Error(_) => {
-                    Err("unsupported_payload".into())
-                }
+                PaneContent::JsonSnapshot(_)
+                | PaneContent::PrList(_)
+                | PaneContent::Loading
+                | PaneContent::Error(_) => Err("unsupported_payload".into()),
             },
             "repl" => {
                 // PTY-owned pane; reject mutations.

@@ -234,6 +234,21 @@ pub struct SessionManager {
     store_path: PathBuf,
     /// Mac-pushed focus registry; served to all clients and broadcast on change.
     focus_registry: Vec<FocusMeta>,
+    /// Tags this daemon created itself, via `nostromo.create_focus` (W7 — D8b).
+    ///
+    /// The Mac's `focuses.json` has never heard of these, so every
+    /// `FocusRegistryPush` omits them. Without this exemption a naive
+    /// "in the old list, not in the new one" diff would evict an
+    /// agent-created focus the moment the Mac pushed anything at all.
+    daemon_created_tags: HashSet<String>,
+    /// Tags one push claimed were gone, awaiting a second push that agrees
+    /// (W7 — D8a).
+    ///
+    /// `set_focus_registry` runs on every reconnect, and a reconnecting client
+    /// can push a partial list before it has finished loading. Evicting on a
+    /// single push would make a routine reconnect destroy a focus's pin.
+    /// Departure therefore requires two consecutive pushes to agree.
+    pending_departures: HashSet<String>,
     /// Per-focus pane-tree registry. Set by the daemon via
     /// [`SessionManager::configure_mcp_bridge`]; `None` in tests / non-daemon use.
     /// A fresh (non-resume) spawn initialises the focus's tree to a single REPL
@@ -278,6 +293,8 @@ impl SessionManager {
             client_senders: Arc::new(Mutex::new(HashMap::new())),
             store_path,
             focus_registry: Vec::new(),
+            daemon_created_tags: HashSet::new(),
+            pending_departures: HashSet::new(),
             pane_registry: None,
             mcp_socket: None,
             mcp_config: None,
@@ -460,7 +477,8 @@ impl SessionManager {
             Some(id) => (id, true),
             None => (Uuid::new_v4().to_string(), false),
         };
-        self.session_reverse.insert(effective_id.clone(), tag.clone());
+        self.session_reverse
+            .insert(effective_id.clone(), tag.clone());
 
         let program = resolve_claude()?;
         let args = build_claude_args(
@@ -549,12 +567,12 @@ impl SessionManager {
                 cmd.arg("--mcp-config").arg(config);
             }
         }
-                                     // Child working directory. When the focus carries no project dir, default
-                                     // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
-                                     // is `/` (filesystem root). Running an agent at `/` has no git context, so
-                                     // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
-                                     // in ways they never do when launched from a real dir. $HOME matches what a
-                                     // terminal-launched agent would typically see.
+        // Child working directory. When the focus carries no project dir, default
+        // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
+        // is `/` (filesystem root). Running an agent at `/` has no git context, so
+        // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
+        // in ways they never do when launched from a real dir. $HOME matches what a
+        // terminal-launched agent would typically see.
         let dir = cwd
             .clone()
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
@@ -653,12 +671,7 @@ impl SessionManager {
 
     /// Enqueue a user message. Writes immediately to stdin if the session is
     /// idle, otherwise queues it to drain after the current turn completes.
-    pub fn send_user_message(
-        &mut self,
-        tag: &str,
-        text: &str,
-        images: &[String],
-    ) -> Result<()> {
+    pub fn send_user_message(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
         let session = self
             .sessions
             .get(tag)
@@ -884,7 +897,8 @@ impl SessionManager {
             // Test stub / fixed program: replay it verbatim.
             Some((program, args)) => {
                 let effective_id = sid.unwrap_or_else(|| Uuid::new_v4().to_string());
-                self.session_reverse.insert(effective_id.clone(), tag.to_string());
+                self.session_reverse
+                    .insert(effective_id.clone(), tag.to_string());
                 let managed = self.spawn_managed(
                     tag.to_string(),
                     agent,
@@ -1126,10 +1140,84 @@ impl SessionManager {
     }
 
     /// Replace the focus registry with the Mac-pushed snapshot. Returns the new
-    /// registry so the caller can broadcast it.
-    pub fn set_focus_registry(&mut self, focuses: Vec<FocusMeta>) -> Vec<FocusMeta> {
+    /// registry so the caller can broadcast it, and the tags that have now
+    /// *departed* so the caller can evict their per-focus state (W7 — D8).
+    ///
+    /// A tag is reported departed only when it is absent from two consecutive
+    /// pushes and was not created by this daemon. Both guards exist because
+    /// this runs on every reconnect, where an empty or partial push is normal
+    /// and eviction is irreversible — see `pending_departures` and
+    /// `daemon_created_tags`.
+    pub fn set_focus_registry(&mut self, focuses: Vec<FocusMeta>) -> (Vec<FocusMeta>, Vec<String>) {
+        // An empty push carries no information about what still exists — it is
+        // what a client sends before it has loaded anything. Take it as the
+        // registry (unchanged from pre-W7 behaviour) but never as evidence that
+        // every focus was deleted.
+        if focuses.is_empty() {
+            self.focus_registry = focuses;
+            self.pending_departures.clear();
+            return (self.focus_registry.clone(), Vec::new());
+        }
+
+        let new_tags: HashSet<String> = focuses.iter().map(|f| f.tag.clone()).collect();
+        let known: HashSet<String> = self
+            .focus_registry
+            .iter()
+            .map(|f| f.tag.clone())
+            .chain(self.pending_departures.iter().cloned())
+            .collect();
+
+        let missing: HashSet<String> = known
+            .difference(&new_tags)
+            .filter(|t| !self.daemon_created_tags.contains(*t))
+            .cloned()
+            .collect();
+
+        // Missing for the second consecutive push → genuinely gone.
+        let mut departed: Vec<String> = missing
+            .intersection(&self.pending_departures)
+            .cloned()
+            .collect();
+        departed.sort();
+
+        self.pending_departures = missing
+            .iter()
+            .filter(|t| !departed.contains(t))
+            .cloned()
+            .collect();
         self.focus_registry = focuses;
-        self.focus_registry.clone()
+        (self.focus_registry.clone(), departed)
+    }
+
+    /// Whether `tag` was created by this daemon rather than pushed by the Mac.
+    pub fn is_daemon_created(&self, tag: &str) -> bool {
+        self.daemon_created_tags.contains(tag)
+    }
+
+    /// Every focus tag that currently exists, or `None` if no client has
+    /// pushed a registry yet (W7 — D8).
+    ///
+    /// The union of the pushed registry and this daemon's own creations, not
+    /// just the registry: `set_focus_registry` replaces the registry wholesale
+    /// with the Mac's view, and the Mac's `focuses.json` has never heard of a
+    /// `nostromo.create_focus` tag. Reading the registry alone would report an
+    /// agent-created focus as non-existent the moment the Mac pushed anything.
+    ///
+    /// `None` rather than an empty set is the point: "nobody has told us which
+    /// focuses exist" and "no focus exists" must not be the same value, or
+    /// every caller has to remember to special-case the difference.
+    pub fn live_focus_tags(&self) -> Option<HashSet<String>> {
+        let tags: HashSet<String> = self
+            .focus_registry
+            .iter()
+            .map(|f| f.tag.clone())
+            .chain(self.daemon_created_tags.iter().cloned())
+            .collect();
+        if tags.is_empty() {
+            None
+        } else {
+            Some(tags)
+        }
     }
 
     /// Current focus registry snapshot.
@@ -1157,6 +1245,11 @@ impl SessionManager {
     /// `create_focus` MCP tool, which adds an agent-spawned focus to the
     /// daemon-owned registry.
     pub fn add_or_update_focus(&mut self, meta: FocusMeta) -> Vec<FocusMeta> {
+        // This is the only way a focus enters the registry other than a Mac
+        // push, so it is where a daemon-created tag earns its eviction
+        // exemption (W7 — D8b).
+        self.daemon_created_tags.insert(meta.tag.clone());
+        self.pending_departures.remove(&meta.tag);
         if let Some(existing) = self.focus_registry.iter_mut().find(|f| f.tag == meta.tag) {
             *existing = meta;
         } else {
@@ -1649,7 +1742,10 @@ mod tests {
     fn derive_summary_41_chars_gets_ellipsis() {
         let input = "a".repeat(41);
         let result = derive_summary(&input).unwrap();
-        assert!(result.ends_with('\u{2026}'), "should end with ellipsis: {result:?}");
+        assert!(
+            result.ends_with('\u{2026}'),
+            "should end with ellipsis: {result:?}"
+        );
         // The truncated part is 40 chars + 1 ellipsis codepoint
         assert_eq!(result.chars().count(), 41);
     }
@@ -1830,7 +1926,14 @@ mod tests {
         std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
         let mut mgr = SessionManager::with_store_path(tmp_store());
         let effective_id = mgr
-            .spawn_session("cody-1".into(), "cody".into(), "Cody".into(), None, None, false)
+            .spawn_session(
+                "cody-1".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                None,
+                false,
+            )
             .unwrap()
             .expect("a fresh session id is always resolved");
         assert_eq!(
@@ -1845,7 +1948,14 @@ mod tests {
         std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
         let mut mgr = SessionManager::with_store_path(tmp_store());
         let effective_id = mgr
-            .spawn_session("cody-2".into(), "cody".into(), "Cody".into(), None, None, false)
+            .spawn_session(
+                "cody-2".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                None,
+                false,
+            )
             .unwrap()
             .expect("a fresh session id is always resolved");
 
@@ -1888,7 +1998,10 @@ mod tests {
 
     // ── activity attribution resolution (activity-path wedge D2) ──────────────
 
-    fn raw_activity_event(focus_tag: Option<&str>, session_id: Option<&str>) -> crate::agent_bus::ActivityEvent {
+    fn raw_activity_event(
+        focus_tag: Option<&str>,
+        session_id: Option<&str>,
+    ) -> crate::agent_bus::ActivityEvent {
         crate::agent_bus::ActivityEvent {
             ts: chrono::Utc::now(),
             agent: "claude".into(),
@@ -1906,6 +2019,118 @@ mod tests {
         }
     }
 
+    // ── W7 — D8: which focuses have departed ─────────────────────────────────
+    //
+    // Eviction is irreversible and this runs on every reconnect, so these
+    // guard the two ways a naive diff destroys live state.
+
+    fn focus(tag: &str) -> FocusMeta {
+        FocusMeta {
+            tag: tag.into(),
+            display_name: tag.into(),
+            agent_name: tag.into(),
+            project_name: None,
+            org: None,
+            is_built_in: false,
+            session_summary: None,
+        }
+    }
+
+    #[test]
+    fn a_tag_absent_from_two_consecutive_pushes_is_reported_departed() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            departed.is_empty(),
+            "one push is not enough to conclude a focus is gone"
+        );
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert_eq!(departed, vec!["cody".to_string()]);
+    }
+
+    #[test]
+    fn a_tag_that_comes_back_before_the_second_push_is_never_departed() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+
+        // A partial push — the shape a reconnecting client sends before it has
+        // finished loading.
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(departed.is_empty());
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        assert!(
+            departed.is_empty(),
+            "a focus that reappears must not be evicted"
+        );
+
+        // ...and the pending departure is genuinely cleared, not merely
+        // deferred: a later push that still has it must stay silent.
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        assert!(departed.is_empty());
+    }
+
+    /// D8a. `set_focus_registry` runs on every reconnect, and an empty push is
+    /// what a client sends before it has loaded anything — never a claim that
+    /// every focus was deleted.
+    #[test]
+    fn an_empty_push_evicts_nothing() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+
+        let (_, departed) = mgr.set_focus_registry(vec![]);
+        assert!(departed.is_empty(), "an empty push must evict nothing");
+
+        // And it must not have armed a departure that the next push confirms.
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            departed.is_empty(),
+            "an empty push must not arm a departure either"
+        );
+    }
+
+    /// D8b. `nostromo.create_focus` tags are absent from every Mac push,
+    /// because the Mac's `focuses.json` has never heard of them.
+    #[test]
+    fn a_daemon_created_focus_survives_any_number_of_mac_pushes() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.add_or_update_focus(focus("cody-core-1234"));
+
+        for _ in 0..3 {
+            let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+            assert!(
+                departed.is_empty(),
+                "a daemon-created focus must never be evicted by a Mac push"
+            );
+        }
+        assert!(mgr.is_daemon_created("cody-core-1234"));
+    }
+
+    #[test]
+    fn live_focus_tags_unions_daemon_creations_over_the_pushed_registry() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        assert_eq!(
+            mgr.live_focus_tags(),
+            None,
+            "before any push the daemon does not know which focuses exist, \
+             which is not the same as knowing none do"
+        );
+
+        mgr.add_or_update_focus(focus("cody-core-1234"));
+        mgr.set_focus_registry(vec![focus("perri")]);
+
+        let live = mgr.live_focus_tags().expect("a pushed registry is known");
+        assert!(live.contains("perri"));
+        assert!(
+            live.contains("cody-core-1234"),
+            "set_focus_registry replaces the registry with the Mac's view, so a \
+             daemon-created focus must be unioned back in or it reads as gone"
+        );
+    }
+
     #[test]
     fn an_event_with_a_focus_tag_the_daemon_knows_is_attributed_to_that_focus() {
         let mut mgr = SessionManager::with_store_path(tmp_store());
@@ -1921,7 +2146,11 @@ mod tests {
 
         let finalized = mgr.ingest_activity_event(raw_activity_event(Some("fred"), None));
         assert_eq!(finalized.focus_tag.as_deref(), Some("fred"));
-        assert_eq!(finalized.seq, Some(0), "an attributed event must be seq-assigned");
+        assert_eq!(
+            finalized.seq,
+            Some(0),
+            "an attributed event must be seq-assigned"
+        );
         assert_eq!(mgr.activity_streams_for_focus("fred").len(), 1);
     }
 
@@ -1932,8 +2161,13 @@ mod tests {
 
         // "cody-1" is not in the registry/sessions map, but the session id
         // resolves via the reverse index — the fallback must still find it.
-        let finalized = mgr.ingest_activity_event(raw_activity_event(Some("cody-1"), Some("sess-1")));
-        assert_eq!(mgr.activity_streams_for_focus("cody-1").len(), 1, "{finalized:?}");
+        let finalized =
+            mgr.ingest_activity_event(raw_activity_event(Some("cody-1"), Some("sess-1")));
+        assert_eq!(
+            mgr.activity_streams_for_focus("cody-1").len(),
+            1,
+            "{finalized:?}"
+        );
     }
 
     #[test]

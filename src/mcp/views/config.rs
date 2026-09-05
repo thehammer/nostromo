@@ -127,8 +127,8 @@ impl ViewPlacementConfig {
 
 /// Parse and validate a `views.yaml` document.
 pub fn parse(yaml: &str) -> Result<ViewPlacementConfig, PlacementError> {
-    let cfg: ViewPlacementConfig = serde_yaml::from_str(yaml)
-        .map_err(|e| PlacementError::InvalidConfig(e.to_string()))?;
+    let cfg: ViewPlacementConfig =
+        serde_yaml::from_str(yaml).map_err(|e| PlacementError::InvalidConfig(e.to_string()))?;
     validate(&cfg)?;
     Ok(cfg)
 }
@@ -239,7 +239,10 @@ mod tests {
     fn the_compiled_in_default_declares_a_creation_path_for_every_region() {
         let cfg = parse(COMPILED_IN).unwrap();
         for (name, region) in &cfg.regions {
-            assert!(!region.create.is_empty(), "region `{name}` must be creatable");
+            assert!(
+                !region.create.is_empty(),
+                "region `{name}` must be creatable"
+            );
         }
     }
 
@@ -348,9 +351,15 @@ mod tests {
             .unwrap()
         };
         write(2);
-        assert_eq!(load_from_dir(dir.path()).unwrap().regions["detail"].tab_cap, Some(2));
+        assert_eq!(
+            load_from_dir(dir.path()).unwrap().regions["detail"].tab_cap,
+            Some(2)
+        );
         write(9);
-        assert_eq!(load_from_dir(dir.path()).unwrap().regions["detail"].tab_cap, Some(9));
+        assert_eq!(
+            load_from_dir(dir.path()).unwrap().regions["detail"].tab_cap,
+            Some(9)
+        );
     }
 
     #[test]

@@ -22,6 +22,65 @@ use tracing::{debug, warn};
 
 use crate::{config::Config, data::dirty_file, data::perri_queue::CiState};
 
+/// Every focus's PR under review, keyed by focus tag (W7 — D6).
+///
+/// Two layers of `Arc` on purpose. The outer one makes publishing a new
+/// generation on a `watch` channel O(1) for every reader regardless of how
+/// many focuses are pinned. The inner one makes "which tags changed?" a
+/// pointer comparison: `PrSnapshot` carries a `diff` of up to 500 KB, so the
+/// per-focus broadcasters — which must repaint only the bindings whose tag
+/// actually moved — would otherwise pay a deep `PartialEq` over every focus's
+/// whole diff on every tick.
+///
+/// A tag absent from the map has no PR under review. That is a normal state,
+/// not an error, and it is what makes a focus with no pin resolve files
+/// against its working tree.
+pub type PrSnapshots =
+    std::sync::Arc<std::collections::HashMap<String, std::sync::Arc<PrSnapshot>>>;
+
+/// An empty [`PrSnapshots`] — no focus has a PR under review.
+pub fn no_prs() -> PrSnapshots {
+    std::sync::Arc::new(std::collections::HashMap::new())
+}
+
+/// A [`PrSnapshots`] with exactly one focus's PR in it — the single-surface
+/// hosts (the TUI, tests) that have one answer to give.
+pub fn one_pr(tag: &str, snap: PrSnapshot) -> PrSnapshots {
+    let mut map = std::collections::HashMap::new();
+    map.insert(tag.to_owned(), std::sync::Arc::new(snap));
+    std::sync::Arc::new(map)
+}
+
+/// Which focus tags differ between two [`PrSnapshots`] generations — a tag
+/// whose snapshot was added, removed, or replaced.
+///
+/// Compares the inner `Arc` pointers, not the snapshots. The PR source
+/// republishes one shared `Arc` per `(repo, number)` per cycle, so an
+/// unchanged focus carries its previous pointer forward and compares equal in
+/// O(1); a deep comparison would walk every focus's whole diff on every tick.
+/// The cost of the conservative direction (a pointer change with identical
+/// content) is one redundant fetch that `last_sent` then dedups anyway.
+pub fn changed_tags(
+    previous: &PrSnapshots,
+    current: &PrSnapshots,
+) -> std::collections::HashSet<String> {
+    let mut changed = std::collections::HashSet::new();
+    for (tag, snap) in current.iter() {
+        match previous.get(tag) {
+            Some(prev) if std::sync::Arc::ptr_eq(prev, snap) => {}
+            _ => {
+                changed.insert(tag.clone());
+            }
+        }
+    }
+    for tag in previous.keys() {
+        if !current.contains_key(tag) {
+            changed.insert(tag.clone());
+        }
+    }
+    changed
+}
+
 /// A single CI check-run result attached to a PR snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CiCheck {
@@ -137,8 +196,15 @@ pub struct PerriPrSource {
 }
 
 impl PerriPrSource {
-    pub fn spawn(config: Config) -> watch::Receiver<Option<PrSnapshot>> {
-        let (tx, rx) = watch::channel(None);
+    /// Publishes into the same per-focus [`PrSnapshots`] shape the native
+    /// source does (W7 — D6), under
+    /// [`crate::data::perri_current_pr::BUILTIN_PERRI_TAG`]. This fallback
+    /// shells out to a script that only ever knew about one PR, and it runs
+    /// only in the TUI, which has exactly one Perri surface — so one tag is
+    /// the honest description of what it can produce, not a limitation of the
+    /// channel.
+    pub fn spawn(config: Config) -> watch::Receiver<PrSnapshots> {
+        let (tx, rx) = watch::channel(no_prs());
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
 
         let dirty_path = config.perri_state_dir().join("current-pr.dirty");
@@ -149,17 +215,22 @@ impl PerriPrSource {
         tokio::spawn(async move {
             let source = PerriPrSource { config };
             loop {
+                let tag = crate::data::perri_current_pr::BUILTIN_PERRI_TAG;
                 match source.fetch().await {
                     Ok(snap) => {
                         debug!(pr = ?snap.pr_number, "perri diff refreshed");
-                        let _ = tx.send(Some(snap));
+                        let _ = tx.send(one_pr(tag, snap));
                     }
                     Err(e) => {
                         warn!("perri diff fetch failed: {e:#}");
-                        let mut snap = tx.borrow().clone().unwrap_or_default();
+                        let mut snap = tx
+                            .borrow()
+                            .get(tag)
+                            .map(|s| (**s).clone())
+                            .unwrap_or_default();
                         snap.stale = true;
                         snap.error = Some(e.to_string());
-                        let _ = tx.send(Some(snap));
+                        let _ = tx.send(one_pr(tag, snap));
                     }
                 }
 
@@ -230,8 +301,14 @@ mod tests {
         let snap: PrSnapshot = serde_json::from_value(json).expect(
             "a pre-W3 PrSnapshot JSON literal (no body/threads/conversation_error) must still deserialize",
         );
-        assert_eq!(snap.body, "", "missing body must default to an empty string");
-        assert!(snap.threads.is_empty(), "missing threads must default to an empty vec");
+        assert_eq!(
+            snap.body, "",
+            "missing body must default to an empty string"
+        );
+        assert!(
+            snap.threads.is_empty(),
+            "missing threads must default to an empty vec"
+        );
         assert_eq!(
             snap.conversation_error, None,
             "missing conversation_error must default to None"

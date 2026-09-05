@@ -121,9 +121,10 @@ pub fn insert_beside(
 /// `children.len() >= 2` invariant — the removal has to leave a tree that is
 /// still valid, not one that merely has the node gone.
 pub fn remove_tabs_region(tree: &mut PaneTree, region: &str) -> bool {
-    remove_where(tree, &|node| {
-        matches!(node, PaneTree::Tabs { region: Some(name), .. } if name == region)
-    })
+    remove_where(
+        tree,
+        &|node| matches!(node, PaneTree::Tabs { region: Some(name), .. } if name == region),
+    )
 }
 
 /// Remove the first node satisfying `pred`, collapsing its parent split. The
@@ -168,7 +169,9 @@ fn remove_where(tree: &mut PaneTree, pred: &dyn Fn(&PaneTree) -> bool) -> bool {
 /// A split or tabs node left holding exactly one child becomes that child.
 fn collapse_single_child(node: &mut PaneTree) {
     let only = match node {
-        PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. } if children.len() == 1 => {
+        PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. }
+            if children.len() == 1 =>
+        {
             Some(children.remove(0))
         }
         _ => None,
@@ -319,7 +322,9 @@ mod tests {
             detail(&["detail.0"], 0),
         );
         let PaneTree::Split {
-            direction, children, ..
+            direction,
+            children,
+            ..
         } = &tree
         else {
             panic!()
@@ -360,7 +365,10 @@ mod tests {
             "detail",
             detail(&["detail.0", "detail.1"], 1)
         ));
-        assert_eq!(tree.pane_ids(), vec!["queue", "detail.0", "detail.1", "repl"]);
+        assert_eq!(
+            tree.pane_ids(),
+            vec!["queue", "detail.0", "detail.1", "repl"]
+        );
         let PaneTree::Tabs { active, .. } = tabs_region(&tree, "detail").unwrap() else {
             panic!()
         };
@@ -428,10 +436,7 @@ mod tests {
             &[0.6, 0.4],
             detail(&["detail.0"], 0),
         );
-        assert_eq!(
-            tree.pane_ids().iter().filter(|id| *id == "repl").count(),
-            1
-        );
+        assert_eq!(tree.pane_ids().iter().filter(|id| *id == "repl").count(), 1);
         remove_tabs_region(&mut tree, "detail");
         assert_eq!(tree, leaf("repl"));
     }

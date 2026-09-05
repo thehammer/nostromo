@@ -296,7 +296,9 @@ pub async fn resume(id: &str, answer: &str) -> Result<()> {
 fn validate_job_id(id: &str) -> Result<()> {
     if id.is_empty()
         || id.starts_with('-')
-        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         anyhow::bail!("invalid job id: {id:?}");
     }
