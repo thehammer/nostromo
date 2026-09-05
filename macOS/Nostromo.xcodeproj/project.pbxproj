@@ -77,6 +77,7 @@
 		FF00000000000000000000A3 /* SidenavGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
 		FF00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000B1 /* SidenavGroupingTests.swift */; };
 		HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */; };
+		ZZ0000000000000000000002 /* PaneAddressDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000000001 /* PaneAddressDecodeTests.swift */; };
 		KK0000000000000000000011 /* LayoutChangeClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000001 /* LayoutChangeClassifier.swift */; };
 		KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000001 /* LayoutChangeClassifier.swift */; };
 		KK0000000000000000000021 /* TabRegionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000002 /* TabRegionView.swift */; };
@@ -218,6 +219,7 @@
 		FF00000000000000000000A1 /* SidenavGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGrouping.swift; sourceTree = "<group>"; };
 		FF00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
 		HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentWireEqualityTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000000001 /* PaneAddressDecodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAddressDecodeTests.swift; sourceTree = "<group>"; };
 		KK0000000000000000000001 /* LayoutChangeClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifier.swift; sourceTree = "<group>"; };
 		KK0000000000000000000002 /* TabRegionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRegionView.swift; sourceTree = "<group>"; };
 		KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifierTests.swift; sourceTree = "<group>"; };
@@ -449,6 +451,7 @@
 				FF00000000000000000000B1 /* SidenavGroupingTests.swift */,
 				GG00000000000000000000B1 /* ProcessRunnerTests.swift */,
 				HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */,
+				ZZ0000000000000000000001 /* PaneAddressDecodeTests.swift */,
 				JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */,
 				KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */,
 				QQ0000000000000000000003 /* PaneRenderPlanTests.swift */,
@@ -684,6 +687,7 @@
 				GG00000000000000000000A3 /* ProcessRunner.swift in TestSources */,
 				GG00000000000000000000B2 /* ProcessRunnerTests.swift in Sources */,
 				HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */,
+				ZZ0000000000000000000002 /* PaneAddressDecodeTests.swift in Sources */,
 				II000000000000000000012 /* TurnInteractionStore.swift in TestSources */,
 				II000000000000000000022 /* AskQuestionView.swift in TestSources */,
 				II000000000000000000032 /* ToolResultView.swift in TestSources */,

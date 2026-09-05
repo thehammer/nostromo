@@ -8,6 +8,13 @@
 // in Models.swift; those shadow these types within the macOS module.
 
 import Foundation
+import os
+
+/// Wire-decode complaints. Deliberately its own category: a lenient decoder
+/// that drops something it could not understand must say so somewhere, or the
+/// operator has no way to tell a client that discarded data from a daemon that
+/// never sent any.
+private let wireLog = Logger(subsystem: "com.hammer.nostromo", category: "wire")
 
 // MARK: - SplitDirection
 
@@ -980,8 +987,51 @@ public struct PaneAddress: Decodable, Equatable {
         // the whole PaneContent message (content and freshness included), the
         // same hazard class B12 exists to prevent for PaneTree node kinds.
         anchor   = try? c.decodeIfPresent(Anchor.self, forKey: .anchor) ?? nil
-        emphasis = (try? c.decode([Emphasis].self, forKey: .emphasis)) ?? []
+        emphasis = PaneAddress.decodeEmphasis(from: c)
         reason   = try c.decodeIfPresent(String.self, forKey: .reason)
+    }
+
+    /// Decode `emphasis` **element by element**, keeping everything that
+    /// decodes and dropping only what does not.
+    ///
+    /// The obvious `(try? c.decode([Emphasis].self, …)) ?? []` is all-or-
+    /// nothing: `Emphasis.init(from:)` throws on an unrecognized `kind`,
+    /// `Array`'s synthesized decode propagates that for the whole array, and
+    /// the outer `try?` swallows it. One emphasis kind newer than this client
+    /// build therefore discarded every sibling element the client *did*
+    /// understand — the operator saw a pane that scrolled to the right line
+    /// with no band on it, indistinguishable from the daemon having sent no
+    /// emphasis at all. Same lenient *intent* as before, correct granularity.
+    ///
+    /// `LenientEmphasis` never throws, which is what makes the per-element
+    /// decode safe: an `UnkeyedDecodingContainer` does not advance past an
+    /// element whose `decode` threw, so a naive `while !isAtEnd { try? … }`
+    /// would spin forever on the first bad element.
+    ///
+    /// Mirrored in the macOS app's own `PaneAddress` in `Models.swift`; keep
+    /// the two in step.
+    private static func decodeEmphasis(from c: KeyedDecodingContainer<CodingKeys>) -> [Emphasis] {
+        guard let lenient = try? c.decode([LenientEmphasis].self, forKey: .emphasis) else {
+            // Absent, or present but not an array at all — nothing to salvage.
+            return []
+        }
+        let kept = lenient.compactMap(\.value)
+        if kept.count < lenient.count {
+            // Counts only, never content. Rare by construction: this fires
+            // only when the daemon ships an emphasis kind this build predates.
+            wireLog.error("""
+                pane address dropped \(lenient.count - kept.count, privacy: .public) of \
+                \(lenient.count, privacy: .public) emphasis element(s) it could not decode
+                """)
+        }
+        return kept
+    }
+
+    /// A single `Emphasis` that decodes to `nil` instead of throwing. See
+    /// `decodeEmphasis(from:)`.
+    private struct LenientEmphasis: Decodable {
+        let value: Emphasis?
+        public init(from decoder: Decoder) throws { value = try? Emphasis(from: decoder) }
     }
 
     /// Whether this address points at the queue row for `repo`#`number`

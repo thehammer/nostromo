@@ -22,6 +22,14 @@
 //     ConversationThreadKind raw value, a pr_conversation-shaped payload with
 //     an unrecognised kind string falling through to .unknown; and Equatable
 //     coverage including nested-content differences.
+//   - PaneAddress.emphasis decodes element-by-element (W3 —
+//     detail-region-materialization): a known element survives sitting next
+//     to a sibling with an unrecognised kind, an emphasis array of only
+//     unrecognised kinds decodes to [] without throwing out of
+//     PaneAddress.init, and the pre-existing all-or-nothing regressions
+//     (absent emphasis, fully-valid emphasis, non-array emphasis, and a
+//     malformed anchor's isolation from its emphasis/reason siblings) are
+//     pinned so the fix can't reintroduce them.
 
 import XCTest
 @testable import NostromoKit
@@ -1360,5 +1368,162 @@ final class PaneContentWireTests: XCTestCase {
         XCTAssertNil(addr.anchor)
         XCTAssertEqual(addr.emphasis, [])
         XCTAssertNil(addr.reason)
+    }
+
+    // MARK: - PaneAddress.emphasis decodes element-by-element, not all-or-nothing (W3 — detail-region-materialization)
+
+    /// The headline regression test. `PaneAddress`'s `emphasis` decode used to be
+    /// `(try? c.decode([Emphasis].self, forKey: .emphasis)) ?? []` — a single
+    /// unrecognised `kind` anywhere in the array throws inside `Array<Emphasis>`'s
+    /// own decode, the `try?` swallows it, and the *entire* array — every element,
+    /// known or not — is silently replaced with `[]`. No log, no partial credit.
+    ///
+    /// Concretely: an agent anchors line 531 and asks the operator to look at an
+    /// emphasis band on it (`line_range`, which this client understands), in the
+    /// same push as some newer emphasis kind this client build predates. Today
+    /// that operator's pane scrolls to the right place and shows no band at all —
+    /// and from the outside, "the daemon sent nothing" and "the client threw away
+    /// what it was sent" are indistinguishable. This test fails against `main`,
+    /// where `addr.emphasis` comes back `[]` instead of containing the line_range.
+    func testEmphasisArrayKeepsAKnownElementWhenASiblingElementHasAnUnrecognisedKind() throws {
+        let json = """
+        {
+            "emphasis": [
+                {"kind": "line_range", "start": 531, "end": 531},
+                {"kind": "some_future_kind", "x": 1}
+            ]
+        }
+        """
+        let addr = try JSONDecoder().decode(PaneAddress.self, from: Data(json.utf8))
+        XCTAssertEqual(addr.emphasis, [.lineRange(path: nil, start: 531, end: 531)], """
+            an agent anchored line 531 and asked for an emphasis band on it; the daemon also sent a \
+            newer emphasis kind this client doesn't recognise yet. The known line_range element must \
+            still decode and survive in PaneAddress.emphasis — dropping it because an unrelated sibling \
+            element failed to decode is the W3 detail-region-materialization bug: the operator sees a \
+            pane that scrolled but has no visible mark, with no way to tell "the daemon sent nothing" \
+            from "the client silently discarded what it was sent."
+            """)
+    }
+
+    /// If every element in the array is unrecognised, the array decodes to `[]` —
+    /// same externally-visible result as before the fix — but critically must not
+    /// throw out of `PaneAddress.init`, which would propagate through
+    /// `ServerMsg.decode`'s own `try?` and discard the whole pane_content message
+    /// (content and freshness included), not just the address.
+    func testEmphasisArrayOfOnlyUnrecognisedKindsDecodesToEmptyWithoutThrowingOutOfPaneAddressInit() throws {
+        let json = """
+        {
+            "anchor": {"kind": "line", "line": 7},
+            "emphasis": [{"kind": "some_future_kind"}],
+            "reason": "opened from the queue"
+        }
+        """
+        let addr = try JSONDecoder().decode(PaneAddress.self, from: Data(json.utf8))
+        XCTAssertEqual(addr.emphasis, [], """
+            an emphasis array containing only unrecognised kinds must decode to [], not throw — but \
+            (per the test above) that must be because every element genuinely failed to decode, not \
+            because one bad element took a good sibling down with it.
+            """)
+        XCTAssertEqual(addr.anchor, .line(path: nil, line: 7), """
+            a malformed emphasis array must not prevent the rest of PaneAddress (its anchor) from \
+            decoding — these are decoded independently and a failure in one must be contained to it.
+            """)
+        XCTAssertEqual(addr.reason, "opened from the queue", """
+            a malformed emphasis array must not prevent PaneAddress.reason from decoding either — the \
+            whole point of per-element decoding is that a failure is contained to the element that \
+            actually failed, not smeared across sibling fields.
+            """)
+    }
+
+    /// Regression guard: emphasis absent entirely must still decode to `[]` without
+    /// throwing — the per-element rewrite must not turn "no emphasis key at all"
+    /// into a new failure mode.
+    func testEmphasisKeyAbsentEntirelyStillDecodesToEmptyArrayWithoutThrowing() throws {
+        let json = """
+        {
+            "anchor": {"kind": "section", "name": "Overview"},
+            "reason": "no emphasis pushed for this pane"
+        }
+        """
+        let addr = try JSONDecoder().decode(PaneAddress.self, from: Data(json.utf8))
+        XCTAssertEqual(addr.emphasis, [], "an absent \"emphasis\" key must decode to [], the same as before this fix")
+        XCTAssertEqual(addr.anchor, .section(name: "Overview"))
+        XCTAssertEqual(addr.reason, "no emphasis pushed for this pane")
+    }
+
+    /// Regression guard: a fully-valid, multi-element, mixed-kind emphasis array
+    /// must still decode every element, in wire order — the per-element rewrite
+    /// must not, say, accidentally keep only the first element or reorder them.
+    func testFullyValidMultiElementEmphasisArrayKeepsEveryElementInWireOrder() throws {
+        let json = """
+        {
+            "emphasis": [
+                {"kind": "line_range", "start": 10, "end": 20},
+                {"kind": "comment", "id": "c-9"},
+                {"kind": "queue_row", "repo": "acme/web", "number": 7}
+            ]
+        }
+        """
+        let addr = try JSONDecoder().decode(PaneAddress.self, from: Data(json.utf8))
+        XCTAssertEqual(addr.emphasis, [
+            .lineRange(path: nil, start: 10, end: 20),
+            .comment(id: "c-9"),
+            .queueRow(repo: "acme/web", number: 7)
+        ], "a fully-valid emphasis array must keep every element, in the order the daemon sent them")
+    }
+
+    /// Regression guard: `"emphasis": 7` (present, but not an array at all) must
+    /// decode to `[]` without throwing, same as before this fix — the per-element
+    /// container decode still has to fail closed on a shape it can't even open an
+    /// unkeyed container from.
+    func testEmphasisPresentButNotAnArrayDecodesToEmptyArrayWithoutThrowing() throws {
+        let json = """
+        {
+            "emphasis": 7,
+            "reason": "malformed shape, not a malformed element"
+        }
+        """
+        let addr = try JSONDecoder().decode(PaneAddress.self, from: Data(json.utf8))
+        XCTAssertEqual(addr.emphasis, [], "\"emphasis\" being present but not an array must still fail closed to [], not throw")
+        XCTAssertEqual(addr.reason, "malformed shape, not a malformed element")
+    }
+
+    /// Regression guard, pinning the existing sibling behaviour this fix must not
+    /// disturb: a malformed *anchor* (unrecognised kind) drops only the anchor —
+    /// emphasis and reason must decode normally alongside it.
+    func testMalformedAnchorDropsOnlyTheAnchorLeavingEmphasisAndReasonIntact() throws {
+        let json = """
+        {
+            "anchor": {"kind": "some_future_anchor_kind"},
+            "emphasis": [{"kind": "text_range", "start": 0, "end": 5}],
+            "reason": "still explains itself"
+        }
+        """
+        let addr = try JSONDecoder().decode(PaneAddress.self, from: Data(json.utf8))
+        XCTAssertNil(addr.anchor, "an unrecognised anchor kind must drop only the anchor")
+        XCTAssertEqual(addr.emphasis, [.textRange(start: 0, end: 5)], "a malformed anchor must not affect emphasis decoding")
+        XCTAssertEqual(addr.reason, "still explains itself", "a malformed anchor must not affect reason decoding")
+    }
+
+    /// `marks(repo:number:)` must still find a `queue_row` emphasis element sitting
+    /// in a partially-decoded array — the row-marking feature (W5) must keep
+    /// working on exactly the array shape this fix produces, not just on arrays
+    /// that decoded cleanly.
+    func testMarksStillFindsAQueueRowEmphasisInAPartiallyDecodedEmphasisArray() throws {
+        let json = """
+        {
+            "emphasis": [
+                {"kind": "queue_row", "repo": "acme/web", "number": 7},
+                {"kind": "some_future_kind"}
+            ]
+        }
+        """
+        let addr = try JSONDecoder().decode(PaneAddress.self, from: Data(json.utf8))
+        XCTAssertTrue(addr.marks(repo: "acme/web", number: 7), """
+            marks(repo:number:) must find the queue_row element even though a sibling element in the \
+            same emphasis array failed to decode — the W5 row-marking feature must not go blind just \
+            because the daemon also sent an emphasis kind this client doesn't recognise yet.
+            """)
+        XCTAssertFalse(addr.marks(repo: "acme/web", number: 8), "marks must still be number-specific, not true for any decoded queue_row")
     }
 }

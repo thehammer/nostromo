@@ -61,6 +61,14 @@ final class CodeContentView: NSView {
     /// The last `.blankBody` summary the mitigation ran for, so a recovery
     /// that doesn't work can never become a redraw loop.
     private var lastMitigatedSummary: String?
+    /// The last `textKitDowngraded` value written to the log. `nil` until the
+    /// first draw pass reports one. Exists so the flag can be emitted
+    /// unconditionally — not only inside a `.blankBody` summary, which is how
+    /// it came to be sampled on every draw for weeks and never once written
+    /// (W3, G2) — without logging it at scroll rate: the value changes at most
+    /// once in a pane's life, when the ruler's first `layoutManager` access
+    /// downgrades the text view to TextKit 1.
+    private var lastLoggedTextKitDowngraded: Bool?
 
     // MARK: - Init
 
@@ -170,6 +178,7 @@ final class CodeContentView: NSView {
         gutterLabels = (0..<document.lineCount).map { String(document.firstLine + $0) }
         rowOffsets = RowOffsetIndex(rowLengths: document.lines.map { $0.utf16.count })
         ruler.reload(labels: gutterLabels, rowOffsets: rowOffsets)
+        logDocumentPush(kind: "code")
     }
 
     private func apply(diff: DiffDocument) {
@@ -188,6 +197,20 @@ final class CodeContentView: NSView {
         }
         rowOffsets = RowOffsetIndex(rowLengths: diff.rows.map { $0.text.utf16.count })
         ruler.reload(labels: gutterLabels, rowOffsets: rowOffsets)
+        logDocumentPush(kind: "diff")
+    }
+
+    /// One line per document push — counts and flags only, never pane content
+    /// (see `docs/diagnostics.md`'s standing rule). `textKitDowngraded` rides
+    /// along here as well as in `auditAfterDraw` so a report covering a pane
+    /// that never redrew still names it (W3, G2).
+    private func logDocumentPush(kind: String) {
+        codePaneLog.info("""
+            code pane document pushed kind=\(kind, privacy: .public) \
+            rows=\(self.rowOffsets.count, privacy: .public) \
+            textStorageLength=\(self.textView.textStorage?.length ?? 0, privacy: .public) \
+            textKitDowngraded=\(self.textView.textLayoutManager == nil, privacy: .public)
+            """)
     }
 
     private func setText(_ attributed: NSAttributedString) {
@@ -263,6 +286,21 @@ final class CodeContentView: NSView {
     /// job: `.claude/plans/instrument-code-pane-render-diagnostics.md`.
     private func auditAfterDraw(_ measurements: CodePaneRenderAudit.Measurements) {
         lastMeasurements = measurements
+
+        // G2 — emitted before the verdict guard below, deliberately: this is
+        // the one field that discriminates between whole hypotheses about a
+        // blank body, and gating it on a `.blankBody` verdict meant it was
+        // measured hundreds of times and never once written to the log.
+        // Counts and flags only, never pane content.
+        if measurements.textKitDowngraded != lastLoggedTextKitDowngraded {
+            lastLoggedTextKitDowngraded = measurements.textKitDowngraded
+            codePaneLog.info("""
+                code pane textKitDowngraded=\(measurements.textKitDowngraded, privacy: .public) \
+                rowCount=\(measurements.rowCount, privacy: .public) \
+                labelsPainted=\(measurements.labelsPainted, privacy: .public)
+                """)
+        }
+
         guard case .blankBody = CodePaneRenderAudit.verdict(measurements) else { return }
 
         let summary = CodePaneRenderAudit.summary(of: measurements)
@@ -284,16 +322,32 @@ final class CodeContentView: NSView {
         codePaneLog.info("blank-body mitigation attempted: \(summary, privacy: .public)")
     }
 
-    /// See `auditAfterDraw(_:)` — a best-effort recovery attempt for an
-    /// unconfirmed cause, not a fix. Re-asserts the container's size from the
-    /// clip view's current width (addresses H1: a collapsed text container),
-    /// forces layout, and asks for a redisplay (addresses H3: a missed
-    /// invalidation). Does nothing for H2 (a TextKit 1 downgrade) by design —
-    /// there is no known corrective action for that hypothesis yet.
+    /// See `auditAfterDraw(_:)` — a best-effort recovery attempt for causes
+    /// this view cannot fix from here, not a fix. Re-asserts the text
+    /// container's width and the text view's minimum height from the clip
+    /// view's current size (a collapsed container in either axis), forces
+    /// layout, and asks for a redisplay (a missed invalidation).
+    ///
+    /// It deliberately does nothing about W3's actual root cause — a gutter
+    /// that painted over the body — because that is fixed at the source in
+    /// `drawHashMarksAndLabels` and needs no runtime mitigation. Whether a
+    /// pane recovers here therefore remains a clean discriminator for the
+    /// geometry hypotheses rather than a catch-all.
     private func attemptRenderRecovery() {
         let width = scrollView.contentView.bounds.width
         if width > 0 {
             textView.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+        }
+        let height = scrollView.contentView.bounds.height
+        if height > 0 {
+            // `NSTextView()` starts with a `.zero` frame and a `.zero`
+            // `minSize`, so nothing but AppKit's own bookkeeping guarantees a
+            // vertically-resizable text view is ever as tall as its viewport.
+            // Re-assert it rather than assume it.
+            textView.minSize = NSSize(width: textView.minSize.width, height: height)
+            if textView.frame.height < height {
+                textView.setFrameSize(NSSize(width: textView.frame.width, height: height))
+            }
         }
         if let layoutManager = textView.layoutManager, let container = textView.textContainer {
             layoutManager.ensureLayout(for: container)
@@ -451,6 +505,14 @@ final class LineNumberRulerView: NSRulerView {
         super.init(scrollView: nil, orientation: .verticalRuler)
         clientView = textView
         ruleThickness = 44
+        // `NSView.clipsToBounds` has defaulted to `false` since macOS 14, and
+        // this ruler is a sibling of — and ordered *after* — the scroll
+        // view's `NSClipView`, so anything it draws outside its own narrow
+        // bounds lands on top of the text body and on whatever sits above the
+        // scroll view. `drawHashMarksAndLabels` clips its fill by hand (that
+        // is the actual fix); this is the backstop for any drawing this view
+        // grows later that forgets to.
+        clipsToBounds = true
     }
 
     required init(coder: NSCoder) { fatalError() }
@@ -478,8 +540,21 @@ final class LineNumberRulerView: NSRulerView {
               let scrollView    = self.scrollView
         else { return }
 
+        // ROOT CAUSE, W3 (`fix/detail-region-materialization`): `rect` is the
+        // dirty rect *AppKit* hands this view, and it is the enclosing scroll
+        // view's, not this ruler's — measured live on macOS 26.5 as
+        // `(0, -32, 880, 234)` for a ruler whose own bounds were
+        // `(0, 0, 40, 200)`. Filling it unclipped painted solid black over the
+        // entire code body *and* over the 26pt `TabRegionView` tab strip above
+        // the scroll view (the rect starts 32pt above this view's origin),
+        // because `NSView.clipsToBounds` defaults to `false` on macOS 14+ and
+        // this view draws after the clip view. That one line produced every
+        // symptom of the three-times-recurring "correct gutter, blank body, no
+        // tab strip, no caption, no emphasis band" bug — the labels below
+        // survive only because they are drawn *after* the fill.
+        let fill = rect.intersection(bounds)
         NSColor.black.setFill()
-        rect.fill()
+        fill.fill()
 
         let text       = textView.string as NSString
         let visible    = scrollView.contentView.documentVisibleRect
@@ -548,6 +623,14 @@ final class LineNumberRulerView: NSRulerView {
         // painting what this ruler just proved was there (see
         // `CodePaneRenderAudit`). Pure observation: nothing below this line
         // can change what was already drawn above.
+        // The height of the text layoutManager actually laid out, insets
+        // folded in here (not in CodePaneRenderAudit, which stays
+        // Foundation-only, D3) — the sibling measurement to
+        // containerUsedWidth just above, and what
+        // documentViewShorterThanItsText actually compares the document
+        // view's frame against, never the viewport.
+        let containerUsedHeight = Double(layoutManager.usedRect(for: container).height)
+            + Double(inset.height) * 2
         let measurements = CodePaneRenderAudit.Measurements(
             labelsPainted: painted,
             labelCount: labels.count,
@@ -556,7 +639,11 @@ final class LineNumberRulerView: NSRulerView {
             documentViewWidth: Double(textView.frame.width),
             clipViewWidth: Double(scrollView.contentView.bounds.width),
             containerUsedWidth: Double(layoutManager.usedRect(for: container).width),
+            containerUsedHeight: containerUsedHeight,
             ruleThickness: Double(ruleThickness),
+            gutterFillWidth: Double(fill.width),
+            documentViewHeight: Double(textView.frame.height),
+            clipViewHeight: Double(scrollView.contentView.bounds.height),
             textKitDowngraded: textView.textLayoutManager == nil
         )
         onDraw?(measurements)

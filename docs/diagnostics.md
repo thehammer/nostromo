@@ -73,14 +73,35 @@ as agreement" rule.
 ## Code-pane render audit
 
 `CodeContentView`'s gutter (`LineNumberRulerView.drawHashMarksAndLabels`)
-measures itself on every draw pass — label count, text-storage length, row
-count, and the document view/clip view/text-container widths — and judges
-whether the pass was healthy (`CodePaneRenderAudit`, in
-`macOS/Nostromo/UI/CodePaneRenderAudit.swift`). This exists to catch a rare,
-previously-unreproducible bug where the gutter paints correct line numbers
-over a completely blank text body; see
-`.claude/plans/instrument-code-pane-render-diagnostics.md` for the full
-investigation.
+measures itself on every draw pass and judges whether the pass was healthy
+(`CodePaneRenderAudit`, in `macOS/Nostromo/UI/CodePaneRenderAudit.swift`). This
+exists to catch a bug where the gutter paints correct line numbers over a
+completely blank text body; see
+`.claude/plans/instrument-code-pane-render-diagnostics.md` for the original
+investigation and
+`.claude/wip/w3-detail-region-ruler-overdraw-root-cause/index.md` for the one
+that finally caught it.
+
+The audit never fires unless the ruler painted at least one label **and** the
+text storage is non-empty — absent either, there is no evidence either way and
+the verdict is `healthy`. Given both, these terms are checked:
+
+| Term | Fires when | Catches |
+| --- | --- | --- |
+| `text container used width is <= 0` | `containerUsedWidth <= 0` | a collapsed text container |
+| `document view width is <= the gutter's rule thickness` | `documentViewWidth <= ruleThickness` | a document view no wider than its own gutter |
+| `clip view width is <= 0` | `clipViewWidth <= 0` | a scroll view with no viewport |
+| `the gutter filled a rect wider than its own rule thickness` | `gutterFillWidth > ruleThickness` | a tautological safety net now that the fill is clipped at the source (`rect.intersection(bounds)` plus `clipsToBounds = true`) — `gutterFillWidth` can never exceed `ruleThickness` in the shipped app. The real regression guard for **the confirmed W3 cause** (a gutter painting over the body and the tab strip above it) is `CodeContentViewTests.testDrawHashMarksAndLabelsFillsOnlyItsOwnBoundsNeverTheRawDirtyRect`, a source-scraping test that fails if the unclipped fill ever comes back. |
+| `document view height is less than the height of the text it laid out` | `documentViewHeight + 1 < containerUsedHeight` (and `containerUsedHeight > 0`) | a document view too short to paint the text it actually laid out — **not** a document view shorter than its viewport, which is the ordinary case for a short file or diff hunk in a tall pane (an earlier version of this term compared against the clip view and was a confirmed false positive on every healthy short document) |
+| `text storage is too short to hold even one character per row` | `rowCount > 1 && textStorageLength <= rowCount - 1` | an all-blank-lines document that reads healthy on every geometry term |
+
+`gutterFillWidth` is the width the ruler *actually filled*
+(`rect.intersection(bounds).width`), never the raw dirty rect AppKit supplies —
+that rect legitimately spans the whole scroll view, so reporting it would make
+this term fire on every healthy pane and catch nothing. The 1pt tolerance on the
+height term and the `rowCount > 1` guard on the plausibility term are there for
+the same reason: a tripwire that fires on a healthy pane is worse than no
+tripwire.
 
 If a pass looks unhealthy (real content, real gutter, but the text view
 wasn't capable of painting it), the app:
@@ -88,9 +109,21 @@ wasn't capable of painting it), the app:
 1. Logs one line to the `codepane` log category (subsystem
    `com.hammer.nostromo`), rate-limited to once per distinct verdict per
    pane.
-2. Attempts a one-shot recovery (re-asserts the text container's size, forces
-   layout, requests a redisplay) — a mitigation for an unconfirmed cause, not
-   a fix. Whether the pane recovers is itself diagnostic evidence.
+2. Attempts a one-shot recovery (re-asserts the text container's width and the
+   text view's minimum height from the clip view, forces layout, requests a
+   redisplay). Whether the pane recovers is itself diagnostic evidence about
+   which geometry hypothesis is in play.
+
+Two lines are emitted **unconditionally**, not only on an unhealthy verdict,
+because a field that is only logged when something is already known to be wrong
+is useless for telling apart hypotheses about *why*:
+
+- one per document push — `code pane document pushed kind=… rows=…
+  textStorageLength=… textKitDowngraded=…`
+- one whenever `textKitDowngraded` changes — at most once per pane, when the
+  ruler's first `layoutManager` access downgrades the text view to TextKit 1.
+
+Counts, flags and geometry only; never pane content.
 
 **Copy code-pane diagnostics** (⌘⇧K) samples the same measurements on demand,
 without needing to catch a live failure — useful for confirming a pane is
@@ -105,6 +138,32 @@ log stream --predicate 'subsystem == "com.hammer.nostromo" AND category == "code
 Note this is a **separate** log category from `panes` above — `codepane` is
 specific to the code/diff render path's own internal audit; `panes` covers
 the broader daemon-to-view pipeline every pane kind goes through.
+
+## The `wire` log category
+
+A third category on the same subsystem, for the wire decoders in
+`macOS/Nostromo/Data/Models.swift` and
+`Shared/NostromoKit/Sources/NostromoKit/Wire/PaneLayout.swift`.
+
+```sh
+log show --predicate 'subsystem == "com.hammer.nostromo" AND category == "wire"' \
+  --last 1h --info
+```
+
+These decoders are deliberately lenient — a `PaneTree` node kind, an `Anchor`
+kind or an `Emphasis` kind newer than the running client must not throw out of
+a decoder and take the whole `pane_content` message down with it. Leniency that
+is also *silent*, though, leaves the operator unable to tell "the daemon sent
+nothing" from "this client threw away what it was sent". So whenever a lenient
+decoder drops something, it says so here:
+
+```
+pane address dropped 1 of 2 emphasis element(s) it could not decode
+```
+
+Counts only, never content. Rare by construction — it fires only against a
+daemon shipping a vocabulary this client build predates, which in practice
+means "you forgot to rebuild the app after changing the wire protocol."
 
 ## `NOSTROMO_PANE_DUMP`
 
