@@ -169,3 +169,66 @@ fn load_pr_json_shape_matches_current_pr_pointer() {
     assert_eq!(pointer.number, 100);
     assert_eq!(pointer.repo, "owner/repo");
 }
+
+// ── W7: the TUI is one surface, and writes exactly one focus's pin ───────────
+
+/// `PerriView` is a single-surface host with no focus registry, so it writes
+/// under the built-in `perri` focus (W7 — D1/D10). What must never happen is
+/// that being *implemented* as "write the one current-PR file": the store is
+/// sharded now, and a pickup on this host has to leave every other focus's
+/// review exactly where it was.
+#[test]
+fn the_tui_s_pickup_writes_only_the_builtin_perri_pin_and_leaves_other_focuses_alone() {
+    use nostromo::data::perri_current_pr::{pin_path, write_pointer};
+
+    let dir = TempDir::new().unwrap();
+    // Two focuses that exist only in the daemon's store — the TUI has never
+    // heard of them, and must not be able to touch them.
+    write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
+    write_pointer(
+        dir.path(),
+        "cody",
+        7,
+        "Carefeed/admin-portal",
+        Some("keep me"),
+    )
+    .unwrap();
+    let others: Vec<(String, Vec<u8>)> = ["operations", "cody"]
+        .iter()
+        .map(|tag| {
+            let path = pin_path(dir.path(), tag).unwrap();
+            ((*tag).to_owned(), std::fs::read(path).unwrap())
+        })
+        .collect();
+
+    let mut view = make_perri_view(dir.path());
+    view.load_pr(4526, "Carefeed/admin-portal".to_string(), None)
+        .unwrap();
+
+    assert!(
+        pin_file(dir.path()).exists(),
+        "the TUI's own surface is the built-in perri focus"
+    );
+    for (tag, before) in &others {
+        assert_eq!(
+            std::fs::read(pin_path(dir.path(), tag).unwrap())
+                .ok()
+                .as_ref(),
+            Some(before),
+            "focus {tag}'s pin must be byte-identical after a TUI pickup"
+        );
+    }
+
+    // And the same for a clear, which used to be "delete the current-PR file".
+    view.clear_current_pr().unwrap();
+    assert!(!pin_file(dir.path()).exists());
+    for (tag, before) in &others {
+        assert_eq!(
+            std::fs::read(pin_path(dir.path(), tag).unwrap())
+                .ok()
+                .as_ref(),
+            Some(before),
+            "focus {tag}'s pin must survive a TUI clear too"
+        );
+    }
+}

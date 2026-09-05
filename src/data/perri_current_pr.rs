@@ -423,4 +423,264 @@ mod tests {
         assert!(result.is_err());
         assert!(!pin_file(dir.path(), TAG).exists());
     }
+
+    // ── lifecycle: the pins survive a restart (W7) ───────────────────────────
+    //
+    // "A focus's PR under review survives a daemon restart: after restart, the
+    // focus reports the same PR." A restart carries nothing in memory, so the
+    // observable form of that criterion is: whatever a running daemon wrote,
+    // a cold read of the store gives back — per focus, unmixed.
+
+    #[test]
+    fn every_focus_s_pin_is_read_back_from_a_cold_store_after_a_restart() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(
+            dir.path(),
+            "perri",
+            4526,
+            "Carefeed/admin-portal",
+            Some("check the recipient service"),
+        )
+        .unwrap();
+        write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
+
+        // The restart: no in-memory state, just the directory.
+        let pins = read_pins(dir.path());
+
+        assert_eq!(
+            pins.len(),
+            2,
+            "both focuses' pins must come back, not just the last one written"
+        );
+        assert_eq!(
+            pins.get("perri"),
+            Some(&Pin {
+                number: 4526,
+                repo: "Carefeed/admin-portal".to_owned(),
+                highlights: Some("check the recipient service".to_owned()),
+            }),
+        );
+        assert_eq!(
+            pins.get("operations"),
+            Some(&Pin {
+                number: 42,
+                repo: "Carefeed/operations".to_owned(),
+                highlights: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn each_focus_reloads_its_own_pin_after_a_restart_and_never_another_s() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
+
+        let perri = read_pin(dir.path(), "perri").expect("perri's pin survives the restart");
+        let ops = read_pin(dir.path(), "operations").expect("operations' pin survives too");
+
+        assert_eq!(
+            (perri.number, perri.repo.as_str()),
+            (4526, "Carefeed/admin-portal")
+        );
+        assert_eq!((ops.number, ops.repo.as_str()), (42, "Carefeed/operations"));
+        assert!(
+            read_pin(dir.path(), "fred").is_none(),
+            "a focus that never picked one up still has none after a restart"
+        );
+    }
+
+    #[test]
+    fn a_pin_cleared_before_a_restart_does_not_come_back_after_one() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
+        clear_pointer(dir.path(), "perri").unwrap();
+
+        let pins = read_pins(dir.path());
+        assert!(!pins.contains_key("perri"), "a cleared pin stays cleared");
+        assert_eq!(
+            pins.get("operations").map(|p| p.number),
+            Some(42),
+            "and clearing one focus's pin left the other's alone across the restart"
+        );
+    }
+
+    // ── the pre-W7 global pointer is discarded, never adopted ────────────────
+
+    #[test]
+    fn a_pre_w7_bare_current_pr_json_is_deleted_and_yields_no_pins() {
+        let dir = TempDir::new().unwrap();
+        let legacy = dir.path().join("current-pr.json");
+        std::fs::write(
+            &legacy,
+            r#"{"number":4526,"repo":"Carefeed/admin-portal","highlights":null}"#,
+        )
+        .unwrap();
+
+        assert!(
+            discard_legacy_pointer(dir.path()),
+            "a legacy pointer that was there must be reported as found"
+        );
+        assert!(
+            !legacy.exists(),
+            "the legacy pointer must be deleted, not left to be re-read every startup"
+        );
+        assert!(
+            read_pins(dir.path()).is_empty(),
+            "the legacy PR names no focus, so it must not resurface under any tag"
+        );
+        assert!(
+            read_pin(dir.path(), BUILTIN_PERRI_TAG).is_none(),
+            "and least of all under the built-in Perri focus, which would be a guess"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_legacy_pointer_is_discarded_just_the_same() {
+        let dir = TempDir::new().unwrap();
+        let legacy = dir.path().join("current-pr.json");
+        std::fs::write(&legacy, "{ this is not json").unwrap();
+
+        assert!(discard_legacy_pointer(dir.path()));
+        assert!(!legacy.exists());
+        assert!(read_pins(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn discarding_a_legacy_pointer_that_was_never_there_reports_nothing() {
+        let dir = TempDir::new().unwrap();
+        assert!(
+            !discard_legacy_pointer(dir.path()),
+            "a fresh install has no legacy pointer to announce"
+        );
+        assert!(read_pins(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn discarding_the_legacy_pointer_leaves_the_per_focus_pins_untouched() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        std::fs::write(
+            dir.path().join("current-pr.json"),
+            r#"{"number":42,"repo":"Carefeed/operations","highlights":null}"#,
+        )
+        .unwrap();
+
+        discard_legacy_pointer(dir.path());
+
+        let pins = read_pins(dir.path());
+        assert_eq!(pins.len(), 1, "only the legacy file goes");
+        assert_eq!(pins.get("perri").map(|p| p.number), Some(4526));
+    }
+
+    // ── a tag is a filename, and is validated as one ─────────────────────────
+
+    /// Every path-bearing tag `validate_tag` must refuse. A tag arrives from a
+    /// self-asserted `pty_id` or an agent-supplied `view_id`, so an
+    /// unvalidated one joined to a filename is a directory escape.
+    const PATH_BEARING_TAGS: &[&str] = &[
+        "..",
+        ".",
+        "",
+        "../evil",
+        "a/b",
+        "/absolute",
+        "nested/../../escape",
+        "trailing/",
+        "back\\slash",
+        "null\0byte",
+    ];
+
+    #[test]
+    fn a_tag_that_is_not_a_plain_filename_is_refused_and_never_joined_to_a_path() {
+        let dir = TempDir::new().unwrap();
+        for tag in PATH_BEARING_TAGS {
+            assert!(
+                validate_tag(tag).is_err(),
+                "validate_tag({tag:?}) must refuse a tag that is not a plain name"
+            );
+            assert!(
+                pin_path(dir.path(), tag).is_err(),
+                "pin_path({tag:?}) must refuse rather than return a path to join"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_escape_tag_writes_no_file_anywhere_and_clears_nothing() {
+        let root = TempDir::new().unwrap();
+        // The state dir is a *child* of `root`, so an escaping tag has
+        // somewhere real to escape to and this test can see it land there.
+        let state_dir = root.path().join("perri-state");
+        write_pointer(&state_dir, "perri", 1, "acme/widget", None).unwrap();
+        let before = tree_snapshot(root.path());
+
+        for tag in ["../../escaped", "../escaped", "..", "a/b"] {
+            let err = write_pointer(&state_dir, tag, 4526, "Carefeed/admin-portal", None)
+                .expect_err("an escaping tag must be refused");
+            assert!(
+                err.starts_with("invalid_tag"),
+                "the refusal must name the tag as the problem, got {err:?}"
+            );
+            assert!(
+                clear_pointer(&state_dir, tag).is_err(),
+                "clearing under an escaping tag must be refused too, not silently unlink"
+            );
+            assert!(
+                remove_pin(&state_dir, tag).is_err(),
+                "and so must an eviction under one"
+            );
+        }
+
+        assert_eq!(
+            tree_snapshot(root.path()),
+            before,
+            "a refused tag must leave the filesystem byte-for-byte as it was — \
+             no file created, moved or removed, inside the pins dir or out of it"
+        );
+    }
+
+    #[test]
+    fn a_pin_file_whose_name_is_not_a_valid_tag_is_skipped_rather_than_adopted() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        // Stem `.` — a name `validate_tag` refuses, planted directly in the
+        // pins dir the way a hand edit or an older binary could.
+        std::fs::write(
+            pins_dir(dir.path()).join("..json"),
+            r#"{"number":42,"repo":"Carefeed/operations","highlights":null}"#,
+        )
+        .unwrap();
+
+        let pins = read_pins(dir.path());
+        assert_eq!(
+            pins.len(),
+            1,
+            "only the well-named pin is served: {:?}",
+            pins.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(pins.get("perri").map(|p| p.number), Some(4526));
+    }
+
+    /// Every path under `root`, relative and sorted — a cheap "did anything at
+    /// all change on disk?" fingerprint.
+    fn tree_snapshot(root: &Path) -> Vec<PathBuf> {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+                if path.is_dir() {
+                    walk(&path, root, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
 }
