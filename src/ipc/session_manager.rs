@@ -234,12 +234,33 @@ pub struct SessionManager {
     store_path: PathBuf,
     /// Mac-pushed focus registry; served to all clients and broadcast on change.
     focus_registry: Vec<FocusMeta>,
-    /// Tags this daemon created itself, via `nostromo.create_focus` (W7 — D8b).
+    /// Tags this daemon created itself, via `nostromo.create_focus`, that no
+    /// client has acknowledged yet (W7 — D8b).
     ///
-    /// The Mac's `focuses.json` has never heard of these, so every
-    /// `FocusRegistryPush` omits them. Without this exemption a naive
-    /// "in the old list, not in the new one" diff would evict an
-    /// agent-created focus the moment the Mac pushed anything at all.
+    /// A tag enters here at `add_or_update_focus` and leaves the first time a
+    /// `FocusRegistryPush` names it; from then on the ordinary
+    /// two-consecutive-push rule governs it exactly like a Mac-created focus.
+    /// The exemption covers the window between creating a focus and the
+    /// client's first acknowledging push (~200ms of debounce on the Mac), and
+    /// a client that never pushes the tag at all — an older build, or a
+    /// non-Mac client. Without it, a naive "in the old list, not in the new
+    /// one" diff would evict an agent-created focus the moment anything was
+    /// pushed.
+    ///
+    /// **It must expire.** It used to be permanent, on the stated grounds that
+    /// "the Mac's `focuses.json` has never heard of these, so every push omits
+    /// them" — which was not the mechanism. The Mac hears about a created
+    /// focus immediately (`AppStore`'s `.focusCreated` adds it to `FocusStore`,
+    /// which persists it and triggers a push); what it could not do was push
+    /// the tag *back* faithfully, because `Focus.sessionTag` re-derived a tag
+    /// from a value that already was one. A permanent exemption meant a
+    /// daemon-created tag could never appear in `departed`, and `departed` is
+    /// the only path that deletes a PR pin — so an agent-created focus's pin
+    /// outlived it, and `nostromo.create_focus`'s deterministic
+    /// `(agent, title)` tag handed it straight to the next focus of the same
+    /// name. That is the PRD's "a removed focus's pin never resurfaces"
+    /// criterion failing for the one class of focus where tag reuse is
+    /// guaranteed.
     daemon_created_tags: HashSet<String>,
     /// Tags one push claimed were gone, awaiting a second push that agrees
     /// (W7 — D8a).
@@ -1160,6 +1181,15 @@ impl SessionManager {
         }
 
         let new_tags: HashSet<String> = focuses.iter().map(|f| f.tag.clone()).collect();
+
+        // A daemon-created tag that this push *names* has been acknowledged:
+        // the client demonstrably knows about it, so its exemption has done
+        // its job and expires here. From the next push on it is an ordinary
+        // focus, and — the point — it can finally reach `departed`, which is
+        // the only path that deletes its PR pin.
+        self.daemon_created_tags
+            .retain(|tag| !new_tags.contains(tag));
+
         let known: HashSet<String> = self
             .focus_registry
             .iter()
@@ -1197,11 +1227,19 @@ impl SessionManager {
     /// Every focus tag that currently exists, or `None` if no client has
     /// pushed a registry yet (W7 — D8).
     ///
-    /// The union of the pushed registry and this daemon's own creations, not
-    /// just the registry: `set_focus_registry` replaces the registry wholesale
-    /// with the Mac's view, and the Mac's `focuses.json` has never heard of a
-    /// `nostromo.create_focus` tag. Reading the registry alone would report an
-    /// agent-created focus as non-existent the moment the Mac pushed anything.
+    /// The union of the pushed registry and the daemon-created tags still
+    /// carrying their (temporary) eviction exemption — not just the registry:
+    /// `set_focus_registry` replaces the registry wholesale with the client's
+    /// view, so between `nostromo.create_focus` and the client's first
+    /// acknowledging push, reading the registry alone would report an
+    /// agent-created focus as non-existent.
+    ///
+    /// It is the *unexpired* exemptions specifically, for the same reason the
+    /// exemption expires at all: a tag the client has acknowledged now lives
+    /// or dies by the registry. Chaining the whole set unconditionally would
+    /// report a departed daemon-created focus as live forever, and
+    /// `retain_pins` — which asks exactly this question — could never collect
+    /// its pin.
     ///
     /// `None` rather than an empty set is the point: "nobody has told us which
     /// focuses exist" and "no focus exists" must not be the same value, or
@@ -2099,10 +2137,12 @@ mod tests {
         );
     }
 
-    /// D8b. `nostromo.create_focus` tags are absent from every Mac push,
-    /// because the Mac's `focuses.json` has never heard of them.
+    /// D8b, first half. A focus the Mac has never carried is absent from every
+    /// push for the boring reason that the Mac has never heard of it, not
+    /// because it was removed. Reading that absence as a removal would delete a
+    /// live agent-created focus's state moments after `create_focus` made it.
     #[test]
-    fn a_daemon_created_focus_survives_any_number_of_mac_pushes() {
+    fn a_daemon_created_focus_the_mac_has_never_pushed_is_never_evicted() {
         let mut mgr = SessionManager::with_store_path(tmp_store());
         mgr.add_or_update_focus(focus("cody-core-1234"));
 
@@ -2110,10 +2150,84 @@ mod tests {
             let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
             assert!(
                 departed.is_empty(),
-                "a daemon-created focus must never be evicted by a Mac push"
+                "a focus the Mac has never acknowledged cannot be evicted by its \
+                 silence — that silence is all the Mac has ever said about it"
             );
         }
         assert!(mgr.is_daemon_created("cody-core-1234"));
+    }
+
+    /// D8b, second half — and the bug. The exemption's job is to cover the
+    /// window between `create_focus` and the Mac's first acknowledging push.
+    /// Once the Mac *has* pushed the tag, its silence afterwards means what it
+    /// means for every other focus, and the ordinary two-push rule governs it.
+    ///
+    /// A permanent exemption is not a safe conservative default here: an
+    /// agent-created tag is derived deterministically from `(agent, title)`, so
+    /// it is the tag most certain to be reused, and a focus that can never
+    /// depart can never have its PR pin evicted.
+    #[test]
+    fn a_daemon_created_focus_the_mac_has_acknowledged_departs_like_any_other() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.add_or_update_focus(focus("cody-core-1234"));
+
+        // The Mac has learned of it (it received `FocusCreated`) and now
+        // carries it.
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri"), focus("cody-core-1234")]);
+        assert!(
+            departed.is_empty(),
+            "a push that carries a focus says nothing about it departing"
+        );
+
+        // Closed on the Mac. One push is still not enough — that is what a
+        // reconnect looks like, and eviction is irreversible.
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            departed.is_empty(),
+            "one omitting push is indistinguishable from a partial push during a \
+             reconnect, whoever created the focus"
+        );
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert_eq!(
+            departed,
+            vec!["cody-core-1234".to_string()],
+            "once the Mac has acknowledged an agent-created focus, two consecutive \
+             pushes omitting it are a removal; while they are not, the focus's PR \
+             pin outlives it and the next create_focus under the same derived tag \
+             inherits it"
+        );
+
+        assert!(
+            !mgr.live_focus_tags()
+                .expect("a registry has been pushed")
+                .contains("cody-core-1234"),
+            "a departed focus must stop counting as live, or the retain_pins \
+             backstop is handed a live set that still vouches for its pin"
+        );
+    }
+
+    /// The reconnect guard (D8a) applies to a now-unexempt agent-created focus
+    /// exactly as it does to a Mac-created one: an empty push carries no
+    /// information about what still exists, and must neither evict nor arm.
+    #[test]
+    fn an_empty_push_never_evicts_an_acknowledged_daemon_created_focus() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.add_or_update_focus(focus("cody-core-1234"));
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody-core-1234")]);
+
+        let (_, departed) = mgr.set_focus_registry(vec![]);
+        assert!(
+            departed.is_empty(),
+            "an empty push is what a client sends before it has loaded anything, \
+             never a claim that every focus was deleted"
+        );
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            departed.is_empty(),
+            "and it must not have armed a departure for the next push to confirm"
+        );
     }
 
     #[test]

@@ -317,11 +317,19 @@ async fn a_removed_focus_loses_its_pin_and_no_other_focus_is_touched() {
     );
 }
 
-/// D10, and the case the plan flags as the one that actually breaks.
-/// `nostromo.create_focus` derives its tag deterministically from
-/// `(agent, title)`, so close-and-recreate yields the *same* tag. The pin must
-/// be genuinely deleted, not tombstoned, or the new focus inherits the dead
+/// D10 for a **Mac-created** focus: every phase here arrives as a
+/// `FocusRegistryPush`, so this is the path a focus from the Mac's
+/// `focuses.json` takes. A tag can be reused on that path too (the operator
+/// names a focus the same thing twice), and when it is, the pin must be
+/// genuinely deleted rather than tombstoned or the new focus inherits the dead
 /// one's PR.
+///
+/// It does **not** cover `nostromo.create_focus`, whose focuses enter through
+/// `SessionManager::add_or_update_focus` and carry an eviction exemption this
+/// path never touches — that is
+/// [`a_daemon_created_focus_recreated_under_a_reused_tag_inherits_no_pin`]
+/// below, and it is the case where tag reuse is guaranteed rather than merely
+/// possible.
 #[tokio::test]
 async fn a_focus_recreated_under_a_reused_tag_inherits_no_pin() {
     let (socket_path, state_dir, _tmp, _server) = serve().await;
@@ -371,6 +379,127 @@ async fn a_focus_recreated_under_a_reused_tag_inherits_no_pin() {
 
     // Give the daemon the same window the eviction got, so this asserts
     // "no pin appeared" rather than "we looked too early".
+    assert!(
+        !wait_until(|| pin_of(&state_dir, reused).exists()).await,
+        "a recreated focus reusing a dead focus's tag must start with no PR under review"
+    );
+}
+
+// ── W7 — D8b: the focus whose tag reuse is *guaranteed* ──────────────────────
+
+/// Same as [`serve`], but also hands back the shared `SessionManager` the
+/// server holds, so a test can register a focus the way an agent does rather
+/// than the way the Mac does.
+///
+/// `nostromo.create_focus` does not push a registry — it calls
+/// `SessionManager::add_or_update_focus` on this very `Arc` and broadcasts
+/// `FocusCreated` (`src/mcp/tools/create_focus.rs`). Reaching the same state
+/// through `FocusRegistryPush` would be a different code path with a
+/// different eviction story, which is exactly the confusion this file exists
+/// to pin down.
+async fn serve_with_session_mgr() -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    TempDir,
+    Server,
+    Arc<Mutex<SessionManager>>,
+) {
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("nostromd.sock");
+    let perri_state_dir = tmp.path().join("perri-state");
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        tmp.path().join("sessions.json"),
+    )));
+    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
+    let server = Server::bind(
+        &socket_path,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        perri_state_dir.clone(),
+        Arc::clone(&decisions),
+    )
+    .unwrap();
+    (socket_path, perri_state_dir, tmp, server, session_mgr)
+}
+
+/// D10, for the class of focus where tag reuse is not a hazard but a
+/// certainty: the agent-created one.
+///
+/// `nostromo.create_focus` derives its tag deterministically from
+/// `(agent, title)`, so closing "cody / core-1234" and asking for it again
+/// returns the identical tag. Such a focus enters the registry through
+/// `add_or_update_focus`, never through a Mac push — and it is removed the
+/// only way the daemon ever learns of a removal, by dropping out of the
+/// pushes. Once the Mac has acknowledged the focus by pushing it, its removal
+/// must be honoured on the ordinary two-push rule and its pin deleted, or the
+/// next `create_focus` for the same title hands the new focus the dead one's
+/// PR.
+#[tokio::test]
+async fn a_daemon_created_focus_recreated_under_a_reused_tag_inherits_no_pin() {
+    let (socket_path, state_dir, _tmp, _server, session_mgr) = serve_with_session_mgr().await;
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    handshake(&mut stream, vec![Topic::Perri, Topic::Focuses]).await;
+
+    let reused = "cody-core-1234";
+
+    // Born the way an agent-created focus is actually born.
+    session_mgr
+        .lock()
+        .unwrap()
+        .add_or_update_focus(focus_meta(reused));
+
+    // It picks up a PR to review.
+    send(
+        &mut stream,
+        &ClientMsg::PerriAction {
+            action: "load_pr".into(),
+            pr_number: Some(4526),
+            repo: Some("Carefeed/admin-portal".into()),
+            tag: Some(reused.into()),
+        },
+    )
+    .await;
+    assert!(
+        wait_until(|| pin_of(&state_dir, reused).exists()).await,
+        "the daemon-created focus must have a pin before there is anything to evict"
+    );
+
+    // The Mac learns of it (it received `FocusCreated`) and starts carrying it
+    // in its pushes. From here on it is an ordinary focus.
+    send(
+        &mut stream,
+        &ClientMsg::FocusRegistryPush {
+            focuses: vec![focus_meta("perri"), focus_meta(reused)],
+        },
+    )
+    .await;
+
+    // Closed, and confirmed closed by a second push.
+    for _ in 0..2 {
+        send(
+            &mut stream,
+            &ClientMsg::FocusRegistryPush {
+                focuses: vec![focus_meta("perri")],
+            },
+        )
+        .await;
+    }
+
+    assert!(
+        wait_until(|| !pin_of(&state_dir, reused).exists()).await,
+        "an agent-created focus the Mac has since dropped must lose its pin like any \
+         other; while it keeps one, the next create_focus for the same title reuses \
+         the tag and inherits a dead focus's PR"
+    );
+    // Recreated under the very same deterministic tag, the same way.
+    session_mgr
+        .lock()
+        .unwrap()
+        .add_or_update_focus(focus_meta(reused));
+
     assert!(
         !wait_until(|| pin_of(&state_dir, reused).exists()).await,
         "a recreated focus reusing a dead focus's tag must start with no PR under review"
