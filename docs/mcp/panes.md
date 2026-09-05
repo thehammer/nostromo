@@ -683,7 +683,7 @@ Produced by **`nostromo.get_file`**, whose `params` are:
 | field | meaning |
 | --- | --- |
 | `path` (required) | repo-relative, resolved against the focus's session cwd |
-| `revision` | `"working"` (the on-disk tree), any git revision, or **omit** for the PR-under-review's head SHA when a PR is loaded, else the working tree |
+| `revision` | `"working"` (the on-disk tree), any git revision, or **omit** for the PR-under-review's head SHA when a PR is loaded *and* the caller's own working directory is actually rooted in that PR's repo, else the working tree (W5 — current-pr-collision: a PR pinned to a *different* repo than the caller's own must never make an omitted revision resolve to that foreign PR's head SHA) |
 | `anchor_line` | 1-based line to scroll to; becomes `address.anchor` |
 | `emphasis` | `[{start, end}]` (or `[[start, end]]`) inclusive 1-based ranges; becomes `address.emphasis` |
 | `reason` | one short phrase, rendered as the tab's caption |
@@ -703,9 +703,23 @@ it is showing. It is also not re-fetched by the background broadcaster.
 pane that already has content keeps it — a bad show never destroys what the
 operator was reading. Each is a distinct code: `invalid_params`,
 `unknown_path`, `path_escapes_root`, `not_utf8`, `anchor_beyond_eof`,
-`invalid_emphasis_range`, `unresolvable_revision`. The one exception is a pane
-this same call just put into `Loading` — there is nothing to preserve, and an
-error beats a spinner that never resolves.
+`invalid_emphasis_range`, `unresolvable_revision`, `revision_repo_mismatch`.
+The one exception is a pane this same call just put into `Loading` — there is
+nothing to preserve, and an error beats a spinner that never resolves.
+
+`revision_repo_mismatch` (W5 — current-pr-collision): an explicit `revision`
+that the local clone can't resolve, where the only remaining way to serve it
+would be the GitHub-contents fallback against a PR pinned to a *different*
+repo than the one the caller's own working directory actually is. Refused
+rather than fetched — the alternative is silently rendering a foreign repo's
+content with `ok: true`, which is worse than an error. `nostromo.show`'s
+`file` type carries `current_pin: {repo, number}` on this refusal
+*unconditionally* — a `revision` was named, but that doesn't mean the caller
+knew a foreign PR pin was the actual reason it was refused, and this is the
+one error whose entire reason for existing is a pin mismatch. Every other
+fetch-level refusal from this path carries `current_pin` only when the
+request's `revision` was omitted and a PR is pinned (see `docs/mcp/tools.md`'s
+`nostromo.show` error table).
 
 ### `diff` — a PR's change, per file
 

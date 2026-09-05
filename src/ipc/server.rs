@@ -839,10 +839,16 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::FocusRegistryUpdated { .. } => topics.contains(&Topic::Focuses),
         ServerMsg::PerriState { .. } => topics.contains(&Topic::Perri),
         ServerMsg::FredState { .. } => topics.contains(&Topic::Fred),
-        // Agent-authored pane layout broadcasts (Phase 1).
+        // Agent-authored pane layout broadcasts (Phase 1). `Notification`
+        // (W5 — current-pr-collision) reuses this topic rather than adding
+        // a new one, deliberately: every client that already renders
+        // FocusLayout/PaneContent has already subscribed to it, so an older
+        // client can't silently miss a Notification just because it never
+        // learned about a topic that postdates it.
         ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }
-        | ServerMsg::FocusCreated { .. } => topics.contains(&Topic::Layout),
+        | ServerMsg::FocusCreated { .. }
+        | ServerMsg::Notification { .. } => topics.contains(&Topic::Layout),
         ServerMsg::DecisionRequest { .. } | ServerMsg::DecisionResolved { .. } => {
             topics.contains(&Topic::Decision)
         }
@@ -936,6 +942,59 @@ mod tests {
     #[test]
     fn decision_resolved_matches_an_empty_topic_list_meaning_everything() {
         assert!(message_matches_topics(&sample_decision_resolved(), &[]));
+    }
+
+    // ── ServerMsg::Notification routes under Topic::Layout (W5 —
+    // current-pr-collision) ───────────────────────────────────────────────────
+    //
+    // Reuses the existing topic the macOS client already subscribes to for
+    // pane-layout traffic — no new `Topic` variant, no client-side
+    // subscribe-list change needed. No production caller sends a
+    // `Notification` yet (that lands a wedge later), so this is proven
+    // directly: the pure predicate, and — because nothing else exercises this
+    // path — the real `tokio::sync::broadcast` transport end to end.
+
+    fn sample_notification() -> ServerMsg {
+        ServerMsg::Notification {
+            tag: "perri".into(),
+            level: crate::ipc::protocol::NotificationLevel::Warning,
+            message: "test".into(),
+        }
+    }
+
+    #[test]
+    fn notification_matches_when_subscribed_to_the_layout_topic() {
+        assert!(message_matches_topics(&sample_notification(), &[Topic::Layout]));
+    }
+
+    #[test]
+    fn notification_does_not_match_a_subscription_to_some_other_topic() {
+        assert!(!message_matches_topics(&sample_notification(), &[Topic::Activity]));
+    }
+
+    #[test]
+    fn notification_matches_an_empty_topic_list_meaning_everything() {
+        assert!(message_matches_topics(&sample_notification(), &[]));
+    }
+
+    #[tokio::test]
+    async fn a_notification_sent_through_a_real_broadcast_channel_still_carries_its_tag_and_topic_gate(
+    ) {
+        // Proves the actual `tokio::sync::broadcast` plumbing carries the
+        // variant intact end to end — not just the pure predicate above —
+        // since no real trigger calls this path for at least one more wedge
+        // and it must still be demonstrably wired correctly today.
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(8);
+        tx.send(sample_notification()).expect("send into a fresh channel");
+
+        let received = rx.recv().await.expect("receive back out");
+
+        assert!(message_matches_topics(&received, &[Topic::Layout]));
+        assert!(!message_matches_topics(&received, &[Topic::Activity]));
+        match received {
+            ServerMsg::Notification { tag, .. } => assert_eq!(tag, "perri"),
+            other => panic!("expected Notification, got {other:?}"),
+        }
     }
 
     // ── ambient activity routes under Topic::Activity ─────────────────────────

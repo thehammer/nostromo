@@ -148,7 +148,15 @@ Source: `src/mcp/tools/perri.rs`
 
 ### `perri.get_state`
 
-Returns `{ queue, current_pr, stale }`.
+Returns `{ queue, current_pr, stale, current_pin }`.
+
+`current_pin` (W5 — current-pr-collision) is `{ repo, number }` when a PR is
+loaded, else an explicit `null` — always a present key, never omitted, so a
+caller can tell "checked, nothing pinned" from "this daemon predates the
+field." Today it names the single daemon-wide pin; it is exposed through the
+same request-scoped accessor (`pin_for_request`, keyed on the caller's own
+focus tag) `nostromo.show`'s `current_pin` error field uses, so both read
+identically once per-focus isolation lands.
 
 **Input**: *(none)*
 
@@ -395,7 +403,8 @@ resolves credentials.
 `not_supported`, or — for the file/diff/conversation/ticket sources — one of
 the refusals `invalid_params`, `unknown_path`, `path_escapes_root`,
 `not_utf8`, `anchor_beyond_eof`, `invalid_emphasis_range`,
-`unresolvable_revision`, `unknown_comment_id` (a `pr_conversation`
+`unresolvable_revision`, `revision_repo_mismatch` (W5 — current-pr-collision;
+see `docs/mcp/panes.md`'s `code` section), `unknown_comment_id` (a `pr_conversation`
 anchor/emphasis naming a comment id not present in the fetched conversation),
 `unsupported_provider`, `provider_unconfigured`, `unknown_ticket`, or
 `unknown_section` (see `docs/mcp/panes.md`'s `ticket` section for what each
@@ -659,6 +668,19 @@ auto-expires after **5 seconds**.
 **Output**: `{ "ok": true }`
 
 Source: `src/mcp/tools/notify.rs`
+
+**Distinct from `ServerMsg::Notification` (W5 — current-pr-collision).** This
+tool's toast is a *TUI* status-bar affordance, routed through
+`state.event_tx`, whose receiver the daemon deliberately drops — so on the
+daemon-hosted path this always returns `{"error":"event_loop_gone"}`. A
+separate, daemon → GUI wire message, `ServerMsg::Notification { tag, level,
+message }`, exists end to end (daemon variant, `Topic::Layout` gate, macOS
+client decode, toast rendering) as of W5, but currently has **no production
+caller** — it was landed as reusable transport for a same-PR advisory that a
+later wedge (W9) wires the first real trigger for. `level` there is
+`info`/`warning`/`alert` (mirroring macOS's `ToastSeverity`), a different
+vocabulary than this tool's own `info`/`warn`/`error` — the two are
+unrelated, not a typo.
 
 ---
 
@@ -953,13 +975,31 @@ downstream, as its own fetch-level error (`unknown_comment_id`,
 | `pane_id_taken` | Creating a non-tabbed region would need a pane id something else in this focus already holds. |
 | `invalid_views_config` | `views.yaml` (compiled-in or override) is malformed. |
 | `unknown_source` / `fetch_failed` | The view's underlying fetcher isn't in the closed registry, or ran but failed — the same codes `apply_layout`/`refresh_pane_content` surface. |
-| `invalid_params` / `unknown_path` / `path_escapes_root` / `not_utf8` / `anchor_beyond_eof` / `invalid_emphasis_range` / `unresolvable_revision` | `file`'s fetch-level refusals (`FileSourceError`) — see `docs/mcp/panes.md`'s `code`/`diff` section. |
+| `invalid_params` / `unknown_path` / `path_escapes_root` / `not_utf8` / `anchor_beyond_eof` / `invalid_emphasis_range` / `unresolvable_revision` / `revision_repo_mismatch` | `file`'s fetch-level refusals (`FileSourceError`) — see `docs/mcp/panes.md`'s `code`/`diff` section. `revision_repo_mismatch` (W5 — current-pr-collision) is a request that resolved to a revision only a PR pinned to a *different* repo than the caller's own working directory could serve — refused rather than silently rendering that foreign repo's content. |
 | `unknown_comment_id` | A `pr_conversation` anchor/emphasis named a comment id absent from the fetched conversation. |
 | `unsupported_provider` / `provider_unconfigured` / `unknown_ticket` / `unknown_section` | `ticket`'s fetch-level refusals — see `docs/mcp/panes.md`'s `ticket` section. |
 | `not_supported` | Called against a non-daemon-hosted MCP server. |
 | `unidentified_caller` | No `view_id` and no caller `pty_id` to target. |
 | `unknown_view` | The resolved focus was removed from the registry between placement and mutation — a race, not a normal path. |
 | `concurrent_modification` | The view's layout changed (a concurrent `nostromo.show`, `perri.load_pr`, or `perri.clear_current_pr` targeting the same focus) between this call's placement decision and its mutation — a race, not a normal path. The layout is left exactly as that other call left it; retry. |
+
+**`current_pin` (W5 — current-pr-collision).** A `file` fetch-level refusal
+(any of the `FileSourceError` codes above) additionally carries
+`current_pin: { repo, number }` on the error payload when the request's
+`revision` was omitted (an implicit revision) *and* a PR is currently pinned
+— e.g. `{"error": "unknown_path", "detail": "...", "current_pin": {"repo":
+"acme/ops", "number": 42}}`. This is scoped narrowly: for most codes, an
+explicit `revision` doesn't carry it (the caller already named exactly what
+it asked for), no other view type ever carries it, and with no PR pinned the
+key is absent entirely (never `null`) — a bare refusal is unchanged from
+before W5. **`revision_repo_mismatch` is the one exception** — it is *only*
+ever produced with an explicit `revision` (an implicit one degrades to the
+working tree and fails as `unknown_path` instead, never reaching this code),
+so it carries `current_pin` unconditionally; otherwise the one refusal whose
+entire reason for existing is a pin mismatch would be the one refusal that
+doesn't name the pin. The point is telling an agent *why* an
+otherwise-ordinary-looking refusal just happened: a second, independent
+session pinning a different PR mid-review.
 
 Every refusal from `unknown_view_type` through `invalid_views_config` happens
 **before** the fetch and leaves the focus's layout byte-identical, broadcasting

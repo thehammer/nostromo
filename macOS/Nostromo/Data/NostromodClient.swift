@@ -150,6 +150,15 @@ enum ServerMsg {
     /// itself without itself sending an answer.
     case decisionResolved(tag: String, requestId: String, resolution: String, choiceId: String?)
 
+    /// A daemon-originated, tag-addressed, operator-facing notification (W5
+    /// — current-pr-collision), modelled on `decisionRequest` above. `level`
+    /// is carried as the raw wire string ("info"/"warning"/"alert") rather
+    /// than a typed enum here — `AppStore` maps it to `ToastSeverity` at the
+    /// point it actually renders, the same distance `DecisionRequestResp`
+    /// keeps from its own presentation type. No production trigger sends
+    /// this yet; a later wedge (the same-PR advisory) wires the first one.
+    case notification(tag: String, level: String, message: String)
+
     // ── ambient activity (activity-path wedge) ───────────────────────────────
     /// Full snapshot of one focus's activity streams — replayed on attach and
     /// sent in response to `requestActivitySnapshot(tag:)`.
@@ -745,7 +754,7 @@ class NostromodClient {
         }
     }
 
-    private func decode(type_: String, json: [String: Any], raw: Data) -> ServerMsg {
+    func decode(type_: String, json: [String: Any], raw: Data) -> ServerMsg {
         switch type_ {
 
         case "welcome":
@@ -887,6 +896,11 @@ class NostromodClient {
                                          resolution: m.resolution, choiceId: m.choice_id)
             }
 
+        case "notification":
+            if let m = try? decoder.decode(NotificationResp.self, from: raw) {
+                return .notification(tag: m.tag, level: m.level, message: m.message)
+            }
+
         // ── ambient activity (activity-path wedge) ───────────────────────────
         case "activity_snapshot":
             if let m = try? decoder.decode(ActivitySnapshotResp.self, from: raw) {
@@ -955,6 +969,16 @@ private struct DecisionResolvedResp: Decodable {
     let request_id: String
     let resolution: String
     let choice_id: String?
+}
+
+/// Mirrors `ServerMsg::Notification` in `src/ipc/protocol.rs` (W5 —
+/// current-pr-collision). `level` decodes as the raw wire string
+/// ("info"/"warning"/"alert") — `AppStore` maps it to `ToastSeverity` at the
+/// point it actually renders.
+private struct NotificationResp: Decodable {
+    let tag: String
+    let level: String
+    let message: String
 }
 
 // MARK: - Inbound session response wrappers (decoded from the raw frame)

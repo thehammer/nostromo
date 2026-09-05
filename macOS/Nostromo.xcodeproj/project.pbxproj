@@ -93,6 +93,8 @@
 		RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000003 /* PRDetailCacheTests.swift */; };
 		WW0000000000000000000001 /* DiffPaneSummaryPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000000 /* DiffPaneSummaryPolicyTests.swift */; };
 		WW0000000000000000000003 /* DiffPaneSummaryWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */; };
+		XX0000000000000000000011 /* NotificationDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = XX0000000000000000000001 /* NotificationDecodeTests.swift */; };
+		XX0000000000000000000012 /* MainLayoutNotificationWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */; };
 		WW0000000000000000000005 /* DiffPaneSummaryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */; };
 		WW0000000000000000000006 /* DiffPaneSummaryPolicy.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */; };
 		TT0000000000000000000001 /* ChatSessionDetachTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT0000000000000000000000 /* ChatSessionDetachTests.swift */; };
@@ -228,6 +230,8 @@
 		WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffPaneSummaryWiringTests.swift; sourceTree = "<group>"; };
 		WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffPaneSummaryPolicy.swift; sourceTree = "<group>"; };
 		TT0000000000000000000000 /* ChatSessionDetachTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionDetachTests.swift; sourceTree = "<group>"; };
+		XX0000000000000000000001 /* NotificationDecodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationDecodeTests.swift; sourceTree = "<group>"; };
+		XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainLayoutNotificationWiringTests.swift; sourceTree = "<group>"; };
 		UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerFocusEvictionWiringTests.swift; sourceTree = "<group>"; };
 		QQ0000000000000000000006 /* RatioPersistencePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioPersistencePolicy.swift; sourceTree = "<group>"; };
 		QQ0000000000000000000007 /* RatioPersistencePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioPersistencePolicyTests.swift; sourceTree = "<group>"; };
@@ -462,6 +466,8 @@
 				UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */,
 				WW0000000000000000000000 /* DiffPaneSummaryPolicyTests.swift */,
 				WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */,
+				XX0000000000000000000001 /* NotificationDecodeTests.swift */,
+				XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */,
 
 			);
 			path = NostromoTests;
@@ -711,6 +717,8 @@
 				UU0000000000000000000001 /* PerFocusEvictionWiringTests.swift in Sources */,
 				WW0000000000000000000001 /* DiffPaneSummaryPolicyTests.swift in Sources */,
 				WW0000000000000000000003 /* DiffPaneSummaryWiringTests.swift in Sources */,
+				XX0000000000000000000011 /* NotificationDecodeTests.swift in Sources */,
+				XX0000000000000000000012 /* MainLayoutNotificationWiringTests.swift in Sources */,
 
 			);
 			runOnlyForDeploymentPostprocessing = 0;

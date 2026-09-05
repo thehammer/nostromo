@@ -150,6 +150,11 @@ class AppStore: ObservableObject {
     private let watchdog = MemoryWatchdog()
     /// Where shed/warning toasts are shown. Set by `MainLayout`.
     var onMemoryToast: ((String, ToastSeverity) -> Void)?
+    /// Where daemon `ServerMsg.notification` broadcasts are shown (W5 —
+    /// current-pr-collision) — the same toast banner surface as
+    /// `onMemoryToast`, set alongside it by `MainLayout`. No production
+    /// trigger sends one yet; a later wedge (the same-PR advisory) does.
+    var onNotification: ((String, ToastSeverity) -> Void)?
 
     func registerTranscriptPane(_ pane: ReplView) {
         transcriptPanes.add(pane)
@@ -1102,6 +1107,13 @@ class AppStore: ObservableObject {
         case .decisionResolved(let tag, let requestId, let resolution, let choiceId):
             decisionResolutions.send(ResolvedDecision(tag: tag, requestId: requestId,
                                                        resolution: resolution, choiceId: choiceId))
+
+        case .notification(_, let level, let message):
+            // No per-focus routing yet (same global banner surface
+            // onMemoryToast already uses) — `tag` is carried on the wire for
+            // a later, more targeted presentation but unused here today.
+            let severity: ToastSeverity = level == "alert" ? .alert : (level == "warning" ? .warning : .info)
+            onNotification?(message, severity)
 
         case .focusCreated(let meta):
             // An agent-spawned focus was created — add it to FocusStore so the

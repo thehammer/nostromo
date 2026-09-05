@@ -421,7 +421,7 @@ async fn perri_get_state_composite() {
         None,
     );
 
-    let result = perri::get_state(&state);
+    let result = perri::get_state(&state, None);
     let queue_arr = result["queue"]
         .as_array()
         .expect("queue should be an array");

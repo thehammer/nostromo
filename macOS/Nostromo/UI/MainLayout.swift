@@ -168,6 +168,12 @@ class MainLayout: NSView {
             self?.toastView.showToast(message: message, severity: severity)
         }
 
+        // Daemon-originated notifications (W5 — current-pr-collision) → the
+        // same banner surface. No production trigger sends one yet.
+        AppStore.shared.onNotification = { [weak self] message, severity in
+            self?.toastView.showToast(message: message, severity: severity)
+        }
+
         // Publish the initial active focus so StatusBarView has a tag from the start.
         AppStore.shared.setActiveFocusAgentTag(activeFocus.agentTag)
         AppStore.shared.setActiveFocusSessionTag(activeFocus.sessionTag)

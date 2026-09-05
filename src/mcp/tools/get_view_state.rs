@@ -27,7 +27,7 @@ pub struct GetViewStateInput {
 /// have panes and a render report against it.
 pub async fn handle(state: &McpSharedState, input: &GetViewStateInput) -> Value {
     let mut result = match input.view_id.as_str() {
-        "perri" => perri::get_state(state),
+        "perri" => perri::get_state(state, Some(input.view_id.as_str())),
         "fred" => fred::get_state(state),
         "mother" => mother::get_status(state),
         "teri" => teri::list_todos(state),
