@@ -733,11 +733,24 @@ fn diff_url(owner: &str, repo: &str, number: u64) -> String {
     format!("{}/repos/{owner}/{repo}/pulls/{number}", api_base())
 }
 
+/// The URL prefix every read keyed on a PR's head SHA falls under.
+/// [`check_runs_url`] is built *from* this and [`live_url_prefixes`] returns
+/// it verbatim, so the pruning prefix cannot drift from the fetched URL.
+fn head_sha_prefix(owner: &str, repo: &str, head_sha: &str) -> String {
+    format!("{}/repos/{owner}/{repo}/commits/{head_sha}/", api_base())
+}
+
+/// The URL prefix a PR's issue-comment reads fall under. Shared with
+/// [`live_url_prefixes`], same reason as [`diff_url`].
+fn issue_comments_prefix(owner: &str, repo: &str, number: u64) -> String {
+    format!("{}/repos/{owner}/{repo}/issues/{number}/", api_base())
+}
+
 /// The URL a head SHA's check-runs are read from.
 fn check_runs_url(owner: &str, repo: &str, head_sha: &str) -> String {
     format!(
-        "{}/repos/{owner}/{repo}/commits/{head_sha}/check-runs?per_page=100",
-        api_base()
+        "{}check-runs?per_page=100",
+        head_sha_prefix(owner, repo, head_sha)
     )
 }
 
@@ -752,21 +765,27 @@ fn check_runs_url(owner: &str, repo: &str, head_sha: &str) -> String {
 /// The check-runs prefix needs the head SHA, which only a fetched snapshot
 /// knows — so it comes from `previous`. A pin whose PR has never been fetched
 /// simply contributes no check-runs prefix, which prunes nothing that exists.
+///
+/// Every prefix below is produced by the *same* function the corresponding
+/// fetch keys on ([`diff_url`], [`issue_comments_prefix`],
+/// [`head_sha_prefix`]) rather than re-spelled here. Those three doc comments
+/// have long claimed to be "shared with `live_url_prefixes`" while this
+/// function hand-rolled the identical strings beside them — a claim whose
+/// failure mode is silent: one edited format string prunes every entry, every
+/// request goes uncached, and nothing shows but the rate-limit bill.
 fn live_url_prefixes(repo: &str, number: u64, previous: &PrSnapshots) -> Vec<String> {
     let Ok((owner, name)) = split_repo(repo) else {
         return Vec::new();
     };
-    let base = api_base();
     let mut prefixes = vec![
-        format!("{base}/repos/{owner}/{name}/pulls/{number}"),
-        format!("{base}/repos/{owner}/{name}/issues/{number}/"),
+        // Covers the raw diff itself plus `/pulls/{n}/comments` (review
+        // comments) and `/pulls/{n}/reviews` — all three sit under it.
+        diff_url(&owner, &name, number),
+        issue_comments_prefix(&owner, &name, number),
     ];
     for snap in previous.values() {
         if snap.repo == repo && snap.pr_number == Some(number) && !snap.head_sha.is_empty() {
-            prefixes.push(format!(
-                "{base}/repos/{owner}/{name}/commits/{}/",
-                snap.head_sha
-            ));
+            prefixes.push(head_sha_prefix(&owner, &name, &snap.head_sha));
         }
     }
     prefixes
@@ -799,6 +818,18 @@ async fn fetch_ci_checks(
         Ok(fetched) => fetched,
         Err(e) => {
             warn!("check-runs fetch failed: {e}");
+            // `Fresh` here is a **sentinel for "add no degraded reason"**, not
+            // a claim that a 2xx happened — no response and no body exist on
+            // this path. It is deliberate: an outright CI-checks failure
+            // yields the empty list below, which already reads as "unknown",
+            // and a CI outage must not invalidate an otherwise-good diff by
+            // marking the whole snapshot stale. That is a different case from
+            // the `CachedAfterFailure` that `etag_get_as` propagates up, which
+            // *is* dishonest if unreported and *does* mark the snapshot stale.
+            // Abusing `Fresh` against its documented meaning ("A 2xx. This
+            // body is the endpoint's current answer.") is the cost; returning
+            // `Option<(Vec<CiCheck>, BodyFreshness)>` instead is filed as a
+            // follow-up rather than done here.
             return (vec![], BodyFreshness::Fresh);
         }
     };
@@ -808,6 +839,8 @@ async fn fetch_ci_checks(
         Ok(b) => b,
         Err(e) => {
             warn!("check-runs parse failed: {e:#}");
+            // Same sentinel, same reason as the fetch-error arm above: an
+            // unparseable body yields "unknown", not "the diff is stale".
             return (vec![], BodyFreshness::Fresh);
         }
     };
@@ -994,7 +1027,19 @@ async fn fetch_conversation_page<T: serde::de::DeserializeOwned>(
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<(Vec<T>, BodyFreshness)> {
     let url = format!("{}{path}", api_base());
-    let fetched = etag_get_as(client, &url, GITHUB_JSON_ACCEPT, etags, body_cache)
+    fetch_conversation_page_url(client, &url, etags, body_cache).await
+}
+
+/// [`fetch_conversation_page`] for a caller that already holds the absolute
+/// URL — used where the URL is built from a shared prefix helper rather than
+/// spelled as a path, so `live_url_prefixes` and the fetch cannot drift.
+async fn fetch_conversation_page_url<T: serde::de::DeserializeOwned>(
+    client: &GithubClient,
+    url: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<(Vec<T>, BodyFreshness)> {
+    let fetched = etag_get_as(client, url, GITHUB_JSON_ACCEPT, etags, body_cache)
         .await
         .map_err(|e| debug!("conversation fetch failed: {e}"))
         .ok()?;
@@ -1010,8 +1055,13 @@ async fn fetch_issue_comments(
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<(Vec<RawIssueComment>, BodyFreshness)> {
-    let path = format!("/repos/{owner}/{repo}/issues/{number}/comments?per_page=100");
-    fetch_conversation_page(client, &path, etags, body_cache).await
+    // Built from the same helper `live_url_prefixes` prunes on, so the two
+    // cannot drift.
+    let url = format!(
+        "{}comments?per_page=100",
+        issue_comments_prefix(owner, repo, number)
+    );
+    fetch_conversation_page_url(client, &url, etags, body_cache).await
 }
 
 async fn fetch_review_comments(
@@ -2109,6 +2159,30 @@ mod tests {
             "a 304 must serve the cached check-runs, not drop them"
         );
 
+        // A steady-state poll is *not* degraded. `NotModified` and
+        // `CachedAfterFailure` sit one match arm apart in `degraded_reason`,
+        // and folding the former in with the latter would make every
+        // unchanged poll — the overwhelmingly common case — publish
+        // `stale: true` with no `generated_at`, painting a permanent
+        // badly-stale badge over a review that is perfectly current. That is
+        // a worse lie than the one the degraded path exists to prevent, so it
+        // is pinned here rather than left implied by the assertions above.
+        assert!(
+            !second.stale,
+            "a 304 is the endpoint answering 'unchanged' — as current as a 200, and free. \
+             Treating it as degraded marks every steady-state poll stale"
+        );
+        assert!(
+            second.error.is_none(),
+            "nothing went wrong on this poll: both conditional GETs were answered. Got: {:?}",
+            second.error
+        );
+        assert!(
+            second.generated_at.is_some(),
+            "a poll whose reads were all answered was fetched successfully and must be able to \
+             say when — dropping `generated_at` here reads as 'never fetched successfully'"
+        );
+
         // Each `.expect(1)` is verified on teardown: if either conditional GET
         // had not fired — an uncached request going out instead — its mock
         // would be unmatched and the unconditional mock would have been hit
@@ -2721,6 +2795,259 @@ mod tests {
     ) {
         let snap = snapshot_after_the_diff_read_fails_with(401).await;
         assert_cached_diff_served_but_marked_stale(&snap, "an expired token on the diff read");
+    }
+
+    // ── the *other* two degraded inputs (W7 — D5.1) ─────────────────────────
+    //
+    // `fetch_pr` marks a snapshot degraded on two independent readings —
+    // `raw_diff.freshness` and `ci_freshness` — and `fetch_conversation`
+    // folds a third, one per conversation endpoint, into
+    // `conversation_error`. The pair of tests above only ever degrade the
+    // diff, so deleting either of the other two lines leaves the suite
+    // green: exactly the "cached body published as fresh" lie those lines
+    // exist to prevent, restored on a different endpoint.
+    //
+    // Which CI failure this is matters. `fetch_ci_checks` deliberately
+    // reports `BodyFreshness::Fresh` when the request errors outright or the
+    // body doesn't parse — an empty `ci_checks` already reads as "unknown",
+    // and a CI-checks outage must not invalidate a diff that came off the
+    // wire perfectly well. The dishonest case is the third one: a *cached*
+    // check-runs list, served after a non-2xx, presented as current. Hence
+    // two polls — the first fills the body cache, the second fails against
+    // it — and hence the assertion that `ci_checks` is still populated,
+    // which is what tells the cache-fallback path apart from the two
+    // return-empty-and-say-Fresh paths.
+
+    /// Warm both caches with one wholly successful poll, then re-poll with the
+    /// check-runs read answering 500 while the diff read still answers 200 —
+    /// so CI checks are unambiguously the only degraded input.
+    #[tokio::test]
+    async fn a_check_runs_read_served_from_cache_after_a_failure_reports_the_snapshot_stale_and_blames_ci_checks(
+    ) {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        // `mount_pr_metadata` reports this head SHA, which is what the
+        // check-runs URL is keyed on — and it must be the same on both polls
+        // or the second poll's cache lookup is a cold miss rather than the
+        // fallback under test.
+        const HEAD: &str = "abc123";
+        let check_runs = format!("/repos/{SHARED_REPO}/commits/{HEAD}/check-runs");
+
+        // First poll: a real check-runs list, which fills the body cache.
+        Mock::given(method("GET"))
+            .and(path(check_runs.clone()))
+            .and(query_param("per_page", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"checks-etag-1\"")
+                    .set_body_json(serde_json::json!({
+                        "total_count": 1,
+                        "check_runs": [
+                            { "id": 7, "name": "build", "status": "completed",
+                              "conclusion": "success", "app": { "slug": "circleci" } }
+                        ]
+                    })),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Second poll: GitHub is unwell. `etag_get_as` serves the cached list
+        // rather than blanking CI mid-review — right for the content, and the
+        // whole reason the snapshot has to say so.
+        Mock::given(method("GET"))
+            .and(path(check_runs))
+            .and(query_param("per_page", "100"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        // The diff and the metadata succeed on both polls.
+        mount_fetchable_pr(&server, SHARED_REPO, SHARED_PR, FRESH_TITLE).await;
+
+        // One source across both polls: the body cache it carries between
+        // them is what makes the second poll a cache fallback.
+        let source = test_source();
+        let client = client_pointed_at(&server.uri());
+
+        let first = source
+            .fetch_pr(&client, SHARED_REPO, SHARED_PR)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.ci_checks.len(),
+            1,
+            "the warm-up poll must really have read a check-runs list, or the fallback below \
+             proves nothing"
+        );
+        assert!(
+            !first.stale && first.error.is_none() && first.generated_at.is_some(),
+            "a poll where every read succeeded publishes a fresh, error-free snapshot"
+        );
+
+        let second = source
+            .fetch_pr(&client, SHARED_REPO, SHARED_PR)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            second.ci_checks.len(),
+            1,
+            "this must be the cache-fallback path: an outright check-runs error or a body that \
+             failed to parse both return an empty list and report themselves `Fresh` by design, \
+             so a test that saw no checks would be asserting on the wrong failure entirely"
+        );
+        assert!(
+            second.stale,
+            "the check-runs list in this snapshot was not read from GitHub on this pass; \
+             publishing it as fresh is how a review silently drifts onto stale CI with nothing \
+             on screen to say so"
+        );
+        let error = second
+            .error
+            .as_deref()
+            .expect("a degraded check-runs read must be surfaced as an error on the snapshot");
+        assert!(
+            error.contains("CI checks"),
+            "the error must name the endpoint that went stale — 'something is stale' sends an \
+             operator looking at the diff, which was fine. Got: {error}"
+        );
+        assert!(
+            !error.contains("the diff"),
+            "the diff read answered 200 on this pass and must not be blamed for the CI \
+             failure. Got: {error}"
+        );
+        assert!(
+            second.generated_at.is_none(),
+            "`generated_at` means 'when this snapshot was last fetched successfully'; a pass \
+             that served CI checks out of the cache cannot say when they were current, and a \
+             timestamp of now alongside `stale: true` reads as merely-a-missed-cycle rather \
+             than badly stale"
+        );
+    }
+
+    /// The same two-poll shape one level down: exactly one conversation
+    /// endpoint degrades, and `conversation_error` has to say so *as a stale
+    /// read* — not as the outright failure it is one match arm away from.
+    #[tokio::test]
+    async fn a_conversation_endpoint_served_from_cache_after_a_failure_is_reported_as_stale_not_as_failed(
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let issue_body = serde_json::json!([
+            {
+                "id": 1,
+                "user": { "login": "alice" },
+                "created_at": "2024-01-01T10:00:00Z",
+                "body": "an issue comment"
+            }
+        ]);
+
+        // Issue comments: 200 on the first poll (filling the body cache),
+        // 500 on the second — served from that cache, so the slot is `Some`
+        // and the wording must come from `degraded_reason`, not from the
+        // "partially failed" branch.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/issues/42/comments"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"issue-etag-1\"")
+                    .set_body_json(issue_body),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/issues/42/comments"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        // The other two endpoints stay healthy across both polls, so the one
+        // reason in `conversation_error` can only have come from the one that
+        // degraded.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 2,
+                    "in_reply_to_id": null,
+                    "path": "src/main.rs",
+                    "line": 10,
+                    "original_line": 10,
+                    "diff_hunk": "@@ -1,3 +1,3 @@",
+                    "user": { "login": "bob" },
+                    "created_at": "2024-01-01T11:00:00Z",
+                    "body": "an inline comment"
+                }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 3,
+                    "user": { "login": "carol" },
+                    "submitted_at": "2024-01-01T12:00:00Z",
+                    "body": "a review body"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client();
+        // The *same* source across both polls — its body cache is what the
+        // second poll's 500 falls back to.
+        let source = test_source();
+
+        let first = source.fetch_conversation(&client, "acme", "web", 42).await;
+        assert!(
+            first.error.is_none() && first.threads.len() == 3,
+            "the warm-up poll must really have read all three endpoints, or the fallback below \
+             proves nothing; got error {:?} and {} threads",
+            first.error,
+            first.threads.len()
+        );
+
+        let second = source.fetch_conversation(&client, "acme", "web", 42).await;
+
+        assert_eq!(
+            second.threads.len(),
+            3,
+            "the cached issue comment is still the best answer available and must still be \
+             served — this is the cache-fallback path, not the endpoint-failed path"
+        );
+        let error = second.error.as_deref().expect(
+            "threads served out of the cache after a non-2xx are not the current conversation; \
+             `conversation_error` is where this snapshot says its threads are not to be trusted \
+             as complete, and a stale set belongs there too",
+        );
+        assert!(
+            error.contains("issue comments"),
+            "the error must name which endpoint went stale, got: {error}"
+        );
+        assert!(
+            error.contains("could not be refreshed") && error.contains("500"),
+            "a stale read must be described as one — with the status, which is the only thing \
+             separating a 500 that clears itself next poll from a 401 that never will. Got: \
+             {error}"
+        );
+        assert!(
+            !error.contains("partially failed"),
+            "'conversation fetch partially failed' is the *other* outcome — nothing came back \
+             at all. Reporting a cached-after-failure read with that wording tells an operator \
+             their comments are missing when they are merely old. Got: {error}"
+        );
     }
 
     // ── a removed focus's pin stops being served (W7 — D8) ──────────────────
