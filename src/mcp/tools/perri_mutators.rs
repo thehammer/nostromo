@@ -31,8 +31,9 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, watch};
+use tracing::warn;
 
-use crate::data::{perri_current_pr, perri_pr::PrSnapshot};
+use crate::data::{perri_current_pr, perri_pr::PrSnapshots};
 use crate::event::AppEvent;
 use crate::ipc::pane_registry::PaneRegistry;
 use crate::ipc::protocol::{PaneContentWire, PaneFreshness};
@@ -57,7 +58,7 @@ pub async fn load_pr(state: &McpSharedState, args: &Value, pty_id: Option<&str>)
         _ => return json!({ "error": "invalid_args", "detail": "missing repo" }),
     };
     if let Err(e) = perri_current_pr::validate_repo_slug(&repo) {
-        return json!({ "error": "invalid_args", "detail": e });
+        return json!({ "error": e.code(), "detail": e.to_string() });
     }
     let highlights = args
         .get("highlights")
@@ -216,15 +217,46 @@ async fn load_pr_daemon(
         });
     };
 
-    if let Err(e) = perri_current_pr::write_pointer(&state_dir, number, repo, highlights) {
-        return json!({ "error": "io_error", "detail": e });
+    // W7 — D4. The tag is resolved *before* anything is written, and a caller
+    // that names no focus and can't be placed in one is refused outright.
+    //
+    // Pre-W7 this write came first and the tag was resolved afterwards, which
+    // was survivable only because the pin was machine-wide: an unattributable
+    // caller still moved the one slot everybody read. Now the pin *is* the
+    // focus's, so a pickup with no focus would pin nothing any surface will
+    // ever show while returning a plain `ok: true` — the "reports success,
+    // paints nothing" failure this project keeps rediscovering. The PRD makes
+    // the honest refusal a hard criterion.
+    //
+    // `unidentified_caller` is the established code at every other
+    // `target_tag` site; this is not a new one.
+    let Some(tag) = apply_layout::target_tag(args, pty_id).map(|s| s.to_string()) else {
+        return json!({
+            "error": "unidentified_caller",
+            "detail": "perri.load_pr pins the PR under review to a focus; pass `view_id` or connect with a pty_id",
+        });
+    };
+
+    if let Err(e) = perri_current_pr::write_pointer(&state_dir, &tag, number, repo, highlights) {
+        // A tag that isn't a safe filename is the caller's error, not an I/O
+        // one — say which. `PinError::code` is the one place that mapping
+        // lives; this used to be `e.starts_with("invalid_tag")` here and
+        // again in `clear_current_pr`, which made the prefix inside a prose
+        // message into API.
+        return json!({ "error": e.code(), "detail": e.to_string() });
     }
 
+    // Refetch exactly this focus's pin (D2) — no other focus's PR changed.
     if let Some(tx) = &daemon.perri.pr_refresh_tx {
-        let _ = tx.send(());
+        // A closed channel is not a nicety to ignore: it means the
+        // `PerriPrNativeSource` task has exited, which `run()` does outright
+        // when `build_client()` fails (no gh token, unreadable hosts.yml). No
+        // refetch will happen, now or ever, and the settle wait below is
+        // about to spend `settle_timeout` discovering that.
+        if let Err(e) = tx.send(Some(tag.clone())) {
+            warn!("perri.load_pr could not request a refetch for `{tag}`: the PR source task is gone ({e})");
+        }
     }
-
-    let tag = apply_layout::target_tag(args, pty_id).map(|s| s.to_string());
 
     // R8 (W5 — curated-agent-views): the PR under review just moved, so the
     // previous review's `file`/`ticket` tabs and any other PR's
@@ -232,43 +264,39 @@ async fn load_pr_daemon(
     // operator never sees the new PR's content sitting beside the old PR's
     // evidence. A no-op for a focus with no curated regions, which is every
     // focus still driving `perri-standard` through the raw tools.
-    if let Some(t) = tag.as_deref() {
-        show::reset_for_pr_change(daemon, t, Some((repo, number)));
-    }
+    show::reset_for_pr_change(daemon, &tag, Some((repo, number)));
 
     // D1/D2: resolve which of the focus's *live* panes load_pr may push its
     // plain-text summary/highlights to, from the freshly pruned tree/bindings
     // — never a fixed template vocabulary. Must run after the reset above, so
-    // resolution sees the pruned tree, not one about to be torn down. A tag
-    // with no resolvable focus falls back to a single inert placeholder id:
-    // with no tag, `push_pane_content` degrades straight to the
-    // "unidentified_caller" warning before ever consulting the pane id.
-    let targets: Vec<String> = match tag.as_deref() {
-        Some(t) => {
-            let reg = daemon.pane_registry.lock().unwrap();
-            load_pr_targets(&reg, t)
-        }
-        None => vec![String::new()],
+    // resolution sees the pruned tree, not one about to be torn down. W7 — D4
+    // removed the old "no resolvable tag" degrade path: an unattributable
+    // caller is refused above, before anything is written, so by here the tag
+    // always names a focus and `targets` is that focus's real panes (possibly
+    // none, which is D2's curated-focus case and not an error).
+    let targets: Vec<String> = {
+        let reg = daemon.pane_registry.lock().unwrap();
+        load_pr_targets(&reg, &tag)
     };
 
     let mut warnings = Vec::new();
-    let mut pending = false;
+    let mut pending: Option<SnapshotWait> = None;
 
     match highlights {
         Some(text) => {
             // D4: highlights are agent-authored final content — sever each
             // target pane's live binding, or the broadcaster would clobber
             // them with the plain rendered summary within seconds.
-            if let Some(t) = tag.as_deref() {
+            {
                 let mut reg = daemon.pane_registry.lock().unwrap();
                 for pane in &targets {
-                    reg.unbind_source(t, pane);
+                    reg.unbind_source(&tag, pane);
                 }
             }
             // D3: highlights are the pane's final content — no fetch, no wait.
             push_content_to_all(
                 daemon,
-                tag.as_deref(),
+                &tag,
                 &targets,
                 PaneContentWire::Text {
                     text: text.to_string(),
@@ -280,15 +308,15 @@ async fn load_pr_daemon(
         None => {
             // D4: no highlights — each target renders straight from
             // perri.get_current_pr, so keep (or re-establish) that binding.
-            if let Some(t) = tag.as_deref() {
+            {
                 let mut reg = daemon.pane_registry.lock().unwrap();
                 for pane in &targets {
-                    reg.bind_source(t, pane, SOURCE_CURRENT_PR);
+                    reg.bind_source(&tag, pane, SOURCE_CURRENT_PR);
                 }
             }
             push_content_to_all(
                 daemon,
-                tag.as_deref(),
+                &tag,
                 &targets,
                 PaneContentWire::Loading,
                 None,
@@ -296,17 +324,29 @@ async fn load_pr_daemon(
             );
 
             let mut pr_rx = state.perri_pr_rx.clone();
-            let matched =
-                wait_for_matching_snapshot(&mut pr_rx, repo, number, daemon.perri.settle_timeout)
-                    .await;
+            let matched = wait_for_matching_snapshot(
+                &mut pr_rx,
+                &tag,
+                repo,
+                number,
+                daemon.perri.settle_timeout,
+            )
+            .await;
 
-            if matched {
-                match apply_layout::fetch(SOURCE_CURRENT_PR, state, apply_layout::FetchArgs::default()) {
+            if matched == SnapshotWait::Matched {
+                match apply_layout::fetch(
+                    SOURCE_CURRENT_PR,
+                    state,
+                    apply_layout::FetchArgs {
+                        tag: Some(&tag),
+                        ..Default::default()
+                    },
+                ) {
                     Ok(content) => {
-                        let fr = apply_layout::freshness(SOURCE_CURRENT_PR, state);
+                        let fr = apply_layout::freshness(SOURCE_CURRENT_PR, state, Some(&tag));
                         push_content_to_all(
                             daemon,
-                            tag.as_deref(),
+                            &tag,
                             &targets,
                             content,
                             Some(fr),
@@ -319,7 +359,7 @@ async fn load_pr_daemon(
                         }
                         push_content_to_all(
                             daemon,
-                            tag.as_deref(),
+                            &tag,
                             &targets,
                             PaneContentWire::Error {
                                 message: format!(
@@ -333,10 +373,10 @@ async fn load_pr_daemon(
                     }
                 }
             } else {
-                pending = true;
+                pending = Some(matched);
                 push_content_to_all(
                     daemon,
-                    tag.as_deref(),
+                    &tag,
                     &targets,
                     PaneContentWire::Text {
                         text: format!("Fetching {repo}#{number}\u{2026} (still loading)"),
@@ -362,17 +402,54 @@ async fn load_pr_daemon(
 
     // D3: report which panes were actually targeted — empty when this focus
     // has real PR-content panes but none of them a valid load_pr destination
-    // (D2's curated-focus consequence, not an error), and also empty when
-    // there was no resolvable tag at all (the `targets` placeholder used
-    // above to drive that degrade path isn't a real pane id).
-    let reported_pane_ids: &[String] = if tag.is_some() { &targets } else { &[] };
-    let mut result = json!({ "ok": true, "pane_ids": reported_pane_ids });
-    if pending {
-        result["pending"] = json!(true);
-        result["detail"] = json!(format!(
-            "refetch for {repo}#{number} still in flight after {:?}",
-            daemon.perri.settle_timeout
-        ));
+    // (D2's curated-focus consequence, not an error). Since W7 — D4 there is
+    // no unresolvable-tag case left to report emptily for; that caller was
+    // already refused.
+    let mut result = json!({ "ok": true, "pane_ids": &targets });
+    if let Some(wait) = pending {
+        // The machine-readable field has to carry the distinction, not just
+        // the prose. `pending: true` for a `SourceGone` said "in flight,
+        // retry" while the detail beside it said "nothing is in flight and
+        // retrying will not help" — and an agent branching on the field
+        // (which is exactly what this tool's descriptor and
+        // `docs/mcp/tools.md` tell it to do) retried forever against a source
+        // that would never answer.
+        //
+        // So `pending` keeps its documented meaning — "a fetch is in flight"
+        // — and `retryable` carries the rest. The two appear together and
+        // only when the refetch did *not* settle, which makes the presence of
+        // `retryable` mean "this did not settle" and its value mean "could it
+        // ever". A settled refetch (the normal case) has neither.
+        let (in_flight, retryable, detail) = match wait {
+            // Unreachable — `Matched` doesn't set `pending` — but spelled out
+            // rather than `unreachable!()`, since a panic in a tool handler is
+            // a worse outcome than a slightly odd string.
+            SnapshotWait::Matched => (false, false, format!("refetch for {repo}#{number} settled")),
+            // Nothing is in flight and nothing ever will be: the
+            // `PerriPrNativeSource` task has exited. Both flags false is the
+            // only honest answer, and `retryable: false` is what stops the
+            // retry loop.
+            SnapshotWait::SourceGone => (
+                false,
+                false,
+                format!(
+                    "refetch for {repo}#{number} was never started: the Perri PR source is not \
+                     running, so nothing is in flight and retrying will not help"
+                ),
+            ),
+            // The fetch may yet land — asking again later is reasonable.
+            SnapshotWait::TimedOut => (
+                true,
+                true,
+                format!(
+                    "refetch for {repo}#{number} still in flight after {:?}",
+                    daemon.perri.settle_timeout
+                ),
+            ),
+        };
+        result["pending"] = json!(in_flight);
+        result["retryable"] = json!(retryable);
+        result["detail"] = json!(detail);
     }
     if !warnings.is_empty() {
         result["warnings"] = json!(warnings);
@@ -394,21 +471,38 @@ async fn clear_current_pr_daemon(
         });
     };
 
-    if let Err(e) = perri_current_pr::clear_pointer(&state_dir) {
-        return json!({ "error": "io_error", "detail": e });
+    // W7 — D4, same as `load_pr`: resolve the focus before touching anything.
+    // Clearing "the PR under review" with no focus to clear it *for* would,
+    // pre-W7, have wiped whichever focus happened to hold the global slot.
+    let Some(tag) = apply_layout::target_tag(args, pty_id).map(|s| s.to_string()) else {
+        return json!({
+            "error": "unidentified_caller",
+            "detail": "perri.clear_current_pr clears one focus's PR under review; pass `view_id` or connect with a pty_id",
+        });
+    };
+
+    if let Err(e) = perri_current_pr::clear_pointer(&state_dir, &tag) {
+        return json!({ "error": e.code(), "detail": e.to_string() });
     }
     if let Err(e) = perri_current_pr::touch_queue_dirty(&state_dir) {
-        return json!({ "error": "io_error", "detail": e });
+        return json!({ "error": e.code(), "detail": e.to_string() });
     }
 
+    // Same channels, same failure, same reporting standard as `load_pr` above:
+    // a closed channel means the source task has exited, so the refresh will
+    // never happen. `load_pr` has a six-line comment explaining why that must
+    // not be swallowed; discarding it nineteen lines away here was the only
+    // thing that made these two look different.
     if let Some(tx) = &daemon.perri.pr_refresh_tx {
-        let _ = tx.send(());
+        if let Err(e) = tx.send(Some(tag.clone())) {
+            warn!("perri.clear_current_pr could not request a refetch for `{tag}`: the PR source task is gone ({e})");
+        }
     }
     if let Some(tx) = &daemon.perri.queue_refresh_tx {
-        let _ = tx.send(());
+        if let Err(e) = tx.send(()) {
+            warn!("perri.clear_current_pr could not request a queue refresh: the PR queue source task is gone ({e})");
+        }
     }
-
-    let tag = apply_layout::target_tag(args, pty_id).map(|s| s.to_string());
 
     // R8 (W5 — curated-agent-views): nothing is under review any more, so
     // every curated review tab closes and the detail region goes with its last
@@ -416,10 +510,7 @@ async fn clear_current_pr_daemon(
     // Must run *before* resolving targets below: this is what prunes closed
     // panes (and their bindings) out of the tree, so the resolver never
     // targets a pane that's about to disappear.
-    let closed: Vec<String> = tag
-        .as_deref()
-        .map(|t| show::reset_for_pr_change(daemon, t, None))
-        .unwrap_or_default();
+    let closed: Vec<String> = show::reset_for_pr_change(daemon, &tag, None);
 
     let mut warnings = Vec::new();
 
@@ -428,13 +519,10 @@ async fn clear_current_pr_daemon(
     // from a fixed template vocabulary. A curated focus's surviving paramless
     // PR pane (Context 2) and `perri-standard`'s fixed `diff`/`queue` panes
     // both fall out of this for free.
-    let (pr_panes, queue_panes) = match tag.as_deref() {
-        Some(t) => {
-            let reg = daemon.pane_registry.lock().unwrap();
-            let targets = resolve_perri_targets(&reg, t);
-            (targets.pr, targets.queue)
-        }
-        None => (Vec::new(), Vec::new()),
+    let (pr_panes, queue_panes) = {
+        let reg = daemon.pane_registry.lock().unwrap();
+        let targets = resolve_perri_targets(&reg, &tag);
+        (targets.pr, targets.queue)
     };
 
     // D4: a pane already bound to a PR-backed source stays bound to it — the
@@ -445,21 +533,21 @@ async fn clear_current_pr_daemon(
     // `perri.load_pr({highlights})`'s `unbind_source`) gets (re)bound here —
     // never repurpose a pane already bound to `perri.get_pr_diff` /
     // `perri.get_pr_conversation` onto a different source.
-    if let Some(t) = tag.as_deref() {
+    {
         let mut reg = daemon.pane_registry.lock().unwrap();
         for pane in &pr_panes {
-            if reg.source_for(t, pane).is_none() {
-                reg.bind_source(t, pane, SOURCE_CURRENT_PR);
+            if reg.source_for(&tag, pane).is_none() {
+                reg.bind_source(&tag, pane, SOURCE_CURRENT_PR);
             }
         }
         for pane in &queue_panes {
-            reg.bind_source(t, pane, SOURCE_PR_QUEUE);
+            reg.bind_source(&tag, pane, SOURCE_PR_QUEUE);
         }
     }
 
     push_content_to_all(
         daemon,
-        tag.as_deref(),
+        &tag,
         &pr_panes,
         PaneContentWire::Text {
             text: apply_layout::NO_PR_LOADED_PLACEHOLDER.to_string(),
@@ -471,7 +559,7 @@ async fn clear_current_pr_daemon(
     if !queue_panes.is_empty() {
         push_content_to_all(
             daemon,
-            tag.as_deref(),
+            &tag,
             &queue_panes,
             PaneContentWire::Loading,
             None,
@@ -482,10 +570,10 @@ async fn clear_current_pr_daemon(
         // that.
         match apply_layout::fetch(SOURCE_PR_QUEUE, state, apply_layout::FetchArgs::default()) {
             Ok(content) => {
-                let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state);
+                let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state, Some(&tag));
                 push_content_to_all(
                     daemon,
-                    tag.as_deref(),
+                    &tag,
                     &queue_panes,
                     content,
                     Some(fr),
@@ -497,7 +585,7 @@ async fn clear_current_pr_daemon(
                     warnings.push(json!({ "pane_id": pane, "error": e.code() }));
                     push_pane_content(
                         daemon,
-                        tag.as_deref(),
+                        &tag,
                         pane,
                         PaneContentWire::Error {
                             message: format!(
@@ -610,8 +698,14 @@ fn load_pr_targets(reg: &PaneRegistry, tag: &str) -> Vec<String> {
 
 /// Push `content` to `pane_id` within `tag`'s pane tree — but only when the
 /// registry actually has that pane registered for `tag` (D7). A resolved tag
-/// with no such pane, or no tag at all, degrades to a `warnings` entry
-/// instead of failing the call or broadcasting to a pane that doesn't exist.
+/// with no such pane degrades to a `warnings` entry instead of failing the
+/// call or broadcasting to a pane that doesn't exist.
+///
+/// `tag` is a plain `&str`, not an `Option`: since W7 — D4 both entry points
+/// refuse an unattributable caller before anything is written, so "no tag at
+/// all" cannot reach here. This used to take an `Option` and degrade to a
+/// `pane_push: unidentified_caller` warning, a branch no caller could reach —
+/// the type now says so, and the compiler keeps it true.
 ///
 /// Delegates the actual send to the D5 choke point: a `Loading` push goes
 /// through [`broadcast_loading_if_first_paint`] (so a pane that's already
@@ -619,19 +713,12 @@ fn load_pr_targets(reg: &PaneRegistry, tag: &str) -> Vec<String> {
 /// [`broadcast_pane_content`] with the given `freshness`.
 fn push_pane_content(
     daemon: &DaemonMcpBackend,
-    tag: Option<&str>,
+    tag: &str,
     pane_id: &str,
     content: PaneContentWire,
     freshness: Option<PaneFreshness>,
     warnings: &mut Vec<Value>,
 ) {
-    let Some(tag) = tag else {
-        if !warnings.iter().any(|w| w.get("pane_push").is_some()) {
-            warnings.push(json!({ "pane_push": "unidentified_caller" }));
-        }
-        return;
-    };
-
     let known = daemon
         .pane_registry
         .lock()
@@ -660,7 +747,7 @@ fn push_pane_content(
 /// `clear_current_pr_daemon`'s placeholder/queue pushes.
 fn push_content_to_all(
     daemon: &DaemonMcpBackend,
-    tag: Option<&str>,
+    tag: &str,
     targets: &[String],
     content: PaneContentWire,
     freshness: Option<PaneFreshness>,
@@ -685,36 +772,74 @@ fn push_content_to_all(
 /// without waiting for a change. A snapshot for the right PR that carries an
 /// `error` still counts as a match — that's a real (if unhappy) answer, not
 /// something to keep waiting past.
+///
+/// Keyed on `tag` (W7 — D3): the channel now carries every focus's PR, so
+/// "some snapshot in there matches" would let focus A's `load_pr` settle the
+/// instant focus B happened to be reviewing the same PR — reporting a fetch
+/// complete that hadn't started.
 async fn wait_for_matching_snapshot(
-    rx: &mut watch::Receiver<Option<PrSnapshot>>,
+    rx: &mut watch::Receiver<PrSnapshots>,
+    tag: &str,
     repo: &str,
     number: u64,
     timeout: Duration,
-) -> bool {
-    fn matches(snap: &Option<PrSnapshot>, repo: &str, number: u64) -> bool {
-        matches!(snap, Some(s) if s.repo == repo && s.pr_number == Some(number))
+) -> SnapshotWait {
+    fn matches(snaps: &PrSnapshots, tag: &str, repo: &str, number: u64) -> bool {
+        matches!(snaps.get(tag), Some(s) if s.repo == repo && s.pr_number == Some(number))
     }
 
-    if matches(&rx.borrow(), repo, number) {
-        return true;
+    if matches(&rx.borrow(), tag, repo, number) {
+        return SnapshotWait::Matched;
     }
 
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return false;
+            return SnapshotWait::TimedOut;
         }
         match tokio::time::timeout(remaining, rx.changed()).await {
             Ok(Ok(())) => {
-                if matches(&rx.borrow(), repo, number) {
-                    return true;
+                if matches(&rx.borrow(), tag, repo, number) {
+                    return SnapshotWait::Matched;
                 }
             }
-            Ok(Err(_)) => return false, // sender dropped
-            Err(_) => return false,     // overall timeout elapsed
+            Ok(Err(_)) => return SnapshotWait::SourceGone,
+            Err(_) => return SnapshotWait::TimedOut,
         }
     }
+}
+
+/// Why [`wait_for_matching_snapshot`] stopped waiting.
+///
+/// `SourceGone` and `TimedOut` used to collapse into one `false`, and the
+/// caller reported both as "still in flight". They are opposites: a timeout
+/// means the fetch may yet land and asking again is reasonable, while a
+/// dropped sender means the `PerriPrNativeSource` task has exited — `run()`
+/// returns outright when `build_client()` fails — so nothing is in flight and
+/// nothing ever will be. Telling an agent to wait for that is telling it to
+/// wait forever.
+///
+/// `load_pr_daemon` reports the distinction on the wire as two fields, which
+/// are the machine-readable half of the same statement made in
+/// `perri.load_pr`'s descriptor and in `docs/mcp/tools.md` — all three must
+/// say the same thing:
+///
+/// | variant       | `pending` | `retryable` |
+/// |---------------|-----------|-------------|
+/// | `Matched`     | *absent*  | *absent*    |
+/// | `TimedOut`    | `true`    | `true`      |
+/// | `SourceGone`  | `false`   | `false`     |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotWait {
+    /// A snapshot for this focus and this PR was published.
+    Matched,
+    /// The PR source's `watch::Sender` was dropped: the task is gone.
+    /// Reported as `pending: false, retryable: false` — retrying can never help.
+    SourceGone,
+    /// `settle_timeout` elapsed with the snapshot still unpublished.
+    /// Reported as `pending: true, retryable: true` — it may yet land.
+    TimedOut,
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -722,7 +847,7 @@ async fn wait_for_matching_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::perri_pr::PrSnapshot;
+    use crate::data::perri_pr::{no_prs, one_pr, PrSnapshot};
     use crate::data::perri_queue::PrQueueSnapshot;
     use crate::ipc::pane_registry::PaneRegistry;
     use crate::ipc::protocol::{PaneTree, ServerMsg, SplitDirection};
@@ -760,7 +885,9 @@ mod tests {
                 selected_index: Arc::new(AtomicUsize::new(0)),
                 settle_timeout: Duration::from_millis(50),
             },
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         (McpSharedState::for_daemon(backend), broadcast_tx)
@@ -902,9 +1029,10 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
 
-        let content =
-            std::fs::read_to_string(tmp.path().join("perri-state").join("current-pr.json"))
-                .unwrap();
+        let content = std::fs::read_to_string(
+            perri_current_pr::pin_path(&tmp.path().join("perri-state"), "perri").unwrap(),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["number"], 42);
         assert_eq!(parsed["repo"], "acme/web");
@@ -928,7 +1056,7 @@ mod tests {
     #[tokio::test]
     async fn load_pr_signals_pr_refresh_exactly_once() {
         let (mut state, _tmp, _bcast) = make_daemon_state().await;
-        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
         if let Some(daemon) = &mut state.daemon {
             daemon.perri.pr_refresh_tx = Some(refresh_tx);
         }
@@ -948,7 +1076,8 @@ mod tests {
     async fn load_pr_no_highlights_with_snapshot_already_published() {
         let (mut state, _tmp, mut bcast) = make_daemon_state().await;
 
-        let (_tx, pr_rx) = watch::channel(Some(pr_snapshot("acme/web", 42, "Add widget")));
+        let (_tx, pr_rx) =
+            watch::channel(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")));
         state.perri_pr_rx = pr_rx;
 
         let args = json!({ "number": 42, "repo": "acme/web" });
@@ -974,7 +1103,7 @@ mod tests {
     async fn load_pr_no_highlights_snapshot_arrives_during_wait() {
         let (mut state, _tmp, mut bcast) = make_daemon_state().await;
 
-        let (tx, pr_rx) = watch::channel(None);
+        let (tx, pr_rx) = watch::channel(no_prs());
         state.perri_pr_rx = pr_rx;
         // Increase settle_timeout for this test so the delayed send lands
         // well inside the window.
@@ -984,7 +1113,7 @@ mod tests {
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = tx.send(Some(pr_snapshot("acme/web", 42, "Add widget")));
+            let _ = tx.send(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")));
         });
 
         let args = json!({ "number": 42, "repo": "acme/web" });
@@ -1038,6 +1167,65 @@ mod tests {
         assert!(!tmp.path().join("perri-state/current-pr.json").exists());
     }
 
+    /// A `view_id` that isn't a safe filename is the *caller's* error, and the
+    /// answer has to say so. This classification used to be
+    /// `e.starts_with("invalid_tag")` on a human-readable message, duplicated
+    /// here and in `clear_current_pr` — so rewording the prose in
+    /// `validate_tag` would have silently turned every rejected tag into
+    /// `io_error`, telling an agent to retry a request that can never succeed
+    /// and telling an operator the disk is broken when it isn't. The code is
+    /// what a caller branches on; the `detail` still has to read the same as
+    /// it always did, because that is what a human reads.
+    #[tokio::test]
+    async fn load_pr_blames_a_path_bearing_view_id_on_the_caller_and_not_on_the_disk() {
+        let (state, tmp, _bcast) = make_daemon_state().await;
+
+        for view_id in ["../escape", "a/b", "..", ".", "nested/../../escape"] {
+            let args = json!({ "number": 42, "repo": "acme/web", "view_id": view_id });
+            let result = load_pr(&state, &args, Some("perri")).await;
+
+            assert_eq!(
+                result["error"], "invalid_args",
+                "a `view_id` of {view_id:?} is a malformed request, not an I/O failure: {result}"
+            );
+            let detail = result["detail"].as_str().unwrap_or_default();
+            assert!(
+                detail.starts_with("invalid_tag: "),
+                "the operator-facing detail for a `view_id` of {view_id:?} must still name the \
+                 tag as the problem, got {detail:?}"
+            );
+        }
+
+        assert!(
+            !perri_current_pr::pins_dir(&tmp.path().join("perri-state")).exists(),
+            "a refused tag must be refused before anything is created on disk"
+        );
+    }
+
+    /// The other direction, so the classification above cannot be satisfied by
+    /// hard-coding `invalid_args`: when the tag is fine and the *disk* is what
+    /// refuses, the caller must be told `io_error` — the only one of these
+    /// failures that is worth retrying, and the only one that means the
+    /// machine rather than the request is at fault. Induced by planting a
+    /// regular file where the pins directory has to go, so the pin store fails
+    /// for a reason that has nothing to do with what was asked for.
+    #[tokio::test]
+    async fn load_pr_blames_a_disk_that_refuses_the_pin_on_the_machine_and_not_on_the_caller() {
+        let (state, tmp, _bcast) = make_daemon_state().await;
+        let state_dir = tmp.path().join("perri-state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(perri_current_pr::pins_dir(&state_dir), b"not a directory").unwrap();
+
+        let args = json!({ "number": 42, "repo": "acme/web" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+
+        assert_eq!(
+            result["error"], "io_error",
+            "a well-formed request the machine could not carry out is the machine's failure, \
+             not the caller's: {result}"
+        );
+    }
+
     #[tokio::test]
     async fn load_pr_no_state_dir_returns_not_supported() {
         let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1054,7 +1242,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         let mut state = McpSharedState::for_daemon(backend);
@@ -1107,10 +1297,20 @@ mod tests {
     #[tokio::test]
     async fn load_pr_diff_text_matches_apply_layout_fetch_output() {
         let (mut state, _tmp, mut bcast) = make_daemon_state().await;
-        let (_tx, pr_rx) = watch::channel(Some(pr_snapshot("acme/web", 42, "Add widget")));
+        let (_tx, pr_rx) =
+            watch::channel(one_pr("perri", pr_snapshot("acme/web", 42, "Add widget")));
         state.perri_pr_rx = pr_rx;
 
-        let expected = match apply_layout::fetch("perri.get_current_pr", &state, apply_layout::FetchArgs::default()).unwrap() {
+        let expected = match apply_layout::fetch(
+            "perri.get_current_pr",
+            &state,
+            apply_layout::FetchArgs {
+                tag: Some("perri"),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        {
             PaneContentWire::Text { text } => text,
             other => panic!("expected Text, got {other:?}"),
         };
@@ -1176,9 +1376,14 @@ mod tests {
             }
         }
 
-        let content =
-            std::fs::read_to_string(tmp.path().join("perri-state").join("current-pr.json"))
-                .unwrap();
+        // The pin still lands — under **this focus's** tag (W7), not the old
+        // machine-wide `current-pr.json`.
+        let pin = crate::data::perri_current_pr::pin_path(
+            &tmp.path().join("perri-state"),
+            "perri",
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(pin).unwrap();
         let parsed: Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["number"], 42);
         assert_eq!(parsed["repo"], "acme/web");
@@ -1188,7 +1393,7 @@ mod tests {
     async fn load_pr_on_curated_focus_signals_pr_refresh_even_when_no_pane_is_targeted() {
         let (mut state, _tmp, _bcast) = make_curated_daemon_state().await;
         seed_curated_detail_tabs(&state, "perri");
-        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
         if let Some(daemon) = &mut state.daemon {
             daemon.perri.pr_refresh_tx = Some(refresh_tx);
         }
@@ -1197,9 +1402,12 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        assert!(
-            refresh_rx.try_recv().is_ok(),
-            "the PR-refresh signal must still fire even when no pane can be targeted"
+        // W7 — D2: the signal names the focus whose pin moved, so no other
+        // focus's PR is refetched for a pickup that wasn't theirs.
+        assert_eq!(
+            refresh_rx.try_recv().ok(),
+            Some(Some("perri".to_string())),
+            "the PR-refresh signal must still fire for this focus even when no pane can be targeted"
         );
     }
 
@@ -1336,39 +1544,56 @@ mod tests {
             .iter()
             .any(|w| w["pane_id"] == "diff" && w["skipped"] == "unknown_pane"));
         assert!(
-            tmp.path().join("perri-state/current-pr.json").exists(),
+            perri_current_pr::pin_path(&tmp.path().join("perri-state"), "no-diff-here")
+                .unwrap()
+                .exists(),
             "state mutation must still happen even when the pane is missing"
         );
     }
 
+    /// W7 — D4. Pre-W7 an unattributable `load_pr` still moved the one
+    /// machine-wide slot, so returning `ok: true` was survivable. Now the pin
+    /// *is* a focus's, so a caller that names no focus would pin something no
+    /// surface will ever show while reporting success — "reports success,
+    /// paints nothing". The PRD makes the honest refusal a hard criterion.
     #[tokio::test]
-    async fn load_pr_unidentified_caller_still_mutates_state_and_warns_once() {
+    async fn load_pr_without_a_resolvable_focus_is_refused_and_writes_nothing() {
         let (state, tmp, _bcast) = make_daemon_state().await;
+        let state_dir = tmp.path().join("perri-state");
 
-        // No highlights + no matching snapshot means the diff pane is pushed
-        // to twice (Loading, then the timed-out placeholder) — this proves
-        // the "no resolvable tag" warning is deduplicated across pushes,
-        // not appended once per attempted push.
         let args = json!({ "number": 42, "repo": "acme/web" });
         let result = load_pr(&state, &args, None).await;
-        assert_eq!(result["ok"], true);
-        assert_eq!(result["pending"], true);
-        let warnings = result["warnings"].as_array().expect("warnings array");
+
         assert_eq!(
-            warnings
-                .iter()
-                .filter(|w| w["pane_push"] == "unidentified_caller")
-                .count(),
-            1,
-            "no resolvable tag must warn exactly once, not once per pane push"
+            result["error"], "unidentified_caller",
+            "a pickup that names no focus must be refused, not silently pinned"
         );
         assert!(
-            tmp.path().join("perri-state/current-pr.json").exists(),
-            "state mutation must still happen even with no resolvable tag"
+            result["ok"].as_bool() != Some(true),
+            "a refused pickup must not also report ok"
+        );
+        assert!(
+            !perri_current_pr::pins_dir(&state_dir).exists()
+                || std::fs::read_dir(perri_current_pr::pins_dir(&state_dir))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "a refused pickup must leave no pin behind"
         );
     }
 
-    // ── load_pr / diff binding ────────────────────────────────────────────────
+    /// An empty-string `pty_id` counts as *absent*, not as a focus named "".
+    /// Coercing it to a valid tag is the same "reports success, paints
+    /// nothing" family (W7 — D4).
+    #[tokio::test]
+    async fn load_pr_with_an_empty_pty_id_is_refused_like_an_absent_one() {
+        let (state, _tmp, _bcast) = make_daemon_state().await;
+
+        let args = json!({ "number": 42, "repo": "acme/web" });
+        let result = load_pr(&state, &args, Some("")).await;
+
+        assert_eq!(result["error"], "unidentified_caller");
+    }
 
     #[tokio::test]
     async fn load_pr_with_highlights_severs_the_diff_pane_s_live_binding() {
@@ -1377,7 +1602,11 @@ mod tests {
         // perri.get_current_pr — confirm the starting point before mutating.
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 Some("perri.get_current_pr")
             );
         }
@@ -1388,7 +1617,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 None,
                 "agent-authored highlights are final content — the diff pane must no \
                  longer be considered live, or the broadcaster would clobber them on \
@@ -1407,7 +1640,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 Some("perri.get_current_pr"),
                 "no-highlights load_pr must keep (or re-establish) the diff pane's \
                  live binding, since its rendered content came from that source"
@@ -1421,13 +1658,17 @@ mod tests {
     async fn clear_current_pr_removes_file_signals_and_pushes_content() {
         let (state, tmp, mut bcast) = make_daemon_state().await;
         let state_dir = tmp.path().join("perri-state");
-        perri_current_pr::write_pointer(&state_dir, 1, "acme/web", None).unwrap();
-        assert!(state_dir.join("current-pr.json").exists());
+        perri_current_pr::write_pointer(&state_dir, "perri", 1, "acme/web", None).unwrap();
+        assert!(perri_current_pr::pin_path(&state_dir, "perri")
+            .unwrap()
+            .exists());
 
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        assert!(!state_dir.join("current-pr.json").exists());
+        assert!(!perri_current_pr::pin_path(&state_dir, "perri")
+            .unwrap()
+            .exists());
         assert!(state_dir.join("current-pr.dirty").exists());
         assert!(state_dir.join("queue.dirty").exists());
 
@@ -1482,7 +1723,11 @@ mod tests {
         assert_eq!(load_result["ok"], true);
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 None,
                 "sanity: highlights must have severed diff's binding first"
             );
@@ -1495,7 +1740,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 Some("perri.get_current_pr"),
                 "clear_current_pr must rebind an unbound legacy diff pane so it goes live \
                  again the moment a PR loads"
@@ -1510,7 +1759,10 @@ mod tests {
                 if pane_id == "diff" && text == "No PR loaded."
             )
         });
-        assert!(got_placeholder, "expected diff to receive the placeholder; got {messages:?}");
+        assert!(
+            got_placeholder,
+            "expected diff to receive the placeholder; got {messages:?}"
+        );
     }
 
     #[tokio::test]
@@ -1520,7 +1772,10 @@ mod tests {
 
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["ok"], true);
-        assert!(result.get("warnings").is_none(), "unexpected warnings: {result}");
+        assert!(
+            result.get("warnings").is_none(),
+            "unexpected warnings: {result}"
+        );
         assert!(result["cleared"].is_array());
         assert!(result["queue"].is_array());
 
@@ -1613,7 +1868,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "queue"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "queue"),
                 Some("perri.list_pr_queue")
             );
         }
@@ -1671,6 +1930,99 @@ mod tests {
         );
     }
 
+    /// W7 — D4, the clearing half of `load_pr`'s refusal. Pre-W7 there was one
+    /// machine-wide pointer, so a `clear_current_pr` that named no focus wiped
+    /// "the" review and that was the intended behaviour. Now the pin belongs to
+    /// a focus, so an unattributable clear would have to guess one — and the
+    /// guess the pre-W7 shape makes is the built-in `perri` focus, silently
+    /// destroying a review a human is in the middle of. The refusal must be an
+    /// error *and* must leave every pin on disk untouched.
+    #[tokio::test]
+    async fn clear_current_pr_refuses_a_caller_it_cannot_attribute_to_a_focus() {
+        let (state, tmp, _bcast) = make_daemon_state().await;
+        let state_dir = tmp.path().join("perri-state");
+        perri_current_pr::write_pointer(
+            &state_dir,
+            perri_current_pr::BUILTIN_PERRI_TAG,
+            42,
+            "acme/web",
+            Some("check auth"),
+        )
+        .unwrap();
+        let before = perri_current_pr::read_pin(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG)
+            .expect("seeded pin");
+
+        let result = clear_current_pr(&state, &json!({}), None).await;
+
+        assert_eq!(
+            result["error"], "unidentified_caller",
+            "a clear that names no focus must be refused, not aimed at a guessed focus"
+        );
+        assert!(
+            result["ok"].as_bool() != Some(true),
+            "a refused clear must not also report ok"
+        );
+        assert_eq!(
+            perri_current_pr::read_pin(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG),
+            Some(before),
+            "a refused clear must not remove any focus's PR under review"
+        );
+    }
+
+    /// An empty-string `pty_id` counts as *absent*, not as a focus named "" —
+    /// same family as `load_pr_with_an_empty_pty_id_is_refused_like_an_absent_one`,
+    /// and the same pin must survive it.
+    #[tokio::test]
+    async fn clear_current_pr_with_an_empty_pty_id_is_refused_like_an_absent_one() {
+        let (state, tmp, _bcast) = make_daemon_state().await;
+        let state_dir = tmp.path().join("perri-state");
+        perri_current_pr::write_pointer(
+            &state_dir,
+            perri_current_pr::BUILTIN_PERRI_TAG,
+            42,
+            "acme/web",
+            Some("check auth"),
+        )
+        .unwrap();
+        let before = perri_current_pr::read_pin(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG)
+            .expect("seeded pin");
+
+        let result = clear_current_pr(&state, &json!({}), Some("")).await;
+
+        assert_eq!(result["error"], "unidentified_caller");
+        assert_eq!(
+            perri_current_pr::read_pin(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG),
+            Some(before),
+            "an empty pty_id must not be coerced into a focus whose review then gets wiped"
+        );
+    }
+
+    /// The clearing half of
+    /// `load_pr_blames_a_path_bearing_view_id_on_the_caller_and_not_on_the_disk`.
+    /// Both handlers classify pin-store failures, and they used to do it with
+    /// the same copy-pasted string sniff — so a test on only one of them
+    /// leaves the other free to regress on its own.
+    #[tokio::test]
+    async fn clear_current_pr_blames_a_path_bearing_view_id_on_the_caller_and_not_on_the_disk() {
+        let (state, _tmp, _bcast) = make_daemon_state().await;
+
+        for view_id in ["../escape", "a/b", "..", ".", "nested/../../escape"] {
+            let result =
+                clear_current_pr(&state, &json!({ "view_id": view_id }), Some("perri")).await;
+
+            assert_eq!(
+                result["error"], "invalid_args",
+                "a `view_id` of {view_id:?} is a malformed request, not an I/O failure: {result}"
+            );
+            let detail = result["detail"].as_str().unwrap_or_default();
+            assert!(
+                detail.starts_with("invalid_tag: "),
+                "the operator-facing detail for a `view_id` of {view_id:?} must still name the \
+                 tag as the problem, got {detail:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn clear_current_pr_noop_when_no_pointer_file_is_success() {
         let (state, _tmp, _bcast) = make_daemon_state().await;
@@ -1693,13 +2045,199 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
         };
         let state = McpSharedState::for_daemon(backend);
 
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["error"], "not_supported");
+    }
+
+    // ── clear_current_pr: dead refresh channels ─────────────────────────────
+
+    /// A `tracing` writer that keeps everything in memory.
+    ///
+    /// This is the capture idiom already established in
+    /// `tests/perri_targeted_relay.rs` (see `CapturedLogs` there); a type in
+    /// an integration-test crate can't be reused from a unit-test module, so
+    /// the same shape is repeated here rather than a new one invented.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Capture every `WARN` emitted on *this* thread until the returned guard
+    /// drops.
+    ///
+    /// `set_default` (guard), not `with_default` (closure): the handlers under
+    /// test are `async`, and a `with_default` closure can only cover the
+    /// synchronous body it wraps — it cannot span the `.await` at the call
+    /// site, which is where the handler's warnings are actually emitted from.
+    /// A held guard stays installed as the thread-local default across every
+    /// poll. `#[tokio::test]` drives a current-thread runtime, so the whole
+    /// future is polled on this thread and nothing escapes the capture.
+    /// This is the same reasoning (and the same fix) as the note above
+    /// `probe_failure_warns_after_three_consecutive_failures_then_resets` in
+    /// `tests/perri_targeted_relay.rs`.
+    fn capture_warnings() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (logs, guard)
+    }
+
+    /// Seed `tag`'s focus with the standard queue/diff/repl layout, so a
+    /// second focus can be driven under a tag that isn't the literal string
+    /// `"perri"` — otherwise "the warning names the focus" is unprovable,
+    /// since every one of these messages already contains the tool name
+    /// `perri.clear_current_pr`.
+    async fn seed_standard_layout_for(state: &McpSharedState, tag: &str) {
+        // An explicit `view_id` makes `apply_layout` refuse to invent the
+        // focus (`unknown_view`), so register it first — exactly what a real
+        // focus's session startup would already have done.
+        {
+            let reg = state.daemon.as_ref().unwrap().pane_registry.clone();
+            reg.lock().unwrap().get_or_init(tag);
+        }
+        let res = apply_layout::apply_layout(
+            state,
+            &json!({ "name": "perri-standard", "view_id": tag }),
+            None,
+        )
+        .await;
+        assert_eq!(res["error"], Value::Null, "failed to seed `{tag}`: {res}");
+    }
+
+    /// f8. A closed `pr_refresh_tx` is not a hiccup: the receiver only goes
+    /// away when `PerriPrNativeSource::run()` has already returned (its
+    /// `build_client()` failed), so the re-fetch this clear just asked for
+    /// will never happen — not now, and not on any later clear either.
+    /// `load_pr` has always said that out loud, nineteen lines up, with a
+    /// six-line comment explaining why. The clear path used to swallow the
+    /// identical failure on the identical channel with `let _ = tx.send(..)`.
+    ///
+    /// The user-visible half of the operation genuinely succeeded — the pin
+    /// really is gone — so the *only* evidence an operator can act on is the
+    /// warning, and it has to name which focus is now wedged.
+    #[tokio::test]
+    async fn clear_current_pr_still_clears_the_pin_but_warns_naming_the_focus_when_the_pr_source_task_is_gone(
+    ) {
+        let (mut state, tmp, _bcast) = make_daemon_state().await;
+        let tag = "reviewer-two";
+        seed_standard_layout_for(&state, tag).await;
+
+        let state_dir = tmp.path().join("perri-state");
+        perri_current_pr::write_pointer(&state_dir, tag, 1, "acme/web", None).unwrap();
+
+        // A dead source task, exactly as the daemon would leave it: the sender
+        // outlives the receiver, so every `send` from here on fails.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        state.daemon.as_mut().unwrap().perri.pr_refresh_tx = Some(tx);
+
+        let (logs, _guard) = capture_warnings();
+        let result = clear_current_pr(&state, &json!({ "view_id": tag }), None).await;
+
+        assert_eq!(
+            result["ok"], true,
+            "a dead PR source must not fail the clear — the pin really was removed; got: {result}"
+        );
+        assert!(
+            !perri_current_pr::pin_path(&state_dir, tag).unwrap().exists(),
+            "the pin file must be gone even though the refetch request could not be delivered"
+        );
+
+        let text = logs.text();
+        assert!(
+            text.contains(tag),
+            "the warning must name the focus whose PR will never refetch; got:\n{text}"
+        );
+        assert!(
+            text.contains("refetch"),
+            "the warning must say what will not happen (the refetch); got:\n{text}"
+        );
+        assert!(
+            text.contains("PR source task is gone"),
+            "the warning must say why — the source task has exited, so this is permanent; got:\n{text}"
+        );
+        assert!(
+            !text.contains("queue refresh"),
+            "only the PR channel was dead here; the queue channel must not be blamed too; got:\n{text}"
+        );
+    }
+
+    /// f8, the queue half. Same channel-closed-means-the-task-exited
+    /// reasoning as the PR refetch above, but for the queue source: the
+    /// review queue is now stale and will stay stale, and a silent
+    /// `let _ = tx.send(())` left an operator staring at a queue that simply
+    /// stops updating with nothing anywhere to explain it.
+    #[tokio::test]
+    async fn clear_current_pr_still_clears_the_pin_but_warns_that_the_queue_will_not_refresh_when_its_source_task_is_gone(
+    ) {
+        let (mut state, tmp, _bcast) = make_daemon_state().await;
+        let tag = "reviewer-two";
+        seed_standard_layout_for(&state, tag).await;
+
+        let state_dir = tmp.path().join("perri-state");
+        perri_current_pr::write_pointer(&state_dir, tag, 1, "acme/web", None).unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        state.daemon.as_mut().unwrap().perri.queue_refresh_tx = Some(tx);
+
+        let (logs, _guard) = capture_warnings();
+        let result = clear_current_pr(&state, &json!({ "view_id": tag }), None).await;
+
+        assert_eq!(
+            result["ok"], true,
+            "a dead queue source must not fail the clear — the pin really was removed; got: {result}"
+        );
+        assert!(
+            !perri_current_pr::pin_path(&state_dir, tag).unwrap().exists(),
+            "the pin file must be gone even though the queue refresh could not be requested"
+        );
+
+        let text = logs.text();
+        assert!(
+            text.contains("queue refresh"),
+            "the warning must say the queue refresh was never requested; got:\n{text}"
+        );
+        assert!(
+            text.contains("queue source task is gone"),
+            "the warning must say why — the queue source task has exited, so the queue stays stale; got:\n{text}"
+        );
+        assert!(
+            !text.contains("refetch"),
+            "only the queue channel was dead here; the PR refetch must not be blamed too; got:\n{text}"
+        );
     }
 
     // ── set_selected_index / get_selected_index ─────────────────────────────
@@ -1776,9 +2314,13 @@ mod tests {
     fn registry_with_panes(tag: &str, ids: &[&str]) -> PaneRegistry {
         let mut children: Vec<PaneTree> = ids
             .iter()
-            .map(|id| PaneTree::Leaf { pane_id: id.to_string() })
+            .map(|id| PaneTree::Leaf {
+                pane_id: id.to_string(),
+            })
             .collect();
-        children.push(PaneTree::Leaf { pane_id: "repl".into() });
+        children.push(PaneTree::Leaf {
+            pane_id: "repl".into(),
+        });
         let n = children.len();
         let mut reg = PaneRegistry::in_memory();
         reg.get_or_init(tag);

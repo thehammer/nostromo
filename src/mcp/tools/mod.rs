@@ -77,20 +77,38 @@ pub fn tool_descriptors() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
         // ── Phase 2: Perri ────────────────────────────────────────────────
+        // `perri.list_pr_queue` takes no `view_id` **deliberately**: the review
+        // queue is fleet-wide (W7 — D9), one answer for every focus. Same for
+        // `perri.get_selected_index` below. Don't "finish the sweep" by adding
+        // one to either — the test
+        // `exactly_the_focus_scoped_perri_tools_declare_a_view_id_in_their_input_schema`
+        // pins both exclusions for exactly that reason.
         json!({
             "name": "perri.list_pr_queue",
-            "description": "Returns Perri's live PR review queue (all three buckets: requested, needs_review, changes_req).",
+            "description": "Returns Perri's live PR review queue (all three buckets: requested, needs_review, changes_req). Fleet-wide: the queue is the same for every focus, so this takes no `view_id`.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
         json!({
             "name": "perri.get_current_pr",
-            "description": "Returns the PR currently loaded in Perri's diff pane, or null if none is loaded.",
-            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            "description": "Returns one focus's PR under review, or null if that focus has none. The PR under review is a property of a focus, not of the machine (W7): an explicit `view_id` wins, otherwise the caller's own focus (from its pty_id). A caller that names no focus and cannot be placed in one gets null — never some other focus's PR.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string", "description": "Focus/view id to answer for; omit to target the caller's own focus" }
+                },
+                "required": []
+            }
         }),
         json!({
             "name": "perri.get_state",
-            "description": "Returns a composite Perri state: { queue, current_pr, stale }.",
-            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            "description": "Returns a composite Perri state: { queue, current_pr, other_focuses, stale, current_pin }. `queue` and `stale` are fleet-wide; `current_pr` and `current_pin` are this focus's (see perri.get_current_pr for how the focus is resolved); `other_focuses` lists every *other* focus's PR as { tag, repo, number }. `current_pin` is a present-and-explicit-null key when nothing is pinned, so a caller can tell \"checked, nothing pinned\" from \"this daemon predates the field\".",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string", "description": "Focus/view id to answer for; omit to target the caller's own focus" }
+                },
+                "required": []
+            }
         }),
         // ── Phase 2: Fred ─────────────────────────────────────────────────
         json!({
@@ -302,7 +320,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         // ── Phase 3: Perri mutations ───────────────────────────────────────
         json!({
             "name": "perri.load_pr",
-            "description": "Load a pull request into Perri's diff pane. Writes current-pr.json and triggers the native watcher. When hosted in nostromd (daemon): pushes the diff pane's content itself (your `highlights`, if given, become the pane's final content; otherwise a Loading state followed by a server-rendered PR summary once the refetch catches up — bounded by a settle timeout), and moves the agent-scoped selected index to this PR if it's in the current queue. May return `{ \"ok\": true, \"pending\": true }` when the refetch is still in flight after the settle timeout — that is success-with-fetch-pending, not a failure to retry. When hosted in the standalone TUI: writes the file and returns once `PerriView` has applied it, with no pane-push/pending behavior. Errors: invalid_args, not_supported (daemon only, when Perri's state dir isn't configured), io_error, event_loop_closed, event_loop_timeout (TUI only).",
+            "description": "Load a pull request into Perri's diff pane — pinning it as *one focus's* PR under review (W7), not the machine's. Writes that focus's pin file and triggers the native watcher. When hosted in nostromd (daemon): pushes the diff pane's content itself (your `highlights`, if given, become the pane's final content; otherwise a Loading state followed by a server-rendered PR summary once the refetch catches up — bounded by a settle timeout), and moves the agent-scoped selected index to this PR if it's in the current queue. When hosted in the standalone TUI: writes the file and returns once `PerriView` has applied it, with no pane-push/pending behavior. If the refetch does not settle, the result carries BOTH `pending` and `retryable` plus a human-readable `detail` — branch on `retryable`, not on `pending`: `{ \"pending\": true, \"retryable\": true }` means the settle timeout elapsed and the fetch may yet land (asking again later is reasonable), while `{ \"pending\": false, \"retryable\": false }` means the PR source task is gone, so nothing is in flight and retrying can never help — stop. A settled refetch (the normal case) has neither field. `ok` is true in every one of those cases: the pin was written and the panes were painted. Errors: invalid_args, unidentified_caller (daemon only — no `view_id` and no usable pty_id; a pin belonging to no focus would paint nothing while reporting success), not_supported (daemon only, when Perri's state dir isn't configured), io_error, event_loop_closed, event_loop_timeout (TUI only).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -316,7 +334,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "perri.clear_current_pr",
-            "description": "Clear the currently-loaded PR from Perri's diff pane. When hosted in nostromd (daemon): also re-pushes the PR queue pane. Errors: not_supported (daemon only), io_error, event_loop_closed, event_loop_timeout (TUI only).",
+            "description": "Clear one focus's PR under review (W7) — and only that focus's; no other focus's PR changes. When hosted in nostromd (daemon): also closes every curated review tab whose PR just stopped being under review, and re-pushes the PR queue pane. Errors: invalid_args (a focus tag that isn't a safe filename), unidentified_caller (daemon only — no `view_id` and no usable pty_id; clearing \"the PR under review\" with no focus to clear it *for* would wipe whichever focus happened to hold the slot), not_supported (daemon only), io_error, event_loop_closed, event_loop_timeout (TUI only).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -510,7 +528,10 @@ pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) 
         return tool_descriptors();
     }
     let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id).await;
-    crate::mcp::tool_policy::filter_descriptors(tool_descriptors(), policy.denied_for(agent.as_deref()))
+    crate::mcp::tool_policy::filter_descriptors(
+        tool_descriptors(),
+        policy.denied_for(agent.as_deref()),
+    )
 }
 
 // ── tool dispatch ─────────────────────────────────────────────────────────────
@@ -586,7 +607,7 @@ async fn dispatch_inner(
         "nostromo.get_view_state" => {
             let input = parse_args::<get_view_state::GetViewStateInput>(arguments);
             match input {
-                Ok(inp) => get_view_state::handle(state, &inp).await,
+                Ok(inp) => get_view_state::handle(state, &inp, pty_id).await,
                 Err(e) => e,
             }
         }
@@ -601,8 +622,17 @@ async fn dispatch_inner(
 
         // ── Phase 2: Perri ────────────────────────────────────────────────
         "perri.list_pr_queue" => perri::list_pr_queue(state),
-        "perri.get_current_pr" => perri::get_current_pr(state),
-        "perri.get_state" => perri::get_state(state, pty_id),
+        // W7 — D3: both resolve the *caller's* focus (or an explicit
+        // `view_id`), like every other focus-scoped tool. `perri.get_selected_index`
+        // below is the precedent for the shape.
+        "perri.get_current_pr" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri::get_current_pr(state, apply_layout::target_tag(&args, pty_id))
+        }
+        "perri.get_state" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri::get_state(state, apply_layout::target_tag(&args, pty_id))
+        }
 
         // ── Phase 2: Fred ─────────────────────────────────────────────────
         "fred.list_unread_emails" => fred::list_unread_emails(state),
@@ -783,13 +813,96 @@ mod tests {
             .iter()
             .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(str::to_string))
             .collect();
-        assert!(!names.is_empty(), "sanity: the tool registry must not be empty");
+        assert!(
+            !names.is_empty(),
+            "sanity: the tool registry must not be empty"
+        );
         for name in &names {
             assert!(
                 !name.to_lowercase().contains("activity"),
                 "found an activity-related MCP tool ({name}) — no agent-callable \
                  control over the ambient activity stream is permitted"
             );
+        }
+    }
+
+    // ── which Perri tools are focus-scoped, as a declared contract ──────────
+
+    /// The descriptor a caller reads from `tools/list` is the *only* runtime
+    /// statement of which Perri tools take a focus. Dispatch resolving a
+    /// `view_id` while the descriptor advertises an empty schema is a
+    /// contradiction an agent cannot see past: it will never send the
+    /// parameter, so per-focus addressing silently doesn't exist for it.
+    ///
+    /// The two `false` rows are **deliberate PRD decisions, not oversights**:
+    ///
+    /// - `perri.list_pr_queue` — one set of open PRs exists and every focus
+    ///   sees the same one. The queue is fleet-wide by design.
+    /// - `perri.get_selected_index` — `selected_index` is explicitly out of
+    ///   scope in the W7 PRD and stays daemon-global.
+    ///
+    /// So this table is two-sided on purpose. It fails if a focus-scoped tool
+    /// stops declaring `view_id`, *and* it fails if an over-eager "add
+    /// `view_id` everywhere" sweep adds one to either deliberate exclusion.
+    /// Change a row only alongside the PRD decision it records.
+    #[test]
+    fn exactly_the_focus_scoped_perri_tools_declare_a_view_id_in_their_input_schema() {
+        // (tool name, expects a `view_id` property)
+        let table: &[(&str, bool)] = &[
+            ("perri.get_current_pr", true),
+            ("perri.get_state", true),
+            ("perri.load_pr", true),
+            ("perri.clear_current_pr", true),
+            // Fleet-wide by design — see the doc comment above.
+            ("perri.list_pr_queue", false),
+            ("perri.get_selected_index", false),
+        ];
+
+        let descriptors = tool_descriptors();
+        for (name, expects_view_id) in table {
+            let descriptor = descriptors
+                .iter()
+                .find(|d| d.get("name").and_then(Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("{name} is not registered in tool_descriptors() at all"));
+            let schema = &descriptor["inputSchema"];
+            let declares_view_id = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|props| props.contains_key("view_id"));
+
+            assert_eq!(
+                declares_view_id,
+                *expects_view_id,
+                "{name}'s inputSchema {} a `view_id` property, but the W7 \
+                 per-focus decision says it should{}. If dispatch resolves a \
+                 caller focus for this tool, the descriptor has to say so or \
+                 no agent can ever address a focus with it; if the tool is \
+                 deliberately fleet-wide (perri.list_pr_queue, \
+                 perri.get_selected_index), adding `view_id` contradicts the \
+                 PRD. Schema was: {schema}",
+                if declares_view_id {
+                    "declares"
+                } else {
+                    "does not declare"
+                },
+                if *expects_view_id { "" } else { " not" },
+            );
+
+            // A focus-scoped Perri tool always defaults to the caller's own
+            // focus, so `view_id` must stay optional: requiring it would break
+            // every existing call site that omits it.
+            if *expects_view_id {
+                let required: Vec<&str> = schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .map(|r| r.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                assert!(
+                    !required.contains(&"view_id"),
+                    "{name} must not *require* `view_id` — omitting it means \
+                     the caller's own focus, which is the common case: {schema}"
+                );
+            }
         }
     }
 }

@@ -1,16 +1,31 @@
-//! Perri current-PR native data source.
+//! Perri PR-under-review native data source — **multi-tenant** since W7.
 //!
-//! Reads `~/.claude/state/perri/current-pr.json` to find which PR to display,
-//! then fetches metadata via `octocrab` and the raw diff via a reqwest GET with
-//! `Accept: application/vnd.github.diff`.
+//! Reads every focus's pin from `~/.claude/state/perri/current-pr/<tag>.json`
+//! (see [`crate::data::perri_current_pr`]), fetches each PR's metadata via
+//! `octocrab`, its raw diff, its check-runs and its conversation, and
+//! publishes the lot as one [`PrSnapshots`] map keyed by focus tag.
 //!
-//! Phase 4: `PerriPrNativeSource::spawn` now returns a `refresh_tx` alongside
-//! the `watch::Receiver`.  Callers (e.g. `perri.load_pr` MCP tool) can send
-//! `()` on the sender to trigger an immediate re-fetch without touching the
-//! dirty-file sentinel.  The sentinel watcher is kept as a fallback for the
-//! deprecation window.
+//! ## One task for N focuses
+//!
+//! There is exactly one of these tasks no matter how many focuses have a PR
+//! under review. It fetches sequentially and deduplicates by `(repo, number)`,
+//! so two focuses reviewing one PR cost one round trip and share one snapshot.
+//! See [`PerriPrNativeSource::spawn`] for why not one task per focus.
+//!
+//! ## Rate limits
+//!
+//! Per PR per cycle this makes: one `pulls().get()` (octocrab, uncached), one
+//! raw-diff GET, one check-runs GET, and three conversation GETs — all five of
+//! the non-octocrab calls conditional (`If-None-Match`). A steady-state cycle
+//! against an unchanged PR therefore costs ~1 uncached request rather than the
+//! `>=3` it cost before W7, which is what makes running this for N focuses
+//! affordable against a shared 5000/hr primary limit.
+//!
+//! `refresh_tx` carries `Some(tag)` to refetch one focus's pin and `None` for
+//! all of them; the `current-pr.dirty` sentinel remains as the "something in
+//! the pin directory changed, rescan" fallback.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -25,9 +40,13 @@ use crate::{
     data::{
         dirty_file,
         github_client::GithubClient,
-        perri_pr::{CiCheck, PrComment, PrSnapshot, PrThread, PrThreadKind},
+        perri_current_pr,
+        perri_pr::{CiCheck, PrComment, PrSnapshot, PrSnapshots, PrThread, PrThreadKind},
         perri_queue::CiState,
-        perri_queue_native::{api_base, etag_get},
+        perri_queue_native::{
+            api_base, etag_get_as, BodyFreshness, FetchedBody, GITHUB_DIFF_ACCEPT,
+            GITHUB_JSON_ACCEPT,
+        },
     },
 };
 
@@ -44,6 +63,9 @@ pub fn diff_is_too_large(diff: &str, changed_files: u64) -> bool {
         || diff.len() > MAX_DIFF_BYTES
         || diff.lines().count() > MAX_DIFF_LINES
 }
+
+/// Ask the PR source to refetch: `Some(tag)` for one focus, `None` for all.
+pub type RefreshTx = mpsc::UnboundedSender<Option<String>>;
 
 // ── Per-PR cache path ─────────────────────────────────────────────────────────
 
@@ -77,7 +99,7 @@ pub async fn prefetch_into_cache(
     repo: &str,
     number: u64,
 ) -> Result<()> {
-    let source = PerriPrNativeSource::new(config.clone());
+    let source = PerriPrNativeSource::new(config.clone(), None);
     let snap = source.fetch_pr(client, repo, number).await?;
     let json = serde_json::to_string(&snap).context("serializing prefetch snapshot")?;
     let cache = pr_cache_path(&config.perri_state_dir(), repo, number);
@@ -118,68 +140,104 @@ struct PrCheckRunOutput {
     text: Option<String>,
 }
 
-// ── current-pr.json shape ─────────────────────────────────────────────────────
-
-/// Matches the format written by `perri-diff-pane` and the real Perri state.
-#[derive(Debug, Deserialize)]
-pub struct CurrentPrPointer {
-    pub number: u64,
-    pub repo: String, // "owner/repo"
-    pub title: Option<String>,
-    pub author: Option<String>,
-    pub url: Option<String>,
-}
-
 // ── Source ────────────────────────────────────────────────────────────────────
+
+/// Supplies the set of focus tags that currently exist, or `None` when the
+/// daemon does not yet know (no client has pushed a focus registry).
+///
+/// A closure rather than a handle to the session manager so this module stays
+/// free of `ipc` types — and so the "we don't know yet" case has to be spelled
+/// out by whoever wires it, rather than being an empty set that silently means
+/// "every focus is gone".
+pub type LiveFocuses = Arc<dyn Fn() -> Option<HashSet<String>> + Send + Sync>;
 
 pub struct PerriPrNativeSource {
     config: Config,
-    /// ETag caches for the conversation fetches (W3 — curated-agent-views),
-    /// so a refetch against unchanged data costs one 304 instead of a full
-    /// GitHub response. `Arc`-shared rather than owned so every construction
-    /// site (`spawn`, `prefetch_into_cache`, `fetch_for_cache`) can hand out a
-    /// cheap clone; only the long-lived instance `spawn` keeps alive across
-    /// polling cycles actually benefits from cache hits, and a fresh one-shot
-    /// instance simply starts cold (a full fetch, no correctness issue).
-    conversation_etags: Arc<Mutex<HashMap<String, String>>>,
-    conversation_body_cache: Arc<Mutex<HashMap<String, String>>>,
+    /// Backstop for a missed eviction (W7 — D8). Pins are *filtered* here, not
+    /// deleted: this runs on every poll, including while a client is
+    /// reconnecting and its registry is briefly partial, and a filter that
+    /// guesses wrong costs one cycle of a hidden PR while a delete that
+    /// guesses wrong is unrecoverable. Genuine deletion happens once, at the
+    /// focus-removal hook in `ipc::server`, behind the two-push guard.
+    live_focuses: Option<LiveFocuses>,
+    /// ETag caches for every conditional GET this source makes: the three
+    /// conversation reads (W3 — curated-agent-views) and, since W7, the two
+    /// expensive ones — the raw diff and the head SHA's check-runs — so a
+    /// refetch against unchanged data costs one 304 instead of a full GitHub
+    /// response.
+    ///
+    /// This is what makes per-focus isolation affordable. Before W7 a poll
+    /// cycle cost >=3 *uncached* requests per PR (metadata, the up-to-500 KB
+    /// raw diff, check-runs), and there was exactly one PR. Isolation
+    /// multiplies that by the number of focuses holding a pin, against a
+    /// 5000/hr primary limit the queue source is already spending from. With
+    /// these two conditional, a steady-state cycle costs ~0-1 uncached
+    /// requests per PR instead.
+    ///
+    /// Keyed by `(accept, url)` — see [`etag_get_as`] — and pruned each cycle
+    /// to the set of URLs the live pins actually need, so a long-lived daemon
+    /// working a queue doesn't accumulate every diff it ever fetched.
+    ///
+    /// `Arc`-shared rather than owned so every construction site (`spawn`,
+    /// `prefetch_into_cache`, `fetch_for_cache`) can hand out a cheap clone;
+    /// only the long-lived instance `spawn` keeps alive across polling cycles
+    /// actually benefits from cache hits, and a fresh one-shot instance simply
+    /// starts cold (a full fetch, no correctness issue).
+    etags: Arc<Mutex<HashMap<String, String>>>,
+    body_cache: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl PerriPrNativeSource {
     /// Build a source instance with fresh, empty conversation caches.
-    fn new(config: Config) -> Self {
+    fn new(config: Config, live_focuses: Option<LiveFocuses>) -> Self {
         PerriPrNativeSource {
             config,
-            conversation_etags: Arc::new(Mutex::new(HashMap::new())),
-            conversation_body_cache: Arc::new(Mutex::new(HashMap::new())),
+            live_focuses,
+            etags: Arc::new(Mutex::new(HashMap::new())),
+            body_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Spawn the data source.
     ///
-    /// Returns `(snapshot_rx, refresh_tx)`.
+    /// Returns `(snapshots_rx, refresh_tx)`.
     ///
-    /// - `snapshot_rx` — watch receiver for the latest `PrSnapshot`.
-    /// - `refresh_tx`  — send `()` to trigger an immediate re-fetch (direct
-    ///   MCP push path introduced in Phase 4).  The dirty-file watcher remains
-    ///   active as a fallback for the shell-script deprecation window.
+    /// - `snapshots_rx` — watch receiver for the current [`PrSnapshots`]:
+    ///   every focus's PR under review, keyed by focus tag.
+    /// - `refresh_tx`  — `Some(tag)` triggers an immediate re-fetch of that
+    ///   focus's pin, `None` of every pinned focus. `perri.load_pr` sends the
+    ///   former; with N focuses pinned, refetching all of them because one
+    ///   picked something up would be N-1 wasted GitHub requests.
+    ///
+    /// **One task, not one per focus** (W7 — D5.2). A task per focus would
+    /// mean N `Octocrab`/`reqwest` clients with N connection pools, N ETag
+    /// caches that can't share a fetch between two focuses reviewing the same
+    /// PR, and N concurrent bursts every poll interval — straight into
+    /// GitHub's secondary rate limits. One task fetching sequentially spreads
+    /// the same work out, and the accidental serialisation is a feature.
     pub fn spawn(
         config: Config,
-    ) -> (
-        watch::Receiver<Option<PrSnapshot>>,
-        mpsc::UnboundedSender<()>,
-    ) {
-        let (tx, rx) = watch::channel(None);
+        live_focuses: Option<LiveFocuses>,
+    ) -> (watch::Receiver<PrSnapshots>, RefreshTx) {
+        let (tx, rx) = watch::channel(crate::data::perri_pr::no_prs());
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
-        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<Option<String>>();
 
-        let dirty_path = config.perri_state_dir().join("current-pr.dirty");
-        dirty_file::spawn_watcher(dirty_path, dirty_tx);
+        let state_dir = config.perri_state_dir();
+        // One sentinel for the whole pin directory, watched once (D2). The
+        // watcher is a 500 ms `exists()` poll; one per focus would be N tasks
+        // at 2 Hz for a signal that is always "rescan the directory" anyway.
+        dirty_file::spawn_watcher(state_dir.join("current-pr.dirty"), dirty_tx);
+
+        // A pre-W7 global `current-pr.json` is read, logged and deleted here —
+        // never adopted. It records what was under review and not who was
+        // reviewing it, and guessing an owner is worse than starting empty.
+        perri_current_pr::discard_legacy_pointer(&state_dir);
 
         let interval_secs = config.pr_diff_poll_secs;
 
         tokio::spawn(async move {
-            let source = PerriPrNativeSource::new(config);
+            let source = PerriPrNativeSource::new(config, live_focuses);
             source
                 .run(tx, &mut dirty_rx, &mut refresh_rx, interval_secs)
                 .await;
@@ -190,49 +248,63 @@ impl PerriPrNativeSource {
 
     async fn run(
         &self,
-        tx: watch::Sender<Option<PrSnapshot>>,
+        tx: watch::Sender<PrSnapshots>,
         dirty_rx: &mut mpsc::UnboundedReceiver<()>,
-        refresh_rx: &mut mpsc::UnboundedReceiver<()>,
+        refresh_rx: &mut mpsc::UnboundedReceiver<Option<String>>,
         interval_secs: u64,
     ) {
         let client = match self.build_client() {
             Ok(c) => c,
             Err(e) => {
+                // Terminal, and deliberately still fleet-wide: without a
+                // GitHub client no focus can have a PR under review, and
+                // turning this into a per-focus failure would mean N copies of
+                // one message and a recovery path per tag for a condition that
+                // never recovers. The source publishes one error snapshot and
+                // stops (unchanged from pre-W7).
                 warn!("github client init failed for perri pr: {e:#}");
-                let _ = tx.send(Some(PrSnapshot {
+                let error = Arc::new(PrSnapshot {
                     error: Some(format!("GitHub client init failed: {e:#}")),
                     stale: true,
                     ..Default::default()
-                }));
+                });
+                let pins = self.live_pins(&self.config.perri_state_dir());
+                let map: HashMap<String, Arc<PrSnapshot>> = pins
+                    .into_keys()
+                    .map(|tag| (tag, Arc::clone(&error)))
+                    .collect();
+                let _ = tx.send(Arc::new(map));
                 return;
             }
         };
 
-        loop {
-            match self.fetch(&client).await {
-                Ok(snap) => {
-                    debug!(pr = ?snap.pr_number, "perri diff refreshed");
-                    let _ = tx.send(Some(snap));
-                }
-                Err(e) => {
-                    warn!("perri diff fetch failed: {e:#}");
-                    let mut snap = tx.borrow().clone().unwrap_or_default();
-                    snap.stale = true;
-                    snap.error = Some(e.to_string());
-                    let _ = tx.send(Some(snap));
-                }
-            }
+        // Which tags to refetch on this pass. `None` means "all of them" —
+        // the timer, the dirty sentinel, and startup.
+        let mut only: Option<HashSet<String>> = None;
 
+        loop {
+            // Clone the current generation out of the watch borrow *before*
+            // awaiting: holding a `watch::Ref` across an await makes the whole
+            // future non-`Send` (and would block every reader for the length of
+            // a GitHub round trip).
+            let previous = tx.borrow().clone();
+            let next = self.fetch_all(&client, &previous, only.as_ref()).await;
+            let _ = tx.send(next);
+
+            only = None;
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
                 // `Some(_) = recv()` disables the branch on a closed channel.
                 // The plain `_ =` form matches None and fires every poll once
                 // the sender is dropped, producing a hot loop.
                 Some(_) = dirty_rx.recv() => {
+                    // The sentinel says "the pin directory changed" and not
+                    // which file, so this is always a full rescan.
                     debug!("perri diff dirty-file signal");
                 }
-                Some(_) = refresh_rx.recv() => {
-                    debug!("perri diff direct-push refresh signal (MCP)");
+                Some(tag) = refresh_rx.recv() => {
+                    debug!(?tag, "perri diff direct-push refresh signal (MCP)");
+                    only = tag.map(|t| HashSet::from([t]));
                 }
             }
 
@@ -240,51 +312,172 @@ impl PerriPrNativeSource {
             // *and* send on `refresh_tx` for the same logical change — drain
             // whichever channel(s) didn't win the select above so a single
             // change collapses into exactly one fetch cycle instead of two.
-            while dirty_rx.try_recv().is_ok() {}
-            while refresh_rx.try_recv().is_ok() {}
+            // Any drained *targeted* refresh widens this pass rather than
+            // being dropped: collapsing two focuses' pickups into one fetch of
+            // one of them would leave the other stale until the next tick.
+            while dirty_rx.try_recv().is_ok() {
+                only = None;
+            }
+            while let Ok(tag) = refresh_rx.try_recv() {
+                match (tag, &mut only) {
+                    (None, _) => only = None,
+                    (Some(_), None) => {}
+                    (Some(t), Some(set)) => {
+                        set.insert(t);
+                    }
+                }
+            }
         }
     }
 
-    /// Main fetch: reads `current-pr.json`, fetches the PR, writes BOTH
-    /// `current-pr-detail.json` and the per-PR cache file.
-    async fn fetch(&self, client: &GithubClient) -> Result<PrSnapshot> {
-        let pointer_path = self.current_pr_path();
+    /// Every pin on disk whose focus still exists (W7 — D8).
+    ///
+    /// With no `live_focuses` provider, or before any client has pushed a
+    /// focus registry, every pin is served: "the daemon does not know which
+    /// focuses exist" must not read as "no focus exists", which would blank
+    /// every focus's PR on a restart before the first push.
+    fn live_pins(&self, state_dir: &std::path::Path) -> HashMap<String, perri_current_pr::Pin> {
+        let mut pins = perri_current_pr::read_pins(state_dir);
+        let Some(live) = self.live_focuses.as_ref().and_then(|f| f()) else {
+            return pins;
+        };
+        pins.retain(|tag, _| {
+            let keep = live.contains(tag);
+            if !keep {
+                debug!(tag = %tag, "ignoring a pin whose focus no longer exists");
+            }
+            keep
+        });
+        pins
+    }
 
-        if !pointer_path.exists() {
-            return Ok(PrSnapshot {
-                title: "(no PR loaded)".to_owned(),
-                ..Default::default()
-            });
-        }
-
-        let raw = tokio::fs::read_to_string(&pointer_path)
-            .await
-            .with_context(|| format!("reading {}", pointer_path.display()))?;
-
-        let pointer: CurrentPrPointer =
-            serde_json::from_str(&raw).context("parsing current-pr.json")?;
-
-        let snap = self.fetch_pr(client, &pointer.repo, pointer.number).await?;
-
-        // Write both files; log and swallow errors (the watch channel still feeds the TUI).
+    /// One polling pass over every focus's pin.
+    ///
+    /// `previous` is the last published generation; `only` restricts the
+    /// *fetching* to those tags (everything else is carried over unchanged).
+    /// Tags whose pin has disappeared are dropped from the result regardless
+    /// of `only` — that is how a cleared or evicted pin stops being published.
+    ///
+    /// Fetches are deduplicated by `(repo, number)`: two focuses reviewing the
+    /// same PR cost one round trip, not two, and share one snapshot `Arc`.
+    async fn fetch_all(
+        &self,
+        client: &GithubClient,
+        previous: &PrSnapshots,
+        only: Option<&HashSet<String>>,
+    ) -> PrSnapshots {
         let state_dir = self.config.perri_state_dir();
-        match serde_json::to_string(&snap) {
-            Ok(json) => {
-                // Single-slot selected-PR file.
-                let detail_path = state_dir.join("current-pr-detail.json");
-                if let Err(e) = write_json_atomic(&detail_path, &json) {
-                    warn!("perri detail write (current-pr-detail.json) failed: {e:#}");
-                }
-                // Per-PR cache file.
-                let cache = pr_cache_path(&state_dir, &pointer.repo, pointer.number);
-                if let Err(e) = write_json_atomic(&cache, &json) {
-                    warn!("perri detail write (pr-cache) failed: {e:#}");
+        let pins = self.live_pins(&state_dir);
+
+        // Keep the ETag/body caches to what the live pins can actually ask
+        // for. Without this a daemon working a queue accumulates every diff
+        // body it has ever fetched, at up to 500 KB each.
+        let live_prefixes: Vec<String> = pins
+            .values()
+            .flat_map(|pin| live_url_prefixes(&pin.repo, pin.number, previous))
+            .collect();
+        crate::data::perri_queue_native::prune_etag_caches(
+            &self.etags,
+            &self.body_cache,
+            &live_prefixes,
+        );
+
+        let mut next: HashMap<String, Arc<PrSnapshot>> = HashMap::new();
+        // `(repo, number)` already fetched on this pass — the dedupe (D5).
+        let mut fetched: HashMap<(String, u64), Arc<PrSnapshot>> = HashMap::new();
+
+        for (tag, pin) in pins {
+            let key = (pin.repo.clone(), pin.number);
+
+            if let Some(shared) = fetched.get(&key) {
+                next.insert(tag, Arc::clone(shared));
+                continue;
+            }
+
+            let carry_over = only.is_some_and(|set| !set.contains(&tag));
+            if carry_over {
+                if let Some(prev) = previous.get(&tag) {
+                    // Only carry over a snapshot that is actually *this* pin's
+                    // — a stale snapshot of the focus's previous PR is a wrong
+                    // answer, not an old one.
+                    if prev.repo == pin.repo && prev.pr_number == Some(pin.number) {
+                        // Deliberately *not* seeded into `fetched`. That map
+                        // means "already fetched on this pass", and a
+                        // carried-over snapshot was not fetched on this pass.
+                        // Seeding it let a targeted refresh be answered with
+                        // stale data: with two focuses on one PR and
+                        // `only = {A}`, `pins` is a `HashMap` and iteration
+                        // order is arbitrary — reach B first and it seeds the
+                        // key, then A's `fetched.get` short-circuits above and
+                        // A is served B's carried-over snapshot having issued
+                        // no request at all. `wait_for_matching_snapshot` sees
+                        // a matching `(repo, number)` and settles, so
+                        // `perri.load_pr` reports success on data up to a poll
+                        // interval old — and if B's snapshot carried an error,
+                        // A paints that error having never tried.
+                        //
+                        // The D5 dedupe guarantee is unaffected: it is the
+                        // insert on the real-fetch path below that makes two
+                        // focuses on one PR cost one round trip and share one
+                        // `Arc`. The only cost here is that two focuses that
+                        // both carry over hold two `Arc`s instead of one.
+                        next.insert(tag, Arc::clone(prev));
+                        continue;
+                    }
                 }
             }
-            Err(e) => warn!("perri detail serialize failed: {e:#}"),
+
+            let snap = match self.fetch_pr(client, &pin.repo, pin.number).await {
+                Ok(snap) => {
+                    debug!(%tag, repo = %pin.repo, pr = pin.number, "perri diff refreshed");
+                    self.persist(&state_dir, &pin.repo, pin.number, &snap);
+                    Arc::new(snap)
+                }
+                Err(e) => {
+                    // One focus's PR failing must not disturb any other's —
+                    // degrade *this* tag to a stale snapshot and keep going.
+                    warn!(%tag, repo = %pin.repo, pr = pin.number, "perri diff fetch failed: {e:#}");
+                    let mut snap = previous
+                        .get(&tag)
+                        .filter(|prev| prev.repo == pin.repo && prev.pr_number == Some(pin.number))
+                        .map(|prev| (**prev).clone())
+                        .unwrap_or_else(|| PrSnapshot {
+                            pr_number: Some(pin.number),
+                            repo: pin.repo.clone(),
+                            ..Default::default()
+                        });
+                    snap.stale = true;
+                    snap.error = Some(e.to_string());
+                    Arc::new(snap)
+                }
+            };
+
+            fetched.insert(key, Arc::clone(&snap));
+            next.insert(tag, snap);
         }
 
-        Ok(snap)
+        Arc::new(next)
+    }
+
+    /// Write the fetched snapshot to the per-PR cache file
+    /// (`pr-cache/<repo>-<n>.json`), which `perri_queue_native`'s prefetch
+    /// shares. It was already keyed per-PR and needed no W7 change.
+    ///
+    /// Nothing else is written. The pre-W7 single-slot
+    /// `current-pr-detail.json` is gone: one file cannot describe N focuses,
+    /// and nothing in this repo ever read it.
+    fn persist(&self, state_dir: &Path, repo: &str, number: u64, snap: &PrSnapshot) {
+        let json = match serde_json::to_string(snap) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!("perri detail serialize failed: {e:#}");
+                return;
+            }
+        };
+        let cache = pr_cache_path(state_dir, repo, number);
+        if let Err(e) = write_json_atomic(&cache, &json) {
+            warn!("perri detail write (pr-cache) failed: {e:#}");
+        }
     }
 
     /// Fetch `(repo, number)` via GitHub API and return a `PrSnapshot`.
@@ -319,17 +512,33 @@ impl PerriPrNativeSource {
         let head_sha = pr_meta.head.sha.clone();
 
         // Fetch the raw diff.
-        let raw_diff = fetch_diff(client, &owner, &repo_name, number).await?;
+        let raw_diff = fetch_diff(
+            client,
+            &owner,
+            &repo_name,
+            number,
+            &self.etags,
+            &self.body_cache,
+        )
+        .await?;
 
         // Apply large-diff threshold: blank the diff and set the flag.
-        let (diff, diff_too_large) = if diff_is_too_large(&raw_diff, changed_files) {
+        let (diff, diff_too_large) = if diff_is_too_large(&raw_diff.body, changed_files) {
             (String::new(), true)
         } else {
-            (raw_diff, false)
+            (raw_diff.body, false)
         };
 
         // D2/D3: fetch check-runs for the PR head SHA and build CiCheck list.
-        let ci_checks = fetch_ci_checks(client, &owner, &repo_name, &head_sha).await;
+        let (ci_checks, ci_freshness) = fetch_ci_checks(
+            client,
+            &owner,
+            &repo_name,
+            &head_sha,
+            &self.etags,
+            &self.body_cache,
+        )
+        .await;
 
         // W3 — curated-agent-views: the PR description, plus its comment and
         // review threads. A conversation-fetch failure must not fail the
@@ -340,6 +549,35 @@ impl PerriPrNativeSource {
             .fetch_conversation(client, &owner, &repo_name, number)
             .await;
 
+        // W7 round 3 — freshness has to describe what actually happened.
+        //
+        // `etag_get_as` deliberately serves the last known-good body when
+        // GitHub answers non-2xx, so one bad poll doesn't blank a review
+        // mid-cycle. That fallback is right and stays. What it must not do is
+        // let this snapshot go out saying `stale: false` with a `generated_at`
+        // of *now*: that renders as "here is the diff, it is current" for an
+        // expired token, a lost SAML grant, a renamed repo or a rate limit —
+        // and since `prune_etag_caches` keeps a live pin's body cached, it
+        // says so indefinitely rather than for one cycle. Before W7 the diff
+        // fetch bailed outright on non-2xx and the snapshot came out
+        // `stale: true`; that property is restored here without giving up the
+        // cached content.
+        //
+        // Only the two `etag_get_as` reads feed this. That is the line
+        // `etag_get_as` was written for — "a caller whose whole fetch depends
+        // on this response can surface a real error" — and it is the
+        // dishonesty that needs fixing, not the failure: an outright CI-fetch
+        // error already yields an empty `ci_checks`, which reads as "unknown"
+        // and is honest as it stands. A *cached* CI list presented as current
+        // is not.
+        let degraded: Vec<String> = [
+            raw_diff.freshness.degraded_reason("the diff"),
+            ci_freshness.degraded_reason("CI checks"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
         Ok(PrSnapshot {
             pr_number: Some(number),
             repo: repo.to_owned(),
@@ -348,9 +586,15 @@ impl PerriPrNativeSource {
             url,
             diff,
             diff_too_large,
-            stale: false,
-            error: None,
-            generated_at: Some(chrono::Utc::now()),
+            stale: !degraded.is_empty(),
+            error: (!degraded.is_empty()).then(|| degraded.join("; ")),
+            // `generated_at` is documented as "when this snapshot was last
+            // fetched successfully". A degraded pass did not fetch it
+            // successfully, and cannot say when the cached body it is serving
+            // was current — so `None`, which `PaneFreshness`/D6 already reads
+            // alongside `stale: true` as "badly stale", is the only honest
+            // answer available.
+            generated_at: degraded.is_empty().then(chrono::Utc::now),
             ci_checks,
             additions,
             deletions,
@@ -375,59 +619,61 @@ impl PerriPrNativeSource {
         repo: &str,
         number: u64,
     ) -> ConversationFetch {
-        let issue_comments = fetch_issue_comments(
-            client,
-            owner,
-            repo,
-            number,
-            &self.conversation_etags,
-            &self.conversation_body_cache,
-        )
-        .await;
-        let review_comments = fetch_review_comments(
-            client,
-            owner,
-            repo,
-            number,
-            &self.conversation_etags,
-            &self.conversation_body_cache,
-        )
-        .await;
-        let reviews = fetch_reviews(
-            client,
-            owner,
-            repo,
-            number,
-            &self.conversation_etags,
-            &self.conversation_body_cache,
-        )
-        .await;
+        let issue_comments =
+            fetch_issue_comments(client, owner, repo, number, &self.etags, &self.body_cache).await;
+        let review_comments =
+            fetch_review_comments(client, owner, repo, number, &self.etags, &self.body_cache).await;
+        let reviews =
+            fetch_reviews(client, owner, repo, number, &self.etags, &self.body_cache).await;
 
-        let mut failed: Vec<&str> = Vec::new();
-        if issue_comments.is_none() {
-            failed.push("issue comments");
-        }
-        if review_comments.is_none() {
-            failed.push("review comments");
-        }
-        if reviews.is_none() {
-            failed.push("reviews");
+        // A conversation endpoint has three outcomes, not two. Beyond
+        // "failed" (nothing came back) there is "served from cache after a
+        // non-2xx" — threads that were current at some earlier poll, handed
+        // over as if they were current now. `conversation_error` is where
+        // this snapshot already says its threads are not to be trusted as
+        // complete, so it is where a stale set belongs too.
+        fn take<T>(
+            slot: Option<(Vec<T>, BodyFreshness)>,
+            what: &'static str,
+            failed: &mut Vec<&'static str>,
+            degraded: &mut Vec<String>,
+        ) -> Vec<T> {
+            match slot {
+                Some((items, freshness)) => {
+                    if let Some(reason) = freshness.degraded_reason(what) {
+                        degraded.push(reason);
+                    }
+                    items
+                }
+                None => {
+                    failed.push(what);
+                    Vec::new()
+                }
+            }
         }
 
+        let mut failed: Vec<&'static str> = Vec::new();
+        let mut degraded: Vec<String> = Vec::new();
         let threads = assemble_threads(
-            issue_comments.unwrap_or_default(),
-            review_comments.unwrap_or_default(),
-            reviews.unwrap_or_default(),
+            take(issue_comments, "issue comments", &mut failed, &mut degraded),
+            take(
+                review_comments,
+                "review comments",
+                &mut failed,
+                &mut degraded,
+            ),
+            take(reviews, "reviews", &mut failed, &mut degraded),
         );
 
-        let error = if failed.is_empty() {
-            None
-        } else {
-            Some(format!(
+        let mut parts: Vec<String> = Vec::new();
+        if !failed.is_empty() {
+            parts.push(format!(
                 "conversation fetch partially failed: {}",
                 failed.join(", ")
-            ))
-        };
+            ));
+        }
+        parts.extend(degraded);
+        let error = (!parts.is_empty()).then(|| parts.join("; "));
 
         ConversationFetch { threads, error }
     }
@@ -448,10 +694,6 @@ impl PerriPrNativeSource {
         Ok(())
     }
 
-    fn current_pr_path(&self) -> PathBuf {
-        self.config.perri_state_dir().join("current-pr.json")
-    }
-
     fn build_client(&self) -> Result<GithubClient> {
         GithubClient::new(self.config.github_token_path.as_deref())
     }
@@ -459,69 +701,147 @@ impl PerriPrNativeSource {
 
 // ── Raw diff fetch ────────────────────────────────────────────────────────────
 
-async fn fetch_diff(client: &GithubClient, owner: &str, repo: &str, number: u64) -> Result<String> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
-
-    let resp = client
-        .http
-        .get(&url)
-        .header(ACCEPT, "application/vnd.github.diff")
-        .header(AUTHORIZATION, format!("Bearer {}", client.token()))
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
+/// Fetch the PR's raw unified diff — conditionally (W7/D5.1).
+///
+/// This is the single most expensive request in a poll cycle: an uncached
+/// response is the whole diff body, up to [`MAX_DIFF_BYTES`]. Sending
+/// `If-None-Match` turns the steady state (a PR nobody has pushed to since the
+/// last poll) into a 304 with no body at all, which is what makes running one
+/// of these per focus affordable rather than reckless.
+///
+/// Returns the [`FetchedBody`], not just the diff text: on a non-2xx
+/// `etag_get_as` serves the last cached diff rather than failing, and the
+/// caller has to know that happened before it stamps a `generated_at` on the
+/// snapshot it builds.
+async fn fetch_diff(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Result<FetchedBody> {
+    let url = diff_url(owner, repo, number);
+    etag_get_as(client, &url, GITHUB_DIFF_ACCEPT, etags, body_cache)
         .await
-        .context("fetching PR diff")?;
+        .map_err(|e| anyhow::anyhow!("diff fetch {e}"))
+}
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("diff fetch {url} -> {status}: {body}");
+/// The URL a PR's raw diff is read from. Shared with [`live_url_prefixes`] so the
+/// cache-pruning set can't drift from what the fetch actually keys on.
+fn diff_url(owner: &str, repo: &str, number: u64) -> String {
+    format!("{}/repos/{owner}/{repo}/pulls/{number}", api_base())
+}
+
+/// The URL prefix every read keyed on a PR's head SHA falls under.
+/// [`check_runs_url`] is built *from* this and [`live_url_prefixes`] returns
+/// it verbatim, so the pruning prefix cannot drift from the fetched URL.
+fn head_sha_prefix(owner: &str, repo: &str, head_sha: &str) -> String {
+    format!("{}/repos/{owner}/{repo}/commits/{head_sha}/", api_base())
+}
+
+/// The URL prefix a PR's issue-comment reads fall under. Shared with
+/// [`live_url_prefixes`], same reason as [`diff_url`].
+fn issue_comments_prefix(owner: &str, repo: &str, number: u64) -> String {
+    format!("{}/repos/{owner}/{repo}/issues/{number}/", api_base())
+}
+
+/// The URL a head SHA's check-runs are read from.
+fn check_runs_url(owner: &str, repo: &str, head_sha: &str) -> String {
+    format!(
+        "{}check-runs?per_page=100",
+        head_sha_prefix(owner, repo, head_sha)
+    )
+}
+
+/// The URL prefixes a live pin's conditional GETs fall under, for
+/// [`crate::data::perri_queue_native::prune_etag_caches`].
+///
+/// Prefixes, not exact URLs: `/pulls/{n}` covers the raw diff, the review
+/// comments and the reviews; `/issues/{n}/` covers the issue comments. A
+/// future endpoint added under either is cached correctly without this
+/// function being touched.
+///
+/// The check-runs prefix needs the head SHA, which only a fetched snapshot
+/// knows — so it comes from `previous`. A pin whose PR has never been fetched
+/// simply contributes no check-runs prefix, which prunes nothing that exists.
+///
+/// Every prefix below is produced by the *same* function the corresponding
+/// fetch keys on ([`diff_url`], [`issue_comments_prefix`],
+/// [`head_sha_prefix`]) rather than re-spelled here. Those three doc comments
+/// have long claimed to be "shared with `live_url_prefixes`" while this
+/// function hand-rolled the identical strings beside them — a claim whose
+/// failure mode is silent: one edited format string prunes every entry, every
+/// request goes uncached, and nothing shows but the rate-limit bill.
+fn live_url_prefixes(repo: &str, number: u64, previous: &PrSnapshots) -> Vec<String> {
+    let Ok((owner, name)) = split_repo(repo) else {
+        return Vec::new();
+    };
+    let mut prefixes = vec![
+        // Covers the raw diff itself plus `/pulls/{n}/comments` (review
+        // comments) and `/pulls/{n}/reviews` — all three sit under it.
+        diff_url(&owner, &name, number),
+        issue_comments_prefix(&owner, &name, number),
+    ];
+    for snap in previous.values() {
+        if snap.repo == repo && snap.pr_number == Some(number) && !snap.head_sha.is_empty() {
+            prefixes.push(head_sha_prefix(&owner, &name, &snap.head_sha));
+        }
     }
-
-    resp.text().await.context("reading diff body")
+    prefixes
 }
 
 // ── CI check-runs fetch ───────────────────────────────────────────────────────
 
 /// Fetch check-runs for the PR head SHA and build the `CiCheck` list.
 /// On any error, logs a warning and returns an empty vec (diff is primary).
+///
+/// The [`BodyFreshness`] rides along so `fetch_pr` can tell a current
+/// check-runs list from one served out of the cache after a failed refresh.
+/// An outright failure needs no such signal — it yields an empty list, which
+/// already reads as "unknown" — but a stale list is indistinguishable from a
+/// current one unless this says so.
 async fn fetch_ci_checks(
     client: &GithubClient,
     owner: &str,
     repo: &str,
     head_sha: &str,
-) -> Vec<CiCheck> {
-    let url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs?per_page=100"
-    );
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> (Vec<CiCheck>, BodyFreshness) {
+    let url = check_runs_url(owner, repo, head_sha);
 
-    let resp = client
-        .http
-        .get(&url)
-        .header(ACCEPT, "application/vnd.github+json")
-        .header(AUTHORIZATION, format!("Bearer {}", client.token()))
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await;
-
-    let resp = match resp {
-        Ok(r) => r,
+    // Conditional (W7/D5.1): `?per_page=100` of check-runs is the second
+    // biggest response in the cycle and it is unchanged on most polls — a
+    // finished CI run's check-runs list never changes again.
+    let fetched = match etag_get_as(client, &url, GITHUB_JSON_ACCEPT, etags, body_cache).await {
+        Ok(fetched) => fetched,
         Err(e) => {
-            warn!("check-runs fetch failed: {e:#}");
-            return vec![];
+            warn!("check-runs fetch failed: {e}");
+            // `Fresh` here is a **sentinel for "add no degraded reason"**, not
+            // a claim that a 2xx happened — no response and no body exist on
+            // this path. It is deliberate: an outright CI-checks failure
+            // yields the empty list below, which already reads as "unknown",
+            // and a CI outage must not invalidate an otherwise-good diff by
+            // marking the whole snapshot stale. That is a different case from
+            // the `CachedAfterFailure` that `etag_get_as` propagates up, which
+            // *is* dishonest if unreported and *does* mark the snapshot stale.
+            // Abusing `Fresh` against its documented meaning ("A 2xx. This
+            // body is the endpoint's current answer.") is the cost; returning
+            // `Option<(Vec<CiCheck>, BodyFreshness)>` instead is filed as a
+            // follow-up rather than done here.
+            return (vec![], BodyFreshness::Fresh);
         }
     };
+    let freshness = fetched.freshness;
 
-    if !resp.status().is_success() {
-        warn!("check-runs fetch non-2xx: {}", resp.status());
-        return vec![];
-    }
-
-    let body: CheckRunsResponse = match resp.json().await {
+    let body: CheckRunsResponse = match serde_json::from_str(&fetched.body) {
         Ok(b) => b,
         Err(e) => {
             warn!("check-runs parse failed: {e:#}");
-            return vec![];
+            // Same sentinel, same reason as the fetch-error arm above: an
+            // unparseable body yields "unknown", not "the diff is stale".
+            return (vec![], BodyFreshness::Fresh);
         }
     };
 
@@ -539,7 +859,7 @@ async fn fetch_ci_checks(
             detail,
         });
     }
-    checks
+    (checks, freshness)
 }
 
 /// Fetch the failure log for a failing check-run (D3).
@@ -690,18 +1010,41 @@ struct RawReview {
 /// body as a list of `T`. The three D3 fetches (`fetch_issue_comments`,
 /// `fetch_review_comments`, `fetch_reviews`) differ only in `path` and the
 /// element type they deserialize into, so this is the one place that shape
-/// is spelled: a failed `etag_get` (network error, non-2xx/304) or a body
-/// that doesn't parse as `Vec<T>` both collapse to `None`, which
-/// `fetch_conversation` already treats as "this endpoint failed".
+/// is spelled: a failed fetch (network error, non-2xx/304 with nothing
+/// cached) or a body that doesn't parse as `Vec<T>` both collapse to `None`,
+/// which `fetch_conversation` already treats as "this endpoint failed".
+///
+/// The [`BodyFreshness`] comes back with the parsed list because "failed" and
+/// "succeeded" are not the only two outcomes: a non-2xx whose body cache has
+/// a hit returns the *previous* poll's threads, and presenting those as the
+/// complete current conversation is the same class of lie the diff had.
+/// Being the single funnel for all three endpoints is what makes recording
+/// that one edit rather than three.
 async fn fetch_conversation_page<T: serde::de::DeserializeOwned>(
     client: &GithubClient,
     path: &str,
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> Option<Vec<T>> {
+) -> Option<(Vec<T>, BodyFreshness)> {
     let url = format!("{}{path}", api_base());
-    let body = etag_get(client, &url, etags, body_cache).await?;
-    serde_json::from_str(&body).ok()
+    fetch_conversation_page_url(client, &url, etags, body_cache).await
+}
+
+/// [`fetch_conversation_page`] for a caller that already holds the absolute
+/// URL — used where the URL is built from a shared prefix helper rather than
+/// spelled as a path, so `live_url_prefixes` and the fetch cannot drift.
+async fn fetch_conversation_page_url<T: serde::de::DeserializeOwned>(
+    client: &GithubClient,
+    url: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<(Vec<T>, BodyFreshness)> {
+    let fetched = etag_get_as(client, url, GITHUB_JSON_ACCEPT, etags, body_cache)
+        .await
+        .map_err(|e| debug!("conversation fetch failed: {e}"))
+        .ok()?;
+    let parsed = serde_json::from_str(&fetched.body).ok()?;
+    Some((parsed, fetched.freshness))
 }
 
 async fn fetch_issue_comments(
@@ -711,9 +1054,14 @@ async fn fetch_issue_comments(
     number: u64,
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> Option<Vec<RawIssueComment>> {
-    let path = format!("/repos/{owner}/{repo}/issues/{number}/comments?per_page=100");
-    fetch_conversation_page(client, &path, etags, body_cache).await
+) -> Option<(Vec<RawIssueComment>, BodyFreshness)> {
+    // Built from the same helper `live_url_prefixes` prunes on, so the two
+    // cannot drift.
+    let url = format!(
+        "{}comments?per_page=100",
+        issue_comments_prefix(owner, repo, number)
+    );
+    fetch_conversation_page_url(client, &url, etags, body_cache).await
 }
 
 async fn fetch_review_comments(
@@ -723,7 +1071,7 @@ async fn fetch_review_comments(
     number: u64,
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> Option<Vec<RawReviewComment>> {
+) -> Option<(Vec<RawReviewComment>, BodyFreshness)> {
     let path = format!("/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100");
     fetch_conversation_page(client, &path, etags, body_cache).await
 }
@@ -735,7 +1083,7 @@ async fn fetch_reviews(
     number: u64,
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> Option<Vec<RawReview>> {
+) -> Option<(Vec<RawReview>, BodyFreshness)> {
     let path = format!("/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100");
     fetch_conversation_page(client, &path, etags, body_cache).await
 }
@@ -869,7 +1217,13 @@ fn assemble_inline_threads(review_comments: Vec<RawReviewComment>) -> Vec<PrThre
             .find(|c| c.id == root)
             .or_else(|| comments.first());
         let (path, line, diff_hunk) = anchor
-            .map(|c| (c.path.clone(), c.line.or(c.original_line), c.diff_hunk.clone()))
+            .map(|c| {
+                (
+                    c.path.clone(),
+                    c.line.or(c.original_line),
+                    c.diff_hunk.clone(),
+                )
+            })
             .unwrap_or((None, None, None));
 
         threads.push(PrThread {
@@ -1025,7 +1379,9 @@ mod tests {
     fn issue_comment(id: u64, author: &str, created_at: &str, body: &str) -> RawIssueComment {
         RawIssueComment {
             id,
-            user: Some(RawGhUser { login: author.to_string() }),
+            user: Some(RawGhUser {
+                login: author.to_string(),
+            }),
             created_at: created_at.parse().unwrap(),
             body: Some(body.to_string()),
         }
@@ -1034,7 +1390,9 @@ mod tests {
     fn review(id: u64, author: &str, submitted_at: Option<&str>, body: Option<&str>) -> RawReview {
         RawReview {
             id,
-            user: Some(RawGhUser { login: author.to_string() }),
+            user: Some(RawGhUser {
+                login: author.to_string(),
+            }),
             submitted_at: submitted_at.map(|s| s.parse().unwrap()),
             body: body.map(str::to_string),
             state: "APPROVED".to_string(),
@@ -1045,7 +1403,9 @@ mod tests {
     fn pending_review(id: u64, author: &str, body: Option<&str>) -> RawReview {
         RawReview {
             id,
-            user: Some(RawGhUser { login: author.to_string() }),
+            user: Some(RawGhUser {
+                login: author.to_string(),
+            }),
             submitted_at: None,
             body: body.map(str::to_string),
             state: "PENDING".to_string(),
@@ -1070,7 +1430,9 @@ mod tests {
             line,
             original_line,
             diff_hunk: diff_hunk.map(str::to_string),
-            user: Some(RawGhUser { login: author.to_string() }),
+            user: Some(RawGhUser {
+                login: author.to_string(),
+            }),
             created_at: created_at.parse().unwrap(),
             body: Some(format!("comment {id}")),
         }
@@ -1096,7 +1458,12 @@ mod tests {
         let threads = assemble_threads(
             vec![],
             vec![],
-            vec![review(1, "bob", Some("2024-01-01T00:00:00Z"), Some("looks good"))],
+            vec![review(
+                1,
+                "bob",
+                Some("2024-01-01T00:00:00Z"),
+                Some("looks good"),
+            )],
         );
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "review-1");
@@ -1151,8 +1518,26 @@ mod tests {
     #[test]
     fn a_straightforward_reply_chain_groups_into_one_thread_rooted_at_the_top_level_comment() {
         // A (top-level) at 10:00, B (reply to A) at 10:05.
-        let a = review_comment(1, None, Some("src/main.rs"), Some(10), None, Some("@@ hunk @@"), "alice", "2024-01-01T10:00:00Z");
-        let b = review_comment(2, Some(1), None, None, None, None, "bob", "2024-01-01T10:05:00Z");
+        let a = review_comment(
+            1,
+            None,
+            Some("src/main.rs"),
+            Some(10),
+            None,
+            Some("@@ hunk @@"),
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
+        let b = review_comment(
+            2,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            "bob",
+            "2024-01-01T10:05:00Z",
+        );
         let threads = assemble_inline_threads(vec![a, b]);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "inline-1");
@@ -1164,13 +1549,22 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_whose_in_reply_to_id_is_not_present_in_the_payload_becomes_its_own_thread_never_dropped()
-    {
+    fn a_reply_whose_in_reply_to_id_is_not_present_in_the_payload_becomes_its_own_thread_never_dropped(
+    ) {
         // The highest-risk case per the plan: comment 99 replies to comment 1,
         // but comment 1 was never fetched (predates this page, or was
         // filtered out upstream). Comment 99 must become its own thread's
         // root — not be silently dropped.
-        let orphan = review_comment(99, Some(1), Some("src/main.rs"), Some(20), None, Some("@@ hunk @@"), "carol", "2024-01-01T11:00:00Z");
+        let orphan = review_comment(
+            99,
+            Some(1),
+            Some("src/main.rs"),
+            Some(20),
+            None,
+            Some("@@ hunk @@"),
+            "carol",
+            "2024-01-01T11:00:00Z",
+        );
         let threads = assemble_inline_threads(vec![orphan]);
         assert_eq!(
             threads.len(),
@@ -1184,8 +1578,26 @@ mod tests {
 
     #[test]
     fn two_independent_orphans_pointing_at_the_same_missing_parent_become_two_separate_threads() {
-        let orphan_a = review_comment(101, Some(5), Some("src/a.rs"), Some(1), None, None, "alice", "2024-01-01T10:00:00Z");
-        let orphan_b = review_comment(102, Some(5), Some("src/b.rs"), Some(2), None, None, "bob", "2024-01-01T10:01:00Z");
+        let orphan_a = review_comment(
+            101,
+            Some(5),
+            Some("src/a.rs"),
+            Some(1),
+            None,
+            None,
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
+        let orphan_b = review_comment(
+            102,
+            Some(5),
+            Some("src/b.rs"),
+            Some(2),
+            None,
+            None,
+            "bob",
+            "2024-01-01T10:01:00Z",
+        );
         let threads = assemble_inline_threads(vec![orphan_a, orphan_b]);
         assert_eq!(
             threads.len(),
@@ -1196,14 +1608,36 @@ mod tests {
         assert!(ids.contains("inline-101"));
         assert!(ids.contains("inline-102"));
         for t in &threads {
-            assert_eq!(t.comments.len(), 1, "each orphan's thread carries only itself");
+            assert_eq!(
+                t.comments.len(),
+                1,
+                "each orphan's thread carries only itself"
+            );
         }
     }
 
     #[test]
     fn a_threads_path_line_and_diff_hunk_come_from_the_root_comment() {
-        let root = review_comment(1, None, Some("src/main.rs"), Some(10), None, Some("@@ -1,3 +1,3 @@"), "alice", "2024-01-01T10:00:00Z");
-        let reply = review_comment(2, Some(1), None, None, None, None, "bob", "2024-01-01T10:05:00Z");
+        let root = review_comment(
+            1,
+            None,
+            Some("src/main.rs"),
+            Some(10),
+            None,
+            Some("@@ -1,3 +1,3 @@"),
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
+        let reply = review_comment(
+            2,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            "bob",
+            "2024-01-01T10:05:00Z",
+        );
         let threads = assemble_inline_threads(vec![root, reply]);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].path.as_deref(), Some("src/main.rs"));
@@ -1216,7 +1650,16 @@ mod tests {
         // Matches a GitHub "outdated" inline comment: `line` is null once the
         // diff has moved on, but `original_line` still names where the
         // comment was anchored.
-        let root = review_comment(1, None, Some("src/main.rs"), None, Some(7), Some("@@ hunk @@"), "alice", "2024-01-01T10:00:00Z");
+        let root = review_comment(
+            1,
+            None,
+            Some("src/main.rs"),
+            None,
+            Some(7),
+            Some("@@ hunk @@"),
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
         let threads = assemble_inline_threads(vec![root]);
         assert_eq!(threads.len(), 1);
         assert_eq!(
@@ -1229,9 +1672,36 @@ mod tests {
     #[test]
     fn comment_ordering_within_a_thread_is_chronological_and_tie_broken_by_id_deterministically() {
         // b and c share an identical timestamp; only id order can break the tie.
-        let a = review_comment(1, None, Some("f.rs"), Some(1), None, None, "alice", "2024-01-01T10:00:00Z");
-        let c = review_comment(3, Some(1), None, None, None, None, "carol", "2024-01-01T10:05:00Z");
-        let b = review_comment(2, Some(1), None, None, None, None, "bob", "2024-01-01T10:05:00Z");
+        let a = review_comment(
+            1,
+            None,
+            Some("f.rs"),
+            Some(1),
+            None,
+            None,
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
+        let c = review_comment(
+            3,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            "carol",
+            "2024-01-01T10:05:00Z",
+        );
+        let b = review_comment(
+            2,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            "bob",
+            "2024-01-01T10:05:00Z",
+        );
 
         // Feed in a shuffled order — the output order must not depend on input order.
         let threads = assemble_inline_threads(vec![c.clone(), a.clone(), b.clone()]);
@@ -1267,7 +1737,8 @@ mod tests {
         )
         .unwrap();
         std::env::remove_var("GITHUB_TOKEN");
-        let client = GithubClient::new(Some(&hosts_path)).expect("client should build from hosts.yml fixture");
+        let client = GithubClient::new(Some(&hosts_path))
+            .expect("client should build from hosts.yml fixture");
         // Keep the tempdir alive for the client's lifetime (it only reads the
         // file once at construction, so leaking is fine for a short-lived test).
         std::mem::forget(dir);
@@ -1275,7 +1746,7 @@ mod tests {
     }
 
     fn test_source() -> PerriPrNativeSource {
-        PerriPrNativeSource::new(Config::default())
+        PerriPrNativeSource::new(Config::default(), None)
     }
 
     async fn mount_conversation_mocks(
@@ -1288,7 +1759,9 @@ mod tests {
         use wiremock::{Mock, ResponseTemplate};
 
         Mock::given(method("GET"))
-            .and(path(format!("/repos/{owner}/{repo}/issues/{number}/comments")))
+            .and(path(format!(
+                "/repos/{owner}/{repo}/issues/{number}/comments"
+            )))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {
                     "id": 1,
@@ -1302,7 +1775,9 @@ mod tests {
             .await;
 
         Mock::given(method("GET"))
-            .and(path(format!("/repos/{owner}/{repo}/pulls/{number}/comments")))
+            .and(path(format!(
+                "/repos/{owner}/{repo}/pulls/{number}/comments"
+            )))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {
                     "id": 2,
@@ -1321,7 +1796,9 @@ mod tests {
             .await;
 
         Mock::given(method("GET"))
-            .and(path(format!("/repos/{owner}/{repo}/pulls/{number}/reviews")))
+            .and(path(format!(
+                "/repos/{owner}/{repo}/pulls/{number}/reviews"
+            )))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {
                     "id": 3,
@@ -1336,8 +1813,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_conversation_with_all_three_endpoints_succeeding_produces_no_error_and_the_expected_threads()
-    {
+    async fn fetch_conversation_with_all_three_endpoints_succeeding_produces_no_error_and_the_expected_threads(
+    ) {
         use wiremock::MockServer;
 
         let server = MockServer::start().await;
@@ -1350,8 +1827,15 @@ mod tests {
         let source = test_source();
         let result = source.fetch_conversation(&client, "acme", "web", 42).await;
 
-        assert!(result.error.is_none(), "all three fetches succeeded — error must be None");
-        assert_eq!(result.threads.len(), 3, "one issue, one inline, one review thread");
+        assert!(
+            result.error.is_none(),
+            "all three fetches succeeded — error must be None"
+        );
+        assert_eq!(
+            result.threads.len(),
+            3,
+            "one issue, one inline, one review thread"
+        );
         let kinds: Vec<PrThreadKind> = result.threads.iter().map(|t| t.kind).collect();
         assert!(kinds.contains(&PrThreadKind::Issue));
         assert!(kinds.contains(&PrThreadKind::Inline));
@@ -1359,8 +1843,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_conversation_with_review_comments_failing_still_returns_the_other_two_threads_and_names_the_failure()
-    {
+    async fn fetch_conversation_with_review_comments_failing_still_returns_the_other_two_threads_and_names_the_failure(
+    ) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1454,9 +1938,11 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/repos/acme/web/pulls/42/comments"))
-            .respond_with(ResponseTemplate::new(200).insert_header("ETag", "\"rc-etag-1\"").set_body_json(
-                serde_json::json!([]),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"rc-etag-1\"")
+                    .set_body_json(serde_json::json!([])),
+            )
             .up_to_n_times(1)
             .expect(1)
             .mount(&server)
@@ -1523,5 +2009,1321 @@ mod tests {
         // fresh, uncached request went out instead), the "second call" mocks
         // would never have been hit and this would panic on drop.
         server.verify().await;
+    }
+
+    // ── the two expensive calls are conditional (W7 — D5.1) ─────────────────
+    //
+    // The rate-limit regression guard. Before W7 the raw diff (up to
+    // MAX_DIFF_BYTES) and check-runs went out uncached on every poll, so a
+    // cycle cost >=3 uncached requests per PR and there was exactly one PR.
+    // Per-focus isolation multiplies that by the number of focuses holding a
+    // pin, against a 5000/hr limit the queue source is already spending from —
+    // this repo has three separate documented fixes for that exact failure
+    // (docs/perri-rl-fix-1.md, -2.md, -3.md).
+    //
+    // A refactor that drops either `etag_get_as` call is silent: everything
+    // still works, and the only symptom is rate-limit exhaustion in
+    // production. Hence a test that asserts on what actually goes out on the
+    // wire.
+
+    /// The diff and check-runs requests of a second poll against unchanged
+    /// data must carry `If-None-Match`, and the 304 must still yield the
+    /// cached content rather than a blanked snapshot.
+    #[tokio::test]
+    async fn a_second_poll_sends_conditional_gets_for_the_diff_and_the_check_runs() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        const HEAD: &str = "abc123";
+        const DIFF: &str = "diff --git a/src/main.rs b/src/main.rs\n+hello\n";
+
+        // The raw diff — same path as the metadata call, distinguished by its
+        // Accept header, which is also what keys the ETag cache.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42"))
+            .and(header("accept", GITHUB_DIFF_ACCEPT))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"diff-etag-1\"")
+                    .set_body_string(DIFF),
+            )
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42"))
+            .and(header("accept", GITHUB_DIFF_ACCEPT))
+            .and(header("if-none-match", "\"diff-etag-1\""))
+            .respond_with(ResponseTemplate::new(304))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // check-runs for the head SHA.
+        let checks = serde_json::json!({
+            "total_count": 1,
+            "check_runs": [
+                { "id": 7, "name": "build", "status": "completed",
+                  "conclusion": "success",
+                  "app": { "slug": "circleci" } }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/acme/web/commits/{HEAD}/check-runs")))
+            .and(query_param("per_page", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"checks-etag-1\"")
+                    .set_body_json(checks),
+            )
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/acme/web/commits/{HEAD}/check-runs")))
+            .and(query_param("per_page", "100"))
+            .and(header("if-none-match", "\"checks-etag-1\""))
+            .respond_with(ResponseTemplate::new(304))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        mount_conversation_mocks(&server, "acme", "web", 42).await;
+
+        // PR metadata — octocrab, unconditional by design, and mounted *last*
+        // so it acts as the fallback for `/pulls/42`. The diff shares that
+        // path and is distinguished only by its `Accept` header (which is
+        // also what keys its ETag cache), so the specific diff mocks above
+        // must be offered the request first.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "url": "https://api.github.com/repos/acme/web/pulls/42",
+                "id": 1001, "node_id": "PR_1001",
+                "number": 42, "title": "Add widget", "state": "open",
+                "user": {
+                    "login": "alice", "id": 1, "node_id": "U_1",
+                    "avatar_url": "https://example.com/a.png",
+                    "gravatar_id": "", "url": "https://api.github.com/users/alice",
+                    "html_url": "https://github.com/alice",
+                    "followers_url": "https://api.github.com/users/alice/followers",
+                    "following_url": "https://api.github.com/users/alice/following{/other_user}",
+                    "gists_url": "https://api.github.com/users/alice/gists{/gist_id}",
+                    "starred_url": "https://api.github.com/users/alice/starred{/owner}{/repo}",
+                    "subscriptions_url": "https://api.github.com/users/alice/subscriptions",
+                    "organizations_url": "https://api.github.com/users/alice/orgs",
+                    "repos_url": "https://api.github.com/users/alice/repos",
+                    "events_url": "https://api.github.com/users/alice/events{/privacy}",
+                    "received_events_url": "https://api.github.com/users/alice/received_events",
+                    "type": "User", "site_admin": false
+                },
+                "html_url": "https://github.com/acme/web/pull/42",
+                "additions": 10, "deletions": 2, "changed_files": 3,
+                "head": { "sha": HEAD, "label": "acme:feature", "ref": "feature" },
+                "base": { "sha": "def456", "label": "acme:main", "ref": "main" },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_pointed_at(&server.uri());
+        // The *same* source across both passes — its ETag cache is what makes
+        // the second pass conditional.
+        let source = test_source();
+
+        let first = source.fetch_pr(&client, "acme/web", 42).await.unwrap();
+        assert_eq!(first.diff, DIFF);
+        assert_eq!(
+            first.ci_checks.len(),
+            1,
+            "the first pass must see the check"
+        );
+
+        let second = source.fetch_pr(&client, "acme/web", 42).await.unwrap();
+        assert_eq!(
+            second.diff, DIFF,
+            "a 304 must serve the cached diff body, not blank it — a pane \
+             rendering an empty diff because nothing changed is the failure \
+             this whole path exists to avoid"
+        );
+        assert_eq!(
+            second.ci_checks.len(),
+            1,
+            "a 304 must serve the cached check-runs, not drop them"
+        );
+
+        // A steady-state poll is *not* degraded. `NotModified` and
+        // `CachedAfterFailure` sit one match arm apart in `degraded_reason`,
+        // and folding the former in with the latter would make every
+        // unchanged poll — the overwhelmingly common case — publish
+        // `stale: true` with no `generated_at`, painting a permanent
+        // badly-stale badge over a review that is perfectly current. That is
+        // a worse lie than the one the degraded path exists to prevent, so it
+        // is pinned here rather than left implied by the assertions above.
+        assert!(
+            !second.stale,
+            "a 304 is the endpoint answering 'unchanged' — as current as a 200, and free. \
+             Treating it as degraded marks every steady-state poll stale"
+        );
+        assert!(
+            second.error.is_none(),
+            "nothing went wrong on this poll: both conditional GETs were answered. Got: {:?}",
+            second.error
+        );
+        assert!(
+            second.generated_at.is_some(),
+            "a poll whose reads were all answered was fetched successfully and must be able to \
+             say when — dropping `generated_at` here reads as 'never fetched successfully'"
+        );
+
+        // Each `.expect(1)` is verified on teardown: if either conditional GET
+        // had not fired — an uncached request going out instead — its mock
+        // would be unmatched and the unconditional mock would have been hit
+        // twice, failing both counts.
+        server.verify().await;
+    }
+
+    // ── the poll dedupes by (repo, number), not by focus (W7 — D5) ───────────
+    //
+    // Two focuses reviewing the same PR is an ordinary state after W7 (the
+    // pickup is never gated), and the PRD's queue/traffic story only holds if
+    // N focuses on one PR cost the fetch of one. These tests drive the real
+    // `fetch_all` against a `wiremock` GitHub and count what actually went out
+    // on the wire — never a wall-clock or a timing window.
+
+    /// A `GithubClient` whose *every* path — octocrab's typed calls and the
+    /// raw ETag'd ones — lands on `base`. `API_BASE_OVERRIDE` only redirects
+    /// the latter, so a client built the production way would still send the
+    /// PR-metadata call to api.github.com.
+    fn client_pointed_at(base: &str) -> GithubClient {
+        let octocrab = octocrab::Octocrab::builder()
+            .base_uri(base)
+            .expect("wiremock's uri is a valid base uri")
+            .personal_token("test-token".to_string())
+            .build()
+            .expect("octocrab client should build");
+        GithubClient {
+            octocrab,
+            http: reqwest::Client::new(),
+            token: "test-token".to_string(),
+        }
+    }
+
+    /// A source whose pins live in `dir`, with fresh (empty) ETag/body caches
+    /// so every scenario below starts from the same cold state and their
+    /// request counts are comparable.
+    fn source_pinned_at(dir: &Path) -> PerriPrNativeSource {
+        PerriPrNativeSource::new(
+            Config {
+                perri_state: Some(dir.to_path_buf()),
+                ..Config::default()
+            },
+            None,
+        )
+    }
+
+    /// Run one polling pass over `pins` (`(tag, repo, number)`) against a
+    /// throwaway mock GitHub, returning the published snapshots and how many
+    /// requests reached the server.
+    ///
+    /// Nothing is mounted: every call 404s, so `fetch_pr` fails and each pin
+    /// degrades to a stale snapshot. That is deliberate — the dedupe happens
+    /// *before* the fetch, so a failing fetch exercises exactly the same
+    /// keying while keeping the test hermetic, and the request count stays a
+    /// faithful measure of how many round trips a pass costs.
+    async fn poll_once(pins: &[(&str, &str, u64)]) -> (PrSnapshots, usize) {
+        let (snaps, requests) =
+            poll_once_with(pins, &crate::data::perri_pr::no_prs(), None, &[]).await;
+        (snaps, requests.len())
+    }
+
+    /// [`poll_once`] with the two inputs it holds fixed opened up: `previous`,
+    /// the last published generation, and `only`, the tags a targeted refresh
+    /// restricts the *fetching* to. `fetchable` names the `(repo, number,
+    /// title)`s whose fetch should actually succeed; anything not listed 404s
+    /// and degrades to a stale snapshot exactly as in [`poll_once`].
+    ///
+    /// Returns the published snapshots and every request that reached the mock
+    /// GitHub — not just how much traffic a pass cost but which PR it was
+    /// spent on, which is the only honest way to ask "was this focus really
+    /// fetched?".
+    async fn poll_once_with(
+        pins: &[(&str, &str, u64)],
+        previous: &PrSnapshots,
+        only: Option<&[&str]>,
+        fetchable: &[(&str, u64, &str)],
+    ) -> (PrSnapshots, Vec<wiremock::Request>) {
+        let server = wiremock::MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        for (repo, number, title) in fetchable {
+            mount_fetchable_pr(&server, repo, *number, title).await;
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        for (tag, repo, number) in pins {
+            perri_current_pr::write_pointer(dir.path(), tag, *number, repo, None).unwrap();
+        }
+
+        let source = source_pinned_at(dir.path());
+        let client = client_pointed_at(&server.uri());
+        let only: Option<HashSet<String>> =
+            only.map(|tags| tags.iter().map(|t| (*t).to_owned()).collect());
+        let snaps = source.fetch_all(&client, previous, only.as_ref()).await;
+        let requests = server.received_requests().await.unwrap_or_default();
+        (snaps, requests)
+    }
+
+    #[tokio::test]
+    async fn two_focuses_pinned_to_the_same_pr_cost_the_same_github_traffic_as_one() {
+        let (_, one_focus) = poll_once(&[("perri", "Carefeed/admin-portal", 4526)]).await;
+        assert!(
+            one_focus > 0,
+            "the baseline pass must actually have hit GitHub, or the comparison below is vacuous"
+        );
+
+        let (snaps, two_focuses) = poll_once(&[
+            ("perri", "Carefeed/admin-portal", 4526),
+            ("operations", "Carefeed/admin-portal", 4526),
+        ])
+        .await;
+
+        assert_eq!(
+            two_focuses, one_focus,
+            "a second focus pinned to the same PR must add no GitHub traffic at all"
+        );
+        assert_eq!(
+            snaps.len(),
+            2,
+            "both focuses must still be published, deduped fetch or not"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&snaps["perri"], &snaps["operations"]),
+            "the two focuses must share the one fetched snapshot, not two copies of it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_dedupe_is_keyed_on_repo_and_number_so_two_different_prs_are_two_fetches() {
+        let (_, one_focus) = poll_once(&[("perri", "Carefeed/admin-portal", 4526)]).await;
+
+        // Same repo, different number — the case a repo-keyed dedupe would
+        // wrongly collapse into one fetch, silently serving focus B focus A's
+        // PR. This is the same line the PRD draws against repo-scoping.
+        let (same_repo, same_repo_requests) = poll_once(&[
+            ("perri", "Carefeed/admin-portal", 4526),
+            ("operations", "Carefeed/admin-portal", 4527),
+        ])
+        .await;
+        assert!(
+            same_repo_requests > one_focus,
+            "two PRs in one repo are two PRs: {same_repo_requests} requests must exceed the \
+             {one_focus} a single pin costs"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&same_repo["perri"], &same_repo["operations"]),
+            "two different PRs must never share a snapshot, however close their repos"
+        );
+        assert_eq!(same_repo["perri"].pr_number, Some(4526));
+        assert_eq!(same_repo["operations"].pr_number, Some(4527));
+
+        // Different repo, same number — the mirror case, which a
+        // number-keyed dedupe would collapse.
+        let (different_repo, different_repo_requests) = poll_once(&[
+            ("perri", "Carefeed/admin-portal", 42),
+            ("operations", "Carefeed/operations", 42),
+        ])
+        .await;
+        assert!(
+            different_repo_requests > one_focus,
+            "the same number in two repos is two PRs"
+        );
+        assert_eq!(different_repo["perri"].repo, "Carefeed/admin-portal");
+        assert_eq!(different_repo["operations"].repo, "Carefeed/operations");
+    }
+
+    // ── a targeted refresh is never answered from the carry-over (W7 — D5) ───
+    //
+    // `only = Some({tag})` — what `perri.load_pr` produces when one focus
+    // picks up a PR — restricts *fetching* to that tag; every other live pin is
+    // carried over from `previous` untouched. The two paths meet when two
+    // focuses are pinned to the same PR, and the carried-over focus must not be
+    // allowed to answer the refreshed focus's question. `pins` is a `HashMap`,
+    // so which of the two `fetch_all` reaches first is arbitrary; seed the
+    // dedupe map from a carry-over and the refreshed focus is served stale data
+    // with no request going out at all. `wait_for_matching_snapshot` only looks
+    // for a matching `(repo, number)`, so `load_pr` then reports success on
+    // data up to a poll interval old — and paints the other focus's error if it
+    // had one.
+
+    const FOCUS_A: &str = "perri";
+    const FOCUS_B: &str = "operations";
+    const SHARED_REPO: &str = "Carefeed/admin-portal";
+    const SHARED_PR: u64 = 4526;
+    /// Only a snapshot that came off the wire on *this* pass carries this.
+    const FRESH_TITLE: &str = "the title this pass fetched";
+    /// Only a snapshot the previous generation left behind carries this.
+    const CARRIED_TITLE: &str = "the title the previous pass left behind";
+
+    /// A snapshot as a previous generation would hold it: stale, and titled so
+    /// that a carry-over is never mistakable for a fetch.
+    fn carried_over_snapshot(repo: &str, number: u64, error: Option<&str>) -> PrSnapshot {
+        PrSnapshot {
+            pr_number: Some(number),
+            repo: repo.to_owned(),
+            title: CARRIED_TITLE.to_owned(),
+            stale: true,
+            error: error.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    /// A published generation — the `previous` argument `fetch_all` carries
+    /// forward from. Each snapshot gets its own `Arc` so a test can tell a
+    /// carried-over pointer from a fetched one.
+    fn generation(entries: Vec<(&str, PrSnapshot)>) -> PrSnapshots {
+        Arc::new(
+            entries
+                .into_iter()
+                .map(|(tag, snap)| (tag.to_owned(), Arc::new(snap)))
+                .collect(),
+        )
+    }
+
+    /// Mount the two calls a successful `fetch_pr` cannot do without: the PR
+    /// metadata (octocrab) and the raw diff.
+    ///
+    /// Check-runs and the conversation are deliberately left unmounted — they
+    /// 404, which `fetch_pr` tolerates by design — so what this produces is a
+    /// real, successful fetch whose `title` is its fingerprint.
+    async fn mount_fetchable_pr(
+        server: &wiremock::MockServer,
+        repo: &str,
+        number: u64,
+        title: &str,
+    ) {
+        // The raw diff shares the metadata path and is told apart only by its
+        // `Accept` header, so it must be offered the request first.
+        mount_pr_diff(server, repo, number).await;
+        mount_pr_metadata(server, repo, number, title).await;
+    }
+
+    /// The body [`mount_pr_diff`] serves — a snapshot's `diff` carrying this is
+    /// one that got a real diff, from the wire or from the cache.
+    const MOUNTED_DIFF: &str = "diff --git a/src/main.rs b/src/main.rs\n+fresh\n";
+
+    /// Mount just the raw-diff half of [`mount_fetchable_pr`].
+    async fn mount_pr_diff(server: &wiremock::MockServer, repo: &str, number: u64) {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{repo}/pulls/{number}")))
+            .and(header("accept", GITHUB_DIFF_ACCEPT))
+            .respond_with(ResponseTemplate::new(200).set_body_string(MOUNTED_DIFF))
+            .mount(server)
+            .await;
+    }
+
+    /// Mount just the PR-metadata half of [`mount_fetchable_pr`], so a scenario
+    /// can let the metadata succeed while the diff fails.
+    async fn mount_pr_metadata(
+        server: &wiremock::MockServer,
+        repo: &str,
+        number: u64,
+        title: &str,
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{repo}/pulls/{number}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "url": format!("https://api.github.com/repos/{repo}/pulls/{number}"),
+                "id": 1001, "node_id": "PR_1001",
+                "number": number, "title": title, "state": "open",
+                "user": {
+                    "login": "alice", "id": 1, "node_id": "U_1",
+                    "avatar_url": "https://example.com/a.png",
+                    "gravatar_id": "", "url": "https://api.github.com/users/alice",
+                    "html_url": "https://github.com/alice",
+                    "followers_url": "https://api.github.com/users/alice/followers",
+                    "following_url": "https://api.github.com/users/alice/following{/other_user}",
+                    "gists_url": "https://api.github.com/users/alice/gists{/gist_id}",
+                    "starred_url": "https://api.github.com/users/alice/starred{/owner}{/repo}",
+                    "subscriptions_url": "https://api.github.com/users/alice/subscriptions",
+                    "organizations_url": "https://api.github.com/users/alice/orgs",
+                    "repos_url": "https://api.github.com/users/alice/repos",
+                    "events_url": "https://api.github.com/users/alice/events{/privacy}",
+                    "received_events_url": "https://api.github.com/users/alice/received_events",
+                    "type": "User", "site_admin": false
+                },
+                "html_url": format!("https://github.com/{repo}/pull/{number}"),
+                "additions": 10, "deletions": 2, "changed_files": 3,
+                "head": { "sha": "abc123", "label": "acme:feature", "ref": "feature" },
+                "base": { "sha": "def456", "label": "acme:main", "ref": "main" },
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// The path a PR's metadata and raw diff are both fetched from — the one
+    /// request whose presence proves a pin was really fetched on a pass.
+    fn pr_request_path(repo: &str, number: u64) -> String {
+        format!("/repos/{repo}/pulls/{number}")
+    }
+
+    /// Which order `fetch_all` happened to walk the two pins in on a pass.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    enum PinOrder {
+        RefreshedFirst,
+        CarriedOverFirst,
+    }
+
+    /// Drive the two-focuses-one-PR targeted refresh until *both* pin orders
+    /// have actually occurred, running `check` on every pass.
+    ///
+    /// The order cannot be forced from a test: `fetch_all` walks the pins as a
+    /// `HashMap`, whose iteration order is randomised per instance and is not
+    /// reachable from here without changing production code. Rather than
+    /// assert on whichever order chance supplied — a test that passes because
+    /// the pins happened to favour the refreshed focus guards nothing — this
+    /// *observes* which order happened and refuses to return until it has seen
+    /// each at least once. The tell is the carried-over focus: it holds the
+    /// refreshed focus's freshly fetched `Arc` only when the refreshed focus
+    /// was reached first (the `(repo, number)` dedupe then serves it), and its
+    /// own previous `Arc` only when it was reached first and carried over.
+    async fn for_both_pin_orders(
+        previous: &PrSnapshots,
+        mut check: impl FnMut(&PrSnapshots, &[wiremock::Request], PinOrder),
+    ) {
+        let mut seen: HashSet<PinOrder> = HashSet::new();
+
+        for _ in 0..64 {
+            let (snaps, requests) = poll_once_with(
+                &[
+                    (FOCUS_A, SHARED_REPO, SHARED_PR),
+                    (FOCUS_B, SHARED_REPO, SHARED_PR),
+                ],
+                previous,
+                Some(&[FOCUS_A]),
+                &[(SHARED_REPO, SHARED_PR, FRESH_TITLE)],
+            )
+            .await;
+
+            let order = if Arc::ptr_eq(&snaps[FOCUS_B], &previous[FOCUS_B]) {
+                PinOrder::CarriedOverFirst
+            } else {
+                PinOrder::RefreshedFirst
+            };
+            check(&snaps, &requests, order);
+            seen.insert(order);
+            if seen.len() == 2 {
+                return;
+            }
+        }
+
+        panic!(
+            "64 passes over two pins never produced both iteration orders (saw only {seen:?}) — \
+             the scenario this guards is the one where the carried-over focus is reached first, \
+             so a run that only ever sees {seen:?} has not tested it"
+        );
+    }
+
+    /// The headline: a focus refreshed on purpose is served this pass's fetch,
+    /// never the snapshot a co-pinned focus carried over.
+    #[tokio::test]
+    async fn a_targeted_refresh_fetches_its_focus_even_when_another_carries_over_the_same_pr() {
+        let previous = generation(vec![
+            (FOCUS_A, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+            (FOCUS_B, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+        ]);
+
+        for_both_pin_orders(&previous, |snaps, requests, order| {
+            let refreshed = &snaps[FOCUS_A];
+            assert_eq!(
+                refreshed.title, FRESH_TITLE,
+                "{order:?}: the refreshed focus must be served the snapshot this pass fetched, \
+                 not the one a co-pinned focus carried over — `load_pr` settles the moment a \
+                 snapshot with a matching (repo, number) appears, so a carried-over answer here \
+                 is a pickup that reports success on data up to a poll interval old"
+            );
+            assert!(
+                !refreshed.stale,
+                "{order:?}: a focus that was just refreshed on purpose, and whose fetch \
+                 succeeded, must not be published stale"
+            );
+
+            let pr_path = pr_request_path(SHARED_REPO, SHARED_PR);
+            assert!(
+                requests.iter().any(|r| r.url.path() == pr_path.as_str()),
+                "{order:?}: a targeted refresh must put a real request on the wire for its \
+                 focus's PR; {} request(s) went out and none of them was for {pr_path}",
+                requests.len()
+            );
+        })
+        .await;
+    }
+
+    /// The user-visible harm: another focus's failure must not be repainted as
+    /// this focus's, on a pass this focus asked for and succeeded at.
+    #[tokio::test]
+    async fn a_refreshed_focus_never_inherits_another_focuss_carried_over_error() {
+        const CARRIED_ERROR: &str = "GitHub returned 502 on the previous pass";
+
+        let previous = generation(vec![
+            (FOCUS_A, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+            (
+                FOCUS_B,
+                carried_over_snapshot(SHARED_REPO, SHARED_PR, Some(CARRIED_ERROR)),
+            ),
+        ]);
+
+        for_both_pin_orders(&previous, |snaps, _requests, order| {
+            let refreshed = &snaps[FOCUS_A];
+            assert_eq!(
+                refreshed.error, None,
+                "{order:?}: the refreshed focus's own fetch succeeded, so it must publish no \
+                 error — inheriting a co-pinned focus's stale failure paints a red pane for a \
+                 fetch that in fact went out and worked"
+            );
+            assert!(
+                !refreshed.stale,
+                "{order:?}: the refreshed focus must not inherit a co-pinned focus's staleness \
+                 either — `stale` is what the pane badges as out-of-date"
+            );
+        })
+        .await;
+    }
+
+    /// The dedupe guarantee (D5) is a property of the *fetch* path, so a
+    /// non-empty `previous` must not change it: a fleet-wide pass still costs
+    /// one round trip for two focuses on one PR, and still shares one `Arc`.
+    #[tokio::test]
+    async fn a_fleet_wide_refresh_over_a_previous_generation_still_costs_one_round_trip() {
+        let previous = generation(vec![
+            (FOCUS_A, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+            (FOCUS_B, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+        ]);
+        let fetchable = [(SHARED_REPO, SHARED_PR, FRESH_TITLE)];
+
+        let (_, one_focus) = poll_once_with(
+            &[(FOCUS_A, SHARED_REPO, SHARED_PR)],
+            &previous,
+            None,
+            &fetchable,
+        )
+        .await;
+        assert!(
+            !one_focus.is_empty(),
+            "the baseline pass must actually have hit GitHub, or the comparison below is vacuous"
+        );
+
+        let (snaps, two_focuses) = poll_once_with(
+            &[
+                (FOCUS_A, SHARED_REPO, SHARED_PR),
+                (FOCUS_B, SHARED_REPO, SHARED_PR),
+            ],
+            &previous,
+            None,
+            &fetchable,
+        )
+        .await;
+
+        assert_eq!(
+            two_focuses.len(),
+            one_focus.len(),
+            "a second focus pinned to the same PR must add no GitHub traffic, previous \
+             generation or not"
+        );
+        assert!(
+            Arc::ptr_eq(&snaps[FOCUS_A], &snaps[FOCUS_B]),
+            "two focuses on one PR must share the one fetched snapshot, not two copies of it"
+        );
+        assert_eq!(
+            snaps[FOCUS_A].title, FRESH_TITLE,
+            "a fleet-wide pass carries nothing over: both focuses must hold this pass's fetch"
+        );
+    }
+
+    /// The other direction, and the property the carry-over exists for: a
+    /// focus outside the refresh set keeps its previous snapshot and costs
+    /// nothing. Both PRs are mounted as fetchable, so a stray request would
+    /// *succeed* — this has to be caught on the wire, not by a 404 accident.
+    #[tokio::test]
+    async fn a_focus_outside_the_refresh_set_is_carried_over_without_a_request() {
+        const OTHER_PR: u64 = 4527;
+
+        let previous = generation(vec![
+            (FOCUS_A, carried_over_snapshot(SHARED_REPO, SHARED_PR, None)),
+            (FOCUS_B, carried_over_snapshot(SHARED_REPO, OTHER_PR, None)),
+        ]);
+
+        let (snaps, requests) = poll_once_with(
+            &[
+                (FOCUS_A, SHARED_REPO, SHARED_PR),
+                (FOCUS_B, SHARED_REPO, OTHER_PR),
+            ],
+            &previous,
+            Some(&[FOCUS_A]),
+            &[
+                (SHARED_REPO, SHARED_PR, FRESH_TITLE),
+                (SHARED_REPO, OTHER_PR, FRESH_TITLE),
+            ],
+        )
+        .await;
+
+        assert!(
+            Arc::ptr_eq(&snaps[FOCUS_B], &previous[FOCUS_B]),
+            "a focus outside the refresh set must carry its previous snapshot forward unchanged \
+             — republishing a new pointer for it makes every downstream `changed_tags` reader \
+             refetch a focus nothing happened to"
+        );
+
+        let other_path = pr_request_path(SHARED_REPO, OTHER_PR);
+        assert!(
+            !requests.iter().any(|r| r.url.path() == other_path.as_str()),
+            "a targeted refresh must spend no GitHub traffic on the focuses it did not target; \
+             {other_path} was requested anyway"
+        );
+
+        assert_eq!(
+            snaps[FOCUS_A].title, FRESH_TITLE,
+            "the targeted focus must still be fetched — carrying over its neighbour must not \
+             cost it its own refresh"
+        );
+    }
+
+    // ── a failed diff fetch is never published as fresh (W7 — D5.1) ─────────
+    //
+    // The raw-diff read falls back to the last good cached body when GitHub
+    // answers non-2xx, so one bad poll — a 500, a secondary rate limit, a
+    // token that expired between passes — never blanks a diff the daemon
+    // already has. That fallback is deliberate and stays.
+    //
+    // What it must not do is dress the result up as a live read. The incident
+    // this whole change came out of was a detail region quietly showing stale
+    // content with nothing on screen to say so; a snapshot assembled around a
+    // diff that did not come off the wire is exactly that, and the operator
+    // has no way to tell. So: serve the cached body, and say it is stale.
+
+    /// Warm the diff cache with one wholly successful pass, then re-poll with
+    /// the diff read answering `failure_status` — the metadata still 200, so
+    /// the diff is unambiguously the thing that failed. Returns the snapshot
+    /// published for the pin on that second pass.
+    async fn snapshot_after_the_diff_read_fails_with(failure_status: u16) -> Arc<PrSnapshot> {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        perri_current_pr::write_pointer(dir.path(), FOCUS_A, SHARED_PR, SHARED_REPO, None).unwrap();
+
+        // One source across both passes: the caches it carries between them
+        // are what make the second pass a cache fallback rather than a cold
+        // miss, which is the whole situation under test.
+        let source = source_pinned_at(dir.path());
+        let client = client_pointed_at(&server.uri());
+
+        mount_fetchable_pr(&server, SHARED_REPO, SHARED_PR, FRESH_TITLE).await;
+        let warm = source
+            .fetch_all(&client, &crate::data::perri_pr::no_prs(), None)
+            .await;
+        assert!(
+            warm[FOCUS_A].diff.contains(MOUNTED_DIFF),
+            "the warm-up pass must really have read a diff, or the fallback below proves nothing"
+        );
+        assert!(
+            !warm[FOCUS_A].stale && warm[FOCUS_A].error.is_none(),
+            "a pass where everything succeeded publishes a fresh, error-free snapshot"
+        );
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(pr_request_path(SHARED_REPO, SHARED_PR)))
+            .and(header("accept", GITHUB_DIFF_ACCEPT))
+            .respond_with(ResponseTemplate::new(failure_status))
+            .mount(&server)
+            .await;
+        mount_pr_metadata(&server, SHARED_REPO, SHARED_PR, FRESH_TITLE).await;
+
+        let after = source.fetch_all(&client, &warm, None).await;
+        Arc::clone(&after[FOCUS_A])
+    }
+
+    /// Assert the two halves of the contract at once: the operator still sees
+    /// the diff, and is told it is not current.
+    fn assert_cached_diff_served_but_marked_stale(snap: &PrSnapshot, what_failed: &str) {
+        assert!(
+            snap.diff.contains(MOUNTED_DIFF),
+            "{what_failed} must not blank a diff the daemon already had — the cached body is \
+             still the best answer available and must still be served, got diff: {:?}",
+            snap.diff
+        );
+        assert!(
+            snap.stale,
+            "{what_failed} means the published snapshot was not read from GitHub on this pass; \
+             publishing it as fresh is how a review silently drifts onto stale content with \
+             nothing on screen to say so"
+        );
+        assert!(
+            snap.error.is_some(),
+            "{what_failed} must be surfaced as an error on the snapshot, not swallowed — an \
+             operator has no other way to learn the diff they are reading is not current"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_diff_fetch_serves_the_cached_body_but_reports_the_snapshot_stale() {
+        let snap = snapshot_after_the_diff_read_fails_with(500).await;
+        assert_cached_diff_served_but_marked_stale(&snap, "a GitHub 500 on the diff read");
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_on_the_diff_fetch_serves_the_cached_body_but_reports_the_snapshot_stale(
+    ) {
+        let snap = snapshot_after_the_diff_read_fails_with(401).await;
+        assert_cached_diff_served_but_marked_stale(&snap, "an expired token on the diff read");
+    }
+
+    // ── the *other* two degraded inputs (W7 — D5.1) ─────────────────────────
+    //
+    // `fetch_pr` marks a snapshot degraded on two independent readings —
+    // `raw_diff.freshness` and `ci_freshness` — and `fetch_conversation`
+    // folds a third, one per conversation endpoint, into
+    // `conversation_error`. The pair of tests above only ever degrade the
+    // diff, so deleting either of the other two lines leaves the suite
+    // green: exactly the "cached body published as fresh" lie those lines
+    // exist to prevent, restored on a different endpoint.
+    //
+    // Which CI failure this is matters. `fetch_ci_checks` deliberately
+    // reports `BodyFreshness::Fresh` when the request errors outright or the
+    // body doesn't parse — an empty `ci_checks` already reads as "unknown",
+    // and a CI-checks outage must not invalidate a diff that came off the
+    // wire perfectly well. The dishonest case is the third one: a *cached*
+    // check-runs list, served after a non-2xx, presented as current. Hence
+    // two polls — the first fills the body cache, the second fails against
+    // it — and hence the assertion that `ci_checks` is still populated,
+    // which is what tells the cache-fallback path apart from the two
+    // return-empty-and-say-Fresh paths.
+
+    /// Warm both caches with one wholly successful poll, then re-poll with the
+    /// check-runs read answering 500 while the diff read still answers 200 —
+    /// so CI checks are unambiguously the only degraded input.
+    #[tokio::test]
+    async fn a_check_runs_read_served_from_cache_after_a_failure_reports_the_snapshot_stale_and_blames_ci_checks(
+    ) {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        // `mount_pr_metadata` reports this head SHA, which is what the
+        // check-runs URL is keyed on — and it must be the same on both polls
+        // or the second poll's cache lookup is a cold miss rather than the
+        // fallback under test.
+        const HEAD: &str = "abc123";
+        let check_runs = format!("/repos/{SHARED_REPO}/commits/{HEAD}/check-runs");
+
+        // First poll: a real check-runs list, which fills the body cache.
+        Mock::given(method("GET"))
+            .and(path(check_runs.clone()))
+            .and(query_param("per_page", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"checks-etag-1\"")
+                    .set_body_json(serde_json::json!({
+                        "total_count": 1,
+                        "check_runs": [
+                            { "id": 7, "name": "build", "status": "completed",
+                              "conclusion": "success", "app": { "slug": "circleci" } }
+                        ]
+                    })),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Second poll: GitHub is unwell. `etag_get_as` serves the cached list
+        // rather than blanking CI mid-review — right for the content, and the
+        // whole reason the snapshot has to say so.
+        Mock::given(method("GET"))
+            .and(path(check_runs))
+            .and(query_param("per_page", "100"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        // The diff and the metadata succeed on both polls.
+        mount_fetchable_pr(&server, SHARED_REPO, SHARED_PR, FRESH_TITLE).await;
+
+        // One source across both polls: the body cache it carries between
+        // them is what makes the second poll a cache fallback.
+        let source = test_source();
+        let client = client_pointed_at(&server.uri());
+
+        let first = source
+            .fetch_pr(&client, SHARED_REPO, SHARED_PR)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.ci_checks.len(),
+            1,
+            "the warm-up poll must really have read a check-runs list, or the fallback below \
+             proves nothing"
+        );
+        assert!(
+            !first.stale && first.error.is_none() && first.generated_at.is_some(),
+            "a poll where every read succeeded publishes a fresh, error-free snapshot"
+        );
+
+        let second = source
+            .fetch_pr(&client, SHARED_REPO, SHARED_PR)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            second.ci_checks.len(),
+            1,
+            "this must be the cache-fallback path: an outright check-runs error or a body that \
+             failed to parse both return an empty list and report themselves `Fresh` by design, \
+             so a test that saw no checks would be asserting on the wrong failure entirely"
+        );
+        assert!(
+            second.stale,
+            "the check-runs list in this snapshot was not read from GitHub on this pass; \
+             publishing it as fresh is how a review silently drifts onto stale CI with nothing \
+             on screen to say so"
+        );
+        let error = second
+            .error
+            .as_deref()
+            .expect("a degraded check-runs read must be surfaced as an error on the snapshot");
+        assert!(
+            error.contains("CI checks"),
+            "the error must name the endpoint that went stale — 'something is stale' sends an \
+             operator looking at the diff, which was fine. Got: {error}"
+        );
+        assert!(
+            !error.contains("the diff"),
+            "the diff read answered 200 on this pass and must not be blamed for the CI \
+             failure. Got: {error}"
+        );
+        assert!(
+            second.generated_at.is_none(),
+            "`generated_at` means 'when this snapshot was last fetched successfully'; a pass \
+             that served CI checks out of the cache cannot say when they were current, and a \
+             timestamp of now alongside `stale: true` reads as merely-a-missed-cycle rather \
+             than badly stale"
+        );
+    }
+
+    /// The same two-poll shape one level down: exactly one conversation
+    /// endpoint degrades, and `conversation_error` has to say so *as a stale
+    /// read* — not as the outright failure it is one match arm away from.
+    #[tokio::test]
+    async fn a_conversation_endpoint_served_from_cache_after_a_failure_is_reported_as_stale_not_as_failed(
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let issue_body = serde_json::json!([
+            {
+                "id": 1,
+                "user": { "login": "alice" },
+                "created_at": "2024-01-01T10:00:00Z",
+                "body": "an issue comment"
+            }
+        ]);
+
+        // Issue comments: 200 on the first poll (filling the body cache),
+        // 500 on the second — served from that cache, so the slot is `Some`
+        // and the wording must come from `degraded_reason`, not from the
+        // "partially failed" branch.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/issues/42/comments"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"issue-etag-1\"")
+                    .set_body_json(issue_body),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/issues/42/comments"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        // The other two endpoints stay healthy across both polls, so the one
+        // reason in `conversation_error` can only have come from the one that
+        // degraded.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 2,
+                    "in_reply_to_id": null,
+                    "path": "src/main.rs",
+                    "line": 10,
+                    "original_line": 10,
+                    "diff_hunk": "@@ -1,3 +1,3 @@",
+                    "user": { "login": "bob" },
+                    "created_at": "2024-01-01T11:00:00Z",
+                    "body": "an inline comment"
+                }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/42/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 3,
+                    "user": { "login": "carol" },
+                    "submitted_at": "2024-01-01T12:00:00Z",
+                    "body": "a review body"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client();
+        // The *same* source across both polls — its body cache is what the
+        // second poll's 500 falls back to.
+        let source = test_source();
+
+        let first = source.fetch_conversation(&client, "acme", "web", 42).await;
+        assert!(
+            first.error.is_none() && first.threads.len() == 3,
+            "the warm-up poll must really have read all three endpoints, or the fallback below \
+             proves nothing; got error {:?} and {} threads",
+            first.error,
+            first.threads.len()
+        );
+
+        let second = source.fetch_conversation(&client, "acme", "web", 42).await;
+
+        assert_eq!(
+            second.threads.len(),
+            3,
+            "the cached issue comment is still the best answer available and must still be \
+             served — this is the cache-fallback path, not the endpoint-failed path"
+        );
+        let error = second.error.as_deref().expect(
+            "threads served out of the cache after a non-2xx are not the current conversation; \
+             `conversation_error` is where this snapshot says its threads are not to be trusted \
+             as complete, and a stale set belongs there too",
+        );
+        assert!(
+            error.contains("issue comments"),
+            "the error must name which endpoint went stale, got: {error}"
+        );
+        assert!(
+            error.contains("could not be refreshed") && error.contains("500"),
+            "a stale read must be described as one — with the status, which is the only thing \
+             separating a 500 that clears itself next poll from a 401 that never will. Got: \
+             {error}"
+        );
+        assert!(
+            !error.contains("partially failed"),
+            "'conversation fetch partially failed' is the *other* outcome — nothing came back \
+             at all. Reporting a cached-after-failure read with that wording tells an operator \
+             their comments are missing when they are merely old. Got: {error}"
+        );
+    }
+
+    // ── a removed focus's pin stops being served (W7 — D8) ──────────────────
+    //
+    // "Removing a focus discards its PR under review. No other focus's PR or
+    // view resolution changes as a result." Deleting the pin file is only half
+    // of that; the serving side has to agree, so that a pin left behind by a
+    // focus that no longer exists is neither published to anyone nor paid for
+    // in GitHub traffic — while the focus still standing next to it keeps its
+    // PR untouched.
+
+    /// [`source_pinned_at`], plus the registry of which focuses currently
+    /// exist. `None` is "no client has pushed a registry yet".
+    fn source_pinned_at_with_live_focuses(
+        dir: &Path,
+        live: Option<&[&str]>,
+    ) -> PerriPrNativeSource {
+        let live: Option<HashSet<String>> =
+            live.map(|tags| tags.iter().map(|t| (*t).to_owned()).collect());
+        PerriPrNativeSource::new(
+            Config {
+                perri_state: Some(dir.to_path_buf()),
+                ..Config::default()
+            },
+            Some(Arc::new(move || live.clone())),
+        )
+    }
+
+    /// One pass over two pinned focuses in two different repos, with `live`
+    /// standing for the focus registry. Both PRs are mounted as fetchable, so
+    /// a request for the removed focus's PR would *succeed* — it has to be
+    /// caught on the wire, not by a 404 accident.
+    async fn poll_two_focuses_with_live(
+        live: Option<&[&str]>,
+    ) -> (PrSnapshots, Vec<wiremock::Request>) {
+        const OTHER_REPO: &str = "Carefeed/operations";
+        const OTHER_PR: u64 = 42;
+
+        let server = wiremock::MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+        mount_fetchable_pr(&server, SHARED_REPO, SHARED_PR, FRESH_TITLE).await;
+        mount_fetchable_pr(&server, OTHER_REPO, OTHER_PR, FRESH_TITLE).await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        perri_current_pr::write_pointer(dir.path(), FOCUS_A, SHARED_PR, SHARED_REPO, None).unwrap();
+        perri_current_pr::write_pointer(dir.path(), FOCUS_B, OTHER_PR, OTHER_REPO, None).unwrap();
+
+        let source = source_pinned_at_with_live_focuses(dir.path(), live);
+        let client = client_pointed_at(&server.uri());
+        let snaps = source
+            .fetch_all(&client, &crate::data::perri_pr::no_prs(), None)
+            .await;
+        let requests = server.received_requests().await.unwrap_or_default();
+        (snaps, requests)
+    }
+
+    #[tokio::test]
+    async fn a_pin_left_by_a_removed_focus_is_not_served_while_its_live_sibling_still_is() {
+        let (snaps, requests) = poll_two_focuses_with_live(Some(&[FOCUS_A])).await;
+
+        assert!(
+            !snaps.contains_key(FOCUS_B),
+            "a focus that no longer exists must not have a PR under review: {FOCUS_B}'s \
+             leftover pin was published anyway, got tags {:?}",
+            snaps.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.url.path() == pr_request_path("Carefeed/operations", 42)),
+            "a removed focus's PR must cost no GitHub traffic — it was fetched anyway"
+        );
+
+        let live = snaps
+            .get(FOCUS_A)
+            .expect("the focus that still exists must keep its PR under review");
+        assert_eq!(
+            (live.repo.as_str(), live.pr_number),
+            (SHARED_REPO, Some(SHARED_PR)),
+            "dropping a neighbour's pin must not disturb which PR a live focus is reviewing"
+        );
+        assert_eq!(
+            live.title, FRESH_TITLE,
+            "the live focus's PR must still be fetched on this pass, not merely listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn before_any_focus_registry_has_been_pushed_every_pin_is_still_served() {
+        let (snaps, _) = poll_two_focuses_with_live(None).await;
+
+        assert!(
+            snaps.contains_key(FOCUS_A) && snaps.contains_key(FOCUS_B),
+            "not knowing which focuses exist is not the same as knowing none do — on a restart \
+             before the first registry push, every focus must keep the PR it was reviewing, got \
+             tags {:?}",
+            snaps.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // ── the prune set must cover every URL the fetch reads (W7 — D5.1) ──────
+    //
+    // Every pass of `fetch_all` opens by pruning the ETag/body caches down to
+    // what `live_url_prefixes` returns for the live pins. A prefix that stops
+    // covering a URL the fetch actually reads therefore drops that URL's ETag
+    // and cached body at the top of every cycle — and nothing visibly breaks.
+    // The data stays correct; the conditional GET simply never fires again
+    // and that endpoint pays for a full uncached response forever. The only
+    // symptom is the rate-limit bill, which this repo has already spent three
+    // documented rounds on (docs/perri-rl-fix-1.md, -2.md, -3.md).
+    //
+    // So these drive a real fetch against a mock GitHub, take the cache keys
+    // that fetch itself produced — never a URL list re-spelled here, which
+    // would drift in exactly the same silence — and put them through the real
+    // `prune_etag_caches` with the real prefixes.
+
+    /// The head SHA `mount_pr_metadata` serves. The check-runs read is keyed
+    /// on it, and so is the one prefix that can only come from `previous`.
+    const MOUNTED_HEAD_SHA: &str = "abc123";
+
+    /// Every URL currently held in a source's two conditional-GET caches.
+    ///
+    /// Keys are `"{accept}|{url}"` — one URL can be cached under two
+    /// `Accept`s, which is the whole reason `/pulls/{n}` can be both the PR
+    /// metadata and the raw diff — and the prune matches on the URL half, so
+    /// that is what comes back.
+    fn cached_urls(source: &PerriPrNativeSource) -> std::collections::BTreeSet<String> {
+        let urls = |map: &Arc<Mutex<HashMap<String, String>>>| -> Vec<String> {
+            map.lock()
+                .unwrap()
+                .keys()
+                .filter_map(|k| k.split_once('|').map(|(_, url)| url.to_owned()))
+                .collect()
+        };
+        urls(&source.etags)
+            .into_iter()
+            .chain(urls(&source.body_cache))
+            .collect()
+    }
+
+    /// A source that has really fetched one PR with every cacheable endpoint
+    /// answering: the raw diff, the check-runs for its head SHA, and the
+    /// three conversation reads.
+    ///
+    /// The `MockServer` comes back because `api_base()` has to keep resolving
+    /// to it after the fetch — `live_url_prefixes` builds its prefixes
+    /// through `api_base()` as well, and a prefix carrying a dead base
+    /// matches nothing at all, which would make every assertion below a
+    /// tautology.
+    async fn a_source_that_has_fetched(
+        repo: &str,
+        number: u64,
+    ) -> (wiremock::MockServer, PerriPrNativeSource, PrSnapshot) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        mount_pr_diff(&server, repo, number).await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{repo}/commits/{MOUNTED_HEAD_SHA}/check-runs"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 1,
+                "check_runs": [
+                    { "id": 7, "name": "build", "status": "completed",
+                      "conclusion": "success", "app": { "slug": "circleci" } }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let (owner, name) = split_repo(repo).expect("the test repo is well formed");
+        mount_conversation_mocks(&server, &owner, &name, number).await;
+        // Mounted last: the metadata shares `/pulls/{n}` with the raw diff and
+        // is told apart only by `Accept`, so the diff mock has to be offered
+        // the request first.
+        mount_pr_metadata(&server, repo, number, "a PR under review").await;
+
+        let source = test_source();
+        let snap = source
+            .fetch_pr(&client_pointed_at(&server.uri()), repo, number)
+            .await
+            .expect("every endpoint is mounted, so this fetch must succeed");
+        (server, source, snap)
+    }
+
+    /// A live pin's prefixes must cover every URL that pin's own fetch just
+    /// cached. Whatever they miss is evicted at the top of the next pass, so
+    /// that endpoint's `If-None-Match` can never be sent again and it buys a
+    /// full response — up to `MAX_DIFF_BYTES` for the diff — every cycle, for
+    /// every focus, for the daemon's lifetime.
+    #[tokio::test]
+    async fn every_url_a_live_pins_fetch_cached_survives_the_prune_that_opens_the_next_poll() {
+        let (_server, source, snap) = a_source_that_has_fetched("acme/web", 42).await;
+
+        let before = cached_urls(&source);
+        // Without this the assertion below could pass vacuously: an endpoint
+        // that stopped caching anything is trivially "covered". These are the
+        // five conditional GETs a poll makes (the sixth call, the octocrab
+        // metadata read, is uncached by design and has nothing to prune).
+        for endpoint in [
+            "/pulls/42",                             // the raw diff
+            "/commits/abc123/check-runs?per_page=100", // CI, keyed on the head SHA
+            "/issues/42/comments?per_page=100",      // issue comments
+            "/pulls/42/comments?per_page=100",       // review comments
+            "/pulls/42/reviews?per_page=100",        // reviews
+        ] {
+            assert!(
+                before.iter().any(|url| url.ends_with(endpoint)),
+                "a poll's fetch must have cached {endpoint} — this test can only prove the \
+                 prune keeps the URLs the fetch reads if the fetch really read them. Cached: \
+                 {before:?}"
+            );
+        }
+
+        // `previous` exactly as `fetch_all` holds it: the generation the last
+        // pass published, which is the only place the head SHA the check-runs
+        // prefix is built from can come from.
+        let previous = generation(vec![("focus-1", snap)]);
+        let prefixes = live_url_prefixes("acme/web", 42, &previous);
+        crate::data::perri_queue_native::prune_etag_caches(
+            &source.etags,
+            &source.body_cache,
+            &prefixes,
+        );
+
+        let after = cached_urls(&source);
+        let dropped: Vec<&String> = before.difference(&after).collect();
+        assert!(
+            dropped.is_empty(),
+            "the prune that opens every poll dropped {} URL(s) this very pin's fetch had just \
+             cached: {dropped:?}. Nothing will look broken — those endpoints just stop sending \
+             `If-None-Match` and pay full price on every cycle from here on, per focus. \
+             Prefixes offered: {prefixes:?}",
+            dropped.len()
+        );
+    }
+
+    /// The mirror image: a pin's prefixes must cover *its* PR and nothing
+    /// else. A prefix loose enough to also match a neighbouring PR's URLs
+    /// keeps that PR's entries alive long after its focus moved on, and the
+    /// diff bodies this prune exists to bound accumulate unboundedly.
+    #[tokio::test]
+    async fn one_pins_prefixes_never_keep_a_different_prs_cache_entries_alive() {
+        let (_server, source, _snap) = a_source_that_has_fetched("acme/web", 42).await;
+        let before = cached_urls(&source);
+        assert!(
+            !before.is_empty(),
+            "the fetch must have cached something for there to be anything to prune"
+        );
+
+        // The only pin still live is a different PR in the same repo, sitting
+        // at a different head SHA. Nothing #42 cached belongs to it.
+        let other = PrSnapshot {
+            pr_number: Some(99),
+            repo: "acme/web".to_owned(),
+            head_sha: "deadbee".to_owned(),
+            ..Default::default()
+        };
+        let previous = generation(vec![("focus-1", other)]);
+        let prefixes = live_url_prefixes("acme/web", 99, &previous);
+        crate::data::perri_queue_native::prune_etag_caches(
+            &source.etags,
+            &source.body_cache,
+            &prefixes,
+        );
+
+        let survivors = cached_urls(&source);
+        assert!(
+            survivors.is_empty(),
+            "PR #42's cache entries outlived its pin: {survivors:?} survived a prune whose only \
+             live pin was #99. Prefixes offered: {prefixes:?}"
+        );
     }
 }

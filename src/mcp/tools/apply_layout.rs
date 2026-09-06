@@ -21,8 +21,8 @@ use crate::data::perri_pr::{PrComment, PrThread, PrThreadKind};
 use crate::data::tickets::{self, Ticket, TicketError};
 use crate::ipc::pane_registry::REPL_PANE_ID;
 use crate::ipc::protocol::{
-    Anchor, ConversationComment, ConversationThread, ConversationThreadKind, Emphasis,
-    PaneAddress, PaneContentWire, PaneFreshness, PrListItem, ServerMsg, TicketComment as WireTicketComment,
+    Anchor, ConversationComment, ConversationThread, ConversationThreadKind, Emphasis, PaneAddress,
+    PaneContentWire, PaneFreshness, PrListItem, ServerMsg, TicketComment as WireTicketComment,
     TicketSection as WireTicketSection,
 };
 use crate::mcp::layout_schema::{self, LayoutSchema};
@@ -205,12 +205,24 @@ pub(crate) fn source_content_kind(source: &str) -> Option<&'static str> {
     }
 }
 
-/// Resolve the focus tag a layout tool targets: an explicit `view_id`, else the
-/// caller's own focus (`pty_id` from the Hello frame). Mirrors
-/// `create_pane.rs::target_tag`. `pub(crate)` — also used by
-/// `refresh_pane::refresh_pane_content`.
+/// Resolve the focus a call targets: an explicit `view_id`, else the caller's
+/// own focus (`pty_id` from the Hello frame, which in the daemon *is* the focus
+/// tag). `None` when neither is available — an unattributable caller.
+///
+/// **The daemon's one addressing rule.** Every focus-scoped tool resolves its
+/// target here and nowhere else; W7 made this load-bearing by putting "which
+/// PR does this request resolve against" behind it, and a second copy of the
+/// rule is the one way that could drift. (`create_pane` used to keep its own.)
+///
+/// An empty string is treated as absent, not as a valid tag. An empty `pty_id`
+/// would otherwise name a focus that cannot exist, and the call would report
+/// success for a pin nothing will ever show — the "reports success, paints
+/// nothing" failure this project keeps rediscovering.
 pub(crate) fn target_tag<'a>(args: &'a Value, pty_id: Option<&'a str>) -> Option<&'a str> {
-    args.get("view_id").and_then(|v| v.as_str()).or(pty_id)
+    args.get("view_id")
+        .and_then(|v| v.as_str())
+        .or(pty_id)
+        .filter(|s| !s.is_empty())
 }
 
 /// Build a [`LayoutSchema`] from an inline `{ tree, panes }` payload.
@@ -287,7 +299,7 @@ pub(crate) fn fetch(
             Ok(PaneContentWire::PrList { items })
         }
         SOURCE_CURRENT_PR => {
-            let snapshot = crate::mcp::tools::perri::get_current_pr(state);
+            let snapshot = crate::mcp::tools::perri::get_current_pr(state, args.tag);
             if snapshot.is_null() {
                 return Ok(no_pr_loaded(args.placeholder));
             }
@@ -305,8 +317,9 @@ pub(crate) fn fetch(
             }
         }
         SOURCE_PR_DIFF => {
-            let snapshot = state.perri_pr_rx.borrow().clone();
-            let Some(snap) = snapshot else {
+            // `args.tag`, not the daemon: a diff pane renders *its own focus's*
+            // PR (W7 — D3).
+            let Some(snap) = state.pr_for(args.tag) else {
                 return Ok(no_pr_loaded(args.placeholder));
             };
             if describes_no_pr(snap.pr_number, &snap.error) {
@@ -345,7 +358,7 @@ pub(crate) fn fetch(
                 "apply_layout: built Diff pane content"
             );
             Ok(PaneContentWire::Diff {
-                repo: snap.repo,
+                repo: snap.repo.clone(),
                 number: snap.pr_number,
                 files,
                 too_large: snap.diff_too_large,
@@ -359,8 +372,7 @@ pub(crate) fn fetch(
             Ok(code_content(ctx.request, ctx.revision, text))
         }
         SOURCE_PR_CONVERSATION => {
-            let snapshot = state.perri_pr_rx.borrow().clone();
-            let Some(snap) = snapshot else {
+            let Some(snap) = state.pr_for(args.tag) else {
                 return Ok(no_pr_loaded(args.placeholder));
             };
             if describes_no_pr(snap.pr_number, &snap.error) {
@@ -371,14 +383,14 @@ pub(crate) fn fetch(
                 validate_comment_ids(params, &threads)?;
             }
             Ok(PaneContentWire::PrConversation {
-                repo: snap.repo,
+                repo: snap.repo.clone(),
                 number: snap.pr_number,
-                title: snap.title,
-                author: snap.author,
-                url: snap.url,
+                title: snap.title.clone(),
+                author: snap.author.clone(),
+                url: snap.url.clone(),
                 body: crate::markdown_blocks::markdown_to_blocks(&snap.body),
                 threads,
-                conversation_error: snap.conversation_error,
+                conversation_error: snap.conversation_error.clone(),
             })
         }
         SOURCE_TICKET => {
@@ -420,8 +432,7 @@ fn ticket_content(ticket: &Ticket, params: &Value) -> Result<PaneContentWire, Ap
     let aliases = tickets::config::load();
     if let Some(obj) = params.as_object() {
         if let Some(anchor) = obj.get("anchor") {
-            if let Ok(Anchor::Section { name }) = serde_json::from_value::<Anchor>(anchor.clone())
-            {
+            if let Ok(Anchor::Section { name }) = serde_json::from_value::<Anchor>(anchor.clone()) {
                 tickets::resolve_section(&ticket.sections, &ticket.comments, &name, &aliases)
                     .map_err(ApplyLayoutError::Ticket)?;
             }
@@ -451,7 +462,11 @@ fn ticket_content(ticket: &Ticket, params: &Value) -> Result<PaneContentWire, Ap
 }
 
 fn ticket_section_wire(s: &crate::data::tickets::TicketSection) -> WireTicketSection {
-    WireTicketSection { name: s.name.clone(), heading: s.heading.clone(), blocks: s.blocks.clone() }
+    WireTicketSection {
+        name: s.name.clone(),
+        heading: s.heading.clone(),
+        blocks: s.blocks.clone(),
+    }
 }
 
 fn ticket_comment_wire(c: &crate::data::tickets::TicketComment) -> WireTicketComment {
@@ -525,8 +540,7 @@ fn validate_comment_ids(
     }
     if let Some(items) = obj.get("emphasis").and_then(|v| v.as_array()) {
         for item in items {
-            if let Ok(Emphasis::Comment { id }) = serde_json::from_value::<Emphasis>(item.clone())
-            {
+            if let Ok(Emphasis::Comment { id }) = serde_json::from_value::<Emphasis>(item.clone()) {
                 if !known.contains(id.as_str()) {
                     return Err(ApplyLayoutError::UnknownCommentId);
                 }
@@ -621,8 +635,14 @@ async fn fetch_ticket_async(
                 .registry
                 .get(provider_name)
                 .map_err(ApplyLayoutError::Ticket)?;
-            let fetched = provider.fetch(key).await.map_err(ApplyLayoutError::Ticket)?;
-            daemon.tickets.cache.put(provider_name, key, fetched.clone());
+            let fetched = provider
+                .fetch(key)
+                .await
+                .map_err(ApplyLayoutError::Ticket)?;
+            daemon
+                .tickets
+                .cache
+                .put(provider_name, key, fetched.clone());
             fetched
         }
     };
@@ -638,11 +658,11 @@ async fn fetch_ticket_async(
 /// `perri.get_state`'s `current_pin` field all call this rather than reading
 /// `state.perri_pr_rx` directly.
 ///
-/// `tag` is accepted but **deliberately ignored** today: the pin is a single
-/// daemon-wide value with no per-focus isolation yet. Threading `tag` through
-/// now — rather than adding it later — is what makes a future per-focus pin
-/// (each focus reviewing its own PR) a change to this function's *body*
-/// alone, with every call site already correct for that world.
+/// `tag` is what the pin is keyed on (W7 — D3). W5 threaded it through every
+/// call site against exactly this change; the per-focus pin landed it in this
+/// function's body, as promised. `None` — a caller Nostromo can't place —
+/// resolves to no pin at all, rather than to whichever focus happened to pick
+/// up a PR most recently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RequestPin {
     pub repo: String,
@@ -661,9 +681,8 @@ impl RequestPin {
     }
 }
 
-pub(crate) fn pin_for_request(state: &McpSharedState, _tag: Option<&str>) -> Option<RequestPin> {
-    let snap = state.perri_pr_rx.borrow();
-    let snap = snap.as_ref()?;
+pub(crate) fn pin_for_request(state: &McpSharedState, tag: Option<&str>) -> Option<RequestPin> {
+    let snap = state.pr_for(tag)?;
     Some(RequestPin {
         repo: snap.repo.clone(),
         number: snap.pr_number?,
@@ -781,7 +800,9 @@ pub(crate) fn address(source: &str, params: Option<&Value>) -> Option<PaneAddres
             PaneAddress {
                 // `path: None` — "the pane's one file", which is exactly what
                 // a `file` pane is.
-                anchor: request.anchor_line.map(|line| Anchor::Line { path: None, line }),
+                anchor: request
+                    .anchor_line
+                    .map(|line| Anchor::Line { path: None, line }),
                 emphasis: request.emphasis_wire(),
                 reason,
             }
@@ -828,21 +849,19 @@ pub(crate) fn address(source: &str, params: Option<&Value>) -> Option<PaneAddres
 ///
 /// A `None` snapshot (source has no data at all yet — e.g. no PR loaded) is
 /// deliberately *not* treated as a staleness condition: `PaneFreshness::default()`.
-pub(crate) fn freshness(source: &str, state: &McpSharedState) -> PaneFreshness {
+pub(crate) fn freshness(source: &str, state: &McpSharedState, tag: Option<&str>) -> PaneFreshness {
     match source {
+        // The queue is fleet-wide (W7 — D9), so its freshness ignores `tag`.
         SOURCE_PR_QUEUE => match state.perri_queue_rx.borrow().as_ref() {
             Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
             None => PaneFreshness::default(),
         },
-        // All three read the identical perri_pr_rx snapshot (SOURCE_PR_DIFF's
+        // All three render the identical per-focus snapshot (SOURCE_PR_DIFF's
         // and SOURCE_PR_CONVERSATION's fetches above do too) — they must share
         // this arm, not just happen to agree, or these panes' staleness could
-        // silently drift apart.
-        SOURCE_CURRENT_PR | SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION => match state
-            .perri_pr_rx
-            .borrow()
-            .as_ref()
-        {
+        // silently drift apart. `tag` is load-bearing: a pane must never be
+        // labelled fresh because *some other* focus's PR just refetched.
+        SOURCE_CURRENT_PR | SOURCE_PR_DIFF | SOURCE_PR_CONVERSATION => match state.pr_for(tag) {
             Some(snap) => compute_freshness(snap.generated_at, snap.stale || snap.error.is_some()),
             None => PaneFreshness::default(),
         },
@@ -982,12 +1001,16 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
             params: None,
         };
         let (content, msg_freshness) = match fetch_async(source, state, args).await {
-            Ok(c) => (c, Some(freshness(source, state))),
+            Ok(c) => (c, Some(freshness(source, state, args.tag))),
             Err(e) => {
-                warnings.push(json!({ "pane_id": pane_id, "error": e.code(), "detail": e.detail() }));
+                warnings
+                    .push(json!({ "pane_id": pane_id, "error": e.code(), "detail": e.detail() }));
                 let message = match e.detail() {
                     Some(detail) => {
-                        format!("apply_layout: {source} fetch failed ({}): {detail}", e.code())
+                        format!(
+                            "apply_layout: {source} fetch failed ({}): {detail}",
+                            e.code()
+                        )
                     }
                     None => format!("apply_layout: {source} fetch failed ({})", e.code()),
                 };
@@ -1009,6 +1032,7 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::perri_pr::one_pr;
     use crate::data::tickets::jira::{JiraCredentials, JiraProvider};
     use crate::data::tickets::{TicketCache, TicketRegistry};
     use crate::ipc::pane_registry::PaneRegistry;
@@ -1043,7 +1067,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: crate::mcp::PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets,
         };
         (McpSharedState::for_daemon(backend), rx)
@@ -1066,7 +1092,10 @@ mod tests {
         let mut registry = TicketRegistry::new();
         let creds = JiraCredentials::for_test("acme.atlassian.net", "hammer@acme.com", "tok");
         registry.register(Arc::new(JiraProvider::for_test(Some(creds), base_url)));
-        TicketRegistryState { registry: Arc::new(registry), cache: Arc::new(TicketCache::new(ttl)) }
+        TicketRegistryState {
+            registry: Arc::new(registry),
+            cache: Arc::new(TicketCache::new(ttl)),
+        }
     }
 
     /// A minimal happy-path Jira issue-fetch response body.
@@ -1146,7 +1175,8 @@ mod tests {
         let mut state = state;
         state.perri_queue_rx = queue_rx;
 
-        let (_ptx, pr_rx) = watch::channel(Some(
+        let (_ptx, pr_rx) = watch::channel(one_pr(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
                 "pr_number": 42, "repo": "acme/web", "title": "Add widget",
                 "author": "alice", "url": "https://example.com/42", "diff": "",
@@ -1244,7 +1274,10 @@ mod tests {
     /// A `PrSnapshot` with just `pr_number`/`error` varied — every other field
     /// carries `#[serde(default)]`, so this is the minimal shape `fetch`'s
     /// three PR-backed arms need to exercise.
-    fn snapshot_with(pr_number: Option<u64>, error: Option<&str>) -> crate::data::perri_pr::PrSnapshot {
+    fn snapshot_with(
+        pr_number: Option<u64>,
+        error: Option<&str>,
+    ) -> crate::data::perri_pr::PrSnapshot {
         serde_json::from_value(json!({
             "pr_number": pr_number, "repo": "acme/web", "title": "Add widget",
             "author": "alice", "url": "https://example.com", "diff": "",
@@ -1258,9 +1291,13 @@ mod tests {
     /// the same snapshot — all three sources read the identical channel in
     /// the daemon, so a single injection point exercises all three fetch
     /// arms identically.
+    /// Seeds `snap` as the **`perri` focus's** PR under review. After W7 a
+    /// fetch resolves the PR of the focus it names, so every fetch below
+    /// passes `tag: Some("perri")` — a `FetchArgs::default()` here would name
+    /// no focus and correctly get the no-PR placeholder.
     fn state_with_pr_snapshot(snap: crate::data::perri_pr::PrSnapshot) -> McpSharedState {
         let (mut state, _bcast) = make_state();
-        let (_tx, rx) = watch::channel(Some(snap));
+        let (_tx, rx) = watch::channel(one_pr("perri", snap));
         state.perri_pr_rx = rx;
         state
     }
@@ -1270,8 +1307,15 @@ mod tests {
         let state = state_with_pr_snapshot(snapshot_with(None, None));
 
         for source in [SOURCE_CURRENT_PR, SOURCE_PR_DIFF, SOURCE_PR_CONVERSATION] {
-            let content = fetch(source, &state, FetchArgs::default())
-                .unwrap_or_else(|e| panic!("{source}: fetch failed: {e:?}"));
+            let content = fetch(
+                source,
+                &state,
+                FetchArgs {
+                    tag: Some("perri"),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{source}: fetch failed: {e:?}"));
             match content {
                 PaneContentWire::Text { text } => {
                     assert_eq!(text, NO_PR_LOADED_PLACEHOLDER, "{source}");
@@ -1291,21 +1335,51 @@ mod tests {
         // get_current_pr: still renders the plain-text summary (repo, no
         // "#N"), not the placeholder — render_pr_summary doesn't itself look
         // at `error`.
-        match fetch(SOURCE_CURRENT_PR, &state, FetchArgs::default()).unwrap() {
+        match fetch(
+            SOURCE_CURRENT_PR,
+            &state,
+            FetchArgs {
+                tag: Some("perri"),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        {
             PaneContentWire::Text { text } => {
                 assert_ne!(text, NO_PR_LOADED_PLACEHOLDER);
-                assert!(text.contains("acme/web"), "expected the summary, got {text:?}");
+                assert!(
+                    text.contains("acme/web"),
+                    "expected the summary, got {text:?}"
+                );
             }
             other => panic!("expected Text, got {other:?}"),
         }
 
         // pr_diff / pr_conversation: still their own normal content shape,
         // not the placeholder Text.
-        match fetch(SOURCE_PR_DIFF, &state, FetchArgs::default()).unwrap() {
+        match fetch(
+            SOURCE_PR_DIFF,
+            &state,
+            FetchArgs {
+                tag: Some("perri"),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        {
             PaneContentWire::Diff { .. } => {}
             other => panic!("expected Diff, not the placeholder: {other:?}"),
         }
-        match fetch(SOURCE_PR_CONVERSATION, &state, FetchArgs::default()).unwrap() {
+        match fetch(
+            SOURCE_PR_CONVERSATION,
+            &state,
+            FetchArgs {
+                tag: Some("perri"),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        {
             PaneContentWire::PrConversation { .. } => {}
             other => panic!("expected PrConversation, not the placeholder: {other:?}"),
         }
@@ -1419,7 +1493,8 @@ mod tests {
     /// prove `fetch` actually converts raw markdown into blocks, not merely
     /// that the field exists.
     fn seeded_conversation_state(state: McpSharedState) -> McpSharedState {
-        let (_ptx, pr_rx) = watch::channel(Some(
+        let (_ptx, pr_rx) = watch::channel(one_pr(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
                 "pr_number": 42, "repo": "acme/web", "title": "Add widget",
                 "author": "alice", "url": "https://example.com/42", "diff": "",
@@ -1496,7 +1571,8 @@ mod tests {
                 assert_eq!(repo, "acme/web");
                 assert_eq!(number, Some(42));
                 assert!(
-                    body.iter().any(|b| matches!(b, crate::ipc::protocol::MdBlock::CodeBlock { .. })),
+                    body.iter()
+                        .any(|b| matches!(b, crate::ipc::protocol::MdBlock::CodeBlock { .. })),
                     "the PR description's fenced code block must survive markdown-to-block \
                      conversion, got: {body:?}"
                 );
@@ -1575,7 +1651,8 @@ mod tests {
         let anchor_params = json!({ "anchor": { "kind": "line", "line": 9000 } });
         assert!(validate_comment_ids(&anchor_params, &threads).is_ok());
 
-        let emphasis_params = json!({ "emphasis": [{ "kind": "line_range", "start": 1, "end": 2 }] });
+        let emphasis_params =
+            json!({ "emphasis": [{ "kind": "line_range", "start": 1, "end": 2 }] });
         assert!(validate_comment_ids(&emphasis_params, &threads).is_ok());
     }
 
@@ -1600,14 +1677,20 @@ mod tests {
 
     #[test]
     fn apply_layout_error_unknown_comment_id_has_the_expected_code_and_leaves_content_intact() {
-        assert_eq!(ApplyLayoutError::UnknownCommentId.code(), "unknown_comment_id");
+        assert_eq!(
+            ApplyLayoutError::UnknownCommentId.code(),
+            "unknown_comment_id"
+        );
         assert!(ApplyLayoutError::UnknownCommentId.leaves_content_intact());
     }
 
     #[test]
     fn source_content_kind_and_source_is_known_include_perri_get_pr_conversation() {
         assert!(source_is_known(SOURCE_PR_CONVERSATION));
-        assert_eq!(source_content_kind(SOURCE_PR_CONVERSATION), Some("pr_conversation"));
+        assert_eq!(
+            source_content_kind(SOURCE_PR_CONVERSATION),
+            Some("pr_conversation")
+        );
     }
 
     // ── nostromo.get_ticket (W4 — curated-agent-views) ────────────────────────
@@ -1627,7 +1710,11 @@ mod tests {
         let err = fetch_async(
             SOURCE_TICKET,
             &state,
-            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+            FetchArgs {
+                tag: Some("cody"),
+                placeholder: None,
+                params: Some(&params),
+            },
         )
         .await
         .unwrap_err();
@@ -1645,7 +1732,11 @@ mod tests {
         let err = fetch_async(
             SOURCE_TICKET,
             &state,
-            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+            FetchArgs {
+                tag: Some("cody"),
+                placeholder: None,
+                params: Some(&params),
+            },
         )
         .await
         .unwrap_err();
@@ -1667,7 +1758,11 @@ mod tests {
         let err = fetch_async(
             SOURCE_TICKET,
             &state,
-            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+            FetchArgs {
+                tag: Some("cody"),
+                placeholder: None,
+                params: Some(&params),
+            },
         )
         .await
         .unwrap_err();
@@ -1675,12 +1770,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_ticket_happy_path_then_a_bad_anchor_is_unknown_section_and_leaves_content_intact()
-    {
+    async fn fetch_ticket_happy_path_then_a_bad_anchor_is_unknown_section_and_leaves_content_intact(
+    ) {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/rest/api/3/issue/PROJ-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(jira_issue_body("Fix the thing")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(jira_issue_body("Fix the thing")),
+            )
             .mount(&server)
             .await;
 
@@ -1692,7 +1789,11 @@ mod tests {
         let content = fetch_async(
             SOURCE_TICKET,
             &state,
-            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&good_params) },
+            FetchArgs {
+                tag: Some("cody"),
+                placeholder: None,
+                params: Some(&good_params),
+            },
         )
         .await
         .expect("the happy path must succeed");
@@ -1711,7 +1812,11 @@ mod tests {
         let err = fetch_async(
             SOURCE_TICKET,
             &state,
-            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&bad_params) },
+            FetchArgs {
+                tag: Some("cody"),
+                placeholder: None,
+                params: Some(&bad_params),
+            },
         )
         .await
         .unwrap_err();
@@ -1727,7 +1832,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/rest/api/3/issue/PROJ-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(jira_issue_body("Fix the thing")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(jira_issue_body("Fix the thing")),
+            )
             .mount(&server)
             .await;
 
@@ -1739,7 +1846,11 @@ mod tests {
             fetch_async(
                 SOURCE_TICKET,
                 &state,
-                FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+                FetchArgs {
+                    tag: Some("cody"),
+                    placeholder: None,
+                    params: Some(&params),
+                },
             )
             .await
             .expect("both calls within the TTL window must succeed");
@@ -1761,7 +1872,11 @@ mod tests {
         let err = fetch(
             SOURCE_TICKET,
             &state,
-            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+            FetchArgs {
+                tag: Some("cody"),
+                placeholder: None,
+                params: Some(&params),
+            },
         )
         .unwrap_err();
         assert_eq!(err, ApplyLayoutError::FetchFailed);
@@ -1787,7 +1902,11 @@ mod tests {
         let content = fetch(
             SOURCE_TICKET,
             &state,
-            FetchArgs { tag: Some("cody"), placeholder: None, params: Some(&params) },
+            FetchArgs {
+                tag: Some("cody"),
+                placeholder: None,
+                params: Some(&params),
+            },
         )
         .expect("a cache hit must succeed with no registry/provider involved at all");
         match content {
@@ -1797,27 +1916,32 @@ mod tests {
     }
 
     #[test]
-    fn apply_layout_error_ticket_fetch_failed_stays_loud_but_every_other_ticket_error_leaves_content_intact()
-    {
+    fn apply_layout_error_ticket_fetch_failed_stays_loud_but_every_other_ticket_error_leaves_content_intact(
+    ) {
         assert!(
             !ApplyLayoutError::Ticket(TicketError::FetchFailed("x".into())).leaves_content_intact(),
             "a live provider failure must stay loud, mirroring FetchFailed on every other source"
         );
-        assert!(ApplyLayoutError::Ticket(TicketError::UnsupportedProvider { supported: vec![] })
-            .leaves_content_intact());
+        assert!(
+            ApplyLayoutError::Ticket(TicketError::UnsupportedProvider { supported: vec![] })
+                .leaves_content_intact()
+        );
         assert!(ApplyLayoutError::Ticket(TicketError::ProviderUnconfigured {
             message: "x".into()
         })
         .leaves_content_intact());
         assert!(ApplyLayoutError::Ticket(TicketError::UnknownTicket).leaves_content_intact());
-        assert!(ApplyLayoutError::Ticket(TicketError::UnknownSection { available: vec![] })
-            .leaves_content_intact());
+        assert!(
+            ApplyLayoutError::Ticket(TicketError::UnknownSection { available: vec![] })
+                .leaves_content_intact()
+        );
     }
 
     #[test]
     fn apply_layout_error_ticket_code_and_detail_delegate_to_the_wrapped_ticket_error() {
-        let err =
-            ApplyLayoutError::Ticket(TicketError::UnsupportedProvider { supported: vec!["jira".into()] });
+        let err = ApplyLayoutError::Ticket(TicketError::UnsupportedProvider {
+            supported: vec!["jira".into()],
+        });
         assert_eq!(err.code(), "unsupported_provider");
         assert!(err.detail().unwrap().contains("jira"));
     }
@@ -1933,8 +2057,12 @@ mod tests {
         // a plausible-but-nonexistent head sha (so a local git resolution
         // would fail and fall through to the GitHub-fallback decision this
         // test is actually about).
-        let mut state = state;
-        let (_tx, rx) = tokio::sync::watch::channel(Some(
+        // Pinned to **this focus** (W7): the pin `fetch_async` reads is keyed
+        // on the tag the request carries, so a snapshot published under any
+        // other tag would leave this focus unpinned and never reach the
+        // repo-mismatch refusal the test is about.
+        state.set_pr_for(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(json!({
                 "pr_number": 99, "repo": "acme/other-repo", "title": "Unrelated",
                 "author": "bob", "url": "https://example.com", "diff": "",
@@ -1942,8 +2070,7 @@ mod tests {
                 "head_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
             }))
             .unwrap(),
-        ));
-        state.perri_pr_rx = rx;
+        );
 
         // 3. Deliberately an EXPLICIT, git-unresolvable revision — not an
         // implicit one. `resolve_revision`'s own pinned contract (see

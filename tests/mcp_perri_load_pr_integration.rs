@@ -10,7 +10,13 @@
 
 use std::sync::Arc;
 
-use nostromo::{config::Config, mcp::McpSharedState, views::perri::PerriView};
+use nostromo::{
+    config::Config,
+    data::perri_current_pr::{pin_path, BUILTIN_PERRI_TAG},
+    data::perri_pr::no_prs,
+    mcp::McpSharedState,
+    views::perri::PerriView,
+};
 use tempfile::TempDir;
 use tokio::sync::{mpsc, watch};
 
@@ -34,7 +40,7 @@ fn make_perri_view(state_dir: &std::path::Path) -> PerriView {
     };
 
     let (queue_tx, queue_rx) = watch::channel(None);
-    let (pr_tx, pr_rx) = watch::channel(None);
+    let (pr_tx, pr_rx) = watch::channel(no_prs());
     drop(queue_tx);
     drop(pr_tx);
 
@@ -43,6 +49,12 @@ fn make_perri_view(state_dir: &std::path::Path) -> PerriView {
     );
 
     PerriView::new(queue_rx, pr_rx, config, ctx, syntect)
+}
+
+/// Where the TUI's pin lives: it is a single-surface host and writes the
+/// built-in Perri focus's pin (W7 — D1/D10).
+fn pin_file(state_dir: &std::path::Path) -> std::path::PathBuf {
+    pin_path(state_dir, BUILTIN_PERRI_TAG).expect("BUILTIN_PERRI_TAG is a valid tag")
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -60,7 +72,7 @@ fn load_pr_writes_json_file() {
     )
     .unwrap();
 
-    let json_path = dir.path().join("current-pr.json");
+    let json_path = pin_file(dir.path());
     assert!(json_path.exists(), "current-pr.json should be written");
 
     let content = std::fs::read_to_string(&json_path).unwrap();
@@ -91,7 +103,7 @@ fn load_pr_no_highlights_writes_null() {
 
     view.load_pr(1, "acme/widget".to_string(), None).unwrap();
 
-    let json_path = dir.path().join("current-pr.json");
+    let json_path = pin_file(dir.path());
     let content = std::fs::read_to_string(&json_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
 
@@ -110,15 +122,12 @@ fn clear_current_pr_removes_file_and_touches_dirty() {
 
     // First write a PR record.
     view.load_pr(5, "acme/foo".to_string(), None).unwrap();
-    assert!(dir.path().join("current-pr.json").exists());
+    assert!(pin_file(dir.path()).exists());
 
     // Then clear it.
     view.clear_current_pr().unwrap();
 
-    assert!(
-        !dir.path().join("current-pr.json").exists(),
-        "json should be removed"
-    );
+    assert!(!pin_file(dir.path()).exists(), "json should be removed");
     assert!(
         dir.path().join("current-pr.dirty").exists(),
         "dirty should still exist"
@@ -153,10 +162,73 @@ fn load_pr_json_shape_matches_current_pr_pointer() {
 
     view.load_pr(100, "owner/repo".to_string(), None).unwrap();
 
-    let content = std::fs::read_to_string(dir.path().join("current-pr.json")).unwrap();
+    let content = std::fs::read_to_string(pin_file(dir.path())).unwrap();
     let pointer: CurrentPrPointer = serde_json::from_str(&content)
         .expect("current-pr.json must deserialize as CurrentPrPointer");
 
     assert_eq!(pointer.number, 100);
     assert_eq!(pointer.repo, "owner/repo");
+}
+
+// ── W7: the TUI is one surface, and writes exactly one focus's pin ───────────
+
+/// `PerriView` is a single-surface host with no focus registry, so it writes
+/// under the built-in `perri` focus (W7 — D1/D10). What must never happen is
+/// that being *implemented* as "write the one current-PR file": the store is
+/// sharded now, and a pickup on this host has to leave every other focus's
+/// review exactly where it was.
+#[test]
+fn the_tui_s_pickup_writes_only_the_builtin_perri_pin_and_leaves_other_focuses_alone() {
+    use nostromo::data::perri_current_pr::{pin_path, write_pointer};
+
+    let dir = TempDir::new().unwrap();
+    // Two focuses that exist only in the daemon's store — the TUI has never
+    // heard of them, and must not be able to touch them.
+    write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
+    write_pointer(
+        dir.path(),
+        "cody",
+        7,
+        "Carefeed/admin-portal",
+        Some("keep me"),
+    )
+    .unwrap();
+    let others: Vec<(String, Vec<u8>)> = ["operations", "cody"]
+        .iter()
+        .map(|tag| {
+            let path = pin_path(dir.path(), tag).unwrap();
+            ((*tag).to_owned(), std::fs::read(path).unwrap())
+        })
+        .collect();
+
+    let mut view = make_perri_view(dir.path());
+    view.load_pr(4526, "Carefeed/admin-portal".to_string(), None)
+        .unwrap();
+
+    assert!(
+        pin_file(dir.path()).exists(),
+        "the TUI's own surface is the built-in perri focus"
+    );
+    for (tag, before) in &others {
+        assert_eq!(
+            std::fs::read(pin_path(dir.path(), tag).unwrap())
+                .ok()
+                .as_ref(),
+            Some(before),
+            "focus {tag}'s pin must be byte-identical after a TUI pickup"
+        );
+    }
+
+    // And the same for a clear, which used to be "delete the current-PR file".
+    view.clear_current_pr().unwrap();
+    assert!(!pin_file(dir.path()).exists());
+    for (tag, before) in &others {
+        assert_eq!(
+            std::fs::read(pin_path(dir.path(), tag).unwrap())
+                .ok()
+                .as_ref(),
+            Some(before),
+            "focus {tag}'s pin must survive a TUI clear too"
+        );
+    }
 }

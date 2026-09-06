@@ -18,9 +18,6 @@ class FileWatchers {
     let rateLimits   = CurrentValueSubject<RateLimits?,      Never>(nil)
     let posture      = CurrentValueSubject<PostureSnapshot?,  Never>(nil)
 
-    /// Full PR detail decoded from current-pr-detail.json — updated via FSEvents.
-    let perriDetail  = CurrentValueSubject<PRDetail?,         Never>(nil)
-
     /// Fires when any file in the pr-cache/ directory changes (add/update).
     /// Subscribers re-check the cache for a pending selection.
     let prCacheChanged = PassthroughSubject<Void, Never>()
@@ -32,10 +29,6 @@ class FileWatchers {
     private var timer:          Timer?
     private var lastRateLimits: String?
     private var lastPosture:    String?
-
-    // FSEvent watcher for current-pr-detail.json
-    private var perriDetailSource: DispatchSourceFileSystemObject?
-    private var perriDetailFd:     Int32 = -1
 
     // FSEvent watcher for pr-cache/ directory
     private var prCacheSource: DispatchSourceFileSystemObject?
@@ -61,7 +54,6 @@ class FileWatchers {
             self?.poll()
         }
         RunLoop.main.add(timer!, forMode: .common)
-        startPerriDetailWatcher()
         startPrCacheWatcher()
         startThresholdWatcher()
     }
@@ -91,45 +83,6 @@ class FileWatchers {
         let snap = PostureSnapshot.load()
         log.debug("budget-posture changed: \(snap?.posture.rawValue ?? "nil", privacy: .public)")
         posture.send(snap)
-    }
-
-    // MARK: - Perri detail file watcher
-
-    private static var detailURL: URL = {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/state/perri/current-pr-detail.json")
-    }()
-
-    private func startPerriDetailWatcher() {
-        let path = Self.detailURL.path
-        let fd   = open(path, O_EVTONLY)
-        guard fd >= 0 else {
-            log.warning("perri detail file not found at \(path, privacy: .public) — watcher skipped (will be created on first selection)")
-            return
-        }
-        perriDetailFd = fd
-
-        let src = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask:      [.write, .rename, .delete],
-            queue:          .global(qos: .utility)
-        )
-        src.setEventHandler { [weak self] in
-            guard let self else { return }
-            Thread.sleep(forTimeInterval: 0.05)
-            guard let data = try? Data(contentsOf: Self.detailURL),
-                  let detail = try? JSONDecoder().decode(PRDetail.self, from: data)
-            else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.perriDetail.send(detail)
-            }
-        }
-        src.setCancelHandler { [weak self] in
-            if let fd = self?.perriDetailFd, fd >= 0 { close(fd) }
-        }
-        src.resume()
-        perriDetailSource = src
-        log.info("perri detail watcher active: \(path, privacy: .public)")
     }
 
     // MARK: - pr-cache/ directory watcher

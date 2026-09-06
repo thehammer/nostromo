@@ -22,6 +22,65 @@ use tracing::{debug, warn};
 
 use crate::{config::Config, data::dirty_file, data::perri_queue::CiState};
 
+/// Every focus's PR under review, keyed by focus tag (W7 — D6).
+///
+/// Two layers of `Arc` on purpose. The outer one makes publishing a new
+/// generation on a `watch` channel O(1) for every reader regardless of how
+/// many focuses are pinned. The inner one makes "which tags changed?" a
+/// pointer comparison: `PrSnapshot` carries a `diff` of up to 500 KB, so the
+/// per-focus broadcasters — which must repaint only the bindings whose tag
+/// actually moved — would otherwise pay a deep `PartialEq` over every focus's
+/// whole diff on every tick.
+///
+/// A tag absent from the map has no PR under review. That is a normal state,
+/// not an error, and it is what makes a focus with no pin resolve files
+/// against its working tree.
+pub type PrSnapshots =
+    std::sync::Arc<std::collections::HashMap<String, std::sync::Arc<PrSnapshot>>>;
+
+/// An empty [`PrSnapshots`] — no focus has a PR under review.
+pub fn no_prs() -> PrSnapshots {
+    std::sync::Arc::new(std::collections::HashMap::new())
+}
+
+/// A [`PrSnapshots`] with exactly one focus's PR in it — the single-surface
+/// hosts (the TUI, tests) that have one answer to give.
+pub fn one_pr(tag: &str, snap: PrSnapshot) -> PrSnapshots {
+    let mut map = std::collections::HashMap::new();
+    map.insert(tag.to_owned(), std::sync::Arc::new(snap));
+    std::sync::Arc::new(map)
+}
+
+/// Which focus tags differ between two [`PrSnapshots`] generations — a tag
+/// whose snapshot was added, removed, or replaced.
+///
+/// Compares the inner `Arc` pointers, not the snapshots. The PR source
+/// republishes one shared `Arc` per `(repo, number)` per cycle, so an
+/// unchanged focus carries its previous pointer forward and compares equal in
+/// O(1); a deep comparison would walk every focus's whole diff on every tick.
+/// The cost of the conservative direction (a pointer change with identical
+/// content) is one redundant fetch that `last_sent` then dedups anyway.
+pub fn changed_tags(
+    previous: &PrSnapshots,
+    current: &PrSnapshots,
+) -> std::collections::HashSet<String> {
+    let mut changed = std::collections::HashSet::new();
+    for (tag, snap) in current.iter() {
+        match previous.get(tag) {
+            Some(prev) if std::sync::Arc::ptr_eq(prev, snap) => {}
+            _ => {
+                changed.insert(tag.clone());
+            }
+        }
+    }
+    for tag in previous.keys() {
+        if !current.contains_key(tag) {
+            changed.insert(tag.clone());
+        }
+    }
+    changed
+}
+
 /// A single CI check-run result attached to a PR snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CiCheck {
@@ -137,8 +196,15 @@ pub struct PerriPrSource {
 }
 
 impl PerriPrSource {
-    pub fn spawn(config: Config) -> watch::Receiver<Option<PrSnapshot>> {
-        let (tx, rx) = watch::channel(None);
+    /// Publishes into the same per-focus [`PrSnapshots`] shape the native
+    /// source does (W7 — D6), under
+    /// [`crate::data::perri_current_pr::BUILTIN_PERRI_TAG`]. This fallback
+    /// shells out to a script that only ever knew about one PR, and it runs
+    /// only in the TUI, which has exactly one Perri surface — so one tag is
+    /// the honest description of what it can produce, not a limitation of the
+    /// channel.
+    pub fn spawn(config: Config) -> watch::Receiver<PrSnapshots> {
+        let (tx, rx) = watch::channel(no_prs());
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
 
         let dirty_path = config.perri_state_dir().join("current-pr.dirty");
@@ -149,17 +215,22 @@ impl PerriPrSource {
         tokio::spawn(async move {
             let source = PerriPrSource { config };
             loop {
+                let tag = crate::data::perri_current_pr::BUILTIN_PERRI_TAG;
                 match source.fetch().await {
                     Ok(snap) => {
                         debug!(pr = ?snap.pr_number, "perri diff refreshed");
-                        let _ = tx.send(Some(snap));
+                        let _ = tx.send(one_pr(tag, snap));
                     }
                     Err(e) => {
                         warn!("perri diff fetch failed: {e:#}");
-                        let mut snap = tx.borrow().clone().unwrap_or_default();
+                        let mut snap = tx
+                            .borrow()
+                            .get(tag)
+                            .map(|s| (**s).clone())
+                            .unwrap_or_default();
                         snap.stale = true;
                         snap.error = Some(e.to_string());
-                        let _ = tx.send(Some(snap));
+                        let _ = tx.send(one_pr(tag, snap));
                     }
                 }
 
@@ -230,8 +301,14 @@ mod tests {
         let snap: PrSnapshot = serde_json::from_value(json).expect(
             "a pre-W3 PrSnapshot JSON literal (no body/threads/conversation_error) must still deserialize",
         );
-        assert_eq!(snap.body, "", "missing body must default to an empty string");
-        assert!(snap.threads.is_empty(), "missing threads must default to an empty vec");
+        assert_eq!(
+            snap.body, "",
+            "missing body must default to an empty string"
+        );
+        assert!(
+            snap.threads.is_empty(),
+            "missing threads must default to an empty vec"
+        );
         assert_eq!(
             snap.conversation_error, None,
             "missing conversation_error must default to None"
@@ -270,6 +347,142 @@ mod tests {
         assert_eq!(
             snap.conversation_error,
             Some("conversation fetch partially failed: reviews".to_string())
+        );
+    }
+
+    // ── 2. changed_tags: which focuses must be repainted (W7 — D6) ───────────
+    //
+    // This is the filter both per-focus fan-out sites run every publish
+    // (`nostromd.rs`'s pane broadcasters and `pane_sources.rs`'s MCP
+    // subscriptions). A tag it fails to report is a focus left rendering the
+    // wrong PR until something unrelated wakes it; a tag it reports
+    // needlessly is a redundant fetch of a diff up to 500 KB, on every tick,
+    // for every focus on the machine.
+
+    fn pr(number: u64, repo: &str) -> PrSnapshot {
+        PrSnapshot {
+            pr_number: Some(number),
+            repo: repo.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// Build a generation from `(tag, Arc<PrSnapshot>)` pairs so a test can
+    /// control `Arc` identity — the thing `changed_tags` actually compares.
+    fn generation(entries: Vec<(&str, std::sync::Arc<PrSnapshot>)>) -> PrSnapshots {
+        std::sync::Arc::new(
+            entries
+                .into_iter()
+                .map(|(tag, snap)| (tag.to_owned(), snap))
+                .collect::<std::collections::HashMap<_, _>>(),
+        )
+    }
+
+    fn tags(of: &std::collections::HashSet<String>) -> Vec<String> {
+        let mut out: Vec<String> = of.iter().cloned().collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_focus_that_picked_up_a_pr_since_the_last_generation_is_reported_changed() {
+        let changed = changed_tags(
+            &no_prs(),
+            &one_pr("cody-core-1234", pr(4526, "Carefeed/admin-portal")),
+        );
+
+        assert_eq!(
+            tags(&changed),
+            vec!["cody-core-1234".to_owned()],
+            "a focus that had no PR under review and now has one must be repainted — \
+             it is the only signal that its pane should stop resolving files against \
+             the working tree and start showing the PR"
+        );
+    }
+
+    #[test]
+    fn a_focus_whose_pr_went_away_since_the_last_generation_is_reported_changed() {
+        let previous = one_pr("cody-core-1234", pr(4526, "Carefeed/admin-portal"));
+
+        let changed = changed_tags(&previous, &no_prs());
+
+        assert_eq!(
+            tags(&changed),
+            vec!["cody-core-1234".to_owned()],
+            "a cleared pin is a change like any other: reporting only the tags \
+             present in the *new* generation would leave the focus that just \
+             cleared its PR still rendering it, with nothing left to ever \
+             contradict it"
+        );
+    }
+
+    #[test]
+    fn a_focus_whose_pr_was_replaced_is_reported_changed_and_its_untouched_neighbour_is_not() {
+        let carried_forward = std::sync::Arc::new(pr(42, "Carefeed/operations"));
+        let previous = generation(vec![
+            (
+                "perri",
+                std::sync::Arc::new(pr(4526, "Carefeed/admin-portal")),
+            ),
+            ("operations", std::sync::Arc::clone(&carried_forward)),
+        ]);
+        let current = generation(vec![
+            // Same focus, a different PR — a new `Arc`.
+            (
+                "perri",
+                std::sync::Arc::new(pr(4600, "Carefeed/admin-portal")),
+            ),
+            // Untouched: the source republished the very same `Arc`.
+            ("operations", std::sync::Arc::clone(&carried_forward)),
+        ]);
+
+        let changed = changed_tags(&previous, &current);
+
+        assert_eq!(
+            tags(&changed),
+            vec!["perri".to_owned()],
+            "the focus that swapped PRs must be repainted, and the focus that did \
+             not must be left alone — the second half is the whole point of the \
+             per-focus filter: without it every publish refetches every focus's \
+             diff, and a busy machine pays that on every tick"
+        );
+    }
+
+    #[test]
+    fn a_focus_whose_snapshot_was_republished_as_a_new_arc_is_reported_changed() {
+        // The conservative direction, asserted so it stays deliberate: equal
+        // *content* behind a fresh pointer still counts as changed. The cost
+        // is one redundant fetch that `last_sent` dedups; the alternative is a
+        // deep compare over every focus's diff on every tick.
+        let previous = generation(vec![(
+            "perri",
+            std::sync::Arc::new(pr(4526, "Carefeed/admin-portal")),
+        )]);
+        let current = generation(vec![(
+            "perri",
+            std::sync::Arc::new(pr(4526, "Carefeed/admin-portal")),
+        )]);
+
+        assert_eq!(
+            tags(&changed_tags(&previous, &current)),
+            vec!["perri".to_owned()],
+            "a fresh pointer is treated as a change on purpose — comparison is by \
+             `Arc::ptr_eq` so it stays O(1) per focus"
+        );
+    }
+
+    #[test]
+    fn two_identical_generations_report_nothing_changed() {
+        let generation_one = one_pr("perri", pr(4526, "Carefeed/admin-portal"));
+        let same = std::sync::Arc::clone(&generation_one);
+
+        assert!(
+            changed_tags(&generation_one, &same).is_empty(),
+            "republishing the very same generation must repaint nobody"
+        );
+        assert!(
+            changed_tags(&no_prs(), &no_prs()).is_empty(),
+            "and two empty generations are not a change either"
         );
     }
 }
