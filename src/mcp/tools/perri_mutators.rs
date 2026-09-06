@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, watch};
+use tracing::warn;
 
 use crate::data::{perri_current_pr, perri_pr::PrSnapshots};
 use crate::event::AppEvent;
@@ -249,7 +250,14 @@ async fn load_pr_daemon(
 
     // Refetch exactly this focus's pin (D2) — no other focus's PR changed.
     if let Some(tx) = &daemon.perri.pr_refresh_tx {
-        let _ = tx.send(Some(tag.clone()));
+        // A closed channel is not a nicety to ignore: it means the
+        // `PerriPrNativeSource` task has exited, which `run()` does outright
+        // when `build_client()` fails (no gh token, unreadable hosts.yml). No
+        // refetch will happen, now or ever, and the settle wait below is
+        // about to spend `settle_timeout` discovering that.
+        if let Err(e) = tx.send(Some(tag.clone())) {
+            warn!("perri.load_pr could not request a refetch for `{tag}`: the PR source task is gone ({e})");
+        }
     }
 
     // R8 (W5 — curated-agent-views): the PR under review just moved, so the
@@ -274,7 +282,7 @@ async fn load_pr_daemon(
     };
 
     let mut warnings = Vec::new();
-    let mut pending = false;
+    let mut pending: Option<SnapshotWait> = None;
 
     match highlights {
         Some(text) => {
@@ -327,7 +335,7 @@ async fn load_pr_daemon(
             )
             .await;
 
-            if matched {
+            if matched == SnapshotWait::Matched {
                 match apply_layout::fetch(
                     SOURCE_CURRENT_PR,
                     state,
@@ -367,7 +375,7 @@ async fn load_pr_daemon(
                     }
                 }
             } else {
-                pending = true;
+                pending = Some(matched);
                 push_content_to_all(
                     daemon,
                     Some(&tag),
@@ -400,12 +408,22 @@ async fn load_pr_daemon(
     // no unresolvable-tag case left to report emptily for; that caller was
     // already refused.
     let mut result = json!({ "ok": true, "pane_ids": &targets });
-    if pending {
+    if let Some(wait) = pending {
         result["pending"] = json!(true);
-        result["detail"] = json!(format!(
-            "refetch for {repo}#{number} still in flight after {:?}",
-            daemon.perri.settle_timeout
-        ));
+        result["detail"] = json!(match wait {
+            // Unreachable — `Matched` doesn't set `pending` — but spelled out
+            // rather than `unreachable!()`, since a panic in a tool handler is
+            // a worse outcome than a slightly odd string.
+            SnapshotWait::Matched => format!("refetch for {repo}#{number} settled"),
+            SnapshotWait::SourceGone => format!(
+                "refetch for {repo}#{number} was never started: the Perri PR source is not \
+                 running, so nothing is in flight and retrying will not help"
+            ),
+            SnapshotWait::TimedOut => format!(
+                "refetch for {repo}#{number} still in flight after {:?}",
+                daemon.perri.settle_timeout
+            ),
+        });
     }
     if !warnings.is_empty() {
         result["warnings"] = json!(warnings);
@@ -736,31 +754,50 @@ async fn wait_for_matching_snapshot(
     repo: &str,
     number: u64,
     timeout: Duration,
-) -> bool {
+) -> SnapshotWait {
     fn matches(snaps: &PrSnapshots, tag: &str, repo: &str, number: u64) -> bool {
         matches!(snaps.get(tag), Some(s) if s.repo == repo && s.pr_number == Some(number))
     }
 
     if matches(&rx.borrow(), tag, repo, number) {
-        return true;
+        return SnapshotWait::Matched;
     }
 
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return false;
+            return SnapshotWait::TimedOut;
         }
         match tokio::time::timeout(remaining, rx.changed()).await {
             Ok(Ok(())) => {
                 if matches(&rx.borrow(), tag, repo, number) {
-                    return true;
+                    return SnapshotWait::Matched;
                 }
             }
-            Ok(Err(_)) => return false, // sender dropped
-            Err(_) => return false,     // overall timeout elapsed
+            Ok(Err(_)) => return SnapshotWait::SourceGone,
+            Err(_) => return SnapshotWait::TimedOut,
         }
     }
+}
+
+/// Why [`wait_for_matching_snapshot`] stopped waiting.
+///
+/// `SourceGone` and `TimedOut` used to collapse into one `false`, and the
+/// caller reported both as "still in flight". They are opposites: a timeout
+/// means the fetch may yet land and asking again is reasonable, while a
+/// dropped sender means the `PerriPrNativeSource` task has exited — `run()`
+/// returns outright when `build_client()` fails — so nothing is in flight and
+/// nothing ever will be. Telling an agent to wait for that is telling it to
+/// wait forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotWait {
+    /// A snapshot for this focus and this PR was published.
+    Matched,
+    /// The PR source's `watch::Sender` was dropped: the task is gone.
+    SourceGone,
+    /// `settle_timeout` elapsed with the snapshot still unpublished.
+    TimedOut,
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -1789,6 +1826,73 @@ mod tests {
         assert!(
             !has_unknown_pane_warning(&result),
             "perri-curated: unexpected unknown_pane warning in {result}"
+        );
+    }
+
+    /// W7 — D4, the clearing half of `load_pr`'s refusal. Pre-W7 there was one
+    /// machine-wide pointer, so a `clear_current_pr` that named no focus wiped
+    /// "the" review and that was the intended behaviour. Now the pin belongs to
+    /// a focus, so an unattributable clear would have to guess one — and the
+    /// guess the pre-W7 shape makes is the built-in `perri` focus, silently
+    /// destroying a review a human is in the middle of. The refusal must be an
+    /// error *and* must leave every pin on disk untouched.
+    #[tokio::test]
+    async fn clear_current_pr_refuses_a_caller_it_cannot_attribute_to_a_focus() {
+        let (state, tmp, _bcast) = make_daemon_state().await;
+        let state_dir = tmp.path().join("perri-state");
+        perri_current_pr::write_pointer(
+            &state_dir,
+            perri_current_pr::BUILTIN_PERRI_TAG,
+            42,
+            "acme/web",
+            Some("check auth"),
+        )
+        .unwrap();
+        let before = perri_current_pr::read_pin(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG)
+            .expect("seeded pin");
+
+        let result = clear_current_pr(&state, &json!({}), None).await;
+
+        assert_eq!(
+            result["error"], "unidentified_caller",
+            "a clear that names no focus must be refused, not aimed at a guessed focus"
+        );
+        assert!(
+            result["ok"].as_bool() != Some(true),
+            "a refused clear must not also report ok"
+        );
+        assert_eq!(
+            perri_current_pr::read_pin(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG),
+            Some(before),
+            "a refused clear must not remove any focus's PR under review"
+        );
+    }
+
+    /// An empty-string `pty_id` counts as *absent*, not as a focus named "" —
+    /// same family as `load_pr_with_an_empty_pty_id_is_refused_like_an_absent_one`,
+    /// and the same pin must survive it.
+    #[tokio::test]
+    async fn clear_current_pr_with_an_empty_pty_id_is_refused_like_an_absent_one() {
+        let (state, tmp, _bcast) = make_daemon_state().await;
+        let state_dir = tmp.path().join("perri-state");
+        perri_current_pr::write_pointer(
+            &state_dir,
+            perri_current_pr::BUILTIN_PERRI_TAG,
+            42,
+            "acme/web",
+            Some("check auth"),
+        )
+        .unwrap();
+        let before = perri_current_pr::read_pin(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG)
+            .expect("seeded pin");
+
+        let result = clear_current_pr(&state, &json!({}), Some("")).await;
+
+        assert_eq!(result["error"], "unidentified_caller");
+        assert_eq!(
+            perri_current_pr::read_pin(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG),
+            Some(before),
+            "an empty pty_id must not be coerced into a focus whose review then gets wiped"
         );
     }
 
