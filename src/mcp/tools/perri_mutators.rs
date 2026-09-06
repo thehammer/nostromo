@@ -58,7 +58,7 @@ pub async fn load_pr(state: &McpSharedState, args: &Value, pty_id: Option<&str>)
         _ => return json!({ "error": "invalid_args", "detail": "missing repo" }),
     };
     if let Err(e) = perri_current_pr::validate_repo_slug(&repo) {
-        return json!({ "error": "invalid_args", "detail": e });
+        return json!({ "error": e.code(), "detail": e.to_string() });
     }
     let highlights = args
         .get("highlights")
@@ -239,13 +239,11 @@ async fn load_pr_daemon(
 
     if let Err(e) = perri_current_pr::write_pointer(&state_dir, &tag, number, repo, highlights) {
         // A tag that isn't a safe filename is the caller's error, not an I/O
-        // one — say which.
-        let code = if e.starts_with("invalid_tag") {
-            "invalid_args"
-        } else {
-            "io_error"
-        };
-        return json!({ "error": code, "detail": e });
+        // one — say which. `PinError::code` is the one place that mapping
+        // lives; this used to be `e.starts_with("invalid_tag")` here and
+        // again in `clear_current_pr`, which made the prefix inside a prose
+        // message into API.
+        return json!({ "error": e.code(), "detail": e.to_string() });
     }
 
     // Refetch exactly this focus's pin (D2) — no other focus's PR changed.
@@ -484,15 +482,10 @@ async fn clear_current_pr_daemon(
     };
 
     if let Err(e) = perri_current_pr::clear_pointer(&state_dir, &tag) {
-        let code = if e.starts_with("invalid_tag") {
-            "invalid_args"
-        } else {
-            "io_error"
-        };
-        return json!({ "error": code, "detail": e });
+        return json!({ "error": e.code(), "detail": e.to_string() });
     }
     if let Err(e) = perri_current_pr::touch_queue_dirty(&state_dir) {
-        return json!({ "error": "io_error", "detail": e });
+        return json!({ "error": e.code(), "detail": e.to_string() });
     }
 
     // Same channels, same failure, same reporting standard as `load_pr` above:
@@ -1172,6 +1165,65 @@ mod tests {
         }
 
         assert!(!tmp.path().join("perri-state/current-pr.json").exists());
+    }
+
+    /// A `view_id` that isn't a safe filename is the *caller's* error, and the
+    /// answer has to say so. This classification used to be
+    /// `e.starts_with("invalid_tag")` on a human-readable message, duplicated
+    /// here and in `clear_current_pr` — so rewording the prose in
+    /// `validate_tag` would have silently turned every rejected tag into
+    /// `io_error`, telling an agent to retry a request that can never succeed
+    /// and telling an operator the disk is broken when it isn't. The code is
+    /// what a caller branches on; the `detail` still has to read the same as
+    /// it always did, because that is what a human reads.
+    #[tokio::test]
+    async fn load_pr_blames_a_path_bearing_view_id_on_the_caller_and_not_on_the_disk() {
+        let (state, tmp, _bcast) = make_daemon_state().await;
+
+        for view_id in ["../escape", "a/b", "..", ".", "nested/../../escape"] {
+            let args = json!({ "number": 42, "repo": "acme/web", "view_id": view_id });
+            let result = load_pr(&state, &args, Some("perri")).await;
+
+            assert_eq!(
+                result["error"], "invalid_args",
+                "a `view_id` of {view_id:?} is a malformed request, not an I/O failure: {result}"
+            );
+            let detail = result["detail"].as_str().unwrap_or_default();
+            assert!(
+                detail.starts_with("invalid_tag: "),
+                "the operator-facing detail for a `view_id` of {view_id:?} must still name the \
+                 tag as the problem, got {detail:?}"
+            );
+        }
+
+        assert!(
+            !perri_current_pr::pins_dir(&tmp.path().join("perri-state")).exists(),
+            "a refused tag must be refused before anything is created on disk"
+        );
+    }
+
+    /// The other direction, so the classification above cannot be satisfied by
+    /// hard-coding `invalid_args`: when the tag is fine and the *disk* is what
+    /// refuses, the caller must be told `io_error` — the only one of these
+    /// failures that is worth retrying, and the only one that means the
+    /// machine rather than the request is at fault. Induced by planting a
+    /// regular file where the pins directory has to go, so the pin store fails
+    /// for a reason that has nothing to do with what was asked for.
+    #[tokio::test]
+    async fn load_pr_blames_a_disk_that_refuses_the_pin_on_the_machine_and_not_on_the_caller() {
+        let (state, tmp, _bcast) = make_daemon_state().await;
+        let state_dir = tmp.path().join("perri-state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(perri_current_pr::pins_dir(&state_dir), b"not a directory").unwrap();
+
+        let args = json!({ "number": 42, "repo": "acme/web" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+
+        assert_eq!(
+            result["error"], "io_error",
+            "a well-formed request the machine could not carry out is the machine's failure, \
+             not the caller's: {result}"
+        );
     }
 
     #[tokio::test]
@@ -1943,6 +1995,32 @@ mod tests {
             Some(before),
             "an empty pty_id must not be coerced into a focus whose review then gets wiped"
         );
+    }
+
+    /// The clearing half of
+    /// `load_pr_blames_a_path_bearing_view_id_on_the_caller_and_not_on_the_disk`.
+    /// Both handlers classify pin-store failures, and they used to do it with
+    /// the same copy-pasted string sniff — so a test on only one of them
+    /// leaves the other free to regress on its own.
+    #[tokio::test]
+    async fn clear_current_pr_blames_a_path_bearing_view_id_on_the_caller_and_not_on_the_disk() {
+        let (state, _tmp, _bcast) = make_daemon_state().await;
+
+        for view_id in ["../escape", "a/b", "..", ".", "nested/../../escape"] {
+            let result =
+                clear_current_pr(&state, &json!({ "view_id": view_id }), Some("perri")).await;
+
+            assert_eq!(
+                result["error"], "invalid_args",
+                "a `view_id` of {view_id:?} is a malformed request, not an I/O failure: {result}"
+            );
+            let detail = result["detail"].as_str().unwrap_or_default();
+            assert!(
+                detail.starts_with("invalid_tag: "),
+                "the operator-facing detail for a `view_id` of {view_id:?} must still name the \
+                 tag as the problem, got {detail:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -52,25 +52,70 @@ pub const BUILTIN_PERRI_TAG: &str = "perri";
 /// be logged, then deleted — never adopted. See [`discard_legacy_pointer`].
 const LEGACY_POINTER: &str = "current-pr.json";
 
+/// Why a pin-store call failed — **as a value, not a string prefix**.
+///
+/// The MCP handlers have to answer one question about every failure here: is
+/// this the caller's fault or the machine's? They used to answer it with
+/// `e.starts_with("invalid_tag")`, duplicated at two sites. That made a
+/// literal prefix inside a human-readable message load-bearing API with no
+/// type protecting it — rewording [`validate_tag`]'s message would silently
+/// reclassify every rejected tag as `io_error`, and no test could see it
+/// happen. The variant is the classification now; [`PinError::code`] is the
+/// single place the mapping lives, and `Display` still renders exactly the
+/// same text so no `detail` a caller reads has changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinError {
+    /// The focus tag is not a name that may be joined to a path.
+    InvalidTag(String),
+    /// The repo slug is not in `"owner/repo"` form.
+    InvalidRepo(String),
+    /// The filesystem refused, or the pin could not be rendered to write.
+    Io(String),
+}
+
+impl PinError {
+    /// The MCP error code this failure is reported under. A malformed tag or
+    /// repo slug came in with the request and no retry will fix it; anything
+    /// else is the machine's.
+    pub fn code(&self) -> &'static str {
+        match self {
+            PinError::InvalidTag(_) | PinError::InvalidRepo(_) => "invalid_args",
+            PinError::Io(_) => "io_error",
+        }
+    }
+}
+
+impl std::fmt::Display for PinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PinError::InvalidTag(detail) => write!(f, "invalid_tag: {detail}"),
+            PinError::InvalidRepo(detail) => write!(f, "invalid_repo: {detail}"),
+            PinError::Io(detail) => write!(f, "io_error: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for PinError {}
+
 /// Validate a `"owner/repo"` slug: non-empty, exactly one `/`, both halves
 /// non-empty, and restricted to `[A-Za-z0-9._-]` so it can never be
 /// misinterpreted as a path/shell fragment once it ends up in a GitHub API
 /// URL or a cache filename.
-pub fn validate_repo_slug(repo: &str) -> Result<(), String> {
+pub fn validate_repo_slug(repo: &str) -> Result<(), PinError> {
     let mut parts = repo.split('/');
     let (owner, name) = match (parts.next(), parts.next(), parts.next()) {
         (Some(o), Some(n), None) if !o.is_empty() && !n.is_empty() => (o, n),
         _ => {
-            return Err(format!(
-                "invalid_repo: {repo:?} must be in \"owner/repo\" form"
-            ));
+            return Err(PinError::InvalidRepo(format!(
+                "{repo:?} must be in \"owner/repo\" form"
+            )));
         }
     };
     let is_valid_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
     if !owner.chars().all(is_valid_char) || !name.chars().all(is_valid_char) {
-        return Err(format!(
-            "invalid_repo: {repo:?} contains characters outside [A-Za-z0-9._-]"
-        ));
+        return Err(PinError::InvalidRepo(format!(
+            "{repo:?} contains characters outside [A-Za-z0-9._-]"
+        )));
     }
     Ok(())
 }
@@ -82,18 +127,20 @@ pub fn validate_repo_slug(repo: &str) -> Result<(), String> {
 /// Hello frame or from an agent-supplied `view_id`, and an unvalidated one
 /// joined to a filename is a directory escape. `..` is additionally rejected
 /// outright — it passes the character rule but is not a name.
-pub fn validate_tag(tag: &str) -> Result<(), String> {
+pub fn validate_tag(tag: &str) -> Result<(), PinError> {
     if tag.is_empty() {
-        return Err("invalid_tag: focus tag must not be empty".to_owned());
+        return Err(PinError::InvalidTag(
+            "focus tag must not be empty".to_owned(),
+        ));
     }
     if tag == "." || tag == ".." {
-        return Err(format!("invalid_tag: {tag:?} is not a focus tag"));
+        return Err(PinError::InvalidTag(format!("{tag:?} is not a focus tag")));
     }
     let is_valid_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
     if !tag.chars().all(is_valid_char) {
-        return Err(format!(
-            "invalid_tag: {tag:?} contains characters outside [A-Za-z0-9._-]"
-        ));
+        return Err(PinError::InvalidTag(format!(
+            "{tag:?} contains characters outside [A-Za-z0-9._-]"
+        )));
     }
     Ok(())
 }
@@ -113,7 +160,7 @@ pub fn pins_dir(state_dir: &Path) -> PathBuf {
 
 /// `<state_dir>/current-pr/<tag>.json`, or an error if `tag` is not a name
 /// that may be joined to a path.
-pub fn pin_path(state_dir: &Path, tag: &str) -> Result<PathBuf, String> {
+pub fn pin_path(state_dir: &Path, tag: &str) -> Result<PathBuf, PinError> {
     validate_tag(tag)?;
     Ok(pins_dir(state_dir).join(format!("{tag}.json")))
 }
@@ -128,21 +175,21 @@ pub fn write_pointer(
     number: u64,
     repo: &str,
     highlights: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), PinError> {
     validate_repo_slug(repo)?;
     let json_path = pin_path(state_dir, tag)?;
 
-    std::fs::create_dir_all(pins_dir(state_dir)).map_err(|e| format!("io_error: {e}"))?;
+    std::fs::create_dir_all(pins_dir(state_dir)).map_err(|e| PinError::Io(e.to_string()))?;
 
     let pointer = json!({
         "number": number,
         "repo": repo,
         "highlights": highlights,
     });
-    let text =
-        serde_json::to_string_pretty(&pointer).map_err(|e| format!("serialization_failed: {e}"))?;
+    let text = serde_json::to_string_pretty(&pointer)
+        .map_err(|e| PinError::Io(format!("could not render the pin: {e}")))?;
 
-    std::fs::write(&json_path, text.as_bytes()).map_err(|e| format!("io_error: {e}"))?;
+    std::fs::write(&json_path, text.as_bytes()).map_err(|e| PinError::Io(e.to_string()))?;
 
     touch_current_pr_dirty(state_dir)
 }
@@ -152,10 +199,10 @@ pub fn write_pointer(
 ///
 /// Only ever touches `tag`'s own file: this is the guarantee behind "no call
 /// made in one focus changes what any other focus reports as under review."
-pub fn clear_pointer(state_dir: &Path, tag: &str) -> Result<(), String> {
+pub fn clear_pointer(state_dir: &Path, tag: &str) -> Result<(), PinError> {
     let json_path = pin_path(state_dir, tag)?;
     if json_path.exists() {
-        std::fs::remove_file(&json_path).map_err(|e| format!("io_error: {e}"))?;
+        std::fs::remove_file(&json_path).map_err(|e| PinError::Io(e.to_string()))?;
     }
     touch_current_pr_dirty(state_dir)
 }
@@ -169,12 +216,12 @@ pub fn clear_pointer(state_dir: &Path, tag: &str) -> Result<(), String> {
 /// the *same* tag. Anything short of removing the file would resurrect the old
 /// focus's pin under the new focus — the PRD's "a removed focus's pin never
 /// resurfaces" criterion, failing.
-pub fn remove_pin(state_dir: &Path, tag: &str) -> Result<bool, String> {
+pub fn remove_pin(state_dir: &Path, tag: &str) -> Result<bool, PinError> {
     let json_path = pin_path(state_dir, tag)?;
     if !json_path.exists() {
         return Ok(false);
     }
-    std::fs::remove_file(&json_path).map_err(|e| format!("io_error: {e}"))?;
+    std::fs::remove_file(&json_path).map_err(|e| PinError::Io(e.to_string()))?;
     touch_current_pr_dirty(state_dir)?;
     Ok(true)
 }
@@ -356,17 +403,17 @@ fn parse_pin(raw: &str) -> Option<Pin> {
 }
 
 /// Touch `current-pr.dirty` to wake `PerriPrNativeSource`'s watcher.
-fn touch_current_pr_dirty(state_dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(state_dir).map_err(|e| format!("io_error: {e}"))?;
+fn touch_current_pr_dirty(state_dir: &Path) -> Result<(), PinError> {
+    std::fs::create_dir_all(state_dir).map_err(|e| PinError::Io(e.to_string()))?;
     let dirty_path = state_dir.join("current-pr.dirty");
-    std::fs::write(&dirty_path, b"").map_err(|e| format!("io_error: {e}"))
+    std::fs::write(&dirty_path, b"").map_err(|e| PinError::Io(e.to_string()))
 }
 
 /// Touch `queue.dirty` to wake `PerriQueueNativeSource`'s watcher.
-pub fn touch_queue_dirty(state_dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(state_dir).map_err(|e| format!("io_error: {e}"))?;
+pub fn touch_queue_dirty(state_dir: &Path) -> Result<(), PinError> {
+    std::fs::create_dir_all(state_dir).map_err(|e| PinError::Io(e.to_string()))?;
     let dirty_path = state_dir.join("queue.dirty");
-    std::fs::write(&dirty_path, b"").map_err(|e| format!("io_error: {e}"))
+    std::fs::write(&dirty_path, b"").map_err(|e| PinError::Io(e.to_string()))
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -704,6 +751,118 @@ mod tests {
         );
     }
 
+    /// The other half of `dropped`: a pin the sweep decided must go, and
+    /// could not remove. This is the zombie-pin scenario the backstop exists
+    /// to prevent, *in progress* — the stale pin is still on disk and will
+    /// still be served to whatever focus reuses the tag — so it may not be
+    /// swallowed. A sweep that silently skips it is indistinguishable from a
+    /// sweep that found nothing to do, which is the opposite outcome.
+    #[test]
+    fn a_pin_that_cannot_be_unlinked_is_reported_rather_than_silently_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        write_pointer(
+            dir.path(),
+            "cody-core-1234",
+            42,
+            "Carefeed/operations",
+            None,
+        )
+        .unwrap();
+
+        // Make the unlink fail without making the pin unreadable: `read_pins`
+        // must still enumerate `cody-core-1234` for the sweep to reach it at
+        // all. A read-only pins dir does exactly that — r-x still lists and
+        // reads the file, but unlinking from it is EACCES. (A pin planted as
+        // a *directory* does not work: `read_pins` skips it at its
+        // `read_to_string` arm, so the sweep never sees the tag.)
+        let pins = pins_dir(dir.path());
+        std::fs::set_permissions(&pins, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let sweep = retain_pins(dir.path(), &live(&["perri"]));
+        // Restored before the assertions so a failure still leaves the
+        // TempDir removable.
+        std::fs::set_permissions(&pins, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            sweep.dropped.is_empty(),
+            "nothing was actually removed, so nothing may be claimed as dropped — \
+             a caller logging `dropped` would otherwise report an eviction that \
+             never happened: {:?}",
+            sweep.dropped
+        );
+        assert!(
+            !sweep.errors.is_empty(),
+            "a pin the sweep could not unlink is still on disk and will resurface \
+             under a reused tag; the sweep must say so instead of returning \
+             quietly, which reads as `there was nothing to collect`"
+        );
+        assert!(
+            sweep.errors.iter().any(|e| e.contains("cody-core-1234")),
+            "the report must name the focus whose pin is stuck, or it cannot be \
+             acted on: {:?}",
+            sweep.errors
+        );
+        assert!(
+            !sweep.is_quiet(),
+            "`is_quiet` is how a caller decides whether to log at all — a sweep \
+             that failed to evict a zombie pin is the loudest outcome there is, \
+             not a quiet one: {sweep:?}"
+        );
+    }
+
+    /// The failure the sweep can hit *after* the unlinks succeed. Its three
+    /// siblings (`write_pointer`, `clear_pointer`, `remove_pin`) all propagate
+    /// a failed sentinel touch; swallowing it here means the pins are gone and
+    /// every Perri surface keeps rendering the PRs the sweep just evicted
+    /// until some unrelated write happens to wake the watcher.
+    #[test]
+    fn a_sweep_that_dropped_a_pin_but_could_not_signal_the_refresh_reports_that_too() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        write_pointer(
+            dir.path(),
+            "cody-core-1234",
+            42,
+            "Carefeed/operations",
+            None,
+        )
+        .unwrap();
+
+        // The sentinel path is occupied by a directory, so the touch fails
+        // (EISDIR) while the pin unlinks still succeed.
+        std::fs::remove_file(dir.path().join("current-pr.dirty")).unwrap();
+        std::fs::create_dir(dir.path().join("current-pr.dirty")).unwrap();
+
+        let sweep = retain_pins(dir.path(), &live(&["perri"]));
+
+        assert_eq!(
+            sweep.dropped,
+            vec!["cody-core-1234".to_owned()],
+            "the unlink itself worked, so the eviction must still be reported: {sweep:?}"
+        );
+        assert!(
+            !sweep.errors.is_empty(),
+            "a sweep that evicted pins and then failed to wake the watcher left \
+             every Perri surface showing PRs that are no longer under review — \
+             partial success is not success"
+        );
+        assert!(
+            sweep
+                .errors
+                .iter()
+                .any(|e| e.contains("no refresh was signalled")),
+            "the report must distinguish `could not delete the pin` from `deleted \
+             the pin but nobody was told`; they need different remedies: {:?}",
+            sweep.errors
+        );
+        assert!(
+            !sweep.is_quiet(),
+            "a sweep with a half-applied outcome must not read as quiet: {sweep:?}"
+        );
+    }
+
     // ── the pre-W7 global pointer is discarded, never adopted ────────────────
 
     #[test]
@@ -818,8 +977,13 @@ mod tests {
             let err = write_pointer(&state_dir, tag, 4526, "Carefeed/admin-portal", None)
                 .expect_err("an escaping tag must be refused");
             assert!(
-                err.starts_with("invalid_tag"),
+                matches!(err, PinError::InvalidTag(_)),
                 "the refusal must name the tag as the problem, got {err:?}"
+            );
+            assert_eq!(
+                err.code(),
+                "invalid_args",
+                "…and an escaping tag is the caller's error, not the disk's: {err}"
             );
             assert!(
                 clear_pointer(&state_dir, tag).is_err(),

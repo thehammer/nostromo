@@ -394,7 +394,7 @@ fn identity_from_target(
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| bad("`{repo, number}`; `repo` is missing or empty"))?;
             if let Err(e) = crate::data::perri_current_pr::validate_repo_slug(repo) {
-                return Err(PlacementError::InvalidTarget(e));
+                return Err(PlacementError::InvalidTarget(e.to_string()));
             }
             let number = obj
                 .get("number")

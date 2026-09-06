@@ -207,7 +207,8 @@ impl PerriView {
             number,
             &repo,
             highlights.as_deref(),
-        )?;
+        )
+        .map_err(|e| e.to_string())?;
 
         // Clear any override so the live diff shows once pr_rx updates.
         self.diff_override = None;
@@ -218,7 +219,8 @@ impl PerriView {
     /// Remove `current-pr.json` and touch the dirty sentinel to clear Perri's diff pane.
     pub fn clear_current_pr(&mut self) -> Result<(), String> {
         let state_dir = self.config.perri_state_dir();
-        perri_current_pr::clear_pointer(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG)?;
+        perri_current_pr::clear_pointer(&state_dir, perri_current_pr::BUILTIN_PERRI_TAG)
+            .map_err(|e| e.to_string())?;
 
         self.diff_override = None;
         Ok(())
