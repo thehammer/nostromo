@@ -2056,6 +2056,190 @@ mod tests {
         assert_eq!(result["error"], "not_supported");
     }
 
+    // ── clear_current_pr: dead refresh channels ─────────────────────────────
+
+    /// A `tracing` writer that keeps everything in memory.
+    ///
+    /// This is the capture idiom already established in
+    /// `tests/perri_targeted_relay.rs` (see `CapturedLogs` there); a type in
+    /// an integration-test crate can't be reused from a unit-test module, so
+    /// the same shape is repeated here rather than a new one invented.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Capture every `WARN` emitted on *this* thread until the returned guard
+    /// drops.
+    ///
+    /// `set_default` (guard), not `with_default` (closure): the handlers under
+    /// test are `async`, and a `with_default` closure can only cover the
+    /// synchronous body it wraps — it cannot span the `.await` at the call
+    /// site, which is where the handler's warnings are actually emitted from.
+    /// A held guard stays installed as the thread-local default across every
+    /// poll. `#[tokio::test]` drives a current-thread runtime, so the whole
+    /// future is polled on this thread and nothing escapes the capture.
+    /// This is the same reasoning (and the same fix) as the note above
+    /// `probe_failure_warns_after_three_consecutive_failures_then_resets` in
+    /// `tests/perri_targeted_relay.rs`.
+    fn capture_warnings() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (logs, guard)
+    }
+
+    /// Seed `tag`'s focus with the standard queue/diff/repl layout, so a
+    /// second focus can be driven under a tag that isn't the literal string
+    /// `"perri"` — otherwise "the warning names the focus" is unprovable,
+    /// since every one of these messages already contains the tool name
+    /// `perri.clear_current_pr`.
+    async fn seed_standard_layout_for(state: &McpSharedState, tag: &str) {
+        // An explicit `view_id` makes `apply_layout` refuse to invent the
+        // focus (`unknown_view`), so register it first — exactly what a real
+        // focus's session startup would already have done.
+        {
+            let reg = state.daemon.as_ref().unwrap().pane_registry.clone();
+            reg.lock().unwrap().get_or_init(tag);
+        }
+        let res = apply_layout::apply_layout(
+            state,
+            &json!({ "name": "perri-standard", "view_id": tag }),
+            None,
+        )
+        .await;
+        assert_eq!(res["error"], Value::Null, "failed to seed `{tag}`: {res}");
+    }
+
+    /// f8. A closed `pr_refresh_tx` is not a hiccup: the receiver only goes
+    /// away when `PerriPrNativeSource::run()` has already returned (its
+    /// `build_client()` failed), so the re-fetch this clear just asked for
+    /// will never happen — not now, and not on any later clear either.
+    /// `load_pr` has always said that out loud, nineteen lines up, with a
+    /// six-line comment explaining why. The clear path used to swallow the
+    /// identical failure on the identical channel with `let _ = tx.send(..)`.
+    ///
+    /// The user-visible half of the operation genuinely succeeded — the pin
+    /// really is gone — so the *only* evidence an operator can act on is the
+    /// warning, and it has to name which focus is now wedged.
+    #[tokio::test]
+    async fn clear_current_pr_still_clears_the_pin_but_warns_naming_the_focus_when_the_pr_source_task_is_gone(
+    ) {
+        let (mut state, tmp, _bcast) = make_daemon_state().await;
+        let tag = "reviewer-two";
+        seed_standard_layout_for(&state, tag).await;
+
+        let state_dir = tmp.path().join("perri-state");
+        perri_current_pr::write_pointer(&state_dir, tag, 1, "acme/web", None).unwrap();
+
+        // A dead source task, exactly as the daemon would leave it: the sender
+        // outlives the receiver, so every `send` from here on fails.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        state.daemon.as_mut().unwrap().perri.pr_refresh_tx = Some(tx);
+
+        let (logs, _guard) = capture_warnings();
+        let result = clear_current_pr(&state, &json!({ "view_id": tag }), None).await;
+
+        assert_eq!(
+            result["ok"], true,
+            "a dead PR source must not fail the clear — the pin really was removed; got: {result}"
+        );
+        assert!(
+            !perri_current_pr::pin_path(&state_dir, tag).unwrap().exists(),
+            "the pin file must be gone even though the refetch request could not be delivered"
+        );
+
+        let text = logs.text();
+        assert!(
+            text.contains(tag),
+            "the warning must name the focus whose PR will never refetch; got:\n{text}"
+        );
+        assert!(
+            text.contains("refetch"),
+            "the warning must say what will not happen (the refetch); got:\n{text}"
+        );
+        assert!(
+            text.contains("PR source task is gone"),
+            "the warning must say why — the source task has exited, so this is permanent; got:\n{text}"
+        );
+        assert!(
+            !text.contains("queue refresh"),
+            "only the PR channel was dead here; the queue channel must not be blamed too; got:\n{text}"
+        );
+    }
+
+    /// f8, the queue half. Same channel-closed-means-the-task-exited
+    /// reasoning as the PR refetch above, but for the queue source: the
+    /// review queue is now stale and will stay stale, and a silent
+    /// `let _ = tx.send(())` left an operator staring at a queue that simply
+    /// stops updating with nothing anywhere to explain it.
+    #[tokio::test]
+    async fn clear_current_pr_still_clears_the_pin_but_warns_that_the_queue_will_not_refresh_when_its_source_task_is_gone(
+    ) {
+        let (mut state, tmp, _bcast) = make_daemon_state().await;
+        let tag = "reviewer-two";
+        seed_standard_layout_for(&state, tag).await;
+
+        let state_dir = tmp.path().join("perri-state");
+        perri_current_pr::write_pointer(&state_dir, tag, 1, "acme/web", None).unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        state.daemon.as_mut().unwrap().perri.queue_refresh_tx = Some(tx);
+
+        let (logs, _guard) = capture_warnings();
+        let result = clear_current_pr(&state, &json!({ "view_id": tag }), None).await;
+
+        assert_eq!(
+            result["ok"], true,
+            "a dead queue source must not fail the clear — the pin really was removed; got: {result}"
+        );
+        assert!(
+            !perri_current_pr::pin_path(&state_dir, tag).unwrap().exists(),
+            "the pin file must be gone even though the queue refresh could not be requested"
+        );
+
+        let text = logs.text();
+        assert!(
+            text.contains("queue refresh"),
+            "the warning must say the queue refresh was never requested; got:\n{text}"
+        );
+        assert!(
+            text.contains("queue source task is gone"),
+            "the warning must say why — the queue source task has exited, so the queue stays stale; got:\n{text}"
+        );
+        assert!(
+            !text.contains("refetch"),
+            "only the queue channel was dead here; the PR refetch must not be blamed too; got:\n{text}"
+        );
+    }
+
     // ── set_selected_index / get_selected_index ─────────────────────────────
 
     #[tokio::test]
