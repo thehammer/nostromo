@@ -3148,4 +3148,182 @@ mod tests {
             snaps.keys().collect::<Vec<_>>()
         );
     }
+
+    // ── the prune set must cover every URL the fetch reads (W7 — D5.1) ──────
+    //
+    // Every pass of `fetch_all` opens by pruning the ETag/body caches down to
+    // what `live_url_prefixes` returns for the live pins. A prefix that stops
+    // covering a URL the fetch actually reads therefore drops that URL's ETag
+    // and cached body at the top of every cycle — and nothing visibly breaks.
+    // The data stays correct; the conditional GET simply never fires again
+    // and that endpoint pays for a full uncached response forever. The only
+    // symptom is the rate-limit bill, which this repo has already spent three
+    // documented rounds on (docs/perri-rl-fix-1.md, -2.md, -3.md).
+    //
+    // So these drive a real fetch against a mock GitHub, take the cache keys
+    // that fetch itself produced — never a URL list re-spelled here, which
+    // would drift in exactly the same silence — and put them through the real
+    // `prune_etag_caches` with the real prefixes.
+
+    /// The head SHA `mount_pr_metadata` serves. The check-runs read is keyed
+    /// on it, and so is the one prefix that can only come from `previous`.
+    const MOUNTED_HEAD_SHA: &str = "abc123";
+
+    /// Every URL currently held in a source's two conditional-GET caches.
+    ///
+    /// Keys are `"{accept}|{url}"` — one URL can be cached under two
+    /// `Accept`s, which is the whole reason `/pulls/{n}` can be both the PR
+    /// metadata and the raw diff — and the prune matches on the URL half, so
+    /// that is what comes back.
+    fn cached_urls(source: &PerriPrNativeSource) -> std::collections::BTreeSet<String> {
+        let urls = |map: &Arc<Mutex<HashMap<String, String>>>| -> Vec<String> {
+            map.lock()
+                .unwrap()
+                .keys()
+                .filter_map(|k| k.split_once('|').map(|(_, url)| url.to_owned()))
+                .collect()
+        };
+        urls(&source.etags)
+            .into_iter()
+            .chain(urls(&source.body_cache))
+            .collect()
+    }
+
+    /// A source that has really fetched one PR with every cacheable endpoint
+    /// answering: the raw diff, the check-runs for its head SHA, and the
+    /// three conversation reads.
+    ///
+    /// The `MockServer` comes back because `api_base()` has to keep resolving
+    /// to it after the fetch — `live_url_prefixes` builds its prefixes
+    /// through `api_base()` as well, and a prefix carrying a dead base
+    /// matches nothing at all, which would make every assertion below a
+    /// tautology.
+    async fn a_source_that_has_fetched(
+        repo: &str,
+        number: u64,
+    ) -> (wiremock::MockServer, PerriPrNativeSource, PrSnapshot) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        mount_pr_diff(&server, repo, number).await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/{repo}/commits/{MOUNTED_HEAD_SHA}/check-runs"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 1,
+                "check_runs": [
+                    { "id": 7, "name": "build", "status": "completed",
+                      "conclusion": "success", "app": { "slug": "circleci" } }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let (owner, name) = split_repo(repo).expect("the test repo is well formed");
+        mount_conversation_mocks(&server, &owner, &name, number).await;
+        // Mounted last: the metadata shares `/pulls/{n}` with the raw diff and
+        // is told apart only by `Accept`, so the diff mock has to be offered
+        // the request first.
+        mount_pr_metadata(&server, repo, number, "a PR under review").await;
+
+        let source = test_source();
+        let snap = source
+            .fetch_pr(&client_pointed_at(&server.uri()), repo, number)
+            .await
+            .expect("every endpoint is mounted, so this fetch must succeed");
+        (server, source, snap)
+    }
+
+    /// A live pin's prefixes must cover every URL that pin's own fetch just
+    /// cached. Whatever they miss is evicted at the top of the next pass, so
+    /// that endpoint's `If-None-Match` can never be sent again and it buys a
+    /// full response — up to `MAX_DIFF_BYTES` for the diff — every cycle, for
+    /// every focus, for the daemon's lifetime.
+    #[tokio::test]
+    async fn every_url_a_live_pins_fetch_cached_survives_the_prune_that_opens_the_next_poll() {
+        let (_server, source, snap) = a_source_that_has_fetched("acme/web", 42).await;
+
+        let before = cached_urls(&source);
+        // Without this the assertion below could pass vacuously: an endpoint
+        // that stopped caching anything is trivially "covered". These are the
+        // five conditional GETs a poll makes (the sixth call, the octocrab
+        // metadata read, is uncached by design and has nothing to prune).
+        for endpoint in [
+            "/pulls/42",                             // the raw diff
+            "/commits/abc123/check-runs?per_page=100", // CI, keyed on the head SHA
+            "/issues/42/comments?per_page=100",      // issue comments
+            "/pulls/42/comments?per_page=100",       // review comments
+            "/pulls/42/reviews?per_page=100",        // reviews
+        ] {
+            assert!(
+                before.iter().any(|url| url.ends_with(endpoint)),
+                "a poll's fetch must have cached {endpoint} — this test can only prove the \
+                 prune keeps the URLs the fetch reads if the fetch really read them. Cached: \
+                 {before:?}"
+            );
+        }
+
+        // `previous` exactly as `fetch_all` holds it: the generation the last
+        // pass published, which is the only place the head SHA the check-runs
+        // prefix is built from can come from.
+        let previous = generation(vec![("focus-1", snap)]);
+        let prefixes = live_url_prefixes("acme/web", 42, &previous);
+        crate::data::perri_queue_native::prune_etag_caches(
+            &source.etags,
+            &source.body_cache,
+            &prefixes,
+        );
+
+        let after = cached_urls(&source);
+        let dropped: Vec<&String> = before.difference(&after).collect();
+        assert!(
+            dropped.is_empty(),
+            "the prune that opens every poll dropped {} URL(s) this very pin's fetch had just \
+             cached: {dropped:?}. Nothing will look broken — those endpoints just stop sending \
+             `If-None-Match` and pay full price on every cycle from here on, per focus. \
+             Prefixes offered: {prefixes:?}",
+            dropped.len()
+        );
+    }
+
+    /// The mirror image: a pin's prefixes must cover *its* PR and nothing
+    /// else. A prefix loose enough to also match a neighbouring PR's URLs
+    /// keeps that PR's entries alive long after its focus moved on, and the
+    /// diff bodies this prune exists to bound accumulate unboundedly.
+    #[tokio::test]
+    async fn one_pins_prefixes_never_keep_a_different_prs_cache_entries_alive() {
+        let (_server, source, _snap) = a_source_that_has_fetched("acme/web", 42).await;
+        let before = cached_urls(&source);
+        assert!(
+            !before.is_empty(),
+            "the fetch must have cached something for there to be anything to prune"
+        );
+
+        // The only pin still live is a different PR in the same repo, sitting
+        // at a different head SHA. Nothing #42 cached belongs to it.
+        let other = PrSnapshot {
+            pr_number: Some(99),
+            repo: "acme/web".to_owned(),
+            head_sha: "deadbee".to_owned(),
+            ..Default::default()
+        };
+        let previous = generation(vec![("focus-1", other)]);
+        let prefixes = live_url_prefixes("acme/web", 99, &previous);
+        crate::data::perri_queue_native::prune_etag_caches(
+            &source.etags,
+            &source.body_cache,
+            &prefixes,
+        );
+
+        let survivors = cached_urls(&source);
+        assert!(
+            survivors.is_empty(),
+            "PR #42's cache entries outlived its pin: {survivors:?} survived a prune whose only \
+             live pin was #99. Prefixes offered: {prefixes:?}"
+        );
+    }
 }
