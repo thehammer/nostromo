@@ -39,9 +39,45 @@ struct Harness {
     /// The decision registry the daemon submits modal requests into. A pickup
     /// must never put anything here.
     decisions: Arc<Mutex<nostromo::ipc::decisions::DecisionRegistry>>,
+    /// The PR-snapshot channel's only sender, when this harness owns one.
+    /// `None` in [`PrSource::Dead`] — that drop *is* the condition under test.
+    _pr_tx: Option<tokio::sync::watch::Sender<nostromo::data::perri_pr::PrSnapshots>>,
+    /// The queue and Mother-jobs senders, held alive for the harness's whole
+    /// life. Load-bearing: the daemon reports "the PR source is gone" from a
+    /// dropped `watch::Sender`, so an unrelated sender the harness itself let
+    /// fall out of scope could manufacture that verdict. These stay alive so a
+    /// source-gone answer can only have come from the PR channel.
+    _queue_tx:
+        Option<tokio::sync::watch::Sender<Option<nostromo::data::perri_queue::PrQueueSnapshot>>>,
+    _jobs_tx: Option<tokio::sync::watch::Sender<Vec<nostromo::mother::MotherJob>>>,
+}
+
+/// Where a harness's `perri.load_pr` refetch can possibly get its snapshot
+/// from — the one axis that decides which non-settled outcome the daemon
+/// reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrSource {
+    /// The shipped test default: `McpSharedState::for_daemon` keeps the
+    /// snapshot sender *inside* the state, so it is alive for as long as the
+    /// state is and a `load_pr` with no matching snapshot can only ever elapse
+    /// its settle timeout. Every pre-existing test in this file uses this, and
+    /// `publish_pr`'s `set_pr_for` requires it.
+    StateOwned,
+    /// A source this harness owns and keeps alive, which never publishes
+    /// anything: an in-flight fetch that hasn't landed yet.
+    LiveButSilent,
+    /// A source whose only sender is dropped before any tool call: the
+    /// `PerriPrNativeSource` task that exited (its `run()` returns outright
+    /// when `build_client()` fails), so no fetch was ever started and none
+    /// ever will be.
+    Dead,
 }
 
 fn make_daemon_state() -> Harness {
+    make_daemon_state_with_pr_source(PrSource::StateOwned)
+}
+
+fn make_daemon_state_with_pr_source(pr_source: PrSource) -> Harness {
     let dir = TempDir::new().unwrap();
     let perri_state_dir = dir.path().join("perri-state");
     let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
@@ -72,12 +108,36 @@ fn make_daemon_state() -> Harness {
         decisions: decisions.clone(),
         tickets: Default::default(),
     };
+    let (state, pr_tx, queue_tx, jobs_tx) = match pr_source {
+        PrSource::StateOwned => (McpSharedState::for_daemon(backend), None, None, None),
+        PrSource::LiveButSilent | PrSource::Dead => {
+            // `for_daemon_with_sources` explicitly clears the state's own
+            // `perri_pr_tx`, so the sender created here is the channel's only
+            // one and this test — not the state — decides whether it lives.
+            let (pr_tx, pr_rx) = tokio::sync::watch::channel(nostromo::data::perri_pr::no_prs());
+            let (queue_tx, queue_rx) =
+                tokio::sync::watch::channel(None::<nostromo::data::perri_queue::PrQueueSnapshot>);
+            let (jobs_tx, jobs_rx) =
+                tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
+            let state = McpSharedState::for_daemon_with_sources(backend, queue_rx, pr_rx, jobs_rx);
+            let pr_tx = if pr_source == PrSource::Dead {
+                drop(pr_tx);
+                None
+            } else {
+                Some(pr_tx)
+            };
+            (state, pr_tx, Some(queue_tx), Some(jobs_tx))
+        }
+    };
     Harness {
-        state: McpSharedState::for_daemon(backend),
+        state,
         _dir: dir,
         perri_state_dir,
         broadcast_tx,
         decisions,
+        _pr_tx: pr_tx,
+        _queue_tx: queue_tx,
+        _jobs_tx: jobs_tx,
     }
 }
 
@@ -285,6 +345,149 @@ async fn load_pr_without_highlights_settles_or_reports_pending_quickly() {
     .await;
     assert_eq!(res["ok"], true);
     assert_eq!(res["pending"], true);
+    // `pending: true` alone cannot tell an elapsed settle timeout apart from a
+    // dead PR source, and this harness is unambiguously the former: the
+    // snapshot sender lives inside the state, so it is alive for this whole
+    // call and the fetch may genuinely still land. Asserting `retryable` here
+    // is what stops the two outcomes from collapsing back into one answer.
+    assert_eq!(
+        res["retryable"], true,
+        "a live-but-silent source that elapsed its settle timeout is retryable — \
+         the fetch may yet land: {res}"
+    );
+}
+
+// ── f4: the two non-settled outcomes are different answers ───────────────────
+//
+// `pending: true` on its own is self-contradictory for a dead source: it says
+// "in flight, ask again" while the accompanying prose says "nothing is in
+// flight and retrying will not help". The pair below pins both halves of the
+// distinction — the machine-readable `pending`/`retryable` fields an agent
+// branches on, and the `detail` string an operator reads — because either half
+// alone leaves the other free to regress. In particular, collapsing the
+// daemon's three-way wait outcome back to a `bool` must fail these.
+
+/// A `PerriPrNativeSource` that exited (its `run()` returns outright when
+/// `build_client()` fails) leaves no sender on the snapshot channel. Nothing
+/// was ever fetched and nothing ever will be, so telling the agent to wait is
+/// telling it to wait forever.
+#[tokio::test]
+async fn load_pr_against_a_dead_pr_source_reports_a_non_pending_unretryable_result_and_says_why() {
+    let harness = make_daemon_state_with_pr_source(PrSource::Dead);
+    let (_server, socket) = serve(&harness, "dead-pr-source").await;
+
+    let (mut reader, mut writer) = connect(&socket, "perri").await;
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.apply_layout",
+        json!({ "name": "perri-standard" }),
+        Duration::from_secs(1),
+    )
+    .await;
+    assert_eq!(res["ok"], true, "{res}");
+
+    // No `highlights`, so the daemon must wait on the snapshot channel — the
+    // only path that can reach a source-gone verdict.
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        3,
+        "perri.load_pr",
+        json!({ "number": 7, "repo": "acme/anvil" }),
+        BOUND,
+    )
+    .await;
+
+    assert_eq!(
+        res["ok"], true,
+        "the pin was written and the panes were painted — that part genuinely \
+         succeeded, and a dead refetch does not retract it: {res}"
+    );
+    assert_eq!(
+        res["pending"], false,
+        "nothing is in flight: the fetch was never started, so reporting it as \
+         pending tells the agent to wait for something that cannot arrive: {res}"
+    );
+    assert_eq!(
+        res["retryable"], false,
+        "and retrying can never help while the source task is gone — this is the \
+         field an agent branches on, so it must be present and false: {res}"
+    );
+
+    let detail = res["detail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`detail` must explain a non-settled refetch: {res}"));
+    assert!(
+        detail.contains("was never started"),
+        "`detail` must say the fetch never started, not that it is still \
+         running: {detail:?}"
+    );
+    assert!(
+        detail.contains("retrying will not help"),
+        "…and must tell the agent plainly not to poll: {detail:?}"
+    );
+}
+
+/// The opposite outcome, through the same harness shape: the source is alive,
+/// it simply hasn't published yet. Here `pending` and `retryable` are both true
+/// and the prose says "in flight" — so a caller can act differently on the two
+/// cases, which is the whole point of distinguishing them.
+#[tokio::test]
+async fn load_pr_against_a_live_but_silent_pr_source_reports_a_pending_retryable_result_and_says_why(
+) {
+    let harness = make_daemon_state_with_pr_source(PrSource::LiveButSilent);
+    let (_server, socket) = serve(&harness, "silent-pr-source").await;
+
+    let (mut reader, mut writer) = connect(&socket, "perri").await;
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.apply_layout",
+        json!({ "name": "perri-standard" }),
+        Duration::from_secs(1),
+    )
+    .await;
+    assert_eq!(res["ok"], true, "{res}");
+
+    // The sender is alive for this whole call (the harness holds it) and
+    // nothing is ever published on it, so the 100ms settle timeout elapses.
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        3,
+        "perri.load_pr",
+        json!({ "number": 7, "repo": "acme/anvil" }),
+        BOUND,
+    )
+    .await;
+
+    assert_eq!(res["ok"], true, "{res}");
+    assert_eq!(
+        res["pending"], true,
+        "a live source that hasn't published yet is genuinely still in flight: {res}"
+    );
+    assert_eq!(
+        res["retryable"], true,
+        "…and asking again later is the reasonable thing to do, which is the \
+         opposite of the dead-source answer: {res}"
+    );
+
+    let detail = res["detail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`detail` must explain a non-settled refetch: {res}"));
+    assert!(
+        detail.contains("still in flight after"),
+        "`detail` must name the elapsed settle timeout, not claim the fetch was \
+         never started — an operator reading these two strings must be able to \
+         tell which happened: {detail:?}"
+    );
+    assert!(
+        !detail.contains("retrying will not help"),
+        "…and must never carry the dead-source advice: {detail:?}"
+    );
 }
 
 /// End-to-end: `perri.clear_current_pr` on a **curated** focus (a layout

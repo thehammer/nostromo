@@ -349,4 +349,140 @@ mod tests {
             Some("conversation fetch partially failed: reviews".to_string())
         );
     }
+
+    // ── 2. changed_tags: which focuses must be repainted (W7 — D6) ───────────
+    //
+    // This is the filter both per-focus fan-out sites run every publish
+    // (`nostromd.rs`'s pane broadcasters and `pane_sources.rs`'s MCP
+    // subscriptions). A tag it fails to report is a focus left rendering the
+    // wrong PR until something unrelated wakes it; a tag it reports
+    // needlessly is a redundant fetch of a diff up to 500 KB, on every tick,
+    // for every focus on the machine.
+
+    fn pr(number: u64, repo: &str) -> PrSnapshot {
+        PrSnapshot {
+            pr_number: Some(number),
+            repo: repo.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// Build a generation from `(tag, Arc<PrSnapshot>)` pairs so a test can
+    /// control `Arc` identity — the thing `changed_tags` actually compares.
+    fn generation(entries: Vec<(&str, std::sync::Arc<PrSnapshot>)>) -> PrSnapshots {
+        std::sync::Arc::new(
+            entries
+                .into_iter()
+                .map(|(tag, snap)| (tag.to_owned(), snap))
+                .collect::<std::collections::HashMap<_, _>>(),
+        )
+    }
+
+    fn tags(of: &std::collections::HashSet<String>) -> Vec<String> {
+        let mut out: Vec<String> = of.iter().cloned().collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_focus_that_picked_up_a_pr_since_the_last_generation_is_reported_changed() {
+        let changed = changed_tags(
+            &no_prs(),
+            &one_pr("cody-core-1234", pr(4526, "Carefeed/admin-portal")),
+        );
+
+        assert_eq!(
+            tags(&changed),
+            vec!["cody-core-1234".to_owned()],
+            "a focus that had no PR under review and now has one must be repainted — \
+             it is the only signal that its pane should stop resolving files against \
+             the working tree and start showing the PR"
+        );
+    }
+
+    #[test]
+    fn a_focus_whose_pr_went_away_since_the_last_generation_is_reported_changed() {
+        let previous = one_pr("cody-core-1234", pr(4526, "Carefeed/admin-portal"));
+
+        let changed = changed_tags(&previous, &no_prs());
+
+        assert_eq!(
+            tags(&changed),
+            vec!["cody-core-1234".to_owned()],
+            "a cleared pin is a change like any other: reporting only the tags \
+             present in the *new* generation would leave the focus that just \
+             cleared its PR still rendering it, with nothing left to ever \
+             contradict it"
+        );
+    }
+
+    #[test]
+    fn a_focus_whose_pr_was_replaced_is_reported_changed_and_its_untouched_neighbour_is_not() {
+        let carried_forward = std::sync::Arc::new(pr(42, "Carefeed/operations"));
+        let previous = generation(vec![
+            (
+                "perri",
+                std::sync::Arc::new(pr(4526, "Carefeed/admin-portal")),
+            ),
+            ("operations", std::sync::Arc::clone(&carried_forward)),
+        ]);
+        let current = generation(vec![
+            // Same focus, a different PR — a new `Arc`.
+            (
+                "perri",
+                std::sync::Arc::new(pr(4600, "Carefeed/admin-portal")),
+            ),
+            // Untouched: the source republished the very same `Arc`.
+            ("operations", std::sync::Arc::clone(&carried_forward)),
+        ]);
+
+        let changed = changed_tags(&previous, &current);
+
+        assert_eq!(
+            tags(&changed),
+            vec!["perri".to_owned()],
+            "the focus that swapped PRs must be repainted, and the focus that did \
+             not must be left alone — the second half is the whole point of the \
+             per-focus filter: without it every publish refetches every focus's \
+             diff, and a busy machine pays that on every tick"
+        );
+    }
+
+    #[test]
+    fn a_focus_whose_snapshot_was_republished_as_a_new_arc_is_reported_changed() {
+        // The conservative direction, asserted so it stays deliberate: equal
+        // *content* behind a fresh pointer still counts as changed. The cost
+        // is one redundant fetch that `last_sent` dedups; the alternative is a
+        // deep compare over every focus's diff on every tick.
+        let previous = generation(vec![(
+            "perri",
+            std::sync::Arc::new(pr(4526, "Carefeed/admin-portal")),
+        )]);
+        let current = generation(vec![(
+            "perri",
+            std::sync::Arc::new(pr(4526, "Carefeed/admin-portal")),
+        )]);
+
+        assert_eq!(
+            tags(&changed_tags(&previous, &current)),
+            vec!["perri".to_owned()],
+            "a fresh pointer is treated as a change on purpose — comparison is by \
+             `Arc::ptr_eq` so it stays O(1) per focus"
+        );
+    }
+
+    #[test]
+    fn two_identical_generations_report_nothing_changed() {
+        let generation_one = one_pr("perri", pr(4526, "Carefeed/admin-portal"));
+        let same = std::sync::Arc::clone(&generation_one);
+
+        assert!(
+            changed_tags(&generation_one, &same).is_empty(),
+            "republishing the very same generation must repaint nobody"
+        );
+        assert!(
+            changed_tags(&no_prs(), &no_prs()).is_empty(),
+            "and two empty generations are not a change either"
+        );
+    }
 }

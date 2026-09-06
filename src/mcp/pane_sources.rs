@@ -1261,6 +1261,151 @@ mod tests {
         handle.abort();
     }
 
+    // ── a PR pickup in one focus repaints only that focus (W7 — D7) ──────────
+    //
+    // The headline efficiency property of per-focus isolation. `PrSnapshots`
+    // now carries every focus's PR and a `PrSnapshot` holds a diff of up to
+    // 500 KB, so a pickup in one focus must not re-fetch and re-diff every
+    // other focus's panes. The whole of what makes that true is one
+    // argument: `push_for_source(..., Some(&changed), ...)`. Passing `None`
+    // is a silent regression to pre-W7 fleet-wide fan-out — everything still
+    // works, the only symptom is the work.
+    //
+    // Read the sentinel pane below before assuming it is decoration.
+    // `push_for_source` dedupes against `last_sent`, so a fan-out over an
+    // *already-painted* pane whose snapshot `Arc` was carried forward
+    // recomputes the identical content and freshness, is swallowed by that
+    // dedup, and never reaches the wire. A test that watched only the
+    // already-painted pane would therefore stay green with the filter
+    // deleted, which is the trap this comment exists to keep the next reader
+    // out of. A pane bound *after* that first paint has no `last_sent` entry
+    // to be deduped against, so it is the one place the wasted fan-out
+    // actually surfaces — and it is an ordinary state, not a contrivance:
+    // `apply_layout` binds a pane every time an operator reshapes a focus.
+
+    /// A published `PrSnapshots` generation from `(tag, Arc<PrSnapshot>)`
+    /// pairs.
+    ///
+    /// Takes the `Arc`s rather than the snapshots deliberately.
+    /// `changed_tags` compares inner pointers, never contents, so carrying a
+    /// focus's *same* `Arc` into the next generation is the only way to say
+    /// "this focus did not change" — an equal-looking rebuild reads as a
+    /// change (deliberately: the conservative direction costs one redundant
+    /// fetch that `last_sent` then dedups).
+    fn generation(entries: Vec<(&str, Arc<PrSnapshot>)>) -> PrSnapshots {
+        Arc::new(
+            entries
+                .into_iter()
+                .map(|(tag, snap)| (tag.to_owned(), snap))
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_pr_pickup_in_one_focus_repaints_that_focus_and_never_touches_another_focuss_panes() {
+        let (state, mut bcast, _qtx, pr_tx) = make_state();
+        bind_pane(&state, "perri", "diff", SOURCE_PR_DIFF);
+        bind_pane(&state, "operations", "diff", SOURCE_PR_DIFF);
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        // Generation 1: each focus holds its own PR, and each pane takes its
+        // first paint from it — which is what warms the dedup path.
+        let untouched = Arc::new(pr_snapshot("acme/api", 7, "the operations PR"));
+        pr_tx
+            .send(generation(vec![
+                ("perri", Arc::new(pr_snapshot("acme/web", 42, "Add widget"))),
+                ("operations", Arc::clone(&untouched)),
+            ]))
+            .unwrap();
+
+        let mut first_painted = std::collections::HashSet::new();
+        for _ in 0..2 {
+            match tokio::time::timeout(Duration::from_millis(200), bcast.recv())
+                .await
+                .expect("both focuses' panes take a first paint from generation 1")
+                .unwrap()
+            {
+                ServerMsg::PaneContent { tag, pane_id, .. } => {
+                    assert_eq!(pane_id, "diff");
+                    first_painted.insert(tag);
+                }
+                other => panic!("expected PaneContent, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            first_painted,
+            ["perri".to_string(), "operations".to_string()]
+                .into_iter()
+                .collect(),
+            "generation 1 adds a PR to both focuses, so both panes must be painted"
+        );
+        // Wait for silence before binding the sentinel, so this test can
+        // never race the broadcaster's own walk of `PR_BACKED_SOURCES` for
+        // generation 1 (`perri.get_pr_conversation` is the last of the three)
+        // and mistake that pass's push for the fan-out under test.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), bcast.recv())
+                .await
+                .is_err(),
+            "generation 1 has exactly two bound panes to paint and must produce exactly two \
+             pushes"
+        );
+
+        // The sentinel: a pane appears in the focus that is about to *not*
+        // change. See this test's preamble for why the already-painted pane
+        // above cannot carry this assertion on its own.
+        bind_pane(&state, "operations", "conversation", SOURCE_PR_CONVERSATION);
+
+        // Generation 2: only "perri" picked up a different PR. "operations"
+        // carries its same `Arc` forward, which is precisely what says "this
+        // focus did not change".
+        pr_tx
+            .send(generation(vec![
+                (
+                    "perri",
+                    Arc::new(pr_snapshot("acme/web", 99, "A different PR")),
+                ),
+                ("operations", Arc::clone(&untouched)),
+            ]))
+            .unwrap();
+
+        // The focus whose PR moved is repainted. Asserted in the same test as
+        // the silence below on purpose: without it, a broadcaster that
+        // delivered nothing at all would pass.
+        match tokio::time::timeout(Duration::from_millis(200), bcast.recv())
+            .await
+            .expect("the focus whose PR actually moved must still be repainted")
+            .unwrap()
+        {
+            ServerMsg::PaneContent { tag, pane_id, .. } => {
+                assert_eq!(tag, "perri");
+                assert_eq!(pane_id, "diff");
+            }
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+
+        // ...and the focus that didn't move is not touched at all: neither
+        // its painted pane nor the sentinel that has never been painted.
+        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(150), bcast.recv()).await
+        {
+            if let ServerMsg::PaneContent { tag, pane_id, .. } = msg {
+                panic!(
+                    "one focus's PR pickup repainted {tag}/{pane_id}, a pane belonging to a \
+                     focus whose PR did not change — this is the pre-W7 fleet-wide fan-out, \
+                     which re-fetches and re-diffs every focus's panes (up to 500 KB of diff \
+                     each) for one focus's change"
+                );
+            }
+        }
+
+        handle.abort();
+    }
+
     // ── nostromo.get_file is deliberately not watch-driven (W2 — D2) ─────────
 
     #[tokio::test]
