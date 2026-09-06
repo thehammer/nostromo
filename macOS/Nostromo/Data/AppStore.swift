@@ -325,12 +325,6 @@ class AppStore: ObservableObject {
             .sink { [weak self] in self?.posture = $0 }
             .store(in: &cancellables)
 
-        // Perri detail — arrives when current-pr-detail.json is written by the daemon.
-        FileWatchers.shared.perriDetail
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] detail in self?.handleDetailUpdate(detail) }
-            .store(in: &cancellables)
-
         // pr-cache dir changed — re-check if pending selection is now warm.
         FileWatchers.shared.prCacheChanged
             .receive(on: DispatchQueue.main)
@@ -750,23 +744,6 @@ class AppStore: ObservableObject {
             headSha:     ""
         )
         selectPR(shell)
-    }
-
-    /// Called when FileWatchers receives an updated PRDetail from current-pr-detail.json.
-    private func handleDetailUpdate(_ detail: PRDetail?) {
-        guard let detail else { return }
-        let key = PRDetailCache.key(repo: detail.repo, number: detail.prNumber ?? 0)
-        prDetailCache.store(detail, forKey: key, protecting: pendingSelectionCacheKey)
-
-        // Only publish if this matches the currently-pending selection.
-        guard let pending = pendingSelection,
-              detail.repo == pending.repo,
-              (detail.prNumber.map { Int($0) } ?? -1) == pending.number
-        else { return }
-
-        perriDetail        = detail
-        perriDetailLoading = false
-        pushDetailToDiffPane(detail)
     }
 
     /// Called when the pr-cache/ directory changes — re-check if pending selection is warm.

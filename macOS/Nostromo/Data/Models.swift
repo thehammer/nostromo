@@ -137,9 +137,44 @@ extension Focus {
         sessionSummary = try c.decodeIfPresent(String.self, forKey: .sessionSummary)
         // Additive and optional: a `focuses.json` written before this field
         // existed decodes it as nil and keeps exactly the `sessionTag` it had.
-        // Persisted daemon-created focuses therefore keep their mangled tag —
-        // the status quo for those entries, and deliberately not rewritten.
         daemonTag      = try c.decodeIfPresent(String.self, forKey: .daemonTag)
+
+        // Self-heal a daemon-created focus persisted before `daemonTag` existed.
+        //
+        // Such an entry has the daemon's wire tag sitting in `id` and no
+        // `daemonTag`, so `sessionTag` re-derives `agentTag-id.prefix(8)` —
+        // which for `cody-core-1234` (agent `cody`) is `cody-cody-cor`, a tag
+        // naming nothing. The focus then renders `FocusLayoutModel.initial`
+        // forever and no pane content ever reaches it, because every
+        // client-side lookup misses the tag the daemon actually broadcasts
+        // under. Leaving that to "delete and recreate the focus" was the
+        // status quo; backfilling is cheap and ends it.
+        //
+        // Each clause is load-bearing:
+        //   • `daemonTag == nil`      — already-migrated and newly-created
+        //                               focuses are untouched.
+        //   • `!isBuiltIn`            — built-in ids (`perri`, `fred`, …) are
+        //                               non-UUID too, but never held a wire tag.
+        //   • `UUID(uuidString:)==nil`— the discriminator. `CreateFocusSheet`
+        //                               mints app focuses with `UUID().uuidString`;
+        //                               `FocusMetaWire.toFocus()` puts the wire
+        //                               tag in `id`. Those are the only two
+        //                               producers of a persisted non-built-in
+        //                               focus, so a non-UUID `id` on one can
+        //                               only have come from the daemon.
+        //
+        // Only `daemonTag` is backfilled — `id` is deliberately left alone. It
+        // is the focus's identity for every other consumer, and rewriting it
+        // would re-key client-side state, which is the failure this migration
+        // exists to end rather than repeat.
+        //
+        // Idempotent and self-persisting: the next `FocusStore.save()` writes
+        // the backfilled tag through, and until then this simply re-runs on the
+        // next launch. That is why there is no migration flag and no schema
+        // version bump here — please don't add one.
+        if daemonTag == nil, !isBuiltIn, UUID(uuidString: id) == nil {
+            daemonTag = id
+        }
     }
 }
 
@@ -434,8 +469,13 @@ struct CiCheck: Decodable, Identifiable {
     }
 }
 
-/// Full PR detail decoded from `current-pr-detail.json` or a per-PR cache file.
-/// Field names are mapped from Rust's snake_case via `CodingKeys`.
+/// Full PR detail decoded from a per-PR cache file or the `PerriState` wire
+/// frame's `current`. Field names are mapped from Rust's snake_case via
+/// `CodingKeys`.
+///
+/// Not from `current-pr-detail.json` — that file is gone (W7): one file cannot
+/// describe N focuses' PRs, so the daemon stopped writing it and the FSEvents
+/// watcher that read it has been removed.
 struct PRDetail: Decodable {
     let prNumber:     Int?
     let repo:         String
