@@ -798,11 +798,21 @@ fn handle_client_msg(
             // this from weakening D8a: it can never collect a pin the loop
             // above would have spared.
             if let Some(live) = reconcilable {
-                let dropped = crate::data::perri_current_pr::retain_pins(perri_state_dir, &live);
-                if !dropped.is_empty() {
+                let sweep = crate::data::perri_current_pr::retain_pins(perri_state_dir, &live);
+                if !sweep.dropped.is_empty() {
                     tracing::info!(
-                        tags = ?dropped,
+                        tags = ?sweep.dropped,
                         "discarded PR pins for focuses that no longer exist"
+                    );
+                }
+                // A backstop that tried and failed must not look like one that
+                // had nothing to do: the pins it could not remove are exactly
+                // the zombies it exists to stop, still on disk and still
+                // waiting for `create_focus` to hand them to a reused tag.
+                if !sweep.errors.is_empty() {
+                    tracing::warn!(
+                        errors = ?sweep.errors,
+                        "PR pins for departed focuses could not be discarded"
                     );
                 }
             }

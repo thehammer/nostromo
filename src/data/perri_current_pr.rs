@@ -207,8 +207,15 @@ pub fn read_pins(state_dir: &Path) -> HashMap<String, Pin> {
             tracing::warn!(tag, "skipping current-pr pin with an invalid tag");
             continue;
         }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) => {
+                // Its two sibling skips above both warn; this one used to
+                // drop out silently, so a focus's review could vanish with
+                // nothing anywhere to say why.
+                tracing::warn!(tag, "skipping unreadable current-pr pin: {e}");
+                continue;
+            }
         };
         match parse_pin(&raw) {
             Some(pin) => {
@@ -220,7 +227,31 @@ pub fn read_pins(state_dir: &Path) -> HashMap<String, Pin> {
     out
 }
 
-/// Drop every pin whose tag is not in `live`, returning the tags dropped.
+/// What one backstop sweep actually did.
+///
+/// `dropped` alone could not distinguish "there was nothing to collect" from
+/// "there was, and every unlink failed" — the two outcomes are the opposite
+/// of each other, and the second *is* the zombie-pin scenario this backstop
+/// exists to prevent, in progress. Both are reported so a caller can log them
+/// differently and a test can tell them apart.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PinSweep {
+    /// Tags whose pin file was removed.
+    pub dropped: Vec<String>,
+    /// Why a pin that should have been collected wasn't, one entry each.
+    /// Non-empty means a stale pin is still on disk and will be served.
+    pub errors: Vec<String>,
+}
+
+impl PinSweep {
+    /// True when the sweep found nothing to do — as opposed to finding
+    /// something and failing at it.
+    pub fn is_quiet(&self) -> bool {
+        self.dropped.is_empty() && self.errors.is_empty()
+    }
+}
+
+/// Drop every pin whose tag is not in `live`, reporting what happened.
 ///
 /// The backstop half of D8: eviction on focus removal is the primary
 /// mechanism, but a missed eviction (the daemon was down when the focus went
@@ -234,25 +265,44 @@ pub fn read_pins(state_dir: &Path) -> HashMap<String, Pin> {
 /// (D8a). A daemon that has genuinely lost every focus keeps its pins until a
 /// real removal says otherwise; the alternative silently discards every pin on
 /// a startup that races the Mac's first registry push.
-pub fn retain_pins(state_dir: &Path, live: &HashSet<String>) -> Vec<String> {
+pub fn retain_pins(state_dir: &Path, live: &HashSet<String>) -> PinSweep {
+    let mut sweep = PinSweep::default();
     if live.is_empty() {
-        return Vec::new();
+        return sweep;
     }
-    let mut dropped = Vec::new();
     for tag in read_pins(state_dir).into_keys() {
         if live.contains(&tag) {
             continue;
         }
-        if let Ok(path) = pin_path(state_dir, &tag) {
-            if std::fs::remove_file(&path).is_ok() {
-                dropped.push(tag);
-            }
+        // Every failure here leaves a pin on disk that this sweep decided
+        // should be gone, so none of them may be swallowed. The primary
+        // eviction path at `server.rs` already matches
+        // `Ok(true)/Ok(false)/Err(e)` on `remove_pin`; this is the same
+        // standard applied to the backstop.
+        match pin_path(state_dir, &tag) {
+            Ok(path) => match std::fs::remove_file(&path) {
+                Ok(()) => sweep.dropped.push(tag),
+                Err(e) => sweep
+                    .errors
+                    .push(format!("could not unlink `{tag}`'s pin: {e}")),
+            },
+            Err(e) => sweep
+                .errors
+                .push(format!("could not resolve `{tag}`'s pin path: {e}")),
         }
     }
-    if !dropped.is_empty() {
-        let _ = touch_current_pr_dirty(state_dir);
+    if !sweep.dropped.is_empty() {
+        // Its three siblings (`write_pointer`, `clear_pointer`, `remove_pin`)
+        // all propagate this. Dropping it meant a sweep could delete the pins
+        // and then have every Perri surface keep rendering the PRs it just
+        // evicted until the next 30s poll happened to notice.
+        if let Err(e) = touch_current_pr_dirty(state_dir) {
+            sweep
+                .errors
+                .push(format!("pins were swept but no refresh was signalled: {e}"));
+        }
     }
-    dropped
+    sweep
 }
 
 /// Read, log and **delete** a pre-W7 bare `<state_dir>/current-pr.json`.
@@ -506,6 +556,38 @@ mod tests {
         );
     }
 
+    /// One hand-edited or half-written file must not blank every focus's
+    /// review. `read_pins` is the cold read the whole store recovers from, so
+    /// a single unparseable file that took the batch down with it would
+    /// silently discard every other focus's in-progress review — and the pins
+    /// it dropped are gone, not merely unread, once `retain_pins` reconciles
+    /// against the result.
+    #[test]
+    fn a_corrupt_pin_file_does_not_blank_the_other_focuses_pins() {
+        let dir = TempDir::new().unwrap();
+        write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
+        write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
+
+        // Half-written by a daemon killed mid-write, or hand-edited.
+        std::fs::write(pin_file(dir.path(), "perri"), r#"{"number":4526,"repo""#).unwrap();
+
+        let pins = read_pins(dir.path());
+        assert_eq!(
+            pins.get("operations"),
+            Some(&Pin {
+                number: 42,
+                repo: "Carefeed/operations".to_owned(),
+                highlights: None,
+            }),
+            "an untouched focus's pin must survive its neighbour's corruption intact"
+        );
+        assert!(
+            !pins.contains_key("perri"),
+            "and the corrupt file is simply absent, never a half-parsed pin"
+        );
+        assert_eq!(pins.len(), 1, "exactly the one bad file is skipped");
+    }
+
     // ── retain_pins: the backstop against a zombie pin (W7 — D8) ─────────────
     //
     // Eviction on focus removal is the primary mechanism; this is what catches
@@ -522,13 +604,18 @@ mod tests {
         write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
         write_pointer(dir.path(), "cody-core-1234", 42, "Carefeed/operations", None).unwrap();
 
-        let dropped = retain_pins(dir.path(), &live(&["perri"]));
+        let sweep = retain_pins(dir.path(), &live(&["perri"]));
 
         assert_eq!(
-            dropped,
+            sweep.dropped,
             vec!["cody-core-1234".to_owned()],
             "the caller is told which focuses it just forgot, so the removal is \
              auditable rather than a silent unlink"
+        );
+        assert!(
+            sweep.errors.is_empty(),
+            "a sweep that removed what it meant to has nothing to report: {:?}",
+            sweep.errors
         );
         assert!(
             !pin_file(dir.path(), "cody-core-1234").exists(),
@@ -543,11 +630,12 @@ mod tests {
         write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
         write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
 
-        let dropped = retain_pins(dir.path(), &live(&["perri", "operations"]));
+        let sweep = retain_pins(dir.path(), &live(&["perri", "operations"]));
 
         assert!(
-            dropped.is_empty(),
-            "a sweep with every focus accounted for must drop nothing: {dropped:?}"
+            sweep.is_quiet(),
+            "a sweep with every focus accounted for must drop nothing — and must \
+             not have *failed* to drop something either: {sweep:?}"
         );
         assert_eq!(
             read_pin(dir.path(), "perri").map(|p| p.number),
@@ -570,11 +658,11 @@ mod tests {
         write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
         write_pointer(dir.path(), "operations", 42, "Carefeed/operations", None).unwrap();
 
-        let dropped = retain_pins(dir.path(), &HashSet::new());
+        let sweep = retain_pins(dir.path(), &HashSet::new());
 
         assert!(
-            dropped.is_empty(),
-            "an unknown registry is not evidence that every focus was deleted"
+            sweep.is_quiet(),
+            "an unknown registry is not evidence that every focus was deleted: {sweep:?}"
         );
         assert_eq!(
             read_pins(dir.path()).len(),
