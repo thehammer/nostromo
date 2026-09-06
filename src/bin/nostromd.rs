@@ -590,9 +590,19 @@ fn build_perri_state(
 /// PR is told *that* rather than being left with whatever it last heard.
 fn perri_state_tags(session_mgr: &Arc<Mutex<SessionManager>>, prs: &PrSnapshots) -> Vec<String> {
     let mut tags: BTreeSet<String> = prs.keys().cloned().collect();
-    if let Ok(mgr) = session_mgr.lock() {
-        tags.extend(mgr.focus_registry().into_iter().map(|f| f.tag));
-    }
+    // `.unwrap()`, like every other `session_mgr` access in this file and in
+    // `server.rs`. The `if let Ok(..)` this replaces silently degraded to
+    // "only the focuses that hold a PR" on a poisoned mutex — defeating the
+    // documented purpose two lines above, and leaving every PR-less focus
+    // rendering its last state with nothing logged to say why.
+    tags.extend(
+        session_mgr
+            .lock()
+            .unwrap()
+            .focus_registry()
+            .into_iter()
+            .map(|f| f.tag),
+    );
     // The `queue` half of every `PerriState` frame is fleet-wide (D9), but
     // after W7 it can only travel *on* a per-focus frame. With no focus to
     // address — before a client has pushed a registry, or briefly after one

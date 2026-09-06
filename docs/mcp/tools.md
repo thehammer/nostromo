@@ -503,10 +503,29 @@ behavior:
     timeout, default 12s) for the refetched snapshot to match `(repo,
     number)`, then pushes the same `Text` summary
     `nostromo.apply_layout`/`nostromo.refresh_pane_content` would render for
-    `perri.get_current_pr`. If the wait times out, pushes a
-    `"Fetching <repo>#<n>… (still loading)"` placeholder and returns
-    `pending: true` — this is success-with-fetch-in-flight, not a failure to
-    retry.
+    `perri.get_current_pr`. If the wait does not settle, pushes a
+    `"Fetching <repo>#<n>… (still loading)"` placeholder and reports why —
+    see **"When the refetch doesn't settle"** below.
+
+  **When the refetch doesn't settle.** The result then carries *both*
+  `pending` and `retryable`, plus a human-readable `detail`. `ok` stays
+  `true` in every case — the pin was written and the panes were painted, and
+  that much genuinely succeeded.
+
+  | outcome | `pending` | `retryable` | what to do |
+  |---|---|---|---|
+  | the refetch settled (normal) | *absent* | *absent* | nothing; the content is in the pane |
+  | the settle timeout elapsed | `true` | `true` | success-with-fetch-in-flight; asking again later is reasonable |
+  | the PR source task is gone | `false` | `false` | **stop.** Nothing is in flight and nothing ever will be — retrying can never help |
+
+  Branch on `retryable`, not on `pending`. The presence of `retryable` means
+  "this did not settle"; its value means "could it ever". The source-gone case
+  happens when `PerriPrNativeSource`'s task has exited, which `run()` does
+  outright when `build_client()` fails (no `gh` token, unreadable
+  `hosts.yml`). Before this was split out, that case reported `pending: true`
+  — "in flight, retry" — beside a `detail` saying nothing was in flight and
+  retrying would not help, and an agent branching on the machine-readable
+  field retried forever.
 
   Also moves the daemon's agent-scoped selected index (see
   `perri.set_selected_index`) to this PR's position in the current queue,
@@ -594,7 +613,7 @@ layout template built the focus, and whatever those panes happen to be named.
 
 **Output**: `{ "ok": true, "cleared": ["<pane ids pushed the no-PR placeholder>"], "queue": ["<pane ids refreshed with the queue>"], "closed": ["<pane ids the curated teardown closed>"] }`, optionally with a `warnings` array (daemon).
 
-**Errors**: `not_supported` (daemon only), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only).
+**Errors**: `invalid_args` (a focus tag that is not a safe filename), `unidentified_caller` (daemon only — no `view_id` and no usable `pty_id`; clearing "the PR under review" with no focus to clear it *for* would, pre-W7, have wiped whichever focus held the global slot), `not_supported` (daemon only), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only).
 
 Source: `src/mcp/tools/perri_mutators.rs`
 

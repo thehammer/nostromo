@@ -298,7 +298,7 @@ async fn load_pr_daemon(
             // D3: highlights are the pane's final content — no fetch, no wait.
             push_content_to_all(
                 daemon,
-                Some(&tag),
+                &tag,
                 &targets,
                 PaneContentWire::Text {
                     text: text.to_string(),
@@ -318,7 +318,7 @@ async fn load_pr_daemon(
             }
             push_content_to_all(
                 daemon,
-                Some(&tag),
+                &tag,
                 &targets,
                 PaneContentWire::Loading,
                 None,
@@ -348,7 +348,7 @@ async fn load_pr_daemon(
                         let fr = apply_layout::freshness(SOURCE_CURRENT_PR, state, Some(&tag));
                         push_content_to_all(
                             daemon,
-                            Some(&tag),
+                            &tag,
                             &targets,
                             content,
                             Some(fr),
@@ -361,7 +361,7 @@ async fn load_pr_daemon(
                         }
                         push_content_to_all(
                             daemon,
-                            Some(&tag),
+                            &tag,
                             &targets,
                             PaneContentWire::Error {
                                 message: format!(
@@ -378,7 +378,7 @@ async fn load_pr_daemon(
                 pending = Some(matched);
                 push_content_to_all(
                     daemon,
-                    Some(&tag),
+                    &tag,
                     &targets,
                     PaneContentWire::Text {
                         text: format!("Fetching {repo}#{number}\u{2026} (still loading)"),
@@ -409,21 +409,49 @@ async fn load_pr_daemon(
     // already refused.
     let mut result = json!({ "ok": true, "pane_ids": &targets });
     if let Some(wait) = pending {
-        result["pending"] = json!(true);
-        result["detail"] = json!(match wait {
+        // The machine-readable field has to carry the distinction, not just
+        // the prose. `pending: true` for a `SourceGone` said "in flight,
+        // retry" while the detail beside it said "nothing is in flight and
+        // retrying will not help" — and an agent branching on the field
+        // (which is exactly what this tool's descriptor and
+        // `docs/mcp/tools.md` tell it to do) retried forever against a source
+        // that would never answer.
+        //
+        // So `pending` keeps its documented meaning — "a fetch is in flight"
+        // — and `retryable` carries the rest. The two appear together and
+        // only when the refetch did *not* settle, which makes the presence of
+        // `retryable` mean "this did not settle" and its value mean "could it
+        // ever". A settled refetch (the normal case) has neither.
+        let (in_flight, retryable, detail) = match wait {
             // Unreachable — `Matched` doesn't set `pending` — but spelled out
             // rather than `unreachable!()`, since a panic in a tool handler is
             // a worse outcome than a slightly odd string.
-            SnapshotWait::Matched => format!("refetch for {repo}#{number} settled"),
-            SnapshotWait::SourceGone => format!(
-                "refetch for {repo}#{number} was never started: the Perri PR source is not \
-                 running, so nothing is in flight and retrying will not help"
+            SnapshotWait::Matched => (false, false, format!("refetch for {repo}#{number} settled")),
+            // Nothing is in flight and nothing ever will be: the
+            // `PerriPrNativeSource` task has exited. Both flags false is the
+            // only honest answer, and `retryable: false` is what stops the
+            // retry loop.
+            SnapshotWait::SourceGone => (
+                false,
+                false,
+                format!(
+                    "refetch for {repo}#{number} was never started: the Perri PR source is not \
+                     running, so nothing is in flight and retrying will not help"
+                ),
             ),
-            SnapshotWait::TimedOut => format!(
-                "refetch for {repo}#{number} still in flight after {:?}",
-                daemon.perri.settle_timeout
+            // The fetch may yet land — asking again later is reasonable.
+            SnapshotWait::TimedOut => (
+                true,
+                true,
+                format!(
+                    "refetch for {repo}#{number} still in flight after {:?}",
+                    daemon.perri.settle_timeout
+                ),
             ),
-        });
+        };
+        result["pending"] = json!(in_flight);
+        result["retryable"] = json!(retryable);
+        result["detail"] = json!(detail);
     }
     if !warnings.is_empty() {
         result["warnings"] = json!(warnings);
@@ -467,11 +495,20 @@ async fn clear_current_pr_daemon(
         return json!({ "error": "io_error", "detail": e });
     }
 
+    // Same channels, same failure, same reporting standard as `load_pr` above:
+    // a closed channel means the source task has exited, so the refresh will
+    // never happen. `load_pr` has a six-line comment explaining why that must
+    // not be swallowed; discarding it nineteen lines away here was the only
+    // thing that made these two look different.
     if let Some(tx) = &daemon.perri.pr_refresh_tx {
-        let _ = tx.send(Some(tag.clone()));
+        if let Err(e) = tx.send(Some(tag.clone())) {
+            warn!("perri.clear_current_pr could not request a refetch for `{tag}`: the PR source task is gone ({e})");
+        }
     }
     if let Some(tx) = &daemon.perri.queue_refresh_tx {
-        let _ = tx.send(());
+        if let Err(e) = tx.send(()) {
+            warn!("perri.clear_current_pr could not request a queue refresh: the PR queue source task is gone ({e})");
+        }
     }
 
     // R8 (W5 — curated-agent-views): nothing is under review any more, so
@@ -517,7 +554,7 @@ async fn clear_current_pr_daemon(
 
     push_content_to_all(
         daemon,
-        Some(&tag),
+        &tag,
         &pr_panes,
         PaneContentWire::Text {
             text: apply_layout::NO_PR_LOADED_PLACEHOLDER.to_string(),
@@ -529,7 +566,7 @@ async fn clear_current_pr_daemon(
     if !queue_panes.is_empty() {
         push_content_to_all(
             daemon,
-            Some(&tag),
+            &tag,
             &queue_panes,
             PaneContentWire::Loading,
             None,
@@ -543,7 +580,7 @@ async fn clear_current_pr_daemon(
                 let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state, Some(&tag));
                 push_content_to_all(
                     daemon,
-                    Some(&tag),
+                    &tag,
                     &queue_panes,
                     content,
                     Some(fr),
@@ -555,7 +592,7 @@ async fn clear_current_pr_daemon(
                     warnings.push(json!({ "pane_id": pane, "error": e.code() }));
                     push_pane_content(
                         daemon,
-                        Some(&tag),
+                        &tag,
                         pane,
                         PaneContentWire::Error {
                             message: format!(
@@ -668,8 +705,14 @@ fn load_pr_targets(reg: &PaneRegistry, tag: &str) -> Vec<String> {
 
 /// Push `content` to `pane_id` within `tag`'s pane tree — but only when the
 /// registry actually has that pane registered for `tag` (D7). A resolved tag
-/// with no such pane, or no tag at all, degrades to a `warnings` entry
-/// instead of failing the call or broadcasting to a pane that doesn't exist.
+/// with no such pane degrades to a `warnings` entry instead of failing the
+/// call or broadcasting to a pane that doesn't exist.
+///
+/// `tag` is a plain `&str`, not an `Option`: since W7 — D4 both entry points
+/// refuse an unattributable caller before anything is written, so "no tag at
+/// all" cannot reach here. This used to take an `Option` and degrade to a
+/// `pane_push: unidentified_caller` warning, a branch no caller could reach —
+/// the type now says so, and the compiler keeps it true.
 ///
 /// Delegates the actual send to the D5 choke point: a `Loading` push goes
 /// through [`broadcast_loading_if_first_paint`] (so a pane that's already
@@ -677,19 +720,12 @@ fn load_pr_targets(reg: &PaneRegistry, tag: &str) -> Vec<String> {
 /// [`broadcast_pane_content`] with the given `freshness`.
 fn push_pane_content(
     daemon: &DaemonMcpBackend,
-    tag: Option<&str>,
+    tag: &str,
     pane_id: &str,
     content: PaneContentWire,
     freshness: Option<PaneFreshness>,
     warnings: &mut Vec<Value>,
 ) {
-    let Some(tag) = tag else {
-        if !warnings.iter().any(|w| w.get("pane_push").is_some()) {
-            warnings.push(json!({ "pane_push": "unidentified_caller" }));
-        }
-        return;
-    };
-
     let known = daemon
         .pane_registry
         .lock()
@@ -718,7 +754,7 @@ fn push_pane_content(
 /// `clear_current_pr_daemon`'s placeholder/queue pushes.
 fn push_content_to_all(
     daemon: &DaemonMcpBackend,
-    tag: Option<&str>,
+    tag: &str,
     targets: &[String],
     content: PaneContentWire,
     freshness: Option<PaneFreshness>,
@@ -790,13 +826,26 @@ async fn wait_for_matching_snapshot(
 /// returns outright when `build_client()` fails — so nothing is in flight and
 /// nothing ever will be. Telling an agent to wait for that is telling it to
 /// wait forever.
+///
+/// `load_pr_daemon` reports the distinction on the wire as two fields, which
+/// are the machine-readable half of the same statement made in
+/// `perri.load_pr`'s descriptor and in `docs/mcp/tools.md` — all three must
+/// say the same thing:
+///
+/// | variant       | `pending` | `retryable` |
+/// |---------------|-----------|-------------|
+/// | `Matched`     | *absent*  | *absent*    |
+/// | `TimedOut`    | `true`    | `true`      |
+/// | `SourceGone`  | `false`   | `false`     |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SnapshotWait {
     /// A snapshot for this focus and this PR was published.
     Matched,
     /// The PR source's `watch::Sender` was dropped: the task is gone.
+    /// Reported as `pending: false, retryable: false` — retrying can never help.
     SourceGone,
     /// `settle_timeout` elapsed with the snapshot still unpublished.
+    /// Reported as `pending: true, retryable: true` — it may yet land.
     TimedOut,
 }
 
