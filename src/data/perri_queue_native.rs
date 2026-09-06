@@ -1887,6 +1887,13 @@ async fn get_pr_head_sha(
 ///
 /// Bodies are stored as raw strings; callers deserialise with `serde_json::from_str`.
 ///
+/// Callers that need to know *how* the body was obtained — specifically,
+/// whether it is the endpoint's current answer or the last cached one served
+/// after a failure — must use [`etag_get_as`] and read
+/// [`FetchedBody::freshness`]. This wrapper deliberately collapses that
+/// distinction, and is only appropriate where a slightly old body is
+/// indistinguishable from a current one *to the caller's own output*.
+///
 /// The Mutex guards are never held across `.await` points.
 pub(crate) async fn etag_get(
     client: &GithubClient,
@@ -1896,7 +1903,60 @@ pub(crate) async fn etag_get(
 ) -> Option<String> {
     etag_get_as(client, url, GITHUB_JSON_ACCEPT, etags, body_cache)
         .await
+        // `etag_get_as` builds a description of exactly what went wrong — the
+        // status and the response body — and its own doc comment calls that
+        // the point of the function. Dropping it with a bare `.ok()` threw
+        // that away at no gain: the caller sees `None` either way, but nobody
+        // could tell a 404 from a DNS failure from a malformed `Accept`.
+        .map_err(|e| debug!("{e}"))
         .ok()
+        .map(|fetched| fetched.body)
+}
+
+/// How the body [`etag_get_as`] returned was actually obtained.
+///
+/// Only one of these three means "this is what the endpoint is serving right
+/// now". A caller that publishes freshness metadata of its own — a
+/// `stale` flag, a `generated_at` timestamp — has to be able to tell them
+/// apart, because a body that is *usable* is not the same as a body that is
+/// *current*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyFreshness {
+    /// A 2xx. This body is the endpoint's current answer.
+    Fresh,
+    /// A 304 Not Modified against a cached ETag. The endpoint answered, and
+    /// its answer was "unchanged" — as current as `Fresh`, and free.
+    NotModified,
+    /// A non-2xx, served from the body cache anyway. The body is the last
+    /// known-good one; the status is why it could not be refreshed.
+    CachedAfterFailure(reqwest::StatusCode),
+}
+
+impl BodyFreshness {
+    /// `Some(reason)` when this body is *not* evidence that the endpoint is
+    /// healthy, phrased for an operator-visible error field.
+    ///
+    /// The reason names the status deliberately. A 500 or a secondary rate
+    /// limit clears itself on the next poll and barely deserves attention; a
+    /// 401 (expired token), 403 (lost SAML grant) or 404 (renamed repo) will
+    /// keep failing until a human does something, and the status is the only
+    /// thing that distinguishes them.
+    pub(crate) fn degraded_reason(self, what: &str) -> Option<String> {
+        match self {
+            Self::Fresh | Self::NotModified => None,
+            Self::CachedAfterFailure(status) => Some(format!(
+                "{what} could not be refreshed: GitHub answered {status}; \
+                 showing the last response that succeeded"
+            )),
+        }
+    }
+}
+
+/// A body from [`etag_get_as`], with the provenance the caller needs to
+/// describe it honestly.
+pub(crate) struct FetchedBody {
+    pub(crate) body: String,
+    pub(crate) freshness: BodyFreshness,
 }
 
 /// The `Accept` every plain GitHub JSON read uses.
@@ -1917,6 +1977,12 @@ pub(crate) const GITHUB_DIFF_ACCEPT: &str = "application/vnd.github.diff";
 /// response body, so a caller whose whole fetch depends on this response (the
 /// PR diff) can surface a real error instead of silently contributing nothing.
 ///
+/// The returned [`FetchedBody`] says which of those three happened. Serving a
+/// cached body after a failure is the right call for the *content* — the
+/// alternative is blanking a review mid-cycle — but it is emphatically not a
+/// successful fetch, and a caller that stamps its output "current" on the
+/// strength of an `Ok` here is publishing a stale body as a fresh one.
+///
 /// Cache keys are `"{accept}|{url}"`, not the bare URL: `/repos/o/r/pulls/N`
 /// serves the PR's JSON *and* its raw diff depending only on `Accept`, and
 /// keying on the URL alone would let one representation's ETag be sent for
@@ -1927,7 +1993,7 @@ pub(crate) async fn etag_get_as(
     accept: &str,
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> Result<String, String> {
+) -> Result<FetchedBody, String> {
     let key = format!("{accept}|{url}");
 
     // Brief lock — get existing ETag before the HTTP round-trip.
@@ -1964,7 +2030,10 @@ pub(crate) async fn etag_get_as(
         // useless: keeping it would 304 forever against an empty cache. Drop
         // it, and the caller's next cycle fetches unconditionally.
         return match body_cache.lock().unwrap().get(&key).cloned() {
-            Some(body) => Ok(body),
+            Some(body) => Ok(FetchedBody {
+                body,
+                freshness: BodyFreshness::NotModified,
+            }),
             None => {
                 etags.lock().unwrap().remove(&key);
                 Err(format!("304 for {url} with no cached body"))
@@ -1980,9 +2049,26 @@ pub(crate) async fn etag_get_as(
         // threads) for this cycle even though nothing about the data itself
         // changed. Fall back to the cache; an error only when this URL has
         // never been fetched successfully at all.
+        //
+        // The fallback is the right call for the content and stays. What it
+        // must not do is happen *silently*: an `Ok` here previously bound
+        // `status` and then dropped it on the floor, so an expired token, a
+        // lost SAML grant or a renamed repo produced a cached body with no
+        // log line and no signal to the caller — and because `prune_etag_caches`
+        // keeps a live pin's body cached, that persisted indefinitely rather
+        // than for one cycle. Warn here, once, wherever the fallback is taken,
+        // and hand the status to the caller in `freshness`.
         let status = resp.status();
-        if let Some(cached) = body_cache.lock().unwrap().get(&key).cloned() {
-            return Ok(cached);
+        if let Some(body) = body_cache.lock().unwrap().get(&key).cloned() {
+            warn!(
+                %status,
+                %url,
+                "GitHub answered non-2xx; serving the last cached body for this endpoint"
+            );
+            return Ok(FetchedBody {
+                body,
+                freshness: BodyFreshness::CachedAfterFailure(status),
+            });
         }
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("{url} -> {status}: {body}"));
@@ -1993,7 +2079,10 @@ pub(crate) async fn etag_get_as(
         .await
         .map_err(|e| format!("reading body of {url}: {e}"))?;
     body_cache.lock().unwrap().insert(key, body.clone());
-    Ok(body)
+    Ok(FetchedBody {
+        body,
+        freshness: BodyFreshness::Fresh,
+    })
 }
 
 /// Drop every cache entry whose URL doesn't start with one of `live_prefixes`.
