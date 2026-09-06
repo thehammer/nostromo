@@ -2371,6 +2371,37 @@ mod tests {
         );
     }
 
+    /// The backstop must not be able to destroy something the primary path
+    /// would have spared. A tag omitted by a single push is a *pending*
+    /// departure, not a departure: the eviction hook reports nothing and
+    /// spares its pin until a second push agrees. Reconciling against
+    /// `live_focus_tags` alone would hand `retain_pins` a set that no longer
+    /// names it, and the backstop would delete that focus's in-progress
+    /// review a full push early — D8a's guarantee inverted.
+    #[test]
+    fn a_focus_pending_departure_is_still_reconcilable_as_live() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            departed.is_empty(),
+            "one omitting push is not enough for the primary path to evict"
+        );
+
+        let tags = mgr
+            .reconcilable_focus_tags()
+            .expect("two agreeing non-empty pushes have landed");
+        assert!(
+            tags.contains("cody"),
+            "a tag the primary path is still sparing must count as live for the \
+             backstop too, or retain_pins collects its pin a push before the \
+             eviction hook would have"
+        );
+        assert!(tags.contains("perri"));
+    }
+
     #[test]
     fn live_focus_tags_unions_daemon_creations_over_the_pushed_registry() {
         let mut mgr = SessionManager::with_store_path(tmp_store());

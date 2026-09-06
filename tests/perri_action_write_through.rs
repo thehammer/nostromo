@@ -593,3 +593,170 @@ async fn an_empty_push_leaves_every_pin_on_disk_while_a_daemon_created_focus_is_
         );
     }
 }
+
+// ── W7 — f4a: the backstop, isolated from the departure loop ─────────────────
+
+/// A pin the departure loop can never reach: the focus went away while this
+/// daemon was not running, so no push it will ever see mentions that tag. The
+/// tag is never in the registry, therefore never in `pending_departures`,
+/// therefore never in `departed` — the only mechanism that can collect it is
+/// the `retain_pins` backstop.
+///
+/// That backstop was once documented but dead (it was wired up for real only in
+/// `5afd21d`), and nothing failed while it was missing. This test is what makes
+/// its removal loud: it must go red if the daemon stops reconciling the pins on
+/// disk against the focuses it believes exist.
+///
+/// The sweep is asserted only after **two agreeing non-empty pushes**, because
+/// that is the evidence standard D8a demands: a reconnecting client's first
+/// push may be partial, and collecting on the strength of it would delete a
+/// live focus's review.
+#[tokio::test]
+async fn a_pin_left_behind_while_the_daemon_was_down_is_swept_once_two_pushes_agree() {
+    let (socket_path, state_dir, _tmp, _server) = serve().await;
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    handshake(&mut stream, vec![Topic::Perri, Topic::Focuses]).await;
+
+    // A pin for a focus this daemon has never heard of — written straight to
+    // disk, the way a previous daemon run left it behind.
+    let ghost = "cody-core-9999";
+    nostromo::data::perri_current_pr::write_pointer(
+        &state_dir,
+        ghost,
+        4526,
+        "Carefeed/admin-portal",
+        None,
+    )
+    .unwrap();
+    // A pin for a focus that *is* live, to prove the sweep is targeted rather
+    // than a wipe.
+    nostromo::data::perri_current_pr::write_pointer(&state_dir, "perri", 42, "acme/anvil", None)
+        .unwrap();
+    assert!(
+        pin_of(&state_dir, ghost).exists() && pin_of(&state_dir, "perri").exists(),
+        "both pins must be on disk before there is anything to reconcile"
+    );
+
+    // Two agreeing, non-empty pushes. Neither names the ghost — nothing ever
+    // will — so `departed` is empty on both of them.
+    for _ in 0..2 {
+        send(
+            &mut stream,
+            &ClientMsg::FocusRegistryPush {
+                focuses: vec![focus_meta("perri"), focus_meta("cody")],
+            },
+        )
+        .await;
+    }
+
+    assert!(
+        wait_until(|| !pin_of(&state_dir, ghost).exists()).await,
+        "a pin for a focus that no longer exists must be swept once the daemon can \
+         vouch for a complete picture; no push will ever name this tag, so while it \
+         survives the next create_focus that reuses the tag inherits a dead focus's PR"
+    );
+    assert!(
+        pin_of(&state_dir, "perri").exists(),
+        "reconciling away a dead focus's pin must not disturb a live focus's review"
+    );
+}
+
+// ── W7 — f4b: the departure loop, isolated from the backstop ─────────────────
+
+/// A confirmed departure must discard the focus's **pane tree and bindings**,
+/// not merely its pin.
+///
+/// Why this asserts the pane registry and not the pin — read before "improving"
+/// it: a pin assertion here would prove nothing about the departure loop,
+/// because the backstop would satisfy it on its own. For a tag to reach
+/// `departed` at all, three non-empty pushes must have landed (one to register
+/// it, one to put it in `pending_departures`, one to confirm), so
+/// `reconcilable_focus_tags` is necessarily `Some` by then; and a departed tag
+/// is in neither `live_focus_tags` nor `pending_departures`, so `retain_pins`
+/// deletes that very pin on the very same message even if the departure loop
+/// never runs. An empty push is no escape either — it both resets the
+/// non-empty-push count and clears `pending_departures`, so it can never
+/// produce a departure. In every state this protocol can reach, the backstop
+/// subsumes the departure loop *for pins*.
+///
+/// Discarding the pane tree and its source bindings is the one effect only the
+/// departure loop has, so it is the only observable that isolates it. Turning
+/// this back into a pin assertion would silently restore that masking, which is
+/// what let a whole eviction path sit dead and green before.
+#[tokio::test]
+async fn a_departed_focus_loses_its_pane_tree_and_bindings() {
+    use nostromo::ipc::pane_registry::{PaneRegistry, SplitPosition, REPL_PANE_ID};
+
+    let (socket_path, _state_dir, tmp, _server, session_mgr) = serve_with_session_mgr().await;
+
+    // The daemon-hosted MCP bridge is what gives the daemon a pane registry;
+    // without it a departure has no tree to discard.
+    let panes = Arc::new(Mutex::new(PaneRegistry::in_memory()));
+    session_mgr.lock().unwrap().configure_mcp_bridge(
+        Arc::clone(&panes),
+        tmp.path().join("mcp.sock"),
+        tmp.path().join("mcp.json"),
+    );
+
+    let departing = "cody-core-1234";
+
+    // Both focuses have assembled a workspace: a second pane bound to a source
+    // the broadcasters keep fetching for.
+    {
+        let mut reg = panes.lock().unwrap();
+        for tag in [departing, "perri"] {
+            reg.init_focus(tag);
+            reg.create_pane(tag, "diff", SplitPosition::Right, REPL_PANE_ID)
+                .unwrap();
+            reg.bind_source(tag, "diff", "perri.get_pr_diff");
+        }
+    }
+
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    handshake(&mut stream, vec![Topic::Perri, Topic::Focuses]).await;
+
+    // Registered…
+    send(
+        &mut stream,
+        &ClientMsg::FocusRegistryPush {
+            focuses: vec![focus_meta("perri"), focus_meta(departing)],
+        },
+    )
+    .await;
+
+    // …then absent from two consecutive pushes, which is the only way the
+    // daemon ever learns a focus is gone.
+    for _ in 0..2 {
+        send(
+            &mut stream,
+            &ClientMsg::FocusRegistryPush {
+                focuses: vec![focus_meta("perri")],
+            },
+        )
+        .await;
+    }
+
+    assert!(
+        wait_until(|| !panes.lock().unwrap().contains(departing)).await,
+        "a focus absent from two consecutive pushes must lose its pane tree — \
+         create_focus derives tags deterministically, so a surviving tree is handed \
+         straight to the next focus of the same name"
+    );
+    let leftover: Vec<String> = panes
+        .lock()
+        .unwrap()
+        .all_bindings()
+        .into_iter()
+        .filter(|(tag, _, _)| tag == departing)
+        .map(|(_, pane_id, _)| pane_id)
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "a removed focus must leave no source binding the broadcasters keep fetching \
+         for, but {departing} still holds bindings for panes {leftover:?}"
+    );
+    assert!(
+        panes.lock().unwrap().contains("perri"),
+        "removing one focus must not disturb another focus's workspace"
+    );
+}
