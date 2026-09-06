@@ -4,6 +4,7 @@ use clap::ValueEnum;
 
 pub mod activity;
 pub mod agent_bus;
+pub mod mdns;
 pub mod app;
 pub mod config;
 pub mod data;
@@ -12,7 +13,6 @@ pub mod ipc;
 pub mod layout;
 pub mod markdown_blocks;
 pub mod mcp;
-pub mod mdns;
 pub mod mother;
 pub mod perri_cli;
 pub mod pty;

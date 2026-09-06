@@ -143,9 +143,7 @@ pub struct TicketRegistry {
 
 impl TicketRegistry {
     pub fn new() -> Self {
-        Self {
-            providers: std::collections::HashMap::new(),
-        }
+        Self { providers: std::collections::HashMap::new() }
     }
 
     pub fn register(&mut self, provider: std::sync::Arc<dyn TicketProvider>) {
@@ -155,12 +153,10 @@ impl TicketRegistry {
     /// Resolve `name` to a configured provider, or the specific refusal.
     pub fn get(&self, name: &str) -> Result<std::sync::Arc<dyn TicketProvider>, TicketError> {
         match self.providers.get(name) {
-            None => Err(TicketError::UnsupportedProvider {
-                supported: self.supported_names(),
-            }),
-            Some(p) if !p.is_configured() => Err(TicketError::ProviderUnconfigured {
-                message: p.unconfigured_message(),
-            }),
+            None => Err(TicketError::UnsupportedProvider { supported: self.supported_names() }),
+            Some(p) if !p.is_configured() => {
+                Err(TicketError::ProviderUnconfigured { message: p.unconfigured_message() })
+            }
             Some(p) => Ok(std::sync::Arc::clone(p)),
         }
     }
@@ -180,17 +176,13 @@ impl TicketRegistry {
 /// daemon-repainted ticket pane doesn't hit the backend on every paint (D5).
 /// Not persisted across restarts.
 pub struct TicketCache {
-    entries:
-        std::sync::Mutex<std::collections::HashMap<(String, String), (Ticket, std::time::Instant)>>,
+    entries: std::sync::Mutex<std::collections::HashMap<(String, String), (Ticket, std::time::Instant)>>,
     ttl: std::time::Duration,
 }
 
 impl TicketCache {
     pub fn new(ttl: std::time::Duration) -> Self {
-        Self {
-            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
-            ttl,
-        }
+        Self { entries: std::sync::Mutex::new(std::collections::HashMap::new()), ttl }
     }
 
     /// A still-fresh cached ticket for `(provider, key)`, if any.
@@ -206,10 +198,7 @@ impl TicketCache {
 
     pub fn put(&self, provider: &str, key: &str, ticket: Ticket) {
         let mut entries = self.entries.lock().unwrap();
-        entries.insert(
-            (provider.to_string(), key.to_string()),
-            (ticket, std::time::Instant::now()),
-        );
+        entries.insert((provider.to_string(), key.to_string()), (ticket, std::time::Instant::now()));
     }
 }
 
@@ -240,22 +229,14 @@ pub fn derive_sections(blocks: Vec<MdBlock>, aliases: &config::AliasTable) -> Ve
 
     for block in blocks {
         if let MdBlock::Heading { ref spans, .. } = block {
-            sections.push(TicketSection {
-                name,
-                heading,
-                blocks: std::mem::take(&mut acc),
-            });
+            sections.push(TicketSection { name, heading, blocks: std::mem::take(&mut acc) });
             name = canonical_section_name(&plain_text(spans), aliases);
             heading = Some(spans.clone());
             continue;
         }
         acc.push(block);
     }
-    sections.push(TicketSection {
-        name,
-        heading,
-        blocks: acc,
-    });
+    sections.push(TicketSection { name, heading, blocks: acc });
     sections
 }
 
@@ -334,9 +315,7 @@ pub fn resolve_section(
 }
 
 fn unknown_section_error(sections: &[TicketSection]) -> TicketError {
-    TicketError::UnknownSection {
-        available: sections.iter().map(|s| s.name.clone()).collect(),
-    }
+    TicketError::UnknownSection { available: sections.iter().map(|s| s.name.clone()).collect() }
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -379,11 +358,8 @@ aliases:
     #[test]
     fn derive_sections_content_before_first_heading_is_the_description_section() {
         let aliases = test_aliases();
-        let blocks = vec![MdBlock::Paragraph {
-            spans: vec![MdSpan::Text {
-                text: "intro text".into(),
-            }],
-        }];
+        let blocks =
+            vec![MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "intro text".into() }] }];
         let sections = derive_sections(blocks.clone(), &aliases);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].name, DESCRIPTION_SECTION);
@@ -395,61 +371,32 @@ aliases:
     fn derive_sections_each_heading_starts_a_new_alias_resolved_section() {
         let aliases = test_aliases();
         let blocks = vec![
-            MdBlock::Paragraph {
-                spans: vec![MdSpan::Text {
-                    text: "intro".into(),
-                }],
-            },
-            MdBlock::Heading {
-                level: 2,
-                spans: vec![MdSpan::Text { text: "AC".into() }],
-            },
-            MdBlock::Paragraph {
-                spans: vec![MdSpan::Text {
-                    text: "criteria body".into(),
-                }],
-            },
+            MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "intro".into() }] },
+            MdBlock::Heading { level: 2, spans: vec![MdSpan::Text { text: "AC".into() }] },
+            MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "criteria body".into() }] },
         ];
         let sections = derive_sections(blocks, &aliases);
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].name, DESCRIPTION_SECTION);
         assert_eq!(
             sections[0].blocks,
-            vec![MdBlock::Paragraph {
-                spans: vec![MdSpan::Text {
-                    text: "intro".into()
-                }]
-            }]
+            vec![MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "intro".into() }] }]
         );
-        assert_eq!(
-            sections[1].name, "acceptance_criteria",
-            "the 'AC' heading must alias-resolve"
-        );
+        assert_eq!(sections[1].name, "acceptance_criteria", "the 'AC' heading must alias-resolve");
         assert!(sections[1].heading.is_some());
         assert_eq!(
             sections[1].blocks,
-            vec![MdBlock::Paragraph {
-                spans: vec![MdSpan::Text {
-                    text: "criteria body".into()
-                }]
-            }]
+            vec![MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "criteria body".into() }] }]
         );
     }
 
     #[test]
-    fn derive_sections_with_only_a_heading_and_no_leading_content_still_yields_an_empty_description(
-    ) {
+    fn derive_sections_with_only_a_heading_and_no_leading_content_still_yields_an_empty_description()
+    {
         let aliases = test_aliases();
         let blocks = vec![
-            MdBlock::Heading {
-                level: 2,
-                spans: vec![MdSpan::Text { text: "AC".into() }],
-            },
-            MdBlock::Paragraph {
-                spans: vec![MdSpan::Text {
-                    text: "criteria".into(),
-                }],
-            },
+            MdBlock::Heading { level: 2, spans: vec![MdSpan::Text { text: "AC".into() }] },
+            MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "criteria".into() }] },
         ];
         let sections = derive_sections(blocks, &aliases);
         assert_eq!(sections.len(), 2);
@@ -467,30 +414,15 @@ aliases:
     #[test]
     fn canonical_section_name_normalizes_case_punctuation_and_whitespace() {
         let aliases = config::AliasTable::default();
-        assert_eq!(
-            canonical_section_name("  Some Heading!! ", &aliases),
-            "some_heading"
-        );
-        assert_eq!(
-            canonical_section_name("Some-Heading", &aliases),
-            "some_heading"
-        );
-        assert_eq!(
-            canonical_section_name("SOME   heading", &aliases),
-            "some_heading"
-        );
+        assert_eq!(canonical_section_name("  Some Heading!! ", &aliases), "some_heading");
+        assert_eq!(canonical_section_name("Some-Heading", &aliases), "some_heading");
+        assert_eq!(canonical_section_name("SOME   heading", &aliases), "some_heading");
     }
 
     #[test]
     fn canonical_section_name_resolves_every_documented_alias_variant_to_acceptance_criteria() {
         let aliases = test_aliases();
-        for variant in [
-            "Acceptance Criteria",
-            "AC",
-            "ac",
-            "  ac  ",
-            "acceptance-criteria",
-        ] {
+        for variant in ["Acceptance Criteria", "AC", "ac", "  ac  ", "acceptance-criteria"] {
             assert_eq!(
                 canonical_section_name(variant, &aliases),
                 "acceptance_criteria",
@@ -502,21 +434,14 @@ aliases:
     #[test]
     fn canonical_section_name_leaves_a_name_with_no_matching_alias_unchanged_but_normalized() {
         let aliases = test_aliases();
-        assert_eq!(
-            canonical_section_name("Random Heading", &aliases),
-            "random_heading"
-        );
+        assert_eq!(canonical_section_name("Random Heading", &aliases), "random_heading");
     }
 
     // ── 3. resolve_section ────────────────────────────────────────────────────
 
     fn sample_sections() -> Vec<TicketSection> {
         vec![
-            TicketSection {
-                name: DESCRIPTION_SECTION.to_string(),
-                heading: None,
-                blocks: vec![],
-            },
+            TicketSection { name: DESCRIPTION_SECTION.to_string(), heading: None, blocks: vec![] },
             TicketSection {
                 name: "acceptance_criteria".to_string(),
                 heading: Some(vec![]),
@@ -556,10 +481,7 @@ aliases:
             TicketError::UnknownSection { available } => {
                 assert_eq!(
                     available,
-                    vec![
-                        DESCRIPTION_SECTION.to_string(),
-                        "acceptance_criteria".to_string()
-                    ]
+                    vec![DESCRIPTION_SECTION.to_string(), "acceptance_criteria".to_string()]
                 );
             }
             other => panic!("expected UnknownSection, got {other:?}"),
@@ -591,8 +513,8 @@ aliases:
         let aliases = test_aliases();
         let sections = sample_sections();
         let comments = sample_comments();
-        let err =
-            resolve_section(&sections, &comments, "comment:not-a-number", &aliases).unwrap_err();
+        let err = resolve_section(&sections, &comments, "comment:not-a-number", &aliases)
+            .unwrap_err();
         assert!(matches!(err, TicketError::UnknownSection { .. }));
     }
 
@@ -619,16 +541,14 @@ aliases:
     }
 
     #[test]
-    fn registry_get_on_an_unregistered_name_is_unsupported_provider_naming_every_registered_provider(
-    ) {
+    fn registry_get_on_an_unregistered_name_is_unsupported_provider_naming_every_registered_provider()
+    {
         let mut reg = TicketRegistry::new();
         reg.register(Arc::new(StubProvider { configured: true }));
         let err = reg.get("linear").err().unwrap();
         assert_eq!(
             err,
-            TicketError::UnsupportedProvider {
-                supported: vec!["jira".to_string()]
-            }
+            TicketError::UnsupportedProvider { supported: vec!["jira".to_string()] }
         );
     }
 
@@ -639,9 +559,7 @@ aliases:
         let err = reg.get("jira").err().unwrap();
         assert_eq!(
             err,
-            TicketError::ProviderUnconfigured {
-                message: "stub unconfigured".to_string()
-            }
+            TicketError::ProviderUnconfigured { message: "stub unconfigured".to_string() }
         );
     }
 
@@ -668,17 +586,11 @@ aliases:
             "unsupported_provider"
         );
         assert_eq!(
-            TicketError::ProviderUnconfigured {
-                message: "x".into()
-            }
-            .code(),
+            TicketError::ProviderUnconfigured { message: "x".into() }.code(),
             "provider_unconfigured"
         );
         assert_eq!(TicketError::UnknownTicket.code(), "unknown_ticket");
-        assert_eq!(
-            TicketError::UnknownSection { available: vec![] }.code(),
-            "unknown_section"
-        );
+        assert_eq!(TicketError::UnknownSection { available: vec![] }.code(), "unknown_section");
         assert_eq!(TicketError::FetchFailed("x".into()).code(), "fetch_failed");
     }
 

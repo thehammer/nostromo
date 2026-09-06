@@ -40,8 +40,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
+use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async_tls_with_config,
@@ -258,11 +258,11 @@ async fn connect_and_subscribe(
         .map_err(|e| RelayError::Other(e.into()))?;
     request.headers_mut().insert(
         AUTHORIZATION,
-        format!("Bearer {token}").parse().map_err(
-            |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+        format!("Bearer {token}")
+            .parse()
+            .map_err(|e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
                 RelayError::Other(e.into())
-            },
-        )?,
+            })?,
     );
     request.headers_mut().insert(
         USER_AGENT,
@@ -283,7 +283,10 @@ async fn connect_and_subscribe(
             }
         })?;
 
-    info!("github-relay: connected (HTTP {})", response.status());
+    info!(
+        "github-relay: connected (HTTP {})",
+        response.status()
+    );
 
     // Declare subscription — org-wide, default event subset.
     let sub = serde_json::json!({ "type": "subscribe", "org": "Carefeed" });
