@@ -122,13 +122,28 @@ enum PaneFirstPaintAudit {
     /// 34. The discriminator is not how small, but whether it stays that
     /// way.
     ///
-    /// "Stays that way" is checked **per offending axis**, not on both at
-    /// once. A collapsed split pins one axis while the other is still
-    /// settling: the bench's genuinely-collapsed detail panes measured
-    /// 44 x 434.5 then 44 x 385.5 — width pinned at its floor, height still
-    /// arriving. Requiring both axes to hold still would have missed that,
-    /// and a pane that settles and then simply never lays out again would
-    /// never be reported at all.
+    /// "Stays that way" is checked **per offending axis** — only the axes
+    /// actually below the threshold have to hold still, and an axis that is
+    /// a healthy size may move freely. A collapsed split pins one axis while
+    /// the other is still settling: the bench's genuinely-collapsed detail
+    /// panes measured 44 x 434.5 then 44 x 385.5 — width pinned at its
+    /// floor, height still arriving. Comparing whole measurements instead
+    /// would have missed that, and a pane that settles and then simply never
+    /// lays out again would never be reported at all.
+    ///
+    /// When *both* axes are offending, **both** must have settled. This is
+    /// the deliberately conservative side of a real trade-off: it can
+    /// silence a genuine single-axis collapse that happens to sit in a
+    /// window short enough for the other axis to be sub-threshold too and
+    /// still moving (44 x 100 → 44 x 90 reports nothing). Requiring only
+    /// *one* offending axis to have settled would catch that, at the cost of
+    /// firing on a pane that is briefly small on both axes on its way to
+    /// being fine — which is precisely the 48 x 10 transient in the table
+    /// above. Silence on a healthy pane is the error this file has always
+    /// chosen, and the gap is not load-bearing: a collapsed split is caught
+    /// independently by `RatioApplicationAudit`'s own `.error` line and by
+    /// the launch smoke's `ratios-claimed-honestly` gate, neither of which
+    /// looks at pane geometry at all.
     ///
     /// This is the file's own standing rule applied to a new term: a
     /// tripwire that fires on a healthy pane is worse than no tripwire.

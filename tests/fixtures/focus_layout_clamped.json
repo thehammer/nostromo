@@ -14,8 +14,8 @@
           "kind": "split",
           "direction": "horizontal",
           "ratios": [
-            0.5,
-            0.5
+            0.97,
+            0.03
           ],
           "children": [
             {
@@ -23,7 +23,14 @@
               "pane_id": "queue"
             },
             {
-              "kind": "tabs",
+              "kind": "split",
+              "direction": "horizontal",
+              "ratios": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
               "children": [
                 {
                   "kind": "leaf",
@@ -32,14 +39,16 @@
                 {
                   "kind": "leaf",
                   "pane_id": "detail.1"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.2"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.3"
                 }
-              ],
-              "labels": [
-                "Conversation",
-                "Diff"
-              ],
-              "active": 0,
-              "region": "detail"
+              ]
             }
           ]
         },
@@ -66,8 +75,8 @@
           "kind": "split",
           "direction": "horizontal",
           "ratios": [
-            0.5,
-            0.5
+            0.97,
+            0.03
           ],
           "children": [
             {
@@ -75,7 +84,14 @@
               "pane_id": "queue"
             },
             {
-              "kind": "tabs",
+              "kind": "split",
+              "direction": "horizontal",
+              "ratios": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
               "children": [
                 {
                   "kind": "leaf",
@@ -84,14 +100,16 @@
                 {
                   "kind": "leaf",
                   "pane_id": "detail.1"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.2"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.3"
                 }
-              ],
-              "labels": [
-                "Conversation",
-                "Diff"
-              ],
-              "active": 0,
-              "region": "detail"
+              ]
             }
           ]
         },
@@ -118,8 +136,8 @@
           "kind": "split",
           "direction": "horizontal",
           "ratios": [
-            0.5,
-            0.5
+            0.97,
+            0.03
           ],
           "children": [
             {
@@ -127,7 +145,14 @@
               "pane_id": "queue"
             },
             {
-              "kind": "tabs",
+              "kind": "split",
+              "direction": "horizontal",
+              "ratios": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
               "children": [
                 {
                   "kind": "leaf",
@@ -136,14 +161,16 @@
                 {
                   "kind": "leaf",
                   "pane_id": "detail.1"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.2"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.3"
                 }
-              ],
-              "labels": [
-                "Conversation",
-                "Diff"
-              ],
-              "active": 0,
-              "region": "detail"
+              ]
             }
           ]
         },
@@ -170,8 +197,8 @@
           "kind": "split",
           "direction": "horizontal",
           "ratios": [
-            0.5,
-            0.5
+            0.97,
+            0.03
           ],
           "children": [
             {
@@ -179,7 +206,14 @@
               "pane_id": "queue"
             },
             {
-              "kind": "tabs",
+              "kind": "split",
+              "direction": "horizontal",
+              "ratios": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
               "children": [
                 {
                   "kind": "leaf",
@@ -188,14 +222,16 @@
                 {
                   "kind": "leaf",
                   "pane_id": "detail.1"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.2"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.3"
                 }
-              ],
-              "labels": [
-                "Conversation",
-                "Diff"
-              ],
-              "active": 0,
-              "region": "detail"
+              ]
             }
           ]
         },

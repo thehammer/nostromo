@@ -1109,6 +1109,38 @@ rendered-but-not-expected (a stale pane the client hasn't torn down yet).
 `age_ms` is how long ago that window last checked in, which is what tells a
 caller whether a report is even worth trusting for the show it just issued.
 
+#### What this tool does **not** tell you
+
+**It reports hierarchy membership, not visibility.** `agrees: true` means
+every expected pane id exists in the client's view hierarchy. It says
+nothing about whether any of those panes has a usable size, sits on screen,
+is unobscured, or was ever painted.
+
+This is not a hypothetical gap. On 2026-09-08 all three windows reported
+`agrees: true`, `missing: []`, `extra: []` for
+`["queue", "detail.0", "detail.1", "repl"]`, freshly, twice, 65 seconds
+apart — while the detail region was **34 points wide** in a split whose
+correct share was 879.5 points, and the operator could see nothing but the
+queue. The region was a member of the hierarchy, so this tool was right, and
+useless. Reading it as "the screen is fine" is what kept a live-blocking bug
+invisible for four days
+(`.claude/bugs/open/2026-09-08-detail-region-hierarchy-self-reports-rendered-but-nothing-is-visibly-painted-on-w7.md`).
+
+Extending the per-window report to carry pane geometry would close this and
+is worth doing; it needs a `ClientMsg::RenderedShape` wire change and was
+deliberately left out of the fix for the collapse itself. Until then, the
+instruments that *can* answer "is it actually usable" are:
+
+- **Debug ▸ Copy pane diagnostics** (⌘⇧P) — per-pane bounds on demand.
+- The `panes` log category's `PaneFirstPaintAudit` line, which since
+  `fix/detail-region-split-collapse` reports `tooSmall` for a pane that is
+  non-zero but unusably small, not only one that is literally zero-sized.
+- A screenshot. Still the only thing that proves a human can see it.
+
+**If an operator says they cannot see something this tool calls fine,
+the operator is right.** An instrument trusted beyond what it measures is
+worse than no instrument, because it ends the investigation.
+
 **Errors**: `unidentified_caller` (no `view_id` and no caller `pty_id` to
 target), `not_supported` (non-daemon-hosted MCP server).
 

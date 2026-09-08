@@ -45,11 +45,32 @@ fn for_each_split<'a>(tree: &'a PaneTree, visit: &mut impl FnMut(&'a PaneTree)) 
             for_each_split(child, visit);
         }
     }
-    // Leaf and Tabs nodes: nothing to recurse into for this fixture's shape
-    // (Tabs isn't used here, but walking only Split children is intentional —
-    // a Tabs child inside a Split would still be visited as `child` in the
-    // loop above via the `Leaf`/`Tabs` no-op case one level up; since this
-    // fixture contains no Tabs nodes, this is exercised at Split/Leaf only).
+    // Leaf and Tabs nodes: nothing to recurse into. A Tabs node is not a
+    // Split and must not be counted as one — since D7 this fixture contains
+    // one per focus, and `every_frame_renders_exactly_two_split_nodes_and_
+    // four_leaves` below depends on that distinction being kept.
+}
+
+/// Recurse into every `Tabs` node in the tree, calling `visit` with its
+/// children, labels and region tag.
+fn for_each_tabs<'a>(
+    tree: &'a PaneTree,
+    visit: &mut impl FnMut(&'a [PaneTree], &'a [String], &'a Option<String>),
+) {
+    match tree {
+        PaneTree::Leaf { .. } => {}
+        PaneTree::Split { children, .. } => {
+            for child in children {
+                for_each_tabs(child, visit);
+            }
+        }
+        PaneTree::Tabs { children, labels, region, .. } => {
+            visit(children, labels, region);
+            for child in children {
+                for_each_tabs(child, visit);
+            }
+        }
+    }
 }
 
 fn collect_leaf_pane_ids<'a>(tree: &'a PaneTree, out: &mut Vec<&'a str>) {
@@ -120,6 +141,46 @@ fn every_frame_carries_a_split_whose_children_and_ratios_agree_and_sum_to_one() 
     }
 }
 
+/// The detail region is the whole reason this fixture exists in its D7
+/// shape: `bin/nostromo-launch-smoke` is the repo's only automated
+/// real-AppKit end-to-end check, and until this landed it had never rendered
+/// a `Tabs` node at all — the node type the product's primary interaction
+/// (picking up a PR) depends on. A collapsed detail region was live-blocking
+/// for four days without this check noticing, because the check had never
+/// drawn one.
+#[test]
+fn every_frame_carries_a_tabs_region_named_detail() {
+    let frames = load_fixture_frames();
+    for frame in &frames {
+        let ServerMsg::FocusLayout { tag, tree, .. } = frame else {
+            panic!("expected FocusLayout, got {frame:?}");
+        };
+        let mut found = 0;
+        for_each_tabs(tree, &mut |children, labels, region| {
+            assert_eq!(
+                children.len(),
+                labels.len(),
+                "focus {tag:?}: tabs children/labels length mismatch"
+            );
+            assert!(
+                children.len() >= 2,
+                "focus {tag:?}: a one-tab region does not exercise a tab strip"
+            );
+            assert_eq!(
+                region.as_deref(),
+                Some("detail"),
+                "focus {tag:?}: the tabs node must be tagged as the placement \
+                 engine's `detail` region, exactly as `nostromo.show` builds it"
+            );
+            found += 1;
+        });
+        assert_eq!(
+            found, 1,
+            "focus {tag:?}: expected exactly one tabs region, found {found}"
+        );
+    }
+}
+
 #[test]
 fn every_frame_has_exactly_one_repl_leaf() {
     let frames = load_fixture_frames();
@@ -159,7 +220,7 @@ fn every_frame_has_unique_leaf_pane_ids() {
 }
 
 #[test]
-fn every_frame_renders_exactly_two_split_nodes_and_three_leaves() {
+fn every_frame_renders_exactly_two_split_nodes_and_four_leaves() {
     let frames = load_fixture_frames();
     for frame in &frames {
         let ServerMsg::FocusLayout { tag, tree, .. } = frame else {
@@ -169,8 +230,13 @@ fn every_frame_renders_exactly_two_split_nodes_and_three_leaves() {
         for_each_split(tree, &mut |_node| split_count += 1);
         let mut leaves = Vec::new();
         collect_leaf_pane_ids(tree, &mut leaves);
+        // Mirrors FIXTURE_SPLIT_NODES_PER_FOCUS / FIXTURE_LEAVES_PER_FOCUS in
+        // bin/nostromo-launch-smoke, which grades the app's rendered shape
+        // against these exact numbers. Four leaves since D7: queue, the
+        // detail region's two tabs, and repl. A Tabs node is not a Split, so
+        // the split count is unchanged at two.
         assert_eq!(split_count, 2, "focus {tag:?}: expected exactly 2 split nodes");
-        assert_eq!(leaves.len(), 3, "focus {tag:?}: expected exactly 3 leaves");
+        assert_eq!(leaves.len(), 4, "focus {tag:?}: expected exactly 4 leaves");
     }
 }
 

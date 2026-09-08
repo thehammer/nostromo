@@ -360,3 +360,456 @@ final class PaneFirstPaintAuditTests: XCTestCase {
             """)
     }
 }
+
+// MARK: - Shared construction helpers
+
+/// The reporting/rate-limit suites below are almost entirely *pairwise*
+/// comparisons: two measurements that differ in exactly one field, and the
+/// question is what the audit does about that one difference. Spelling all
+/// seven fields out twice per test (the style of the verdict suite above,
+/// where each measurement stands alone) would bury the single varying field
+/// in noise, so those suites build their measurements through this helper
+/// and name only what differs.
+private func paneMeasurement(
+    paneId: String = "detail.0",
+    hasContent: Bool = true,
+    isLoading: Bool = false,
+    width: Double,
+    height: Double,
+    hasWindow: Bool = true,
+    layoutPassCount: Int = 1
+) -> PaneFirstPaintAudit.Measurements {
+    PaneFirstPaintAudit.Measurements(
+        paneId: paneId, hasContent: hasContent, isLoading: isLoading,
+        boundsWidth: width, boundsHeight: height,
+        hasWindow: hasWindow, layoutPassCount: layoutPassCount
+    )
+}
+
+// MARK: - PaneFirstPaintAuditReportingTests
+
+/// Behavioural tests for `PaneFirstPaintAudit.shouldReport(_:previous:)` —
+/// the sampling rule that decides whether an unhealthy verdict is worth
+/// putting on the wire *yet*.
+///
+/// `.tooSmall` on its own false-positives badly. Measured on the
+/// reproduction bench for fix/detail-region-split-collapse, on panes that
+/// ended up completely healthy:
+///
+/// | pane     | pass | measured    | settled at    |
+/// |----------|------|-------------|---------------|
+/// | queue    | 1    | 639.5 x 36  | 639.5 x 485.5 |
+/// | queue    | 6    | 639.5 x 56  | 639.5 x 485.5 |
+/// | detail.0 | 1    | 48 x 10     | 639.5 x 459.5 |
+///
+/// 48 is *wider* than the real failure's 34pt, so no threshold can separate
+/// a healthy pane mid-layout from a genuinely collapsed one. The
+/// discriminator is not how small the pane is but whether the **offending
+/// axis** has stopped moving — and it must be checked per-axis, because the
+/// bench's genuinely-collapsed detail panes measured 44 x 434.5 then
+/// 44 x 385.5: width pinned at its floor while height was still arriving.
+/// Requiring *both* axes to hold still would have missed the real bug.
+///
+/// As everywhere else in this file: a tripwire that fires on a healthy pane
+/// is worse than no tripwire, so the suite leans on the non-firing cases.
+final class PaneFirstPaintAuditReportingTests: XCTestCase {
+
+    // MARK: 14. A healthy pane is never reported
+
+    func testAHealthyPaneIsNeverReported() {
+        let m = paneMeasurement(width: 900, height: 600)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: nil), """
+            a healthy verdict has nothing to report, with or without history.
+            """)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: m), """
+            a healthy pane that has held perfectly still is still healthy — "unchanged" is only a \
+            discriminator once the verdict says something is wrong.
+            """)
+    }
+
+    // MARK: 15. .notDrawable reports immediately, whatever the history
+
+    func testAZeroSizedPaneIsReportedOnItsFirstSightingWithNoPreviousMeasurement() {
+        let m = paneMeasurement(paneId: "queue", width: 900, height: 0)
+        XCTAssertTrue(PaneFirstPaintAudit.shouldReport(m, previous: nil), """
+            pre-existing behaviour that must not regress: a pane with content, a window and a \
+            completed layout pass that has no drawable size at all is reported at once — it is \
+            usually not going to lay out again, so waiting for a second sighting would mean never \
+            reporting the original first-paint bug.
+            """)
+    }
+
+    func testAZeroSizedPaneIsReportedEvenWhileItsOtherAxisIsStillMoving() {
+        let m = paneMeasurement(paneId: "queue", width: 0, height: 481, layoutPassCount: 2)
+        let previous = paneMeasurement(paneId: "queue", width: 0, height: 300, layoutPassCount: 1)
+        XCTAssertTrue(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            the settling rule is scoped to .tooSmall only — .notDrawable must never be delayed or \
+            suppressed by a still-changing measurement.
+            """)
+    }
+
+    func testAZeroSizedPaneIsReportedEvenWhenEverythingHasChangedSinceTheLastPass() {
+        let m = paneMeasurement(paneId: "queue", width: 0, height: 0, layoutPassCount: 2)
+        let previous = paneMeasurement(paneId: "queue", width: 900, height: 600, layoutPassCount: 1)
+        XCTAssertTrue(PaneFirstPaintAudit.shouldReport(m, previous: previous))
+    }
+
+    // MARK: 16. .tooSmall has nothing to compare on its first sighting
+
+    func testATooSmallPaneIsNotReportedOnItsFirstSighting() {
+        let m = paneMeasurement(width: 34, height: 481)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: nil), """
+            with no previous measurement there is no way to tell a collapsed pane from a healthy \
+            one still on its way to a real size, and the file's standing rule breaks the tie in \
+            favour of silence.
+            """)
+    }
+
+    // MARK: 17. The three measured healthy transients must stay silent
+
+    /// Each row of the bench table above, on its first sighting. These are
+    /// the false positives that motivated the whole rule.
+    func testTheMeasuredHealthyQueueTransientAtPassOneIsNotReported() {
+        let m = paneMeasurement(paneId: "queue", width: 639.5, height: 36)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: nil), """
+            measured on the bench: this queue pane settled at 639.5 x 485.5 and was entirely \
+            healthy. Reporting it would be a false positive.
+            """)
+    }
+
+    func testTheMeasuredHealthyQueueTransientAtPassSixIsNotReported() {
+        let m = paneMeasurement(paneId: "queue", width: 639.5, height: 56, layoutPassCount: 6)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: nil), """
+            six passes in and still 56pt tall — "it has had plenty of passes by now" is not the \
+            discriminator, so a high layoutPassCount must not make the audit any more willing to \
+            report a first sighting.
+            """)
+    }
+
+    func testTheMeasuredHealthyDetailTransientAtPassOneIsNotReported() {
+        let m = paneMeasurement(width: 48, height: 10)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: nil), """
+            48 x 10 on a pane that settled at 639.5 x 459.5 — and 48 is *wider* than the real \
+            failure's 34pt, which is precisely why no threshold could ever separate these two \
+            populations.
+            """)
+    }
+
+    /// The queue pane's two bench sightings in sequence: the offending axis
+    /// (height) moved between them, so it is still settling.
+    func testTheMeasuredHealthyQueuePaneIsNotReportedWhileItsHeightIsStillArriving() {
+        let m = paneMeasurement(paneId: "queue", width: 639.5, height: 56, layoutPassCount: 6)
+        let previous = paneMeasurement(paneId: "queue", width: 639.5, height: 36, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            width held still between the two passes, but width is not the offending axis — the \
+            verdict is .tooShort, and the height moved 36 -> 56. Checking the wrong axis (or "any \
+            axis held still") would turn this healthy pane into a report.
+            """)
+    }
+
+    // MARK: 18. The real failure: one axis pinned, the other still arriving
+
+    /// The bench's genuinely-collapsed detail pane, measured across two
+    /// passes: `44 x 434.5` then `44 x 385.5`. Width is pinned at its
+    /// floor; height is still moving. This MUST report — a rule that waited
+    /// for both axes to hold still would have missed the actual bug.
+    func testAPaneWhoseWidthIsPinnedAtItsFloorIsReportedEvenWhileItsHeightIsStillMoving() {
+        let m = paneMeasurement(width: 44, height: 385.5, layoutPassCount: 2)
+        let previous = paneMeasurement(width: 44, height: 434.5, layoutPassCount: 1)
+        XCTAssertTrue(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            this is the real defect as measured on the bench. The verdict is .tooNarrow, and the \
+            width has not budged off 44 across two passes — that is a clamped split, not a pane \
+            mid-layout. The height still changing is irrelevant to a width violation.
+            """)
+    }
+
+    func testAPaneThatStaysCollapsedAcrossPassesIsReported() {
+        let m = paneMeasurement(width: 34, height: 481, layoutPassCount: 5)
+        let previous = paneMeasurement(width: 34, height: 481, layoutPassCount: 4)
+        XCTAssertTrue(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            34pt wide and holding — the confirmed signature of the split-collapse defect. If this \
+            did not report, the instrument would have nothing left to catch.
+            """)
+    }
+
+    // MARK: 19. .tooNarrow keys off width only
+
+    func testANarrowPaneIsNotReportedWhileItsWidthIsStillChanging() {
+        let m = paneMeasurement(width: 48, height: 481, layoutPassCount: 2)
+        let previous = paneMeasurement(width: 34, height: 481, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            the offending axis is still moving — the pane is on its way somewhere, even if it is \
+            currently below the threshold.
+            """)
+    }
+
+    func testANarrowPaneIsReportedWhenItsWidthHoldsWhileItsHeightChangesFreely() {
+        // Both heights are comfortably above the threshold, so the verdict
+        // really is .tooNarrow alone — a height that dipped below 120 would
+        // add .tooShort and pull in the stricter both-axes rule, which is a
+        // different case (see 21 below).
+        let m = paneMeasurement(width: 34, height: 200, layoutPassCount: 2)
+        let previous = paneMeasurement(width: 34, height: 900, layoutPassCount: 1)
+        XCTAssertTrue(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            a 700pt swing on the healthy axis says nothing about a width violation — the width has \
+            not moved off 34, and that is the whole finding.
+            """)
+    }
+
+    // MARK: 20. .tooShort keys off height only
+
+    func testAShortPaneIsReportedWhenItsHeightHoldsWhileItsWidthChangesFreely() {
+        let m = paneMeasurement(paneId: "queue", width: 700, height: 56, layoutPassCount: 2)
+        let previous = paneMeasurement(paneId: "queue", width: 639.5, height: 56, layoutPassCount: 1)
+        XCTAssertTrue(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            the verdict is .tooShort and the height has not moved — the pane is pinned short even \
+            though the window is evidently still resizing it horizontally.
+            """)
+    }
+
+    func testAShortPaneIsNotReportedWhileItsHeightIsStillChanging() {
+        let m = paneMeasurement(paneId: "queue", width: 639.5, height: 60, layoutPassCount: 2)
+        let previous = paneMeasurement(paneId: "queue", width: 639.5, height: 56, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            a 4pt move is still a move — the offending axis has not settled, so there is no \
+            evidence of a collapse yet.
+            """)
+    }
+
+    // MARK: 21. Two reasons require both axes to have settled
+
+    func testAPaneSmallOnBothAxesIsReportedOnlyWhenBothAxesHaveSettled() {
+        let m = paneMeasurement(width: 48, height: 10, layoutPassCount: 2)
+        let previous = paneMeasurement(width: 48, height: 10, layoutPassCount: 1)
+        XCTAssertTrue(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            both offending axes have stopped moving, so both violations are real.
+            """)
+    }
+
+    func testAPaneSmallOnBothAxesIsNotReportedWhileItsWidthIsStillChanging() {
+        let m = paneMeasurement(width: 48, height: 10, layoutPassCount: 2)
+        let previous = paneMeasurement(width: 34, height: 10, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            one settled axis is not enough when both are named — the pane is demonstrably still \
+            being laid out.
+            """)
+    }
+
+    func testAPaneSmallOnBothAxesIsNotReportedWhileItsHeightIsStillChanging() {
+        let m = paneMeasurement(width: 48, height: 10, layoutPassCount: 2)
+        let previous = paneMeasurement(width: 48, height: 40, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous))
+    }
+
+    func testAPaneSmallOnBothAxesIsNotReportedWhileBothAxesAreStillChanging() {
+        let m = paneMeasurement(width: 48, height: 10, layoutPassCount: 2)
+        let previous = paneMeasurement(width: 34, height: 40, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous))
+    }
+
+    // MARK: 22. The layout-pass counter is not part of the comparison
+
+    func testAPaneIsStillReportedWhenOnlyItsLayoutPassCountHasChanged() {
+        let m = paneMeasurement(width: 34, height: 481, layoutPassCount: 9)
+        let previous = paneMeasurement(width: 34, height: 481, layoutPassCount: 1)
+        XCTAssertTrue(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            the counter increments on every pass by definition, so "previous differs" must never \
+            be read off the whole Measurements value — only off the offending axis. Reading it off \
+            equality of the two Measurements would silence every real report.
+            """)
+    }
+
+    // MARK: 23. The four preconditions still dominate the settling rule
+
+    /// Each of these has an *identical* previous measurement — i.e. the
+    /// geometry has demonstrably settled — and must still stay silent,
+    /// because the verdict is `.healthy` and a settled healthy pane is just
+    /// a pane.
+    func testASettledTinyPaneWithNoContentIsNotReported() {
+        let m = paneMeasurement(hasContent: false, width: 34, height: 10, layoutPassCount: 2)
+        let previous = paneMeasurement(hasContent: false, width: 34, height: 10, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            a pane before its first content push has no size it needs to be, however long it holds \
+            that size. The preconditions gate reporting exactly as they gate the verdict.
+            """)
+    }
+
+    func testASettledTinyPaneThatIsLoadingIsNotReported() {
+        let m = paneMeasurement(isLoading: true, width: 34, height: 10, layoutPassCount: 2)
+        let previous = paneMeasurement(isLoading: true, width: 34, height: 10, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous))
+    }
+
+    func testASettledTinyPaneWithNoWindowIsNotReported() {
+        let m = paneMeasurement(paneId: "detail.1", width: 34, height: 10, hasWindow: false, layoutPassCount: 2)
+        let previous = paneMeasurement(paneId: "detail.1", width: 34, height: 10, hasWindow: false, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            an unselected tab holds a nonsense size indefinitely and by design — this is the single \
+            most common way a settled-and-tiny pane arises, and reporting it would drown the log.
+            """)
+    }
+
+    func testASettledTinyPaneBeforeItsFirstLayoutPassIsNotReported() {
+        let m = paneMeasurement(width: 34, height: 10, layoutPassCount: 0)
+        let previous = paneMeasurement(width: 34, height: 10, layoutPassCount: 0)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            no layout pass yet means the bounds are not evidence of anything, and two \
+            not-yet-laid-out sightings are not evidence twice over.
+            """)
+    }
+
+    func testASettledZeroSizedPaneWithNoContentIsNotReported() {
+        let m = paneMeasurement(hasContent: false, width: 0, height: 0, layoutPassCount: 2)
+        let previous = paneMeasurement(hasContent: false, width: 0, height: 0, layoutPassCount: 1)
+        XCTAssertFalse(PaneFirstPaintAudit.shouldReport(m, previous: previous), """
+            .notDrawable reports unconditionally, but only once the preconditions have actually \
+            produced a .notDrawable verdict — "always report" must not leak past the guard.
+            """)
+    }
+}
+
+// MARK: - PaneFirstPaintAuditViolationKeyTests
+
+/// Behavioural tests for `PaneFirstPaintAudit.violationKey(of:)` — the
+/// rate-limit *identity* of a violation, as distinct from `summary(of:)`,
+/// the line that gets logged.
+///
+/// `PaneContentNSView` rate-limits its `.error` tripwire by comparing a
+/// string across layout passes. It used `summary(of:)` — which names
+/// `layoutPasses=N`, incrementing every single pass — so it never
+/// deduplicated anything. Harmless while the only verdict was
+/// `.notDrawable` (a zero-size pane usually stops laying out); not harmless
+/// once `.tooSmall` fires on a pane that is alive and relaying out, where
+/// it was observed flooding the log thousands of times in a single run.
+///
+/// The key must therefore ignore the pass counter and *nothing else*: every
+/// other field is part of the violation's identity, and dropping one would
+/// silently merge two distinct violations into one report.
+final class PaneFirstPaintAuditViolationKeyTests: XCTestCase {
+
+    // MARK: 24. The defect that motivated the key
+
+    func testMeasurementsDifferingOnlyInLayoutPassCountShareAViolationKey() {
+        let a = paneMeasurement(width: 34, height: 481, layoutPassCount: 1)
+        let b = paneMeasurement(width: 34, height: 481, layoutPassCount: 87)
+        XCTAssertEqual(PaneFirstPaintAudit.violationKey(of: a), PaneFirstPaintAudit.violationKey(of: b), """
+            this is the whole reason the function exists. A pane stuck in one bad state produces a \
+            new measurement every layout pass differing only in the counter; if that changed the \
+            rate-limit key, the limiter would log every pass — which is exactly the flood that was \
+            observed.
+            """)
+    }
+
+    func testTheSummaryStillDistinguishesWhatTheViolationKeyDeliberatelyIgnores() {
+        let a = paneMeasurement(width: 34, height: 481, layoutPassCount: 1)
+        let b = paneMeasurement(width: 34, height: 481, layoutPassCount: 87)
+        XCTAssertNotEqual(PaneFirstPaintAudit.summary(of: a), PaneFirstPaintAudit.summary(of: b), """
+            the two functions are deliberately different: the summary is what a human reads and it \
+            still reports how many passes have happened. Pinning this keeps the split honest — if \
+            someone "simplified" violationKey back into summary, this test and the one above \
+            cannot both pass.
+            """)
+    }
+
+    // MARK: 25. Every other field is part of the violation's identity
+
+    /// Each of these pairs is chosen to differ in exactly one field *and*
+    /// share a verdict, so the test fails if that field is dropped from the
+    /// key rather than passing incidentally on a differing `verdict=`.
+    func testADifferentPaneIdProducesADifferentViolationKey() {
+        let a = paneMeasurement(paneId: "queue", width: 900, height: 600)
+        let b = paneMeasurement(paneId: "detail.0", width: 900, height: 600)
+        XCTAssertNotEqual(PaneFirstPaintAudit.violationKey(of: a), PaneFirstPaintAudit.violationKey(of: b), """
+            two panes in the same bad state are two violations, not one — rate-limiting them \
+            together would hide the second pane entirely.
+            """)
+    }
+
+    func testADifferentWidthProducesADifferentViolationKey() {
+        let a = paneMeasurement(width: 200, height: 600)
+        let b = paneMeasurement(width: 300, height: 600)
+        XCTAssertNotEqual(PaneFirstPaintAudit.violationKey(of: a), PaneFirstPaintAudit.violationKey(of: b), """
+            a pane that moves from one bad width to another is in a new state and deserves a fresh \
+            report.
+            """)
+    }
+
+    func testADifferentHeightProducesADifferentViolationKey() {
+        let a = paneMeasurement(width: 900, height: 600)
+        let b = paneMeasurement(width: 900, height: 700)
+        XCTAssertNotEqual(PaneFirstPaintAudit.violationKey(of: a), PaneFirstPaintAudit.violationKey(of: b))
+    }
+
+    func testADifferentHasContentProducesADifferentViolationKey() {
+        let a = paneMeasurement(hasContent: true, width: 900, height: 600)
+        let b = paneMeasurement(hasContent: false, width: 900, height: 600)
+        XCTAssertNotEqual(PaneFirstPaintAudit.violationKey(of: a), PaneFirstPaintAudit.violationKey(of: b), """
+            hasContent is one of the four preconditions and is what makes a measurement damning or \
+            innocuous — the geometry here is healthy in both cases precisely so this fails if the \
+            field is dropped, rather than passing off a differing verdict.
+            """)
+    }
+
+    func testADifferentIsLoadingProducesADifferentViolationKey() {
+        let a = paneMeasurement(isLoading: false, width: 900, height: 600)
+        let b = paneMeasurement(isLoading: true, width: 900, height: 600)
+        XCTAssertNotEqual(PaneFirstPaintAudit.violationKey(of: a), PaneFirstPaintAudit.violationKey(of: b))
+    }
+
+    func testADifferentHasWindowProducesADifferentViolationKey() {
+        let a = paneMeasurement(width: 900, height: 600, hasWindow: true)
+        let b = paneMeasurement(width: 900, height: 600, hasWindow: false)
+        XCTAssertNotEqual(PaneFirstPaintAudit.violationKey(of: a), PaneFirstPaintAudit.violationKey(of: b))
+    }
+
+    // MARK: 26. The key names the verdict
+
+    /// `.tooSmall` and `.notDrawable` cannot coincide on geometry — that is
+    /// what separates them — so the geometry necessarily differs and only
+    /// the `verdict=` fragment is compared.
+    func testTheViolationKeyNamesTheVerdictSoTheTwoFailureShapesAreNeverRateLimitedTogether() {
+        let tooSmall = paneMeasurement(width: 34, height: 481)
+        let notDrawable = paneMeasurement(width: 0, height: 481)
+        let tooSmallFragment = verdictFragment(of: PaneFirstPaintAudit.violationKey(of: tooSmall))
+        let notDrawableFragment = verdictFragment(of: PaneFirstPaintAudit.violationKey(of: notDrawable))
+        XCTAssertEqual(tooSmallFragment, "verdict=tooSmall(tooNarrow)")
+        XCTAssertEqual(notDrawableFragment, "verdict=notDrawable(zeroWidth)")
+        XCTAssertNotEqual(tooSmallFragment, notDrawableFragment, """
+            a collapsed pane and a zero-size pane are different failures with different causes; \
+            the key must keep them apart so one cannot rate-limit the other into silence.
+            """)
+    }
+
+    // MARK: 27. The key and the summary can never disagree about the verdict
+
+    func testTheViolationKeyAndTheSummaryAgreeOnTheVerdictForEveryVerdictShape() {
+        let cases: [(String, PaneFirstPaintAudit.Measurements)] = [
+            ("healthy", paneMeasurement(width: 900, height: 600)),
+            ("no content", paneMeasurement(hasContent: false, width: 0, height: 0)),
+            ("zero width", paneMeasurement(width: 0, height: 481)),
+            ("zero on both axes", paneMeasurement(width: 0, height: 0)),
+            ("too narrow", paneMeasurement(width: 34, height: 481)),
+            ("too short", paneMeasurement(width: 900, height: 34)),
+            ("too small on both axes", paneMeasurement(width: 48, height: 10))
+        ]
+        for (label, m) in cases {
+            let key = PaneFirstPaintAudit.violationKey(of: m)
+            XCTAssertTrue(key.contains("verdict="), "\(label): the key must carry a verdict= field")
+            let fragment = verdictFragment(of: key)
+            XCTAssertTrue(PaneFirstPaintAudit.summary(of: m).contains(fragment), """
+                \(label): the logged line and the rate-limit key must render the verdict \
+                identically — they share one private helper today, and if they ever drifted apart \
+                the log would name one failure while the limiter deduplicated on another. Key \
+                fragment "\(fragment)" not found in summary "\(PaneFirstPaintAudit.summary(of: m))".
+                """)
+        }
+    }
+}
+
+/// The trailing `verdict=…` field of a `violationKey`/`summary` line.
+/// Returns the empty string if absent, which the callers assert against
+/// separately.
+private func verdictFragment(of line: String) -> String {
+    guard let range = line.range(of: "verdict=") else { return "" }
+    return String(line[range.lowerBound...])
+}

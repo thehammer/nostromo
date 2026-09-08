@@ -40,7 +40,17 @@ macOS ▸ Debug menu (⌘⇧-prefixed shortcuts throughout — the app reserves 
   anything and, on every layout pass, judges the pane's drawable size via
   `PaneFirstPaintAudit`. That verdict logs at `.error`, rate-limited to once
   per distinct verdict, if a pane has content, is in a window, and has been
-  laid out — but doesn't have a real width and height.
+  laid out — but doesn't have a usable size. Two distinct verdicts:
+  `notDrawable(zeroWidth|zeroHeight)` for a pane with no drawable size at
+  all, and `tooSmall(tooNarrow|tooShort)` for one with a perfectly real size
+  that is nonetheless below `PaneFirstPaintAudit.minimumUsableExtent`
+  (120pt) — see "Too small to use" below.
+- `RatioSplitView.layout()` logs at `.error`, **once per split**, when a
+  split's requested ratios turn out to be unreachable:
+  `split ratios unreachable: requested … achieved … worstDelta=… bounds=… children=…`.
+  This is the line that says "the layout settled somewhere other than where
+  the daemon asked", and it is the direct signal for the 2026-09-04 /
+  2026-09-08 detail-region collapse.
 
 **Every line here is counts, ids, kinds and geometry only. No pane
 content — no repo name, PR title, file path or diff text — is ever written
@@ -69,6 +79,69 @@ per-window report the macOS client sends at the end of every
 attached window. See `docs/mcp/tools.md`'s "Render-state visibility (W1)"
 section for the full shape, error codes, and the "no report is not the same
 as agreement" rule.
+
+## "Too small to use" — the `tooSmall` verdict
+
+`PaneFirstPaintAudit` originally fired only on a pane with **zero** width or
+height. On 2026-09-08 the detail region collapsed to **34 points wide** in a
+1760pt split whose correct share was 879.5pt, stayed there, and tripped
+nothing: 34 is not zero. Every other instrument missed it for the same
+reason — `nostromo.get_render_state` saw a hierarchy member, the launch
+smoke's `splitsRatiosApplied` read a boolean that was `true` regardless, and
+no unit test asserted achieved geometry at all.
+
+So the audit now distinguishes two unhealthy verdicts under the same four
+preconditions (has content, not loading, in a window, has laid out at least
+once):
+
+| Verdict | Fires when | Catches |
+| --- | --- | --- |
+| `notDrawable(zeroWidth\|zeroHeight)` | an axis is `<= 0` | a pane with no drawable size at all — unchanged meaning |
+| `tooSmall(tooNarrow\|tooShort)` | both axes `> 0`, at least one `< 120pt` | a pane that exists, has real geometry, and still shows the operator nothing — the collapsed-split signature |
+
+The two populations are disjoint: zero wins, so a zero-width pane is never
+also reported as `tooSmall`.
+
+**`tooSmall` waits for the offending axis to stop moving.** A healthy pane
+legitimately passes through small extents while laying out — measured on the
+reproduction bench at `48 x 10` and `639.5 x 36` on panes that ended up
+entirely healthy, both of which *overlap* the real 34pt failure. No
+threshold can separate them, so the discriminator is whether the axis that
+is too small holds the same value across two consecutive layout passes. A
+pane still arriving is still changing; a collapsed split axis is pinned.
+`PaneFirstPaintAudit.shouldReport` is that rule, and it is why this tripwire
+does not fire on every launch. The standing rule this file's audits all
+follow: a tripwire that fires on a healthy pane is worse than no tripwire.
+
+## The launch smoke check's fixtures
+
+`bin/nostromo-launch-smoke` serves a committed fixture to a real app launch.
+`--fixture` picks which:
+
+| `--fixture` | File | What it is for |
+| --- | --- | --- |
+| `split` (default) | `tests/fixtures/focus_layout_split.json` | The product shape: a queue pane beside a two-tab `detail` region, above a repl. Every automated caller uses this, and it must PASS. |
+| `clamped` | `tests/fixtures/focus_layout_clamped.json` | A split whose requested ratios are genuinely unreachable — a four-child region given 3% of the width, so its panes settle at 44pt. **Expected to FAIL** `no-undersized-laid-out-pane` by construction. |
+
+The default fixture gained the tabs region in
+`fix/detail-region-split-collapse`: this check is the repo's only automated
+real-AppKit end-to-end coverage, and until then it had never once rendered
+the node type the product's primary interaction depends on.
+
+The `clamped` fixture exists to make the `ratios-claimed-honestly` gate
+bite. Run against it:
+
+```sh
+bin/nostromo-launch-smoke --fixture clamped
+```
+
+    origin/main (before the fix)   splitsRatiosApplied 3 of 3 laid out, no error logged
+    with the fix                   splitsRatiosApplied 1 of 3 laid out, two `.error` lines
+
+That difference is the whole point of the fix stated as an observation: a
+split that did not achieve its ratios must not be counted as having applied
+them. Before, `splitsRatiosApplied` certified the exact failure this check
+exists to catch as a success.
 
 ## Code-pane render audit
 
