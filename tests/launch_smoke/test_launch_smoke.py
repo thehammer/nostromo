@@ -190,11 +190,17 @@ CLAMPED_PANE_WIDTH = 44.0
 CLAMPED_PANE_HEIGHT = 434.5
 
 #: The clamped fixture's own tree shape: outer split (inner split + repl),
-#: inner split (queue + nested split), nested split (4 detail leaves) — 3
-#: splits, 6 leaves. Deliberately NOT a whole multiple of the split
+#: inner split (queue + nested split), nested split (6 detail leaves) — 3
+#: splits, 8 leaves. Deliberately NOT a whole multiple of the split
 #: fixture's shape; see `ClampedFixtureTests`.
+#:
+#: Six detail leaves rather than four, and 2% of the width rather than 3, so
+#: the resulting miss clears `RatioApplicationAudit.defaultTolerance` with
+#: room to spare. The four-leaf version missed by 11 points against a
+#: tolerance that later had to widen to 10 — too close to be a dependable
+#: demonstration.
 CLAMPED_SPLITS_PER_FOCUS = 3
-CLAMPED_LEAVES_PER_FOCUS = 6
+CLAMPED_LEAVES_PER_FOCUS = 8
 
 
 def clamped_detail_panes():

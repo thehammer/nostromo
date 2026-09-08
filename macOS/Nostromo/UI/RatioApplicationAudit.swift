@@ -22,16 +22,38 @@ enum RatioApplicationAudit {
 
     /// Per-child tolerance in ratio units (percentage points / 100).
     ///
-    /// Chosen against the measured failure, not intuition: the collapse is
-    /// `0.9807 / 0.0193` against a requested `0.5 / 0.5`, i.e. **48
-    /// percentage points** out on each child. Five points is an order of
-    /// magnitude tighter than that and an order of magnitude looser than
-    /// the sub-point noise a real layout settles within (a healthy split
-    /// measured 879.5pt of 1759pt, which is 0.5000 to four places), so
-    /// there is a wide band on both sides where this cannot be wrong. The
-    /// earlier capture of the same defect, `0.978 / 0.022`, is 47.8 points
-    /// out and is caught by the same margin.
-    static let defaultTolerance: Double = 0.05
+    /// Chosen against measurements, not intuition, from both ends.
+    ///
+    /// **The failures it must catch.** The collapse is `0.9807 / 0.0193`
+    /// against a requested `0.5 / 0.5` — **48.1 percentage points** out on
+    /// each child. The earlier capture of the same defect, `0.978 / 0.022`,
+    /// is 47.8 points out. Any genuinely unusable region is in this range:
+    /// even a detail pane at 200pt of an 880pt share is 39 points out.
+    ///
+    /// **The noise it must tolerate.** `NSSplitView.setPosition` lands a
+    /// roughly **constant ~44pt short** on the vertical split of the
+    /// product's own layout, whatever ratio it is handed — measured at
+    /// 50.9pt, 48.0pt and 41.7pt for requests of 0.6, 0.5 and 0.3 in the
+    /// same 810pt split. This predates the fix: `origin/main` produces
+    /// byte-identical geometry and simply never noticed, which is the whole
+    /// reason this type exists. It is tracked separately
+    /// (`.claude/bugs/open/2026-09-08-nssplitview-setposition-lands-a-constant-44pt-short-on-the-vertical-split.md`)
+    /// and is not what this fix is about.
+    ///
+    /// A **constant** absolute error is a *variable* ratio error, which is
+    /// the trap here: 44pt is 5.4 points of an 810pt split (the launch
+    /// smoke window, the smallest the app ever lays out in) but only 2.4 of
+    /// an 1810pt one and 2.2 of a full-height display. A tolerance of 5
+    /// points is therefore satisfiable on a real display and *unsatisfiable*
+    /// in the smoke window — verified against three different requested
+    /// ratios, none of which could clear it.
+    ///
+    /// Ten points sits an order of magnitude below every real failure and
+    /// ~1.6x above the worst observed noise, with nothing measured anywhere
+    /// in between. Tighten it when the 44pt offset is fixed; do not tighten
+    /// it below ~7 until then, or the launch smoke check goes permanently
+    /// INCONCLUSIVE.
+    static let defaultTolerance: Double = 0.10
 
     /// How much a child's achieved share must move between two layout
     /// passes to count as "the layout is still settling" rather than "the

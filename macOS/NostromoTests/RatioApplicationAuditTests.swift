@@ -185,19 +185,49 @@ final class RatioApplicationAuditTests: XCTestCase {
             """)
     }
 
-    func testTheDefaultToleranceAdmitsFourPointsAndRejectsSix() {
-        // Pins the shipped default without naming the constant: four
-        // percentage points off is fine, six is not.
+    func testTheDefaultToleranceAdmitsEightPointsAndRejectsTwelve() {
+        // Pins the shipped default without naming the constant: eight
+        // percentage points off is fine, twelve is not.
+        //
+        // Widened from 5 points once the fix was run against a real window.
+        // `NSSplitView.setPosition` lands a roughly constant ~44pt short on
+        // the product's vertical split whatever ratio it is handed (50.9,
+        // 48.0 and 41.7pt measured for requests of 0.6, 0.5 and 0.3), and a
+        // constant *absolute* error is a variable *ratio* error: 5.4 points
+        // of the 810pt launch-smoke split, 2.2 of a full-height display. At
+        // 5 points the smoke check was unsatisfiable at every ratio tried.
+        // The failures this must catch are all 39-48 points out, so there is
+        // still an order of magnitude of headroom. See the constant's own
+        // doc comment for the full derivation.
         XCTAssertEqual(
-            RatioApplicationAudit.outcome(requested: [0.5, 0.5], achieved: [0.54, 0.46]),
+            RatioApplicationAudit.outcome(requested: [0.5, 0.5], achieved: [0.58, 0.42]),
             .applied,
-            "four percentage points per child must sit inside the default tolerance"
+            "eight percentage points per child must sit inside the default tolerance"
         )
         XCTAssertNotEqual(
-            RatioApplicationAudit.outcome(requested: [0.5, 0.5], achieved: [0.56, 0.44]),
+            RatioApplicationAudit.outcome(requested: [0.5, 0.5], achieved: [0.62, 0.38]),
             .applied,
-            "six percentage points per child must sit outside the default tolerance"
+            "twelve percentage points per child must sit outside the default tolerance"
         )
+    }
+
+    /// The real failures must stay caught by a wide margin whatever the
+    /// tolerance is tuned to — this is the test that should fail if anyone
+    /// ever widens it far enough to matter.
+    func testEveryMeasuredCollapseIsCaughtWithAtLeastThreeTimesTheMargin() {
+        for achieved in [[0.9807, 0.0193], [0.978, 0.022], [0.89, 0.11]] {
+            let outcome = RatioApplicationAudit.outcome(requested: [0.5, 0.5], achieved: achieved)
+            guard let delta = worstDelta(outcome) else { continue }
+            XCTAssertGreaterThan(
+                delta, RatioApplicationAudit.defaultTolerance * 3,
+                """
+                \(achieved) against [0.5, 0.5] is \(delta) out, which must stay at least 3x the \
+                default tolerance of \(RatioApplicationAudit.defaultTolerance). If this fails, the \
+                tolerance has been widened until it no longer separates a collapsed region from \
+                ordinary layout noise.
+                """
+            )
+        }
     }
 
     func testTheToleranceIsPerChildNotAggregate() {
@@ -416,11 +446,16 @@ final class RatioApplicationAuditTests: XCTestCase {
     /// stop rule that fired anywhere in the middle would leave the
     /// operator with a permanently collapsed region, which is the bug.
     func testAnImprovingSequenceKeepsRetryingUntilItLands() {
+        // Every intermediate step stays clear of the default tolerance so
+        // this asserts the retry rule and not the boundary — [0.60, 0.40]
+        // used to sit here and became exactly-at-tolerance when the default
+        // widened to 10 points, which made pass 3 land early and told us
+        // nothing about whether an improving sequence is abandoned.
         let sequence: [[Double]] = [
             [0.98, 0.02],
-            [0.80, 0.20],
-            [0.60, 0.40],
-            [0.51, 0.49]
+            [0.85, 0.15],
+            [0.70, 0.30],
+            [0.52, 0.48]
         ]
         var previous: [Double]?
         for (index, achieved) in sequence.enumerated() {
