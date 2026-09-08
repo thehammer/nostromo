@@ -36,13 +36,22 @@ enum PaneFirstPaintAudit {
         let layoutPassCount: Int
     }
 
-    /// One failing dimension. `rawValue` is used verbatim in `summary(of:)`.
-    /// `zeroWidth`/`zeroHeight` mean "no drawable size at all";
-    /// `tooNarrow`/`tooShort` mean "a real, non-zero size that is still too
-    /// small to be usable" (fix/detail-region-split-collapse — D6).
-    enum Reason: String, Equatable {
+    /// A failing dimension for `.notDrawable`: no drawable size at all.
+    /// `rawValue` is used verbatim in `summary(of:)`.
+    enum NotDrawableReason: String, Equatable {
         case zeroWidth
         case zeroHeight
+    }
+
+    /// A failing dimension for `.tooSmall`: a real, non-zero size that is
+    /// still too small to be usable (fix/detail-region-split-collapse — D6).
+    /// `rawValue` is used verbatim in `summary(of:)`.
+    ///
+    /// Kept as its own type rather than sharing `NotDrawableReason` — the
+    /// two verdicts never overlap (see `verdict(_:)`), so a shared type
+    /// would force `shouldReport`'s `.tooSmall` switch to handle
+    /// `.zeroWidth`/`.zeroHeight` cases that can never actually occur there.
+    enum SmallReason: String, Equatable {
         case tooNarrow
         case tooShort
     }
@@ -50,11 +59,11 @@ enum PaneFirstPaintAudit {
     enum Verdict: Equatable {
         case healthy
         /// Zero (or negative) on at least one axis — unchanged meaning.
-        case notDrawable(reasons: [Reason])
+        case notDrawable(reasons: [NotDrawableReason])
         /// Non-zero on both axes but below `minimumUsableExtent` on at
         /// least one — the signature of a split whose `setPosition` was
         /// clamped: measured live at 34pt wide where 879.5pt was correct.
-        case tooSmall(reasons: [Reason])
+        case tooSmall(reasons: [SmallReason])
     }
 
     /// Below this many points on an axis, a pane that has content and has
@@ -90,12 +99,12 @@ enum PaneFirstPaintAudit {
         guard m.hasContent, !m.isLoading, m.hasWindow, m.layoutPassCount > 0 else {
             return .healthy
         }
-        var zeroReasons: [Reason] = []
+        var zeroReasons: [NotDrawableReason] = []
         if m.boundsWidth <= 0 { zeroReasons.append(.zeroWidth) }
         if m.boundsHeight <= 0 { zeroReasons.append(.zeroHeight) }
         guard zeroReasons.isEmpty else { return .notDrawable(reasons: zeroReasons) }
 
-        var smallReasons: [Reason] = []
+        var smallReasons: [SmallReason] = []
         if m.boundsWidth < minimumUsableExtent { smallReasons.append(.tooNarrow) }
         if m.boundsHeight < minimumUsableExtent { smallReasons.append(.tooShort) }
         return smallReasons.isEmpty ? .healthy : .tooSmall(reasons: smallReasons)
@@ -159,11 +168,6 @@ enum PaneFirstPaintAudit {
                 switch reason {
                 case .tooNarrow: return m.boundsWidth == previous.boundsWidth
                 case .tooShort:  return m.boundsHeight == previous.boundsHeight
-                // Unreachable: `.tooSmall` only ever carries the two
-                // reasons above. Reported rather than silently allowed,
-                // since "an axis we cannot check held still" is the kind of
-                // vacuous truth this whole fix exists to stamp out.
-                case .zeroWidth, .zeroHeight: return false
                 }
             }
         }

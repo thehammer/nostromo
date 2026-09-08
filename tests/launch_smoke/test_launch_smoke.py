@@ -2682,8 +2682,8 @@ class UndersizedPanesPerRowSettleRuleTests(unittest.TestCase):
         first, second = [v for _row, v in result]
         self.assertEqual(first, ())
         self.assertEqual(len(second), 1, second)
-        self.assertIn("tooSmall(tooNarrow)", second[0])
-        self.assertIn("bounds=44.0x385.5", second[0])
+        self.assertIn("tooSmall(tooNarrow)", second[0].summary)
+        self.assertIn("bounds=44.0x385.5", second[0].summary)
 
     def test_639_5x36_then_639_5x56_is_not_a_violation_the_offending_axis_moved(self):
         # Also measured on the bench, also on a pane that ended up healthy:
@@ -2742,13 +2742,13 @@ class UndersizedPanesPerRowSettleRuleTests(unittest.TestCase):
         row0, row1, row2 = [v for _row, v in result]
         self.assertEqual(row0, (), "both panes are on their first observation")
         self.assertEqual(len(row1), 1)
-        self.assertIn("pane=detail.0", row1[0])
+        self.assertIn("pane=detail.0", row1[0].summary)
         self.assertEqual(
             len(row2), 1,
             "detail.1's previous observation is its own, two rows back -- "
             "being absent from the intervening row must not reset it",
         )
-        self.assertIn("pane=detail.1", row2[0])
+        self.assertIn("pane=detail.1", row2[0].summary)
 
     def test_a_pane_absent_from_a_row_does_not_have_its_history_overwritten(self):
         _rows, result = self._per_row(
@@ -2863,6 +2863,40 @@ class UndersizedPaneViolationsFromRowsTests(unittest.TestCase):
             make_row(panes=[small_pane("detail.0", 44.0, 434.5)]) for _ in range(10)
         )
         self.assertEqual(len(launch_smoke.undersized_pane_violations_from_rows(rows)), 1)
+
+    def test_a_stuck_pane_yields_one_entry_even_as_its_layout_pass_count_climbs(self):
+        # The test above cannot catch this on its own: `small_pane` defaults
+        # every row to the same `layoutPassCount`, so a dedup key that
+        # wrongly included the pass counter would still collapse to one
+        # entry there and look correct.
+        #
+        # A real stuck pane relays out, so its counter climbs every row. If
+        # the key includes it, nothing deduplicates at all -- which is
+        # precisely the defect this fix had to repair on the Swift side,
+        # where it flooded the log thousands of times in a single run. And
+        # `cause` is capped at three joined entries, so the repeats would
+        # crowd out genuinely distinct panes from ever being named.
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=n)])
+            for n in range(1, 11)
+        )
+        violations = launch_smoke.undersized_pane_violations_from_rows(rows)
+        self.assertEqual(
+            len(violations), 1,
+            f"one stuck pane must report once however many times it relaid out; got "
+            f"{len(violations)}:\n" + "\n".join(violations),
+        )
+
+    def test_the_reported_summary_still_names_the_layout_pass_count(self):
+        # The counter is excluded from the dedup KEY, not from the report --
+        # it is the first thing an operator wants when reading a FAIL.
+        rows = (
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=3)]),
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=4)]),
+        )
+        violations = launch_smoke.undersized_pane_violations_from_rows(rows)
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("layoutPasses=4", violations[0])
 
     def test_the_same_pane_settled_at_two_different_sizes_yields_two_entries(self):
         rows = (

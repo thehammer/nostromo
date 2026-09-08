@@ -854,6 +854,11 @@ def collapsed_geometry_violations_from_rows(rows):
     )
 
 
+UndersizedPane = namedtuple("UndersizedPane", ["key", "summary"])
+"""One undersized-pane observation. `key` is its rate-limit identity
+(everything but the layout-pass counter); `summary` is what gets reported."""
+
+
 MINIMUM_USABLE_EXTENT = 120.0
 """Mirrors `PaneFirstPaintAudit.minimumUsableExtent`
 (macOS/Nostromo/UI/PaneFirstPaintAudit.swift). Below this many points on an
@@ -923,26 +928,41 @@ def undersized_panes_per_row(rows):
             )
             if not settled:
                 continue
-            violations.append(
-                f"pane={pane_id} hasWindow={str(pane.get('hasWindow')).lower()} "
-                f"layoutPasses={pane.get('layoutPassCount', 0)} "
-                f"bounds={width}x{height} verdict=tooSmall({','.join(reasons)})"
-            )
+            violations.append(UndersizedPane(
+                key=f"pane={pane_id} bounds={width}x{height} "
+                    f"verdict=tooSmall({','.join(reasons)})",
+                summary=f"pane={pane_id} hasWindow={str(pane.get('hasWindow')).lower()} "
+                        f"layoutPasses={pane.get('layoutPassCount', 0)} "
+                        f"bounds={width}x{height} verdict=tooSmall({','.join(reasons)})",
+            ))
         out.append((row, tuple(violations)))
     return out
 
 
 def undersized_pane_violations_from_rows(rows):
-    """One summary string per DISTINCT violating (paneId, width, height) —
-    the same rate-limiting spirit as the Swift side's `violationKey`."""
+    """One summary string per DISTINCT violating pane state.
+
+    Deduplicated on `UndersizedPane.key`, which — like the Swift side's
+    `PaneFirstPaintAudit.violationKey` and for the same reason — deliberately
+    **excludes** `layoutPasses`. That counter increments on every layout
+    pass, so keying on the full summary deduplicates nothing at all: a pane
+    stuck at one bad size across ten diagnostics rows would report ten times.
+    That is not hypothetical — it is the exact defect this fix had to repair
+    on the Swift side, where it flooded the log thousands of times in a
+    single run, and `cause` below is capped at three joined entries, so the
+    repeats would crowd out genuinely distinct panes.
+
+    The reported string is still the full `summary`, pass count included —
+    it is the first thing an operator wants when reading a FAIL.
+    """
     seen = set()
     out = []
     for _row, violations in undersized_panes_per_row(rows):
-        for summary in violations:
-            if summary in seen:
+        for violation in violations:
+            if violation.key in seen:
                 continue
-            seen.add(summary)
-            out.append(summary)
+            seen.add(violation.key)
+            out.append(violation.summary)
     return tuple(out)
 
 

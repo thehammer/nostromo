@@ -937,7 +937,16 @@ final class RatioSplitView: NSSplitView, TranscriptDiagnostics.SplitReporting {
     /// True once `DynamicFocusView.applyRatios` has returned `true` for this
     /// split — positive proof it reached `NSSplitView.setPosition` and
     /// returned, the exact call that never returned in the 2026-09-03
-    /// defect. Never cleared once set.
+    /// defect.
+    ///
+    /// It **is** cleared again, in exactly one place: when
+    /// `confirmPreviousApplication` finds the split no longer holds what it
+    /// was asked for and withdraws a provisional success. That is the point
+    /// of D5 — this value is read out as `splitsRatiosApplied` and graded,
+    /// so it has to be able to go back to `false` when the claim turns out
+    /// not to be true. (Before D1 it could only ever move to `true`, off an
+    /// unverified return value, which is how the launch smoke check came to
+    /// certify a collapsed split as a success.)
     ///
     /// **This only means what its consumers think it means because
     /// `applyRatios` verifies the achieved geometry** (D1/D5). It is
@@ -1064,30 +1073,30 @@ final class RatioSplitView: NSSplitView, TranscriptDiagnostics.SplitReporting {
     /// else" — a different fact from "not settled yet", and the only one
     /// worth giving up on.
     private func recordMiss(requested: [Double], achieved: [Double]) {
-        switch RatioApplicationAudit.progress(
+        // `.applied` is unreachable here — every caller has already judged
+        // this pass out of tolerance against the same rule before calling
+        // this method — so only `.converged` is worth naming; `.retry` and
+        // the unreachable `.applied` are handled identically by this `else`:
+        // keep trying, remembering what this pass achieved.
+        guard case .converged(let worstDelta) = RatioApplicationAudit.progress(
             requested: requested, achieved: achieved, previousAchieved: lastAchievedRatios
-        ) {
-        case .applied, .retry:
-            // `.applied` is unreachable — every caller has already judged
-            // this pass out of tolerance against the same rule. Treated as
-            // "keep trying" rather than silently succeeding, so a future
-            // divergence between the two can never fabricate a success.
+        ) else {
             lastAchievedRatios = achieved
-        case .converged(let worstDelta):
-            ratiosAbandoned = true
-            // Once, at .error, naming requested vs achieved — geometry
-            // only, never pane content. This is the line that would have
-            // made the 2026-09-04 collapse visible the day it appeared.
-            log.error("""
-                split ratios unreachable: requested \(requested.map { String(format: "%.4f", $0) }
-                    .joined(separator: ","), privacy: .public) \
-                achieved \(achieved.map { String(format: "%.4f", $0) }
-                    .joined(separator: ","), privacy: .public) \
-                worstDelta=\(String(format: "%.4f", worstDelta), privacy: .public) \
-                bounds=\(self.bounds.width, privacy: .public)x\(self.bounds.height, privacy: .public) \
-                children=\(self.subviews.count, privacy: .public)
-                """)
+            return
         }
+        ratiosAbandoned = true
+        // Once, at .error, naming requested vs achieved — geometry
+        // only, never pane content. This is the line that would have
+        // made the 2026-09-04 collapse visible the day it appeared.
+        log.error("""
+            split ratios unreachable: requested \(requested.map { String(format: "%.4f", $0) }
+                .joined(separator: ","), privacy: .public) \
+            achieved \(achieved.map { String(format: "%.4f", $0) }
+                .joined(separator: ","), privacy: .public) \
+            worstDelta=\(String(format: "%.4f", worstDelta), privacy: .public) \
+            bounds=\(self.bounds.width, privacy: .public)x\(self.bounds.height, privacy: .public) \
+            children=\(self.subviews.count, privacy: .public)
+            """)
     }
 }
 
