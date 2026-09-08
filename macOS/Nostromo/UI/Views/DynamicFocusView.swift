@@ -721,16 +721,34 @@ final class DynamicFocusView: NSView {
         isVertical ? size.width : size.height
     }
 
-    /// Turn `ratios` into actual divider positions via `RatioSolver` and
-    /// apply them. A `nil` from the solver (no real size yet, a count
-    /// mismatch, or ratios that don't sum to ~1.0) means "don't touch the
-    /// split" — obedience is everything this does; every judgement call
-    /// about whether it's safe to apply lives in `RatioSolver`. Returns
-    /// whether the ratios were actually applied, so `RatioSplitView.layout()`
-    /// can tell a real application apart from a refusal (D3) — the exact
-    /// distinction `RatioSolver`'s own doc comment says the caller must
-    /// honour: keep trying next layout pass on `false`, stop trying on
-    /// `true`.
+    /// Turn `ratios` into actual divider positions via `RatioSolver`, apply
+    /// them, and report **whether the split actually ended up there**.
+    ///
+    /// There are two ways this can decline, and the caller treats them
+    /// identically (keep trying next layout pass):
+    ///
+    /// 1. A `nil` from the solver — no real size yet, a count mismatch, or
+    ///    ratios that don't sum to ~1.0 — means "don't touch the split".
+    ///    Every judgement call about whether it's *safe* to apply lives in
+    ///    `RatioSolver` (D3).
+    /// 2. `NSSplitView.setPosition(_:ofDividerAt:)` clamped what it was
+    ///    given. AppKit is free to refuse a divider position against a
+    ///    subview's minimum or compression resistance, and it says nothing
+    ///    when it does. This function used to `return true` regardless
+    ///    (fix/detail-region-split-collapse — D1), which made
+    ///    `RatioSplitView.layout()`'s retry path unreachable in principle:
+    ///    a clamp was indistinguishable from a success, so `desiredRatios`
+    ///    was cleared and never re-applied. Measured live: a detail region
+    ///    re-inserted on a PR pickup landed a requested `[0.5, 0.5]` at
+    ///    `0.9807 / 0.0193` — 34pt wide where 879.5pt was correct — and was
+    ///    certified as applied.
+    ///
+    /// So the achieved geometry is now read back via `currentRatios(for:)`
+    /// (whose round trip with this function is documented on it) and
+    /// compared by `RatioApplicationAudit`. This is the same "a refusal
+    /// must be distinguishable from a successful application" rule
+    /// `fix-collapsed-split-ratio-persistence`'s D3/D4 already state for
+    /// the solver; only the clamp case was left uncovered.
     ///
     /// `fileprivate` rather than `private`: `RatioSplitView`, a separate
     /// top-level type in this same file, is the only other caller.
@@ -748,7 +766,9 @@ final class DynamicFocusView: NSView {
             split.setPosition(CGFloat(position), ofDividerAt: i)
         }
         split.adjustSubviews()
-        return true
+        return RatioApplicationAudit.outcome(
+            requested: ratios, achieved: currentRatios(for: split)
+        ) == .applied
     }
 
     /// The operator's actual current split, normalized so the result sums to
@@ -763,7 +783,14 @@ final class DynamicFocusView: NSView {
     /// successful application (see `RatioSplitView.layout()`), silently
     /// abandoning the ratios. Normalizing against the child-extent sum makes
     /// `applyRatios` → `currentRatios` a round trip.
-    private static func currentRatios(for split: NSSplitView) -> [Double] {
+    ///
+    /// `fileprivate` rather than `private` since D1: `RatioSplitView.layout()`
+    /// — a separate top-level type in this same file — needs the achieved
+    /// ratios to decide whether a failed application is still settling or
+    /// has converged somewhere else. (`DynamicFocusViewWiringTests`'
+    /// sequencing guard looks for the substring `private static func
+    /// currentRatios`, which `fileprivate` still contains.)
+    fileprivate static func currentRatios(for split: NSSplitView) -> [Double] {
         let subviews = split.subviews
         let sizes = subviews.map { extent(of: $0.frame.size, isVertical: split.isVertical) }
         let sum = sizes.reduce(0, +)
@@ -911,7 +938,45 @@ final class RatioSplitView: NSSplitView, TranscriptDiagnostics.SplitReporting {
     /// split — positive proof it reached `NSSplitView.setPosition` and
     /// returned, the exact call that never returned in the 2026-09-03
     /// defect. Never cleared once set.
+    ///
+    /// **This only means what its consumers think it means because
+    /// `applyRatios` verifies the achieved geometry** (D1/D5). It is
+    /// surfaced as `splitsRatiosApplied` in the diagnostics stream, which
+    /// `bin/nostromo-launch-smoke` grades as its shape check — so while
+    /// `applyRatios` returned an unverified `true`, that check certified
+    /// the collapsed-split failure as a success. Weaken `applyRatios` and
+    /// this silently becomes a lie again.
     private(set) var ratiosApplied = false
+
+    /// What the previous *unsuccessful* layout pass achieved, for the D2
+    /// convergence rule below. `nil` before the first miss and after a
+    /// successful application.
+    private var lastAchievedRatios: [Double]?
+
+    /// Set once this split has been judged unable to reach `desiredRatios`
+    /// (two consecutive passes landing identically out of tolerance). Stops
+    /// the retry loop *without* clearing `desiredRatios`: the request is
+    /// still what we want, we simply cannot get it, and clearing the
+    /// request stays reserved for genuine success (RC3).
+    private var ratiosAbandoned = false
+
+    /// The ratio set most recently applied *successfully*, held for one more
+    /// layout pass so the result can be re-checked.
+    ///
+    /// Verifying inside `applyRatios` catches a clamp `setPosition` performs
+    /// synchronously, which is the measured failure. It does **not** catch a
+    /// clamp that arrives afterwards, when a child split propagates its own
+    /// minimum back up on a later pass — reproduced on the bench for this
+    /// fix, where a region squeezed to 3% read back the requested ratios
+    /// immediately after `adjustSubviews()` and only settled at its real
+    /// floor a pass later. Without this second look, `ratiosApplied` would
+    /// still be `true` for a split that plainly did not achieve its ratios,
+    /// which is exactly the property D5 exists to guarantee.
+    ///
+    /// Cleared after that one re-check, so this can never turn into a loop
+    /// that fights an operator dragging the divider.
+    private var ratiosPendingConfirmation: [Double]?
+
     var splitBoundsWidth: Double { Double(bounds.width) }
     var splitBoundsHeight: Double { Double(bounds.height) }
 
@@ -942,15 +1007,86 @@ final class RatioSplitView: NSSplitView, TranscriptDiagnostics.SplitReporting {
         // flag: the inner call sees it `true`, does nothing beyond the
         // already-completed `super.layout()`, and returns — letting the
         // outer `setPosition` call unwind normally.
-        guard !isApplyingProgrammatically,
-              let ratios = desiredRatios, bounds.width > 0, bounds.height > 0
+        guard !isApplyingProgrammatically, !ratiosAbandoned,
+              bounds.width > 0, bounds.height > 0
         else { return }
+        confirmPreviousApplication()
+        guard !ratiosAbandoned, let ratios = desiredRatios else { return }
         isApplyingProgrammatically = true
         let applied = DynamicFocusView.applyRatios(ratios, to: self)
+        let achieved = DynamicFocusView.currentRatios(for: self)
         isApplyingProgrammatically = false
         if applied {
             desiredRatios = nil
             ratiosApplied = true
+            ratiosPendingConfirmation = ratios
+            // `lastAchievedRatios` is deliberately NOT cleared here. This
+            // success is provisional until `confirmPreviousApplication`
+            // re-checks it next pass, and if that check fails it needs the
+            // previous miss to compare against — clearing it here made
+            // every confirmation failure look like a first sighting, so the
+            // D2 stop rule never fired and apply/reinstate ping-ponged
+            // forever (observed on the bench: 2288 layout passes and
+            // climbing). It is cleared once the confirmation holds.
+            return
+        }
+        recordMiss(requested: ratios, achieved: achieved)
+    }
+
+    /// Re-check a previously *successful* application one layout pass later
+    /// (see `ratiosPendingConfirmation`). If the split no longer holds what
+    /// it was asked for, the earlier success is withdrawn — `ratiosApplied`
+    /// goes back to `false` and the request is reinstated — and the same D2
+    /// convergence rule bounds the retry, so a genuinely unreachable ratio
+    /// cannot ping-pong between "applied" and "reinstated" forever.
+    private func confirmPreviousApplication() {
+        guard let pending = ratiosPendingConfirmation else { return }
+        ratiosPendingConfirmation = nil
+        let achieved = DynamicFocusView.currentRatios(for: self)
+        guard RatioApplicationAudit.outcome(requested: pending, achieved: achieved) != .applied
+        else {
+            lastAchievedRatios = nil
+            return
+        }
+        ratiosApplied = false
+        desiredRatios = pending
+        recordMiss(requested: pending, achieved: achieved)
+    }
+
+    /// D2 — bound the retry without counting attempts.
+    ///
+    /// A split whose children genuinely cannot reach the requested ratio (a
+    /// real minimum-width floor) would otherwise re-apply on every layout
+    /// pass forever, and a fixed attempt cap would silently reintroduce the
+    /// collapsed-region bug at whatever window size happened to need more
+    /// passes than the cap allowed. Two consecutive passes achieving the
+    /// same out-of-tolerance result is "the layout has settled somewhere
+    /// else" — a different fact from "not settled yet", and the only one
+    /// worth giving up on.
+    private func recordMiss(requested: [Double], achieved: [Double]) {
+        switch RatioApplicationAudit.progress(
+            requested: requested, achieved: achieved, previousAchieved: lastAchievedRatios
+        ) {
+        case .applied, .retry:
+            // `.applied` is unreachable — every caller has already judged
+            // this pass out of tolerance against the same rule. Treated as
+            // "keep trying" rather than silently succeeding, so a future
+            // divergence between the two can never fabricate a success.
+            lastAchievedRatios = achieved
+        case .converged(let worstDelta):
+            ratiosAbandoned = true
+            // Once, at .error, naming requested vs achieved — geometry
+            // only, never pane content. This is the line that would have
+            // made the 2026-09-04 collapse visible the day it appeared.
+            log.error("""
+                split ratios unreachable: requested \(requested.map { String(format: "%.4f", $0) }
+                    .joined(separator: ","), privacy: .public) \
+                achieved \(achieved.map { String(format: "%.4f", $0) }
+                    .joined(separator: ","), privacy: .public) \
+                worstDelta=\(String(format: "%.4f", worstDelta), privacy: .public) \
+                bounds=\(self.bounds.width, privacy: .public)x\(self.bounds.height, privacy: .public) \
+                children=\(self.subviews.count, privacy: .public)
+                """)
         }
     }
 }
@@ -985,6 +1121,13 @@ final class PaneContentNSView: NSView {
     /// changes so a *new* violation on the same pane is never swallowed by
     /// an old one's rate limit.
     private var lastLoggedViolationSummary: String?
+
+    /// What the previous layout pass measured, so
+    /// `PaneFirstPaintAudit.shouldReport` can tell a pane that has settled
+    /// at an unusable size from one that is merely still arriving at a
+    /// healthy one. `nil` before the first pass — nothing to compare, so
+    /// the first pass can never report `.tooSmall`.
+    private var lastAuditedMeasurements: PaneFirstPaintAudit.Measurements?
 
     /// Set by `DynamicFocusView.makeLeafView` right after construction —
     /// diagnostics-only identity, never used for rendering decisions. Used
@@ -1136,7 +1279,7 @@ final class PaneContentNSView: NSView {
         if changed {
             model.content = content
             currentContent = content
-            // A content change means whatever `.notDrawable` verdict was
+            // A content change means whatever unhealthy verdict was
             // last logged no longer describes the current state — the next
             // layout pass must be free to log again even if it reports the
             // exact same summary string as before (e.g. the same pane
@@ -1223,11 +1366,20 @@ final class PaneContentNSView: NSView {
     /// verdict, not once per frame.
     private func auditAfterLayout() {
         let measurements = currentMeasurements()
-        guard case .notDrawable = PaneFirstPaintAudit.verdict(measurements) else { return }
-        let summary = PaneFirstPaintAudit.summary(of: measurements)
-        guard summary != lastLoggedViolationSummary else { return }
-        lastLoggedViolationSummary = summary
-        log.error("PaneFirstPaintAudit \(summary, privacy: .public)")
+        let previous = lastAuditedMeasurements
+        lastAuditedMeasurements = measurements
+        // Both unhealthy verdicts are reported. `.tooSmall` (D6) is the
+        // collapsed-split signature — a pane with real content, in a
+        // window, after a completed layout pass, at 34pt where 879.5pt was
+        // correct. `.notDrawable` never fired on it, because 34 is not
+        // zero, which is how a live-blocking failure stayed invisible to
+        // this tripwire for four days. `shouldReport` is what keeps the new
+        // term off a healthy pane that is merely still laying out.
+        guard PaneFirstPaintAudit.shouldReport(measurements, previous: previous) else { return }
+        let key = PaneFirstPaintAudit.violationKey(of: measurements)
+        guard key != lastLoggedViolationSummary else { return }
+        lastLoggedViolationSummary = key
+        log.error("PaneFirstPaintAudit \(PaneFirstPaintAudit.summary(of: measurements), privacy: .public)")
     }
 
     /// Exposed so "Copy pane diagnostics" (AppDelegate's Debug menu) can
