@@ -51,6 +51,17 @@ macOS ▸ Debug menu (⌘⇧-prefixed shortcuts throughout — the app reserves 
   This is the line that says "the layout settled somewhere other than where
   the daemon asked", and it is the direct signal for the 2026-09-04 /
   2026-09-08 detail-region collapse.
+- `TabRegionView.selectTab` logs the pane id being selected and the pane id
+  it was previously active, on every call — both the local, no-daemon-round-
+  trip click path and the daemon-driven `focused_pane` path go through here.
+- `TabButtonView.didClick` logs the tab's label the instant AppKit delivers
+  the click, before `selectTab` runs. Silence here on a real click means the
+  click never reached the button at all — the 2026-09-08 zero-height-buttons
+  signature (see "Zero-height tab buttons" below), not a selection bug.
+- `TabButtonView` logs its own geometry once, after its first layout pass:
+  `bounds`, `clickButton.frame`, and `captionField.frame`. One-shot per
+  button, not per relayout, so opening a detail region with several tabs
+  doesn't spam the timeline.
 
 **Every line here is counts, ids, kinds and geometry only. No pane
 content — no repo name, PR title, file path or diff text — is ever written
@@ -112,6 +123,34 @@ pane still arriving is still changing; a collapsed split axis is pinned.
 `PaneFirstPaintAudit.shouldReport` is that rule, and it is why this tripwire
 does not fire on every launch. The standing rule this file's audits all
 follow: a tripwire that fires on a healthy pane is worse than no tripwire.
+
+## Zero-height tab buttons (2026-09-08)
+
+The split-collapse fix above landed a real tab strip in the detail region,
+and immediately exposed a second, unrelated defect: `TabRegionView`'s
+`stripStack` (an `NSStackView`) defaults to `.centerY` cross-axis alignment,
+which sizes each arranged `TabButtonView` to its own fitting height rather
+than stretching it — and `TabButtonView` had no height constraint and
+nothing anchored to its own bottom, so that fitting height was 0. Its
+full-bleed `clickButton` was therefore also 0pt tall, so a click at a tab's
+visible center hit nothing (`hitTest` returned `nil` or the stack view
+itself, never the button), while the label/caption text fields kept drawing
+past the 0pt button into the content pane below (AppKit does not clip
+subviews by default).
+
+This is the same shape as the split-collapse bug: the view rendered
+plausibly, every existing instrument was silent (`TabRegionView` had *no*
+logging at all before this fix — see `didClick`/`selectTab`/first-layout
+geometry above), and the failure was only visible by measuring rendered
+geometry. Fixed by pinning each tab button's top/bottom to the strip (so it
+gets a real height to hit-test against), anchoring the button's own content
+to its bottom with `>=` constraints (so the view has a self-derived minimum
+height instead of trusting an unmoored constant), and widening the
+`stripHeight` constant from 26 to 34 to fit a label line plus a caption line.
+`macOS/NostromoTests/TabRegionViewTests.swift` asserts both: every tab's
+click target has nonzero height and is what `hitTest` actually returns at
+that tab's center, and a caption's rendered frame stays within its own
+button's bounds.
 
 ## The launch smoke check's fixtures
 
