@@ -237,7 +237,7 @@ async fn all_four_perri_mutators_never_hit_the_event_loop_timeout_path() {
 }
 
 #[tokio::test]
-async fn load_pr_without_highlights_settles_or_reports_pending_quickly() {
+async fn load_pr_without_highlights_with_no_native_source_reports_not_retryable_quickly() {
     let harness = make_daemon_state();
     let socket_path = harness._dir.path().join("mcp-daemon2.sock");
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
@@ -256,9 +256,17 @@ async fn load_pr_without_highlights_settles_or_reports_pending_quickly() {
     .await;
 
     // No highlights, and nothing will ever publish a matching snapshot in
-    // this test (there's no real native source running) — the 100ms settle
-    // timeout configured in make_daemon_state() must still make this call
-    // return promptly with `pending: true`, not hang for 5s.
+    // this test — `make_daemon_state()` (via `McpSharedState::for_test`)
+    // wires `perri_pr_rx` from a `watch::channel` whose sender is dropped
+    // immediately, standing in for "no real `PerriPrNativeSource` task is
+    // running". That is `SnapshotWait::SourceGone`, not a settle-timeout —
+    // the wait must resolve as soon as `rx.changed()` sees the sender gone,
+    // well inside the 1500ms bound below (in fact well inside the 100ms
+    // settle timeout `make_daemon_state()` configures, since a dropped
+    // sender doesn't need to wait for it at all). Before `SnapshotWait`
+    // existed this scenario and a genuine in-flight-but-slow fetch both
+    // collapsed into `pending: true`; now they're distinguishable, and this
+    // is the source-gone one — `pending: false, retryable: false`.
     let res = call_tool_bounded(
         &mut reader,
         &mut writer,
@@ -269,7 +277,8 @@ async fn load_pr_without_highlights_settles_or_reports_pending_quickly() {
     )
     .await;
     assert_eq!(res["ok"], true);
-    assert_eq!(res["pending"], true);
+    assert_eq!(res["pending"], false);
+    assert_eq!(res["retryable"], false);
 }
 
 /// End-to-end: `perri.clear_current_pr` on a **curated** focus (a layout

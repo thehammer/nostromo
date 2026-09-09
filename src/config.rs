@@ -13,6 +13,28 @@ use serde::{Deserialize, Serialize};
 /// Environment variable that overrides the TCP listen address.
 pub const TCP_ADDR_ENV: &str = "NOSTROMD_TCP_ADDR";
 
+/// Connect timeout for every GitHub HTTP request (raw `reqwest` and
+/// `octocrab` alike), in seconds.
+///
+/// Short and unforgiving on purpose: a stalled TCP handshake is never
+/// legitimate the way a slow body transfer sometimes is, so this doesn't
+/// need the headroom [`GITHUB_HTTP_TIMEOUT_SECS`] gives the overall request.
+pub const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 5;
+
+/// Overall per-request timeout for every GitHub HTTP request (connect + send
+/// + full body read), in seconds.
+///
+/// Sized to comfortably clear a legitimate large-diff fetch (`MAX_DIFF_BYTES`
+/// = 500 KB in `data::perri_pr_native`) even on a slow link, while staying
+/// well under `pr_diff_poll_secs` (30s default) so a request that genuinely
+/// hangs fails and frees the poll loop before the next cycle would otherwise
+/// queue up behind it — see `github_timeout_is_shorter_than_the_poll_interval`
+/// in `data::github_client`, which pins that relationship. Without a bound
+/// here at all, a stalled connection or a half-delivered body hangs
+/// indefinitely (reqwest's default), wedging every consumer of the single
+/// watch-channel PR source behind it.
+pub const GITHUB_HTTP_TIMEOUT_SECS: u64 = 20;
+
 /// Default TCP listen address when no override is present.
 ///
 /// **Loopback-only by default.**  Phase 0 carries no authentication; binding
@@ -48,6 +70,11 @@ pub struct Config {
     pub pr_queue_poll_secs: u64,
     /// PR diff poll interval in seconds (default: 30).
     pub pr_diff_poll_secs: u64,
+    // NOTE: GITHUB_CONNECT_TIMEOUT_SECS / GITHUB_HTTP_TIMEOUT_SECS live just
+    // below as plain `const`s, not `Config` fields — they bound one GitHub
+    // HTTP attempt and must stay visibly smaller than `pr_diff_poll_secs`
+    // above (see `github_timeout_is_shorter_than_the_poll_interval` in
+    // `data::github_client`), which a user-configurable field would obscure.
     /// How long (in seconds) to suppress a just-approved PR from the queue.
     ///
     /// Covers the GitHub search-index lag window (typically seconds to low minutes).
