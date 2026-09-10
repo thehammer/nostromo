@@ -502,24 +502,35 @@ class ChatTurnView: NSView, TurnIsland {
         var y = Self.topPadding
         if let bubble {
             let width = Self.bubbleWidth(paneWidth: islandWidth)
-            setFrameIfChanged(bubble,
-                              NSRect(x: islandWidth - Self.bubbleTrailingInset - width,
-                                     y: y, width: width, height: bubbleHeight))
+            place(bubble, alignmentRect:
+                    NSRect(x: islandWidth - Self.bubbleTrailingInset - width,
+                           y: y, width: width, height: bubbleHeight))
             y += bubbleHeight + Self.bubbleGap
         }
         let blocksWidth = Self.blockWidth(paneWidth: islandWidth)
         for (i, view) in columnViews.enumerated() {
             if i > 0 { y += TurnHeightEstimator.blockSpacing }
-            setFrameIfChanged(view, NSRect(x: Self.blocksLeadingInset, y: y,
-                                           width: blocksWidth, height: columnHeights[i]))
+            place(view, alignmentRect: NSRect(x: Self.blocksLeadingInset, y: y,
+                                              width: blocksWidth, height: columnHeights[i]))
             y += columnHeights[i]
         }
     }
 
-    /// Writing an unchanged frame would dirty a block that is already laid out,
-    /// and re-solving every block on every pass is precisely the cost this
-    /// design exists to avoid.
-    private func setFrameIfChanged(_ view: NSView, _ rect: NSRect) {
+    /// Place one island, from the **alignment** rect the constraints this
+    /// replaces would have addressed.
+    ///
+    /// For every custom view here the alignment rect and the frame are the
+    /// same thing, but `NSTextField` insets its text two points on each side —
+    /// and the truncation banner is a bare `NSTextField`, so writing these
+    /// numbers straight into `frame` would shift it two points against every
+    /// other block. Its own width constraint addresses the alignment rect too,
+    /// so this keeps the two agreeing.
+    ///
+    /// Writing an unchanged frame would dirty a block that is already laid
+    /// out, and re-solving every block on every pass is precisely the cost
+    /// this design exists to avoid.
+    private func place(_ view: NSView, alignmentRect: NSRect) {
+        let rect = view.frame(forAlignmentRect: alignmentRect)
         guard view.frame != rect else { return }
         view.frame = rect
     }

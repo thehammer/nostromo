@@ -165,10 +165,25 @@ class MarkdownTableView: NSView {
 
         let cellHeight = Self.cellTextHeight(header: row.height == Self.headerRowHeight)
         for (colIdx, cell) in row.cells.enumerated() {
-            let rect = NSRect(x: Self.sideInset + CGFloat(colIdx) * (cellWidth + Self.columnGap),
-                              y: ((row.height - cellHeight) / 2).rounded(),
-                              width: cellWidth,
-                              height: cellHeight)
+            // An **alignment** rect, converted to a frame — not a frame
+            // directly. The constraints this replaces addressed each label's
+            // alignment rect, and `NSTextField` insets its text two points on
+            // each side, so writing these numbers straight into `frame` drew
+            // every cell's text two points right of where the solver had put
+            // it. `y` is deliberately unrounded for the same reason: it is the
+            // `centerY == row.centerY` constraint, and AppKit backing-aligns
+            // the result exactly as it did for the solved one.
+            let alignmentRect = NSRect(
+                x: Self.sideInset + CGFloat(colIdx) * (cellWidth + Self.columnGap),
+                y: (row.height - cellHeight) / 2,
+                width: cellWidth,
+                height: cellHeight)
+            // Backing-aligned, because the solver's output was: a cell whose
+            // column width is not a whole number of points otherwise lands on
+            // a fractional coordinate the constraint-based layout would have
+            // snapped.
+            let rect = cell.frame(forAlignmentRect:
+                backingAlignedRect(alignmentRect, options: .alignAllEdgesNearest))
             if cell.frame != rect { cell.frame = rect }
         }
 

@@ -131,6 +131,7 @@
 		HH000000000000000000112 /* TurnPayloadStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000110 /* TurnPayloadStoreTests.swift */; };
 		HH000000000000000000122 /* TurnListVirtualizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000120 /* TurnListVirtualizerTests.swift */; };
 		HH000000000000000000132 /* TurnHeightEstimatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000130 /* TurnHeightEstimatorTests.swift */; };
+		TT000000000000000000042 /* ChatTurnViewLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000040 /* ChatTurnViewLayoutTests.swift */; };
 		HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000140 /* ImageDecodePolicyTests.swift */; };
 		HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000150 /* MemoryWatchdogTests.swift */; };
 		II000000000000000000011 /* TurnInteractionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000010 /* TurnInteractionStore.swift */; };
@@ -269,6 +270,7 @@
 		HH000000000000000000110 /* TurnPayloadStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPayloadStoreTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000120 /* TurnListVirtualizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnListVirtualizerTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000130 /* TurnHeightEstimatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnHeightEstimatorTests.swift; sourceTree = "<group>"; };
+		TT000000000000000000040 /* ChatTurnViewLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTurnViewLayoutTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000140 /* ImageDecodePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDecodePolicyTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000150 /* MemoryWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdogTests.swift; sourceTree = "<group>"; };
 		II000000000000000000010 /* TurnInteractionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionStore.swift; sourceTree = "<group>"; };
@@ -454,6 +456,7 @@
 				HH000000000000000000110 /* TurnPayloadStoreTests.swift */,
 				HH000000000000000000120 /* TurnListVirtualizerTests.swift */,
 				HH000000000000000000130 /* TurnHeightEstimatorTests.swift */,
+				TT000000000000000000040 /* ChatTurnViewLayoutTests.swift */,
 				HH000000000000000000140 /* ImageDecodePolicyTests.swift */,
 				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
 				II000000000000000000100 /* TurnInteractionTests.swift */,
@@ -673,6 +676,7 @@
 				HH000000000000000000112 /* TurnPayloadStoreTests.swift in Sources */,
 				HH000000000000000000122 /* TurnListVirtualizerTests.swift in Sources */,
 				HH000000000000000000132 /* TurnHeightEstimatorTests.swift in Sources */,
+				TT000000000000000000042 /* ChatTurnViewLayoutTests.swift in Sources */,
 				HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */,
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
 				BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */,

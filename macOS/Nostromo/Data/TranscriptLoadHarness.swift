@@ -31,6 +31,20 @@ private let log = Logger(subsystem: "com.hammer.nostromo", category: "loadharnes
 ///   NOSTROMO_LOAD_FOCUSES=1..8     panes driven concurrently
 ///   NOSTROMO_LOAD_SCROLL=1         after load, scroll bottom→top→bottom
 ///   NOSTROMO_LOAD_DURATION=24h     keep driving for a soak run
+///   NOSTROMO_LOAD_BIG_TURN_BLOCKS=160   one turn of N blocks, before the rest
+///   NOSTROMO_LOAD_BIG_TURN_TABLE_ROWS=60  rows in that turn's markdown table
+///
+/// ## Why the big turn exists
+///
+/// Everything above drives *many small* turns — five thousand of them — which
+/// is the axis this harness was built for and the axis that was already fast.
+/// Nothing here had ever driven **one large turn**, so the whole region where
+/// `ReplView.measure()` was superlinear went untested until it froze the app on
+/// 2026-09-09: a single turn of a couple of hundred blocks including a markdown
+/// table took ten seconds of main thread per measurement, and re-measured on
+/// every streamed block. `NOSTROMO_LOAD_BIG_TURN_BLOCKS` drives exactly that
+/// shape, streamed block by block as the daemon would, and
+/// `transcript-load-report.py`'s `measure-budget` row grades it.
 final class TranscriptLoadHarness {
 
     private(set) static var shared: TranscriptLoadHarness?
@@ -46,6 +60,12 @@ final class TranscriptLoadHarness {
     let focusCount: Int
     let scrollAfterLoad: Bool
     let durationSeconds: TimeInterval?
+    /// Blocks in the one deliberately-large turn, or 0 for none.
+    let bigTurnBlocks: Int
+    /// Rows in that turn's markdown table. A table is one `TurnBlock` and was
+    /// the single densest shape measured, so a big-turn scenario without one
+    /// misses most of what made the incident.
+    let bigTurnTableRows: Int
 
     private(set) var turnsDelivered = 0
 
@@ -85,6 +105,8 @@ final class TranscriptLoadHarness {
         self.focusCount      = max(1, min(8, Int(env["NOSTROMO_LOAD_FOCUSES"] ?? "") ?? 1))
         self.scrollAfterLoad = env["NOSTROMO_LOAD_SCROLL"] == "1"
         self.durationSeconds = Self.parseDuration(env["NOSTROMO_LOAD_DURATION"])
+        self.bigTurnBlocks    = max(0, Int(env["NOSTROMO_LOAD_BIG_TURN_BLOCKS"] ?? "") ?? 0)
+        self.bigTurnTableRows = max(0, Int(env["NOSTROMO_LOAD_BIG_TURN_TABLE_ROWS"] ?? "") ?? 60)
     }
 
     /// Wait until the window has laid out and its transcript panes have
@@ -170,7 +192,8 @@ final class TranscriptLoadHarness {
         }
         log.info("""
             load harness: turns=\(self.totalTurns) reconnects=\(self.reconnects) \
-            focuses=\(self.focusCount) scroll=\(self.scrollAfterLoad)
+            focuses=\(self.focusCount) scroll=\(self.scrollAfterLoad) \
+            bigTurnBlocks=\(self.bigTurnBlocks) bigTurnTableRows=\(self.bigTurnTableRows)
             """)
 
         // Re-announce "connected" so ChatSession attaches, then deliver an empty
@@ -179,6 +202,16 @@ final class TranscriptLoadHarness {
         for tag in tags {
             client.messages.send(.sessionSpawned(tag: tag, sessionId: sessionIds[tag]))
             client.messages.send(.sessionTurns(tag: tag, turns: []))
+        }
+
+        // The big turn goes first, while the transcript is short enough that it
+        // is certain to be inside the materialized window and therefore
+        // certain to be measured. Streamed block by block, so the
+        // re-measure-per-appended-block path — the branch the incident's stack
+        // sample named — is what gets exercised, not just the one-shot
+        // materialization.
+        if bigTurnBlocks > 0 {
+            for tag in tags { deliverBigTurn(tag: tag) }
         }
 
         // One turn per tick. Slow enough that the main thread can actually
@@ -277,6 +310,67 @@ final class TranscriptLoadHarness {
             turnId: id,
             summary: DaemonResultSummary(durationMs: 1_200, costUsd: 0.004, isError: false),
             contextTokens: 40_000)))
+    }
+
+    /// One deliberately-large turn: `bigTurnBlocks` tool-call/tool-result pairs
+    /// with a markdown table and a findings card, streamed a block at a time.
+    ///
+    /// Shaped after the turn that actually froze the app — a Perri QA report —
+    /// rather than after something synthetic: alternating tool calls and
+    /// results, a prose findings card, and one wide table.
+    private func deliverBigTurn(tag: String) {
+        let seq = nextSeq[tag] ?? 0
+        nextSeq[tag] = seq + 1
+        let id = "t\(seq)"
+        let timestamp = Self.timestamp(forSequence: seq)
+        let userInput = "review the queue and report"
+
+        let started = DaemonTurn(id: id, userInput: userInput, timestamp: timestamp,
+                                 blocks: [], isComplete: false)
+        client.messages.send(.sessionTurnDelta(tag: tag, delta: .turnStarted(started)))
+
+        var blocks: [DaemonTurnBlock] = []
+        while blocks.count < bigTurnBlocks {
+            blocks.append(.toolCall(toolName: "Bash", inputSummary: Self.prose(80, rng: &rng),
+                                    inputFull: "{}"))
+            if blocks.count < bigTurnBlocks {
+                blocks.append(.toolResult(content: Self.prose(3_000, rng: &rng), isError: false))
+            }
+        }
+        blocks.append(.text("## Findings\n\n- " + Self.prose(1_500, rng: &rng)))
+        if bigTurnTableRows > 0 {
+            blocks.append(.text(Self.markdownTable(rows: bigTurnTableRows, columns: 6)))
+        }
+
+        // One `blockAppended` at a time is the point: each one lands as a
+        // `.updatedBlocks` change and asks `ReplView` to re-measure the turn.
+        for block in blocks {
+            client.messages.send(.sessionTurnDelta(
+                tag: tag, delta: .blockAppended(turnId: id, block: block)))
+        }
+
+        records[tag, default: []].append(
+            DaemonTurn(id: id, userInput: userInput, timestamp: timestamp,
+                       blocks: blocks, isComplete: true))
+        client.messages.send(.sessionTurnDelta(tag: tag, delta: .turnCompleted(
+            turnId: id,
+            summary: DaemonResultSummary(durationMs: 9_876, costUsd: 0.21, isError: false),
+            contextTokens: 90_000)))
+        log.info("""
+            load harness: delivered one big turn of \(blocks.count, privacy: .public) blocks \
+            (table rows \(self.bigTurnTableRows, privacy: .public)) to \(tag, privacy: .public)
+            """)
+    }
+
+    /// A markdown pipe table, which `TextBlockView` routes to `MarkdownTableView`.
+    private static func markdownTable(rows: Int, columns: Int) -> String {
+        let header = "|" + (0..<columns).map { " h\($0) " }.joined(separator: "|") + "|"
+        let rule   = "|" + (0..<columns).map { _ in "---" }.joined(separator: "|") + "|"
+        var lines = [header, rule]
+        for r in 0..<rows {
+            lines.append("|" + (0..<columns).map { " r\(r)c\($0) " }.joined(separator: "|") + "|")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// A daemon restart, through the production path.
