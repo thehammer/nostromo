@@ -491,6 +491,27 @@ behavior:
   `perri.set_selected_index`) to this PR's position in the current queue,
   if it's there.
 
+  Before any of the above, closes every curated tab whose review context
+  just went stale (R8 — the same teardown described under
+  `perri.clear_current_pr` below): the previous PR's `pr_conversation`/
+  `pr_diff` tabs and any `file`/`ticket` tabs. On a curated focus this can
+  empty the tabbed detail region entirely, and an emptied region is removed
+  from the tree rather than left lingering. If the region existed a moment
+  before that happened, `load_pr` immediately rebuilds it for the *new* PR —
+  the same outcome `nostromo.show(pr_conversation)` followed by
+  `show(pr_diff)` would produce, so a caller that never calls `nostromo.show`
+  at all (the macOS GUI's "click a PR row" action, notably) still ends up
+  with a usable, visible detail region instead of one that silently vanished.
+  The rebuild does not fetch: each recreated tab is bound to its PR-backed
+  source and painted `Loading`, then filled in by the same watch-driven
+  broadcaster that already keeps a *surviving* `pr_conversation`/`pr_diff`
+  tab fresh across a PR change — so `load_pr` never blocks on this even if
+  the underlying PR fetch never resolves. A curated focus that never had a
+  detail region gets nothing conjured into it, and a `perri-standard` focus
+  (no such region at all) is completely unaffected. A later explicit
+  `nostromo.show` for the same PR re-anchors the rebuilt tabs (R2's identity
+  reuse) rather than duplicating them.
+
   On a curated focus whose only PR-content panes are `perri.get_pr_diff`/
   `perri.get_pr_conversation`-bound tabs, this resolves to **zero** targets:
   the call still succeeds, still writes the pointer file and signals the

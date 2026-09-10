@@ -232,8 +232,26 @@ async fn load_pr_daemon(
     // operator never sees the new PR's content sitting beside the old PR's
     // evidence. A no-op for a focus with no curated regions, which is every
     // focus still driving `perri-standard` through the raw tools.
+    //
+    // D1 (fix-gui-pr-pickup-detail-region): that teardown can empty the
+    // tabbed detail region entirely, and `reset_for_pr_change` removes an
+    // emptied region rather than leave it lingering (D5) — with no
+    // `nostromo.show` call to follow (the GUI's "click a PR row" path calls
+    // only `load_pr`), nothing would ever rebuild it. So: rebuild it exactly
+    // when the reset just made it disappear — it existed a moment ago and
+    // does not now. A region that *survives* the reset (e.g. a paramless
+    // `pr_diff` tab whose identity already fell back to whatever PR just
+    // became current) needs no rebuild; recreating on top of it would push
+    // fresh content into a pane that's already correctly tracking the new
+    // PR. A focus that never had a detail region gets nothing conjured into
+    // it, and `perri-standard` (no such region at all) is untouched either
+    // way.
     if let Some(t) = tag.as_deref() {
+        let had_detail_region = show::has_detail_region(daemon, t);
         show::reset_for_pr_change(daemon, t, Some((repo, number)));
+        if had_detail_region && !show::has_detail_region(daemon, t) {
+            show::recreate_detail_region_for_pr(daemon, t, repo, number);
+        }
     }
 
     // D1/D2: resolve which of the focus's *live* panes load_pr may push its

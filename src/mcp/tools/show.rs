@@ -38,8 +38,8 @@ use serde_json::{json, Value};
 
 use crate::data::file_source::FileSourceError;
 use crate::ipc::pane_registry::SplitPosition;
-use crate::ipc::protocol::{Anchor, Emphasis, ServerMsg};
-use crate::mcp::pane_sources::broadcast_pane_content_with_address;
+use crate::ipc::protocol::{Anchor, Emphasis, PaneContentWire, ServerMsg};
+use crate::mcp::pane_sources::{broadcast_pane_content, broadcast_pane_content_with_address};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
 use crate::mcp::tools::apply_layout::{
     address, fetch_async, freshness, pin_for_request, target_tag, ApplyLayoutError, FetchArgs,
@@ -276,12 +276,9 @@ pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<
         let Some(tree) = reg.get(tag).cloned() else {
             return Vec::new();
         };
-        let bindings = bindings_for(&reg, tag);
         // `new_pr` is already the PR under review by the time this runs, so it
         // is also the right value to resolve a paramless PR binding against.
-        let live: Vec<String> = tree.pane_ids();
-        let order = reg.view_focus_order(tag, &live);
-        let state = derive::view_state(&cfg, &tree, &bindings, new_pr, &order);
+        let state = view_state_for(&mut reg, &cfg, tag, &tree, new_pr);
         let closed = placement::reset_for_pr_change(&cfg, &state, new_pr);
         if closed.is_empty() {
             return Vec::new();
@@ -341,6 +338,134 @@ pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<
         });
     }
     closed
+}
+
+/// Whether `tag`'s focus currently has a non-empty tabbed detail region — the
+/// region `pr_conversation`/`pr_diff` live in, per `views.yaml` (`detail`,
+/// `tabbed: true`).
+///
+/// Called by `perri.load_pr` *before* [`reset_for_pr_change`] tears the
+/// region down, so [`recreate_detail_region_for_pr`] only ever rebuilds a
+/// region that genuinely existed a moment ago (D1's scope decision): a
+/// curated focus that never had one gets nothing conjured into it, and a
+/// `perri-standard` focus — which has no region named here at all, its PR
+/// content living in a fixed `diff` leaf pane outside the `views.yaml` system
+/// entirely — always reads `false` here and sees no change whatsoever.
+pub fn has_detail_region(daemon: &DaemonMcpBackend, tag: &str) -> bool {
+    let Ok(cfg) = views_config::load() else {
+        return false;
+    };
+    let Ok(region_name) = cfg
+        .view(ViewType::PrConversation.as_str())
+        .map(|r| r.region.clone())
+    else {
+        return false;
+    };
+    let reg = daemon.pane_registry.lock().unwrap();
+    let Some(tree) = reg.get(tag) else {
+        return false;
+    };
+    matches!(
+        view_tree::tabs_region(tree, &region_name),
+        Some(crate::ipc::protocol::PaneTree::Tabs { children, .. }) if !children.is_empty()
+    )
+}
+
+/// D1: rebuild the curated detail region for `(repo, number)` — the PR
+/// `perri.load_pr` just pinned — producing the same outcome
+/// `nostromo.show(pr_conversation)` followed by `show(pr_diff)` would, minus
+/// the fetch.
+///
+/// Called by `perri.load_pr` right after [`reset_for_pr_change`], and only
+/// when [`has_detail_region`] found one in place a moment before that reset
+/// ran *and* the region is gone afterward — i.e. the reset just emptied it
+/// out from under the focus. A region that survives the reset (a paramless
+/// `pr_diff`/`pr_conversation` tab whose identity already fell back to the
+/// new PR under review) needs no rebuild; running this over it anyway would
+/// push fresh `Loading` content into a pane that's already correctly
+/// tracking the new PR. Runs the exact same placement decision `nostromo.show` uses
+/// ([`placement::place`]) for `pr_conversation` then `pr_diff`, so a later
+/// explicit `nostromo.show` for the same PR re-anchors these tabs via R2's
+/// identity reuse rather than duplicating them.
+///
+/// Deliberately does not fetch anything: each new pane is bound to its
+/// PR-backed source (`SOURCE_PR_CONVERSATION`/`SOURCE_PR_DIFF`) and painted
+/// `Loading` unconditionally — **not** through
+/// [`crate::mcp::pane_sources::broadcast_loading_if_first_paint`]'s
+/// first-paint suppression, because every pane `place()` hands back here is
+/// freshly placed for the PR that just moved (this function never runs on a
+/// tree `reset_for_pr_change` left with a surviving tab of the *same* PR, so
+/// `reused` is always `false`); a pane id being *physically* recycled from a
+/// tab this same reset just closed must never read as "already showing this
+/// PR's content" and skip the paint — that would leave the operator staring
+/// at the old PR's stale diff until the next unrelated `perri_pr_rx` change
+/// happened to fire. Real content follows with no further tool call, from the
+/// same watch-driven broadcaster (`pane_sources::run_pane_source_broadcaster`,
+/// reacting to `perri_pr_rx`) that already keeps a *surviving*
+/// `pr_conversation`/`pr_diff` tab fresh across a PR change — see this
+/// module's [`reset_for_pr_change`] doc comment. Fetching synchronously here
+/// instead would couple region creation to fetch completion and reintroduce
+/// the wedge `perri.load_pr`'s own PR-summary push is careful to avoid.
+///
+/// Held under one lock acquisition per placed view (no `.await` anywhere in
+/// this function), so unlike `show()` there is no decide/mutate race window
+/// to guard against.
+pub fn recreate_detail_region_for_pr(daemon: &DaemonMcpBackend, tag: &str, repo: &str, number: u64) {
+    let Ok(cfg) = views_config::load() else {
+        return;
+    };
+    let current_pr = Some((repo, number));
+    let params = json!({ "repo": repo, "number": number });
+
+    let mut placed_panes: Vec<String> = Vec::new();
+    let final_tree = {
+        let mut reg = daemon.pane_registry.lock().unwrap();
+        let Some(mut tree) = reg.get(tag).cloned() else {
+            return;
+        };
+
+        for view_type in [ViewType::PrConversation, ViewType::PrDiff] {
+            let view_state = view_state_for(&mut reg, &cfg, tag, &tree, current_pr);
+            let request = ShowRequest::new(
+                view_type,
+                ViewIdentity::Pr {
+                    repo: repo.to_string(),
+                    number,
+                },
+            );
+            let Ok(placement) = placement::place(&cfg, &view_state, &request) else {
+                continue;
+            };
+            if apply_to_tree(&mut tree, &placement).is_err() {
+                continue;
+            }
+            let Ok(t) = reg.set_layout(tag, &json!({ "tree": tree })) else {
+                continue;
+            };
+            tree = t;
+            reg.bind_source_with_params(
+                tag,
+                &placement.pane_id,
+                source_for(view_type),
+                Some(params.clone()),
+            );
+            reg.touch_view_focus(tag, &placement.tab_order, &placement.pane_id);
+            placed_panes.push(placement.pane_id);
+        }
+        tree
+    };
+
+    let Some(frontmost) = placed_panes.last().cloned() else {
+        return;
+    };
+    let _ = daemon.broadcast_tx.send(ServerMsg::FocusLayout {
+        tag: tag.to_string(),
+        tree: final_tree,
+        focused_pane: Some(frontmost),
+    });
+    for pane_id in &placed_panes {
+        broadcast_pane_content(daemon, tag, pane_id, PaneContentWire::Loading, None);
+    }
 }
 
 // ── argument mapping ─────────────────────────────────────────────────────────
@@ -662,6 +787,23 @@ fn bindings_for(
         .collect()
 }
 
+/// Derive a [`views::ViewState`] for `tag`'s current `tree`, given the PR
+/// under review — the reconstruction `current_view_state`,
+/// `reset_for_pr_change`, and `recreate_detail_region_for_pr` all need before
+/// they can hand `placement`'s functions something to reason against.
+fn view_state_for(
+    reg: &mut crate::ipc::pane_registry::PaneRegistry,
+    cfg: &views::ViewPlacementConfig,
+    tag: &str,
+    tree: &crate::ipc::protocol::PaneTree,
+    current_pr: Option<(&str, u64)>,
+) -> views::ViewState {
+    let bindings = bindings_for(reg, tag);
+    let live = tree.pane_ids();
+    let order = reg.view_focus_order(tag, &live);
+    derive::view_state(cfg, tree, &bindings, current_pr, &order)
+}
+
 /// Derive the focus's [`views::ViewState`] from the registry, the PR under
 /// review, and the in-memory focus order.
 fn current_view_state(
@@ -674,12 +816,9 @@ fn current_view_state(
     let tree = reg.get(tag).cloned().unwrap_or_else(|| {
         crate::ipc::protocol::PaneTree::repl_leaf()
     });
-    let bindings = bindings_for(reg, tag);
-    let live = tree.pane_ids();
-    let order = reg.view_focus_order(tag, &live);
     let snapshot = state.perri_pr_rx.borrow().clone();
     let current_pr = current_pr_of(snapshot.as_ref());
-    derive::view_state(cfg, &tree, &bindings, current_pr, &order)
+    view_state_for(reg, cfg, tag, &tree, current_pr)
 }
 
 /// The `(repo, number)` the daemon currently has under review, when it has a
