@@ -107,9 +107,12 @@ pub struct PrSnapshot {
     /// curated-agent-views).
     #[serde(default)]
     pub conversation_error: Option<String>,
-    /// When this snapshot was last fetched successfully. `None` when the
-    /// source has never produced good data (see `PaneFreshness`/D6 — a `None`
-    /// combined with `stale: true` means "badly stale immediately").
+    /// When this snapshot was last *attempted* — a successful fetch stamps
+    /// it, and (fix/pr-source-http-timeout) so does a failed one, so a
+    /// stalled-then-failing fetch cycle is distinguishable from a source
+    /// that never ran at all. `None` when the source has never even
+    /// attempted a fetch (see `PaneFreshness`/D6 — a `None` combined with
+    /// `stale: true` means "badly stale immediately").
     #[serde(default)]
     pub generated_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Per-check CI results (empty when unknown / not yet fetched).

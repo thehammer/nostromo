@@ -219,6 +219,14 @@ impl PerriPrNativeSource {
                     let mut snap = tx.borrow().clone().unwrap_or_default();
                     snap.stale = true;
                     snap.error = Some(e.to_string());
+                    // Stamp `generated_at` here too, the same way a successful
+                    // fetch does (see `fetch_pr`). Without this a stalled-then-
+                    // failing cycle is indistinguishable from a frozen task that
+                    // never ran at all — both show a stale `generated_at` from
+                    // whatever the last successful snapshot was. Advancing it on
+                    // the error path makes "we tried and it failed" observably
+                    // different from "nothing happened".
+                    snap.generated_at = Some(chrono::Utc::now());
                     let _ = tx.send(Some(snap));
                 }
             }
@@ -453,8 +461,31 @@ impl PerriPrNativeSource {
     }
 
     fn build_client(&self) -> Result<GithubClient> {
+        #[cfg(test)]
+        {
+            // Test-only hook, mirroring `perri_queue_native::API_BASE_OVERRIDE`
+            // (used for the raw `http` calls) and `GithubClient::new_for_test`
+            // (which this delegates to): lets a test drive `run()`'s *own*
+            // client construction — normally hardcoded to real GitHub — at a
+            // local `wiremock` server, so `run()`'s publish path can be
+            // exercised end to end instead of only `fetch_pr` in isolation.
+            if let Some(base) = TEST_OCTOCRAB_BASE_OVERRIDE.with(|c| c.borrow().clone()) {
+                return GithubClient::new_for_test(self.config.github_token_path.as_deref(), &base);
+            }
+        }
         GithubClient::new(self.config.github_token_path.as_deref())
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// See `build_client`'s use of this: unlike `API_BASE_OVERRIDE` (which
+    /// must stay compiled unconditionally so out-of-crate integration tests
+    /// can set it too), this is only ever touched by this file's own
+    /// in-crate unit tests, so it's fine to gate it on `cfg(test)` the same
+    /// way `GithubClient::new_for_test` is.
+    static TEST_OCTOCRAB_BASE_OVERRIDE: std::cell::RefCell<Option<String>> =
+        std::cell::RefCell::new(None);
 }
 
 // ── Raw diff fetch ────────────────────────────────────────────────────────────
@@ -1739,5 +1770,185 @@ mod tests {
             snap.diff, diff_body,
             "the full diff body must come through even with a delayed-but-legitimate response"
         );
+    }
+
+    /// The headline test above (`a_stalled_diff_fetch_fails_within_the_...`)
+    /// only exercises `fetch_pr` directly — it never proved that `run()`'s
+    /// own `Err` arm (the code that actually runs in production, publishing
+    /// on the `watch` channel every consumer reads) behaves correctly. This
+    /// drives a full `run()` loop against the same kind of stalled-diff mock,
+    /// through three cycles — success, stall, recovery — and checks the
+    /// thing that was silently broken twice: `generated_at` must advance on
+    /// the error snapshot too, not just stay frozen at the last success, or
+    /// a stalled-then-failing fetch is indistinguishable from a source that
+    /// never ran at all (see `PrSnapshot::generated_at`'s doc comment).
+    ///
+    /// Uses `TEST_OCTOCRAB_BASE_OVERRIDE` (see `build_client`) so `run()`'s
+    /// own client construction — not a test-built stand-in — is what's
+    /// exercised, the same way `API_BASE_OVERRIDE` redirects the raw `http`
+    /// diff fetch. Real wall-clock waits, no `tokio::time::pause()` — see the
+    /// long comment on the headline test for why that was tried and dropped
+    /// in this file.
+    #[tokio::test]
+    async fn a_stalled_diff_fetch_publishes_an_error_snapshot_via_run_and_generated_at_advances_on_recovery()
+    {
+        use std::time::Duration;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+        TEST_OCTOCRAB_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let hosts_dir = tempfile::tempdir().unwrap();
+        let hosts_path = hosts_dir.path().join("hosts.yml");
+        std::fs::write(
+            &hosts_path,
+            "github.com:\n  oauth_token: test-token\n  user: tester\n  git_protocol: https\n",
+        )
+        .unwrap();
+        std::env::remove_var("GITHUB_TOKEN");
+
+        mount_pr_metadata_mock(&server, "acme", "web", 7).await;
+
+        // Three same-priority, same-path/header mocks, mounted in this exact
+        // order and each capped with `up_to_n_times(1)` (except the last).
+        // `wiremock` tries same-priority mocks in insertion order and skips
+        // ones that have exhausted their match count (see `MountedMock::matches`
+        // / `MountedMockSet::handle_request`), so requests 1, 2, 3 land on
+        // these in order: initial success, then stall, then recovery.
+        let initial_diff = "diff --git a/f.rs b/f.rs\n+initial\n".to_string();
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/7"))
+            .and(header("accept", "application/vnd.github.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(initial_diff.clone()))
+            .with_priority(1)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/7"))
+            .and(header("accept", "application/vnd.github.diff"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("diff that never fully arrives")
+                    .set_delay(Duration::from_secs(crate::config::GITHUB_HTTP_TIMEOUT_SECS + 30)),
+            )
+            .with_priority(1)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let recovered_diff = "diff --git a/f.rs b/f.rs\n+recovered\n".to_string();
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/7"))
+            .and(header("accept", "application/vnd.github.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(recovered_diff.clone()))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+
+        let state_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            state_dir.path().join("current-pr.json"),
+            serde_json::json!({"number": 7, "repo": "acme/web"}).to_string(),
+        )
+        .unwrap();
+
+        let config = Config {
+            perri_state: Some(state_dir.path().to_path_buf()),
+            github_token_path: Some(hosts_path.clone()),
+            // Long enough that only `refresh_tx` (never the natural poll
+            // interval) drives cycles 2 and 3 below — keeps the test's
+            // timing deterministic.
+            pr_diff_poll_secs: 3600,
+            ..Config::default()
+        };
+
+        let source = PerriPrNativeSource::new(config.clone());
+        let (tx, mut rx) = watch::channel(None);
+        let (_dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+
+        let run_handle = tokio::spawn(async move {
+            source
+                .run(tx, &mut dirty_rx, &mut refresh_rx, config.pr_diff_poll_secs)
+                .await;
+        });
+
+        // A successful cycle also runs `fetch_ci_checks`, which — like the
+        // headline test's CI-checks call — hits the hardcoded real
+        // `https://api.github.com` rather than the mock server (see that
+        // test's doc comment) and needs real outbound network to complete,
+        // bounded by the same client-level timeouts this file's tests share.
+        // Reuse the headline test's generous hard-deadline for every cycle
+        // rather than a tighter one, so that real call doesn't make this
+        // flaky.
+        let generous_deadline = Duration::from_secs(crate::config::GITHUB_HTTP_TIMEOUT_SECS + 15);
+
+        // Cycle 1: the initial fetch fires immediately on loop entry.
+        tokio::time::timeout(generous_deadline, rx.changed())
+            .await
+            .expect("initial fetch hung")
+            .expect("watch sender dropped unexpectedly");
+        let initial_snap = rx.borrow().clone().expect("expected a published snapshot");
+        assert!(!initial_snap.stale, "initial fetch should succeed: {initial_snap:?}");
+        assert!(initial_snap.error.is_none());
+        assert_eq!(initial_snap.diff, initial_diff);
+        let t0 = initial_snap
+            .generated_at
+            .expect("a successful snapshot must stamp generated_at");
+
+        // Cycle 2: trigger immediately (don't wait out the 1h poll interval)
+        // and land on the stall mock.
+        refresh_tx.send(()).unwrap();
+        tokio::time::timeout(generous_deadline, rx.changed())
+            .await
+            .expect(
+                "run() hung past this test's own hard deadline instead of publishing an error \
+                 snapshot for the stalled fetch",
+            )
+            .expect("watch sender dropped unexpectedly");
+        let error_snap = rx.borrow().clone().expect("expected a published snapshot");
+        assert!(error_snap.stale, "stalled fetch must publish stale:true: {error_snap:?}");
+        assert!(
+            error_snap.error.is_some(),
+            "stalled fetch must publish a populated error: {error_snap:?}"
+        );
+        let t1 = error_snap.generated_at.expect(
+            "the error snapshot must stamp generated_at too — otherwise a stalled-then-failing \
+             fetch is indistinguishable from a source that never ran at all, which is the exact \
+             diagnostic gap this test guards against",
+        );
+        assert!(
+            t1 > t0,
+            "generated_at must advance on the error snapshot relative to the pre-stall snapshot \
+             (t0={t0:?}, t1={t1:?})"
+        );
+
+        // Cycle 3: trigger again and land on the recovery mock.
+        refresh_tx.send(()).unwrap();
+        tokio::time::timeout(generous_deadline, rx.changed())
+            .await
+            .expect("recovery fetch hung")
+            .expect("watch sender dropped unexpectedly");
+        let recovered_snap = rx.borrow().clone().expect("expected a published snapshot");
+        assert!(!recovered_snap.stale, "recovered fetch should succeed: {recovered_snap:?}");
+        assert!(recovered_snap.error.is_none());
+        assert_eq!(recovered_snap.diff, recovered_diff);
+        let t2 = recovered_snap
+            .generated_at
+            .expect("a successful snapshot must stamp generated_at");
+        assert!(
+            t2 > t1,
+            "generated_at must advance again on the successful cycle following the error \
+             (t1={t1:?}, t2={t2:?})"
+        );
+
+        run_handle.abort();
+        TEST_OCTOCRAB_BASE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        crate::data::perri_queue_native::API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = None);
     }
 }
