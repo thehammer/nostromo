@@ -219,14 +219,6 @@ impl PerriPrNativeSource {
                     let mut snap = tx.borrow().clone().unwrap_or_default();
                     snap.stale = true;
                     snap.error = Some(e.to_string());
-                    // Stamp `generated_at` here too, the same way a successful
-                    // fetch does (see `fetch_pr`). Without this a stalled-then-
-                    // failing cycle is indistinguishable from a frozen task that
-                    // never ran at all — both show a stale `generated_at` from
-                    // whatever the last successful snapshot was. Advancing it on
-                    // the error path makes "we tried and it failed" observably
-                    // different from "nothing happened".
-                    snap.generated_at = Some(chrono::Utc::now());
                     let _ = tx.send(Some(snap));
                 }
             }
@@ -1777,11 +1769,14 @@ mod tests {
     /// own `Err` arm (the code that actually runs in production, publishing
     /// on the `watch` channel every consumer reads) behaves correctly. This
     /// drives a full `run()` loop against the same kind of stalled-diff mock,
-    /// through three cycles — success, stall, recovery — and checks the
-    /// thing that was silently broken twice: `generated_at` must advance on
-    /// the error snapshot too, not just stay frozen at the last success, or
-    /// a stalled-then-failing fetch is indistinguishable from a source that
-    /// never ran at all (see `PrSnapshot::generated_at`'s doc comment).
+    /// through three cycles — success, stall, recovery — and checks that
+    /// `generated_at` stays frozen at the last successful fetch's timestamp
+    /// on the error snapshot, then advances again once a later fetch
+    /// succeeds. `generated_at` doubles as `PaneFreshness::as_of`, the sole
+    /// input to `badly_stale`'s 5-minute clock (see
+    /// `PrSnapshot::generated_at`'s doc comment) — if a failed fetch
+    /// re-stamped it to "now", a source stuck in a failure loop would never
+    /// trip `badly_stale`.
     ///
     /// Uses `TEST_OCTOCRAB_BASE_OVERRIDE` (see `build_client`) so `run()`'s
     /// own client construction — not a test-built stand-in — is what's
@@ -1917,16 +1912,16 @@ mod tests {
             error_snap.error.is_some(),
             "stalled fetch must publish a populated error: {error_snap:?}"
         );
-        let t1 = error_snap.generated_at.expect(
-            "the error snapshot must stamp generated_at too — otherwise a stalled-then-failing \
-             fetch is indistinguishable from a source that never ran at all, which is the exact \
-             diagnostic gap this test guards against",
+        let t1 = error_snap.generated_at;
+        assert_eq!(
+            t1,
+            Some(t0),
+            "generated_at must stay frozen at the last successful fetch's timestamp on the error \
+             snapshot, not advance to \"now\" — advancing it here would make a source stuck in a \
+             failure loop indistinguishable from a healthy-but-slow one, since badly_stale only \
+             trips once now - generated_at exceeds 5 minutes (t0={t0:?}, t1={t1:?})"
         );
-        assert!(
-            t1 > t0,
-            "generated_at must advance on the error snapshot relative to the pre-stall snapshot \
-             (t0={t0:?}, t1={t1:?})"
-        );
+        let t1 = t1.expect("generated_at must remain populated on the error snapshot");
 
         // Cycle 3: trigger again and land on the recovery mock.
         refresh_tx.send(()).unwrap();
@@ -1946,6 +1941,164 @@ mod tests {
             "generated_at must advance again on the successful cycle following the error \
              (t1={t1:?}, t2={t2:?})"
         );
+
+        run_handle.abort();
+        TEST_OCTOCRAB_BASE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        crate::data::perri_queue_native::API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+    }
+
+    /// `generated_at` doubles as `PaneFreshness::as_of` (see
+    /// `PrSnapshot::generated_at`'s doc comment): `badly_stale` is computed
+    /// as `stale && (as_of is None || now - as_of > 300s)`. If `run()`'s
+    /// error arm re-stamps `generated_at` to "now" on *every* failed fetch,
+    /// that resets the 5-minute clock on every cycle — a source with a dead
+    /// token or a GitHub outage fails forever but `badly_stale` never trips,
+    /// because `as_of` is always "just now". The fix is for only a
+    /// *successful* fetch to advance `generated_at`; a failed one must leave
+    /// it exactly where the last success left it.
+    ///
+    /// This drives `run()` through one success followed by three consecutive
+    /// failures (fast `500`s, no artificial delay — unlike the stall tests
+    /// above, this isn't testing the timeout, just the error arm, so there's
+    /// no need to wait out `GITHUB_HTTP_TIMEOUT_SECS`) and asserts
+    /// `generated_at` stays byte-identical to the post-success value across
+    /// every one of those failures, not merely non-decreasing.
+    ///
+    /// Uses the same `run()`/`TEST_OCTOCRAB_BASE_OVERRIDE`/`refresh_tx`
+    /// wiring as the headline stall test above. Deliberately does not
+    /// re-test recovery (advancing `generated_at` again on a subsequent
+    /// success) — that's already covered there.
+    #[tokio::test]
+    async fn a_failed_diff_fetch_does_not_advance_generated_at_even_across_repeated_failures() {
+        use std::time::Duration;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+        TEST_OCTOCRAB_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let hosts_dir = tempfile::tempdir().unwrap();
+        let hosts_path = hosts_dir.path().join("hosts.yml");
+        std::fs::write(
+            &hosts_path,
+            "github.com:\n  oauth_token: test-token\n  user: tester\n  git_protocol: https\n",
+        )
+        .unwrap();
+        std::env::remove_var("GITHUB_TOKEN");
+
+        mount_pr_metadata_mock(&server, "acme", "web", 7).await;
+
+        // Same same-priority/insertion-order/`up_to_n_times` trick as the
+        // headline test: request 1 lands on the success mock, requests 2-4
+        // land on the three failure mocks in order, each consumed exactly
+        // once. No `.set_delay(...)` on the failures — a fast 500 is enough
+        // to exercise `run()`'s `Err` arm without paying the
+        // `GITHUB_HTTP_TIMEOUT_SECS` cost this file's stall tests need.
+        let initial_diff = "diff --git a/f.rs b/f.rs\n+initial\n".to_string();
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/web/pulls/7"))
+            .and(header("accept", "application/vnd.github.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(initial_diff.clone()))
+            .with_priority(1)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        for i in 0..3u32 {
+            Mock::given(method("GET"))
+                .and(path("/repos/acme/web/pulls/7"))
+                .and(header("accept", "application/vnd.github.diff"))
+                .respond_with(
+                    ResponseTemplate::new(500).set_body_string(format!("boom {i}")),
+                )
+                .with_priority(1)
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+        }
+
+        let state_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            state_dir.path().join("current-pr.json"),
+            serde_json::json!({"number": 7, "repo": "acme/web"}).to_string(),
+        )
+        .unwrap();
+
+        let config = Config {
+            perri_state: Some(state_dir.path().to_path_buf()),
+            github_token_path: Some(hosts_path.clone()),
+            // Long enough that only `refresh_tx` (never the natural poll
+            // interval) drives cycles 2-4 below — keeps the test's timing
+            // deterministic.
+            pr_diff_poll_secs: 3600,
+            ..Config::default()
+        };
+
+        let source = PerriPrNativeSource::new(config.clone());
+        let (tx, mut rx) = watch::channel(None);
+        let (_dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
+        let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+
+        let run_handle = tokio::spawn(async move {
+            source
+                .run(tx, &mut dirty_rx, &mut refresh_rx, config.pr_diff_poll_secs)
+                .await;
+        });
+
+        // None of the fetches in this test are artificially delayed (the
+        // failures are fast 500s, and the only real-network call —
+        // `fetch_ci_checks` — only runs on the success path, once), so a
+        // short deadline is enough; no need for the `GITHUB_HTTP_TIMEOUT_SECS`-
+        // scaled deadline the stall tests use.
+        let deadline = Duration::from_secs(15);
+
+        // Cycle 1: the initial fetch fires immediately on loop entry and
+        // succeeds, establishing the frozen `generated_at` baseline.
+        tokio::time::timeout(deadline, rx.changed())
+            .await
+            .expect("initial fetch hung")
+            .expect("watch sender dropped unexpectedly");
+        let initial_snap = rx.borrow().clone().expect("expected a published snapshot");
+        assert!(!initial_snap.stale, "initial fetch should succeed: {initial_snap:?}");
+        assert!(initial_snap.error.is_none());
+        assert_eq!(initial_snap.diff, initial_diff);
+        let t0 = initial_snap
+            .generated_at
+            .expect("a successful snapshot must stamp generated_at");
+
+        // Cycles 2-4: three consecutive failed fetches. `generated_at` must
+        // stay pinned at `t0` — exactly equal, not just `<=` — through every
+        // one of them.
+        for cycle in 1..=3u32 {
+            refresh_tx.send(()).unwrap();
+            tokio::time::timeout(deadline, rx.changed())
+                .await
+                .unwrap_or_else(|_| panic!("run() hung publishing failure snapshot for cycle {cycle}"))
+                .expect("watch sender dropped unexpectedly");
+            let error_snap = rx.borrow().clone().expect("expected a published snapshot");
+            assert!(
+                error_snap.stale,
+                "cycle {cycle}: failed fetch must publish stale:true: {error_snap:?}"
+            );
+            assert!(
+                error_snap.error.is_some(),
+                "cycle {cycle}: failed fetch must publish a populated error: {error_snap:?}"
+            );
+            assert_eq!(
+                error_snap.generated_at,
+                Some(t0),
+                "cycle {cycle}: generated_at must stay frozen at the last successful fetch's \
+                 timestamp (t0={t0:?}) across repeated failures, not advance to \"now\" on every \
+                 failed cycle (got {:?}) — advancing it here would make a source stuck in a \
+                 failure loop (dead token, GitHub outage) indistinguishable from a healthy-but-\
+                 slow one, since `badly_stale` only trips once `now - generated_at` exceeds 5 \
+                 minutes, and a `generated_at` that keeps re-stamping to \"now\" never lets that \
+                 gap grow",
+                error_snap.generated_at
+            );
+        }
 
         run_handle.abort();
         TEST_OCTOCRAB_BASE_OVERRIDE.with(|c| *c.borrow_mut() = None);
