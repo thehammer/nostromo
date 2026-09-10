@@ -10,11 +10,38 @@ import AppKit
 
 // MARK: - TurnIsland
 
-/// A turn view that owns exactly one constraint of its own — its width — so it
-/// can be measured with `fittingSize` before it is inserted anywhere, and can be
-/// re-widened on a pane resize without ever being constrained to its container.
+/// A turn view that can be sized and measured before it is inserted anywhere,
+/// and re-widened on a pane resize, without ever being constrained to its
+/// container.
+///
+/// Islands report their own height rather than being asked for `fittingSize`.
+/// That is not a stylistic preference: `fittingSize` on a `ChatTurnView` means
+/// solving every block it holds, which made a steady-state re-measure of a
+/// 300-block turn cost 754 ms even when nothing about it had changed — the
+/// treadmill that froze the app on 2026-09-09. A turn already knows the height
+/// of each of its blocks, so summing them is arithmetic.
 protocol TurnIsland: NSView {
     func setIslandWidth(_ width: CGFloat)
+    /// Rendered height at the width last given to `setIslandWidth`.
+    func islandHeight() -> CGFloat
+}
+
+// MARK: - WidthPresettable
+
+/// A view that can be told the width it is about to be laid out at, *before*
+/// anything solves.
+///
+/// Exists for `MarkdownCardView`, whose height depends on a width it otherwise
+/// learns only from `bounds` inside its first `layout()` — so it computes a
+/// height against a 400 pt fallback, calls `invalidateIntrinsicContentSize()`,
+/// and corrects itself on a second pass. Every measurement therefore paid a
+/// `layoutSubtreeIfNeeded()` plus two full solves. Measured on one 200-char
+/// text block: `layoutSubtreeIfNeeded()` alone is 1.64 ms where `fittingSize`
+/// alone is 0.52 ms, and a turn materializes hundreds of blocks.
+///
+/// Told the width up front, one `fittingSize` is exact and the loop is gone.
+protocol WidthPresettable: NSView {
+    func presetLayoutWidth(_ width: CGFloat)
 }
 
 // MARK: - MarkerTurnView
@@ -74,15 +101,120 @@ class MarkerTurnView: NSView, TurnIsland {
     required init?(coder: NSCoder) { fatalError() }
 
     func setIslandWidth(_ width: CGFloat) { widthConstraint.constant = width }
+
+    /// Solved rather than cached: a marker is one wrapped label and a rule, so
+    /// its whole constraint graph is five constraints deep and costs less to
+    /// solve than to bookkeep.
+    func islandHeight() -> CGFloat {
+        layoutSubtreeIfNeeded()
+        return fittingSize.height
+    }
 }
 
 // MARK: - ChatTurnView
 
+/// One exchange — the operator's message, then the agent's blocks — rendered as
+/// a self-contained Auto Layout island.
+///
+/// ## Every block is its own island too
+///
+/// `ReplView`'s header describes why *turns* are frame-positioned islands: Auto
+/// Layout's cost scales with the size of one connected constraint graph, so an
+/// `NSStackView` chaining N children into one system re-solved the whole session
+/// on every pass. This view used to do exactly that *inside* a single turn — an
+/// `NSStackView` of blocks plus a `width == stack.width` constraint per block —
+/// and so the bug that was fixed between turns was never fixed within one.
+///
+/// Measured against the real views at a 900 pt pane, before this change:
+///
+/// | one turn holding | constraints | `measure()` |
+/// |---|---|---|
+/// | 100 text blocks | 512 | 119 ms |
+/// | 400 text blocks | 2 012 | 3 362 ms |
+/// | 800 text blocks | 4 012 | 21 825 ms |
+/// | 80 tool pairs + a 60×6 table | 2 572 | 9 965 ms |
+///
+/// …and splitting the *same* 200 table rows across 8 turns instead of 1 took
+/// 849 ms instead of 20 147 ms. 24× for identical pixels, which is the result
+/// that says the fix is to break the graph up rather than to shrink the content.
+///
+/// So: the bubble and every block are positioned by `frame` from `layout()`,
+/// each holding exactly one constraint of its own — its width — and none
+/// linking it to a sibling. Each is measured **detached**, for the same reason
+/// `ReplView.measure()` measures a turn detached, and its height is cached
+/// here. The turn's own height is those cached heights summed, reported through
+/// `intrinsicContentSize`, so `ReplView.measure()`'s contract is unchanged and a
+/// turn-level solve is now O(1).
+///
+/// ## Which makes streaming incremental
+///
+/// A block's width never depends on its siblings, so appending one cannot
+/// change any earlier block's height. `update(turn:)` therefore measures only
+/// the blocks it just rendered and adds them to the running sum, where before
+/// every appended block re-solved the entire turn: streaming one turn to 300
+/// blocks cost 79 750 ms of cumulative main-thread time, spread over 300 solves
+/// each redoing work already done. That treadmill is the branch the 2026-09-09
+/// stack sample landed in.
+///
+/// See `.claude/wip/replview-measure-superlinear-autolayout/index.md` for the
+/// full measurements and `MarkdownTableView` for the same argument applied
+/// inside a single block.
 class ChatTurnView: NSView, TurnIsland {
 
-    private let blocksStack   = NSStackView()
-    private var renderedCount = 0
+    // MARK: Geometry — each of these was a constraint constant
+
+    /// Gap above the bubble (or above the first block when it is suppressed).
+    private static let topPadding: CGFloat = 12
+    /// Gap below the last block.
+    private static let bottomPadding: CGFloat = 14
+    /// Gap between the bubble and the first block.
+    private static let bubbleGap: CGFloat = 8
+    /// Leading inset of the block column.
+    private static let blocksLeadingInset: CGFloat = 14
+    /// Trailing inset of the user bubble.
+    private static let bubbleTrailingInset: CGFloat = 12
+
+    /// `TurnHeightEstimator` reproduces this layout arithmetically to estimate a
+    /// turn's height before it is built, and reads the shared fractions and
+    /// spacing from there rather than repeating the literals, so the two cannot
+    /// drift apart. `turnChrome` is `topPadding + bottomPadding`; `bubbleChrome`
+    /// is `bubbleGap` plus `UserBubbleView`'s own vertical padding.
+    static func blockWidth(paneWidth: CGFloat) -> CGFloat {
+        paneWidth * TurnHeightEstimator.blocksWidthFraction - blocksLeadingInset
+    }
+
+    static func bubbleWidth(paneWidth: CGFloat) -> CGFloat {
+        paneWidth * TurnHeightEstimator.bubbleWidthFraction
+    }
+
+    // MARK: State
+
     private var widthConstraint: NSLayoutConstraint!
+    /// Pane width the cached heights below were measured at. Starts at the same
+    /// 400 pt placeholder the width constraint used to, so a view that is never
+    /// given a real width still renders something coherent.
+    private var islandWidth: CGFloat = 400
+    /// Set when every cached height is stale — at construction, and whenever the
+    /// island width actually changes. Cleared by `remeasureIfNeeded`.
+    private var needsFullRemeasure = true
+
+    private var bubble: UserBubbleView?
+    private var bubbleHeight: CGFloat = 0
+
+    /// The frame-positioned column under the bubble: the truncation banner when
+    /// there is one, then one view per rendered block. Parallel to
+    /// `columnHeights`.
+    private var columnViews: [NSView] = []
+    private var columnHeights: [CGFloat] = []
+    /// Width constraint of each column view, so a pane resize can re-widen them
+    /// without rebuilding. Parallel to `columnViews`.
+    private var columnWidthConstraints: [NSLayoutConstraint] = []
+    private var bubbleWidthConstraint: NSLayoutConstraint?
+    /// Index into `columnViews` of the first *block* — 1 when a truncation
+    /// banner is present, 0 otherwise. Block index `i` is `columnViews[blockOffset + i]`.
+    private var blockOffset = 0
+    private var renderedCount = 0
+
     /// False when this turn's payload was dropped past the retention cap. Its
     /// blocks say so rather than rendering as empty.
     private let contentAvailable: Bool
@@ -105,8 +237,6 @@ class ChatTurnView: NSView, TurnIsland {
     /// block views as they are built.
     private let interaction: TurnInteractionState
 
-    func setIslandWidth(_ width: CGFloat) { widthConstraint.constant = width }
-
     /// Reply text injected by the confirm card — suppress its bubble so the card
     /// itself serves as the only visible acknowledgement of the user's choice.
     private static let confirmReplySentinel = "(This answers your question:"
@@ -126,64 +256,16 @@ class ChatTurnView: NSView, TurnIsland {
         // session, and evicting it removes that component entirely.
         translatesAutoresizingMaskIntoConstraints = true
         wantsLayer = true
-        widthConstraint = widthAnchor.constraint(equalToConstant: 400)
+        widthConstraint = widthAnchor.constraint(equalToConstant: islandWidth)
         widthConstraint.isActive = true
-
-        // Blocks container — AI response, left-aligned at 82% width.
-        //
-        // The width fractions and the stack spacing here are read back by
-        // `TurnHeightEstimator`, which has to reproduce this layout arithmetically
-        // to estimate a turn's height before it is built. They are referenced from
-        // there rather than repeated, so a change to the layout cannot silently
-        // desynchronise the estimator. The remaining calibration constants in that
-        // file are *sums* of several constraint constants below (chrome, padding);
-        // folding those together needs a real refactor of these views and is
-        // deliberately not part of this change.
-        blocksStack.orientation = .vertical
-        blocksStack.spacing     = TurnHeightEstimator.blockSpacing
-        blocksStack.alignment   = .width
-        blocksStack.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(blocksStack)
 
         // Suppress the bubble when the reply was injected by the confirm card — the
         // card's own chosen-state visuals already acknowledge the selection.
-        let suppressBubble = turn.userInput.contains(Self.confirmReplySentinel)
-
-        if suppressBubble {
-            // Pin blocksStack directly to the top so there is no gap where the bubble
-            // would have been.
-            NSLayoutConstraint.activate([
-                blocksStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-                blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                blocksStack.widthAnchor.constraint(equalTo: widthAnchor,
-                                                   multiplier: TurnHeightEstimator.blocksWidthFraction,
-                                                   constant: -14),
-                blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
-            ])
-        } else {
-            // User bubble — trailing-pinned, width driven by intrinsicContentSize capped at 75%.
-            // No spacer/NSStackView needed: trailing anchor right-aligns it, intrinsicContentSize
-            // gives AutoLayout the natural width, and the ≤ constraint caps long messages.
+        if !turn.userInput.contains(Self.confirmReplySentinel) {
             let bubble = UserBubbleView(text: turn.userInput)
-            bubble.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(bubble)
-
-            NSLayoutConstraint.activate([
-                bubble.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-                bubble.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-                // Fixed 75 % width so AutoLayout never needs intrinsicContentSize — the
-                // unconstrained single-line NSTextField width overflowed the right edge.
-                bubble.widthAnchor.constraint(equalTo: widthAnchor,
-                                              multiplier: TurnHeightEstimator.bubbleWidthFraction),
-
-                blocksStack.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 8),
-                blocksStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-                blocksStack.widthAnchor.constraint(equalTo: widthAnchor,
-                                                   multiplier: TurnHeightEstimator.blocksWidthFraction,
-                                                   constant: -14),
-                blocksStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
-            ])
+            self.bubble = bubble
+            bubbleWidthConstraint = attachIsland(bubble,
+                                                 width: Self.bubbleWidth(paneWidth: islandWidth))
         }
 
         // Every block of an unrecoverable turn is truncated — the user bubble
@@ -193,10 +275,13 @@ class ChatTurnView: NSView, TurnIsland {
         // disclosure adds its own line because that content is separately
         // expandable.
         if !contentAvailable {
-            blocksStack.addArrangedSubview(Self.makeTruncationBanner())
+            appendColumnView(Self.makeTruncationBanner())
+            blockOffset = 1
         }
         renderNewBlocks(turn.blocks)
     }
+
+    required init?(coder: NSCoder) { fatalError() }
 
     private static func makeTruncationBanner() -> NSView {
         let label = NSTextField(labelWithString:
@@ -207,15 +292,38 @@ class ChatTurnView: NSView, TurnIsland {
         label.lineBreakMode        = .byWordWrapping
         label.maximumNumberOfLines = 0
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }
 
-    required init?(coder: NSCoder) { fatalError() }
+    // MARK: - TurnIsland
+
+    /// Re-widen the turn, and everything inside it.
+    ///
+    /// Called by `ReplView.measure()` immediately before it solves, so this is
+    /// the deterministic point at which stale heights get refreshed — rather
+    /// than relying on `layout()` being reached, which for a detached view is
+    /// not something to bet a cached-forever height on. `layout()` calls
+    /// `remeasureIfNeeded()` too; both are idempotent.
+    func setIslandWidth(_ width: CGFloat) {
+        if abs(width - islandWidth) > 0.5 {
+            islandWidth = width
+            widthConstraint.constant = width
+            needsFullRemeasure = true
+        }
+        remeasureIfNeeded()
+    }
+
+    // MARK: - Streaming
 
     /// Called as the turn's blocks array grows during live streaming.
+    ///
+    /// Renders — and measures — only the blocks that are new. Everything already
+    /// rendered keeps its cached height, which is sound precisely because each
+    /// block is an island at a fixed width: appending one cannot move an
+    /// earlier one.
     func update(turn: ChatTurn) {
         let newBlocks = Array(turn.blocks.dropFirst(renderedCount))
+        guard !newBlocks.isEmpty else { return }
         renderNewBlocks(newBlocks)
     }
 
@@ -225,14 +333,11 @@ class ChatTurnView: NSView, TurnIsland {
             // it keeps counting across streaming `update(turn:)` calls — so it is
             // the block index, and a second counter would only be a second thing
             // to get out of step with it.
-            let v = makeBlockView(block, at: renderedCount)
-            v.translatesAutoresizingMaskIntoConstraints = false
-            blocksStack.addArrangedSubview(v)
-            // Explicitly match width — NSStackView alignment=.width doesn't reliably
-            // propagate width to custom views with no intrinsic size (e.g. TextBlockView)
-            v.widthAnchor.constraint(equalTo: blocksStack.widthAnchor).isActive = true
+            appendColumnView(makeBlockView(block, at: renderedCount))
             renderedCount += 1
         }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     private func makeBlockView(_ block: TurnBlock, at index: Int) -> NSView {
@@ -245,6 +350,10 @@ class ChatTurnView: NSView, TurnIsland {
             v.onExpansionChange = { [weak self] isExpanded in
                 guard let self else { return }
                 self.onBlockExpansion?(index, isExpanded)
+                // Only this block's height changed. Re-measuring the one island
+                // and re-summing is what keeps an expand O(1) in turn size — and
+                // what stops the cached total drifting from what is on screen.
+                self.remeasureColumnView(at: self.blockOffset + index)
                 self.onIntrinsicHeightChange?()
             }
             return v
@@ -263,12 +372,166 @@ class ChatTurnView: NSView, TurnIsland {
             return v
         }
     }
+
+    // MARK: - Islands
+
+    /// Add one column view — banner or block — and measure it, unless nothing
+    /// has been measured at a real width yet.
+    ///
+    /// Deferring in that case is what stops materialization measuring every
+    /// block twice: `init` runs before `ReplView.measure()` has said how wide
+    /// the pane is, so the heights it could produce would be thrown away by the
+    /// `setIslandWidth` that immediately follows.
+    private func appendColumnView(_ view: NSView) {
+        let width = Self.blockWidth(paneWidth: islandWidth)
+        columnWidthConstraints.append(attachIsland(view, width: width))
+        columnViews.append(view)
+        columnHeights.append(needsFullRemeasure ? 0 : Self.measureIsland(view, width: width))
+    }
+
+    /// Give `view` its single width constraint — the only constraint it will
+    /// ever hold that is visible from outside itself — and attach it.
+    ///
+    /// `translatesAutoresizingMaskIntoConstraints = true` is what makes the
+    /// frame stick once it is attached. It is also why `measureIsland` has to
+    /// detach first; see there.
+    @discardableResult
+    private func attachIsland(_ view: NSView, width: CGFloat) -> NSLayoutConstraint {
+        view.translatesAutoresizingMaskIntoConstraints = true
+        let constraint = view.widthAnchor.constraint(equalToConstant: width)
+        constraint.isActive = true
+        addSubview(view)
+        return constraint
+    }
+
+    /// Measure one island at `width`, detached.
+    ///
+    /// Detached is not optional, and the reason is `ReplView.measure()`'s:
+    /// `translatesAutoresizingMaskIntoConstraints = true` makes AppKit pin the
+    /// view's size to its frame the moment it has a superview, at which point
+    /// `fittingSize` reports the frame it already has rather than the height
+    /// its content wants — so a freshly built view measures as zero and a
+    /// re-measured one never changes.
+    ///
+    /// One solve, where `ReplView.measure()`'s loop needed two.
+    ///
+    /// The loop existed solely so `MarkdownCardView` could discover its own
+    /// width during a first, throwaway layout pass; `WidthPresettable` hands it
+    /// that width instead — it was always this same `width` argument, knowable
+    /// arithmetically before anything was built. `layoutSubtreeIfNeeded()`
+    /// still has to run: a wrapping `NSTextField`'s height is only resolved
+    /// once the solve has given it a real width, and `fittingSize` alone
+    /// reports it as a single line.
+    static func measureIsland(_ view: NSView, width: CGFloat) -> CGFloat {
+        let superview = view.superview
+        superview.map { _ in view.removeFromSuperview() }
+
+        (view as? WidthPresettable)?.presetLayoutWidth(width)
+        view.setFrameSize(NSSize(width: width, height: view.frame.height))
+        view.layoutSubtreeIfNeeded()
+        let height = view.fittingSize.height
+        view.setFrameSize(NSSize(width: width, height: height))
+
+        superview?.addSubview(view)
+        return height
+    }
+
+    /// Re-measure one column view in place — a tool result that just expanded.
+    private func remeasureColumnView(at index: Int) {
+        guard columnViews.indices.contains(index) else { return }
+        columnHeights[index] = Self.measureIsland(columnViews[index],
+                                                  width: Self.blockWidth(paneWidth: islandWidth))
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    /// Re-measure everything, because the width they were measured at is gone
+    /// (or was never real). Idempotent — `needsFullRemeasure` is the latch.
+    private func remeasureIfNeeded() {
+        guard needsFullRemeasure else { return }
+        needsFullRemeasure = false
+
+        if let bubble {
+            let width = Self.bubbleWidth(paneWidth: islandWidth)
+            bubbleWidthConstraint?.constant = width
+            bubbleHeight = Self.measureIsland(bubble, width: width)
+        }
+        let blocksWidth = Self.blockWidth(paneWidth: islandWidth)
+        for (i, view) in columnViews.enumerated() {
+            columnWidthConstraints[i].constant = blocksWidth
+            columnHeights[i] = Self.measureIsland(view, width: blocksWidth)
+        }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    // MARK: - Geometry
+
+    /// Content grows downward, so the view's own coordinates do too.
+    override var isFlipped: Bool { true }
+
+    /// The same arithmetic `TurnHeightEstimator.estimate` performs, over
+    /// measured heights instead of estimated ones — which is what makes the
+    /// estimator and the renderer converge rather than drift.
+    private var contentHeight: CGFloat {
+        var height = Self.topPadding
+        if bubble != nil { height += bubbleHeight + Self.bubbleGap }
+        for (i, blockHeight) in columnHeights.enumerated() {
+            if i > 0 { height += TurnHeightEstimator.blockSpacing }
+            height += blockHeight
+        }
+        return height + Self.bottomPadding
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: contentHeight)
+    }
+
+    /// Arithmetic over cached block heights — no solve, no matter how many
+    /// blocks the turn holds. This is what makes a streaming re-measure cost
+    /// the new blocks and nothing else.
+    func islandHeight() -> CGFloat {
+        remeasureIfNeeded()
+        return contentHeight
+    }
+
+    override func layout() {
+        super.layout()
+        remeasureIfNeeded()
+
+        var y = Self.topPadding
+        if let bubble {
+            let width = Self.bubbleWidth(paneWidth: islandWidth)
+            setFrameIfChanged(bubble,
+                              NSRect(x: islandWidth - Self.bubbleTrailingInset - width,
+                                     y: y, width: width, height: bubbleHeight))
+            y += bubbleHeight + Self.bubbleGap
+        }
+        let blocksWidth = Self.blockWidth(paneWidth: islandWidth)
+        for (i, view) in columnViews.enumerated() {
+            if i > 0 { y += TurnHeightEstimator.blockSpacing }
+            setFrameIfChanged(view, NSRect(x: Self.blocksLeadingInset, y: y,
+                                           width: blocksWidth, height: columnHeights[i]))
+            y += columnHeights[i]
+        }
+    }
+
+    /// Writing an unchanged frame would dirty a block that is already laid out,
+    /// and re-solving every block on every pass is precisely the cost this
+    /// design exists to avoid.
+    private func setFrameIfChanged(_ view: NSView, _ rect: NSRect) {
+        guard view.frame != rect else { return }
+        view.frame = rect
+    }
 }
 
 // MARK: - UserBubbleView
 
 /// Right-floating chat bubble for user messages.
-/// Overrides intrinsicContentSize so NSStackView (bubbleRow) can determine height.
+///
+/// Still constraint-based inside — it is one label in a rounded rect, and its
+/// width is a fixed fraction of the pane — but `ChatTurnView` measures and
+/// positions it as an island like every block, so it links to nothing.
 class UserBubbleView: NSView {
 
     private let label: NSTextField
@@ -309,9 +572,18 @@ class UserBubbleView: NSView {
 /// Renders text with markdown table detection. Tables become native grid views;
 /// paragraphs stay as labels.
 ///
-/// Uses explicit leading/trailing constraints (not NSStackView alignment) so
-/// MarkdownTableView — which has no intrinsic content size — fills the full width.
-class TextBlockView: NSView {
+/// Uses explicit leading/trailing constraints so `MarkdownTableView` — whose
+/// intrinsic size names a height but no width — fills the full block width.
+class TextBlockView: NSView, WidthPresettable {
+
+    /// Cards this block rendered, so `presetLayoutWidth` can tell each of them
+    /// the width it will be laid out at. Empty for the label/table path, whose
+    /// heights do not depend on a width the view has to discover.
+    private var cards: [MarkdownCardView] = []
+
+    func presetLayoutWidth(_ width: CGFloat) {
+        for card in cards { card.presetWidth = width }
+    }
 
     init(text: String) {
         super.init(frame: .zero)
@@ -325,6 +597,7 @@ class TextBlockView: NSView {
                 let card = MarkdownCardView(markdown: segment)
                 card.translatesAutoresizingMaskIntoConstraints = false
                 addSubview(card)
+                cards.append(card)
                 NSLayoutConstraint.activate([
                     card.topAnchor.constraint(equalTo: prevAnchor, constant: i == 0 ? 0 : 8),
                     card.leadingAnchor.constraint(equalTo: leadingAnchor),

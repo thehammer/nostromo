@@ -1,5 +1,16 @@
 import AppKit
 import Combine
+import os
+
+/// Transcript layout and measurement — see `docs/diagnostics.md`, "The
+/// `transcript` log category".
+///
+/// `measure()` had no instrumentation of any kind before 2026-09-10, which is
+/// why a call that took three and a half minutes and a call that took three
+/// milliseconds were indistinguishable from the timeline, and why diagnosing
+/// the 2026-09-09 beachball needed a live `sample` of the running process.
+private let log = Logger(subsystem: "com.hammer.nostromo", category: "transcript")
+private let signposter = OSSignposter(subsystem: "com.hammer.nostromo", category: "transcript")
 
 // MARK: - ReplView
 
@@ -41,7 +52,7 @@ class ReplView: NSView {
     private let virtualizer = TurnListVirtualizer()
     /// The materialized window — never larger than
     /// `TurnListVirtualizer.maxMaterialized`.
-    private var turnViews: [UUID: NSView] = [:]
+    private var turnViews: [UUID: TurnIsland] = [:]
     /// Turns whose content changed since they were last measured.
     private var pendingRemeasure: Set<UUID> = []
     /// What the operator has done to each turn — answered cards, expanded tool
@@ -440,10 +451,10 @@ class ReplView: NSView {
             if turnViews[turn.id] == nil {
                 let view = makeTurnView(for: turn)
                 turnViews[turn.id] = view
-                measure(view, at: i, isComplete: turn.isComplete)   // detached — see `measure`
+                measure(view, turn: turn, at: i, reason: .materialize)   // detached — see `measure`
                 documentView.addSubview(view)
             } else if pendingRemeasure.contains(turn.id) {
-                measure(turnViews[turn.id]!, at: i, isComplete: turn.isComplete)
+                measure(turnViews[turn.id]!, turn: turn, at: i, reason: .remeasure)
             }
             pendingRemeasure.remove(turn.id)
         }
@@ -470,7 +481,7 @@ class ReplView: NSView {
     }
 
     /// Build a turn view, hydrating its payload first if it has gone cold.
-    private func makeTurnView(for turn: ChatTurn) -> NSView {
+    private func makeTurnView(for turn: ChatTurn) -> TurnIsland {
         if let marker = turn.marker {
             return MarkerTurnView(marker: marker)
         }
@@ -520,50 +531,95 @@ class ReplView: NSView {
     /// Measure a materialized turn at the current pane width and hand the real
     /// height to the virtualizer, replacing its estimate.
     ///
-    /// The view carries exactly one constraint of its own — its width — which is
-    /// what makes `fittingSize.height` well defined while it is still an island.
-    private func measure(_ view: NSView, at index: Int, isComplete: Bool) {
+    /// Asks the island for its height rather than reading `fittingSize`. A
+    /// `ChatTurnView` already holds a measured height for each of its blocks
+    /// (see there), so its answer is a sum and costs nothing in the number of
+    /// blocks — where `fittingSize` meant solving the whole turn, which is what
+    /// made streaming one long turn a positive-feedback loop with no exit.
+    private func measure(_ view: TurnIsland, turn: ChatTurn, at index: Int, reason: MeasureReason) {
+        let signpostID = signposter.makeSignpostID()
+        let interval   = signposter.beginInterval("measure", id: signpostID)
+        let started    = ContinuousClock.now
+        defer {
+            signposter.endInterval("measure", interval)
+            noteMeasureDuration(started.duration(to: .now),
+                                view: view, turn: turn, at: index, reason: reason)
+        }
+
         // Measured while **detached**, and that is not incidental.
         //
         // `translatesAutoresizingMaskIntoConstraints = true` makes AppKit install
         // constraints pinning the view's size to its frame the moment it has a
-        // superview. `fittingSize` then just hands back the frame it already has:
-        // a newly-created view measures as its zero frame (and conflicts with its
-        // own width constraint while doing so), and a streaming turn re-measured
-        // in place keeps reporting the height it had before the block arrived, so
-        // the document silently stops growing.
+        // superview. Any height read while attached is then just the frame it
+        // already has: a newly-created view measures as its zero frame, and a
+        // streaming turn re-measured in place keeps reporting the height it had
+        // before the block arrived, so the document silently stops growing.
         //
-        // Detached, the only constraints it holds are its own width plus its
-        // internal layout — which is exactly the question being asked.
+        // Detached, the only constraints in play are the island's own internal
+        // layout — which is exactly the question being asked.
         let superview = view.superview
         superview.map { _ in view.removeFromSuperview() }
 
-        (view as? TurnIsland)?.setIslandWidth(contentWidth)
-
-        // A width-dependent intrinsic size (MarkdownCardView, for one — see its
-        // "Why not layout()" doc comment) can't be resolved in a single solve: its
-        // *first* layout() runs before `bounds.width` has settled, computes a
-        // height against a fallback/stale width, then calls
-        // invalidateIntrinsicContentSize() — which only schedules a *later* pass
-        // to pick up the correction, it doesn't force one now. A single
-        // `layoutSubtreeIfNeeded()` call stops right there, so `fittingSize` below
-        // would read the pre-correction height and freeze it into the virtualizer
-        // forever (a completed turn's measured height is cached and never
-        // revisited). Repeat until `fittingSize` stops moving so the same
-        // self-correction that ordinary on-screen relayout gets for free also
-        // applies to this one-shot, detached measurement.
-        var previousHeight: CGFloat = -1
-        for _ in 0..<4 {
-            view.layoutSubtreeIfNeeded()
-            let current = view.fittingSize.height
-            if abs(current - previousHeight) < 0.5 { break }
-            previousHeight = current
-        }
-        let height = max(view.fittingSize.height, TurnHeightEstimator.minimumTurnHeight)
+        view.setIslandWidth(contentWidth)
+        let height = max(view.islandHeight(), TurnHeightEstimator.minimumTurnHeight)
         view.setFrameSize(NSSize(width: contentWidth, height: height))
-        virtualizer.recordMeasured(height, at: index, isComplete: isComplete)
+        virtualizer.recordMeasured(height, at: index, isComplete: turn.isComplete)
 
         superview?.addSubview(view)
+    }
+
+    /// Which of `materialize()`'s two step-3 call sites asked for a measurement.
+    ///
+    /// Worth distinguishing because they fail differently: `.materialize` is
+    /// paid once per turn entering the viewport, while `.remeasure` is paid
+    /// again on *every* streamed block, and it was `.remeasure` the 2026-09-09
+    /// stack sample landed in.
+    private enum MeasureReason: String {
+        case materialize
+        case remeasure
+    }
+
+    /// One measurement's wall-clock budget.
+    ///
+    /// The same 250 ms `makeTurnView`'s hydration comment measures itself
+    /// against, and the number the load harness's report script grades on. A
+    /// measurement is a synchronous main-thread stall, so this is also the
+    /// longest the UI can be frozen by one turn entering the viewport.
+    static let measureBudgetSeconds: Double = 0.250
+
+    /// How many `measure()` calls have blown `measureBudgetSeconds` in this pane's
+    /// lifetime, and the worst one seen. Surfaced through
+    /// `TranscriptDiagnostics.Reporting` so a run can be graded without a
+    /// debugger — see `docs/diagnostics.md`.
+    private(set) var slowMeasureCount = 0
+    private(set) var worstMeasureSeconds: Double = 0
+
+    /// Record one measurement, and shout about it if it blew the budget.
+    ///
+    /// The subview and constraint walk is O(subtree), so it happens *only* on
+    /// the already-slow path — a measurement that came in under budget costs
+    /// this function two comparisons.
+    private func noteMeasureDuration(_ elapsed: Duration, view: NSView, turn: ChatTurn,
+                                     at index: Int, reason: MeasureReason) {
+        let seconds = Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
+        worstMeasureSeconds = max(worstMeasureSeconds, seconds)
+        guard seconds > Self.measureBudgetSeconds else { return }
+        slowMeasureCount += 1
+        log.error("""
+            slow measure: tag=\(self.session.tag, privacy: .public) turn=\(index, privacy: .public) blocks=\(turn.blocks.count, privacy: .public) subviews=\(Self.subtreeViewCount(view), privacy: .public) constraints=\(Self.subtreeConstraintCount(view), privacy: .public) reason=\(reason.rawValue, privacy: .public) elapsed=\(seconds * 1000, format: .fixed(precision: 1), privacy: .public)ms budget=\(Self.measureBudgetSeconds * 1000, format: .fixed(precision: 0), privacy: .public)ms
+            """)
+    }
+
+    /// Total Auto Layout constraints held anywhere in `view`'s subtree — the
+    /// quantity the solve's cost is superlinear in, so it is the one number
+    /// that makes a slow line actionable rather than merely alarming.
+    private static func subtreeConstraintCount(_ view: NSView) -> Int {
+        view.constraints.count + view.subviews.reduce(0) { $0 + subtreeConstraintCount($1) }
+    }
+
+    private static func subtreeViewCount(_ view: NSView) -> Int {
+        1 + view.subviews.reduce(0) { $0 + subtreeViewCount($1) }
     }
 
     private func releaseAllTurnViews() {
@@ -781,6 +837,7 @@ extension ReplView: TranscriptDiagnostics.Reporting {
     var compressedPayloadBytes: Int     { session.payloadStore.stats.compressedBytes }
     var estimatedDocumentHeight: Double { Double(virtualizer.documentHeight) }
     var transcriptClearCount: Int       { session.transcriptClears }
+    var worstMeasureMs: Double          { worstMeasureSeconds * 1000 }
 }
 
 // MARK: - ReplClipView
