@@ -81,6 +81,8 @@
 		KK0000000000000000000011 /* LayoutChangeClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000001 /* LayoutChangeClassifier.swift */; };
 		KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000001 /* LayoutChangeClassifier.swift */; };
 		KK0000000000000000000021 /* TabRegionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000002 /* TabRegionView.swift */; };
+		KK0000000000000000000022 /* TabRegionView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000002 /* TabRegionView.swift */; };
+		TB0000000000000000000002 /* TabRegionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TB0000000000000000000001 /* TabRegionViewTests.swift */; };
 		KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */; };
 		QQ0000000000000000000101 /* PaneRenderPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000001 /* PaneRenderPlan.swift */; };
 		QQ0000000000000000000102 /* PaneRenderPlan.swift in TestSources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000001 /* PaneRenderPlan.swift */; };
@@ -226,6 +228,7 @@
 		KK0000000000000000000001 /* LayoutChangeClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifier.swift; sourceTree = "<group>"; };
 		KK0000000000000000000002 /* TabRegionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRegionView.swift; sourceTree = "<group>"; };
 		KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifierTests.swift; sourceTree = "<group>"; };
+		TB0000000000000000000001 /* TabRegionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRegionViewTests.swift; sourceTree = "<group>"; };
 		QQ0000000000000000000001 /* PaneRenderPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneRenderPlan.swift; sourceTree = "<group>"; };
 		QQ0000000000000000000002 /* RatioSolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioSolver.swift; sourceTree = "<group>"; };
 		QQ0000000000000000000003 /* PaneRenderPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneRenderPlanTests.swift; sourceTree = "<group>"; };
@@ -460,6 +463,7 @@
 				ZZ0000000000000000000001 /* PaneAddressDecodeTests.swift */,
 				JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */,
 				KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */,
+				TB0000000000000000000001 /* TabRegionViewTests.swift */,
 				QQ0000000000000000000003 /* PaneRenderPlanTests.swift */,
 				QQ0000000000000000000004 /* RatioSolverTests.swift */,
 				QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */,
@@ -707,6 +711,8 @@
 				JJ0000000000000000000014 /* IPCLatencyStatsTests.swift in Sources */,
 				KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */,
 				KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */,
+				KK0000000000000000000022 /* TabRegionView.swift in TestSources */,
+				TB0000000000000000000002 /* TabRegionViewTests.swift in Sources */,
 				QQ0000000000000000000102 /* PaneRenderPlan.swift in TestSources */,
 				QQ0000000000000000000202 /* RatioSolver.swift in TestSources */,
 				QQ0000000000000000000602 /* RatioPersistencePolicy.swift in TestSources */,
