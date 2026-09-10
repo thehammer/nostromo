@@ -331,14 +331,22 @@ final class TurnInteractionWiringTests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// `ReplView.swift` is not compiled into this target, so it has to be read
-    /// as text — same idiom as `ImageDecodePolicyTests.sourceRoot`.
+    /// The AppKit call sites read as text — same idiom as
+    /// `ImageDecodePolicyTests.sourceRoot`.
+    ///
+    /// `ReplView.swift` is still not compiled into this target (it needs a real
+    /// window to mean anything), and `ChatTurnView.swift` now is — but the two
+    /// are scanned together regardless, because *which* of them holds a given
+    /// construction site is exactly the thing a refactor moves. Reading only one
+    /// turned a relocation into a green run with the check silently gone.
     private static func replViewSource() throws -> String {
-        let url = URL(fileURLWithPath: #filePath)     // …/macOS/NostromoTests/TurnInteractionTests.swift
+        let views = URL(fileURLWithPath: #filePath)   // …/macOS/NostromoTests/TurnInteractionTests.swift
             .deletingLastPathComponent()                // …/macOS/NostromoTests
             .deletingLastPathComponent()                // …/macOS
-            .appendingPathComponent("Nostromo/UI/Views/ReplView.swift")
-        return try String(contentsOf: url, encoding: .utf8)
+            .appendingPathComponent("Nostromo/UI/Views")
+        return try ["ReplView.swift", "ChatTurnView.swift"]
+            .map { try String(contentsOf: views.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
     }
 
     /// Every call `marker` … `)` in `source`, matching parentheses so a nested

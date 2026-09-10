@@ -139,6 +139,11 @@
 		II000000000000000000022 /* AskQuestionView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000020 /* AskQuestionView.swift */; };
 		II000000000000000000031 /* ToolResultView.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000030 /* ToolResultView.swift */; };
 		II000000000000000000032 /* ToolResultView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000030 /* ToolResultView.swift */; };
+		TT000000000000000000011 /* ChatTurnView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000010 /* ChatTurnView.swift */; };
+		TT000000000000000000012 /* ChatTurnView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000010 /* ChatTurnView.swift */; };
+		TT000000000000000000021 /* MarkdownTableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000020 /* MarkdownTableView.swift */; };
+		TT000000000000000000022 /* MarkdownTableView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000020 /* MarkdownTableView.swift */; };
+		TT000000000000000000032 /* MarkdownCardView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000C0 /* MarkdownCardView.swift */; };
 		II000000000000000000041 /* LoadHarnessTargeting.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000040 /* LoadHarnessTargeting.swift */; };
 		II000000000000000000042 /* LoadHarnessTargeting.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000040 /* LoadHarnessTargeting.swift */; };
 		II000000000000000000102 /* TurnInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000100 /* TurnInteractionTests.swift */; };
@@ -269,6 +274,8 @@
 		II000000000000000000010 /* TurnInteractionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionStore.swift; sourceTree = "<group>"; };
 		II000000000000000000020 /* AskQuestionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskQuestionView.swift; sourceTree = "<group>"; };
 		II000000000000000000030 /* ToolResultView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolResultView.swift; sourceTree = "<group>"; };
+		TT000000000000000000010 /* ChatTurnView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTurnView.swift; sourceTree = "<group>"; };
+		TT000000000000000000020 /* MarkdownTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableView.swift; sourceTree = "<group>"; };
 		II000000000000000000040 /* LoadHarnessTargeting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadHarnessTargeting.swift; sourceTree = "<group>"; };
 		II000000000000000000100 /* TurnInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionTests.swift; sourceTree = "<group>"; };
 		II000000000000000000110 /* ChatSessionCompactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionCompactionTests.swift; sourceTree = "<group>"; };
@@ -421,6 +428,8 @@
 				AA0000020000000000000023 /* ReplView.swift */,
 				II000000000000000000020 /* AskQuestionView.swift */,
 				II000000000000000000030 /* ToolResultView.swift */,
+				TT000000000000000000010 /* ChatTurnView.swift */,
+				TT000000000000000000020 /* MarkdownTableView.swift */,
 				EE00000000000000000000C0 /* MarkdownCardView.swift */,
 				EE00000000000000000000D0 /* DynamicFocusView.swift */,
 				EE00000000000000000000E0 /* PaneContentView.swift */,
@@ -629,6 +638,8 @@
 				II000000000000000000011 /* TurnInteractionStore.swift in Sources */,
 				II000000000000000000021 /* AskQuestionView.swift in Sources */,
 				II000000000000000000031 /* ToolResultView.swift in Sources */,
+				TT000000000000000000011 /* ChatTurnView.swift in Sources */,
+				TT000000000000000000021 /* MarkdownTableView.swift in Sources */,
 				II000000000000000000041 /* LoadHarnessTargeting.swift in Sources */,
 				JJ0000000000000000000011 /* IPCLatencyStats.swift in Sources */,
 				JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */,
@@ -699,6 +710,9 @@
 				II000000000000000000012 /* TurnInteractionStore.swift in TestSources */,
 				II000000000000000000022 /* AskQuestionView.swift in TestSources */,
 				II000000000000000000032 /* ToolResultView.swift in TestSources */,
+				TT000000000000000000012 /* ChatTurnView.swift in TestSources */,
+				TT000000000000000000022 /* MarkdownTableView.swift in TestSources */,
+				TT000000000000000000032 /* MarkdownCardView.swift in TestSources */,
 				II000000000000000000042 /* LoadHarnessTargeting.swift in TestSources */,
 				II000000000000000000102 /* TurnInteractionTests.swift in Sources */,
 				II000000000000000000112 /* ChatSessionCompactionTests.swift in Sources */,
