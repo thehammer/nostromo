@@ -112,6 +112,10 @@ def make_rows(
     transcript_clears=0,
     hot_payload_turns=200,
     run_id="run-A",
+    include_measure_budget=True,
+    measure_budget_ms=250.0,
+    worst_measure_ms=48.0,
+    slow_measures=0,
 ):
     """Build a diagnostics-row fixture that satisfies every criterion by
     default. Each test perturbs exactly one keyword to violate exactly one
@@ -136,6 +140,8 @@ def make_rows(
             "maxMaterializedPerPane": max_materialized_per_pane,
             "turnsProcessed": turns,
         }
+        if include_measure_budget:
+            row["measureBudgetMs"] = measure_budget_ms
         if run_id is not None:
             row["runID"] = run_id
         if include_harness_fields:
@@ -149,6 +155,8 @@ def make_rows(
                 "hotPayloadTurns": hot_payload_turns,
                 "compressedPayloadBytes": 0,
                 "estimatedDocHeight": 1000.0,
+                "slowMeasures": slow_measures,
+                "worstMeasureMs": worst_measure_ms,
             }
             if include_transcript_clears:
                 pane["transcriptClears"] = transcript_clears
@@ -791,6 +799,13 @@ def mutate_throughput_collapses(tc):
     return rows, {}
 
 
+def mutate_a_measure_call_blew_the_budget(tc):
+    """One turn took 3.4 s of main thread inside a single `measure()` call —
+    the 2026-09-09 shape, an order of magnitude past the 250 ms budget, with
+    the app otherwise reporting perfectly ordinary turn and view counts."""
+    return make_rows(worst_measure_ms=3_412.0, slow_measures=7), {}
+
+
 def mutate_idle_cpu_burning(tc):
     """Nine percent of a core across a minute of doing nothing."""
     return make_rows(), {"cpu_percent": 9.0}
@@ -837,6 +852,7 @@ SENSITIVITY = {
     "no-coreautolayout-frames": mutate_sample_carries_signature_frames,
     "stream-parses-cleanly": mutate_malformed_line_mid_stream,
     "samples-are-from-this-run": mutate_samples_carry_no_run_identity,
+    "measure-budget": mutate_a_measure_call_blew_the_budget,
 }
 
 
@@ -965,6 +981,8 @@ def absence_fixtures(tc):
         ("cpu_percent", make_rows(),
          dict(healthy_context(tc), cpu_percent=None)),
         ("sample_path", make_rows(), dict(healthy_context(tc), sample_path=None)),
+        ("measureBudgetMs", make_rows(include_measure_budget=False),
+         healthy_context(tc)),
     ]
 
 #: registry key -> the evidence sources above that criterion reads.
@@ -983,6 +1001,7 @@ EVIDENCE_DEPENDENCIES = {
     "per-delta-cost-flat": {"timestamp"},
     "idle-cpu": {"cpu_percent"},
     "no-coreautolayout-frames": {"sample_path"},
+    "measure-budget": {"panes", "measureBudgetMs"},
 }
 
 #: The criteria that legitimately read no evidence source above, pinned exactly

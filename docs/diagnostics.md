@@ -251,6 +251,66 @@ Note this is a **separate** log category from `panes` above — `codepane` is
 specific to the code/diff render path's own internal audit; `panes` covers
 the broader daemon-to-view pipeline every pane kind goes through.
 
+## The `transcript` log category
+
+`ReplView.swift`'s own category, `com.hammer.nostromo` / `transcript`, for
+the cost of laying a turn out.
+
+```sh
+log show --predicate 'subsystem == "com.hammer.nostromo" AND category == "transcript"' \
+  --last 1h --info
+```
+
+Two things live here:
+
+- An `os_signpost` interval named `measure` around **every**
+  `ReplView.measure()` call, always on. Open the log in Instruments'
+  points-of-interest track to see measurement cost against the rest of the
+  timeline.
+- One `.error` line per `measure()` call that takes longer than
+  `ReplView.measureBudgetSeconds` (250 ms — the same budget
+  `makeTurnView`'s hydration comment measures itself against):
+
+  ```
+  slow measure: tag=perri turn=4182 blocks=164 subviews=1300 constraints=983
+                reason=remeasure elapsed=9964.7ms budget=250ms
+  ```
+
+  `reason` distinguishes `materialize` — a turn entering the viewport for
+  the first time — from `remeasure`, a turn whose blocks changed while it
+  was already materialized. They fail differently: `materialize` is paid
+  once per turn, `remeasure` is paid again on *every* streamed block, and
+  it was `remeasure` the 2026-09-09 freeze sat in. `subviews` and
+  `constraints` are walked only on this already-slow path, never on the
+  fast one.
+
+Why it exists: before 2026-09-10 `measure()` carried no instrumentation of
+any kind, so a call that took three and a half minutes and a call that took
+three milliseconds were indistinguishable from every counter and every log
+this app had. Diagnosing the beachball needed a live `sample` of the running
+process. See
+`.claude/bugs/resolved/2026-09-09-replview-s-auto-layout-measurement-pass-can-peg-the-main-thread-indefinitely-on-a-large-turn.md`.
+
+Counts, ids and durations only. No turn content is ever written.
+
+### The matching counters
+
+`TranscriptDiagnostics` reports the same thing numerically, so a run can be
+graded without reading a log. Per pane:
+
+- `slowMeasures` — how many `measure()` calls blew the budget in this pane's
+  lifetime.
+- `worstMeasureMs` — the worst single call, reported even when nothing was
+  slow, so a healthy run says how much headroom it actually had.
+
+And once per report line, `measureBudgetMs`: the budget **the build itself
+used**, so `macOS/scripts/transcript-load-report.py`'s `measure-budget` row
+grades against that rather than a number copied into the script.
+
+Neither counter is visible from turn or view counts: during the freeze the
+pane held a perfectly ordinary number of turns and materialized views the
+entire time, so memory, materialization and retention all read green.
+
 ## The `wire` log category
 
 A third category on the same subsystem, for the wire decoders in
@@ -310,6 +370,30 @@ Appends one JSON line per interval to
 diagnostics report (`TranscriptDiagnostics`), the same JSON **Copy transcript
 diagnostics** puts on the pasteboard. Used by
 `macOS/scripts/transcript-load-test.sh`.
+
+## `NOSTROMO_LOAD_BIG_TURN_BLOCKS`
+
+```sh
+NOSTROMO_LOAD_BIG_TURN_BLOCKS=160
+NOSTROMO_LOAD_BIG_TURN_TABLE_ROWS=60   # default 60
+```
+
+Makes `TranscriptLoadHarness` deliver **one deliberately-large turn** — N
+alternating tool-call/tool-result blocks, a findings card and a markdown
+table — before its ordinary traffic, streamed a block at a time so each
+append re-measures the turn.
+
+The rest of the harness drives five thousand *small* turns, which is the axis
+that was always fast. Nothing had ever driven one large turn, which is why
+`ReplView.measure()`'s superlinear region went untested until it froze the
+app. Grade a run with the `measure-budget` row of
+`macOS/scripts/transcript-load-report.py`:
+
+```sh
+NOSTROMO_LOAD_BIG_TURN_BLOCKS=160 macOS/scripts/transcript-load-test.sh 2000 1
+```
+
+Unset (the default), the harness behaves exactly as before.
 
 ## `NOSTROMO_DIAG_PATH`
 
