@@ -477,7 +477,7 @@ thread_local! {
     /// in-crate unit tests, so it's fine to gate it on `cfg(test)` the same
     /// way `GithubClient::new_for_test` is.
     static TEST_OCTOCRAB_BASE_OVERRIDE: std::cell::RefCell<Option<String>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 // ── Raw diff fetch ────────────────────────────────────────────────────────────
