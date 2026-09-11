@@ -443,6 +443,28 @@ mod tests {
         .unwrap()
     }
 
+    /// Like [`pr_snapshot`], but with explicit `stale`/`error`/`generated_at`
+    /// — used to simulate a source that is failing repeatedly while pinning
+    /// `generated_at` at whatever the test wants (i.e. a correct error path
+    /// that does *not* re-stamp it on every failed poll).
+    fn pr_snapshot_with_status(
+        repo: &str,
+        number: u64,
+        title: &str,
+        stale: bool,
+        error: Option<&str>,
+        generated_at: Option<chrono::DateTime<Utc>>,
+    ) -> PrSnapshot {
+        serde_json::from_value(json!({
+            "pr_number": number, "repo": repo, "title": title,
+            "author": "alice", "url": "https://example.com", "diff": "",
+            "stale": stale, "error": error, "additions": 1, "deletions": 1,
+            "changed_files": 1, "head_sha": "abc123", "diff_too_large": false,
+            "generated_at": generated_at
+        }))
+        .unwrap()
+    }
+
     // ── broadcast_pane_content ───────────────────────────────────────────────
 
     #[test]
@@ -936,6 +958,73 @@ mod tests {
                 .await
                 .is_err(),
             "an unchanged badly-stale verdict must not re-broadcast on every tick"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pr_source_stale_past_five_minutes_gets_flagged_badly_stale() {
+        tokio::time::pause();
+        let (state, mut bcast, _queue_tx, pr_tx) = make_state();
+        bind_pane(&state, "perri", "diff", "perri.get_current_pr");
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        // The PR source was last genuinely fresh 6 minutes ago, and has been
+        // failing on every poll since. A correct error path never re-stamps
+        // `generated_at` on failure, so `as_of` stays pinned at `stale_since`
+        // across every one of these retries — only simulated time moves.
+        let stale_since = Utc::now() - ChronoDuration::minutes(6);
+        for _ in 0..4 {
+            pr_tx
+                .send(Some(pr_snapshot_with_status(
+                    "acme/web",
+                    42,
+                    "Add widget",
+                    true,
+                    Some("boom"),
+                    Some(stale_since),
+                )))
+                .unwrap();
+            tokio::time::advance(Duration::from_secs(30)).await;
+        }
+
+        let mut saw_badly_stale = false;
+        while let Ok(Ok(msg)) =
+            tokio::time::timeout(Duration::from_millis(200), bcast.recv()).await
+        {
+            match msg {
+                ServerMsg::PaneContent {
+                    tag,
+                    pane_id,
+                    content,
+                    freshness,
+                    ..
+                } => {
+                    assert_eq!(tag, "perri");
+                    assert_eq!(pane_id, "diff");
+                    assert!(matches!(content, PaneContentWire::Text { .. }));
+                    if freshness
+                        .expect("freshness must be attached once data is known-stale")
+                        .badly_stale
+                    {
+                        saw_badly_stale = true;
+                    }
+                }
+                other => panic!("expected PaneContent, got {other:?}"),
+            }
+        }
+
+        assert!(
+            saw_badly_stale,
+            "a PR source stuck in a repeated-failure loop for over five minutes \
+             (with `generated_at` never re-stamped by the error path) must \
+             eventually be flagged badly_stale"
         );
 
         handle.abort();

@@ -270,7 +270,7 @@ async fn load_pr_daemon(
     };
 
     let mut warnings = Vec::new();
-    let mut pending = false;
+    let mut pending: Option<SnapshotWait> = None;
 
     match highlights {
         Some(text) => {
@@ -314,11 +314,11 @@ async fn load_pr_daemon(
             );
 
             let mut pr_rx = state.perri_pr_rx.clone();
-            let matched =
+            let wait =
                 wait_for_matching_snapshot(&mut pr_rx, repo, number, daemon.perri.settle_timeout)
                     .await;
 
-            if matched {
+            if wait == SnapshotWait::Matched {
                 match apply_layout::fetch(SOURCE_CURRENT_PR, state, apply_layout::FetchArgs::default()) {
                     Ok(content) => {
                         let fr = apply_layout::freshness(SOURCE_CURRENT_PR, state);
@@ -351,7 +351,7 @@ async fn load_pr_daemon(
                     }
                 }
             } else {
-                pending = true;
+                pending = Some(wait);
                 push_content_to_all(
                     daemon,
                     tag.as_deref(),
@@ -385,12 +385,52 @@ async fn load_pr_daemon(
     // above to drive that degrade path isn't a real pane id).
     let reported_pane_ids: &[String] = if tag.is_some() { &targets } else { &[] };
     let mut result = json!({ "ok": true, "pane_ids": reported_pane_ids });
-    if pending {
-        result["pending"] = json!(true);
-        result["detail"] = json!(format!(
-            "refetch for {repo}#{number} still in flight after {:?}",
-            daemon.perri.settle_timeout
-        ));
+    if let Some(wait) = pending {
+        // The machine-readable field has to carry the distinction, not just
+        // the prose. `pending: true` for a source that will never answer
+        // said "in flight, retry" while the `detail` beside it said the
+        // opposite — and an agent branching on the field (which is exactly
+        // what this tool's descriptor and `docs/mcp/tools.md` tell it to do)
+        // retried forever against a source that would never answer.
+        //
+        // So `pending` keeps its documented meaning — "a fetch is in
+        // flight" — and `retryable` carries the rest. The two appear
+        // together and only when the refetch did *not* settle, which makes
+        // the presence of `retryable` mean "this did not settle" and its
+        // value mean "could it ever". A settled refetch (the normal case)
+        // has neither.
+        let (in_flight, retryable, detail) = match wait {
+            // Unreachable — `Matched` doesn't set `pending` — but spelled
+            // out rather than `unreachable!()`, since a panic in a tool
+            // handler is a worse outcome than a slightly odd string.
+            SnapshotWait::Matched => {
+                (false, false, format!("refetch for {repo}#{number} settled"))
+            }
+            // Nothing is in flight and nothing ever will be: the
+            // `PerriPrNativeSource` task has exited. Both flags false is
+            // the only honest answer, and `retryable: false` is what stops
+            // the retry loop.
+            SnapshotWait::SourceGone => (
+                false,
+                false,
+                format!(
+                    "refetch for {repo}#{number} was never started: the Perri PR source is not \
+                     running, so nothing is in flight and retrying will not help"
+                ),
+            ),
+            // The fetch may yet land — asking again later is reasonable.
+            SnapshotWait::TimedOut => (
+                true,
+                true,
+                format!(
+                    "refetch for {repo}#{number} still in flight after {:?}",
+                    daemon.perri.settle_timeout
+                ),
+            ),
+        };
+        result["pending"] = json!(in_flight);
+        result["retryable"] = json!(retryable);
+        result["detail"] = json!(detail);
     }
     if !warnings.is_empty() {
         result["warnings"] = json!(warnings);
@@ -708,31 +748,69 @@ async fn wait_for_matching_snapshot(
     repo: &str,
     number: u64,
     timeout: Duration,
-) -> bool {
+) -> SnapshotWait {
     fn matches(snap: &Option<PrSnapshot>, repo: &str, number: u64) -> bool {
         matches!(snap, Some(s) if s.repo == repo && s.pr_number == Some(number))
     }
 
     if matches(&rx.borrow(), repo, number) {
-        return true;
+        return SnapshotWait::Matched;
     }
 
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return false;
+            return SnapshotWait::TimedOut;
         }
         match tokio::time::timeout(remaining, rx.changed()).await {
             Ok(Ok(())) => {
                 if matches(&rx.borrow(), repo, number) {
-                    return true;
+                    return SnapshotWait::Matched;
                 }
             }
-            Ok(Err(_)) => return false, // sender dropped
-            Err(_) => return false,     // overall timeout elapsed
+            Ok(Err(_)) => return SnapshotWait::SourceGone,
+            Err(_) => return SnapshotWait::TimedOut,
         }
     }
+}
+
+/// Why [`wait_for_matching_snapshot`] stopped waiting.
+///
+/// `SourceGone` and `TimedOut` used to collapse into one `false` (a single
+/// `pending: bool`), and the caller reported both as "still in flight". They
+/// are opposites: a timeout means the fetch may yet land and asking again is
+/// reasonable, while a dropped sender means the `PerriPrNativeSource` task
+/// has exited — `run()` returns outright when `build_client()` fails (no
+/// `gh` token, unreadable `hosts.yml`) — so nothing is in flight and nothing
+/// ever will be. Telling an agent to wait for that is telling it to wait
+/// forever.
+///
+/// `load_pr_daemon` reports the distinction on the wire as two fields, which
+/// are the machine-readable half of the same statement made in
+/// `perri.load_pr`'s descriptor and in `docs/mcp/tools.md` — all three must
+/// say the same thing:
+///
+/// | variant       | `pending` | `retryable` |
+/// |---------------|-----------|-------------|
+/// | `Matched`     | *absent*  | *absent*    |
+/// | `TimedOut`    | `true`    | `true`      |
+/// | `SourceGone`  | `false`   | `false`     |
+///
+/// Ported from `w7-per-focus-pr-isolation-core` (commit `3d45d903`), minus
+/// that branch's per-focus `tag` scoping — this repo has no per-focus PR
+/// isolation, so `wait_for_matching_snapshot` here stays keyed on
+/// `(repo, number)` alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotWait {
+    /// A snapshot for this PR was published.
+    Matched,
+    /// The PR source's `watch::Sender` was dropped: the task is gone.
+    /// Reported as `pending: false, retryable: false` — retrying can never help.
+    SourceGone,
+    /// `settle_timeout` elapsed with the snapshot still unpublished.
+    /// Reported as `pending: true, retryable: true` — it may yet land.
+    TimedOut,
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -973,6 +1051,9 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
+        // "absent means settled": a `Matched` wait must not carry a
+        // `retryable` verdict at all — there's nothing to retry.
+        assert!(result.get("retryable").is_none());
 
         // make_daemon_state() already painted "diff" via the perri-standard
         // apply_layout call, so D5 suppresses the Loading push here — the
@@ -1009,6 +1090,9 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
+        // "absent means settled" — see the sibling assertion in
+        // `load_pr_no_highlights_with_snapshot_already_published`.
+        assert!(result.get("retryable").is_none());
 
         // make_daemon_state() already painted "diff" via the perri-standard
         // apply_layout call, so D5 suppresses the Loading push here.
@@ -1021,17 +1105,78 @@ mod tests {
 
     #[tokio::test]
     async fn load_pr_no_highlights_times_out_leaves_pane_on_text_not_loading() {
-        let (state, _tmp, mut bcast) = make_daemon_state().await;
-        // perri_pr_rx stays at its default None — never matches.
+        let (mut state, _tmp, mut bcast) = make_daemon_state().await;
+        // A *live* sender that is kept alive for the whole test (bound to
+        // `_tx`, which only drops at the end of this function) but never
+        // publishes a matching snapshot. This is what makes the wait a
+        // genuine elapsed-settle-timeout (`SnapshotWait::TimedOut`) rather
+        // than a dropped-sender one (`SnapshotWait::SourceGone`, covered by
+        // `load_pr_no_highlights_source_task_gone_reports_not_retryable`
+        // below).
+        //
+        // NOTE for whoever lands `SnapshotWait`: `make_daemon_state()`'s own
+        // default `perri_pr_rx` (i.e. not overridden at all) already has its
+        // sender dropped — see `McpSharedState::for_test` in
+        // `src/mcp/state.rs`, which does
+        // `let (_, perri_pr_rx) = watch::channel(None);`. Before this test
+        // was updated it relied on that default and was, mechanically,
+        // already exercising `SourceGone` rather than `TimedOut` (it just
+        // couldn't tell the difference because both collapsed to the same
+        // `pending: true`). Overriding with an explicit live sender here
+        // makes the test's name and intent actually match its mechanics.
+        let (_tx, pr_rx) = watch::channel(None);
+        state.perri_pr_rx = pr_rx;
 
         let args = json!({ "number": 99, "repo": "acme/web" });
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
         assert_eq!(result["pending"], true);
+        assert_eq!(
+            result["retryable"], true,
+            "a genuine settle-timeout (the source may still be alive and fetching) \
+             must be reported as retryable, unlike a dead source"
+        );
 
         // make_daemon_state() already painted "diff" via the perri-standard
         // apply_layout call, so D5 suppresses the Loading push here — the
         // pane goes straight to the "still loading" placeholder text.
+        let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
+        match content {
+            PaneContentWire::Text { text } => assert!(text.contains("acme/web#99")),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// The counterpart to the `TimedOut` case above: the `PerriPrNativeSource`
+    /// task has exited (its `watch::Sender` dropped — e.g. `build_client()`
+    /// failed in `run()`), so no fetch is in flight and none ever will be
+    /// without a daemon restart. An agent that only checks `pending` can't
+    /// tell this apart from "still loading, ask again shortly" and would
+    /// retry forever; `retryable: false` is the signal that distinguishes
+    /// them. The pushed pane content is unchanged from the `TimedOut` case —
+    /// only the reported fields differ.
+    #[tokio::test]
+    async fn load_pr_no_highlights_source_task_gone_reports_not_retryable() {
+        let (mut state, _tmp, mut bcast) = make_daemon_state().await;
+        let (tx, pr_rx) = watch::channel(None);
+        drop(tx); // the source task's sender is gone before the wait even starts
+        state.perri_pr_rx = pr_rx;
+
+        let args = json!({ "number": 99, "repo": "acme/web" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            result["pending"], false,
+            "a dead source is not 'still fetching' — pending must be false, not true"
+        );
+        assert_eq!(
+            result["retryable"], false,
+            "retrying can never help once the source task itself is gone"
+        );
+
+        // Same placeholder text as the TimedOut case — only pending/retryable
+        // differ, the pane content path is shared.
         let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
         match content {
             PaneContentWire::Text { text } => assert!(text.contains("acme/web#99")),
@@ -1361,7 +1506,15 @@ mod tests {
 
     #[tokio::test]
     async fn load_pr_unidentified_caller_still_mutates_state_and_warns_once() {
-        let (state, tmp, _bcast) = make_daemon_state().await;
+        let (mut state, tmp, _bcast) = make_daemon_state().await;
+        // Live sender kept alive for the duration (see the long comment in
+        // `load_pr_no_highlights_times_out_leaves_pane_on_text_not_loading`):
+        // this test wants a genuine settle-timeout (`pending: true`), and
+        // `make_daemon_state()`'s default `perri_pr_rx` has its sender
+        // dropped immediately, which is the *other* (`SourceGone`,
+        // `pending: false`) case once `SnapshotWait` distinguishes them.
+        let (_tx, pr_rx) = watch::channel(None);
+        state.perri_pr_rx = pr_rx;
 
         // No highlights + no matching snapshot means the diff pane is pushed
         // to twice (Loading, then the timed-out placeholder) — this proves
