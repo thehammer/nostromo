@@ -5,8 +5,13 @@
 //! (named, with on-disk-override precedence, or inline), builds the pane tree
 //! through the existing [`PaneRegistry`](crate::ipc::pane_registry::PaneRegistry),
 //! runs each pane's data fetch **server-side, with no LLM involvement**, and
-//! broadcasts the result in one round trip: a single `ServerMsg::FocusLayout`
-//! followed by one `ServerMsg::PaneContent` per non-repl pane.
+//! broadcasts the result: a single `ServerMsg::FocusLayout` followed by one
+//! `ServerMsg::PaneContent` per pane that declares a `source`. Each such pane
+//! is also *bound* to its source (`PaneRegistry::bind_source`) and its pushes
+//! route through `pane_sources::broadcast_pane_content`, rather than
+//! `apply_layout` sending `ServerMsg::PaneContent` itself — that's what keeps
+//! the pane's content live (re-pushed on the source's next change) instead of
+//! a one-shot snapshot.
 //!
 //! This collapses the imperative `reset_panes` → `create_pane` (×N) →
 //! `set_pane_layout` → per-pane `set_pane_content`/read-tool sequence — and all
@@ -161,9 +166,23 @@ pub(crate) const PR_BACKED_SOURCES: &[&str] =
     &[SOURCE_CURRENT_PR, SOURCE_PR_DIFF, SOURCE_PR_CONVERSATION];
 
 /// The closed set of `source` names a `PaneSpec` may bind to. Adding a new
-/// source is a deliberate code change: add a `match` arm in [`fetch`], a
-/// constant above, list it here, and ensure the corresponding receiver is
-/// wired into the daemon's `McpSharedState`.
+/// source is a deliberate code change touching every one of these:
+/// - a constant above, and an entry in this list
+/// - a `match` arm in [`fetch`]
+/// - if the source can only ever resolve asynchronously (a network-only
+///   fetch, or a fallback like [`SOURCE_FILE`]'s GitHub-contents path) — a
+///   branch in [`fetch_async`] too; otherwise [`fetch_async`] already
+///   delegates to [`fetch`] for you
+/// - a `match` arm in [`freshness`] — its `_ => PaneFreshness::default()`
+///   fallback means a missing arm silently reports "always fresh" instead
+///   of erroring
+/// - a `match` arm in [`source_content_kind`] — its `_ => None` fallback
+///   means a missing arm passes `layout_schema::validate` regardless of what
+///   `content_kind` the schema declares
+/// - a `select!` arm plus `push_for_source` call in
+///   `pane_sources::run_pane_source_broadcaster` — without this the new
+///   source binds and fetches fine but never auto-updates
+/// - the corresponding receiver wired into the daemon's `McpSharedState`
 const KNOWN_SOURCES: &[&str] = &[
     SOURCE_PR_QUEUE,
     SOURCE_CURRENT_PR,
@@ -178,10 +197,13 @@ pub(crate) fn source_is_known(source: &str) -> bool {
     KNOWN_SOURCES.contains(&source)
 }
 
-/// The full closed set of known source names — used by `PaneRegistry` to drop
-/// a persisted binding whose source has been retired in a later daemon
-/// version (D3), and by `pane_sources.rs` to drive the automatic broadcaster
-/// without a second list of source strings.
+/// The full closed set of known source names — used by
+/// `PaneRegistry::load_store` to drop a persisted binding whose source has
+/// been retired in a later daemon version (D3). `pane_sources.rs` does NOT
+/// call this — it imports the [`SOURCE_PR_QUEUE`]/[`SOURCE_CURRENT_PR`]
+/// constants directly and keeps its own hand-maintained dispatch (one
+/// `select!` arm per source in `run_pane_source_broadcaster`); see the
+/// checklist on [`KNOWN_SOURCES`] for everywhere a new source must be added.
 pub(crate) fn known_sources() -> &'static [&'static str] {
     KNOWN_SOURCES
 }
@@ -263,9 +285,13 @@ impl<'a> FetchArgs<'a> {
 /// `perri.get_current_pr` renders a plain-text snapshot summary — no agent
 /// "highlights" — the agent may overwrite it afterward via `set_pane_content`.
 ///
-/// `pub(crate)` — this is the single dispatch point both `apply_layout` and
-/// `refresh_pane::refresh_pane_content` call, which is what guarantees the two
-/// tools can never disagree about what a source produces.
+/// `pub(crate)` — this is the single dispatch point every caller of a bound
+/// source goes through, which is what guarantees they can never disagree
+/// about what a source produces. `pane_sources.rs`'s automatic broadcaster
+/// (`run_pane_source_broadcaster`) is now the highest-volume caller — it
+/// re-fetches on every watch-channel change — alongside `apply_layout`,
+/// `refresh_pane::refresh_pane_content`, and the Perri mutator tools
+/// (`load_pr`/`clear_current_pr`).
 ///
 /// **Synchronous by construction.** `PaneContentProvider::bound_pane_contents`
 /// is a sync trait method called from the IPC layer, so this cannot become
@@ -1011,10 +1037,8 @@ mod tests {
     use super::*;
     use crate::data::tickets::jira::{JiraCredentials, JiraProvider};
     use crate::data::tickets::{TicketCache, TicketRegistry};
-    use crate::ipc::pane_registry::PaneRegistry;
-    use crate::ipc::SessionManager;
-    use crate::mcp::{DaemonMcpBackend, TicketRegistryState};
-    use std::sync::{Arc, Mutex};
+    use crate::mcp::TicketRegistryState;
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::{broadcast, watch};
     use wiremock::matchers::{method, path};
@@ -1027,26 +1051,8 @@ mod tests {
     fn make_state_with_tickets(
         tickets: TicketRegistryState,
     ) -> (McpSharedState, broadcast::Receiver<ServerMsg>) {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
-            tmp.path().join("panes.json"),
-        )));
-        let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
-            tmp.path().join("sessions.json"),
-        )));
-        // Leak the tempdir so it outlives the test (its Drop would otherwise
-        // remove the directory while the registry might still write to it).
-        std::mem::forget(tmp);
-        let (broadcast_tx, rx) = broadcast::channel(64);
-        let backend = DaemonMcpBackend {
-            pane_registry,
-            session_mgr,
-            broadcast_tx,
-            perri: crate::mcp::PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
-            tickets,
-        };
-        (McpSharedState::for_daemon(backend), rx)
+        let built = crate::mcp::test_support::daemon_test_state_with_tickets(tickets);
+        (built.state, built.bcast_rx)
     }
 
     /// A `TicketRegistryState` with `jira` registered but unconfigured (no

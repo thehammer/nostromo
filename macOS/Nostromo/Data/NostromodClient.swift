@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import os
+import NostromoKit
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "ipc")
 

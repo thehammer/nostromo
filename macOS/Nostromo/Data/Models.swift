@@ -889,6 +889,21 @@ struct CalendarSnapshot: Decodable {
 // Wire encoding uses `#[serde(tag = "kind", rename_all = "snake_case")]`, so:
 //   leaf:  { "kind": "leaf",  "pane_id": "repl" }
 //   split: { "kind": "split", "direction": "horizontal", "children": [...], "ratios": [0.5, 0.5] }
+//
+// macOS links NostromoKit and could use its versions of these types, but this
+// file still locally re-declares (and thereby shadows, within the macOS
+// module) `PaneTree`, `PaneContentWire` (+ its `Decodable`/`Equatable`),
+// `SplitDirection`, and `FocusLayoutModel`. `PaneFreshness` is no longer among
+// them — it was de-duplicated in favor of `NostromoKit.PaneFreshness`, which
+// is identical in shape and has no behavioural delta from the macOS copy it
+// replaced. The rest are NOT mechanical deletes: `NostromoKit`'s
+// `PaneContentWire: Decodable` throws on a malformed field where this file's
+// silently defaults (`?? [:]`, `?? []`) — unifying them is filed as a todo,
+// not done here. `.jsonSnapshot`/`.unknown`'s payload is `JSONValue` (below),
+// a real `Equatable` enum with a keyed-container decode branch — NostromoKit's
+// `PaneContentWire` still carries a bare `Any` for these two cases and
+// compares via `NSObject`/`isEqual` bridging; that divergence is also filed as
+// a todo rather than ported here.
 
 /// Direction a split lays its children out in.
 enum SplitDirection: String, Decodable, Equatable {
@@ -1593,24 +1608,6 @@ extension PaneContentWire: Equatable {
         default:
             return false
         }
-    }
-}
-
-/// How trustworthy the content in a `pane_content` push is. Mirrors
-/// `PaneFreshness` in `src/ipc/protocol.rs` (macOS-local copy — see
-/// `NostromoKit.PaneFreshness` for the shared one iOS uses). `stale` is the
-/// source's own transient flag and must NOT be rendered — a single missed
-/// poll is normal. `badlyStale` is the daemon's verdict that the source
-/// hasn't produced good data in a while; it is the only flag rendered.
-struct PaneFreshness: Decodable, Equatable {
-    let asOf: Date?
-    let stale: Bool
-    let badlyStale: Bool
-
-    private enum CodingKeys: String, CodingKey {
-        case asOf = "as_of"
-        case stale
-        case badlyStale = "badly_stale"
     }
 }
 

@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import os
+import NostromoKit
 
 /// Counts, ids, kinds and geometry only — never pane content. A `pr_list`
 /// carries repo names and PR titles and must not reach the system log.

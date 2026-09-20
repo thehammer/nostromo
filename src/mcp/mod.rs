@@ -56,6 +56,8 @@ pub mod pane_sources;
 pub mod server;
 pub mod socket;
 pub mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tool_policy;
 pub mod tool_stats;
 pub mod tools;
