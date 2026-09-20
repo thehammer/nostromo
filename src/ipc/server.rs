@@ -365,7 +365,7 @@ where
     // quiet focus apart from a broken ingestion path — so both a snapshot per
     // known focus and one health verdict are pushed immediately on attach,
     // mirroring the Layout replay above (D4).
-    if subscribed(&topics, Topic::Activity) {
+    if topics.contains(&Topic::Activity) {
         let (snapshots, health_msg): (Vec<ServerMsg>, ServerMsg) = {
             let mgr = session_mgr.lock().unwrap();
             let snapshots = mgr
