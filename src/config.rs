@@ -13,6 +13,28 @@ use serde::{Deserialize, Serialize};
 /// Environment variable that overrides the TCP listen address.
 pub const TCP_ADDR_ENV: &str = "NOSTROMD_TCP_ADDR";
 
+/// Connect timeout for every GitHub HTTP request (raw `reqwest` and
+/// `octocrab` alike), in seconds.
+///
+/// Short and unforgiving on purpose: a stalled TCP handshake is never
+/// legitimate the way a slow body transfer sometimes is, so this doesn't
+/// need the headroom [`GITHUB_HTTP_TIMEOUT_SECS`] gives the overall request.
+pub const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 5;
+
+/// Overall per-request timeout for every GitHub HTTP request (connect + send
+/// + full body read), in seconds.
+///
+/// Sized to comfortably clear a legitimate large-diff fetch (`MAX_DIFF_BYTES`
+/// = 500 KB in `data::perri_pr_native`) even on a slow link, while staying
+/// well under `pr_diff_poll_secs` (30s default) so a request that genuinely
+/// hangs fails and frees the poll loop before the next cycle would otherwise
+/// queue up behind it — see `github_timeout_is_shorter_than_the_poll_interval`
+/// in `data::github_client`, which pins that relationship. Without a bound
+/// here at all, a stalled connection or a half-delivered body hangs
+/// indefinitely (reqwest's default), wedging every consumer of the single
+/// watch-channel PR source behind it.
+pub const GITHUB_HTTP_TIMEOUT_SECS: u64 = 20;
+
 /// Default TCP listen address when no override is present.
 ///
 /// **Loopback-only by default.**  Phase 0 carries no authentication; binding
@@ -48,6 +70,11 @@ pub struct Config {
     pub pr_queue_poll_secs: u64,
     /// PR diff poll interval in seconds (default: 30).
     pub pr_diff_poll_secs: u64,
+    // NOTE: GITHUB_CONNECT_TIMEOUT_SECS / GITHUB_HTTP_TIMEOUT_SECS live just
+    // below as plain `const`s, not `Config` fields — they bound one GitHub
+    // HTTP attempt and must stay visibly smaller than `pr_diff_poll_secs`
+    // above (see `github_timeout_is_shorter_than_the_poll_interval` in
+    // `data::github_client`), which a user-configurable field would obscure.
     /// How long (in seconds) to suppress a just-approved PR from the queue.
     ///
     /// Covers the GitHub search-index lag window (typically seconds to low minutes).
@@ -79,10 +106,33 @@ pub struct Config {
     /// Bearer token for the github-relay WebSocket endpoint.
     /// Obtain via `https://github-relay.carefeed.com/auth/token` (VPN required).
     pub relay_token: Option<String>,
+    /// Kill switch for the targeted relay-update engine (default: `true`).
+    ///
+    /// Set `perri_targeted_relay = false` in `~/.config/nostromo/config.toml` to
+    /// make every relay event trigger a full queue refresh again — the exact
+    /// pre-engine behaviour, at the cost of three org-wide search calls per
+    /// event.  Present so the engine can be disabled in the field without a
+    /// rebuild if its per-PR verdicts turn out to disagree with the poll's.
+    pub perri_targeted_relay: bool,
 
     /// VIP sender addresses (lowercase); emails from these addresses are
     /// highlighted in the mailbox panel.
     pub vip_senders: Vec<String>,
+
+    // ── W4 curated-agent-views: Jira ticket provider ────────────────────────
+    /// Overrides the resolved Atlassian site (e.g. `carefeed.atlassian.net`)
+    /// ahead of the environment or the credentials file. See
+    /// `crate::data::tickets::jira` for the full resolution order.
+    pub jira_site: Option<String>,
+    /// Overrides the resolved Atlassian account email ahead of the
+    /// environment or the credentials file.
+    pub jira_email: Option<String>,
+    /// Path to a `.env`-style file carrying `ATLASSIAN_SITE_NAME` /
+    /// `ATLASSIAN_USER_EMAIL` / `ATLASSIAN_API_TOKEN`. Default:
+    /// `~/.claude/credentials/.env`. The token itself is never read into
+    /// this struct — only this path is — so `Config`'s unredacted `Debug`
+    /// derive never carries a secret.
+    pub jira_credentials_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -103,7 +153,11 @@ impl Default for Config {
             github_token_path: None,
             relay_url: None,
             relay_token: None,
+            perri_targeted_relay: true,
             vip_senders: Vec::new(),
+            jira_site: None,
+            jira_email: None,
+            jira_credentials_path: None,
         }
     }
 }

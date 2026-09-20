@@ -16,6 +16,9 @@ class MainLayout: NSView {
     private let statusBar = StatusBarView()
     /// Toast overlay — renders above all content, passes through non-toast clicks.
     private let toastView = ToastBannerView()
+    /// Ambient-activity ticker overlay — always visible, pinned to the bottom
+    /// edge of the content area; passes through non-ticker clicks (D6).
+    private let activityTicker = ActivityTickerView()
 
     // MARK: - Content
 
@@ -71,8 +74,12 @@ class MainLayout: NSView {
             statusBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             statusBar.heightAnchor.constraint(equalToConstant: Theme.statusBarHeight),
 
-            // Pace bars — above status bar, right column
-            paceBars.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+            // Pace bars — above status bar, right column. Offset by the
+            // ticker's own line height (not just statusBar.topAnchor) so the
+            // always-visible activity ticker gets its own reserved strip
+            // between pace bars and the status bar, instead of its 22pt line
+            // drawing on top of the bottom of the pace bars (F1 / D1).
+            paceBars.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -ActivityTickerView.lineHeight),
             paceBars.leadingAnchor.constraint(equalTo: tabBar.trailingAnchor),
             paceBars.trailingAnchor.constraint(equalTo: trailingAnchor),
             paceBars.heightAnchor.constraint(equalToConstant: Theme.paceBarsHeight),
@@ -95,6 +102,20 @@ class MainLayout: NSView {
             toastView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
         ])
 
+        // Ambient-activity ticker overlay — same content-area span as the
+        // toast overlay (so it draws over content without shrinking it), and
+        // added after it so it's always on top. hitTest passthrough means
+        // clicks reach views below everywhere except the ticker's own line
+        // (and its expanded panel when open).
+        activityTicker.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(activityTicker)   // added last → draws on top of the toast overlay too
+        NSLayoutConstraint.activate([
+            activityTicker.topAnchor.constraint(equalTo: topAnchor),
+            activityTicker.leadingAnchor.constraint(equalTo: tabBar.trailingAnchor),
+            activityTicker.trailingAnchor.constraint(equalTo: trailingAnchor),
+            activityTicker.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+        ])
+
         contentContainer.wantsLayer = true
         contentContainer.layer?.backgroundColor = Theme.bg.cgColor
 
@@ -104,13 +125,35 @@ class MainLayout: NSView {
         tabBar.onRemove      = { [weak self] focus in self?.removeFocus(focus) }
         tabBar.onForceStart  = { [weak self] focus in self?.forceStart(focus) }
 
-        // Subscribe to FocusStore so the tab bar rebuilds when focuses change
+        // Subscribe to FocusStore so the tab bar rebuilds when focuses change.
+        //
+        // FocusStore is the one app-wide truth on which focuses exist; every
+        // window's sink reacts uniformly to a removal here — not just the
+        // window whose tab bar was clicked (`removeFocus` below no longer
+        // does either of these itself). Before this, a focus closed from
+        // Window A left its content and its `viewCache` entry alive forever
+        // in Window B: the tab disappeared from B's tab bar (rebuilt below)
+        // while B's content view, if it was showing that focus, stayed on
+        // screen — and B's cached `NSView` kept its `ChatSession` reachable
+        // no matter what `AppStore.evictPerFocusState` did.
         FocusStore.shared.$focuses
             .receive(on: DispatchQueue.main)
             .sink { [weak self] focuses in
                 guard let self else { return }
                 self.tabBar.setFocuses(focuses)
                 self.tabBar.activeFocus = self.activeFocus
+                // This window's active focus was removed — fall back to
+                // Mother, exactly like a click-to-close used to for the one
+                // window that initiated it.
+                if !focuses.contains(where: { $0.id == self.activeFocus.id }) {
+                    let mother = focuses.first { $0.id == "mother" } ?? Focus.builtIns[1]
+                    self.switchFocus(mother)
+                }
+                // Evict this window's cached view for any focus that's gone —
+                // the other half of what makes eviction in AppStore actually
+                // free memory rather than just unlink a dictionary entry.
+                let liveIds = Set(focuses.map { $0.id })
+                self.viewCache = self.viewCache.filter { liveIds.contains($0.key) }
             }
             .store(in: &cancellables)
 
@@ -120,8 +163,20 @@ class MainLayout: NSView {
             .sink { [weak self] event in self?.toastView.showToast(event) }
             .store(in: &cancellables)
 
+        // Memory warnings and shed notices → the same banner surface.
+        AppStore.shared.onMemoryToast = { [weak self] message, severity in
+            self?.toastView.showToast(message: message, severity: severity)
+        }
+
+        // Daemon-originated notifications (W5 — current-pr-collision) → the
+        // same banner surface. No production trigger sends one yet.
+        AppStore.shared.onNotification = { [weak self] message, severity in
+            self?.toastView.showToast(message: message, severity: severity)
+        }
+
         // Publish the initial active focus so StatusBarView has a tag from the start.
         AppStore.shared.setActiveFocusAgentTag(activeFocus.agentTag)
+        AppStore.shared.setActiveFocusSessionTag(activeFocus.sessionTag)
 
         showContent(for: activeFocus)
     }
@@ -134,7 +189,20 @@ class MainLayout: NSView {
         UserDefaults.standard.set(focus.id, forKey: udKey)
         UserDefaults.standard.synchronize()
         AppStore.shared.setActiveFocusAgentTag(focus.agentTag)
+        AppStore.shared.setActiveFocusSessionTag(focus.sessionTag)
         showContent(for: focus)
+    }
+
+    /// Switch this window's active tab to whichever focus corresponds to
+    /// `tag`, if any is known. Exposed (not `private`) so `DecisionPresenter`
+    /// can direct the operator's attention to the session asking a decision
+    /// — on the ONE window it actually presents on, not on every window the
+    /// way the pre-fix per-window presentation used to (that's also what
+    /// used to yank every display's tab to the asking session as a side
+    /// effect; this fixes that too).
+    func focusSession(tag: String) {
+        guard let focus = FocusStore.shared.focuses.first(where: { $0.sessionTag == tag }) else { return }
+        switchFocus(focus)
     }
 
     private func forceStart(_ focus: Focus) {
@@ -147,14 +215,14 @@ class MainLayout: NSView {
     }
 
     private func removeFocus(_ focus: Focus) {
+        // The switch-away and the viewCache prune used to happen right here,
+        // for this window only. They've moved into the `$focuses` sink above
+        // so every window reacts uniformly — this window included, since it
+        // also observes `$focuses` — rather than only the one whose tab bar
+        // was clicked. `FocusStore.remove` is the one thing that has to
+        // happen here: everything else follows from its `focusRemovals`/
+        // `$focuses` announcements.
         FocusStore.shared.remove(focus)
-        // If the removed focus was active, fall back to Mother
-        if activeFocus.id == focus.id {
-            let mother = FocusStore.shared.focuses.first { $0.id == "mother" } ?? Focus.builtIns[1]
-            switchFocus(mother)
-        }
-        // Evict from cache so it doesn't leak memory
-        viewCache.removeValue(forKey: focus.id)
     }
 
     // MARK: - Content switching
@@ -169,7 +237,7 @@ class MainLayout: NSView {
         // remain in the project for parity verification (W3 exit gate). Once
         // agent prompts (W5) assemble the equivalent layouts and visual parity
         // is confirmed, those files will be removed in a follow-up PR.
-        let v = DynamicFocusView(focus: focus)
+        let v = DynamicFocusView(focus: focus, windowId: String(windowIndex))
         viewCache[focus.id] = v
         return v
     }

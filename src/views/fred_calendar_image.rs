@@ -386,6 +386,11 @@ fn pixmap_to_dynamic_image(pixmap: Pixmap) -> image::DynamicImage {
 
     // Un-premultiply alpha for the image crate.
     let mut rgba = Vec::with_capacity(raw.len());
+    // `chunks_exact(4)` over `as_chunks::<4>()`: `as_chunks` isn't stabilized
+    // on the toolchain pinned for local dev (rustc 1.94), only on newer CI
+    // runners — pin to the lint-triggering-but-portable form rather than a
+    // call this repo's own contributors can't build locally.
+    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
     for chunk in raw.chunks_exact(4) {
         let r = chunk[0];
         let g = chunk[1];

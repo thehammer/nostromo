@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use nostromo::ipc::{
     codec::{read_frame, write_frame},
+    decisions::DecisionRegistry,
     protocol::{ClientMsg, ServerMsg, Topic, PROTOCOL_VERSION},
     server::Server,
     PtyManager, SessionManager,
@@ -27,8 +28,16 @@ async fn spawn_server() -> (Server, u16, TempDir) {
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let session_mgr = Arc::new(Mutex::new(SessionManager::new()));
 
-    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), tmp.path().join("perri-state"))
-        .expect("bind unix socket");
+    let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
+
+    let server = Server::bind(
+        &socket_path,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        tmp.path().join("perri-state"),
+        Arc::clone(&decisions),
+    )
+    .expect("bind unix socket");
 
     // Bind on an ephemeral port so tests don't collide.
     let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -39,7 +48,13 @@ async fn spawn_server() -> (Server, u16, TempDir) {
         .expect("local addr")
         .port();
 
-    server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), tmp.path().join("perri-state"));
+    server.bind_tcp(
+        tcp_listener,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        tmp.path().join("perri-state"),
+        decisions,
+    );
 
     (server, port, tmp)
 }
@@ -67,7 +82,7 @@ async fn do_handshake(mut stream: &mut TcpStream) {
     }
 
     // → Subscribe (no topics — we only care about targeted responses)
-    let sub = ClientMsg::Subscribe { topics: vec![] };
+    let sub = ClientMsg::Subscribe { topics: vec![], renders_decisions: false };
     write_frame(&mut stream, &serde_json::to_vec(&sub).unwrap())
         .await
         .unwrap();
@@ -139,6 +154,7 @@ async fn tcp_and_unix_share_broadcast() {
 
     let sub = ClientMsg::Subscribe {
         topics: vec![Topic::Activity],
+        renders_decisions: false,
     };
     write_frame(&mut stream, &serde_json::to_vec(&sub).unwrap())
         .await
@@ -146,6 +162,16 @@ async fn tcp_and_unix_share_broadcast() {
 
     // Give the server a moment to register the subscriber.
     tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+    // Subscribing to Topic::Activity triggers an immediate ActivityHealth
+    // replay (mirrors tests/activity.rs's own handshake) — drain it before
+    // looking for the broadcast below, or it's mistaken for the Pong.
+    let health_bytes = read_frame(&mut stream).await.unwrap();
+    let health: ServerMsg = serde_json::from_slice(&health_bytes).unwrap();
+    assert!(
+        matches!(health, ServerMsg::ActivityHealth { .. }),
+        "expected the subscribe-time ActivityHealth replay, got {health:?}"
+    );
 
     // Broadcast a Pong (matches any topic filter since it's not an Activity/Mother msg).
     server.broadcast(ServerMsg::Pong);

@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import os
+import NostromoKit
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "ipc")
 
@@ -24,6 +25,11 @@ private struct ClientSubscribe: Encodable {
         case type_  = "type"
         case topics
     }
+}
+
+private struct ClientPingMsg: Encodable {
+    let type_ = "ping"
+    enum CodingKeys: String, CodingKey { case type_ = "type" }
 }
 
 // MARK: - Mother peek wire types
@@ -128,11 +134,65 @@ enum ServerMsg {
     /// Content push for a single pane; never carries split geometry so an
     /// operator's drag-resize survives content refreshes. `freshness` is
     /// `nil` for content with no staleness concept and for frames from a
-    /// daemon that predates this field — always decodes successfully either way.
-    case paneContent(tag: String, paneId: String, content: PaneContentWire, freshness: PaneFreshness?)
+    /// daemon that predates this field — always decodes successfully either
+    /// way. `address` (W1 — curated-agent-views) is likewise `nil` for any
+    /// push with nothing to point at, and for frames from a daemon that
+    /// predates the field.
+    case paneContent(tag: String, paneId: String, content: PaneContentWire, freshness: PaneFreshness?, address: PaneAddress?)
     /// An agent-spawned focus was created; every client should add the new tab.
     case focusCreated(meta: FocusCreatedMeta)
+    /// A daemon-driven decision modal request — an agent posed a question with
+    /// a fixed set of choices and is blocked awaiting the operator's answer.
+    case decisionRequest(tag: String, requestId: String, prompt: String, detail: String?,
+                         choices: [DecisionChoiceWire], contextPaneId: String?)
+    /// A decision request was resolved — answered, dismissed, timed out, or
+    /// its owning session went away (multi-window decision-sheet fix). Lets
+    /// every window's sheet for the same request learn it's done and close
+    /// itself without itself sending an answer.
+    case decisionResolved(tag: String, requestId: String, resolution: String, choiceId: String?)
+
+    /// A daemon-originated, tag-addressed, operator-facing notification (W5
+    /// — current-pr-collision), modelled on `decisionRequest` above. `level`
+    /// is carried as the raw wire string ("info"/"warning"/"alert") rather
+    /// than a typed enum here — `AppStore` maps it to `ToastSeverity` at the
+    /// point it actually renders, the same distance `DecisionRequestResp`
+    /// keeps from its own presentation type. No production trigger sends
+    /// this yet; a later wedge (the same-PR advisory) wires the first one.
+    case notification(tag: String, level: String, message: String)
+
+    // ── ambient activity (activity-path wedge) ───────────────────────────────
+    /// Full snapshot of one focus's activity streams — replayed on attach and
+    /// sent in response to `requestActivitySnapshot(tag:)`.
+    case activitySnapshot(tag: String, streams: [ActivityStreamWire])
+    /// Ingestion health verdict for the ambient activity feed.
+    case activityHealth(ingesting: Bool, reason: String?, lastEventAt: Date?, hookInstalled: Bool)
+
     case unknown
+}
+
+/// One choice offered by a `decision_request` frame.
+/// Mirrors `DecisionChoice` in `src/ipc/protocol.rs`.
+struct DecisionChoiceWire: Decodable, Equatable {
+    let id: String
+    let label: String
+    let detail: String?
+}
+
+/// Mirrors `ipc::protocol::ActivityStreamWire` — one focus's main stream
+/// (`agentId == nil`) or one subagent's stream.
+struct ActivityStreamWire: Decodable {
+    let agentId:       String?
+    let agentType:     String?
+    let parentAgentId: String?
+    let events:        [ActivityEvent]
+    let finished:      Bool
+
+    enum CodingKeys: String, CodingKey {
+        case agentId       = "agent_id"
+        case agentType     = "agent_type"
+        case parentAgentId = "parent_agent_id"
+        case events, finished
+    }
 }
 
 // MARK: - Session wire types (mirror src/ipc/stream_json.rs; snake_case/tagged)
@@ -323,6 +383,15 @@ private struct SessionControlMsg: Encodable {
     enum CodingKeys: String, CodingKey { case type_ = "type", tag, action }
 }
 
+private struct DecisionAnswerMsg: Encodable {
+    let type_ = "decision_answer"
+    let requestId: String
+    let choiceId: String?
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", requestId = "request_id", choiceId = "choice_id"
+    }
+}
+
 // MARK: - NostromodClient
 
 /// Unix-socket IPC client for nostromd.
@@ -346,6 +415,11 @@ class NostromodClient {
     /// exactly once, and a reconnect (false→true) re-triggers spawn/attach —
     /// without the init+welcome double that caused duplicate-rendered turns.
     let connected = CurrentValueSubject<Bool, Never>(false)
+
+    /// IPC round-trip / frame latency stats. Instance-owned (not global) so
+    /// tests construct their own `NostromodClient` and inspect independent
+    /// stats. See `IPCLatencyStats` for the correlation rules.
+    let latency = IPCLatencyStats()
 
     private var fd: Int32 = -1            // POSIX AF_UNIX socket (NWConnection's
                                          // .unix endpoint fails with ENETDOWN).
@@ -429,6 +503,7 @@ class NostromodClient {
         reconnectDelay = 1.0
         sendHello()
         connected.send(true)
+        latency.noteConnect()
         // Blocking frame reader on a dedicated background queue.
         DispatchQueue.global(qos: .utility).async { [weak self] in self?.readLoop(sock) }
     }
@@ -446,9 +521,19 @@ class NostromodClient {
     private func sendHello() {
         // protocol v4 adds the focus registry push/pull family. The daemon holds
         // MIN_CLIENT_VERSION at 2, so the shipped GUI keeps working against older daemons.
-        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
+        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4), type: "hello")
         // "layout" subscribes to FocusLayout / PaneContent / FocusCreated broadcasts.
-        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout"]))
+        // "decision" subscribes to daemon-driven DecisionRequest broadcasts — being
+        // subscribed is also what tells the daemon a client (an operator) exists at
+        // all, so `nostromo.ask_decision` can fail fast with `no_operator` otherwise.
+        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]), type: "subscribe")
+    }
+
+    /// Clean, unambiguous round-trip probe: no side effects, no fan-out
+    /// ambiguity (unlike `session_send`, which is answered by a broadcast
+    /// every attached client receives).
+    func ping() {
+        send(ClientPingMsg(), type: "ping")
     }
 
     // MARK: - Session commands (protocol v3)
@@ -457,24 +542,41 @@ class NostromodClient {
     func sessionSpawn(tag: String, agentName: String, viewName: String,
                       cwd: String?, sessionId: String?, remoteControl: Bool) {
         send(SessionSpawnMsg(tag: tag, agentName: agentName, viewName: viewName,
-                             cwd: cwd, sessionId: sessionId, remoteControl: remoteControl))
+                             cwd: cwd, sessionId: sessionId, remoteControl: remoteControl),
+             type: "session_spawn", tag: tag)
     }
 
     /// Attach to a session — daemon replies with a `SessionTurns` snapshot then
     /// streams `SessionTurnDelta`/`SessionState`.
-    func sessionAttach(tag: String) { send(SessionAttachMsg(tag: tag)) }
+    func sessionAttach(tag: String) {
+        send(SessionAttachMsg(tag: tag), type: "session_attach", tag: tag)
+    }
 
     /// Stop receiving deltas for a session without stopping the child.
-    func sessionDetach(tag: String) { send(SessionDetachMsg(tag: tag)) }
+    func sessionDetach(tag: String) {
+        send(SessionDetachMsg(tag: tag), type: "session_detach", tag: tag)
+    }
 
     /// Enqueue a user message; the daemon writes it to the child's stdin.
     func sessionSend(tag: String, text: String, imagePaths: [String] = []) {
-        send(SessionSendMsg(tag: tag, text: text, images: imagePaths))
+        send(SessionSendMsg(tag: tag, text: text, images: imagePaths), type: "session_send", tag: tag)
     }
 
     /// Lifecycle control: "stop" | "restart" | "new_session".
     func sessionControl(tag: String, action: String) {
-        send(SessionControlMsg(tag: tag, action: action))
+        send(SessionControlMsg(tag: tag, action: action), type: "session_control", tag: tag)
+    }
+
+    // MARK: - Decision modal commands
+
+    /// Answer a `decision_request` by `requestId`. `choiceId: nil` means
+    /// dismissed without choosing — a distinct outcome, not a default choice.
+    /// This is the first client→daemon message carrying a request id that the
+    /// daemon actually consumes (unlike `SessionAnswerPermission`, which is a
+    /// deliberate no-op) — see `ClientMsg::DecisionAnswer` in
+    /// `src/ipc/protocol.rs`.
+    func decisionAnswer(requestId: String, choiceId: String?) {
+        send(DecisionAnswerMsg(requestId: requestId, choiceId: choiceId), type: "decision_answer")
     }
 
     // MARK: - Focus registry commands (Phase 1)
@@ -497,10 +599,74 @@ class NostromodClient {
 
     /// Publish the full focus registry to the daemon, replacing its in-memory registry.
     func focusRegistryPush(_ focuses: [FocusMetaWire]) {
-        send(FocusRegistryPushMsg(focuses: focuses))
+        send(FocusRegistryPushMsg(focuses: focuses), type: "focus_registry_push")
     }
 
-    private func send(_ msg: some Encodable) {
+    // MARK: - Ambient activity (activity-path wedge)
+
+    private struct ActivitySnapshotRequestMsg: Encodable {
+        let type_ = "activity_snapshot_request"
+        let tag: String
+        enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+    }
+
+    /// Request a full activity-stream snapshot for `tag`. The daemon replies
+    /// with `ServerMsg.activitySnapshot` — used both for the gap-recovery
+    /// path (a `seq` gap was observed) and for an on-demand refresh (e.g. the
+    /// ticker's expanded panel opening for a focus with no cached snapshot yet).
+    func requestActivitySnapshot(tag: String) {
+        send(ActivitySnapshotRequestMsg(tag: tag), type: "activity_snapshot_request", tag: tag)
+    }
+
+    // MARK: - Render-state visibility (W1)
+
+    private struct RenderedShapeMsg: Encodable {
+        let type_ = "rendered_shape"
+        let tag: String
+        let windowId: String
+        let paneIds: [String]
+        /// RFC3339 with fractional seconds, matching `decoder`'s `fmtFrac`
+        /// strategy above and the `chrono::DateTime<Utc>` the daemon decodes
+        /// this into — encoded as a plain string (not a `Date` field) since
+        /// `encoder` has no `dateEncodingStrategy` configured and every other
+        /// outgoing message on this connection is timestamp-free.
+        let renderedAt: String
+        enum CodingKeys: String, CodingKey {
+            case type_ = "type", tag
+            case windowId = "window_id"
+            case paneIds = "pane_ids"
+            case renderedAt = "rendered_at"
+        }
+    }
+
+    private static let renderedAtFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// Report which pane ids `windowId` actually materialised for `tag`, as
+    /// of right now — sent once per window at the end of
+    /// `DynamicFocusView.reconcile`. The daemon stores the most recent report
+    /// per `(window_id, tag)` and serves it back through
+    /// `nostromo.get_render_state` / `nostromo.get_view_state`'s
+    /// `render_state` section, diffed against its own `PaneRegistry` tree.
+    func reportRenderedShape(tag: String, windowId: String, paneIds: [String]) {
+        let renderedAt = Self.renderedAtFormatter.string(from: Date())
+        send(
+            RenderedShapeMsg(tag: tag, windowId: windowId, paneIds: paneIds, renderedAt: renderedAt),
+            type: "rendered_shape",
+            tag: tag
+        )
+    }
+
+    /// Encode and send `msg`. `type`/`tag` identify the frame for
+    /// `IPCLatencyStats` correlation — they must match the wire `type` field
+    /// (and, where present, the `tag` field) the `Encodable` struct itself
+    /// emits. The send is only recorded once every byte has actually left
+    /// the process: recording a send that never left would leave a pending
+    /// entry in `latency` that can never match, inflating `unmatchedPending`.
+    private func send(_ msg: some Encodable, type: String, tag: String? = nil) {
         guard fd >= 0, let body = try? encoder.encode(msg)
         else { log.debug("send dropped — not connected (fd=\(self.fd, privacy: .public))"); return }
 
@@ -511,14 +677,19 @@ class NostromodClient {
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
         guard curFd >= 0 else { return }
+        var wroteFully = false
         frame.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             guard let base = raw.baseAddress else { return }
             var off = 0
             while off < raw.count {
                 let n = Darwin.write(curFd, base.advanced(by: off), raw.count - off)
-                if n <= 0 { log.warning("write failed errno=\(errno, privacy: .public)"); break }
+                if n <= 0 { log.warning("write failed errno=\(errno, privacy: .public)"); return }
                 off += n
             }
+            wroteFully = true
+        }
+        if wroteFully {
+            latency.recordSend(type: type, tag: tag, bytes: frame.count)
         }
     }
 
@@ -538,6 +709,7 @@ class NostromodClient {
         Darwin.close(sock)
         if fd == sock { fd = -1 }
         connected.send(false)
+        latency.noteDisconnect()
         scheduleReconnect()
     }
 
@@ -564,14 +736,26 @@ class NostromodClient {
               let type_ = json["type"] as? String
         else { return }
 
+        let t0 = Date()
         let msg = decode(type_: type_, json: json, raw: data)
+        let decodeSeconds = Date().timeIntervalSince(t0)
+        // `session_turn_delta` nests its discriminator: {"type":"session_turn_delta",
+        // "tag":…,"delta":{"delta":"turn_started",…}} — the top-level object has no
+        // `delta` string field of its own.
+        latency.recordReceive(
+            type: type_,
+            tag: json["tag"] as? String,
+            deltaKind: (json["delta"] as? [String: Any])?["delta"] as? String,
+            bytes: data.count,
+            decodeSeconds: decodeSeconds)
+
         log.debug("← \(type_, privacy: .public) (\(data.count, privacy: .public) bytes)")
         DispatchQueue.main.async { [weak self] in
             self?.messages.send(msg)
         }
     }
 
-    private func decode(type_: String, json: [String: Any], raw: Data) -> ServerMsg {
+    func decode(type_: String, json: [String: Any], raw: Data) -> ServerMsg {
         switch type_ {
 
         case "welcome":
@@ -681,13 +865,57 @@ class NostromodClient {
             }
 
         case "pane_content":
-            if let m = try? decoder.decode(PaneContentResp.self, from: raw) {
-                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content, freshness: m.freshness)
+            // Captured before the decode attempt so a frame that fails to
+            // decode is still on disk to inspect — a decode failure is
+            // exactly the moment the raw bytes matter most.
+            PaneContentDump.writeIfRequested(raw: raw, paneId: json["pane_id"] as? String)
+            do {
+                let m = try decoder.decode(PaneContentResp.self, from: raw)
+                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content, freshness: m.freshness, address: m.address)
+            } catch {
+                log.error("""
+                    failed to decode pane_content (pane_id=\(json["pane_id"] as? String ?? "unknown", privacy: .public)): \
+                    \(String(describing: error), privacy: .public)
+                    """)
             }
 
         case "focus_created":
             if let m = try? decoder.decode(FocusCreatedResp.self, from: raw) {
                 return .focusCreated(meta: m.meta)
+            }
+
+        case "decision_request":
+            if let m = try? decoder.decode(DecisionRequestResp.self, from: raw) {
+                return .decisionRequest(tag: m.tag, requestId: m.request_id, prompt: m.prompt,
+                                        detail: m.detail, choices: m.choices,
+                                        contextPaneId: m.context_pane_id)
+            }
+
+        case "decision_resolved":
+            if let m = try? decoder.decode(DecisionResolvedResp.self, from: raw) {
+                return .decisionResolved(tag: m.tag, requestId: m.request_id,
+                                         resolution: m.resolution, choiceId: m.choice_id)
+            }
+
+        case "notification":
+            if let m = try? decoder.decode(NotificationResp.self, from: raw) {
+                return .notification(tag: m.tag, level: m.level, message: m.message)
+            }
+
+        // ── ambient activity (activity-path wedge) ───────────────────────────
+        case "activity_snapshot":
+            if let m = try? decoder.decode(ActivitySnapshotResp.self, from: raw) {
+                return .activitySnapshot(tag: m.tag, streams: m.streams)
+            }
+
+        case "activity_health":
+            if let m = try? decoder.decode(ActivityHealthResp.self, from: raw) {
+                return .activityHealth(
+                    ingesting: m.ingesting,
+                    reason: m.reason,
+                    lastEventAt: m.last_event_at,
+                    hookInstalled: m.hook_installed
+                )
             }
 
         default:
@@ -696,6 +924,16 @@ class NostromodClient {
 
         return .unknown
     }
+}
+
+// MARK: - Ambient activity response wrappers (activity-path wedge)
+
+private struct ActivitySnapshotResp: Decodable { let tag: String; let streams: [ActivityStreamWire] }
+private struct ActivityHealthResp: Decodable {
+    let ingesting: Bool
+    let reason: String?
+    let last_event_at: Date?
+    let hook_installed: Bool
 }
 
 // MARK: - Agent-authored pane layout response wrappers (Phase 1)
@@ -711,10 +949,37 @@ private struct PaneContentResp: Decodable {
     let pane_id:   String
     let content:   PaneContentWire
     let freshness: PaneFreshness?
+    let address:   PaneAddress?
 }
 
 private struct FocusCreatedResp: Decodable {
     let meta: FocusCreatedMeta
+}
+
+private struct DecisionRequestResp: Decodable {
+    let tag: String
+    let request_id: String
+    let prompt: String
+    let detail: String?
+    let choices: [DecisionChoiceWire]
+    let context_pane_id: String?
+}
+
+private struct DecisionResolvedResp: Decodable {
+    let tag: String
+    let request_id: String
+    let resolution: String
+    let choice_id: String?
+}
+
+/// Mirrors `ServerMsg::Notification` in `src/ipc/protocol.rs` (W5 —
+/// current-pr-collision). `level` decodes as the raw wire string
+/// ("info"/"warning"/"alert") — `AppStore` maps it to `ToastSeverity` at the
+/// point it actually renders.
+private struct NotificationResp: Decodable {
+    let tag: String
+    let level: String
+    let message: String
 }
 
 // MARK: - Inbound session response wrappers (decoded from the raw frame)

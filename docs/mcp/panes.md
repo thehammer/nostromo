@@ -25,23 +25,35 @@ payloads each pane accepts or rejects.
 Every pane the daemon (`nostromd`) hosts can optionally be **bound** to a
 server-side `source` — one of the closed set of fetchers in
 `src/mcp/tools/apply_layout.rs::known_sources()` (currently
-`perri.list_pr_queue` and `perri.get_current_pr`). A binding is structural
-metadata stored on `PaneRegistry` — `(tag, pane_id) -> source` — never
-content. It answers one question: "does this pane refresh itself?"
+`perri.list_pr_queue`, `perri.get_current_pr`, `perri.get_pr_diff`, and
+`nostromo.get_file`). A binding is structural metadata stored on
+`PaneRegistry` — `(tag, pane_id) -> (source, params)` — never content. It
+answers one question: "does this pane refresh itself?"
 
 ### Lifecycle
 
 - **One source per pane.** Binding a pane that's already bound replaces the
-  old source; it never accumulates.
+  old source (and its params); it never accumulates.
+- **A binding can carry `params`** (curated-agent-views W2). `params` is the
+  source's own argument object, passed through verbatim — it is what makes a
+  source say *which* thing: `nostromo.get_file` is one source, but a pane
+  bound to it also records which file it shows, or a daemon restart would
+  repaint it as some other file. `PaneRegistry` knows nothing about the
+  shape; only the fetcher validates it. A binding with no params behaves
+  exactly as it did before the field existed.
 - **`repl` can never be bound**, and a pane not currently a leaf of the
   focus's tree is silently refused (logged at `debug!`, not an error).
 - **A binding dies with its pane.** `reset_panes` drops every binding for
   that tag; `set_pane_layout` with a tree that omits a previously-bound pane
   drops just that pane's binding.
 - **A binding survives a daemon restart.** It's persisted alongside the pane
-  tree in `~/.nostromo/daemon-panes.json`. On restart, a binding whose source
-  has been retired (no longer in `known_sources()`) is dropped, and the
-  daemon repaints every reloaded binding immediately — no tool call needed.
+  tree in `~/.nostromo/daemon-panes.json`, params included. On restart, a
+  binding whose source has been retired (no longer in `known_sources()`) is
+  dropped, and the daemon repaints every reloaded binding immediately — no
+  tool call needed. The store is versioned: `version: 3` carries
+  `{source, params}` bindings, `version: 2` carries bare source-name strings
+  (loaded as `params: null`), and an unversioned bare tree map is the
+  original V1 format. All three still load.
 - **Who binds, who unbinds** — see the table in `docs/mcp/tools.md`'s "Live
   pane-source bindings" section. The short version: a push that came from
   fetching `source` binds the pane; a push of content an agent wrote by hand
@@ -95,6 +107,1005 @@ content, as a second line of defense against an older daemon or a race.
 
 ---
 
+## Tabbed regions (`PaneTree::Tabs`) — curated-agent-views W1
+
+A third `PaneTree` node kind, alongside `Leaf` and `Split`: a region that hosts
+several panes with exactly one frontmost.
+
+```json
+{
+  "kind": "tabs",
+  "children": [ { "kind": "leaf", "pane_id": "ticket" }, { "kind": "leaf", "pane_id": "activity" } ],
+  "labels": ["Ticket", "Activity"],
+  "active": 0
+}
+```
+
+- `children` — ordered tabs, left to right. In v1 every child is a `Leaf` —
+  every tab is a real pane with a real `pane_id`, and its content still
+  arrives via the ordinary `ServerMsg::PaneContent` broadcast for that pane
+  id. Tabs are a presentation grouping, not a new content-delivery mechanism.
+- `labels` — per-tab display labels, parallel to `children` (same shape as
+  `Split`'s `children`/`ratios` pairing).
+- `active` — index into `children` of the frontmost tab. Authoritative unless
+  overridden by `FocusLayout.focused_pane` naming one of this node's children
+  (see below).
+
+**Invariants** (enforced by `PaneRegistry::validate_node`, the same choke
+point as `Split`'s shape checks): `children.len() >= 1`, `labels.len() ==
+children.len()`, `active < children.len()`, and — recursively through the
+whole tabs subtree — **no `repl` leaf**. Hiding the REPL behind a tab is
+never valid: the REPL is where the operator's hands are. A tree violating any
+of these is refused as `PaneError::InvalidLayout` (or, from the
+`apply_layout` DSL below, `ApplyLayoutError::ReplInTabs` specifically for the
+repl case) and the registry's stored tree is left unchanged.
+
+**Reachable today only through `set_pane_layout` (a full tree) or the
+`apply_layout` DSL below** — there is no dedicated tab-mutation tool in this
+wedge. `focused_pane`, `create_pane`/`reset_panes`, and every other existing
+tool are unaffected; a tabs child is an ordinary leaf pane once installed, so
+it can be split further with `create_pane` or bound to a live source with
+`bind_source`/`refresh_pane_content` exactly like any other leaf.
+
+### DSL form
+
+```yaml
+tree:
+  direction: horizontal
+  ratios: [0.7, 0.3]
+  children:
+    - pane: repl
+    - tabs:
+        - pane: ticket
+          label: Ticket
+        - pane: activity
+          label: Activity
+      active: ticket
+panes:
+  ticket:
+    content_kind: text
+  activity:
+    content_kind: text
+```
+
+A `tabs:` node lists `{ pane, label }` pairs; `active` names the frontmost
+pane **by id**, not index (matching the DSL's pane-id-centric vocabulary
+elsewhere — it can't silently drift if `tabs:` is reordered). A schema
+declaring `repl` among a `tabs:` list's panes is refused at validation time
+with `repl_in_tabs`, distinct from the `invalid_schema` code used when `repl`
+is bound in the top-level `panes` map.
+
+### Client rendering (macOS, W1)
+
+This section and "Client rendering (iOS)" describe how the *same* tree is
+presented on each client. As of `ios-curated-view-parity` W6 there are three
+presentations across two clients, not two: macOS renders every `Split` branch
+simultaneously with a tab strip per `Tabs` region; iOS renders the same
+regions at regular width (iPad, wide) and flattens the whole tree into one
+compact strip at compact width (phone, or iPad in a narrow window). All three
+key off the same `LayoutChangeClassifier` semantics for when to honour
+`active` without fighting the operator, and the same `RegionPath` convention
+for naming a node.
+
+A tabs node renders as a tab strip over a stack of **resident** child views —
+every tab's view is built once and kept alive for the container's whole
+lifetime; switching tabs is a visibility toggle, not a rebuild, which is what
+lets scroll position and view state survive a switch with no bookkeeping.
+Opening, closing, reordering, relabeling, or switching a tab is classified by
+`LayoutChangeClassifier` as `.tabMembership`/`.activeTabOnly` rather than a
+full structural rebuild, so it never clears the operator's dragged split
+ratios for the *surrounding* regions the way an actual split-topology change
+does. Unread state (a content push for a tab that isn't currently frontmost)
+is derived entirely client-side — the daemon has no business knowing which
+tab the operator is looking at.
+
+**`json_snapshot`/`unknown` decode and equality (`fix/per-focus-state-eviction`).**
+Until this fix, macOS's local JSON decoder (`Models.swift`'s private
+`AnyDecodable`) had no keyed-container branch, so a `json_snapshot`/`unknown`
+`value` that was a JSON *object* silently decoded to an empty value and
+rendered nothing — NostromoKit's own decoder (used by iOS) never had this
+gap. That decoder was replaced with `JSONValue`, a recursive
+`Decodable & Equatable` type that decodes objects correctly, so an object
+payload now renders on macOS the same generic key/value rows iOS has always
+shown. The equality fix is not just cosmetic: a `json_snapshot`/`unknown`
+push with byte-identical content is now suppressed by the same client-side
+no-op guard every other content kind already got (previously these two kinds
+compared unequal unconditionally, so a repeated push always re-rendered the
+pane — a flicker/scroll-reset/spinner cost paid on every redundant refresh).
+
+iOS got decoder correctness only in W1: a tabs node's children flattened into
+the existing per-pane `TabView` alongside every other non-repl pane, with no
+dedicated tabs UI, no `active`/`focused_pane` honouring, and tabs labelled
+from the pane id rather than `labels`. `ios-curated-view-parity` W5 replaced
+that with a real compact tab strip — see below.
+
+### Split ratio persistence (macOS)
+
+A `Split` node's `ratios` are the daemon's *default*, not the last word.
+`DynamicFocusView` treats a split's on-disk ratios as client-side operator
+state: once an operator drags a divider, that ratio is saved to
+`UserDefaults` under `nostromo.dynlayout.<tag>.<path>` (`tag` is the focus's
+session tag, `path` is the tree path — `"root"`, `"root.0"`, `"root.tab1"`,
+…) and wins over whatever the daemon broadcasts next, so the workspace looks
+the same across a content refresh, a tab switch, or a relaunch. Only a
+genuine agent-authored structural change (`LayoutChangeClassifier`'s
+`.splitTopology`) clears it, and the operator can always clear it manually
+via a focus's "Reset Layout" quick action.
+
+Two things guard that state so it can't strand the operator:
+
+- **Not every resize is an operator drag.** Programmatic ratio application
+  (`RatioSplitView` applying `desiredRatios`) and other non-operator resize
+  churn (window resize, fullscreen, display reconfiguration) never get
+  written back to disk — only `RatioPersistencePolicy.shouldPersist` returning
+  true does that, and it requires the resize not be our own doing.
+- **A ratio that would collapse a pane is refused, not written.** Any share
+  below `RatioPersistencePolicy.minimumShare` (5%) leaves a pane with no
+  grabbable divider edge and no visible content — effectively un-recoverable
+  from the UI — so it's never persisted, and a value already on disk that
+  fails this check (or whose element count no longer matches the split's
+  child count) is discarded the next time that split is built rather than
+  applied. If a focus's detail region ever renders at implausible width, look
+  at `defaults read com.hammer.nostromo` for a `nostromo.dynlayout.*` key
+  before suspecting the daemon's tree.
+
+### Client rendering (iOS): two presentations, one width test
+
+As of `ios-curated-view-parity` W6, iOS has **two** presentations of the
+daemon's tree, and the branch between them is the app's current **horizontal
+width class** — nothing else. Not the device model, not the idiom, not the
+orientation, not a threshold in points. An iPad in a narrow multitasking
+window (Slide Over, a narrow Split View) presents the compact layout; a phone
+never presents the regular one. Both of those follow from the size class for
+free.
+
+- **Compact** — one surface at a time, one flattened tab strip. This is the
+  presentation described in "Tabs and layout on iOS" below, unchanged.
+- **Regular** — the daemon's `Split` nodes as **real, simultaneously visible
+  regions**, in the node's direction, proportioned by the node's ratios, with
+  a tab strip per `Tabs` region. This is the presentation macOS has always
+  had; W6 is where iOS got it.
+
+**The width test is the only branch.** Every renderer, every addressing
+behaviour, every label, the `reason` caption, the unread marks, the ambient
+ticker and the decision surface are identical in both presentations. Compact
+and regular differ in how regions are *arranged*, and in nothing else. If a
+surface ever seems to need to look different on an iPad beyond having more
+room, that is a signal the design is wrong, not a requirement.
+
+**Nesting is real nesting.** A `Split` whose child is a `Split` renders as
+regions within regions, not as a flattened row, and a `Tabs` node whose child
+is a `Split` renders as a region inside a tab. Every leaf in the tree is
+reachable in both presentations — the compact strip flattens the split
+structure rather than dropping it.
+
+**Directions and ratios are the daemon's, and are honoured.** `horizontal`
+means a vertical divider (left | right), `vertical` a horizontal one (top over
+bottom) — the same meaning as on macOS. Ratios are normalised into shares that
+sum to 1 with a small positive floor per region, so a malformed `ratios` array
+(one that doesn't sum to 1, is the wrong length, or contains a zero, a
+negative, a `NaN` or an infinity) degrades to a usable layout rather than
+blanking a region.
+
+**The operator cannot resize a region on iOS.** There is no drag-to-resize,
+no divider handle, no collapse/expand, and no locally persisted ratio state
+that could diverge from what the daemon sent. The divider is a hairline
+separator, not a grab affordance. This is deliberate: macOS's
+ratio-persistence machinery (`clearSavedRatios`, the
+`nostromo.dynlayout.<tag>.<path>` defaults keys, and the split-signature
+classifier) is the hairiest part of its layout code and has historically eaten
+the operator's dragged layout when tabs churned. Deferring the gesture also
+keeps the layout decision a pure function of `(tree, width class)`, which is
+what makes it testable on a target with no test bundle and no CI.
+
+**Changing width class at runtime is lossless.** Rotating an iPad or dragging
+a multitasking divider changes the presentation live, with no relaunch, and
+preserves every region's frontmost tab, every surface's scroll position, an
+open activity surface, and a presented decision. Nothing reloads and nothing
+scrolls back to the top. The mechanism is that almost nothing is in the view
+to begin with: frontmost tabs and unread marks live in `FocusRegionState`
+inside the client's store, keyed by a region path that is a pure function of
+the tree rather than of the presentation, so the same key resolves before and
+after; the transcript's turns live in a store that outlives the view; sheets
+are presented above the region hierarchy rather than inside it. Only scroll
+position needs an explicit save and restore, because a width change genuinely
+destroys the container that held the scroll view.
+
+The decision itself is `layoutPlan(tree:width:)` in
+`Shared/NostromoKit/Sources/NostromoKit/Layout/LayoutPlan.swift` — pure, with
+no view hierarchy, no `GeometryReader`, no environment and no device, and
+exercised for both width classes by tests that run with no device and no
+simulator. `iOS/Nostromo/Views/Panes/RegionContainerView.swift` renders
+whatever it returns and computes no proportion of its own. See
+`docs/ios-verification.md` for the honest split between what that buys and
+what is still checkable only by hand on an iPad.
+
+### Client rendering (iOS)
+
+iOS renders a non-repl pane's content in
+`iOS/Nostromo/Views/Panes/PaneSurfaceView.swift`, keyed by the same
+`PaneContentWire` switch macOS's `PaneContentView.swift` uses, but with no
+AppKit siblings layered over it — SwiftUI only, all the way down. `text`,
+`json_snapshot`, `loading`, `error`, and `unknown` render generically;
+`pr_list` renders bucket-grouped `PerriPRRow`s at parity with macOS,
+including the queue-row marking below and the swipe-to-approve confirmation
+gate.
+
+`pr_conversation` and `ticket` render for real, as of `ios-curated-view-parity`
+W9 (`iOS/Nostromo/Views/Panes/ProseSurfaceView.swift`) — the honest stubs
+`PaneSurfaceStub` used to show (deleted along with its now-empty table) are
+gone. Both payloads are already trees of `MdBlock`/`MdSpan` from the daemon's
+server-side `pulldown-cmark` parse (see "Markdown blocks and
+`pr_conversation`" and "`ticket`" below), so **one renderer serves both**:
+`Shared/NostromoKit/Sources/NostromoKit/Prose/` turns a payload into a
+platform-neutral `[ProseRow]` plan (`ConversationPlan`/`TicketPlan`), and
+`ProseSurfaceView` renders rows — it knows nothing about PRs or tickets. A
+rendering improvement lands on both surfaces at once.
+
+**`code` renders for real, as of `ios-curated-view-parity` W7**
+(`iOS/Nostromo/Views/Panes/CodeSurfaceView.swift`). Before W7, `code`
+rendered its raw file text in a monospaced view — no gutter, no
+scroll-to-anchor, no emphasis, discarding `path`/`revision`/`first_line`
+entirely. That looked like a working file view and wasn't one; the operator
+had no way to tell that the line an agent pointed at wasn't the line she was
+reading. W2 deleted that rendering rather than keep a half-built one, and W7
+replaces the stub it left behind with a real one:
+
+- **The line arithmetic is the same code macOS uses**, ported rather than
+  reimplemented: `CodeDocument`, `RowOffsetIndex`, and `ScrollDecision`
+  (`Shared/NostromoKit/Sources/NostromoKit/Code/`) are copies of macOS's own
+  types (`macOS/Nostromo/UI/`), with macOS's test suites ported alongside
+  them and passing unmodified. Offsets are UTF-16 code units, so `path:line`
+  lands on the same line on both clients even for a file containing an
+  emoji. The two clients keep separate copies rather than a shared move
+  (deduplicating them is a deferred cleanup), but they cannot silently drift
+  apart in behaviour without a ported test noticing.
+- **The gutter is one cell per logical line, top-aligned against a freely
+  wrapping text column**, with no `NSTextView` and no fragment-counting
+  arithmetic behind it (contrast macOS's `LineNumberRulerView`, which
+  numbers only paragraph-starting line fragments and carries a long comment
+  about the off-by-one that produces). A soft-wrapped continuation gets a
+  blank gutter cell for free, structurally, rather than by computing which
+  fragment starts a paragraph. A long line is fully readable with no
+  horizontal panning.
+- **Anchor and emphasis resolution is three states, not two.** Macos's own
+  resolution collapses to `Int?` and silently drops any anchor that isn't
+  `.line`/`.section` (`TicketContentView.swift`'s `resolveRows`) — the exact
+  silent fallback this PRD forbids. iOS's `CodeDocument.resolve(anchor:)` /
+  `resolve(emphasis:)` return `AnchorResolution`/`EmphasisResolution`: not
+  requested, resolved, or requested-and-unresolvable-with-a-reason. An
+  anchor line outside the file, an anchor for a different path, an anchor
+  kind this surface can't use, or an emphasis range that matches nothing are
+  all **stated** at the top of the content — never clamped to the nearest
+  valid line and rendered as though it had matched, and never silently
+  dropped.
+- **The header names the path and the revision** — `working` renders as
+  words ("working tree"), never as though it were a hash; a SHA renders
+  abbreviated to 7–8 characters, with the full value available via
+  tap-and-hold, so a PR head SHA and the working tree are distinguishable at
+  a glance. The path is rendered in full, truncated from the leading end if
+  it must be, so the filename survives.
+- **A re-show re-anchors without rebuilding.** The surface's SwiftUI
+  identity is `(path, revision)`, never the address — an address-only push
+  re-resolves and re-marks without rebuilding the document, the row views,
+  or their scroll position, and an anchor already in the viewport does not
+  move it.
+- **No truncation, no syntax highlighting.** Unlike `PerriView`'s raw diff
+  (truncated at 4000 characters and 60 lines — a different, deferred
+  surface), a large file relies on `LazyVStack`'s own laziness rather than a
+  cap. Neither client highlights syntax; the wire type reserves room for it.
+
+**`pr_diff` renders for real, as of `ios-curated-view-parity` W8**
+(`iOS/Nostromo/Views/Panes/DiffSurfaceView.swift`,
+`DiffFileListView.swift`, `DiffFileContentView.swift`) — and it is the one
+place this PRD deliberately diverges from macOS in *shape*, not just in
+completeness:
+
+- **iOS is file-list-first; macOS is one flat scrolling document.** macOS's
+  `DiffDocument`/`CodeContentView` render a whole PR's diff as one
+  continuous document — a one-line banner per file, then hunks, then lines.
+  iOS instead presents the changed files as a list (path, status, `+`/`-`
+  counts) and opens one file's hunks at a time. This is a deliberate
+  form-factor call, not a lesser rendering: a 40-file diff as one continuous
+  scroll is a defensible document at a Mac's width and a haystack at a
+  phone's. macOS is unchanged by this wedge.
+- **The two parts are one component pair, arranged two ways.**
+  `DiffFileListView` (the list) and `DiffFileContentView` (one file's hunks)
+  take identical parameters at both widths. At compact width they're a
+  `NavigationStack` push — list, then content, with the list still behind it
+  in the back stack. At regular width they sit side by side, list on the
+  leading edge; selecting a different file replaces the content and never
+  loses the list. `DiffSurfaceView` is the only renderer, besides
+  `DynamicFocusView`/`RegionContainerView` themselves, permitted to read the
+  app's `WidthClass` — enforced by an explicit allowlist in
+  `tests/ios_policy/test_ios_view_policy.py`.
+- **An anchored show bypasses the list entirely.** `Anchor.line(path:line:)`
+  opens the named file directly, scrolled to the resolved line, with any
+  emphasis marked — the operator never has to tap through the list to reach
+  the thing an agent pointed at. An anchor naming a file absent from the
+  diff, or of a kind this surface can't use, is stated and falls back to the
+  list rather than opening an arbitrary file.
+- **Line resolution is the SAME code on both clients**, which is the
+  property agents depend on for "line 412" to mean the same thing
+  everywhere. `DiffDocument` (`Shared/NostromoKit/Sources/NostromoKit/Code/`)
+  is a byte-for-byte port of macOS's own `DiffDocument.swift`, macOS's test
+  suite ported alongside it and passing unmodified, including the rule a
+  naive reimplementation gets backwards: a new-side line number wins, and a
+  line that exists only on the old side (one the PR deletes) resolves to its
+  removal row. `DiffAddressing` (new to iOS, since macOS's own diff view has
+  no three-state resolution) wraps that arithmetic in the same
+  `AnchorResolution`/`EmphasisResolution` types `code` uses, so "this file
+  isn't in the diff," "this line isn't in the diff," "this anchor kind
+  doesn't apply here," and "this diff was gated" are four distinct, stated
+  messages, never a silent fallback.
+- **Hunk lines share `code`'s exact gutter and wrapping mechanism**
+  (`CodeRowView`, extracted from `CodeSurfaceView` in this wedge) — the same
+  top-aligned gutter cell beside a freely wrapping text column, no
+  horizontal panning, no truncation. A line's added/removed/context/
+  hunk-header kind is distinguishable by three signals, not colour alone:
+  the restored `+`/`-`/space marker, a background tint, and the gutter's
+  new-or-old-number precedence.
+- **A `tooLarge` diff states that it is too large and names the changed-file
+  count**, replacing the entire surface — never an empty file list, which
+  would be indistinguishable from a PR that changes nothing.
+- **The selected file and its scroll position are not view state.** Both
+  live in `FocusRegionState` (a per-pane selected-file slot, and a per-file
+  scroll-restore key alongside the existing per-pane one), so a width-class
+  change, a tab switch, or a region rebuild all preserve which file is open
+  and where in it, the same way `code`'s scroll position survives those
+  transitions.
+
+**`pr_conversation` and `ticket` render for real, as of `ios-curated-view-parity`
+W9** (`iOS/Nostromo/Views/Panes/ProseSurfaceView.swift`,
+`Shared/NostromoKit/Sources/NostromoKit/Prose/`) — and **this is the one
+place iOS deliberately renders more of the same payload than macOS does**,
+which is worth stating plainly rather than leaving a reader to notice it on
+their own:
+
+- **iOS renders thread structure; macOS flattens it.** macOS's
+  `MarkdownBlockDocument.init(title:body:threads:)`
+  (`macOS/Nostromo/UI/MarkdownBlockDocument.swift:29-58`) concatenates every
+  comment from every thread into one linear document — an inline review
+  comment on `session_manager.rs:412` renders identically to a general PR
+  comment. iOS groups by thread: one `threadHeader` row per thread (naming
+  its kind, and — for an inline thread only — the `path:line` it's attached
+  to), followed by that thread's comments in order, never interleaved with
+  another thread's.
+- **iOS renders resolved state; macOS discards it.** `ConversationThreadModel
+  .resolved` is decoded on both clients and read by neither view before this
+  wedge. iOS marks a resolved thread with three signals — a glyph, the word
+  "Resolved," and a de-emphasised header — so the distinction survives
+  greyscale; macOS still shows a resolved and an unresolved thread
+  identically.
+- **iOS states an incomplete conversation; macOS shows nothing.**
+  `PrConversationPayload.conversationError` is set exactly when the PR fetch
+  succeeded but the conversation fetch failed — `threads` then carries
+  whatever was retrieved, never meant to be read as the whole conversation.
+  iOS renders a non-dismissible notice above the threads it did get, naming
+  the daemon's own error; macOS decodes the field and displays it nowhere,
+  so a partial conversation there looks exactly like a complete one — this
+  PRD's forbidden state, still live on one client.
+- **Unresolved anchors are stated on iOS and silent on macOS.**
+  `TicketContentView`/`ConversationContentView`
+  (`macOS/Nostromo/UI/Views/TicketContentView.swift:115-125`,
+  `ConversationContentView.swift:115-131`) collapse anchor resolution to
+  `Int?`: an anchor kind the view doesn't handle, or a name/id that doesn't
+  match, produces `nil`, which reads identically to "no anchor was
+  requested" — no scroll, no notice, no operator-visible signal. iOS's
+  `ConversationPlan.resolve(anchor:)`/`TicketPlan.resolve(anchor:)` return
+  the same three-state `AnchorResolution`/`EmphasisResolution` `code` and
+  `pr_diff` use (W7's memo B12): not requested, resolved, or
+  requested-and-unresolvable with a named reason. A `.comment(id:)` naming
+  an absent id names the id and how many comments are actually present; an
+  anchor kind a conversation can't use (`.line`, `.section`, `.queueRow`)
+  names the kind — exactly the case macOS drops on the floor.
+- **A ticket's comments share the section-addressing convention.** Both
+  clients key ticket lookups by either a canonical section name or the
+  string `"comment:<index>"` (`TicketBlockDocument.ranges`,
+  `macOS/Nostromo/UI/TicketBlockDocument.swift:20-24`, ported unchanged to
+  `TicketPlan.sectionOrCommentRowIndex`), so `anchor: {section:
+  "comment:3"}` means the same thing on both. An unmatched section name on
+  iOS renders the top of the description **and states that the section
+  wasn't found**; on macOS the identical request silently renders the top of
+  the description with no way to tell that from a successful anchor at all
+  — the PRD's forbidden state again, in its section-anchor shape. An
+  out-of-range comment index (`"comment:99"` on a four-comment ticket) is
+  reported by iOS naming both numbers, and silently ignored by macOS.
+- **Fenced code renders as a code block on both clients**, monospaced and
+  wrapping, sharing `code`/`pr_diff`'s no-truncation rule; `lang` is carried
+  on the row but never rendered (no syntax highlighting on either client) —
+  unlike macOS's `MarkdownBlockDocument.codeBlockRun`, which discards `lang`
+  outright (`_ = lang`, `:233`) rather than merely declining to render it.
+- **Markdown tables render as pipe-separated rows and images as
+  `[image: alt]` placeholders on both clients** — a real grid is worse at
+  phone width, not better, and image loading is out of scope for both.
+- **Re-emphasising a ticket clears only its own prior emphasis on iOS.**
+  macOS's `TicketContentView.clearEmphasis` (`:128-131`) removes
+  `.backgroundColor` over the *entire* document, which also wipes the
+  inline-code and code-block tints that emphasis had nothing to do with;
+  iOS tracks the emphasised row set explicitly and replaces it wholesale, so
+  a second emphasis never disturbs unrelated formatting.
+
+`PaneAddress` (below) reaches iOS the same way it reaches macOS —
+`DynamicFocusView` passes `layout.paneAddress[paneId]` into
+`PaneSurfaceView` — and iOS's uses of `anchor`/`emphasis` are `pr_list`
+queue-row marking, `code`'s line/range addressing, `pr_diff`'s line/range
+addressing (identical resolution semantics to `code`, applied to a
+flattened diff instead of a flattened file), and, as of W9,
+`pr_conversation`'s comment addressing and `ticket`'s section/comment
+addressing above — every content kind that has any addressing to render now
+renders it. `reason` is used more broadly — see the tab strip below.
+
+### Tabs and layout on iOS: the compact strip (`ios-curated-view-parity` W5)
+
+Real split views are impractical on a phone-width screen, so iOS never
+renders `Split`/`Tabs` as simultaneously-visible regions the way macOS does.
+Instead, `NostromoKit`'s `TabPlan.build(tree:content:)` flattens the whole
+`PaneTree` — depth-first, `Split` and `Tabs` children alike — into a single
+ordered list of tab-strip entries, rendered by
+`iOS/Nostromo/Views/Panes/TabStripView.swift` as one horizontal strip at the
+top of the focus, with no chrome at all when the tree is a single `repl`
+leaf. Two `Tabs` nodes in one tree stay as two contiguous runs in that
+flattened order rather than interleaving — the strip reflects the tree's
+shape, not a bare pane-id walk.
+
+**Labels never come from a pane id.** A `tabs` node's `labels` are used
+positionally against `children`; a leaf reached any other way (a `Split`
+child, or a `tabs` entry whose label is missing or the array is too short)
+falls back to a name derived from that pane's *content kind* —
+`"Repl"`/`"Queue"`/`"Diff"`/`"File"`/`"Conversation"`/`"Ticket"`, or the
+neutral `"View"` — never `paneId.capitalized`. This is `TabPlan.fallbackLabel`
+in `Shared/NostromoKit/Sources/NostromoKit/Layout/TabPlan.swift`.
+
+**`active`/`focused_pane` are honoured, but never fight the operator.**
+`NostromoKit`'s `LayoutChangeClassifier` (a port of macOS's own — see above)
+classifies each incoming tree against the previous one; `FocusRegionState`
+(`Shared/NostromoKit/Sources/NostromoKit/Layout/FocusRegionState.swift`)
+then moves the compact strip's frontmost pane only on a
+`.activeTabOnly`/`.tabMembership`/`.splitTopology` change, never on
+`.identical`/`.contentOnly` — a content-only republish (by far the most
+frequent broadcast) must never yank the operator back to a tab they've since
+navigated away from. `focused_pane`, when it names a pane still present,
+always wins on top of that — this is what makes a deliberate `nostromo.show`
+actually bring its tab to front on iOS, which it did not before W5.
+
+**Unread is derived, not remembered.** `DaemonStore` tracks a
+`paneContentVersion` per pane, incremented once for every `pane_content` push
+it actually applies (never for one its `.loading`-suppression guard drops).
+A pane is unread iff it isn't the strip's current frontmost pane and its
+version has advanced past what `FocusRegionState` last recorded for it;
+tapping a tab clears its mark immediately. The frontmost tab's
+`PaneAddress.reason`, when present, renders as a dimmed caption beneath the
+strip — the same "why am I looking at this" line macOS renders as a tab
+caption (`TabRegionView.setCaption(_:for:)`).
+
+**iOS resolves no placement.** The compact strip renders whatever tree the
+daemon sends; there is no identity-reuse rule, no type ordering, no tab cap,
+and no eviction policy on the client, and no split ratio is persisted
+locally — every layout decision remains the daemon-side placement engine's
+alone (see `nostromo.show` above).
+
+See `docs/ios-verification.md` for how this rendering is verified given
+`iOS/Nostromo.xcodeproj` has no test target.
+
+Ambient activity (`ios-curated-view-parity` W4) is a related but separate
+surface, deliberately not a pane or a tab: the `activity` view type never
+reaches the pane tree on either platform (R1), so it doesn't appear in
+`PaneSurfaceView`'s switch above. It's the always-present
+`ActivityTickerBar`/`ActivityStreamsSheet` pair in
+`iOS/Nostromo/Views/Activity/`, composed by `DynamicFocusView` above
+`TranscriptView`'s input bar (or as a plain bottom inset on a non-repl
+surface). See `docs/activity.md` for the full ambient-activity picture,
+including where iOS's client-side retention bounds diverge from macOS's.
+
+Decision modals (`ios-curated-view-parity` W3) are likewise not a pane or a
+tab: a `decision_request` never reaches the pane tree, so it doesn't appear
+in `PaneSurfaceView`'s switch either. It's a `.sheet` presented from
+`iOS/Nostromo/NostromoApp.swift`, above the root `TabView` rather than from
+any region or focus view — a decision arriving while the operator is on a
+given tab leaves them on that tab once they've answered. See
+`docs/mcp/tools.md`'s "Decision modals" section for the full behavior.
+
+---
+
+## `PaneAddress` — anchor, emphasis, and reason (curated-agent-views W1)
+
+`ServerMsg::PaneContent` carries an optional sibling of `freshness`:
+
+```json
+{
+  "type": "pane_content",
+  "tag": "cody-core-1234",
+  "pane_id": "ticket",
+  "content": { "kind": "text", "text": "CORE-1234: ..." },
+  "address": {
+    "anchor": { "kind": "line", "path": "src/main.rs", "line": 42 },
+    "emphasis": [ { "kind": "text_range", "start": 0, "end": 40 } ],
+    "reason": "flagged by CI"
+  }
+}
+```
+
+`address` says where to look inside a pane's content, and why. It's a
+sibling of `freshness` rather than a field on `PaneContentWire` deliberately:
+that placement is what lets a caller cheaply re-anchor/re-emphasise a pane
+("a show matching a live tab re-anchors it") without re-sending the content
+itself. `None`/absent means "no addressing concept for this pane" — every
+push before this field existed, and every push from a caller with nothing to
+point at.
+
+- `anchor` (optional) — the one place to land: `line` (a line, optionally
+  scoped to one file — the `path` is how a multi-file view like `pr_diff`
+  addresses a line within it), `comment` (a PR-review comment thread id),
+  `section` (a named heading), or `queue_row` (a `repo`/`number` pair).
+- `emphasis` (zero or more) — ranges to highlight: `line_range`, `comment`,
+  `section`, `text_range` (a raw character offset range), or `queue_row`.
+- `reason` (optional) — one short human-readable phrase explaining why this
+  was shown.
+
+W1 transported every variant but rendered only `reason` — as a tab's caption,
+dimmed and truncated, sourced from that tab's own last-pushed content. **W2
+renders `anchor` and `emphasis` for the `code` and `diff` content kinds**
+(see below); the remaining variants (`comment`, `section`, `queue_row`) still
+decode, round-trip, and are otherwise inert. The dedup logic in
+`pane_sources::run_pane_source_broadcaster` treats `address` as part of the
+change-detection key, so an address-only push (identical content and
+freshness) is still broadcast rather than silently dropped as a duplicate —
+which is what makes "re-emphasise this same file without re-fetching it"
+cheap. The two W2 sources derive an address from their `params`; every other
+daemon-side call site passes `address: None`.
+
+---
+
+## Line-addressable code (`code` / `diff`) — curated-agent-views W2
+
+Two content kinds render with a line-number gutter, scroll-to-line, and marked
+ranges. Both are produced daemon-side; the client renders.
+
+### `code` — a file at a revision
+
+```json
+{
+  "kind": "code",
+  "path": "src/ipc/session_manager.rs",
+  "revision": "a1b2c3d",
+  "first_line": 1,
+  "text": "use std::..."
+}
+```
+
+Text plus the line number its first line represents, rather than an array of
+per-line objects: the client splits and numbers, which keeps a whole-file
+payload the same size as the `text` variant it replaces.
+
+Produced by **`nostromo.get_file`**, whose `params` are:
+
+| field | meaning |
+| --- | --- |
+| `path` (required) | repo-relative, resolved against the focus's session cwd |
+| `revision` | `"working"` (the on-disk tree), any git revision, or **omit** for the PR-under-review's head SHA when a PR is loaded *and* the caller's own working directory is actually rooted in that PR's repo, else the working tree (W5 — current-pr-collision: a PR pinned to a *different* repo than the caller's own must never make an omitted revision resolve to that foreign PR's head SHA) |
+| `anchor_line` | 1-based line to scroll to; becomes `address.anchor` |
+| `emphasis` | `[{start, end}]` (or `[[start, end]]`) inclusive 1-based ranges; becomes `address.emphasis` |
+| `reason` | one short phrase, rendered as the tab's caption |
+
+A non-`working` revision is read via `git show <rev>:<path>` in the session
+cwd, falling back to the GitHub contents API when the local clone doesn't have
+the object — which is the common case for a PR head from a fork that was never
+fetched. That fallback needs the network, so it only runs on the tool path;
+the daemon's synchronous restart-repaint skips a pane it can't resolve locally
+rather than replacing its content with an error.
+
+**`nostromo.get_file` is deliberately not watch-driven.** A `file` pane is a
+snapshot of a revision; live-updating it would contradict the revision it says
+it is showing. It is also not re-fetched by the background broadcaster.
+
+**Refusals.** Every one of these fails *before* anything is broadcast, so a
+pane that already has content keeps it — a bad show never destroys what the
+operator was reading. Each is a distinct code: `invalid_params`,
+`unknown_path`, `path_escapes_root`, `not_utf8`, `anchor_beyond_eof`,
+`invalid_emphasis_range`, `unresolvable_revision`, `revision_repo_mismatch`.
+The one exception is a pane this same call just put into `Loading` — there is
+nothing to preserve, and an error beats a spinner that never resolves.
+
+`revision_repo_mismatch` (W5 — current-pr-collision): an explicit `revision`
+that the local clone can't resolve, where the only remaining way to serve it
+would be the GitHub-contents fallback against a PR pinned to a *different*
+repo than the one the caller's own working directory actually is. Refused
+rather than fetched — the alternative is silently rendering a foreign repo's
+content with `ok: true`, which is worse than an error. `nostromo.show`'s
+`file` type carries `current_pin: {repo, number}` on this refusal
+*unconditionally* — a `revision` was named, but that doesn't mean the caller
+knew a foreign PR pin was the actual reason it was refused, and this is the
+one error whose entire reason for existing is a pin mismatch. Every other
+fetch-level refusal from this path carries `current_pin` only when the
+request's `revision` was omitted and a PR is pinned (see `docs/mcp/tools.md`'s
+`nostromo.show` error table).
+
+### `diff` — a PR's change, per file
+
+```json
+{
+  "kind": "diff",
+  "repo": "acme/web",
+  "number": 42,
+  "files": [
+    {
+      "path": "src/main.rs",
+      "old_path": null,
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1,
+      "hunks": [
+        {
+          "header": "@@ -10,3 +10,5 @@ fn main() {",
+          "old_start": 10,
+          "new_start": 10,
+          "lines": [
+            { "kind": "context", "old_n": 10, "new_n": 10, "text": "let x = 1;" },
+            { "kind": "removed", "old_n": 11, "text": "let y = 2;" },
+            { "kind": "added",   "new_n": 11, "text": "let y = 3;" }
+          ]
+        }
+      ]
+    }
+  ],
+  "too_large": false,
+  "changed_files": 1
+}
+```
+
+`status` is one of `added` / `removed` / `modified` / `renamed`; a line's
+`kind` is one of `context` / `added` / `removed` / `meta`. A `meta` line is a
+line the format carries but gives no content meaning to — notably
+`\ No newline at end of file` — kept rather than dropped so the parser never
+loses a line.
+
+A diff needs this structure (where `code` does not) because
+`anchor: {kind: "line", path, line}` must resolve to exactly one row, and only
+something that has parsed the hunk headers knows which side of a hunk a given
+line number lives on. **New-side numbering wins**; a line present only on the
+old side resolves to its removal row.
+
+Produced by **`perri.get_pr_diff`**, which is watch-driven off the same
+current-PR channel as `perri.get_current_pr`, so a bound pane refreshes itself
+with no tool call. Its optional `params` are `{anchor, emphasis, reason}`,
+carrying wire-shaped `Anchor`/`Emphasis` values through to `address`.
+
+**There is no display budget.** The whole diff is sent and the whole diff is
+rendered. The fetch-level large-diff gate in `perri_pr_native.rs` is a
+different thing — a protection against pulling a megabyte over the wire — and
+when it trips, `too_large` is `true`, `files` is empty, and the client says so
+explicitly and names `changed_files`. A stated limit is not silent truncation;
+the old client-side 150-line cap was, and it is gone.
+
+---
+
+## Markdown blocks and `pr_conversation` — curated-agent-views W3
+
+Markdown (a PR description, a review comment) is parsed **server-side** with
+`pulldown-cmark` into a block model, and travels on the wire as structured
+data — never as a markdown string the client re-parses. This is what makes a
+fenced code block in a PR description or review comment render as an actual
+code block, monospaced with its indentation intact, instead of literal
+backticks and flattened prose.
+
+```json
+{ "kind": "code_block", "lang": "rust", "text": "fn main() {\n    todo!()\n}" }
+```
+
+An `MdBlock` is one of `paragraph`, `heading` (`level` 1–6), `code_block`
+(`lang` is the fence's language token, `null` for an unlabelled fence or an
+indented block), `list` (`ordered`, optional `start`, `items: [[MdBlock]]`),
+`quote` (`blocks: [MdBlock]`), `table` (`header`/`rows` of `[[MdSpan]]`), and
+`rule`. An `MdSpan` — inline content inside a block — is one of `text`,
+`code`, `emph`/`strong`/`strike` (each wrapping nested `spans`), `link`
+(`spans`, `url`), and `image` (`alt`, `url`). Both are defined once in
+`src/ipc/protocol.rs` and reused by `ticket` (curated-agent-views W4, below)
+— this is not a `pr_conversation`-specific format.
+
+### `pr_conversation` — a PR's description and comment/review threads
+
+```json
+{
+  "kind": "pr_conversation",
+  "repo": "acme/web",
+  "number": 42,
+  "title": "feat: add user authentication",
+  "author": "alice",
+  "url": "https://github.com/acme/web/pull/42",
+  "body": [ { "kind": "paragraph", "spans": [{ "kind": "text", "text": "..." }] } ],
+  "threads": [
+    {
+      "id": "inline-9001",
+      "kind": "inline",
+      "path": "src/main.rs",
+      "line": 42,
+      "diff_hunk": "@@ -40,3 +40,3 @@ ...",
+      "resolved": false,
+      "comments": [
+        { "id": "9001", "author": "bob", "created_at": "2024-01-01T00:00:00Z",
+          "body": [ { "kind": "code_block", "lang": null, "text": "..." } ] }
+      ]
+    }
+  ],
+  "conversation_error": null
+}
+```
+
+`kind` on a thread is `issue` (a top-level PR conversation comment), `review`
+(a whole-PR review with a written body), or `inline` (a review-comment thread
+anchored to a file/line). Inline threads are assembled by walking each
+comment's `in_reply_to_id` up to its root; a reply whose stated root isn't in
+the fetched page becomes a root of its own rather than being dropped.
+`resolved` is always `false` today — GitHub's REST API doesn't expose
+inline-thread resolution, only its GraphQL API does.
+
+Produced by **`perri.get_pr_conversation`**, watch-driven off the same
+current-PR channel as `perri.get_current_pr` and `perri.get_pr_diff` — a bound
+pane refreshes itself with no tool call. Its optional `params` are
+`{anchor, emphasis, reason}`, the same generic `Anchor`/`Emphasis` passthrough
+`perri.get_pr_diff` uses; the variant that applies here is
+`{"kind": "comment", "id": "..."}` for both. **A `params.anchor`/`params.emphasis`
+naming a comment id absent from the fetched conversation is refused —
+`unknown_comment_id` — leaving the pane's existing content untouched,** the
+same "a bad show never destroys what you were reading" discipline `code`/`diff`
+apply to a bad line.
+
+**Partial failure is explicit.** The daemon makes three REST calls per fetch
+(issue comments, review comments, reviews); if the PR fetch itself succeeds
+but one or more of those three fails, `conversation_error` names which, and
+`threads` carries whatever the other calls returned — never blanked, and never
+presented as a complete conversation it isn't.
+
+---
+
+## `ticket` — an issue-tracker ticket — curated-agent-views W4
+
+```json
+{
+  "kind": "ticket",
+  "provider": "jira",
+  "key": "CORE-2841",
+  "summary": "Referral status doesn't sync to the portal",
+  "status": "In Progress",
+  "assignee": "Alice Smith",
+  "url": "https://carefeed.atlassian.net/browse/CORE-2841",
+  "sections": [
+    { "name": "description", "heading": null,
+      "blocks": [ { "kind": "paragraph", "spans": [{ "kind": "text", "text": "..." }] } ] },
+    { "name": "acceptance_criteria",
+      "heading": [{ "kind": "text", "text": "Acceptance Criteria" }],
+      "blocks": [ { "kind": "list", "ordered": false, "start": null, "items": [ ["..."] ] } ] }
+  ],
+  "comments": [
+    { "index": 1, "author": "bob", "created_at": "2024-01-01T00:00:00Z",
+      "body": [ { "kind": "paragraph", "spans": [{ "kind": "text", "text": "..." }] } ] }
+  ]
+}
+```
+
+`provider` names which registered issue-tracker backend produced this ticket
+— a request field, not a view type, so Linear or GitHub Issues can register a
+second provider later without a new `PaneContentWire` variant. v1 registers
+exactly one provider, `jira`.
+
+`sections` splits the ticket's description on its own headings: every block
+before the first heading is the `"description"` section (`heading: null`);
+each subsequent heading starts a new section whose `name` is that heading's
+text, lowercased/normalized, then resolved against an aliasable table (see
+below) — so `## Acceptance Criteria`, `## AC`, and `## Definition of Done` all
+resolve to the same canonical `"acceptance_criteria"` name. `comments` is
+chronological and 1-indexed; a comment is addressable the same way a section
+is, via the reserved name `"comment:<index>"`.
+
+Produced by **`nostromo.get_ticket`**, params `{ provider, key, anchor?,
+emphasis?, reason? }` — the same generic `Anchor`/`Emphasis`/`reason`
+passthrough `perri.get_pr_diff`/`perri.get_pr_conversation` use; the variant
+that applies here is `{"kind": "section", "name": "acceptance_criteria"}` (or
+`"comment:3"`) for both `anchor` and `emphasis`. Unlike every other source,
+`ticket` is **not watch-driven** — a ticket is a one-shot fetch, not a live
+subscription — and it is the first source that talks to a service outside
+GitHub.
+
+**Refusals are specific, and never render as raw text or blank the pane:**
+
+| `error` | Meaning |
+|---|---|
+| `unsupported_provider` | `provider` isn't registered. The daemon's log/response names every provider it *does* support. |
+| `provider_unconfigured` | `provider` is registered (`jira` always is) but has no resolved credentials — see `docs/jira-provider.md`. The message names the credentials file and all three variable names. |
+| `unknown_ticket` | The provider's backend has no such ticket (Jira returned 404). |
+| `unknown_section` | `anchor`/`emphasis` named a section (or `comment:<n>`) that doesn't exist on *this* ticket — the message lists every section that does. |
+| `fetch_failed` | The provider ran but failed for some other reason (network error, non-2xx status, malformed response) — this one does **not** leave the pane's content untouched, the same way a `code`/`file` fetch failure on a live source stays loud. |
+
+**A short in-memory TTL cache** (60 seconds, keyed `(provider, key)`, never
+persisted across a daemon restart) means repeatedly showing the same ticket —
+including the daemon's own startup repaint of a bound `ticket` pane — costs at
+most one HTTP request per window, not one per repaint.
+
+---
+
+## Placement rules (`views.yaml`) — curated-agent-views W5
+
+`nostromo.show` (see `docs/mcp/tools.md`) is backed by a deterministic
+placement engine (`src/mcp/views/`) that decides where a view lands from data
+alone — no LLM inference, no hidden state beyond what's derived from the
+pane registry. This section documents the rules-as-data (`views.yaml`) and
+where the engine enforces each of the PRD's eight placement rules, R1–R8.
+
+### The `region` name on a `PaneTree::Tabs` node
+
+A `Tabs` node gained an optional `region` field (`src/ipc/protocol.rs`):
+`None` for every tabs node written before W5, and for any tabs node an agent
+builds by hand through `apply_layout`/`set_pane_layout` — **the layout schema
+DSL has no `region:` keyword.** `SchemaNode::to_pane_tree`
+(`src/mcp/layout_schema.rs`) always emits `region: None`; a named region is
+exclusively an artifact of the placement engine itself, set only by
+`views::tree::build_tabs` when the engine creates or rebuilds the `detail`
+region for a curated show. The name is how `nostromo.show` finds "the detail
+region" again in a tree it is itself about to mutate, and it survives a
+daemon restart because the pane tree is persisted. A tabs node with `region:
+None` is invisible to the placement engine: an agent's own
+`apply_layout`-built tabs region behaves exactly as it did before W5, and the
+engine will never adopt, reuse, or evict any of its tabs.
+
+### `views.yaml` schema
+
+The engine's entire input, besides the derived view state and the request.
+Compiled-in default at `src/mcp/views.yaml`; shadowed **wholesale** (not
+merged) by `~/.nostromo/views.yaml` if present, re-read fresh on every
+`nostromo.show` call — the same no-caching, override-wins discipline
+`~/.nostromo/layouts/<name>.yaml` follows for named layouts. A present-but-
+malformed override is `invalid_views_config`, not a silent fallback to the
+compiled-in rules — an operator who edited the file wants to know the edit is
+broken, not have it look like it had no effect.
+
+```yaml
+regions:
+  <region-name>:
+    tabbed: true | false            # required
+    pane: <pane-id>                 # required when tabbed: false — the one pane this region is
+    pane_prefix: <string>           # required when tabbed: true — new tab ids are "<prefix>.<n>"
+    tab_cap: <int>?                 # optional; omitted means unbounded
+    evict: least_recently_focused_unpinned?  # optional; omitted means never evict (a cap is simply exceeded)
+    create:                         # ordered candidates for bringing the region into existence (D5)
+      - relative_to: <pane-id>      # the pane id to split; first whose pane is live wins
+        position: split_left | split_right | split_above | split_below
+        ratios: [<f32>, <f32>]      # exactly two
+
+views:
+  <view-type-name>:
+    region: <region-name>           # R1: this type's one home region
+    order: <u32>                    # R3: sort key among the region's tabs, ties break on identity
+```
+
+Validated at load: every `views.*.region` must name a declared region; an
+untabbed region needs `pane`; a tabbed region needs `pane_prefix`; every
+`create` rule needs exactly two ratios and a recognised `position`. The
+compiled-in default (`src/mcp/views.yaml`):
+
+```yaml
+regions:
+  queue:
+    tabbed: false
+    pane: queue
+    create:
+      - { relative_to: repl, position: split_above, ratios: [0.6, 0.4] }
+  detail:
+    tabbed: true
+    tab_cap: 6
+    evict: least_recently_focused_unpinned
+    pane_prefix: detail
+    create:
+      - { relative_to: queue, position: split_right, ratios: [0.5, 0.5] }
+      - { relative_to: repl, position: split_above, ratios: [0.6, 0.4] }
+
+views:
+  review_queue: { region: queue, order: 0 }
+  pr_conversation: { region: detail, order: 1 }
+  pr_diff: { region: detail, order: 2 }
+  ticket: { region: detail, order: 3 }
+  file: { region: detail, order: 4 }
+```
+
+### R1–R8, and where each is enforced
+
+| Rule | Enforced |
+|---|---|
+| **R1** home region | `views.yaml`'s `views.<type>.region`, resolved in `placement::place`. A request whose home region doesn't exist yet gets a `create_region` intent (see below); a non-tabbed region already holding a *different* view refuses the show (`region_not_tabbed`) — this is what keeps the queue region single-purpose. |
+| **R2** identity reuse | `placement::place` — a live tab whose `(view_type, identity)` matches the request is reused: re-anchored, re-labelled, brought to front. Anchor/emphasis/reason are not part of `ViewIdentity`, so "the same file at a different line" is the same view by construction, not by a special case. |
+| **R3** new identity, new tab | `placement::place`'s `insertion_index` — a new tab is inserted at the position `(views.<type>.order, identity.key())` dictates, so where a tab lands is a function of what it holds, never of arrival order. |
+| **R4** cap and eviction | `placement::place`'s `pick_victim`, run only when adding a *new* tab would push the region over `tab_cap`: the least-recently-focused tab that is neither frontmost nor pinned, ties breaking leftmost. A region every tab of which is pinned or frontmost simply runs one over the cap rather than refusing the show. |
+| **R5** focus asymmetry | `placement::place` unconditionally makes the target tab frontmost, new or reused, by construction of `tab_index`; `tools::show` sends `FocusLayout` with `focused_pane` set to it unconditionally. There is no configuration knob for this — a deliberate, settled PRD decision. |
+| **R6** no pointless motion | **Enforced on the client, not here.** The daemon has no way to know what the operator's viewport is currently showing, so `nostromo.show` always sends the anchor and lets W2's client-side `ScrollDecision` decide whether that means actually scrolling. This is the one rule with no representation anywhere in `src/mcp/views/`. |
+| **R7** modals are not a content channel | **Enforced by omission.** `ViewType` has no modal variant and `nostromo.show`'s schema has no free-text content field (see `docs/mcp/tools.md`) — there is no plumbing through which a decision could be routed as a "view." W6 owns the decision surface. |
+| **R8** PR change resets | `placement::place`, when a `pr_conversation`/`pr_diff` show names a `(repo, number)` other than the one currently live in the detail region; and `placement::reset_for_pr_change`, called from `tools::show::reset_for_pr_change`, which `perri.load_pr`/`perri.clear_current_pr` invoke when the PR under review itself changes. Both close every `file`/`ticket` tab and the previous PR's conversation/diff tabs, keeping only the new PR's. Teardown alone isn't the whole story for `perri.clear_current_pr`: a paramless-bound PR tab survives it (it derives its identity from "the PR under review," which is now none), so `perri.clear_current_pr` also resolves whatever PR-content panes remain and pushes the no-PR placeholder to them — see `perri.clear_current_pr` in `docs/mcp/tools.md`. |
+
+### The `perri-curated` layout
+
+`src/mcp/layouts/perri-curated.yaml` is a second compiled-in named layout,
+registered alongside `perri-standard`. Its starting tree is just a queue and
+a REPL — `split(vertical, [leaf queue, leaf repl], [0.6, 0.4])` — with `queue`
+bound to `perri.list_pr_queue`/`pr_list`, matching the PRD's walking scenario:
+"the top region shows only the review queue … nothing else has anything to
+say yet." There is no `diff` pane and no `detail` region in the layout
+itself; the detail region comes into existence only when the placement engine
+splits it off on the first `nostromo.show` of a `pr_conversation`, `pr_diff`,
+`file`, or `ticket` view, and it is removed again when its last tab closes.
+
+This differs from `perri-standard`, which declares a fixed three-pane
+`queue`/`diff`/`repl` tree up front, with `diff` bound to
+`perri.get_current_pr`. **`perri-standard` is unchanged and stays
+byte-identical** to its pre-W5 content — it is the fallback path for a caller
+still driving the raw pane tools (`create_pane`, `set_pane_content`,
+`apply_layout`, `refresh_pane_content`, …) directly rather than
+`nostromo.show`, and its non-regression (including live refresh, restart
+repaint, and `badly_stale` marking) is a stated acceptance criterion of this
+wedge.
+
+### Creating and removing the detail region
+
+The `detail` region does not exist in `perri-curated`'s tree until the first
+`nostromo.show` that needs one. At that point the engine picks the first
+`create` candidate from `views.yaml` whose `relative_to` pane is actually
+live in the focus — `queue` (split right, `[0.5, 0.5]`) if the queue pane
+exists, else `repl` (split above, `[0.6, 0.4]`) as a fallback for a bare
+focus with no queue at all — and the applier (`tools::show::apply_to_tree`)
+builds the tabs node via `views::tree::insert_beside`. This is the same
+tree-mutation path R4's eviction and R8's reset both use, so a region's
+creation and its removal are not separate machinery: `views::tree::
+remove_tabs_region` collapses the split back out when a region's last tab is
+closed, whether that closure came from R4 evicting down to nothing (never
+happens in the compiled-in rules, since eviction only fires when adding a
+tab, which always leaves at least one) or, in practice, from R8's reset
+leaving zero survivors in the region.
+
+---
+
+## Pane ids are recycled — client state must be too
+
+`new_pane_id` (`src/mcp/views/placement.rs`) allocates the lowest free
+`<prefix>.<n>` id for a tabbed region (e.g. `detail.0`) — it does not mint a
+fresh, ever-increasing id. The same id is reissued the moment its previous
+occupant's tab closes: R8's PR-change reset tears down every
+`pr_conversation`/`pr_diff`/`file`/`ticket` tab in the detail region, and the
+very next `nostromo.show` can hand `detail.0` right back out for a
+**completely different view**.
+
+This makes a pane id a **slot**, not an identity. A client that keys any
+per-pane cache — a rendered document, a scroll offset, a "last rendered this
+content, skip the repaint" check, whatever a given content-kind renderer
+holds onto between pushes — by pane id alone, and never clears that cache
+when the pane's occupant changes, will go on rendering a new PR's diff with
+the previous PR's document still cached underneath it: a gutter, a cached
+line count, or an idempotent-push guard built on top of that stale cache is
+now describing a document nobody asked for.
+
+Two things a client must do to stay correct under recycling:
+
+- **Prune per-pane content/freshness/address state down to the pane ids
+  named by the *current* tree, on every structural layout broadcast** — not
+  only when a later content push happens to touch that pane. A structural
+  broadcast and the content push(es) that follow it are separate messages;
+  there is a real (short) window between them where a recycled pane id has
+  no content yet. Show a plain "waiting for content…" placeholder in that
+  window — that's the correct, honest intermediate state — rather than
+  carrying the previous occupant's content forward into it.
+- **Clear a content-kind renderer's own cached state the moment that pane
+  stops being rendered as that kind** — not just on a content *change*
+  within the same kind, but on the transition away from the kind
+  altogether. Otherwise a renderer that's hidden and later reshown
+  resurfaces holding whatever document it last had, independently of what
+  the pane actually contains now — e.g. a line-number gutter left over from
+  a file that isn't on screen anymore, drawn over whatever text a different
+  kind is now showing in the same space.
+
+(Nostromo's macOS client implements both of these — see
+`AppStore.swift`'s `.focusLayout` handling for the prune, and
+`DynamicFocusView.swift`'s `PaneContentNSView.update` /
+`CodeContentView.clearContent()` and its siblings for the per-kind clear.)
+
+---
+
 ## Views and panes
 
 ### `perri` — PR review view
@@ -120,7 +1131,7 @@ content, as a second line of defense against an older daemon or a race.
 | Tool | Effect |
 |------|--------|
 | `perri.load_pr({ number, repo, highlights? })` | Writes `current-pr.json` + touches `.dirty` → native watcher fetches PR diff |
-| `perri.clear_current_pr()` | Removes `current-pr.json` + touches `.dirty` → diff pane clears |
+| `perri.clear_current_pr()` | Removes `current-pr.json` + touches `.dirty` → closes stale curated tabs (R8) and pushes the no-PR placeholder to whatever live pane holds PR content, wherever the layout template put it |
 | `perri.set_selected_index({ index })` | Moves the queue selection cursor |
 
 ---
@@ -314,7 +1325,8 @@ true, "warnings": [...] }`, listing the failed panes.
 | `unknown_layout` | Named layout has no on-disk override and no compiled-in default |
 | `unknown_source` | A pane's `source` isn't in the closed fetcher registry |
 | `invalid_content_kind` | A pane's `content_kind` isn't a recognised `PaneContentWire` variant |
-| `invalid_schema` | The schema document is malformed, or `repl` is bound as a pane |
+| `invalid_schema` | The schema document is malformed, or `repl` is bound as a pane in the top-level `panes` map |
+| `repl_in_tabs` | A `tabs:` region named `repl` among its tab panes — distinct from `invalid_schema` above |
 | `fetch_failed` | A fetcher ran but failed to produce content (reported via `warnings`, not a hard error) |
 | `invalid_args` | Neither `name` nor `tree` was provided, or both were |
 | `unidentified_caller` | No `view_id` and no caller `pty_id` to target |

@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 
+use crate::ipc::decisions::DecisionRegistry;
 use crate::ipc::pane_registry::PaneRegistry;
 use crate::ipc::protocol::ServerMsg;
 use crate::ipc::SessionManager;
 use crate::mcp::state::McpSharedState;
-use crate::mcp::{DaemonMcpBackend, PerriDaemonState};
+use crate::mcp::{DaemonMcpBackend, PerriDaemonState, TicketRegistryState};
 
 pub(crate) struct DaemonTestState {
     pub state: McpSharedState,
@@ -22,7 +23,9 @@ pub(crate) struct DaemonTestState {
     pub pane_registry: Arc<Mutex<PaneRegistry>>,
 }
 
-/// Build a daemon-hosted `McpSharedState` over a throwaway store dir.
+/// Build a daemon-hosted `McpSharedState` over a throwaway store dir, with no
+/// ticket providers registered (`TicketRegistryState::default()`) — the
+/// common case for every test that doesn't itself exercise a ticket source.
 ///
 /// The `TempDir` is deliberately leaked with `std::mem::forget`: its `Drop`
 /// would remove the directory while `PaneRegistry`/`SessionManager` may still
@@ -31,6 +34,13 @@ pub(crate) struct DaemonTestState {
 /// the crate that does it — the four `make_state()` helpers that used to each
 /// repeat it now delegate here.
 pub(crate) fn daemon_test_state() -> DaemonTestState {
+    daemon_test_state_with_tickets(TicketRegistryState::default())
+}
+
+/// Same as [`daemon_test_state`], but with a caller-supplied
+/// `TicketRegistryState` — for tests that exercise `nostromo.get_ticket` and
+/// need a registered (and possibly wiremock-backed) provider.
+pub(crate) fn daemon_test_state_with_tickets(tickets: TicketRegistryState) -> DaemonTestState {
     let tmp = tempfile::TempDir::new().unwrap();
     let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
         tmp.path().join("panes.json"),
@@ -46,6 +56,8 @@ pub(crate) fn daemon_test_state() -> DaemonTestState {
         session_mgr,
         broadcast_tx,
         perri: PerriDaemonState::default(),
+        decisions: Arc::new(Mutex::new(DecisionRegistry::default())),
+        tickets,
     };
     let state = McpSharedState::for_daemon(backend);
 

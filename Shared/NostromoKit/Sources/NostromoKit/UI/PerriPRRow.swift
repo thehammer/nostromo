@@ -43,6 +43,7 @@ public struct PerriPRRow: View {
 
     private var rowContent: some View {
         HStack(spacing: 10) {
+            markGlyph
             ciGlyph
 
             VStack(alignment: .leading, spacing: 2) {
@@ -75,6 +76,26 @@ public struct PerriPRRow: View {
                 .clipShape(Capsule())
         }
         .padding(.vertical, 4)
+        .padding(.leading, 4)
+        .background(model.marked ? Color.accentColor.opacity(0.16) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    // MARK: - Agent mark (W5 — curated-agent-views)
+
+    /// A leading bar for a row an agent has pointed at. Present as a
+    /// zero-opacity placeholder when unmarked rather than absent, so marking a
+    /// row does not reflow the rest of the queue under the operator's eyes.
+    ///
+    /// Visual only — see `PerriPRRowModel.marked`. Nothing here touches
+    /// selection or the load/approve actions.
+    private var markGlyph: some View {
+        RoundedRectangle(cornerRadius: 1.5)
+            .fill(Color.accentColor)
+            .frame(width: 3)
+            .opacity(model.marked ? 1 : 0)
+            .accessibilityHidden(!model.marked)
+            .accessibilityLabel("Pointed at by the agent")
     }
 
     // MARK: - CI glyph

@@ -101,7 +101,7 @@ impl CiState {
 
 // ── Queue items ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PrQueueItem {
     pub repo: String,
     pub number: u64,

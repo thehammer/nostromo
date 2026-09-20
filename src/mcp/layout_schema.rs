@@ -30,7 +30,17 @@ use crate::mcp::tools::apply_layout::{source_content_kind, source_is_known, Appl
 
 /// The `content_kind` names a `PaneSpec` may declare — one per
 /// `PaneContentWire` variant.
-const VALID_CONTENT_KINDS: [&str; 5] = ["text", "json_snapshot", "pr_list", "loading", "error"];
+const VALID_CONTENT_KINDS: [&str; 9] = [
+    "text",
+    "json_snapshot",
+    "pr_list",
+    "loading",
+    "error",
+    "code",
+    "diff",
+    "pr_conversation",
+    "ticket",
+];
 
 /// A named, declarative pane layout: a tree shape plus per-pane data bindings.
 #[derive(Debug, Clone, Deserialize)]
@@ -43,14 +53,35 @@ pub struct LayoutSchema {
     pub panes: HashMap<String, PaneSpec>,
 }
 
-/// A node in the DSL tree: either an interior split or a leaf pane reference.
+/// One entry in a `SchemaNode::Tabs`'s `tabs:` list — a pane reference plus
+/// its display label. A struct (rather than a bare `{ pane: "x", label: "Y" }`
+/// leaf-with-extra-field) so the DSL reads as "a list of (pane, label) pairs"
+/// rather than overloading the leaf shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SchemaTabEntry {
+    pub pane: String,
+    pub label: String,
+}
+
+/// A node in the DSL tree: an interior split, a tabbed region, or a leaf pane
+/// reference.
 ///
 /// Untagged: a leaf is `{ pane: "queue" }`; a split is `{ direction, ratios,
-/// children }`. Serde tries `Split` first and falls back to `Leaf` when the
-/// split fields are absent.
+/// children }`; a tabbed region is `{ tabs: [{ pane, label }, ...], active:
+/// "<pane id>" }`. Serde tries each variant in declaration order and falls
+/// through to the next on a field mismatch — `Tabs` is listed first (it has
+/// the most distinctive field, `tabs`), then `Split`, then `Leaf` last as the
+/// catch-all shape.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum SchemaNode {
+    Tabs {
+        tabs: Vec<SchemaTabEntry>,
+        /// The pane id (not index) of the frontmost tab — matching the DSL's
+        /// pane-id-centric vocabulary elsewhere, rather than an index that
+        /// would silently drift if `tabs` were reordered.
+        active: String,
+    },
     Split {
         direction: SplitDirection,
         ratios: Vec<f32>,
@@ -63,7 +94,8 @@ pub enum SchemaNode {
 
 impl SchemaNode {
     /// Convert this DSL node into the wire [`PaneTree`] shape. Purely
-    /// structural — the registry's own `set_layout` validates the result.
+    /// structural — the registry's own `set_layout` validates the result
+    /// (including that `active` actually names one of `tabs`).
     pub fn to_pane_tree(&self) -> PaneTree {
         match self {
             SchemaNode::Leaf { pane } => PaneTree::Leaf {
@@ -78,6 +110,20 @@ impl SchemaNode {
                 children: children.iter().map(SchemaNode::to_pane_tree).collect(),
                 ratios: ratios.clone(),
             },
+            SchemaNode::Tabs { tabs, active } => {
+                let active_index = tabs.iter().position(|t| &t.pane == active).unwrap_or(0);
+                PaneTree::Tabs {
+                    children: tabs
+                        .iter()
+                        .map(|t| PaneTree::Leaf {
+                            pane_id: t.pane.clone(),
+                        })
+                        .collect(),
+                    labels: tabs.iter().map(|t| t.label.clone()).collect(),
+                    active: active_index,
+                    region: None,
+                }
+            }
         }
     }
 }
@@ -111,7 +157,11 @@ pub fn parse(yaml: &str) -> Result<LayoutSchema, ApplyLayoutError> {
 }
 
 /// Validate the parts of a schema the `PaneRegistry` doesn't know about:
-/// the `repl` leaf must not appear in `panes`, every `content_kind` must be a
+/// the `repl` leaf must not appear in `panes`, no `tabs` region may contain
+/// `repl` (a distinct check from the one above — the REPL is where the
+/// operator's hands are, and hiding it behind a tab is never what an agent
+/// means, so this fails loud rather than silently being caught later by the
+/// registry's own repl-inside-tabs guard), every `content_kind` must be a
 /// recognised `PaneContentWire` variant, every `source` must resolve against
 /// the closed fetcher registry, and — for a pane that has a `source` — the
 /// declared `content_kind` must match what that source actually produces.
@@ -126,6 +176,7 @@ pub fn validate(schema: &LayoutSchema) -> Result<(), ApplyLayoutError> {
     if schema.panes.contains_key(REPL_PANE_ID) {
         return Err(ApplyLayoutError::InvalidSchema);
     }
+    validate_no_repl_in_tabs(&schema.tree)?;
     for spec in schema.panes.values() {
         if !content_kind_is_valid(&spec.content_kind) {
             return Err(ApplyLayoutError::InvalidContentKind);
@@ -142,6 +193,29 @@ pub fn validate(schema: &LayoutSchema) -> Result<(), ApplyLayoutError> {
         }
     }
     Ok(())
+}
+
+/// Recursively refuse a `tabs` region that names `repl` among its tab panes
+/// (W1 — curated-agent-views). A separate check from the `panes` map lookup
+/// above: `repl` is never declared in `panes` (it has no data binding), but it
+/// is a perfectly normal `pane:` reference inside a `SchemaNode::Tabs`'s
+/// `tabs:` list, so that shape needs its own walk.
+fn validate_no_repl_in_tabs(node: &SchemaNode) -> Result<(), ApplyLayoutError> {
+    match node {
+        SchemaNode::Leaf { .. } => Ok(()),
+        SchemaNode::Split { children, .. } => {
+            for child in children {
+                validate_no_repl_in_tabs(child)?;
+            }
+            Ok(())
+        }
+        SchemaNode::Tabs { tabs, .. } => {
+            if tabs.iter().any(|t| t.pane == REPL_PANE_ID) {
+                return Err(ApplyLayoutError::ReplInTabs);
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Resolve a named layout: an on-disk override under `dir` if present, else
@@ -166,6 +240,9 @@ pub fn load(name: &str) -> Result<LayoutSchema, ApplyLayoutError> {
 fn compiled_in(name: &str) -> Result<LayoutSchema, ApplyLayoutError> {
     match name {
         "perri-standard" => parse(include_str!("layouts/perri-standard.yaml")),
+        // W5 — curated-agent-views. The queue and the REPL only; the detail
+        // region is the placement engine's to create and remove.
+        "perri-curated" => parse(include_str!("layouts/perri-curated.yaml")),
         _ => Err(ApplyLayoutError::UnknownLayout),
     }
 }
@@ -323,6 +400,141 @@ panes:
         assert_eq!(err, ApplyLayoutError::InvalidSchema);
     }
 
+    // ── SchemaNode::Tabs (W1 — curated-agent-views) ──────────────────────────
+
+    #[test]
+    fn tabs_form_parses_and_converts_to_a_pane_tree_tabs_node() {
+        let yaml = r#"
+name: with-tabs
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: repl
+    - tabs:
+        - pane: ticket
+          label: Ticket
+        - pane: activity
+          label: Activity
+      active: activity
+panes:
+  ticket:
+    content_kind: text
+  activity:
+    content_kind: text
+"#;
+        let schema = parse(yaml).expect("a tabs region must parse");
+        let tree = schema.tree.to_pane_tree();
+
+        match &tree {
+            PaneTree::Split { children, .. } => {
+                assert!(matches!(&children[0], PaneTree::Leaf { pane_id } if pane_id == "repl"));
+                match &children[1] {
+                    PaneTree::Tabs {
+                        children: tab_children,
+                        labels,
+                        active,
+                        ..
+                    } => {
+                        assert!(
+                            matches!(&tab_children[0], PaneTree::Leaf { pane_id } if pane_id == "ticket")
+                        );
+                        assert!(
+                            matches!(&tab_children[1], PaneTree::Leaf { pane_id } if pane_id == "activity")
+                        );
+                        assert_eq!(labels, &vec!["Ticket".to_string(), "Activity".to_string()]);
+                        assert_eq!(*active, 1, "\"active: activity\" must resolve to index 1");
+                    }
+                    other => panic!("expected inner Tabs node, got {other:?}"),
+                }
+            }
+            other => panic!("expected outer Split, got {other:?}"),
+        }
+
+        // And the converted tree passes the registry's own invariant checks.
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("perri");
+        reg.set_layout("perri", &serde_json::json!({ "tree": tree }))
+            .expect("converted tabs tree should satisfy PaneRegistry invariants");
+    }
+
+    #[test]
+    fn a_plain_split_still_parses_correctly_with_the_tabs_variant_listed_first() {
+        // `SchemaNode` is `#[serde(untagged)]`, so variant order controls
+        // fallthrough — `Tabs` is tried before `Split`/`Leaf`. A document with
+        // no `tabs:` key at all must still fall through to `Split` correctly.
+        let schema = compiled_in("perri-standard").expect("perri-standard should still parse");
+        assert!(matches!(schema.tree, SchemaNode::Split { .. }));
+    }
+
+    #[test]
+    fn a_plain_leaf_still_parses_correctly_with_the_tabs_variant_listed_first() {
+        let yaml = r#"
+name: just-repl
+tree:
+  pane: repl
+panes: {}
+"#;
+        let schema = parse(yaml).expect("a bare leaf must still parse");
+        assert!(matches!(schema.tree, SchemaNode::Leaf { pane } if pane == "repl"));
+    }
+
+    #[test]
+    fn tabs_region_naming_repl_is_rejected_as_repl_in_tabs() {
+        let yaml = r#"
+name: bad
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - tabs:
+        - pane: repl
+          label: Repl
+        - pane: ticket
+          label: Ticket
+      active: repl
+    - pane: sidebar
+panes:
+  ticket:
+    content_kind: text
+  sidebar:
+    content_kind: text
+"#;
+        let err = parse(yaml).unwrap_err();
+        assert_eq!(err, ApplyLayoutError::ReplInTabs);
+    }
+
+    #[test]
+    fn tabs_region_nested_inside_a_split_still_rejects_a_nested_repl() {
+        let yaml = r#"
+name: bad
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: sidebar
+    - direction: vertical
+      ratios: [0.5, 0.5]
+      children:
+        - tabs:
+            - pane: repl
+              label: Repl
+          active: repl
+        - pane: ticket
+panes:
+  sidebar:
+    content_kind: text
+  ticket:
+    content_kind: text
+"#;
+        let err = parse(yaml).unwrap_err();
+        assert_eq!(
+            err,
+            ApplyLayoutError::ReplInTabs,
+            "the repl-in-tabs walk must recurse through nested splits"
+        );
+    }
+
     #[test]
     fn tree_with_two_repl_leaves_is_rejected_by_registry_validation() {
         // The DSL itself doesn't check for duplicate repl leaves — that's the
@@ -377,5 +589,105 @@ panes: {}
         let tmp = tempfile::TempDir::new().unwrap();
         let err = load_from_dir("does-not-exist", tmp.path()).unwrap_err();
         assert_eq!(err, ApplyLayoutError::UnknownLayout);
+    }
+
+    // ── pr_conversation content kind (W3 — curated-agent-views) ──────────────
+
+    #[test]
+    fn content_kind_is_valid_accepts_pr_conversation() {
+        assert!(content_kind_is_valid("pr_conversation"));
+    }
+
+    #[test]
+    fn a_schema_declaring_perri_get_pr_conversation_with_pr_conversation_content_kind_validates() {
+        let yaml = r#"
+name: ok
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: conversation
+    - pane: repl
+panes:
+  conversation:
+    source: perri.get_pr_conversation
+    content_kind: pr_conversation
+"#;
+        let schema = parse(yaml).expect("a pr_conversation source/content_kind pair must validate");
+        assert_eq!(schema.panes["conversation"].content_kind, "pr_conversation");
+    }
+
+    #[test]
+    fn perri_get_pr_conversation_with_a_mismatched_content_kind_is_rejected() {
+        let yaml = r#"
+name: bad
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: conversation
+    - pane: repl
+panes:
+  conversation:
+    source: perri.get_pr_conversation
+    content_kind: text
+"#;
+        let err = parse(yaml).unwrap_err();
+        assert_eq!(err, ApplyLayoutError::InvalidContentKind);
+    }
+
+    // ── ticket content kind (W4 — curated-agent-views) ───────────────────────
+
+    #[test]
+    fn content_kind_is_valid_accepts_ticket() {
+        assert!(content_kind_is_valid("ticket"));
+    }
+
+    #[test]
+    fn valid_content_kinds_has_exactly_nine_entries_including_ticket() {
+        assert_eq!(
+            VALID_CONTENT_KINDS.len(),
+            9,
+            "adding/removing a content kind must be a deliberate, counted change"
+        );
+        assert!(VALID_CONTENT_KINDS.contains(&"ticket"));
+    }
+
+    #[test]
+    fn a_schema_declaring_nostromo_get_ticket_with_ticket_content_kind_validates() {
+        let yaml = r#"
+name: ok
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: ticket
+    - pane: repl
+panes:
+  ticket:
+    source: nostromo.get_ticket
+    content_kind: ticket
+"#;
+        let schema = parse(yaml).expect("a ticket source/content_kind pair must validate");
+        assert_eq!(schema.panes["ticket"].content_kind, "ticket");
+    }
+
+    #[test]
+    fn nostromo_get_ticket_with_a_mismatched_content_kind_is_rejected() {
+        let yaml = r#"
+name: bad
+tree:
+  direction: horizontal
+  ratios: [0.5, 0.5]
+  children:
+    - pane: ticket
+    - pane: repl
+panes:
+  ticket:
+    source: nostromo.get_ticket
+    content_kind: text
+"#;
+        let err = parse(yaml).unwrap_err();
+        assert_eq!(err, ApplyLayoutError::InvalidContentKind);
     }
 }

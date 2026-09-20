@@ -1,0 +1,286 @@
+[
+  {
+    "type": "focus_layout",
+    "tag": "fred",
+    "tree": {
+      "kind": "split",
+      "direction": "vertical",
+      "ratios": [
+        0.6,
+        0.4
+      ],
+      "children": [
+        {
+          "kind": "split",
+          "direction": "horizontal",
+          "ratios": [
+            0.98,
+            0.02
+          ],
+          "children": [
+            {
+              "kind": "leaf",
+              "pane_id": "queue"
+            },
+            {
+              "kind": "split",
+              "direction": "horizontal",
+              "ratios": [
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666
+              ],
+              "children": [
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.0"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.1"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.2"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.3"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.4"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.5"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "leaf",
+          "pane_id": "repl"
+        }
+      ]
+    },
+    "focused_pane": null
+  },
+  {
+    "type": "focus_layout",
+    "tag": "mother",
+    "tree": {
+      "kind": "split",
+      "direction": "vertical",
+      "ratios": [
+        0.6,
+        0.4
+      ],
+      "children": [
+        {
+          "kind": "split",
+          "direction": "horizontal",
+          "ratios": [
+            0.98,
+            0.02
+          ],
+          "children": [
+            {
+              "kind": "leaf",
+              "pane_id": "queue"
+            },
+            {
+              "kind": "split",
+              "direction": "horizontal",
+              "ratios": [
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666
+              ],
+              "children": [
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.0"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.1"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.2"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.3"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.4"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.5"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "leaf",
+          "pane_id": "repl"
+        }
+      ]
+    },
+    "focused_pane": null
+  },
+  {
+    "type": "focus_layout",
+    "tag": "perri",
+    "tree": {
+      "kind": "split",
+      "direction": "vertical",
+      "ratios": [
+        0.6,
+        0.4
+      ],
+      "children": [
+        {
+          "kind": "split",
+          "direction": "horizontal",
+          "ratios": [
+            0.98,
+            0.02
+          ],
+          "children": [
+            {
+              "kind": "leaf",
+              "pane_id": "queue"
+            },
+            {
+              "kind": "split",
+              "direction": "horizontal",
+              "ratios": [
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666
+              ],
+              "children": [
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.0"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.1"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.2"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.3"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.4"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.5"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "leaf",
+          "pane_id": "repl"
+        }
+      ]
+    },
+    "focused_pane": null
+  },
+  {
+    "type": "focus_layout",
+    "tag": "teri",
+    "tree": {
+      "kind": "split",
+      "direction": "vertical",
+      "ratios": [
+        0.6,
+        0.4
+      ],
+      "children": [
+        {
+          "kind": "split",
+          "direction": "horizontal",
+          "ratios": [
+            0.98,
+            0.02
+          ],
+          "children": [
+            {
+              "kind": "leaf",
+              "pane_id": "queue"
+            },
+            {
+              "kind": "split",
+              "direction": "horizontal",
+              "ratios": [
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666,
+                0.16666666666666666
+              ],
+              "children": [
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.0"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.1"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.2"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.3"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.4"
+                },
+                {
+                  "kind": "leaf",
+                  "pane_id": "detail.5"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "leaf",
+          "pane_id": "repl"
+        }
+      ]
+    },
+    "focused_pane": null
+  }
+]

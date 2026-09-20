@@ -48,12 +48,26 @@ async fn mcp_connect(
     BufReader<tokio::net::unix::OwnedReadHalf>,
     tokio::net::unix::OwnedWriteHalf,
 ) {
+    mcp_connect_as(socket_path, "").await
+}
+
+/// Complete the MCP handshake as a named caller — the `Hello` frame's
+/// `pty_id`, which in the daemon *is* the focus tag. `mcp_connect` is just
+/// this with `pty_id: ""` (an unidentified caller), kept so existing call
+/// sites don't need touching.
+async fn mcp_connect_as(
+    socket_path: &std::path::Path,
+    pty_id: &str,
+) -> (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+) {
     let stream = UnixStream::connect(socket_path).await.unwrap();
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
     // Hello
-    write_frame(&mut write_half, &json!({"type":"hello","pty_id":""})).await;
+    write_frame(&mut write_half, &json!({"type":"hello","pty_id":pty_id})).await;
 
     // Initialize
     write_frame(&mut write_half, &json!({
@@ -63,6 +77,22 @@ async fn mcp_connect(
     let _init_resp = read_frame(&mut reader).await;
 
     (reader, write_half)
+}
+
+/// `tools/list`, parsed to the plain `result.tools` array.
+#[allow(dead_code)]
+async fn list_tools(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    id: u64,
+) -> Value {
+    write_frame(
+        writer,
+        &json!({ "jsonrpc": "2.0", "id": id, "method": "tools/list" }),
+    )
+    .await;
+    let resp = read_frame(reader).await;
+    resp["result"]["tools"].clone()
 }
 
 /// Call a tool and parse the text content of the first content item.

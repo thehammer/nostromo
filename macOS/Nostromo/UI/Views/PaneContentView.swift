@@ -17,6 +17,12 @@ import NostromoKit
 final class PaneContentModel: ObservableObject {
     @Published var content:   PaneContentWire?
     @Published var freshness: PaneFreshness?
+    /// Where to look inside this pane's content, and why (W1 —
+    /// curated-agent-views). Nothing in this wedge renders `anchor` or
+    /// `emphasis`; `reason` reaches `TabRegionView` via
+    /// `DynamicFocusView.updateContent` reading this same value, not by
+    /// rendering it here.
+    @Published var address:   PaneAddress?
     @Published var onLoadPR:    (String, Int) -> Void = { _, _ in }
     @Published var onApprovePR: (String, Int) -> Void = { _, _ in }
 }
@@ -29,7 +35,12 @@ struct PaneContentHost: View {
     @ObservedObject var model: PaneContentModel
 
     var body: some View {
-        PaneContentView(content: model.content, onLoadPR: model.onLoadPR, onApprovePR: model.onApprovePR)
+        PaneContentView(
+            content:     model.content,
+            address:     model.address,
+            onLoadPR:    model.onLoadPR,
+            onApprovePR: model.onApprovePR
+        )
     }
 }
 
@@ -48,6 +59,10 @@ struct PaneContentHost: View {
 /// which is the normal initial state before an agent's first `set_pane_content` call.
 struct PaneContentView: View {
     let content: PaneContentWire?
+    /// Where to look inside this pane's content, and why (W1/W5 —
+    /// curated-agent-views). `pr_list` reads its `queue_row` anchor/emphasis
+    /// to mark a row; the other kinds rendered here have no addressing yet.
+    var address: PaneAddress? = nil
     /// Called when the user loads a PR from a `pr_list` row. `(repo, number)`
     var onLoadPR:   (String, Int) -> Void = { _, _ in }
     /// Called when the user approves a PR from a `pr_list` row. `(repo, number)`
@@ -76,6 +91,24 @@ struct PaneContentView: View {
                 loadingView
             case .error(let message):
                 errorView(message)
+            case .code, .diff:
+                // Rendered by `CodeContentView`, an AppKit sibling layered
+                // over this hosting view (W2 — curated-agent-views): a gutter,
+                // a scroll-to-line, and a marked range have no SwiftUI
+                // equivalent. Drawing anything here would show through
+                // whenever that view is mid-layout.
+                Color.clear
+            case .prConversation:
+                // Rendered by `ConversationContentView`, an AppKit sibling
+                // layered over this hosting view (W3 — curated-agent-views):
+                // markdown blocks and comment anchoring have no SwiftUI
+                // equivalent here either. Same rationale as `.code`/`.diff`.
+                Color.clear
+            case .ticket:
+                // Rendered by `TicketContentView`, an AppKit sibling layered
+                // over this hosting view (W4 — curated-agent-views). Same
+                // rationale as `.prConversation`.
+                Color.clear
             case .unknown(let raw):
                 jsonView(raw)
             }
@@ -101,9 +134,9 @@ struct PaneContentView: View {
                         let group = items.filter { $0.bucket == bucket.key }
                         if !group.isEmpty {
                             sectionHeader(bucket.label, count: group.count)
-                            ForEach(group) { item in
+                            ForEach(group, id: \.bucketScopedId) { item in
                                 NostromoKit.PerriPRRow(
-                                    model:  item.toRowModel(),
+                                    model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                     onLoad: { onLoadPR(item.repo, item.number) },
                                     onClear: {}
                                 )
@@ -119,9 +152,9 @@ struct PaneContentView: View {
                     let overflow = items.filter { !knownBuckets.contains($0.bucket) }
                     if !overflow.isEmpty {
                         sectionHeader("OTHER", count: overflow.count)
-                        ForEach(overflow) { item in
+                        ForEach(overflow, id: \.bucketScopedId) { item in
                             NostromoKit.PerriPRRow(
-                                model:  item.toRowModel(),
+                                model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                 onLoad: { onLoadPR(item.repo, item.number) },
                                 onClear: {}
                             )
@@ -208,7 +241,7 @@ struct PaneContentView: View {
     }
 
     @ViewBuilder
-    private func jsonView(_ value: Any) -> some View {
+    private func jsonView(_ value: JSONValue) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(jsonRows(from: value), id: \.key) { row in
@@ -233,29 +266,30 @@ struct PaneContentView: View {
 
     private struct JsonRow { let key: String; let value: String }
 
-    private func jsonRows(from value: Any) -> [JsonRow] {
-        if let dict = value as? [String: Any] {
+    private func jsonRows(from value: JSONValue) -> [JsonRow] {
+        switch value {
+        case .object(let dict):
             return dict.map { k, v in JsonRow(key: k, value: jsonString(v)) }
                        .sorted { $0.key < $1.key }
-        }
-        if let arr = value as? [Any] {
+        case .array(let arr):
             return arr.enumerated().map { i, v in JsonRow(key: "\(i)", value: jsonString(v)) }
+        default:
+            return [JsonRow(key: "value", value: jsonString(value))]
         }
-        return [JsonRow(key: "value", value: jsonString(value))]
     }
 
-    private func jsonString(_ value: Any) -> String {
-        if let s = value as? String { return s }
-        if let b = value as? Bool   { return b ? "true" : "false" }
-        if let i = value as? Int    { return "\(i)" }
-        if let d = value as? Double { return "\(d)" }
-        if let arr = value as? [Any] {
+    private func jsonString(_ value: JSONValue) -> String {
+        switch value {
+        case .string(let s): return s
+        case .bool(let b):   return b ? "true" : "false"
+        case .int(let i):    return "\(i)"
+        case .double(let d): return "\(d)"
+        case .null:          return "null"
+        case .array(let arr):
             return "[\(arr.map { jsonString($0) }.joined(separator: ", "))]"
-        }
-        if let dict = value as? [String: Any] {
+        case .object(let dict):
             let pairs = dict.map { "\($0.key): \(jsonString($0.value))" }.joined(separator: ", ")
             return "{\(pairs)}"
         }
-        return "\(value)"
     }
 }

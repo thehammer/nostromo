@@ -41,3 +41,42 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  python-tooling:
+    name: Python tooling tests
+    # macOS, not ubuntu. The suite includes `ShellScriptSyntaxTests` (needs bash
+    # and shellcheck), `ShellScriptCpuGuardDeadPidTests` (exercises the driver's
+    # `ps -o time=` guard, whose output format differs between BSD and GNU ps)
+    # and source-scanning policy tests over the Swift tree. On ubuntu those would
+    # either fail for environmental reasons or — worse — *skip*, and a skipped
+    # test is a vacuously passing test, which is the exact bug class this suite
+    # exists to catch.
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      # Every dependency the suite needs is installed above, so a skip here means
+      # the suite quietly stopped checking something. If a skip ever becomes
+      # legitimate, add it to an explicit allowlist in this step rather than
+      # relaxing the check.
+      #
+      # The pattern matches how unittest *reports* a skip — the per-test
+      # `... skipped 'reason'` suffix and the `(skipped=N)` summary count — and
+      # deliberately not the bare word. Five tests in the doctor suite are named
+      # things like `test_blank_lines_are_skipped` because skipping a malformed
+      # log line is the behaviour under test, so `grep -i skipped` matches them
+      # and fails the job every single run. A guard that cannot pass is as
+      # useless as a criterion that cannot fail, which is the defect this whole
+      # PR is about; grepping for the report, not the word, is the fix.
+      - name: Python tooling tests
+        run: |
+          set -o pipefail
+          make python-test 2>&1 | tee /tmp/pytests.txt
+          if grep -nE '\.\.\. skipped|\(skipped=' /tmp/pytests.txt; then
+            echo "::error::a test was skipped — see the note in .github/workflows/ci.yml"
+            exit 1
+          fi

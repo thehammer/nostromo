@@ -140,13 +140,51 @@ impl SplitPosition {
 /// clients).
 pub struct PaneRegistry {
     trees: HashMap<String, PaneTree>,
-    /// tag → pane_id → source name. Persisted (D3).
-    bindings: HashMap<String, HashMap<String, String>>,
+    /// tag → pane_id → source binding. Persisted (D3).
+    bindings: HashMap<String, HashMap<String, SourceBinding>>,
     /// tag → pane_ids the daemon has broadcast any content to since this
     /// process started. NOT persisted — exists only to suppress a `Loading`
     /// broadcast over a pane that already has content (D5).
     painted: HashMap<String, HashSet<String>>,
+    /// tag → curated-view focus order, least-recently-focused first (W5 —
+    /// curated-agent-views). Read by the placement engine's eviction rule
+    /// (R4) and written by every `nostromo.show`.
+    ///
+    /// **Deliberately not persisted**, and living here for exactly the reason
+    /// `painted` does: it is process-lifetime state *about* panes rather than
+    /// part of what a pane *is*. The consequence is stated rather than hidden
+    /// — a restarted daemon evicts in left-to-right tab order rather than true
+    /// recency, because that is what the order re-seeds to. Persisting it
+    /// would be a third fact about every pane bought for a marginal
+    /// improvement to one rule.
+    view_focus_lru: HashMap<String, Vec<String>>,
+    /// `(window_id, tag)` → the most recent client report of what that window
+    /// actually materialised for that focus (W1 — render-state-visibility).
+    ///
+    /// NOT persisted — same reasoning as `painted` and `view_focus_lru`: this
+    /// is process-lifetime observability about what a *client* did, not part
+    /// of what a pane *is*. A report surviving a daemon restart would claim a
+    /// client-side fact the daemon has no way to still vouch for.
+    rendered_shapes: HashMap<(String, String), RenderedShapeReport>,
     store_path: Option<PathBuf>,
+}
+
+/// A client's report of what it actually rendered for one `(window_id, tag)`
+/// pair, as recorded by [`PaneRegistry::record_rendered_shape`].
+#[derive(Debug, Clone)]
+pub struct RenderedShapeReport {
+    /// Pane ids the reporting window's view hierarchy held for this tag, as
+    /// of `reported_at`.
+    pub pane_ids: Vec<String>,
+    /// The client's own wall-clock timestamp for this shape (not the
+    /// daemon's receipt time) — the basis for the age a caller sees back.
+    pub reported_at: chrono::DateTime<chrono::Utc>,
+    /// The connection this report arrived on. Never surfaced to a tool
+    /// caller — it exists solely so [`PaneRegistry::prune_rendered_shapes_for_conn`]
+    /// can remove exactly the entries a dropped connection contributed,
+    /// without clobbering a fresher report a reconnect already sent under a
+    /// new connection for the same window id.
+    conn_key: String,
 }
 
 impl Default for PaneRegistry {
@@ -168,6 +206,8 @@ impl PaneRegistry {
             trees,
             bindings,
             painted: HashMap::new(),
+            view_focus_lru: HashMap::new(),
+            rendered_shapes: HashMap::new(),
             store_path: Some(store_path),
         }
     }
@@ -179,6 +219,8 @@ impl PaneRegistry {
             trees: HashMap::new(),
             bindings: HashMap::new(),
             painted: HashMap::new(),
+            view_focus_lru: HashMap::new(),
+            rendered_shapes: HashMap::new(),
             store_path: None,
         }
     }
@@ -222,6 +264,23 @@ impl PaneRegistry {
     /// is the structural guard that makes "no automatic content for a pane
     /// that isn't in the tree" true by construction rather than by convention.
     pub fn bind_source(&mut self, tag: &str, pane_id: &str, source: &str) {
+        self.bind_source_with_params(tag, pane_id, source, None);
+    }
+
+    /// [`bind_source`](Self::bind_source) plus the per-pane `params` the
+    /// fetcher is invoked with (W2 — curated-agent-views).
+    ///
+    /// Params are what makes a source say *which* thing: `nostromo.get_file`
+    /// is one source, but a pane bound to it also has to record which file it
+    /// shows, or a daemon restart repaints it as some other file. They are
+    /// persisted alongside the source name for exactly that reason.
+    pub fn bind_source_with_params(
+        &mut self,
+        tag: &str,
+        pane_id: &str,
+        source: &str,
+        params: Option<serde_json::Value>,
+    ) {
         if pane_id == REPL_PANE_ID {
             debug!(tag, pane_id, "bind_source: refusing to bind the repl pane");
             return;
@@ -233,10 +292,13 @@ impl PaneRegistry {
             );
             return;
         }
-        self.bindings
-            .entry(tag.to_string())
-            .or_default()
-            .insert(pane_id.to_string(), source.to_string());
+        self.bindings.entry(tag.to_string()).or_default().insert(
+            pane_id.to_string(),
+            SourceBinding {
+                source: source.to_string(),
+                params,
+            },
+        );
         self.persist();
     }
 
@@ -257,24 +319,29 @@ impl PaneRegistry {
 
     /// The source bound to `pane_id` within `tag`, if any.
     pub fn source_for(&self, tag: &str, pane_id: &str) -> Option<&str> {
-        self.bindings
-            .get(tag)
-            .and_then(|m| m.get(pane_id))
-            .map(|s| s.as_str())
+        self.binding_for(tag, pane_id).map(|b| b.source.as_str())
     }
 
-    /// Every live binding as `(tag, pane_id, source)`, in a stable sorted order.
-    pub fn all_bindings(&self) -> Vec<(String, String, String)> {
-        let mut out: Vec<(String, String, String)> = self
+    /// The full binding (source + params) for `pane_id` within `tag`, if any.
+    pub fn binding_for(&self, tag: &str, pane_id: &str) -> Option<&SourceBinding> {
+        self.bindings.get(tag).and_then(|m| m.get(pane_id))
+    }
+
+    /// Every live binding as `(tag, pane_id, binding)`, in a stable sorted
+    /// order. Sorted on `(tag, pane_id)` alone — a binding's `params` is
+    /// arbitrary JSON with no total order, and `(tag, pane_id)` is already
+    /// unique, so nothing is lost.
+    pub fn all_bindings(&self) -> Vec<(String, String, SourceBinding)> {
+        let mut out: Vec<(String, String, SourceBinding)> = self
             .bindings
             .iter()
             .flat_map(|(tag, panes)| {
                 panes
                     .iter()
-                    .map(move |(pane_id, source)| (tag.clone(), pane_id.clone(), source.clone()))
+                    .map(move |(pane_id, binding)| (tag.clone(), pane_id.clone(), binding.clone()))
             })
             .collect();
-        out.sort();
+        out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
         out
     }
 
@@ -294,6 +361,78 @@ impl PaneRegistry {
             .get(tag)
             .map(|s| s.contains(pane_id))
             .unwrap_or(false)
+    }
+
+    // ── curated-view focus order (W5) ───────────────────────────────────────────
+
+    /// `tag`'s curated-view focus order, least-recently-focused first, after
+    /// re-seeding it against `live` (see [`Self::view_focus_lru`]'s doc).
+    ///
+    /// Re-seeding on read rather than on write is what makes a daemon restart
+    /// mid-review degrade to tab order instead of to "nothing has ever been
+    /// focused": the first show after a restart finds an empty order and fills
+    /// it from the tabs that are actually there.
+    pub fn view_focus_order(&mut self, tag: &str, live: &[String]) -> Vec<String> {
+        let order = self.view_focus_lru.entry(tag.to_string()).or_default();
+        crate::mcp::views::derive::seed(order, live);
+        order.clone()
+    }
+
+    /// Record `pane_id` as `tag`'s most recently focused curated view,
+    /// dropping any pane no longer in `live`.
+    pub fn touch_view_focus(&mut self, tag: &str, live: &[String], pane_id: &str) {
+        let order = self.view_focus_lru.entry(tag.to_string()).or_default();
+        crate::mcp::views::derive::touch(order, live, pane_id);
+    }
+
+    // ── rendered-shape reports (W1 — render-state-visibility) ─────────────────
+
+    /// Record a client's report of what `window_id` actually rendered for
+    /// `tag`. Overwrites any prior report for the same `(window_id, tag)` —
+    /// only the most recent shape is ever meaningful. Not persisted.
+    pub fn record_rendered_shape(
+        &mut self,
+        conn_key: &str,
+        window_id: &str,
+        tag: &str,
+        pane_ids: Vec<String>,
+        reported_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        self.rendered_shapes.insert(
+            (window_id.to_string(), tag.to_string()),
+            RenderedShapeReport {
+                pane_ids,
+                reported_at,
+                conn_key: conn_key.to_string(),
+            },
+        );
+    }
+
+    /// Every window's rendered-shape report for `tag`, as `(window_id,
+    /// report)`, sorted by `window_id` for a deterministic response. Empty
+    /// when no window has ever reported for this tag — callers must treat
+    /// that as "unknown", never as "agrees" (see the `nostromo.get_render_state`
+    /// handler).
+    pub fn rendered_shapes_for_tag(&self, tag: &str) -> Vec<(String, &RenderedShapeReport)> {
+        let mut out: Vec<(String, &RenderedShapeReport)> = self
+            .rendered_shapes
+            .iter()
+            .filter(|((_, t), _)| t == tag)
+            .map(|((window_id, _), report)| (window_id.clone(), report))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Drop every rendered-shape report that arrived on `conn_key` — called
+    /// when that connection disconnects, so a closed window's report
+    /// disappears from subsequent tool responses instead of outliving the
+    /// window it describes. Scoped to `conn_key` (not `window_id` alone) so
+    /// pruning an old connection can never clobber a fresher report a
+    /// reconnect already sent under a new connection for the same window id.
+    pub fn prune_rendered_shapes_for_conn(&mut self, conn_key: &str) {
+        self.rendered_shapes
+            .retain(|_, report| report.conn_key != conn_key);
     }
 
     // ── mutations ──────────────────────────────────────────────────────────────
@@ -476,7 +615,7 @@ fn split_leaf(
             };
             true
         }
-        PaneTree::Split { children, .. } => {
+        PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. } => {
             for child in children.iter_mut() {
                 // Move-out workaround: split_leaf needs `new_leaf` by value, but
                 // we may recurse into multiple children. Clone is cheap (a leaf).
@@ -490,30 +629,39 @@ fn split_leaf(
 }
 
 /// Apply a flat `pane_id -> ratio` map to every split whose direct children are
-/// all leaves named in the map. Ratios are normalised to sum to 1.0.
+/// all leaves named in the map. Ratios are normalised to sum to 1.0. A `Tabs`
+/// node has no ratios of its own — recurse into its children (in case one of
+/// them is itself a split), but otherwise leave it untouched.
 fn apply_ratio_map(node: &mut PaneTree, ratios: &HashMap<String, f32>) {
-    if let PaneTree::Split {
-        children,
-        ratios: r,
-        ..
-    } = node
-    {
-        let direct: Option<Vec<f32>> = children
-            .iter()
-            .map(|c| match c {
-                PaneTree::Leaf { pane_id } => ratios.get(pane_id).copied(),
-                _ => None,
-            })
-            .collect();
-        if let Some(values) = direct {
-            let sum: f32 = values.iter().sum();
-            if sum > 0.0 {
-                *r = values.iter().map(|v| v / sum).collect();
+    match node {
+        PaneTree::Split {
+            children,
+            ratios: r,
+            ..
+        } => {
+            let direct: Option<Vec<f32>> = children
+                .iter()
+                .map(|c| match c {
+                    PaneTree::Leaf { pane_id } => ratios.get(pane_id).copied(),
+                    _ => None,
+                })
+                .collect();
+            if let Some(values) = direct {
+                let sum: f32 = values.iter().sum();
+                if sum > 0.0 {
+                    *r = values.iter().map(|v| v / sum).collect();
+                }
+            }
+            for child in children.iter_mut() {
+                apply_ratio_map(child, ratios);
             }
         }
-        for child in children.iter_mut() {
-            apply_ratio_map(child, ratios);
+        PaneTree::Tabs { children, .. } => {
+            for child in children.iter_mut() {
+                apply_ratio_map(child, ratios);
+            }
         }
+        PaneTree::Leaf { .. } => {}
     }
 }
 
@@ -532,23 +680,54 @@ fn validate_tree(tree: &PaneTree) -> Result<(), PaneError> {
             return Err(PaneError::InvalidLayout);
         }
     }
-    // Well-formed splits.
-    validate_splits(tree)
+    // Well-formed splits and tabs nodes.
+    validate_node(tree)
 }
 
-fn validate_splits(node: &PaneTree) -> Result<(), PaneError> {
-    if let PaneTree::Split {
-        children, ratios, ..
-    } = node
-    {
-        if children.len() < 2 || children.len() != ratios.len() {
-            return Err(PaneError::InvalidLayout);
+/// Recursively validate every interior node's shape: a `Split` must have
+/// `children.len() == ratios.len() >= 2`; a `Tabs` node must have at least one
+/// child, `labels.len() == children.len()`, `active < children.len()`, and no
+/// `repl` leaf among its (possibly nested) descendants — hiding the REPL
+/// behind a tab is never what an agent means, since the REPL is where the
+/// operator's hands are.
+fn validate_node(node: &PaneTree) -> Result<(), PaneError> {
+    match node {
+        PaneTree::Leaf { .. } => Ok(()),
+        PaneTree::Split {
+            children, ratios, ..
+        } => {
+            if children.len() < 2 || children.len() != ratios.len() {
+                return Err(PaneError::InvalidLayout);
+            }
+            for child in children {
+                validate_node(child)?;
+            }
+            Ok(())
         }
-        for child in children {
-            validate_splits(child)?;
+        PaneTree::Tabs {
+            children,
+            labels,
+            active,
+            ..
+        } => {
+            if children.is_empty()
+                || labels.len() != children.len()
+                || *active >= children.len()
+            {
+                return Err(PaneError::InvalidLayout);
+            }
+            if children
+                .iter()
+                .any(|c| c.pane_ids().iter().any(|id| id == REPL_PANE_ID))
+            {
+                return Err(PaneError::InvalidLayout);
+            }
+            for child in children {
+                validate_node(child)?;
+            }
+            Ok(())
         }
     }
-    Ok(())
 }
 
 // ── persistence helpers ──────────────────────────────────────────────────────
@@ -562,10 +741,53 @@ pub fn default_store_path() -> PathBuf {
         .join("daemon-panes.json")
 }
 
-/// On-disk store format (D3). `version` is always 2 for anything this code
-/// writes; `bindings` defaults to empty so a V2 file written by an earlier
-/// build of this same version (before a hypothetical V3) still loads.
+/// One pane's persisted data binding: which source feeds it, and with what
+/// arguments (W2 — curated-agent-views).
+///
+/// `params` is the fetcher's own argument object, passed through verbatim —
+/// `PaneRegistry` deliberately knows nothing about its shape, because the set
+/// of sources is meant to grow without this file changing again. A binding
+/// created before params existed round-trips as `params: None`, which is
+/// exactly what every parameterless source wants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceBinding {
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub params: Option<serde_json::Value>,
+}
+
+impl SourceBinding {
+    /// A binding with no params — the shape every pre-W2 binding loads as.
+    pub fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            params: None,
+        }
+    }
+}
+
+/// On-disk store format (W2 — curated-agent-views). `version` is always 3 for
+/// anything this code writes; `bindings` defaults to empty so a V3 file written
+/// by an earlier build of this same version still loads.
+///
+/// The shape here needs no change for `PaneTree::Tabs` (W1) — the tree
+/// serialises itself, tabs included. The one consequence: a store persisted by
+/// a build with `Tabs` support, containing a focus whose tree has a tabs node,
+/// is unreadable by a pre-W1 binary (the `kind: "tabs"` discriminator has no
+/// matching variant there). `load_store`'s existing failure path already
+/// degrades gracefully in that case — a parse failure falls through the ladder
+/// to the V1 bare-`HashMap` shape, which also fails, and the registry simply
+/// starts empty for that focus rather than crashing.
 #[derive(Serialize, Deserialize)]
+struct StoreV3 {
+    version: u32,
+    trees: HashMap<String, PaneTree>,
+    #[serde(default)]
+    bindings: HashMap<String, HashMap<String, SourceBinding>>,
+}
+
+/// The pre-params store format (D3): bindings were a bare source name.
+#[derive(Deserialize)]
 struct StoreV2 {
     version: u32,
     trees: HashMap<String, PaneTree>,
@@ -573,28 +795,45 @@ struct StoreV2 {
     bindings: HashMap<String, HashMap<String, String>>,
 }
 
-/// Parse raw store bytes: current V2 envelope first, then the pre-binding V1
-/// bare-map format. `Err` means neither format matched — the caller must
-/// treat that as "discard, and say so" (see `load_store`).
-fn parse_store(
-    bytes: &[u8],
-) -> Result<(HashMap<String, PaneTree>, HashMap<String, HashMap<String, String>>), serde_json::Error> {
-    match serde_json::from_slice::<StoreV2>(bytes) {
-        Ok(store) if store.version == 2 => Ok((store.trees, store.bindings)),
-        _ => {
-            // V1 fallback: a bare `HashMap<String, PaneTree>`, no bindings.
-            serde_json::from_slice::<HashMap<String, PaneTree>>(bytes)
-                .map(|trees| (trees, HashMap::new()))
-        }
+/// Parse raw store bytes: the current V3 envelope first, then the pre-params
+/// V2 envelope (whose bindings are bare source-name strings, upgraded to
+/// [`SourceBinding`] with `params: None`), then the pre-binding V1 bare-map
+/// format. `Err` means none of the three formats matched — the caller must
+/// treat that as "discard, and say so" (see `load_store`). Precedence is
+/// exact: a V3 file is never read as V2.
+fn parse_store(bytes: &[u8]) -> Result<LoadedStore, serde_json::Error> {
+    match serde_json::from_slice::<StoreV3>(bytes) {
+        Ok(store) if store.version == 3 => Ok((store.trees, store.bindings)),
+        _ => match serde_json::from_slice::<StoreV2>(bytes) {
+            Ok(store) if store.version == 2 => {
+                let upgraded = store
+                    .bindings
+                    .into_iter()
+                    .map(|(tag, panes)| {
+                        let panes = panes
+                            .into_iter()
+                            .map(|(pane_id, source)| (pane_id, SourceBinding::new(source)))
+                            .collect();
+                        (tag, panes)
+                    })
+                    .collect();
+                Ok((store.trees, upgraded))
+            }
+            _ => {
+                // V1 fallback: a bare `HashMap<String, PaneTree>`, no bindings.
+                serde_json::from_slice::<HashMap<String, PaneTree>>(bytes)
+                    .map(|trees| (trees, HashMap::new()))
+            }
+        },
     }
 }
 
 /// Load the on-disk store, returning `(trees, bindings)`. Tries the current
-/// versioned envelope first; falls back to the pre-binding V1 format (a bare
-/// `HashMap<String, PaneTree>`) so an existing `~/.nostromo/daemon-panes.json`
-/// from before this feature loads with trees intact and no data loss — just
-/// zero bindings, which is the correct answer for a file that predates the
-/// concept.
+/// versioned envelope first, then the pre-params V2 envelope (whose bindings
+/// are bare source-name strings and load as `params: None`), then the
+/// pre-binding V1 format (a bare `HashMap<String, PaneTree>`) — so an existing
+/// `~/.nostromo/daemon-panes.json` from either earlier era loads with trees
+/// intact and no data loss.
 ///
 /// Bindings are additionally filtered on load: a binding whose `pane_id` is
 /// not in the loaded tree, or whose `source` is not in
@@ -602,7 +841,12 @@ fn parse_store(
 /// version, or a hand-edited state file), is dropped. Both checks are cheap —
 /// the source name comes from a closed, small registry — and this is the
 /// entirety of the forward/backward-compatibility story for this field.
-fn load_store(path: &std::path::Path) -> (HashMap<String, PaneTree>, HashMap<String, HashMap<String, String>>) {
+type LoadedStore = (
+    HashMap<String, PaneTree>,
+    HashMap<String, HashMap<String, SourceBinding>>,
+);
+
+fn load_store(path: &std::path::Path) -> LoadedStore {
     let Ok(bytes) = std::fs::read(path) else {
         return (HashMap::new(), HashMap::new());
     };
@@ -614,24 +858,24 @@ fn load_store(path: &std::path::Path) -> (HashMap<String, PaneTree>, HashMap<Str
                 path = %path.display(),
                 bytes = bytes.len(),
                 error = %e,
-                "pane store is unparseable as either the V2 envelope or the V1 bare-map \
-                 format; discarding every persisted layout and binding for this daemon run \
-                 (the file is left on disk untouched)"
+                "pane store is unparseable as the V3 envelope, the V2 envelope, or the \
+                 V1 bare-map format; discarding every persisted layout and binding for \
+                 this daemon run (the file is left on disk untouched)"
             );
             (HashMap::new(), HashMap::new())
         }
     };
 
     let known_sources = crate::mcp::tools::apply_layout::known_sources();
-    let filtered: HashMap<String, HashMap<String, String>> = bindings
+    let filtered: HashMap<String, HashMap<String, SourceBinding>> = bindings
         .into_iter()
         .filter_map(|(tag, panes)| {
             let tree = trees.get(&tag)?;
             let live: HashSet<String> = tree.pane_ids().into_iter().collect();
-            let kept: HashMap<String, String> = panes
+            let kept: HashMap<String, SourceBinding> = panes
                 .into_iter()
-                .filter(|(pane_id, source)| {
-                    live.contains(pane_id) && known_sources.contains(&source.as_str())
+                .filter(|(pane_id, binding)| {
+                    live.contains(pane_id) && known_sources.contains(&binding.source.as_str())
                 })
                 .collect();
             if kept.is_empty() {
@@ -651,14 +895,14 @@ static SAVE_STORE_LOCK: Mutex<()> = Mutex::new(());
 fn save_store(
     path: &std::path::Path,
     trees: &HashMap<String, PaneTree>,
-    bindings: &HashMap<String, HashMap<String, String>>,
+    bindings: &HashMap<String, HashMap<String, SourceBinding>>,
 ) {
     let _guard = SAVE_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let store = StoreV2 {
-        version: 2,
+    let store = StoreV3 {
+        version: 3,
         trees: trees.clone(),
         bindings: bindings.clone(),
     };
@@ -1129,6 +1373,200 @@ mod tests {
         assert_eq!(err, PaneError::InvalidLayout);
     }
 
+    // ── 12b. PaneTree::Tabs validation (W1 — curated-agent-views) ────────────
+
+    /// A well-formed tree with a tabs node: repl alongside a two-child tabs
+    /// region.
+    fn tree_with_tabs_region(tab_children: Vec<PaneTree>, labels: Vec<&str>, active: usize) -> PaneTree {
+        PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Leaf {
+                    pane_id: "repl".into(),
+                },
+                PaneTree::Tabs {
+                    children: tab_children,
+                    labels: labels.into_iter().map(String::from).collect(),
+                    active,
+                    region: None,
+                },
+            ],
+            ratios: vec![0.5, 0.5],
+        }
+    }
+
+    #[test]
+    fn set_layout_with_well_formed_tabs_node_is_accepted() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        let tree = tree_with_tabs_region(
+            vec![
+                PaneTree::Leaf { pane_id: "ticket".into() },
+                PaneTree::Leaf { pane_id: "activity".into() },
+            ],
+            vec!["Ticket", "Activity"],
+            0,
+        );
+        let payload = serde_json::to_value(&tree).unwrap();
+        let result = reg.set_layout("mother", &payload).unwrap();
+
+        assert_eq!(reg.pane_ids("mother"), vec!["repl", "ticket", "activity"]);
+        assert_eq!(result, tree);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_with_mismatched_labels_length_is_rejected() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        let tree = tree_with_tabs_region(
+            vec![
+                PaneTree::Leaf { pane_id: "ticket".into() },
+                PaneTree::Leaf { pane_id: "activity".into() },
+            ],
+            vec!["Ticket"],
+            0,
+        );
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+        assert_eq!(reg.pane_ids("mother"), vec!["repl"], "tree must be left unchanged");
+    }
+
+    #[test]
+    fn set_layout_tabs_node_with_active_out_of_range_is_rejected() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        let tree = tree_with_tabs_region(
+            vec![
+                PaneTree::Leaf { pane_id: "ticket".into() },
+                PaneTree::Leaf { pane_id: "activity".into() },
+            ],
+            vec!["Ticket", "Activity"],
+            2,
+        );
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_with_zero_children_is_rejected() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        let tree = tree_with_tabs_region(vec![], vec![], 0);
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_containing_repl_leaf_is_rejected() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        // The tabs region itself hosts "repl" — hiding the REPL behind a tab
+        // is never valid, regardless of whether a repl leaf exists elsewhere.
+        let tree = PaneTree::Tabs {
+            children: vec![
+                PaneTree::Leaf { pane_id: "repl".into() },
+                PaneTree::Leaf { pane_id: "ticket".into() },
+            ],
+            labels: vec!["Repl".into(), "Ticket".into()],
+            active: 0,
+            region: None,
+        };
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_nested_inside_a_split_still_rejects_a_nested_repl() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        // "repl" appears nested two levels deep inside the tabs region's own
+        // inner split — the repl-inside-tabs check must walk the tabs
+        // subtree recursively, not just its direct children. (This also
+        // means the tree has no repl leaf anywhere else, so a naive
+        // "exactly one repl" check alone wouldn't catch this — it's the
+        // tabs-specific rule that must fire.)
+        let tree = PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Leaf { pane_id: "other".into() },
+                PaneTree::Tabs {
+                    children: vec![
+                        PaneTree::Split {
+                            direction: SplitDirection::Vertical,
+                            children: vec![
+                                PaneTree::Leaf { pane_id: "repl".into() },
+                                PaneTree::Leaf { pane_id: "activity".into() },
+                            ],
+                            ratios: vec![0.5, 0.5],
+                        },
+                        PaneTree::Leaf { pane_id: "ticket".into() },
+                    ],
+                    labels: vec!["Nested".into(), "Ticket".into()],
+                    active: 0,
+                    region: None,
+                },
+            ],
+            ratios: vec![0.5, 0.5],
+        };
+
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn set_layout_tabs_node_with_nested_split_recurses_ratio_validation() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+
+        // A tabs child that is itself a malformed split (mismatched ratio
+        // count) must still be caught — validation recurses into tab children.
+        let tree = tree_with_tabs_region(
+            vec![PaneTree::Split {
+                direction: SplitDirection::Horizontal,
+                children: vec![
+                    PaneTree::Leaf { pane_id: "a".into() },
+                    PaneTree::Leaf { pane_id: "b".into() },
+                ],
+                ratios: vec![1.0], // wrong length
+            }],
+            vec!["Broken"],
+            0,
+        );
+        let payload = serde_json::to_value(&tree).unwrap();
+        let err = reg.set_layout("mother", &payload).unwrap_err();
+        assert_eq!(err, PaneError::InvalidLayout);
+    }
+
+    #[test]
+    fn tabs_node_pane_ids_are_reachable_through_create_pane_and_bindable() {
+        // A tabs child is an ordinary leaf pane once installed — it can be
+        // targeted by create_pane (splitting it further) and bound to a source
+        // exactly like any other leaf.
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("mother");
+        let tree = tree_with_tabs_region(
+            vec![PaneTree::Leaf { pane_id: "ticket".into() }],
+            vec!["Ticket"],
+            0,
+        );
+        reg.set_layout("mother", &serde_json::to_value(&tree).unwrap())
+            .unwrap();
+
+        reg.bind_source("mother", "ticket", "perri.list_pr_queue");
+        assert_eq!(reg.source_for("mother", "ticket"), Some("perri.list_pr_queue"));
+    }
+
     // ── 13. PaneError::code() returns stable snake_case strings ──────────────
 
     #[test]
@@ -1335,10 +1773,14 @@ mod tests {
         reg.bind_source("a-tag", "diff", "perri.get_current_pr");
 
         let bindings = reg.all_bindings();
-        let mut sorted = bindings.clone();
+        let keys: Vec<(String, String)> = bindings
+            .iter()
+            .map(|(tag, pane_id, _)| (tag.clone(), pane_id.clone()))
+            .collect();
+        let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(
-            bindings, sorted,
+            keys, sorted,
             "all_bindings must already be returned in stable sorted order"
         );
         assert_eq!(
@@ -1347,12 +1789,12 @@ mod tests {
                 (
                     "a-tag".to_string(),
                     "diff".to_string(),
-                    "perri.get_current_pr".to_string()
+                    SourceBinding::new("perri.get_current_pr")
                 ),
                 (
                     "b-tag".to_string(),
                     "queue".to_string(),
-                    "perri.list_pr_queue".to_string()
+                    SourceBinding::new("perri.list_pr_queue")
                 ),
             ]
         );
@@ -1498,7 +1940,33 @@ mod tests {
         assert_eq!(trees.get("mother"), Some(&PaneTree::repl_leaf()));
         assert_eq!(
             bindings.get("mother").and_then(|panes| panes.get("repl")),
-            Some(&"some.source".to_string())
+            Some(&SourceBinding::new("some.source")),
+            "a V2 binding (bare source string) must upgrade into a SourceBinding with params: None"
+        );
+    }
+
+    #[test]
+    fn parse_store_accepts_a_valid_v3_envelope() {
+        let json = serde_json::json!({
+            "version": 3,
+            "trees": {
+                "mother": { "kind": "leaf", "pane_id": "repl" }
+            },
+            "bindings": {
+                "mother": { "repl": { "source": "some.source", "params": { "path": "a.rs" } } }
+            }
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+
+        let (trees, bindings) = parse_store(&bytes).expect("a valid V3 envelope must parse");
+        assert_eq!(trees.get("mother"), Some(&PaneTree::repl_leaf()));
+        assert_eq!(
+            bindings.get("mother").and_then(|panes| panes.get("repl")),
+            Some(&SourceBinding {
+                source: "some.source".to_string(),
+                params: Some(serde_json::json!({ "path": "a.rs" })),
+            }),
+            "a V3 binding's params must round-trip, not just its source"
         );
     }
 
@@ -1615,5 +2083,303 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── 21. bind_source (no params) persists and reloads as params: None ─────
+
+    #[test]
+    fn binding_created_without_params_persists_and_reloads_as_params_none() {
+        let tmp = std::env::temp_dir()
+            .join("pane_registry_test_binding_without_params_reloads_as_none.json");
+        let _ = std::fs::remove_file(&tmp);
+
+        {
+            let mut reg = PaneRegistry::with_store_path(tmp.clone());
+            reg.init_focus("perri");
+            reg.create_pane("perri", "queue", SplitPosition::Right, "repl")
+                .unwrap();
+            reg.bind_source("perri", "queue", "perri.list_pr_queue");
+        }
+
+        let reg2 = PaneRegistry::with_store_path(tmp.clone());
+        let binding = reg2
+            .binding_for("perri", "queue")
+            .expect("binding must survive reload");
+        assert_eq!(binding.source, "perri.list_pr_queue");
+        assert_eq!(
+            binding.params, None,
+            "a bind_source binding must reload with params: None, identical to before"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── 22. bind_source_with_params round-trips its params through save/reload
+
+    #[test]
+    fn binding_created_with_params_round_trips_params_through_save_and_reload() {
+        let tmp = std::env::temp_dir()
+            .join("pane_registry_test_binding_with_params_round_trips.json");
+        let _ = std::fs::remove_file(&tmp);
+
+        let params =
+            serde_json::json!({ "path": "src/main.rs", "revision": "working", "anchor_line": 12 });
+
+        {
+            let mut reg = PaneRegistry::with_store_path(tmp.clone());
+            reg.init_focus("cody");
+            reg.create_pane("cody", "file", SplitPosition::Right, "repl")
+                .unwrap();
+            reg.bind_source_with_params(
+                "cody",
+                "file",
+                "nostromo.get_file",
+                Some(params.clone()),
+            );
+        }
+
+        let reg2 = PaneRegistry::with_store_path(tmp.clone());
+        let binding = reg2
+            .binding_for("cody", "file")
+            .expect("binding must survive reload");
+        assert_eq!(binding.source, "nostromo.get_file");
+        assert_eq!(binding.params, Some(params));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── 23. Hand-written V2 store (bare source-name bindings) loads correctly ─
+
+    #[test]
+    fn hand_written_v2_store_loads_trees_and_binding_as_params_none() {
+        let tmp = std::env::temp_dir()
+            .join("pane_registry_test_hand_written_v2_store_loads.json");
+        let _ = std::fs::remove_file(&tmp);
+
+        // The exact pre-params (D3) wire shape: `bindings` maps
+        // tag -> pane_id -> a bare source-name *string*, with no `params`
+        // field anywhere — this literal is the migration criterion.
+        let raw = r#"{
+            "version": 2,
+            "trees": {
+                "perri": {
+                    "kind": "split",
+                    "direction": "horizontal",
+                    "children": [
+                        { "kind": "leaf", "pane_id": "repl" },
+                        { "kind": "leaf", "pane_id": "queue" }
+                    ],
+                    "ratios": [0.5, 0.5]
+                }
+            },
+            "bindings": {
+                "perri": { "queue": "perri.list_pr_queue" }
+            }
+        }"#;
+        std::fs::write(&tmp, raw).unwrap();
+
+        let reg = PaneRegistry::with_store_path(tmp.clone());
+        assert_eq!(
+            reg.pane_ids("perri"),
+            vec!["repl".to_string(), "queue".to_string()],
+            "trees must load intact from a V2 store"
+        );
+        let binding = reg
+            .binding_for("perri", "queue")
+            .expect("a V2-shaped binding must load");
+        assert_eq!(binding.source, "perri.list_pr_queue");
+        assert_eq!(
+            binding.params, None,
+            "a V2 binding has no params field at all and must load as None"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── 24. Hand-written V1 store (bare tag -> PaneTree map) loads trees only ─
+
+    #[test]
+    fn hand_written_v1_store_bare_map_loads_trees_with_zero_bindings() {
+        let tmp = std::env::temp_dir()
+            .join("pane_registry_test_hand_written_v1_store_loads.json");
+        let _ = std::fs::remove_file(&tmp);
+
+        // The pre-binding wire shape: a bare `{ "<tag>": <PaneTree> }` map —
+        // no version envelope, no "trees"/"bindings" keys at all.
+        let raw = r#"{
+            "mother": { "kind": "leaf", "pane_id": "repl" }
+        }"#;
+        std::fs::write(&tmp, raw).unwrap();
+
+        let reg = PaneRegistry::with_store_path(tmp.clone());
+        assert!(reg.contains("mother"));
+        assert_eq!(reg.pane_ids("mother"), vec!["repl".to_string()]);
+        assert!(
+            reg.all_bindings().is_empty(),
+            "a V1 store has no bindings to recover, not a load failure"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── 25. A persisted binding with params to an unknown source is dropped ──
+
+    #[test]
+    fn binding_with_params_to_unknown_source_is_dropped_on_load_but_pane_tree_survives() {
+        let tmp = std::env::temp_dir()
+            .join("pane_registry_test_binding_with_params_unknown_source_dropped.json");
+        let _ = std::fs::remove_file(&tmp);
+
+        {
+            let mut reg = PaneRegistry::with_store_path(tmp.clone());
+            reg.init_focus("cody");
+            reg.create_pane("cody", "file", SplitPosition::Right, "repl")
+                .unwrap();
+            reg.bind_source_with_params(
+                "cody",
+                "file",
+                "nostromo.get_file",
+                Some(serde_json::json!({ "path": "src/main.rs" })),
+            );
+        }
+
+        // Corrupt the persisted binding's source to something outside the
+        // closed fetcher registry, the same way an already-established test
+        // above does for a params-less binding — this is the params-carrying
+        // counterpart of that guard.
+        let raw = std::fs::read_to_string(&tmp).unwrap();
+        assert!(raw.contains("nostromo.get_file"));
+        let corrupted = raw.replace("nostromo.get_file", "totally.unknown.source");
+        std::fs::write(&tmp, corrupted).unwrap();
+
+        let reg2 = PaneRegistry::with_store_path(tmp.clone());
+        assert_eq!(
+            reg2.binding_for("cody", "file"),
+            None,
+            "a binding (with params) to an unknown source must not survive a reload"
+        );
+        assert_eq!(
+            reg2.pane_ids("cody"),
+            vec!["repl".to_string(), "file".to_string()],
+            "the pane structure must be unaffected by dropping the stale binding"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── 26. nostromo.get_file is a known source — its binding is not dropped ─
+
+    #[test]
+    fn binding_to_nostromo_get_file_survives_reload_because_it_is_a_known_source() {
+        let tmp = std::env::temp_dir()
+            .join("pane_registry_test_get_file_binding_survives_because_known.json");
+        let _ = std::fs::remove_file(&tmp);
+
+        assert!(
+            crate::mcp::tools::apply_layout::known_sources().contains(&"nostromo.get_file"),
+            "sanity: nostromo.get_file must be a known source"
+        );
+
+        {
+            let mut reg = PaneRegistry::with_store_path(tmp.clone());
+            reg.init_focus("cody");
+            reg.create_pane("cody", "file", SplitPosition::Right, "repl")
+                .unwrap();
+            reg.bind_source_with_params(
+                "cody",
+                "file",
+                "nostromo.get_file",
+                Some(serde_json::json!({ "path": "src/main.rs", "revision": "working" })),
+            );
+        }
+
+        let reg2 = PaneRegistry::with_store_path(tmp.clone());
+        let binding = reg2
+            .binding_for("cody", "file")
+            .expect("a known-source binding must survive reload, unlike an unknown one");
+        assert_eq!(binding.source, "nostromo.get_file");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── 27. rendered-shape reports (W1 — render-state-visibility) ────────────
+
+    #[test]
+    fn rendered_shapes_for_tag_is_empty_when_nothing_has_reported() {
+        let reg = PaneRegistry::in_memory();
+        assert!(reg.rendered_shapes_for_tag("perri").is_empty());
+    }
+
+    #[test]
+    fn rendered_shapes_for_tag_returns_every_window_sorted_by_window_id() {
+        let mut reg = PaneRegistry::in_memory();
+        let now = chrono::Utc::now();
+        reg.record_rendered_shape("conn-a", "2", "perri", vec!["queue".into()], now);
+        reg.record_rendered_shape("conn-b", "0", "perri", vec!["queue".into(), "repl".into()], now);
+
+        let reports = reg.rendered_shapes_for_tag("perri");
+        let window_ids: Vec<&str> = reports.iter().map(|(w, _)| w.as_str()).collect();
+        assert_eq!(window_ids, vec!["0", "2"]);
+    }
+
+    #[test]
+    fn rendered_shapes_for_tag_ignores_other_tags() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.record_rendered_shape("conn-a", "0", "mother", vec!["repl".into()], chrono::Utc::now());
+        assert!(reg.rendered_shapes_for_tag("perri").is_empty());
+    }
+
+    #[test]
+    fn a_second_report_for_the_same_window_and_tag_replaces_the_first() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.record_rendered_shape("conn-a", "0", "perri", vec!["repl".into()], chrono::Utc::now());
+        reg.record_rendered_shape(
+            "conn-a",
+            "0",
+            "perri",
+            vec!["repl".into(), "queue".into()],
+            chrono::Utc::now(),
+        );
+
+        let reports = reg.rendered_shapes_for_tag("perri");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].1.pane_ids, vec!["repl", "queue"]);
+    }
+
+    #[test]
+    fn dropping_a_connection_prunes_only_the_windows_it_reported() {
+        let mut reg = PaneRegistry::in_memory();
+        let now = chrono::Utc::now();
+        reg.record_rendered_shape("conn-a", "0", "perri", vec!["repl".into()], now);
+        reg.record_rendered_shape("conn-b", "1", "perri", vec!["repl".into()], now);
+
+        reg.prune_rendered_shapes_for_conn("conn-a");
+
+        let reports = reg.rendered_shapes_for_tag("perri");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].0, "1");
+    }
+
+    #[test]
+    fn a_reconnect_report_survives_the_old_connections_disconnect_prune() {
+        // Window "0" reconnects under a new conn_key and reports before the
+        // old connection's disconnect cleanup runs. The prune must key off
+        // which connection actually produced the stored report, not the
+        // window id alone — otherwise this race deletes the fresher report.
+        let mut reg = PaneRegistry::in_memory();
+        reg.record_rendered_shape("conn-old", "0", "perri", vec!["repl".into()], chrono::Utc::now());
+        reg.record_rendered_shape(
+            "conn-new",
+            "0",
+            "perri",
+            vec!["repl".into(), "queue".into()],
+            chrono::Utc::now(),
+        );
+
+        reg.prune_rendered_shapes_for_conn("conn-old");
+
+        let reports = reg.rendered_shapes_for_tag("perri");
+        assert_eq!(reports.len(), 1, "the reconnect's fresher report must survive");
+        assert_eq!(reports[0].1.pane_ids, vec!["repl", "queue"]);
     }
 }

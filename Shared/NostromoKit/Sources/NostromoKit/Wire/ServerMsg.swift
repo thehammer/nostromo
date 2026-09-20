@@ -64,13 +64,102 @@ public enum ServerMsg {
     /// Content update for a single pane (set_pane_content — does not touch geometry).
     /// `freshness` is `nil` for content with no staleness concept (e.g.
     /// agent-authored content) and for frames from a daemon that predates
-    /// this field — always decodes successfully either way.
-    case paneContent(tag: String, paneId: String, content: PaneContentWire, freshness: PaneFreshness?)
+    /// this field — always decodes successfully either way. `address` (W1 —
+    /// curated-agent-views) is likewise `nil` for any push with nothing to
+    /// point at, and for frames from a daemon that predates the field.
+    case paneContent(tag: String, paneId: String, content: PaneContentWire, freshness: PaneFreshness?, address: PaneAddress?)
 
     /// A new daemon-hosted focus was spawned via `create_focus`.
     case focusCreated(meta: FocusCreatedMeta)
 
+    /// A daemon-driven decision-modal request (W6). iOS decodes this so the
+    /// frame doesn't fall through to `.unknown`, but renders nothing for it —
+    /// decision modals are macOS-only in this wedge.
+    case decisionRequest(tag: String, requestId: String, prompt: String, detail: String?,
+                         choices: [DecisionChoice], contextPaneId: String?)
+
+    /// A decision request was resolved — answered, dismissed, timed out, or
+    /// its owning session went away (multi-window decision-sheet fix). Like
+    /// `decisionRequest`, iOS decodes this so the frame doesn't fall through
+    /// to `.unknown`, but renders nothing for it — decision modals are
+    /// macOS-only in this wedge.
+    case decisionResolved(tag: String, requestId: String, resolution: String, choiceId: String?)
+
+    // ── ambient activity (activity-path wedge) ───────────────────────────────
+    // iOS decodes these without throwing but renders nothing — no iOS UI in
+    // this wedge (see the plan's "Out of scope"). Mirrors the Rust
+    // `ServerMsg::Activity`/`ActivitySnapshot`/`ActivityHealth` variants.
+
+    /// One ambient activity event, broadcast live.
+    case activity(ActivityEvent)
+    /// Full snapshot of one focus's activity streams (response to
+    /// `activity_snapshot_request`, and replayed on attach).
+    case activitySnapshot(tag: String, streams: [ActivityStreamWire])
+    /// Ingestion health verdict for the ambient activity feed.
+    case activityHealth(ingesting: Bool, reason: String?, lastEventAt: Date?, hookInstalled: Bool)
+
     case unknown
+}
+
+// MARK: - DecisionChoice
+
+/// One choice offered by a `decision_request` frame.
+/// Mirrors `DecisionChoice` in `src/ipc/protocol.rs`.
+public struct DecisionChoice: Decodable, Equatable {
+    public let id: String
+    public let label: String
+    public let detail: String?
+}
+
+// MARK: - ActivityEvent / ActivityStreamWire
+
+/// Mirrors the Rust `agent_bus::ActivityEvent`. Every field beyond the
+/// original four is optional and `#[serde(default)]` on the Rust side, so an
+/// old 4-field line still decodes here too.
+public struct ActivityEvent: Decodable {
+    public let ts:            Date
+    public let agent:         String
+    public let kind:          String
+    public let summary:       String
+    public let focusTag:      String?
+    public let sessionId:     String?
+    public let agentId:       String?
+    public let agentType:     String?
+    public let parentAgentId: String?
+    public let toolName:      String?
+    public let toolUseId:     String?
+    public let cwd:           String?
+    public let seq:           UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case ts, agent, kind, summary
+        case focusTag      = "focus_tag"
+        case sessionId     = "session_id"
+        case agentId       = "agent_id"
+        case agentType     = "agent_type"
+        case parentAgentId = "parent_agent_id"
+        case toolName      = "tool_name"
+        case toolUseId     = "tool_use_id"
+        case cwd
+        case seq
+    }
+}
+
+/// Mirrors the Rust `ipc::protocol::ActivityStreamWire` — one focus's main
+/// stream (`agentId == nil`) or one subagent's stream.
+public struct ActivityStreamWire: Decodable {
+    public let agentId:       String?
+    public let agentType:     String?
+    public let parentAgentId: String?
+    public let events:        [ActivityEvent]
+    public let finished:      Bool
+
+    enum CodingKeys: String, CodingKey {
+        case agentId       = "agent_id"
+        case agentType     = "agent_type"
+        case parentAgentId = "parent_agent_id"
+        case events, finished
+    }
 }
 
 // MARK: - SessionInfo
@@ -323,7 +412,28 @@ extension ServerMsg {
     private struct FredStateWrapper:         Decodable { let mailbox: MailboxSnapshot; let calendar: CalendarSnapshot }
     private struct TeriStateWrapper:         Decodable { let todos: TeriTodosSnapshot }
     private struct FocusLayoutWrapper:       Decodable { let tag: String; let tree: PaneTree; let focused_pane: String? }
-    private struct PaneContentWrapper:       Decodable { let tag: String; let pane_id: String; let content: PaneContentWire; let freshness: PaneFreshness? }
+    private struct PaneContentWrapper:       Decodable { let tag: String; let pane_id: String; let content: PaneContentWire; let freshness: PaneFreshness?; let address: PaneAddress? }
+    private struct DecisionRequestWrapper:   Decodable {
+        let tag: String
+        let request_id: String
+        let prompt: String
+        let detail: String?
+        let choices: [DecisionChoice]
+        let context_pane_id: String?
+    }
+    private struct DecisionResolvedWrapper:  Decodable {
+        let tag: String
+        let request_id: String
+        let resolution: String
+        let choice_id: String?
+    }
+    private struct ActivitySnapshotWrapper:  Decodable { let tag: String; let streams: [ActivityStreamWire] }
+    private struct ActivityHealthWrapper:    Decodable {
+        let ingesting: Bool
+        let reason: String?
+        let last_event_at: Date?
+        let hook_installed: Bool
+    }
 
     /// Decode a raw JSON frame from the daemon.
     /// Unknown message types decode to `.unknown` rather than throwing.
@@ -435,12 +545,45 @@ extension ServerMsg {
 
         case "pane_content":
             if let m = try? dec.decode(PaneContentWrapper.self, from: data) {
-                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content, freshness: m.freshness)
+                return .paneContent(tag: m.tag, paneId: m.pane_id, content: m.content, freshness: m.freshness, address: m.address)
             }
 
         case "focus_created":
             if let m = try? dec.decode(FocusCreatedMeta.self, from: data) {
                 return .focusCreated(meta: m)
+            }
+
+        case "decision_request":
+            if let m = try? dec.decode(DecisionRequestWrapper.self, from: data) {
+                return .decisionRequest(tag: m.tag, requestId: m.request_id, prompt: m.prompt,
+                                        detail: m.detail, choices: m.choices,
+                                        contextPaneId: m.context_pane_id)
+            }
+
+        case "decision_resolved":
+            if let m = try? dec.decode(DecisionResolvedWrapper.self, from: data) {
+                return .decisionResolved(tag: m.tag, requestId: m.request_id,
+                                         resolution: m.resolution, choiceId: m.choice_id)
+            }
+
+        case "activity":
+            if let ev = try? dec.decode(ActivityEvent.self, from: data) {
+                return .activity(ev)
+            }
+
+        case "activity_snapshot":
+            if let m = try? dec.decode(ActivitySnapshotWrapper.self, from: data) {
+                return .activitySnapshot(tag: m.tag, streams: m.streams)
+            }
+
+        case "activity_health":
+            if let m = try? dec.decode(ActivityHealthWrapper.self, from: data) {
+                return .activityHealth(
+                    ingesting: m.ingesting,
+                    reason: m.reason,
+                    lastEventAt: m.last_event_at,
+                    hookInstalled: m.hook_installed
+                )
             }
 
         default:

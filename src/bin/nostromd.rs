@@ -38,10 +38,14 @@ use nostromo::{
         perri_queue::PrQueueSnapshot,
         perri_queue_native::PerriQueueNativeSource,
         teri_todos::TeriTodosNativeSource,
+        tickets::TicketProvider,
     },
     ipc::{
-        pane_registry::PaneRegistry, perri_state::build_perri_state, perri_state::WatchPerriStateProvider,
-        protocol::ServerMsg, PtyManager, Server, SessionManager,
+        decisions::DecisionRegistry,
+        pane_registry::PaneRegistry,
+        perri_state::{build_perri_state, WatchPerriStateProvider},
+        protocol::ServerMsg,
+        PtyManager, Server, SessionManager,
     },
     mcp::{daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState},
     mother::{self, statusline_cache_path, MotherStatus},
@@ -78,16 +82,37 @@ async fn main() -> Result<()> {
 
     // ── Session manager (persistent stream-json sessions) ──────────────────────
     let session_mgr: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
+    // Seed the session-id reverse index from the on-disk store so activity
+    // events from sessions spawned by a *previous* daemon process (this one
+    // predates a fresh process's in-memory index) still attribute correctly
+    // from the first event, not just after this process spawns/restarts them.
+    session_mgr.lock().unwrap().seed_reverse_index();
 
     // ── Pane registry (agent-authored layout) ──────────────────────────────────
     // Single source of truth for every focus's pane tree. Persisted to disk so
     // an assembled layout survives a daemon restart.
     let pane_registry: Arc<Mutex<PaneRegistry>> = Arc::new(Mutex::new(PaneRegistry::new()));
 
+    // ── Decision registry (W6 decision modals) ─────────────────────────────────
+    // Shared between the IPC server (routes ClientMsg::DecisionAnswer, tracks
+    // Topic::Decision subscribers) and the daemon-hosted MCP backend
+    // (nostromo.ask_decision creates requests and blocks on their answer).
+    let decisions: Arc<Mutex<DecisionRegistry>> = Arc::new(Mutex::new(DecisionRegistry::new()));
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_decisions(Arc::clone(&decisions));
+    }
+
     // ── IPC server (Unix socket) ──────────────────────────────────────────────
     let socket_path = nostromo::ipc::default_socket_path();
-    let server = Server::bind(&socket_path, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), config.perri_state_dir())
-        .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
+    let server = Server::bind(
+        &socket_path,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        config.perri_state_dir(),
+        Arc::clone(&decisions),
+    )
+    .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
 
     // ── IPC server (TCP — iOS / LAN clients) ──────────────────────────────────
     let tcp_addr = config.tcp_listen_addr();
@@ -110,7 +135,13 @@ async fn main() -> Result<()> {
         );
     }
 
-    server.bind_tcp(tcp_listener, Arc::clone(&pty_mgr), Arc::clone(&session_mgr), config.perri_state_dir());
+    server.bind_tcp(
+        tcp_listener,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        config.perri_state_dir(),
+        Arc::clone(&decisions),
+    );
 
     // ── mDNS / Bonjour advertising ────────────────────────────────────────────
     // Advertise nostromd on the LAN so iOS clients can discover it without a
@@ -143,18 +174,20 @@ async fn main() -> Result<()> {
     }
 
     let broadcast_tx = server.tx.clone();
+    // Every DecisionRegistry resolution path (answer/timeout/cancel_tag) can
+    // now announce a ServerMsg::DecisionResolved so every presenting window —
+    // not just the one the operator actually used — learns a request is done
+    // (multi-window decision-sheet fix). Must happen here, after `server.tx`
+    // exists, not in the registry-construction block above.
+    decisions.lock().unwrap().configure_broadcast(broadcast_tx.clone());
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
-    let (perri_queue_rx, perri_queue_refresh_tx) = PerriQueueNativeSource::spawn(config.clone());
+    let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx) =
+        PerriQueueNativeSource::spawn(config.clone());
     let (perri_pr_rx, perri_pr_refresh_tx) = PerriPrNativeSource::spawn(config.clone());
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
     let perri_pr_rx_for_mcp = perri_pr_rx.clone();
-    // Cloned here because `perri_queue_refresh_tx` itself is moved into
-    // `relay_client::spawn` below; the MCP-hosted `perri.load_pr`/
-    // `perri.clear_current_pr` handlers need their own sender to wake the
-    // native sources without touching the dirty-file sentinel's watcher.
-    let perri_queue_refresh_tx_for_mcp = perri_queue_refresh_tx.clone();
     let perri_pr_refresh_tx_for_mcp = perri_pr_refresh_tx.clone();
 
     // f1: attach-replay for `ServerMsg::PerriState` (see `PerriStateProvider`).
@@ -192,6 +225,22 @@ async fn main() -> Result<()> {
                     mcp_config,
                 );
             }
+            // ── ticket provider registry (W4 — curated-agent-views) ─────────────
+            // `jira` is always registered; whether it's actually *configured*
+            // (credentials resolved) is logged once so a deployment missing
+            // ATLASSIAN_* can tell why `ticket` shows are refused, without
+            // ever logging the token itself.
+            let jira_provider = Arc::new(nostromo::data::tickets::jira::JiraProvider::new(&config));
+            info!(configured = jira_provider.is_configured(), "jira ticket provider");
+            let mut ticket_registry = nostromo::data::tickets::TicketRegistry::new();
+            ticket_registry.register(jira_provider);
+            let tickets = nostromo::mcp::TicketRegistryState {
+                registry: Arc::new(ticket_registry),
+                cache: Arc::new(nostromo::data::tickets::TicketCache::new(
+                    std::time::Duration::from_secs(60),
+                )),
+            };
+
             let backend = DaemonMcpBackend {
                 pane_registry: Arc::clone(&pane_registry),
                 session_mgr: Arc::clone(&session_mgr),
@@ -199,9 +248,11 @@ async fn main() -> Result<()> {
                 perri: nostromo::mcp::PerriDaemonState {
                     state_dir: Some(config.perri_state_dir()),
                     pr_refresh_tx: Some(perri_pr_refresh_tx_for_mcp.clone()),
-                    queue_refresh_tx: Some(perri_queue_refresh_tx_for_mcp.clone()),
+                    queue_refresh_tx: Some(perri_queue_refresh_tx.clone()),
                     ..Default::default()
                 },
+                decisions: Arc::clone(&decisions),
+                tickets,
             };
             let state = McpSharedState::for_daemon_with_sources(
                 backend,
@@ -257,9 +308,18 @@ async fn main() -> Result<()> {
         .join("activity.jsonl");
 
     let btx_activity = broadcast_tx.clone();
+    let session_mgr_for_activity = Arc::clone(&session_mgr);
     tokio::spawn(async move {
         let on_event = move |ev: ActivityEvent| {
-            let _ = btx_activity.send(ServerMsg::Activity(ev));
+            // Resolve attribution, assign `seq`, and defensively re-scrub —
+            // all inside `SessionManager::ingest_activity_event` — before
+            // broadcasting, so every subscriber sees the same finalized event
+            // the daemon's own snapshot/health responses are built from.
+            let finalized = session_mgr_for_activity
+                .lock()
+                .unwrap()
+                .ingest_activity_event(ev);
+            let _ = btx_activity.send(ServerMsg::Activity(finalized));
         };
         if let Err(e) = tail_activity_jsonl(activity_path, on_event).await {
             tracing::warn!("activity tailer exited: {e:#}");
@@ -270,7 +330,7 @@ async fn main() -> Result<()> {
     // Connects to the relay WebSocket and triggers an immediate queue refresh
     // on every relevant GitHub event, reducing PR-queue lag from the poll
     // interval (~60s) to ~3s. No-ops if relay_url/relay_token are not set.
-    nostromo::data::relay_client::spawn(config.clone(), perri_queue_refresh_tx);
+    nostromo::data::relay_client::spawn(config.clone(), perri_queue_relay_tx);
 
     // ── Perri broadcaster ─────────────────────────────────────────────────────
     // (Sources were spawned earlier so the MCP state could get live receivers.)

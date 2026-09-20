@@ -43,6 +43,13 @@ use crate::mcp::{state::McpSharedState, tools};
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "nostromo";
 
+/// JSON-RPC error code for a tool the operator's policy withdraws from this
+/// caller (W5 — curated-agent-views). In the implementation-defined server
+/// range (-32000..-32099), deliberately *not* -32601 "Method not found" —
+/// distinguishing a withdrawn tool from a typo'd one is a stated acceptance
+/// criterion.
+pub const TOOL_FORBIDDEN_CODE: i64 = -32001;
+
 // ── server handle ─────────────────────────────────────────────────────────────
 
 /// Handle to the running MCP server.  Drop to request shutdown.
@@ -167,7 +174,7 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
             "initialize" => Some(handle_initialize(id, &req)),
             "notifications/initialized" => None, // notification; no response
             "ping" => id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
-            "tools/list" => Some(handle_tools_list(id)),
+            "tools/list" => Some(handle_tools_list(id, &state, pty_id.as_deref()).await),
             "tools/call" => Some(handle_tools_call(id, &req, &state, pty_id.as_deref()).await),
             other => {
                 debug!("MCP: unknown method {other:?}");
@@ -210,13 +217,23 @@ fn handle_initialize(id: Option<Value>, req: &Value) -> Value {
     })
 }
 
-fn handle_tools_list(id: Option<Value>) -> Value {
+/// `tools/list`, narrowed to what this caller may see (W5 —
+/// curated-agent-views, B8/D7).
+///
+/// Takes `state` and `pty_id` — both already in scope at the call site — so the
+/// operator's tool policy can be applied per caller. With no policy armed, the
+/// shipped default, this is byte-for-byte the list it always returned.
+async fn handle_tools_list(
+    id: Option<Value>,
+    state: &McpSharedState,
+    pty_id: Option<&str>,
+) -> Value {
     let id = id.unwrap_or(json!(null));
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "tools": tools::tool_descriptors()
+            "tools": tools::tool_descriptors_for(state, pty_id).await
         }
     })
 }
@@ -247,6 +264,14 @@ async fn handle_tools_call(
         tools::ToolResult::UnknownTool(n) => {
             json_rpc_error(Some(id), -32601, &format!("Unknown tool: {n}"))
         }
+        // A distinct JSON-RPC code from "Method not found", because the two
+        // mean different things to the caller: the tool exists and works, but
+        // the operator's policy withdraws it from this agent.
+        tools::ToolResult::Forbidden(n) => json_rpc_error(
+            Some(id),
+            TOOL_FORBIDDEN_CODE,
+            &format!("Tool not available to this caller: {n}"),
+        ),
     }
 }
 

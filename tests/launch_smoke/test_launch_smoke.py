@@ -1,0 +1,3478 @@
+"""Behavioral tests for bin/nostromo-launch-smoke.
+
+These tests exercise the pure-function contract of the launch smoke check:
+the verdict model (`reach_verdict`/`gate_verdict`/`aggregate`/`exit_code_for`),
+the detector registry, `.ips` crash-report parsing, diagnostics-row
+attribution helpers, CPU-percentage arithmetic, the
+`PaneFirstPaintAudit`-mirroring not-drawable predicate, and the fixture
+daemon's IPC handshake over a real `AF_UNIX` socket. They do NOT exercise the
+real launch/build/isolation/known-bad-validation machinery — that is verified
+by actually running `bin/nostromo-launch-smoke` and
+`macOS/scripts/launch-smoke-validate.sh` (see tests/launch_smoke/README.md).
+
+This is the RED phase of red-green-refactor: `bin/nostromo-launch-smoke` does
+not exist yet. Every test below is written against the module contract handed
+down for this wedge (see `.claude/plans/launch-smoke-test.md` in the primary
+repo checkout) and will fail at import time until that script exists.
+
+The governing discipline, copied from
+`macOS/scripts/transcript-load-report.py` and its test suite
+(`tests/transcript_load/test_transcript_load_tooling.py`): a detector that
+passes on evidence that measured nothing is worse than no detector at all,
+because it converts "we didn't check" into "we checked and it's fine". So the
+universal vacuity tests below are parameterised over the live `CRITERIA`
+registry, not over today's list of nine detector keys — a detector added
+tomorrow with no barren-input defence is a detector nobody checked.
+
+Run with:
+    /usr/bin/python3 -m unittest discover -s tests/launch_smoke
+"""
+
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import tempfile
+import time
+import unittest
+
+REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+SCRIPT_PATH = os.path.join(REPO_ROOT, "bin", "nostromo-launch-smoke")
+FIXTURE_FRAMES_PATH = os.path.join(REPO_ROOT, "tests", "fixtures", "focus_layout_split.json")
+# The deliberately-unsatisfiable fixture behind `--fixture clamped`: a nested
+# split handed ~3% of the width and asked to divide it four ways. It exists
+# to make `ratios-claimed-honestly` bite, and is expected to FAIL
+# `no-undersized-laid-out-pane` by construction.
+CLAMPED_FIXTURE_PATH = os.path.join(
+    REPO_ROOT, "tests", "fixtures", "focus_layout_clamped.json"
+)
+
+# The script is extensionless (bin/nostromo-launch-smoke, not .py), so
+# spec_from_file_location can't infer a loader from the suffix and returns
+# None unless we hand it one explicitly. Same mechanism tests/doctor uses to
+# import bin/nostromo-doctor.
+_loader = importlib.machinery.SourceFileLoader("nostromo_launch_smoke", SCRIPT_PATH)
+_spec = importlib.util.spec_from_file_location(
+    "nostromo_launch_smoke", SCRIPT_PATH, loader=_loader
+)
+launch_smoke = importlib.util.module_from_spec(_spec)
+_loader.exec_module(launch_smoke)
+
+
+# ---------------------------------------------------------------------------
+# Fixture builders
+# ---------------------------------------------------------------------------
+
+
+def make_pane(
+    pane_id="queue",
+    *,
+    has_content=True,
+    is_loading=False,
+    bounds_width=100.0,
+    bounds_height=50.0,
+    has_window=True,
+    layout_pass_count=1,
+):
+    """A `panesMeasured` entry, shaped exactly like `PaneFirstPaintAudit.Measurements`."""
+    return {
+        "paneId": pane_id,
+        "hasContent": has_content,
+        "isLoading": is_loading,
+        "boundsWidth": bounds_width,
+        "boundsHeight": bounds_height,
+        "hasWindow": has_window,
+        "layoutPassCount": layout_pass_count,
+    }
+
+
+#: A width/height comfortably above `MINIMUM_USABLE_EXTENT` (120pt). The
+#: `make_pane` defaults (100x50) predate that floor and are BELOW it on both
+#: axes, so a fixture built from them is not a healthy pane any more — it is
+#: exactly the `tooSmall` shape `no-undersized-laid-out-pane` exists to
+#: catch. Every "this run is healthy" fixture therefore states its bounds
+#: explicitly through this helper rather than inheriting the defaults.
+HEALTHY_WIDTH = 879.5
+HEALTHY_HEIGHT = 434.5
+
+
+def healthy_pane(pane_id="queue", **kwargs):
+    """A `panesMeasured` entry that is healthy on every axis every detector
+    grades — non-zero AND at or above `MINIMUM_USABLE_EXTENT`."""
+    kwargs.setdefault("bounds_width", HEALTHY_WIDTH)
+    kwargs.setdefault("bounds_height", HEALTHY_HEIGHT)
+    return make_pane(pane_id, **kwargs)
+
+
+def make_row(*, pid=100, run_id="run-1", splits_ratios_applied=None,
+             split_nodes_rendered=None, leaves_rendered=None, splits_laid_out=None,
+             panes=None):
+    """A diagnostics.jsonl row, shaped per the module contract."""
+    return {
+        "pid": pid,
+        "runID": run_id,
+        "splitsRatiosApplied": splits_ratios_applied,
+        "splitNodesRendered": split_nodes_rendered,
+        "leavesRendered": leaves_rendered,
+        "splitsLaidOut": splits_laid_out,
+        "panesMeasured": list(panes) if panes is not None else [],
+    }
+
+
+def healthy_evidence():
+    """An Evidence that must make every registered detector PASS.
+
+    Two rows, two distinct healthy panes each (queue/diff), split ratios
+    applied, alive at window end, plausible mid-range CPU, a crash-report
+    scan that actually happened and found nothing, and a pane scan that
+    actually happened and found no violations. This is the mandatory
+    counterpart to the vacuity tests below (mirrors
+    `EvaluateKnownGoodRunTests` in transcript_load's suite) — without it, the
+    vacuity tests would be satisfiable by a module that always fails, which
+    is the same defect one level up.
+    """
+    return launch_smoke.Evidence.empty()._replace(
+        launched_pid=100,
+        rows=(
+            make_row(pid=100, splits_ratios_applied=2, splits_laid_out=2,
+                     split_nodes_rendered=2, leaves_rendered=4,
+                     panes=[healthy_pane("queue"), healthy_pane("diff")]),
+            make_row(pid=100, splits_ratios_applied=2, splits_laid_out=2,
+                     split_nodes_rendered=2, leaves_rendered=4,
+                     panes=[healthy_pane("queue"), healthy_pane("diff")]),
+        ),
+        observed_pids=(100,),
+        another_instance_pid=None,
+        alive_at_window_end=True,
+        cpu_percent=15.0,
+        crash_reports_scanned=3,
+        crash_reports_dir_present=True,
+        crash_reports_attributed_pids=(),
+        notdrawable_violations=(),
+        # Two DISTINCT paneIds (queue, diff) across the two rows -- the same
+        # thing `build_evidence` counts. This said 4 (pane OBSERVATIONS, not
+        # distinct panes) until `HealthyFixtureIsGenuinelyHealthyTests`
+        # started re-deriving it from the rows.
+        panes_scanned=2,
+        # ...and this was never set at all, so the "known good" fixture
+        # asserted every detector PASSed while reporting it had judged zero
+        # panes for geometry -- the exact "passed because it measured
+        # nothing" shape this suite exists to prevent, in the fixture rather
+        # than in the module.
+        geometry_panes_judged=2,
+        window_seconds=15.0,
+    )
+
+
+def load_fixture_frames():
+    with open(FIXTURE_FRAMES_PATH) as f:
+        return json.load(f)
+
+
+def load_clamped_fixture_frames():
+    with open(CLAMPED_FIXTURE_PATH) as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# The 34pt collapse, as measured on the reproduction bench.
+# ---------------------------------------------------------------------------
+
+#: Measured on the live reproduction bench against
+#: `tests/fixtures/focus_layout_clamped.json`: a nested split handed ~3% of a
+#: 1760pt window and asked to divide it four ways, so each detail pane settles
+#: at 44pt wide. Real, non-zero, and entirely unusable — which is exactly why
+#: none of the four instruments watching for a collapse ever saw it, and why
+#: the floor this suite pins is a MINIMUM extent rather than "> 0".
+CLAMPED_PANE_WIDTH = 44.0
+CLAMPED_PANE_HEIGHT = 434.5
+
+#: The clamped fixture's own tree shape: outer split (inner split + repl),
+#: inner split (queue + nested split), nested split (6 detail leaves) — 3
+#: splits, 8 leaves. Deliberately NOT a whole multiple of the split
+#: fixture's shape; see `ClampedFixtureTests`.
+#:
+#: Six detail leaves rather than four, and 2% of the width rather than 3, so
+#: the resulting miss clears `RatioApplicationAudit.defaultTolerance` with
+#: room to spare. The four-leaf version missed by 11 points against a
+#: tolerance that later had to widen to 10 — too close to be a dependable
+#: demonstration.
+CLAMPED_SPLITS_PER_FOCUS = 3
+CLAMPED_LEAVES_PER_FOCUS = 8
+
+
+def clamped_detail_panes():
+    """The four detail-region panes, each clamped to 44pt wide."""
+    return [
+        make_pane(f"detail.{i}", has_content=False,
+                  bounds_width=CLAMPED_PANE_WIDTH, bounds_height=CLAMPED_PANE_HEIGHT)
+        for i in range(4)
+    ]
+
+
+def clamped_bench_rows(*, splits_ratios_applied, splits_laid_out=3, repeats=2):
+    """`repeats` identical snapshots of the clamped bench.
+
+    The repeat is load-bearing, not padding: the settle rule means a pane's
+    FIRST observation can never be a violation, so a single snapshot of a
+    permanently-collapsed pane proves nothing and must not.
+    """
+    return tuple(
+        make_row(pid=100,
+                 split_nodes_rendered=CLAMPED_SPLITS_PER_FOCUS,
+                 leaves_rendered=CLAMPED_LEAVES_PER_FOCUS,
+                 splits_laid_out=splits_laid_out,
+                 splits_ratios_applied=splits_ratios_applied,
+                 panes=[healthy_pane("queue")] + clamped_detail_panes())
+        for _ in range(repeats)
+    )
+
+
+def evidence_from_rows(rows, base=None):
+    """An Evidence whose row-derived populations are re-derived from `rows`
+    by the module's own extractors, exactly as `build_evidence` does — so a
+    fixture can never claim a violation population its own rows do not
+    produce, nor hide one they do."""
+    ev = healthy_evidence() if base is None else base
+    return ev._replace(
+        rows=rows,
+        notdrawable_violations=launch_smoke.notdrawable_violations_from_rows(rows),
+        panes_scanned=len({p.get("paneId") for row in rows
+                           for p in (row.get("panesMeasured") or [])}),
+        collapsed_geometry_violations=(
+            launch_smoke.collapsed_geometry_violations_from_rows(rows)),
+        geometry_panes_judged=launch_smoke.geometry_judged_pane_count(rows),
+        undersized_pane_violations=(
+            launch_smoke.undersized_pane_violations_from_rows(rows)),
+        dishonest_ratio_claims=launch_smoke.dishonest_ratio_claims_from_rows(rows),
+        rows_with_undersized_panes=launch_smoke.rows_with_undersized_panes(rows),
+    )
+
+
+def keyed(verdicts):
+    return {v.key: v for v in verdicts}
+
+
+def _wait_until(predicate, timeout=2.0, interval=0.02):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
+# ---------------------------------------------------------------------------
+# Module constants
+# ---------------------------------------------------------------------------
+
+
+class ModuleConstantsTests(unittest.TestCase):
+    def test_verdict_states_are_the_documented_strings_and_pairwise_distinct(self):
+        self.assertEqual(
+            [launch_smoke.PASS, launch_smoke.FAIL, launch_smoke.INCONCLUSIVE],
+            ["PASS", "FAIL", "INCONCLUSIVE"],
+        )
+        self.assertEqual(
+            len({launch_smoke.PASS, launch_smoke.FAIL, launch_smoke.INCONCLUSIVE}), 3
+        )
+
+    def test_exit_codes_table_matches_the_documented_mapping(self):
+        self.assertEqual(
+            launch_smoke.EXIT_CODES,
+            {launch_smoke.PASS: 0, launch_smoke.FAIL: 1, launch_smoke.INCONCLUSIVE: 2},
+        )
+
+    def test_detector_kinds_are_the_documented_strings(self):
+        self.assertEqual([launch_smoke.REACH, launch_smoke.GATE], ["reach", "gate"])
+
+    def test_aggregate_inconclusive_causes_are_pinned_exactly(self):
+        # Two come from main()'s pre-Evidence short-circuit (no Evidence
+        # exists yet); the rest come from the three REACH detectors — and
+        # since `split-ratios-applied` now corroborates rendered shape and
+        # applied/laid-out ratios via `split_layout_agreement`, it alone
+        # contributes 4 causes, not 1: three from the shape/ratio
+        # corroboration itself, and a fourth — "diagnostics row omitted the
+        # split shape fields" — for when the stream never said enough to
+        # corroborate anything at all (f4). Since GATE detectors can never be
+        # INCONCLUSIVE, this is the complete set by construction — pinned
+        # here the same way MATERIALIZED_LIMIT is pinned in
+        # transcript-load-report.py, so widening it is a visible, deliberate
+        # edit rather than a silent drift.
+        self.assertEqual(
+            launch_smoke.AGGREGATE_INCONCLUSIVE_CAUSES,
+            frozenset({
+                "build failed",
+                "prerequisite missing",
+                "multi-pane layout not reached",
+                "another instance took the launch",
+                "timed out before the app came up",
+                "rendered layout shape did not match the fixture",
+                "not every rendered split applied its ratios",
+                "diagnostics row omitted the split shape fields",
+            }),
+        )
+
+
+class EvidenceEmptyTests(unittest.TestCase):
+    def test_matches_the_documented_all_absent_shape(self):
+        ev = launch_smoke.Evidence.empty()
+        self.assertIsNone(ev.launched_pid)
+        self.assertEqual(ev.rows, ())
+        self.assertEqual(ev.observed_pids, ())
+        self.assertIsNone(ev.another_instance_pid)
+        self.assertIsNone(ev.alive_at_window_end)
+        self.assertIsNone(ev.cpu_percent)
+        self.assertEqual(ev.crash_reports_scanned, 0)
+        self.assertFalse(ev.crash_reports_dir_present)
+        self.assertEqual(ev.crash_reports_attributed_pids, ())
+        self.assertEqual(ev.notdrawable_violations, ())
+        self.assertEqual(ev.panes_scanned, 0)
+        self.assertEqual(ev.collapsed_geometry_violations, ())
+        self.assertEqual(ev.geometry_panes_judged, 0)
+        self.assertEqual(ev.undersized_pane_violations, ())
+        self.assertEqual(ev.dishonest_ratio_claims, ())
+        self.assertEqual(ev.rows_with_undersized_panes, 0)
+        self.assertEqual(ev.window_seconds, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# reach_verdict / gate_verdict — the only two ways to build a Verdict
+# ---------------------------------------------------------------------------
+
+
+class ReachVerdictTests(unittest.TestCase):
+    def test_ok_true_yields_pass_with_no_cause(self):
+        v = launch_smoke.reach_verdict(
+            "k", "name", ok=True, measured="m", cause=None, observations=3
+        )
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIsNone(v.cause)
+
+    def test_ok_false_yields_inconclusive_with_the_given_cause(self):
+        v = launch_smoke.reach_verdict(
+            "k", "name", ok=False, measured="m", cause="reason", observations=0
+        )
+        self.assertEqual(v.state, launch_smoke.INCONCLUSIVE)
+        self.assertEqual(v.cause, "reason")
+
+    def test_reach_verdict_can_never_produce_fail(self):
+        for ok in (True, False):
+            with self.subTest(ok=ok):
+                v = launch_smoke.reach_verdict(
+                    "k", "name", ok=ok, measured="m",
+                    cause=(None if ok else "r"), observations=1,
+                )
+                self.assertNotEqual(v.state, launch_smoke.FAIL)
+
+
+class GateVerdictTests(unittest.TestCase):
+    def test_ok_true_yields_pass_with_no_cause(self):
+        v = launch_smoke.gate_verdict(
+            "k", "name", ok=True, measured="m", cause=None, observations=3
+        )
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIsNone(v.cause)
+
+    def test_ok_false_yields_fail_with_the_given_cause(self):
+        v = launch_smoke.gate_verdict(
+            "k", "name", ok=False, measured="m", cause="reason", observations=0
+        )
+        self.assertEqual(v.state, launch_smoke.FAIL)
+        self.assertEqual(v.cause, "reason")
+
+    def test_gate_verdict_can_never_produce_inconclusive(self):
+        for ok in (True, False):
+            with self.subTest(ok=ok):
+                v = launch_smoke.gate_verdict(
+                    "k", "name", ok=ok, measured="m",
+                    cause=(None if ok else "r"), observations=1,
+                )
+                self.assertNotEqual(v.state, launch_smoke.INCONCLUSIVE)
+
+
+# ---------------------------------------------------------------------------
+# The registry
+# ---------------------------------------------------------------------------
+
+#: Pinned exactly, in the same spirit as `CriterionKindPartitionTests` in
+#: transcript_load's suite — widening either set is a visible, deliberate
+#: edit to this line, not a silent drift.
+EXPECTED_REACH_KEYS = frozenset({
+    "our-process-ran-the-app", "multi-pane-laid-out", "split-ratios-applied",
+})
+EXPECTED_GATE_KEYS = frozenset({
+    "alive-at-window-end", "no-attributable-crash-report", "cpu-settled",
+    "no-zero-size-laid-out-pane",
+    # D6/D5, added by fix/detail-region-split-collapse. The detail region
+    # collapsed to 34pt wide in a 1760pt split whose correct share was
+    # 879.5pt, and `splitsRatiosApplied` — this tool's own shape check —
+    # certified it as a success, because `applyRatios` returned an
+    # unverified `true`. `no-undersized-laid-out-pane` grades the collapse;
+    # `ratios-claimed-honestly` grades the certification.
+    "no-undersized-laid-out-pane",
+    "ratios-claimed-honestly",
+})
+
+
+class DetectorRegistryPinTests(unittest.TestCase):
+    def test_exactly_nine_detectors_are_registered(self):
+        self.assertEqual(len(launch_smoke.CRITERIA), 9)
+
+    def test_reach_keys_are_pinned_exactly(self):
+        self.assertEqual(
+            {r.key for r in launch_smoke.CRITERIA if r.kind == launch_smoke.REACH},
+            EXPECTED_REACH_KEYS,
+        )
+
+    def test_gate_keys_are_pinned_exactly(self):
+        self.assertEqual(
+            {r.key for r in launch_smoke.CRITERIA if r.kind == launch_smoke.GATE},
+            EXPECTED_GATE_KEYS,
+        )
+
+    def test_every_registered_kind_is_reach_or_gate(self):
+        allowed = {launch_smoke.REACH, launch_smoke.GATE}
+        strays = [(r.key, r.kind) for r in launch_smoke.CRITERIA if r.kind not in allowed]
+        self.assertEqual(strays, [])
+
+    def test_no_duplicate_keys(self):
+        keys = [r.key for r in launch_smoke.CRITERIA]
+        self.assertEqual(len(keys), len(set(keys)))
+
+
+class RegistrationLookupTests(unittest.TestCase):
+    def test_registration_returns_the_matching_registered_entry(self):
+        for reg in launch_smoke.CRITERIA:
+            with self.subTest(key=reg.key):
+                self.assertEqual(launch_smoke.registration(reg.key).key, reg.key)
+
+    def test_registration_raises_keyerror_for_an_unknown_key(self):
+        with self.assertRaises(KeyError):
+            launch_smoke.registration("not-a-real-detector-key")
+
+
+class DetectorDecoratorTests(unittest.TestCase):
+    def test_registering_a_new_detector_appends_it_to_the_registry(self):
+        saved = list(launch_smoke.CRITERIA)
+        self.addCleanup(launch_smoke.CRITERIA.__setitem__, slice(None), saved)
+
+        @launch_smoke.detector("redd-test-probe", launch_smoke.REACH)
+        def _probe(ev):  # pragma: no cover - never invoked in this test
+            return launch_smoke.reach_verdict(
+                "redd-test-probe", "probe", ok=True, measured="m",
+                cause=None, observations=1,
+            )
+
+        self.assertIn("redd-test-probe", [r.key for r in launch_smoke.CRITERIA])
+        self.assertEqual(launch_smoke.registration("redd-test-probe").kind, launch_smoke.REACH)
+
+
+# ---------------------------------------------------------------------------
+# evaluate_evidence: shape invariants (fixed row set, registry order)
+# ---------------------------------------------------------------------------
+
+
+class EvaluateEvidenceShapeTests(unittest.TestCase):
+    def test_returns_exactly_one_verdict_per_registered_detector_in_registry_order(self):
+        for label, ev in [
+            ("EMPTY", launch_smoke.Evidence.empty()),
+            ("HEALTHY", healthy_evidence()),
+        ]:
+            with self.subTest(fixture=label):
+                verdicts = launch_smoke.evaluate_evidence(ev)
+                self.assertEqual(
+                    [v.key for v in verdicts],
+                    [r.key for r in launch_smoke.CRITERIA],
+                )
+
+    def test_a_detector_that_raises_becomes_a_failing_verdict_naming_the_exception(self):
+        saved = list(launch_smoke.CRITERIA)
+        self.addCleanup(launch_smoke.CRITERIA.__setitem__, slice(None), saved)
+
+        target_key = launch_smoke.CRITERIA[0].key
+        idx = next(i for i, r in enumerate(launch_smoke.CRITERIA) if r.key == target_key)
+
+        def _boom(ev):
+            raise ValueError("redd-injected-boom")
+
+        launch_smoke.CRITERIA[idx] = launch_smoke.CRITERIA[idx]._replace(fn=_boom)
+
+        verdicts = launch_smoke.evaluate_evidence(healthy_evidence())
+        self.assertEqual(
+            len(verdicts), len(saved),
+            "a raising detector must not crash the whole evaluation or drop a row",
+        )
+        broken = keyed(verdicts)[target_key]
+        self.assertEqual(broken.state, launch_smoke.FAIL)
+        self.assertTrue(broken.cause)
+        haystack = f"{broken.cause} {broken.measured}"
+        self.assertIn("redd-injected-boom", haystack)
+
+
+class VerdictCausePassInvariantTests(unittest.TestCase):
+    """state == PASS <=> cause is None, and non-PASS always carries a
+    non-empty cause. Checked across every fixture this file builds, not just
+    a hand-picked pair — any future fixture added to `_ALL_FIXTURES` is
+    covered automatically.
+    """
+
+    def test_across_every_fixture_in_this_suite(self):
+        fixtures = [launch_smoke.Evidence.empty(), healthy_evidence()]
+        for ev in fixtures:
+            for v in launch_smoke.evaluate_evidence(ev):
+                with self.subTest(fixture=id(ev), key=v.key):
+                    if v.state == launch_smoke.PASS:
+                        self.assertIsNone(v.cause, f"{v.key} PASSed but carries a cause")
+                    else:
+                        self.assertTrue(v.cause, f"{v.key} is {v.state} with no cause")
+
+
+# ---------------------------------------------------------------------------
+# The universal vacuity tests — the feature's main defence.
+# ---------------------------------------------------------------------------
+
+
+class UniversalVacuityTests(unittest.TestCase):
+    """On evidence that observed nothing at all, no registered detector may
+    produce a passing verdict — with one pinned, documented exception, in the
+    same spirit as transcript-load-report.py's two-row-wide STREAM/PROCESS
+    exemption from its own universal vacuity test (see that module's
+    docstring: "these CAN pass on a file holding one clean line ... the
+    exemption exists, it is two rows wide, and moving a criterion into it
+    fails the suite until someone edits that line on purpose").
+
+    `no-zero-size-laid-out-pane` is that exemption here, and it is
+    load-bearing, not an oversight: verified empirically by actually running
+    `bin/nostromo-launch-smoke` against the fixture daemon serving a
+    single-`repl`-leaf tree instead of the split tree (the literal
+    fixture-rot demonstration the PRD requires). `repl` is a `ReplView`, not
+    a `PaneContentNSView`, so it is never registered in the pane registry
+    `panesMeasured` reads from — a perfectly healthy, ordinary tree
+    legitimately produces `panes_scanned == 0` and zero violations. Gating
+    this detector on `panes_scanned > 0` (as an earlier revision did) made it
+    FAIL on that tree, which — because a GATE FAIL always dominates
+    `aggregate()` — reported the whole run FAIL instead of the required
+    INCONCLUSIVE "multi-pane layout not reached", breaking the fixture-rot
+    demonstration outright. This mirrors `PaneFirstPaintAudit.verdict` itself
+    (`macOS/Nostromo/UI/PaneFirstPaintAudit.swift`): it reports `.healthy`
+    whenever there is nothing to judge (no content, no window, no completed
+    layout pass) — "nothing to violate" is not the same failure mode as
+    "something was measured and it's wrong," and only the latter is what
+    this detector exists to catch.
+    """
+
+    #: Detectors that may legitimately PASS on `Evidence.empty()`. Pinned
+    #: here the same way transcript-load-report.py pins its STREAM/PROCESS
+    #: partition — widening this is a visible, deliberate edit, not a silent
+    #: drift.
+    #:
+    #: All three are geometry gates over the same `panesMeasured`
+    #: population, and all three share the exemption for the same reason:
+    #: "no pane was in a state anyone could judge" is not "a pane was judged
+    #: and it was wrong". `no-undersized-laid-out-pane` is graded on exactly
+    #: the population `no-zero-size-laid-out-pane` is (see that detector's
+    #: comment: same panes, disjoint predicate), so it inherits the
+    #: exemption verbatim. `ratios-claimed-honestly` is vacuous by
+    #: construction on any run with no undersized pane — including a
+    #: perfectly healthy one — which is precisely why its `measured` names
+    #: the row denominator out loud (see
+    #: `RatiosClaimedHonestlyDetectorTests.test_measured_names_the_row_
+    #: denominator_so_a_vacuous_pass_says_so`) instead of passing by vacuum
+    #: in silence.
+    #:
+    #: The non-vacuity these two DO carry is enforced elsewhere, not here:
+    #: `rows_with_undersized_panes` is reported on every run, and
+    #: `CriterionSensitivityTests` proves each can be flipped off PASS.
+    VACUOUS_PASS_EXEMPT = frozenset({
+        "no-zero-size-laid-out-pane",
+        "no-undersized-laid-out-pane",
+        "ratios-claimed-honestly",
+    })
+
+    def test_no_registered_detector_passes_on_evidence_empty_except_the_pinned_exemption(self):
+        verdicts = launch_smoke.evaluate_evidence(launch_smoke.Evidence.empty())
+        offenders = [
+            v for v in verdicts
+            if v.state == launch_smoke.PASS and v.key not in self.VACUOUS_PASS_EXEMPT
+        ]
+        self.assertEqual(
+            offenders, [],
+            f"detectors passed on Evidence.empty(): {[v.key for v in offenders]}",
+        )
+        # And every exempted detector really does still PASS here —
+        # otherwise the exemption itself would be dead code nobody's fixture
+        # exercises. Checked per-key, not just for one representative: an
+        # entry that no longer needs the exemption should be deleted from
+        # it, not left to rot.
+        by_key = keyed(verdicts)
+        for key in sorted(self.VACUOUS_PASS_EXEMPT):
+            with self.subTest(exempt=key):
+                self.assertIn(key, by_key, f"{key} is exempted but not registered")
+                self.assertEqual(
+                    by_key[key].state, launch_smoke.PASS,
+                    f"{key} no longer PASSes on Evidence.empty(); it does not "
+                    f"need the exemption and must be removed from it",
+                )
+
+    def test_no_registered_detector_is_inconclusive_since_gate_never_is_and_reach_never_fails(self):
+        # Every verdict on Evidence.empty() is either INCONCLUSIVE (a REACH
+        # detector), FAIL (a GATE detector), or PASS (the one pinned
+        # exemption above) — never an unpinned PASS — which is exactly
+        # `test_no_registered_detector_passes_on_evidence_empty_except_the_pinned_exemption`
+        # above, restated per-kind so a reader sees why the aggregate can't
+        # be INCONCLUSIVE here without re-deriving it (some GATE detector
+        # always FAILs on totally barren evidence, and a GATE FAIL always
+        # dominates `aggregate()` — see AggregateTests below).
+        verdicts = launch_smoke.evaluate_evidence(launch_smoke.Evidence.empty())
+        for v in verdicts:
+            kind = launch_smoke.registration(v.key).kind
+            with self.subTest(key=v.key, kind=kind):
+                if v.key in self.VACUOUS_PASS_EXEMPT:
+                    self.assertEqual(v.state, launch_smoke.PASS)
+                elif kind == launch_smoke.REACH:
+                    self.assertEqual(v.state, launch_smoke.INCONCLUSIVE)
+                elif kind == launch_smoke.GATE:
+                    self.assertEqual(v.state, launch_smoke.FAIL)
+
+
+class VacuityTestActuallyBitesTests(unittest.TestCase):
+    """Proof the vacuity test above is not itself vacuous: register a
+    detector shaped exactly like the historical defect class (a PASS
+    satisfied by input that measured nothing) and confirm the same assertion
+    body objects. Mirrors `VacuityTestActuallyBitesTests` in transcript_load's
+    suite.
+    """
+
+    def test_a_detector_that_cannot_fail_is_caught_on_evidence_empty(self):
+        saved = list(launch_smoke.CRITERIA)
+        self.addCleanup(launch_smoke.CRITERIA.__setitem__, slice(None), saved)
+
+        @launch_smoke.detector("always-passes", launch_smoke.GATE)
+        def _always_passes(ev):
+            return launch_smoke.gate_verdict(
+                "always-passes", "a detector that measures nothing",
+                ok=True, measured="claimed a measurement it never made",
+                cause=None, observations=0,
+            )
+
+        verdicts = launch_smoke.evaluate_evidence(launch_smoke.Evidence.empty())
+        offenders = [v for v in verdicts if v.state == launch_smoke.PASS]
+        self.assertIn("always-passes", [v.key for v in offenders])
+
+
+class EvaluateKnownGoodEvidenceTests(unittest.TestCase):
+    """Mandatory counterpart to the vacuity tests: on a genuinely healthy
+    run, every detector must PASS. Without this, the vacuity tests above are
+    satisfiable by a module that always FAILs/INCONCLUSIVEs — the same bug
+    one level up. Mirrors `EvaluateKnownGoodRunTests`.
+    """
+
+    def test_every_registered_detector_passes_on_a_healthy_run(self):
+        verdicts = launch_smoke.evaluate_evidence(healthy_evidence())
+        not_passing = [
+            (v.key, v.state, v.cause) for v in verdicts if v.state != launch_smoke.PASS
+        ]
+        self.assertEqual(
+            not_passing, [],
+            "a healthy run must pass every detector, or the vacuity tests are "
+            "satisfied by a module that always fails",
+        )
+
+
+# ---------------------------------------------------------------------------
+# The kind-partition invariant: REACH never FAILs, GATE never INCONCLUSIVE.
+# Parameterised over the live registry (via `registration(key).kind`), not
+# over today's hardcoded list of seven keys — a detector registered tomorrow
+# is covered with no new test.
+# ---------------------------------------------------------------------------
+
+
+def mutate_another_instance_took_the_launch():
+    return (
+        healthy_evidence()._replace(
+            launched_pid=999, observed_pids=(100,), another_instance_pid=100,
+        ),
+        launch_smoke.INCONCLUSIVE,
+        "another instance took the launch",
+    )
+
+
+def mutate_timed_out_before_the_app_came_up():
+    return (
+        healthy_evidence()._replace(
+            launched_pid=999, observed_pids=(100,), another_instance_pid=None,
+        ),
+        launch_smoke.INCONCLUSIVE,
+        "timed out before the app came up",
+    )
+
+
+def mutate_multipane_not_reached():
+    return (
+        healthy_evidence()._replace(
+            rows=(make_row(pid=100, splits_ratios_applied=1, panes=[make_pane("repl")]),),
+        ),
+        launch_smoke.INCONCLUSIVE,
+        "multi-pane layout not reached",
+    )
+
+
+def mutate_split_ratios_never_applied():
+    return (
+        healthy_evidence()._replace(
+            rows=(make_row(pid=100, splits_ratios_applied=None,
+                           panes=[make_pane("queue"), make_pane("diff")]),),
+        ),
+        launch_smoke.INCONCLUSIVE,
+        "multi-pane layout not reached",
+    )
+
+
+def mutate_split_shape_did_not_match_fixture():
+    # The outer split never rendered at all -- 1 split / 2 leaves is not a
+    # whole multiple of the fixture's own 2-split/4-leaf shape.
+    return (
+        healthy_evidence()._replace(
+            rows=(make_row(pid=100, split_nodes_rendered=1, leaves_rendered=2,
+                           splits_laid_out=1, splits_ratios_applied=1,
+                           panes=[healthy_pane("queue"), healthy_pane("diff")]),),
+        ),
+        launch_smoke.INCONCLUSIVE,
+        "rendered layout shape did not match the fixture",
+    )
+
+
+def mutate_split_ratios_not_all_applied():
+    # The literal f2 bug: the outer split's ratio never came back from
+    # setPosition, so splitsRatiosApplied (1) trails splitNodesRendered (2)
+    # even though the fixture's own shape (2 splits, 4 leaves) fully
+    # rendered and laid out.
+    return (
+        healthy_evidence()._replace(
+            rows=(make_row(pid=100, split_nodes_rendered=2, leaves_rendered=4,
+                           splits_laid_out=2, splits_ratios_applied=1,
+                           panes=[healthy_pane("queue"), healthy_pane("diff")]),),
+        ),
+        launch_smoke.INCONCLUSIVE,
+        "not every rendered split applied its ratios",
+    )
+
+
+def mutate_process_died_before_window_end():
+    return healthy_evidence()._replace(alive_at_window_end=False), launch_smoke.FAIL, None
+
+
+def mutate_crash_report_attributed():
+    return (
+        healthy_evidence()._replace(crash_reports_attributed_pids=(100,)),
+        launch_smoke.FAIL,
+        None,
+    )
+
+
+def mutate_crash_scan_never_happened():
+    # Nothing was actually scanned (no DiagnosticReports directory, zero
+    # reports considered). An implementation that only checks
+    # `len(crash_reports_attributed_pids) == 0` would wrongly PASS here —
+    # exactly the "criterion satisfied by the absence of the thing it
+    # measures" defect transcript-load-report.py's whole registry design
+    # exists to close (see its `idle-cpu` criterion, which FAILs rather than
+    # passes when `cpu_percent is None`). Since this is a GATE detector it
+    # cannot report INCONCLUSIVE for "didn't measure" the way a REACH
+    # detector would, so the only correct answer is FAIL.
+    return (
+        healthy_evidence()._replace(
+            crash_reports_scanned=0, crash_reports_dir_present=False,
+            crash_reports_attributed_pids=(),
+        ),
+        launch_smoke.FAIL,
+        None,
+    )
+
+
+def mutate_cpu_unmeasured():
+    return healthy_evidence()._replace(cpu_percent=None), launch_smoke.FAIL, "could not measure CPU"
+
+
+def mutate_cpu_wedged_at_zero():
+    return healthy_evidence()._replace(cpu_percent=0.0), launch_smoke.FAIL, "wedged, not idle"
+
+
+def mutate_cpu_pinned():
+    return healthy_evidence()._replace(cpu_percent=95.0), launch_smoke.FAIL, "pinned at"
+
+
+def mutate_zero_size_pane_violation():
+    # f3: `notdrawable_violations` is always a subset of
+    # `collapsed_geometry_violations` for any state reachable from real
+    # `rows` (both dedup on the identical key, and the geometry predicate is
+    # a strict superset of the audit-mirror predicate). A content-gated
+    # violation therefore always has a corresponding collapsed-geometry
+    # entry -- setting only `notdrawable_violations` here (as this mutation
+    # did before f3) built an Evidence no real run can produce, and would
+    # now silently PASS once the detector grades `collapsed_geometry_
+    # violations` alone. Populating both keeps this a reachable state while
+    # still proving the content-gated case FAILs.
+    return (
+        healthy_evidence()._replace(
+            notdrawable_violations=(
+                "pane=queue hasContent=true loading=false hasWindow=true "
+                "layoutPasses=1 bounds=0.0x50.0 verdict=notDrawable(zeroWidth)",
+            ),
+            collapsed_geometry_violations=(
+                "pane=queue hasContent=true loading=false hasWindow=true "
+                "layoutPasses=1 bounds=0.0x50.0 verdict=collapsed(zeroWidth)",
+            ),
+        ),
+        launch_smoke.FAIL,
+        None,
+    )
+
+
+def mutate_collapsed_geometry_pane_without_content():
+    # The f1 bug: the fixture daemon never pushes pane_content, so
+    # hasContent is False for the whole run, yet a genuinely collapsed pane
+    # (real window, completed layout pass, zero bounds) must still FAIL —
+    # notdrawable_violations alone would never see this because its
+    # predicate requires hasContent.
+    return (
+        healthy_evidence()._replace(
+            collapsed_geometry_violations=(
+                "pane=queue hasContent=false loading=false hasWindow=true "
+                "layoutPasses=3 bounds=0.0x0.0 verdict=collapsed(zeroWidth,zeroHeight)",
+            ),
+        ),
+        launch_smoke.FAIL,
+        None,
+    )
+
+
+def mutate_undersized_pane_settled_below_the_usable_floor():
+    # D6, the literal bug: four detail panes settled at 44pt wide in a split
+    # whose correct share was 879.5pt. Non-zero on both axes, so the
+    # zero-size gate above cannot see it; `splitsRatiosApplied` is left at 1
+    # of 3 here (the FIXED branch's honest reading) so this mutation flips
+    # `no-undersized-laid-out-pane` and nothing else — the collapse itself,
+    # graded independently of whether the tool lied about it.
+    return (
+        evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1)),
+        launch_smoke.FAIL,
+        "verdict=tooSmall(tooNarrow)",
+    )
+
+
+def mutate_dishonest_ratio_claim():
+    # D5, the certification of the bug as a success: the same four 44pt
+    # panes, with the UNFIXED branch's `splitsRatiosApplied` of 3 of 3 laid
+    # out. Unlike every other mutation here this one necessarily trips a
+    # second detector (`no-undersized-laid-out-pane`) as well, and that is
+    # the invariant, not a leak in the fixture: "claimed every split applied
+    # its ratios" is only dishonest in the presence of an unusably small
+    # pane, so the two conditions cannot be separated by construction.
+    return (
+        evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3)),
+        launch_smoke.FAIL,
+        "splitsLaidOut=3 splitsRatiosApplied=3",
+    )
+
+
+#: registry key -> list of (builder returning (evidence, expected_state,
+#: cause_substring_or_None)) — every registered detector must appear at least
+#: once. `cause_substring_or_None` is only checked when not None, since the
+#: contract pins exact cause text for some detectors (the REACH causes and
+#: cpu-settled's three) but not others.
+SENSITIVITY = {
+    "our-process-ran-the-app": [
+        mutate_another_instance_took_the_launch,
+        mutate_timed_out_before_the_app_came_up,
+    ],
+    "multi-pane-laid-out": [mutate_multipane_not_reached],
+    # `split-ratios-applied` now corroborates rendered shape and applied/
+    # laid-out ratios via `split_layout_agreement` (see f2), so it can go
+    # INCONCLUSIVE for three distinct reasons, not one.
+    "split-ratios-applied": [
+        mutate_split_ratios_never_applied,
+        mutate_split_shape_did_not_match_fixture,
+        mutate_split_ratios_not_all_applied,
+    ],
+    "alive-at-window-end": [mutate_process_died_before_window_end],
+    "no-attributable-crash-report": [
+        mutate_crash_report_attributed,
+        mutate_crash_scan_never_happened,
+    ],
+    "cpu-settled": [mutate_cpu_unmeasured, mutate_cpu_wedged_at_zero, mutate_cpu_pinned],
+    # `no-zero-size-laid-out-pane` grades the union of `notdrawable_violations`
+    # (content-gated) and `collapsed_geometry_violations` (content-
+    # independent, see f1) — one mutation per input that can make it FAIL.
+    # There is still no "zero panes scanned" failure case for this detector
+    # — see `PaneScanNeverHappenedStillPassesTests` below and
+    # `UniversalVacuityTests`'s docstring for why that absence is
+    # intentional, not an oversight.
+    "no-zero-size-laid-out-pane": [
+        mutate_zero_size_pane_violation,
+        mutate_collapsed_geometry_pane_without_content,
+    ],
+    "no-undersized-laid-out-pane": [mutate_undersized_pane_settled_below_the_usable_floor],
+    "ratios-claimed-honestly": [mutate_dishonest_ratio_claim],
+}
+
+#: All the (evidence, ...) fixtures the sensitivity mutations produce, used to
+#: broaden the kind-partition invariant's coverage beyond EMPTY/HEALTHY.
+def _all_sensitivity_fixtures():
+    for builders in SENSITIVITY.values():
+        for build in builders:
+            yield build()[0]
+
+
+class CriterionSensitivityTests(unittest.TestCase):
+    """Every registered detector must be provably able to produce its
+    non-passing state at least once. Mirrors `CriterionSensitivityTests` /
+    T3 in transcript_load's suite — a detector nobody proved can fail is the
+    defect this whole file exists to close.
+    """
+
+    def test_every_registered_detector_has_a_sensitivity_case(self):
+        self.assertEqual(
+            set(SENSITIVITY), {r.key for r in launch_smoke.CRITERIA},
+            "every detector must be paired with a mutation that flips it off PASS",
+        )
+
+    def test_each_mutation_flips_its_own_detector_to_the_expected_state(self):
+        for key, builders in SENSITIVITY.items():
+            for build in builders:
+                with self.subTest(criterion=key, mutation=build.__name__):
+                    evidence, expected_state, cause_substring = build()
+                    row = keyed(launch_smoke.evaluate_evidence(evidence))[key]
+                    self.assertEqual(
+                        row.state, expected_state,
+                        f"{key}/{build.__name__} did not produce {expected_state}: {row}",
+                    )
+                    if cause_substring is not None:
+                        self.assertIn(
+                            cause_substring, row.cause or "",
+                            f"{key}/{build.__name__}: cause {row.cause!r} does not "
+                            f"contain {cause_substring!r}",
+                        )
+
+
+class PaneScanNeverHappenedStillPassesTests(unittest.TestCase):
+    """`no-zero-size-laid-out-pane` must PASS when zero panes were ever
+    scanned — the load-bearing counterpart to
+    `UniversalVacuityTests.VACUOUS_PASS_EXEMPT` above. `panes_scanned == 0`
+    is the ordinary, healthy shape of a tree with no `PaneContentNSView`-
+    backed panes (a single `repl` leaf — `repl` is a `ReplView`, never
+    registered in the pane registry `panesMeasured` reads from), not evidence
+    that this run's own plumbing failed to measure anything. Verified
+    empirically: this is precisely the diagnostics shape
+    `bin/nostromo-launch-smoke` observed when actually run against the
+    fixture daemon serving a single-leaf tree instead of the split tree — the
+    literal fixture-rot demonstration the PRD requires to report
+    INCONCLUSIVE ("multi-pane layout not reached"), which an earlier
+    revision of this detector broke by FAILing on exactly that shape (a GATE
+    FAIL always dominates `aggregate()`, so the whole run read FAIL instead).
+    """
+
+    def test_zero_panes_scanned_and_zero_violations_still_passes(self):
+        ev = healthy_evidence()._replace(
+            panes_scanned=0, notdrawable_violations=(),
+            geometry_panes_judged=0, collapsed_geometry_violations=(),
+        )
+        row = keyed(launch_smoke.evaluate_evidence(ev))["no-zero-size-laid-out-pane"]
+        self.assertEqual(row.state, launch_smoke.PASS, row)
+        self.assertIsNone(row.cause)
+
+
+class CollapsedPaneMakesTheWholeRunFailTests(unittest.TestCase):
+    """The f1 finding's exact reproduction: the fixture daemon never pushes
+    `pane_content`, so `hasContent` is `False` for the whole run, yet a
+    genuinely collapsed pane (real window, completed layout pass, zero
+    bounds) must FAIL the whole run — the pre-fix harness reported PASS
+    here, because `notdrawable_violations_from_rows`'s predicate requires
+    `hasContent` and so never even looked at this pane."""
+
+    def test_collapsed_pane_makes_the_whole_run_fail(self):
+        pane = make_pane("queue", has_content=False, is_loading=False, has_window=True,
+                         layout_pass_count=3, bounds_width=0.0, bounds_height=0.0)
+        violations = launch_smoke.collapsed_geometry_violations_from_rows((make_row(panes=[pane]),))
+        self.assertEqual(len(violations), 1)
+        ev = healthy_evidence()._replace(
+            notdrawable_violations=(),
+            collapsed_geometry_violations=violations,
+        )
+        detectors = launch_smoke.evaluate_evidence(ev)
+        row = keyed(detectors)["no-zero-size-laid-out-pane"]
+        self.assertEqual(row.state, launch_smoke.FAIL)
+        state, cause = launch_smoke.aggregate(detectors)
+        self.assertEqual(state, launch_smoke.FAIL)
+        self.assertTrue(cause)
+        self.assertEqual(launch_smoke.exit_code_for(state), 1)
+
+
+class ContentGatedOnlyViolationStillFailsTests(unittest.TestCase):
+    """The f3 finding: `_no_zero_size_laid_out_pane` now grades
+    `collapsed_geometry_violations` alone rather than the union with
+    `notdrawable_violations`. Since a content-gated violation is always a
+    subset of the collapsed-geometry population (see
+    `NotdrawableIsASubsetOfCollapsedGeometryTests` below), a run whose only
+    violation started out content-gated must still FAIL — dropping the union
+    changed no verdict. Deliberately does NOT test a hand-built Evidence with
+    a non-empty `notdrawable_violations` and an EMPTY
+    `collapsed_geometry_violations` — that state is unreachable from any real
+    `rows` and pinning it to PASS would enshrine a state the subset
+    invariant forbids.
+    """
+
+    def test_content_gated_violation_with_its_collapsed_geometry_counterpart_still_fails(self):
+        pane = make_pane("queue", has_content=True, is_loading=False, has_window=True,
+                         layout_pass_count=1, bounds_width=0.0, bounds_height=50.0)
+        rows = (make_row(panes=[pane]),)
+        notdrawable = launch_smoke.notdrawable_violations_from_rows(rows)
+        collapsed = launch_smoke.collapsed_geometry_violations_from_rows(rows)
+        self.assertEqual(len(notdrawable), 1)
+        self.assertEqual(len(collapsed), 1)
+        ev = healthy_evidence()._replace(
+            notdrawable_violations=notdrawable,
+            collapsed_geometry_violations=collapsed,
+        )
+        row = keyed(launch_smoke.evaluate_evidence(ev))["no-zero-size-laid-out-pane"]
+        self.assertEqual(row.state, launch_smoke.FAIL)
+
+
+class GeometryGateIsLiveOnEveryPassingRunTests(unittest.TestCase):
+    """Guards against ever re-adding a hasContent (or isLoading) precondition
+    to collapsed_geometry_violations_from_rows / geometry_judged_pane_count:
+    multi-pane-laid-out's REACH proof (>=2 real, non-zero, laid-out panes) is
+    a strict subset of the geometry predicate's precondition (hasWindow &&
+    layoutPassCount>0), so any run allowed to PASS overall necessarily has
+    >=2 panes actually judged for geometry — never a silent zero-judged
+    detector. See PR #134's f1 finding and PR #149 round 2's f1 finding
+    (.claude/plans/launch-smoke-test-integrity-findings.md): the original
+    version of this test guarded its assertions behind
+    `if distinct_multipane_count(rows) >= 2`, and one of its two batteries
+    (the zero-size-queue-plus-diff row) had a multipane count of exactly 1
+    — so the guard was never entered and that battery ran zero assertions,
+    the only battery meant to exercise the case this whole test exists to
+    catch. The precondition is now itself an assertion: a battery that stops
+    qualifying is a broken battery, not a skippable one.
+    """
+    def test_multipane_reach_implies_geometry_panes_judged(self):
+        batteries = [
+            healthy_evidence().rows,
+            # Fixed from the original (zero-size queue + one qualifying
+            # pane, multipane count 1 -- the guard was never entered): now a
+            # zero-size-but-judged pane plus TWO qualifying panes, so
+            # distinct_multipane_count is 2 without relying on the
+            # zero-size pane to make up the count.
+            (make_row(panes=[
+                make_pane("queue", has_content=False, is_loading=False,
+                         has_window=True, layout_pass_count=3,
+                         bounds_width=0.0, bounds_height=0.0),
+                make_pane("diff"),
+                make_pane("repl"),
+            ]),),
+        ]
+        for rows in batteries:
+            with self.subTest(rows=rows):
+                self.assertGreaterEqual(
+                    launch_smoke.distinct_multipane_count(rows), 2,
+                    "this battery no longer has >=2 qualifying panes -- a "
+                    "battery that stops qualifying is a broken battery, not "
+                    "a skippable one; fix the fixture, don't reintroduce a "
+                    "conditional guard around the assertion below",
+                )
+                self.assertGreaterEqual(
+                    launch_smoke.geometry_judged_pane_count(rows), 2,
+                )
+
+    def test_geometry_judged_pane_count_strictly_exceeds_distinct_multipane_count(self):
+        # Makes the superset relationship strict rather than coincidental:
+        # two genuinely-qualifying panes (window, layout pass, non-zero
+        # bounds) plus a third zero-size-but-judged pane. Unlike the
+        # batteries above (where geometry_judged == distinct_multipane == 2
+        # is also possible without the geometry predicate doing any extra
+        # work), this fixture can only satisfy geometry_judged_pane_count ==
+        # 3 if the geometry predicate really does judge a pane that
+        # distinct_multipane_count would never count.
+        rows = (make_row(panes=[
+            make_pane("queue"),
+            make_pane("diff"),
+            make_pane("repl", has_content=False, has_window=True,
+                     layout_pass_count=3, bounds_width=0.0, bounds_height=0.0),
+        ]),)
+        self.assertEqual(launch_smoke.distinct_multipane_count(rows), 2)
+        self.assertEqual(launch_smoke.geometry_judged_pane_count(rows), 3)
+        self.assertGreater(
+            launch_smoke.geometry_judged_pane_count(rows),
+            launch_smoke.distinct_multipane_count(rows),
+            "geometry_judged_pane_count must be a STRICT superset of "
+            "distinct_multipane_count on a run with a genuinely zero-size "
+            "judged pane -- the class docstring's superset claim, actually "
+            "proven, not merely not-contradicted",
+        )
+
+
+class DetectorKindInvariantTests(unittest.TestCase):
+    """The kind-partition invariant, asserted generically: for every verdict
+    produced across a battery of fixtures, a REACH detector's verdict is
+    never FAIL and a GATE detector's verdict is never INCONCLUSIVE. Looked up
+    via `registration(key).kind` rather than a hardcoded key list, so a
+    detector registered tomorrow is covered automatically — mirrors
+    `CriterionKindPartitionTests`'s spirit applied at the evaluation layer
+    rather than only at the static-registry layer (see
+    DetectorRegistryPinTests above for the static pin).
+    """
+
+    def test_reach_never_fails_and_gate_never_inconclusive_across_many_fixtures(self):
+        fixtures = [launch_smoke.Evidence.empty(), healthy_evidence()]
+        fixtures.extend(_all_sensitivity_fixtures())
+
+        for i, ev in enumerate(fixtures):
+            for v in launch_smoke.evaluate_evidence(ev):
+                kind = launch_smoke.registration(v.key).kind
+                with self.subTest(fixture=i, key=v.key, kind=kind):
+                    if kind == launch_smoke.REACH:
+                        self.assertNotEqual(v.state, launch_smoke.FAIL)
+                    elif kind == launch_smoke.GATE:
+                        self.assertNotEqual(v.state, launch_smoke.INCONCLUSIVE)
+
+
+# ---------------------------------------------------------------------------
+# aggregate()
+# ---------------------------------------------------------------------------
+
+
+def _v(key, state, cause=None):
+    return launch_smoke.Verdict(
+        key=key, name=key, state=state, measured="m", cause=cause, observations=1
+    )
+
+
+class AggregateTests(unittest.TestCase):
+    def test_empty_list_is_pass_with_no_cause(self):
+        self.assertEqual(launch_smoke.aggregate([]), (launch_smoke.PASS, None))
+
+    def test_all_pass_is_pass_with_no_cause(self):
+        verdicts = [_v("a", launch_smoke.PASS), _v("b", launch_smoke.PASS)]
+        self.assertEqual(launch_smoke.aggregate(verdicts), (launch_smoke.PASS, None))
+
+    def test_inconclusive_alone_beats_pass(self):
+        verdicts = [_v("a", launch_smoke.PASS), _v("b", launch_smoke.INCONCLUSIVE, "b-cause")]
+        self.assertEqual(
+            launch_smoke.aggregate(verdicts), (launch_smoke.INCONCLUSIVE, "b-cause")
+        )
+
+    def test_fail_beats_inconclusive_the_load_bearing_precedence_case(self):
+        # The known-bad build (reentrancy guard removed): the app dies
+        # mid-layout, so the REACH detectors read INCONCLUSIVE (never reached
+        # multi-pane layout) while a GATE detector FAILs (not alive at window
+        # end / crash report / unsettled CPU). This must aggregate to FAIL —
+        # if INCONCLUSIVE won here, the known-bad build would report
+        # INCONCLUSIVE forever and the whole gate would be decorative.
+        verdicts = [
+            _v("multi-pane-laid-out", launch_smoke.INCONCLUSIVE, "multi-pane layout not reached"),
+            _v("alive-at-window-end", launch_smoke.FAIL, "process died before window end"),
+        ]
+        self.assertEqual(
+            launch_smoke.aggregate(verdicts),
+            (launch_smoke.FAIL, "process died before window end"),
+        )
+
+    def test_fail_beats_pass_and_inconclusive_regardless_of_list_order(self):
+        verdicts = [
+            _v("a", launch_smoke.FAIL, "only fail"),
+            _v("b", launch_smoke.INCONCLUSIVE, "inc"),
+            _v("c", launch_smoke.PASS),
+        ]
+        self.assertEqual(launch_smoke.aggregate(verdicts), (launch_smoke.FAIL, "only fail"))
+
+    def test_cause_is_the_first_registry_order_verdict_at_the_worst_state(self):
+        verdicts = [
+            _v("a", launch_smoke.PASS),
+            _v("b", launch_smoke.FAIL, "first fail"),
+            _v("c", launch_smoke.FAIL, "second fail"),
+        ]
+        self.assertEqual(launch_smoke.aggregate(verdicts), (launch_smoke.FAIL, "first fail"))
+
+    # See the note in UniversalVacuityTests above: aggregate() of the real
+    # registry on Evidence.empty() is FAIL, not INCONCLUSIVE, because
+    # "alive-at-window-end" and "cpu-settled" (both GATE) each correctly FAIL
+    # on totally barren evidence per their own literal spec, and GATE FAILs
+    # dominate. That is asserted directly here rather than left unstated.
+    def test_real_registered_verdicts_on_evidence_empty_aggregate_to_fail_not_inconclusive(self):
+        verdicts = launch_smoke.evaluate_evidence(launch_smoke.Evidence.empty())
+        state, _cause = launch_smoke.aggregate(verdicts)
+        self.assertEqual(
+            state, launch_smoke.FAIL,
+            "if this ever starts reading INCONCLUSIVE, the contract tension "
+            "documented above has been resolved — great, but then the "
+            "'aggregate empty evidence is INCONCLUSIVE' requirement from the "
+            "module contract should get a real test here instead of this one",
+        )
+
+    def test_real_registered_verdicts_on_a_healthy_run_aggregate_to_pass(self):
+        verdicts = launch_smoke.evaluate_evidence(healthy_evidence())
+        self.assertEqual(launch_smoke.aggregate(verdicts), (launch_smoke.PASS, None))
+
+
+class ExitCodeForTests(unittest.TestCase):
+    def test_maps_each_state_to_its_documented_code(self):
+        self.assertEqual(launch_smoke.exit_code_for(launch_smoke.PASS), 0)
+        self.assertEqual(launch_smoke.exit_code_for(launch_smoke.FAIL), 1)
+        self.assertEqual(launch_smoke.exit_code_for(launch_smoke.INCONCLUSIVE), 2)
+
+    def test_matches_the_exit_codes_table(self):
+        for state in (launch_smoke.PASS, launch_smoke.FAIL, launch_smoke.INCONCLUSIVE):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    launch_smoke.exit_code_for(state), launch_smoke.EXIT_CODES[state]
+                )
+
+    def test_the_three_codes_are_pairwise_distinct(self):
+        codes = {
+            launch_smoke.exit_code_for(s)
+            for s in (launch_smoke.PASS, launch_smoke.FAIL, launch_smoke.INCONCLUSIVE)
+        }
+        self.assertEqual(len(codes), 3)
+
+
+# ---------------------------------------------------------------------------
+# .ips crash-report parsing
+# ---------------------------------------------------------------------------
+
+
+def build_ips_text(
+    *,
+    pid=4242,
+    proc_path="/private/tmp/nostromo-smoke-abc123/Nostromo.app/Contents/MacOS/Nostromo",
+    header_timestamp="2026-09-03 10:15:22.00 -0700",
+    capture_time="2026-09-03 10:15:23.50 -0700",
+    incident_id="ABCDEF12-3456-7890-ABCD-EF1234567890",
+):
+    """A realistic two-JSON-part .ips report, built inline rather than read
+    from a file on disk — a JSON header object on line 1, followed by the
+    JSON body (pretty-printed, as real .ips bodies are, spanning several
+    lines), matching the shape verified against a real report in the plan.
+    """
+    header = json.dumps({
+        "app_name": "Nostromo",
+        "timestamp": header_timestamp,
+        "bug_type": "309",
+        "incident_id": incident_id,
+    })
+    body = json.dumps({
+        "pid": pid,
+        "procName": "Nostromo",
+        "procPath": proc_path,
+        "captureTime": capture_time,
+        "exception": {"type": "EXC_BAD_ACCESS", "signal": "SIGSEGV"},
+    }, indent=2)
+    return header + "\n" + body
+
+
+class ParseIpsReportTests(unittest.TestCase):
+    def _parse_never_raises(self, text):
+        try:
+            return launch_smoke.parse_ips_report(text)
+        except Exception as e:  # noqa: BLE001 - the contract says this must never raise
+            self.fail(f"parse_ips_report raised {type(e).__name__}: {e} on {text!r}")
+
+    def test_a_realistic_two_part_report_parses_pid_path_and_timestamps(self):
+        text = build_ips_text(
+            pid=4242,
+            proc_path="/tmp/x/Nostromo.app/Contents/MacOS/Nostromo",
+            header_timestamp="2026-09-03 10:15:22.00 -0700",
+            capture_time="2026-09-03 10:15:23.50 -0700",
+        )
+        parsed = self._parse_never_raises(text)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["pid"], 4242)
+        self.assertEqual(parsed["proc_path"], "/tmp/x/Nostromo.app/Contents/MacOS/Nostromo")
+        self.assertEqual(parsed["capture_time"], "2026-09-03 10:15:23.50 -0700")
+        self.assertEqual(parsed["header_timestamp"], "2026-09-03 10:15:22.00 -0700")
+
+    def test_empty_text_returns_none(self):
+        self.assertIsNone(self._parse_never_raises(""))
+
+    def test_single_json_object_with_no_body_returns_none(self):
+        text = json.dumps({
+            "app_name": "Nostromo", "timestamp": "x", "bug_type": "309", "incident_id": "abc",
+        })
+        self.assertIsNone(self._parse_never_raises(text))
+
+    def test_truncated_report_returns_none_not_a_crash(self):
+        text = build_ips_text()
+        truncated = text[: len(text) // 2]
+        self.assertIsNone(self._parse_never_raises(truncated))
+
+    def test_garbage_text_returns_none(self):
+        self.assertIsNone(self._parse_never_raises("this is not json at all\nnor is this"))
+
+    def test_valid_header_but_garbage_body_returns_none(self):
+        header = json.dumps({
+            "app_name": "Nostromo", "timestamp": "x", "bug_type": "309", "incident_id": "abc",
+        })
+        text = header + "\nnot valid json for the body"
+        self.assertIsNone(self._parse_never_raises(text))
+
+
+class ParseIpsTimestampTests(unittest.TestCase):
+    """`parse_ips_timestamp` — the piece that lets `crash_report_matches`
+    corroborate a report's pid/path match against the actual observation
+    window, rather than trusting pid equality alone (macOS recycles pids,
+    so a stale `.ips` file from an unrelated, months-old run can share a pid
+    with the current run purely by chance)."""
+
+    def _parse_never_raises(self, s):
+        try:
+            return launch_smoke.parse_ips_timestamp(s)
+        except Exception as e:  # noqa: BLE001 - the contract says this must never raise
+            self.fail(f"parse_ips_timestamp raised {type(e).__name__}: {e} on {s!r}")
+
+    def test_a_realistic_timestamp_parses_to_the_correct_epoch_value(self):
+        s = "2026-09-03 10:15:22.00 -0700"
+        expected = datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S.%f %z").timestamp()
+        self.assertEqual(self._parse_never_raises(s), expected)
+
+    def test_none_returns_none(self):
+        self.assertIsNone(self._parse_never_raises(None))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(self._parse_never_raises(""))
+
+    def test_garbage_string_returns_none(self):
+        self.assertIsNone(self._parse_never_raises("not a timestamp"))
+
+    def test_missing_utc_offset_returns_none(self):
+        # Plausible-looking but malformed: the same date/time as a real
+        # capture_time, minus the trailing " ±ZZZZ" the format requires.
+        self.assertIsNone(self._parse_never_raises("2026-09-03 10:15:22.00"))
+
+    def test_non_string_input_returns_none(self):
+        self.assertIsNone(self._parse_never_raises(12345))
+        self.assertIsNone(self._parse_never_raises(["2026-09-03 10:15:22.00 -0700"]))
+
+
+# A window that contains the realistic default capture_time/header_timestamp
+# `CrashReportMatchesTests._parsed()` below hands out, so the pre-existing
+# pid/path structural tests keep testing exactly what they tested before
+# `crash_report_matches` gained timestamp corroboration.
+_WINDOW_TZ = datetime.timezone(datetime.timedelta(hours=-7))
+_WINDOW_START_DT = datetime.datetime(2026, 9, 3, 10, 0, 0, tzinfo=_WINDOW_TZ)
+_WINDOW_END_DT = datetime.datetime(2026, 9, 3, 10, 30, 0, tzinfo=_WINDOW_TZ)
+_WINDOW_START = _WINDOW_START_DT.timestamp()
+_WINDOW_END = _WINDOW_END_DT.timestamp()
+_DEFAULT_CAPTURE_TIME = "2026-09-03 10:15:23.50 -0700"      # inside the window
+_DEFAULT_HEADER_TIMESTAMP = "2026-09-03 10:15:22.00 -0700"  # inside the window
+
+
+def _ips_ts(dt):
+    return dt.strftime("%Y-%m-%d %H:%M:%S.00 %z")
+
+
+class CrashReportMatchesTests(unittest.TestCase):
+    @staticmethod
+    def _parsed(pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+                capture_time=_DEFAULT_CAPTURE_TIME, header_timestamp=_DEFAULT_HEADER_TIMESTAMP):
+        return {
+            "pid": pid, "proc_path": proc_path,
+            "capture_time": capture_time, "header_timestamp": header_timestamp,
+        }
+
+    # -- pre-existing structural (pid/path) tests, now given a window that
+    # contains the realistic default timestamps above, so they still test
+    # only the structural check they always tested. --
+
+    def test_matching_pid_and_path_under_bundle_root_matches(self):
+        parsed = self._parsed(pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo")
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_wrong_pid_does_not_match(self):
+        parsed = self._parsed(pid=999, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo")
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_matching_pid_but_path_outside_bundle_root_does_not_match(self):
+        parsed = self._parsed(pid=100, proc_path="/Applications/Nostromo.app/Contents/MacOS/Nostromo")
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_both_pid_and_path_right_matches_among_multiple_candidate_pids(self):
+        parsed = self._parsed(pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo")
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(50, 100, 200), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_missing_proc_path_does_not_match(self):
+        parsed = {
+            "pid": 100, "proc_path": None,
+            "capture_time": _DEFAULT_CAPTURE_TIME, "header_timestamp": _DEFAULT_HEADER_TIMESTAMP,
+        }
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_macos_redacted_temp_clone_path_matches_when_bundle_root_is_a_temp_dir(self):
+        # Verified against a real crash report from this check's own
+        # known-bad validation run: macOS's crash reporter redacted a real
+        # absolute clone path under /var/folders/ down to exactly this
+        # literal shape (the whole variable middle collapsed to one `*`).
+        parsed = self._parsed(
+            pid=100, proc_path="/var/folders/*/Nostromo.app/Contents/MacOS/Nostromo",
+        )
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,),
+                bundle_root="/var/folders/m8/abc123/T/nostromo-launch-smoke-xyz/Nostromo.app",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_redacted_shape_does_not_match_when_bundle_root_is_not_a_temp_dir(self):
+        # The redacted-shape acceptance must not become a blanket "any
+        # Nostromo.app matches" rule — it only applies when OUR OWN clone is
+        # itself under a temp directory (always true in practice), so an
+        # unrelated report whose path merely looks like this can't slip
+        # through for a `bundle_root` that was never a temp path at all.
+        parsed = self._parsed(
+            pid=100, proc_path="/var/folders/*/Nostromo.app/Contents/MacOS/Nostromo",
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/Applications/Nostromo.app",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    # -- new: timestamp corroboration --
+
+    def test_matching_pid_and_path_but_timestamp_outside_window_does_not_match_a_stale_report(self):
+        """The core regression this gap exists to fix: macOS recycles pids,
+        so a *stale* `.ips` file left over from a months-old validation run
+        can share a pid with the current run's launched process purely by
+        chance, and — because this check's own runs always produce the same
+        redacted temp-clone `procPath` shape — the structural pid+path check
+        alone would falsely attribute that ancient crash to a perfectly
+        healthy current run, turning a false-negative crash into a false
+        FAIL. Corroborating against the run's own observation window closes
+        that hole: pid/path matching is necessary but no longer sufficient.
+        """
+        stale = "2026-01-01 09:00:00.00 -0700"  # months before the window
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=stale, header_timestamp=stale,
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_unparseable_capture_time_falls_back_to_header_timestamp(self):
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time="not a timestamp", header_timestamp=_DEFAULT_HEADER_TIMESTAMP,
+        )
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_both_timestamps_unparseable_fails_closed_even_with_correct_pid_and_path(self):
+        # Pid/path equality alone is never enough — if neither timestamp
+        # field parses, the report does not corroborate and must not match,
+        # regardless of how convincing the structural match looks.
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time="garbage", header_timestamp=None,
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_timestamp_exactly_at_window_start_matches_inclusive_boundary(self):
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=_ips_ts(_WINDOW_START_DT), header_timestamp=_ips_ts(_WINDOW_START_DT),
+        )
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_timestamp_exactly_at_window_end_matches_inclusive_boundary(self):
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=_ips_ts(_WINDOW_END_DT), header_timestamp=_ips_ts(_WINDOW_END_DT),
+        )
+        self.assertTrue(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_timestamp_one_second_before_window_start_does_not_match(self):
+        before = _WINDOW_START_DT - datetime.timedelta(seconds=1)
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=_ips_ts(before), header_timestamp=_ips_ts(before),
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+    def test_timestamp_one_second_after_window_end_does_not_match(self):
+        after = _WINDOW_END_DT + datetime.timedelta(seconds=1)
+        parsed = self._parsed(
+            pid=100, proc_path="/tmp/clone/Nostromo.app/Contents/MacOS/Nostromo",
+            capture_time=_ips_ts(after), header_timestamp=_ips_ts(after),
+        )
+        self.assertFalse(
+            launch_smoke.crash_report_matches(
+                parsed, pids=(100,), bundle_root="/tmp/clone",
+                window_start=_WINDOW_START, window_end=_WINDOW_END,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# CPU arithmetic
+# ---------------------------------------------------------------------------
+
+
+class CpuPercentFromTimesTests(unittest.TestCase):
+    def test_basic_arithmetic(self):
+        self.assertAlmostEqual(launch_smoke.cpu_percent_from_times(10.0, 25.0, 10.0), 150.0)
+
+    def test_zero_delta_is_zero_percent(self):
+        self.assertAlmostEqual(launch_smoke.cpu_percent_from_times(100.0, 100.0, 10.0), 0.0)
+
+    def test_plausible_idle_delta(self):
+        self.assertAlmostEqual(launch_smoke.cpu_percent_from_times(100.0, 100.05, 10.0), 0.5)
+
+    def test_a_full_core_pinned_over_the_whole_window_is_100_percent(self):
+        self.assertAlmostEqual(launch_smoke.cpu_percent_from_times(0.0, 10.0, 10.0), 100.0)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics-row pure helpers
+# ---------------------------------------------------------------------------
+
+
+class RowsForPidTests(unittest.TestCase):
+    def test_returns_only_rows_for_the_given_pid_in_file_order(self):
+        rows = (make_row(pid=1), make_row(pid=2), make_row(pid=1))
+        self.assertEqual(launch_smoke.rows_for_pid(rows, 1), (rows[0], rows[2]))
+
+    def test_no_matching_rows_returns_empty_tuple(self):
+        rows = (make_row(pid=1),)
+        self.assertEqual(launch_smoke.rows_for_pid(rows, 999), ())
+
+    def test_empty_input_returns_empty_tuple(self):
+        self.assertEqual(launch_smoke.rows_for_pid((), 1), ())
+
+
+class DistinctPidsTests(unittest.TestCase):
+    def test_sorted_distinct_pids_from_mixed_input(self):
+        rows = (make_row(pid=9871), make_row(pid=233), make_row(pid=40412), make_row(pid=233))
+        # Adversarial fixture: these particular small ints happen to iterate
+        # out of order through a CPython set today (verified: tuple({9871, 233,
+        # 40412}) == (233, 40412, 9871)), which is what makes this test able to
+        # actually catch a missing sorted() in distinct_pids — ascending-by-luck
+        # pids would pass whether or not the implementation sorts. If a future
+        # CPython version changes small-int set iteration and this stops being
+        # adversarial, this assertion (not the one above) will fail loudly
+        # rather than the suite quietly going vacuous a second time.
+        self.assertNotEqual(tuple({9871, 233, 40412}), (233, 9871, 40412))
+        self.assertEqual(launch_smoke.distinct_pids(rows), (233, 9871, 40412))
+
+    def test_rows_without_a_pid_field_are_skipped(self):
+        rows = ({"runID": "x", "panesMeasured": []}, make_row(pid=5))
+        self.assertEqual(launch_smoke.distinct_pids(rows), (5,))
+
+    def test_empty_input_returns_empty_tuple(self):
+        self.assertEqual(launch_smoke.distinct_pids(()), ())
+
+
+class DistinctMultipaneCountTests(unittest.TestCase):
+    def test_the_same_pane_id_across_two_samples_counts_once_not_twice(self):
+        rows = (make_row(panes=[make_pane("queue")]), make_row(panes=[make_pane("queue")]))
+        self.assertEqual(launch_smoke.distinct_multipane_count(rows), 1)
+
+    def test_two_distinct_qualifying_panes_counts_two(self):
+        rows = (make_row(panes=[make_pane("queue"), make_pane("diff")]),)
+        self.assertEqual(launch_smoke.distinct_multipane_count(rows), 2)
+
+    def test_a_pane_without_a_window_is_excluded(self):
+        rows = (make_row(panes=[make_pane("queue", has_window=False), make_pane("diff")]),)
+        self.assertEqual(launch_smoke.distinct_multipane_count(rows), 1)
+
+    def test_a_pane_with_zero_layout_passes_is_excluded(self):
+        rows = (make_row(panes=[make_pane("queue", layout_pass_count=0), make_pane("diff")]),)
+        self.assertEqual(launch_smoke.distinct_multipane_count(rows), 1)
+
+    def test_a_pane_with_zero_width_is_excluded(self):
+        rows = (make_row(panes=[make_pane("queue", bounds_width=0), make_pane("diff")]),)
+        self.assertEqual(launch_smoke.distinct_multipane_count(rows), 1)
+
+    def test_a_pane_with_zero_height_is_excluded(self):
+        rows = (make_row(panes=[make_pane("queue", bounds_height=0), make_pane("diff")]),)
+        self.assertEqual(launch_smoke.distinct_multipane_count(rows), 1)
+
+    def test_only_one_qualifying_pane_across_the_whole_stream_never_reaches_two(self):
+        rows = (make_row(panes=[make_pane("repl")]), make_row(panes=[make_pane("repl")]))
+        self.assertEqual(launch_smoke.distinct_multipane_count(rows), 1)
+
+    def test_no_rows_yields_zero(self):
+        self.assertEqual(launch_smoke.distinct_multipane_count(()), 0)
+
+
+class MaxSplitsRatiosAppliedTests(unittest.TestCase):
+    def test_takes_the_max_across_rows(self):
+        rows = (make_row(splits_ratios_applied=1), make_row(splits_ratios_applied=2))
+        self.assertEqual(launch_smoke.max_splits_ratios_applied(rows), 2)
+
+    def test_none_values_are_ignored_not_treated_as_zero_that_wins(self):
+        rows = (make_row(splits_ratios_applied=None), make_row(splits_ratios_applied=1))
+        self.assertEqual(launch_smoke.max_splits_ratios_applied(rows), 1)
+
+    def test_all_none_defaults_to_zero(self):
+        rows = (make_row(splits_ratios_applied=None), make_row(splits_ratios_applied=None))
+        self.assertEqual(launch_smoke.max_splits_ratios_applied(rows), 0)
+
+    def test_no_rows_defaults_to_zero(self):
+        self.assertEqual(launch_smoke.max_splits_ratios_applied(()), 0)
+
+
+class SplitLayoutAgreementTests(unittest.TestCase):
+    """`split_layout_agreement(rows)` corroborates `splitsRatiosApplied`
+    against what actually rendered (`splitNodesRendered`/`leavesRendered`,
+    checked against the fixture's own shape via
+    `FIXTURE_SPLIT_NODES_PER_FOCUS`/`FIXTURE_LEAVES_PER_FOCUS`) and laid out
+    (`splitsLaidOut`), rather than trusting a single scalar count in
+    isolation. This is the f2 fix: the old `split-ratios-applied` detector
+    was satisfied by `max_splits_ratios_applied(rows) >= 1`, which the outer
+    split's `setPosition` never returning still trivially cleared (the inner
+    split alone reported ratios applied) — a criterion satisfied by the
+    thing it measures never actually completing.
+    """
+
+    def _agreement(self, *rows):
+        return launch_smoke.split_layout_agreement(tuple(rows))
+
+    def test_fully_applied_and_laid_out_shape_passes(self):
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
+                        splits_laid_out=2, splits_ratios_applied=2)
+        self.assertTrue(self._agreement(row).ok)
+
+    def test_outer_split_ratio_never_applied_fails_the_f2_bug(self):
+        # The literal f2 bug: the outer split never returned from
+        # setPosition, so splitsRatiosApplied (1) trails splitNodesRendered
+        # (2) even though the tree fully rendered.
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
+                        splits_laid_out=2, splits_ratios_applied=1)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "not every rendered split applied its ratios")
+
+    def test_laid_out_corroboration_is_also_required(self):
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
+                        splits_laid_out=1, splits_ratios_applied=2)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "not every rendered split applied its ratios")
+
+    def test_a_shape_that_is_not_a_whole_multiple_of_the_fixture_does_not_match(self):
+        # The outer split never rendered at all -- 1 split / 2 leaves is not
+        # a whole multiple of the fixture's 2-split/4-leaf shape.
+        row = make_row(split_nodes_rendered=1, leaves_rendered=2,
+                        splits_laid_out=1, splits_ratios_applied=1)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "rendered layout shape did not match the fixture")
+
+    def test_four_focuses_worth_is_still_a_whole_multiple_and_passes(self):
+        row = make_row(split_nodes_rendered=8, leaves_rendered=16,
+                        splits_laid_out=8, splits_ratios_applied=8)
+        self.assertTrue(self._agreement(row).ok)
+
+    def test_four_focuses_worth_with_one_split_short_of_applied_fails(self):
+        row = make_row(split_nodes_rendered=8, leaves_rendered=16,
+                        splits_laid_out=8, splits_ratios_applied=7)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "not every rendered split applied its ratios")
+
+    def test_nothing_rendered_at_all_is_multi_pane_layout_not_reached(self):
+        row = make_row(split_nodes_rendered=None, leaves_rendered=None,
+                        splits_laid_out=None, splits_ratios_applied=None)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "multi-pane layout not reached")
+
+    def test_agreement_is_per_row_one_passing_row_is_enough(self):
+        row_a = make_row(split_nodes_rendered=2, leaves_rendered=4,
+                          splits_laid_out=1, splits_ratios_applied=1)
+        row_b = make_row(split_nodes_rendered=2, leaves_rendered=4,
+                          splits_laid_out=2, splits_ratios_applied=2)
+        self.assertTrue(self._agreement(row_a, row_b).ok)
+
+    def test_neither_row_individually_satisfying_applied_ge_rendered_fails(self):
+        row_a = make_row(split_nodes_rendered=2, leaves_rendered=4,
+                          splits_laid_out=2, splits_ratios_applied=1)
+        row_b = make_row(split_nodes_rendered=8, leaves_rendered=16,
+                          splits_laid_out=8, splits_ratios_applied=2)
+        self.assertFalse(self._agreement(row_a, row_b).ok)
+
+    def test_empty_rows_is_multi_pane_layout_not_reached(self):
+        result = launch_smoke.split_layout_agreement(())
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "multi-pane layout not reached")
+
+    # -- f4: absent telemetry gets its own cause, distinct from a genuine
+    # shape mismatch or under-applied tree. --
+
+    def test_missing_leaves_rendered_yields_the_missing_telemetry_cause(self):
+        # Without the f4 fix, `row.get("leavesRendered") or 0` coerces this
+        # None into 0, which is not a whole multiple of the fixture shape --
+        # misreporting this as "rendered layout shape did not match the
+        # fixture" when the app never said what it rendered.
+        row = make_row(split_nodes_rendered=2, leaves_rendered=None,
+                        splits_laid_out=2, splits_ratios_applied=2)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "diagnostics row omitted the split shape fields")
+
+    def test_missing_splits_laid_out_yields_the_missing_telemetry_cause(self):
+        # Without the f4 fix, `row.get("splitsLaidOut") or 0` coerces this
+        # None into 0, which is < rendered -- misreporting this as "not
+        # every rendered split applied its ratios" when the app never said
+        # whether it laid out.
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
+                        splits_laid_out=None, splits_ratios_applied=2)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "diagnostics row omitted the split shape fields")
+
+    def test_missing_splits_ratios_applied_yields_the_missing_telemetry_cause(self):
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
+                        splits_laid_out=2, splits_ratios_applied=None)
+        result = self._agreement(row)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.cause, "diagnostics row omitted the split shape fields")
+
+    def test_one_incomplete_row_does_not_preempt_a_complete_passing_row(self):
+        # The missing-telemetry cause is for the case where NOTHING is left
+        # to grade, not merely intermittent telemetry -- a stream with some
+        # incomplete rows and some complete, passing ones must still PASS on
+        # the complete ones.
+        incomplete = make_row(split_nodes_rendered=2, leaves_rendered=None,
+                              splits_laid_out=None, splits_ratios_applied=None)
+        complete = make_row(split_nodes_rendered=2, leaves_rendered=4,
+                            splits_laid_out=2, splits_ratios_applied=2)
+        result = self._agreement(incomplete, complete)
+        self.assertTrue(result.ok)
+
+
+class NotdrawableViolationsFromRowsTests(unittest.TestCase):
+    """Pins the exact `PaneFirstPaintAudit.verdict` predicate
+    (`macOS/Nostromo/UI/PaneFirstPaintAudit.swift`): a pane is a violation iff
+    `hasContent && !isLoading && hasWindow && layoutPassCount > 0 &&
+    (boundsWidth <= 0 || boundsHeight <= 0)`.
+    """
+
+    def _violations(self, pane):
+        return launch_smoke.notdrawable_violations_from_rows((make_row(panes=[pane]),))
+
+    def test_no_content_is_healthy(self):
+        pane = make_pane(has_content=False, has_window=True, layout_pass_count=1,
+                         bounds_width=0, bounds_height=0)
+        self.assertEqual(self._violations(pane), ())
+
+    def test_loading_is_healthy(self):
+        pane = make_pane(is_loading=True, has_content=True, has_window=True,
+                         layout_pass_count=1, bounds_width=0, bounds_height=0)
+        self.assertEqual(self._violations(pane), ())
+
+    def test_no_window_is_healthy(self):
+        pane = make_pane(has_content=True, has_window=False, layout_pass_count=1,
+                         bounds_width=0, bounds_height=0)
+        self.assertEqual(self._violations(pane), ())
+
+    def test_zero_layout_passes_is_healthy(self):
+        pane = make_pane(has_content=True, has_window=True, layout_pass_count=0,
+                         bounds_width=0, bounds_height=0)
+        self.assertEqual(self._violations(pane), ())
+
+    def test_content_window_laid_out_zero_width_is_a_violation(self):
+        pane = make_pane(has_content=True, is_loading=False, has_window=True,
+                         layout_pass_count=1, bounds_width=0, bounds_height=50)
+        self.assertEqual(len(self._violations(pane)), 1)
+
+    def test_content_window_laid_out_zero_height_is_a_violation(self):
+        pane = make_pane(has_content=True, is_loading=False, has_window=True,
+                         layout_pass_count=1, bounds_width=50, bounds_height=0)
+        self.assertEqual(len(self._violations(pane)), 1)
+
+    def test_healthy_real_size_is_healthy(self):
+        pane = make_pane(has_content=True, is_loading=False, has_window=True,
+                         layout_pass_count=1, bounds_width=100, bounds_height=50)
+        self.assertEqual(self._violations(pane), ())
+
+    def test_the_same_violation_repeated_across_samples_is_deduplicated(self):
+        pane = make_pane("queue", has_content=True, is_loading=False, has_window=True,
+                         layout_pass_count=1, bounds_width=0, bounds_height=50)
+        rows = (make_row(panes=[dict(pane)]), make_row(panes=[dict(pane)]))
+        self.assertEqual(len(launch_smoke.notdrawable_violations_from_rows(rows)), 1)
+
+    def test_distinct_violations_are_each_reported(self):
+        pane_a = make_pane("queue", has_content=True, is_loading=False, has_window=True,
+                           layout_pass_count=1, bounds_width=0, bounds_height=50)
+        pane_b = make_pane("diff", has_content=True, is_loading=False, has_window=True,
+                           layout_pass_count=1, bounds_width=50, bounds_height=0)
+        rows = (make_row(panes=[pane_a, pane_b]),)
+        self.assertEqual(len(launch_smoke.notdrawable_violations_from_rows(rows)), 2)
+
+    def test_no_rows_yields_no_violations(self):
+        self.assertEqual(launch_smoke.notdrawable_violations_from_rows(()), ())
+
+
+class CollapsedGeometryViolationsTests(unittest.TestCase):
+    """`collapsed_geometry_violations_from_rows` is a content-independent
+    geometry predicate: `hasWindow && layoutPassCount > 0 && (boundsWidth <=
+    0 || boundsHeight <= 0)` — regardless of `hasContent`/`isLoading`. This
+    is the f1 fix: the fixture daemon never pushes `pane_content`, so
+    `hasContent` stays `False` for the whole run, and
+    `notdrawable_violations_from_rows`'s audit-mirroring predicate (gated on
+    `hasContent`) can never catch a pane that genuinely collapsed to zero
+    size under those conditions — a criterion satisfied by the absence of
+    the very content signal it was gated on.
+    """
+
+    def _violations(self, pane):
+        return launch_smoke.collapsed_geometry_violations_from_rows((make_row(panes=[pane]),))
+
+    def test_laid_out_zero_width_pane_is_a_violation_even_without_content(self):
+        pane = make_pane("queue", has_content=False, is_loading=False, has_window=True,
+                         layout_pass_count=1, bounds_width=0, bounds_height=50)
+        self.assertEqual(len(self._violations(pane)), 1)
+
+    def test_laid_out_zero_height_pane_is_a_violation_even_without_content(self):
+        pane = make_pane("queue", has_content=False, is_loading=False, has_window=True,
+                         layout_pass_count=1, bounds_width=50, bounds_height=0)
+        self.assertEqual(len(self._violations(pane)), 1)
+
+    def test_loading_and_content_do_not_exempt_a_collapsed_pane(self):
+        # Proves this predicate does NOT gate on content/loading, unlike
+        # notdrawable_violations_from_rows's audit-mirroring predicate.
+        pane = make_pane("queue", has_content=True, is_loading=True, has_window=True,
+                         layout_pass_count=1, bounds_width=0, bounds_height=0)
+        self.assertEqual(len(self._violations(pane)), 1)
+
+    def test_no_window_is_not_judged(self):
+        pane = make_pane("queue", has_content=False, has_window=False,
+                         layout_pass_count=1, bounds_width=0, bounds_height=0)
+        self.assertEqual(self._violations(pane), ())
+
+    def test_zero_layout_passes_is_not_judged(self):
+        pane = make_pane("queue", has_content=False, has_window=True,
+                         layout_pass_count=0, bounds_width=0, bounds_height=0)
+        self.assertEqual(self._violations(pane), ())
+
+    def test_healthy_real_size_pane_is_not_a_violation(self):
+        pane = make_pane("queue", has_content=False, has_window=True,
+                         layout_pass_count=1, bounds_width=100, bounds_height=50)
+        self.assertEqual(self._violations(pane), ())
+
+    def test_the_same_violation_repeated_across_rows_is_deduplicated(self):
+        pane = make_pane("queue", has_content=False, is_loading=False, has_window=True,
+                         layout_pass_count=1, bounds_width=0, bounds_height=0)
+        rows = (make_row(panes=[dict(pane)]), make_row(panes=[dict(pane)]))
+        self.assertEqual(len(launch_smoke.collapsed_geometry_violations_from_rows(rows)), 1)
+
+    def test_two_distinct_violating_panes_are_each_reported(self):
+        pane_a = make_pane("queue", has_content=False, is_loading=False, has_window=True,
+                           layout_pass_count=1, bounds_width=0, bounds_height=50)
+        pane_b = make_pane("diff", has_content=False, is_loading=False, has_window=True,
+                           layout_pass_count=1, bounds_width=50, bounds_height=0)
+        rows = (make_row(panes=[pane_a, pane_b]),)
+        self.assertEqual(len(launch_smoke.collapsed_geometry_violations_from_rows(rows)), 2)
+
+    def test_no_rows_yields_no_violations(self):
+        self.assertEqual(launch_smoke.collapsed_geometry_violations_from_rows(()), ())
+
+    def test_summary_string_matches_the_documented_shape(self):
+        pane = make_pane("queue", has_content=False, is_loading=False, has_window=True,
+                         layout_pass_count=3, bounds_width=0.0, bounds_height=0.0)
+        self.assertEqual(
+            self._violations(pane),
+            (
+                "pane=queue hasContent=false loading=false hasWindow=true "
+                "layoutPasses=3 bounds=0.0x0.0 verdict=collapsed(zeroWidth,zeroHeight)",
+            ),
+        )
+
+
+class NotdrawableIsASubsetOfCollapsedGeometryTests(unittest.TestCase):
+    """The f3 premise `_no_zero_size_laid_out_pane` now relies on to grade
+    `collapsed_geometry_violations` alone: `notdrawable_violations_from_rows`'s
+    predicate (`hasContent && !isLoading && hasWindow && layoutPassCount > 0
+    && zero size`) is a strict SUBSET of `collapsed_geometry_violations_
+    from_rows`'s (the same, minus the `hasContent && !isLoading` gate). Both
+    dedup on the identical (paneId, boundsWidth, boundsHeight,
+    layoutPassCount) key and produce byte-identical prefixes -- only the
+    trailing `verdict=notDrawable(...)`/`verdict=collapsed(...)` differs --
+    so comparing on the string with that suffix stripped is exactly
+    comparing on the dedup key.
+    """
+
+    @staticmethod
+    def _key(violation):
+        return violation.split(" verdict=")[0]
+
+    def test_notdrawable_keys_are_a_subset_of_collapsed_geometry_keys_across_a_battery(self):
+        panes = [
+            make_pane("content-zero-width", has_content=True, is_loading=False,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=0.0, bounds_height=50.0),
+            make_pane("content-zero-height", has_content=True, is_loading=False,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=50.0, bounds_height=0.0),
+            make_pane("no-content-zero", has_content=False, is_loading=False,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=0.0, bounds_height=0.0),
+            make_pane("loading-zero", has_content=True, is_loading=True,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=0.0, bounds_height=0.0),
+            make_pane("healthy", has_content=True, is_loading=False,
+                      has_window=True, layout_pass_count=1,
+                      bounds_width=100.0, bounds_height=50.0),
+        ]
+        rows = (make_row(panes=panes),)
+
+        notdrawable_keys = {
+            self._key(v) for v in launch_smoke.notdrawable_violations_from_rows(rows)
+        }
+        collapsed_keys = {
+            self._key(v) for v in launch_smoke.collapsed_geometry_violations_from_rows(rows)
+        }
+
+        # content-zero-width, content-zero-height trip both predicates;
+        # no-content-zero, loading-zero trip only the content-independent
+        # one; healthy trips neither.
+        self.assertEqual(len(notdrawable_keys), 2)
+        self.assertEqual(len(collapsed_keys), 4)
+        self.assertTrue(
+            notdrawable_keys.issubset(collapsed_keys),
+            f"notdrawable_violations_from_rows produced a key not present in "
+            f"collapsed_geometry_violations_from_rows: "
+            f"{notdrawable_keys - collapsed_keys}",
+        )
+
+
+class ViolationBuildersShareLogicTests(unittest.TestCase):
+    """The f5 extraction: `notdrawable_violations_from_rows` and
+    `collapsed_geometry_violations_from_rows` are now two thin call sites
+    over one shared helper (`_zero_size_violations_from_rows`) that differ
+    only in judged-predicate and verdict label. Proves that
+    behavior-preserving property directly: on a battery where both
+    predicates agree a pane qualifies, the two outputs are identical except
+    for the `notDrawable`/`collapsed` verdict-label substring.
+    """
+
+    def test_outputs_are_identical_up_to_the_verdict_label(self):
+        panes = [
+            make_pane("queue", has_content=True, is_loading=False, has_window=True,
+                      layout_pass_count=1, bounds_width=0.0, bounds_height=50.0),
+            make_pane("diff", has_content=True, is_loading=False, has_window=True,
+                      layout_pass_count=2, bounds_width=50.0, bounds_height=0.0),
+        ]
+        rows = (make_row(panes=panes),)
+        notdrawable = launch_smoke.notdrawable_violations_from_rows(rows)
+        collapsed = launch_smoke.collapsed_geometry_violations_from_rows(rows)
+        self.assertEqual(len(notdrawable), 2)
+        self.assertEqual(len(collapsed), 2)
+        for nd, cg in zip(sorted(notdrawable), sorted(collapsed)):
+            self.assertEqual(nd.replace("verdict=notDrawable(", "verdict=collapsed("), cg)
+
+
+class GeometryJudgedPaneCountTests(unittest.TestCase):
+    """`geometry_judged_pane_count` deliberately does NOT require non-zero
+    bounds — a judged pane can be zero-size; that's exactly what makes it
+    judgeable for the geometry check in the first place. (Contrast
+    `distinct_multipane_count`/`_qualifying_panes`, which DOES require real
+    size — that's a REACH proof of healthy layout, not a judged-for-geometry
+    count.)
+    """
+
+    def test_a_zero_size_pane_meeting_the_window_and_layout_precondition_still_counts(self):
+        pane = make_pane("queue", has_window=True, layout_pass_count=1,
+                         bounds_width=0, bounds_height=0)
+        rows = (make_row(panes=[pane]),)
+        self.assertEqual(launch_smoke.geometry_judged_pane_count(rows), 1)
+
+    def test_the_same_pane_id_across_two_rows_counts_once(self):
+        pane = make_pane("queue", has_window=True, layout_pass_count=1)
+        rows = (make_row(panes=[pane]), make_row(panes=[pane]))
+        self.assertEqual(launch_smoke.geometry_judged_pane_count(rows), 1)
+
+    def test_a_pane_without_a_window_does_not_count(self):
+        pane = make_pane("queue", has_window=False, layout_pass_count=1)
+        rows = (make_row(panes=[pane]),)
+        self.assertEqual(launch_smoke.geometry_judged_pane_count(rows), 0)
+
+    def test_a_pane_with_zero_layout_passes_does_not_count(self):
+        pane = make_pane("queue", has_window=True, layout_pass_count=0)
+        rows = (make_row(panes=[pane]),)
+        self.assertEqual(launch_smoke.geometry_judged_pane_count(rows), 0)
+
+    def test_no_rows_yields_zero(self):
+        self.assertEqual(launch_smoke.geometry_judged_pane_count(()), 0)
+
+    def test_two_distinct_qualifying_pane_ids_counts_two(self):
+        rows = (make_row(panes=[
+            make_pane("queue", has_window=True, layout_pass_count=1),
+            make_pane("diff", has_window=True, layout_pass_count=1),
+        ]),)
+        self.assertEqual(launch_smoke.geometry_judged_pane_count(rows), 2)
+
+
+# ---------------------------------------------------------------------------
+# Process-snapshot isolation invariant: no nostromd/mother/claude process
+# started during a run. Per the same discipline `_warn_if_isolation_broken`
+# already applies to the focuses.json hash and the
+# `defaults export com.hammer.nostromo` domain, this is a third isolation
+# invariant — WARNING-only, never a verdict input, and NOT a new GATE/REACH
+# detector (the plan caps verdict detectors at 4 GATE + 3 REACH). Only the
+# pure parsing/diffing logic is tested here; the impure `ps` invocation and
+# the before/after wiring into `run()`/`_isolation_snapshot()` are Cody's.
+# ---------------------------------------------------------------------------
+
+
+class MonitoredProcessNamesConstantTests(unittest.TestCase):
+    def test_pinned_exactly(self):
+        self.assertEqual(
+            launch_smoke.MONITORED_PROCESS_NAMES, frozenset({"nostromd", "mother", "claude"})
+        )
+
+
+class MatchingMonitoredProcessesTests(unittest.TestCase):
+    """`matching_monitored_processes` parses `ps -axo pid,command` text and
+    returns the `(pid, basename)` pairs whose EXECUTABLE's basename — not
+    the whole command string — is exactly a monitored name. Mirrors the
+    documented rationale for `another_nostromo_pid`'s path-vs-substring
+    distinction: matching anywhere in the command line would flag an
+    unrelated process whose arguments merely happen to mention "mother" or
+    "claude" (e.g. a coding agent's own invocation, or a script path)."""
+
+    SAMPLE = (
+        "  PID COMMAND\n"
+        "  907 /usr/local/bin/mother daemon start\n"
+        "  118 /opt/homebrew/bin/claude --resume\n"
+        "  503 /usr/local/bin/nostromod\n"
+        "  442 /usr/local/bin/nostromd\n"
+        "  505 /usr/bin/ps -axo pid,command\n"
+        "  206 /usr/bin/python3 /Users/x/plans/mother-plan.py\n"
+    )
+    # These pids are deliberately NOT in ascending `ps` order — monitored
+    # matches in `ps` order are (907, "mother"), (118, "claude"),
+    # (442, "nostromd"); sorted by pid they are 118, 442, 907. An
+    # implementation that returns ps-order instead of actually sorting would
+    # be caught by test_result_is_sorted_by_pid below.
+
+    def test_matches_exactly_the_monitored_processes_by_executable_basename(self):
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertEqual(
+            set(result), {(907, "mother"), (118, "claude"), (442, "nostromd")}
+        )
+
+    def test_nostromod_is_not_a_substring_or_prefix_match_for_nostromd(self):
+        # "nostromod" (pid 503) and "nostromd" (pid 442) are different
+        # strings — an exact basename match must tell them apart, or a
+        # process that has nothing to do with the real daemon binary would
+        # be reported as if it were nostromd.
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertNotIn(503, [pid for pid, _name in result])
+        self.assertIn((442, "nostromd"), result)
+
+    def test_a_monitored_name_embedded_only_in_the_arguments_does_not_match(self):
+        # pid 206's executable is /usr/bin/python3; "mother" only appears
+        # deep in an argument (a plan file path). Only the executable's own
+        # basename is ever checked — never the rest of the command string.
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertNotIn(206, [pid for pid, _name in result])
+
+    def test_an_unrelated_process_does_not_match(self):
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertNotIn(505, [pid for pid, _name in result])
+
+    def test_a_basename_that_merely_starts_with_a_monitored_name_does_not_match(self):
+        # /opt/foo/mothership -> basename "mothership" -- a prefix of
+        # "mother", not equal to it. Exact basename equality only.
+        text = "  PID COMMAND\n  600 /opt/foo/mothership\n"
+        self.assertEqual(launch_smoke.matching_monitored_processes(text), ())
+
+    def test_empty_string_returns_empty_tuple(self):
+        self.assertEqual(launch_smoke.matching_monitored_processes(""), ())
+
+    def test_header_only_returns_empty_tuple(self):
+        self.assertEqual(launch_smoke.matching_monitored_processes("  PID COMMAND\n"), ())
+
+    def test_result_is_sorted_by_pid(self):
+        # SAMPLE's pids are deliberately out of ps order (907, 118, 442 in
+        # that order in the text) so an implementation that returns ps-order
+        # instead of sorting is provably wrong, not accidentally right.
+        result = launch_smoke.matching_monitored_processes(self.SAMPLE)
+        self.assertEqual([pid for pid, _name in result], [118, 442, 907])
+
+    def test_never_raises_on_malformed_or_blank_lines_mixed_in(self):
+        text = (
+            "  PID COMMAND\n"
+            "\n"
+            "   \n"
+            "  501 /usr/local/bin/mother daemon start\n"
+        )
+        try:
+            result = launch_smoke.matching_monitored_processes(text)
+        except Exception as e:  # noqa: BLE001 - the contract says this must never raise
+            self.fail(f"matching_monitored_processes raised {type(e).__name__}: {e}")
+        self.assertEqual(set(result), {(501, "mother")})
+
+
+class NewMonitoredProcessesTests(unittest.TestCase):
+    """`new_monitored_processes(before, after)` — the entries in `after`
+    whose pid wasn't present in `before`. A monitored process that was
+    already running before the run started (e.g. the operator's own Mother
+    daemon, coincidentally) is excluded even though it's still present in
+    `after` — it isn't something this run caused."""
+
+    def test_a_process_absent_before_is_new(self):
+        self.assertEqual(
+            launch_smoke.new_monitored_processes((), ((501, "mother"),)),
+            ((501, "mother"),),
+        )
+
+    def test_a_process_present_in_both_before_and_after_is_not_new(self):
+        before = ((501, "mother"),)
+        after = ((501, "mother"),)
+        self.assertEqual(launch_smoke.new_monitored_processes(before, after), ())
+
+    def test_only_the_genuinely_new_pid_is_returned_when_one_was_pre_existing(self):
+        before = ((501, "mother"),)
+        after = ((501, "mother"), (502, "claude"))
+        self.assertEqual(
+            launch_smoke.new_monitored_processes(before, after), ((502, "claude"),)
+        )
+
+    def test_both_empty_returns_empty(self):
+        self.assertEqual(launch_smoke.new_monitored_processes((), ()), ())
+
+    def test_this_is_the_structural_defence_against_the_broker_offline_backstop_firing_silently(self):
+        """`AppStore.start()`'s 5s "broker offline, spawn mother daemon
+        start" backstop is exactly what `BrokerStub` (answering the hello
+        handshake immediately) and the scrubbed child `PATH` in `_child_env`
+        exist to prevent from ever firing. If it fires anyway — a bug in
+        BrokerStub's timing, a PATH leak, anything — this diff is what
+        surfaces it: "mother" shows up as a newly-started process even
+        though the whole run otherwise looks perfectly healthy (still
+        reaches multi-pane layout, stays alive, settles CPU). Without this
+        check, that failure mode passes completely silently.
+        """
+        before = ()
+        after = ((777, "mother"),)
+        self.assertEqual(
+            launch_smoke.new_monitored_processes(before, after), ((777, "mother"),)
+        )
+
+
+class NostromoPidFromPsOutputTests(unittest.TestCase):
+    """`nostromo_pid_from_ps_output` — the pure loop extracted from
+    `another_nostromo_pid` (see its docstring for the full rationale). These
+    tests pin CURRENT documented behavior — a straight, behavior-preserving
+    extraction — not new behavior. A fake `bundle_id_of` (dict-backed, and
+    call-recording) stands in for the real Info.plist lookup so these tests
+    never touch the filesystem."""
+
+    @staticmethod
+    def _recording_bundle_id_of(mapping):
+        calls = []
+
+        def fn(executable_path):
+            calls.append(executable_path)
+            return mapping.get(executable_path)
+
+        return fn, calls
+
+    # commit 8711bc3's mutant killer: a whole-command-line substring match
+    # would wrongly call bundle_id_of (or wrongly match) here — the
+    # executable itself is /usr/bin/python3, and the Nostromo path only
+    # appears deep inside a quoted argument. Re-run this mutation by hand
+    # once nostromo_pid_from_ps_output exists (see plan item 14).
+    def test_an_unrelated_process_whose_arguments_merely_embed_the_path_does_not_match(self):
+        text = (
+            "  PID COMMAND\n"
+            '  700 /usr/bin/python3 /Users/x/run.py --plan '
+            '"quotes the path /Applications/Nostromo.app/Contents/MacOS/Nostromo"\n'
+        )
+        bundle_id_of, calls = self._recording_bundle_id_of({})
+        result = launch_smoke.nostromo_pid_from_ps_output(
+            text, exclude_pid=999, clone_bundle_id="com.hammer.nostromo.smoke",
+            bundle_id_of=bundle_id_of,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(calls, [])
+
+    # commit 70dabfb's mutant killer: matching by path alone (ignoring
+    # bundle id) would wrongly match here — the operator's real,
+    # legitimately-running Nostromo.app has nothing to do with our clone's
+    # isolated bundle id. Re-run this mutation by hand once
+    # nostromo_pid_from_ps_output exists (see plan item 14).
+    def test_the_operators_real_app_does_not_match_a_different_clone_bundle_id(self):
+        text = (
+            "  PID COMMAND\n"
+            "  800 /Applications/Nostromo.app/Contents/MacOS/Nostromo\n"
+        )
+        bundle_id_of, _calls = self._recording_bundle_id_of({
+            "/Applications/Nostromo.app/Contents/MacOS/Nostromo": "com.hammer.nostromo",
+        })
+        result = launch_smoke.nostromo_pid_from_ps_output(
+            text, exclude_pid=999, clone_bundle_id="com.hammer.nostromo.smoke",
+            bundle_id_of=bundle_id_of,
+        )
+        self.assertIsNone(result)
+
+    def test_a_genuine_same_bundle_id_collision_matches_and_returns_its_pid(self):
+        clone_path = (
+            "/private/var/folders/xyz/T/nostromo-launch-smoke-validate.ABCD/"
+            "Nostromo.app/Contents/MacOS/Nostromo"
+        )
+        text = f"  PID COMMAND\n  900 {clone_path}\n"
+        bundle_id_of, _calls = self._recording_bundle_id_of({
+            clone_path: "com.hammer.nostromo.smoke",
+        })
+        result = launch_smoke.nostromo_pid_from_ps_output(
+            text, exclude_pid=999, clone_bundle_id="com.hammer.nostromo.smoke",
+            bundle_id_of=bundle_id_of,
+        )
+        self.assertEqual(result, 900)
+
+    def test_exclude_pid_is_never_returned_even_when_it_would_otherwise_match(self):
+        clone_path = "/tmp/x/Nostromo.app/Contents/MacOS/Nostromo"
+        text = f"  PID COMMAND\n  111 {clone_path}\n"
+        bundle_id_of, _calls = self._recording_bundle_id_of({
+            clone_path: "com.hammer.nostromo.smoke",
+        })
+        result = launch_smoke.nostromo_pid_from_ps_output(
+            text, exclude_pid=111, clone_bundle_id="com.hammer.nostromo.smoke",
+            bundle_id_of=bundle_id_of,
+        )
+        self.assertIsNone(result)
+
+    def test_a_candidate_whose_bundle_id_is_unreadable_does_not_match(self):
+        clone_path = "/tmp/x/Nostromo.app/Contents/MacOS/Nostromo"
+        text = f"  PID COMMAND\n  222 {clone_path}\n"
+        bundle_id_of, _calls = self._recording_bundle_id_of({})  # Info.plist unreadable -> None
+        result = launch_smoke.nostromo_pid_from_ps_output(
+            text, exclude_pid=999, clone_bundle_id="com.hammer.nostromo.smoke",
+            bundle_id_of=bundle_id_of,
+        )
+        self.assertIsNone(result)
+
+    def test_header_only_text_never_raises_and_never_matches(self):
+        bundle_id_of, _calls = self._recording_bundle_id_of({})
+        result = launch_smoke.nostromo_pid_from_ps_output(
+            "  PID COMMAND\n", exclude_pid=999, clone_bundle_id="x", bundle_id_of=bundle_id_of,
+        )
+        self.assertIsNone(result)
+
+    def test_empty_text_never_raises_and_never_matches(self):
+        bundle_id_of, _calls = self._recording_bundle_id_of({})
+        result = launch_smoke.nostromo_pid_from_ps_output(
+            "", exclude_pid=999, clone_bundle_id="x", bundle_id_of=bundle_id_of,
+        )
+        self.assertIsNone(result)
+
+    def test_blank_lines_are_skipped_without_raising(self):
+        clone_path = "/tmp/x/Nostromo.app/Contents/MacOS/Nostromo"
+        text = f"  PID COMMAND\n\n   \n  333 {clone_path}\n"
+        bundle_id_of, _calls = self._recording_bundle_id_of({
+            clone_path: "com.hammer.nostromo.smoke",
+        })
+        result = launch_smoke.nostromo_pid_from_ps_output(
+            text, exclude_pid=999, clone_bundle_id="com.hammer.nostromo.smoke",
+            bundle_id_of=bundle_id_of,
+        )
+        self.assertEqual(result, 333)
+
+    def test_a_malformed_line_with_a_non_integer_pid_is_skipped_without_raising(self):
+        clone_path = "/tmp/x/Nostromo.app/Contents/MacOS/Nostromo"
+        text = f"  PID COMMAND\n  notapid {clone_path}\n  444 {clone_path}\n"
+        bundle_id_of, _calls = self._recording_bundle_id_of({
+            clone_path: "com.hammer.nostromo.smoke",
+        })
+        try:
+            result = launch_smoke.nostromo_pid_from_ps_output(
+                text, exclude_pid=999, clone_bundle_id="com.hammer.nostromo.smoke",
+                bundle_id_of=bundle_id_of,
+            )
+        except Exception as e:  # noqa: BLE001 - the contract says this must never raise
+            self.fail(f"nostromo_pid_from_ps_output raised {type(e).__name__}: {e}")
+        self.assertEqual(result, 444)
+
+    def test_with_two_colliding_clones_the_first_in_ps_order_wins(self):
+        clone_path_a = "/tmp/a/Nostromo.app/Contents/MacOS/Nostromo"
+        clone_path_b = "/tmp/b/Nostromo.app/Contents/MacOS/Nostromo"
+        text = (
+            "  PID COMMAND\n"
+            f"  555 {clone_path_a}\n"
+            f"  556 {clone_path_b}\n"
+        )
+        bundle_id_of, _calls = self._recording_bundle_id_of({
+            clone_path_a: "com.hammer.nostromo.smoke",
+            clone_path_b: "com.hammer.nostromo.smoke",
+        })
+        result = launch_smoke.nostromo_pid_from_ps_output(
+            text, exclude_pid=999, clone_bundle_id="com.hammer.nostromo.smoke",
+            bundle_id_of=bundle_id_of,
+        )
+        self.assertEqual(result, 555)
+
+
+# ---------------------------------------------------------------------------
+# Multi-launch accounting: "if more than one launch is observed in a run,
+# the report states how many launches crashed and FAILs if that count
+# exceeds zero." The FAIL-on-any-attributed-crash behavior already exists
+# (`no-attributable-crash-report` FAILs on any non-empty
+# `crash_reports_attributed_pids`); what's missing is purely making the
+# launch/crash counts explicit and visible in the printed report.
+# ---------------------------------------------------------------------------
+
+
+class MultiLaunchSummaryTests(unittest.TestCase):
+    def test_single_healthy_launch(self):
+        self.assertEqual(launch_smoke.multi_launch_summary((100,), ()), (1, 0))
+
+    def test_two_launches_observed_one_attributed_to_a_crash(self):
+        # e.g. a crash-relaunch within one run's observation window.
+        self.assertEqual(launch_smoke.multi_launch_summary((100, 200), (200,)), (2, 1))
+
+    def test_nothing_observed_and_nothing_attributed(self):
+        self.assertEqual(launch_smoke.multi_launch_summary((), ()), (0, 0))
+
+    def test_three_launches_two_crashed(self):
+        self.assertEqual(
+            launch_smoke.multi_launch_summary((100, 200, 300), (200, 300)), (3, 2)
+        )
+
+    def test_an_attributed_pid_not_among_observed_pids_does_not_inflate_the_crashed_count(self):
+        # An attributed pid this run never actually observed as a launch
+        # (e.g. a pid seen only in an unrelated stale scan) must not count
+        # towards "crashed launches" — it wasn't a launch this run observed.
+        self.assertEqual(launch_smoke.multi_launch_summary((100,), (999,)), (1, 0))
+
+
+class FormatReportMultiLaunchTests(unittest.TestCase):
+    """`format_report` must make the launch/crash accounting visible in the
+    printed report, not only implicit in whether `no-attributable-crash-
+    report` happened to FAIL. Substring-only assertions — the exact
+    formatting/column layout is Cody's call, not part of this contract."""
+
+    def test_report_mentions_launches_observed_and_launches_crashed_counts(self):
+        ev = healthy_evidence()._replace(
+            observed_pids=(100, 200), crash_reports_attributed_pids=(200,),
+        )
+        detectors = launch_smoke.evaluate_evidence(ev)
+        state, cause = launch_smoke.aggregate(detectors)
+        report = launch_smoke.format_report(state, cause, detectors, ev)
+
+        self.assertEqual(launch_smoke.multi_launch_summary(ev.observed_pids,
+                                                             ev.crash_reports_attributed_pids),
+                          (2, 1))
+        self.assertRegex(report, r"launches observed[^0-9]*2")
+        self.assertRegex(report, r"launches crashed[^0-9]*1")
+
+
+class FixtureShapeConstantsTests(unittest.TestCase):
+    """Anti-drift pin: `FIXTURE_SPLIT_NODES_PER_FOCUS`/`FIXTURE_LEAVES_PER_FOCUS`
+    pin the shape of the committed fixture. Editing the fixture's tree shape
+    (e.g. adding a third split, or another leaf) without editing these two
+    constants to match must fail this test — `split_layout_agreement` relies
+    on them to recognize a whole multiple of the fixture's own shape. A
+    local recursive counter, independent of the Rust side's
+    `for_each_split`/`collect_leaf_pane_ids` helpers, so this test doesn't
+    depend on anything but the fixture's own JSON shape.
+    """
+
+    @staticmethod
+    def _count_splits_and_leaves(tree):
+        if tree["kind"] in ("split", "tabs"):
+            # A `tabs` node is a container, not a split: it contributes 0 to
+            # the split count (it does not lay out an NSSplitView and has no
+            # ratios to apply) while its children are ordinary leaves. This
+            # is why `FIXTURE_LEAVES_PER_FOCUS` went 3 -> 4 when the `diff`
+            # leaf became a two-tab detail region, and
+            # `FIXTURE_SPLIT_NODES_PER_FOCUS` stayed at 2.
+            splits = 1 if tree["kind"] == "split" else 0
+            leaves = 0
+            for child in tree["children"]:
+                child_splits, child_leaves = (
+                    FixtureShapeConstantsTests._count_splits_and_leaves(child)
+                )
+                splits += child_splits
+                leaves += child_leaves
+            return splits, leaves
+        elif tree["kind"] == "leaf":
+            return 0, 1
+        raise ValueError(f"unknown tree node kind: {tree.get('kind')!r}")
+
+    def test_every_frame_matches_the_pinned_split_and_leaf_counts(self):
+        frames = load_fixture_frames()
+        self.assertTrue(frames, "fixture must carry at least one frame")
+        for frame in frames:
+            with self.subTest(tag=frame.get("tag")):
+                splits, leaves = self._count_splits_and_leaves(frame["tree"])
+                self.assertEqual(splits, launch_smoke.FIXTURE_SPLIT_NODES_PER_FOCUS)
+                self.assertEqual(leaves, launch_smoke.FIXTURE_LEAVES_PER_FOCUS)
+
+
+# ---------------------------------------------------------------------------
+# D6/D5: the 34pt collapse and the tool's own certification of it.
+#
+# The detail region collapsed to 34pt wide in a 1760pt split whose correct
+# share was 879.5pt each -- requested [0.5, 0.5], achieved 0.9807/0.0193 --
+# and never recovered. `applyRatios` called `NSSplitView.setPosition`, which
+# AppKit silently clamped, then returned `true` unconditionally, so
+# `splitsRatiosApplied` -- the shape check THIS tool grades -- certified the
+# failure as a success. Four instruments and a live QA pass all missed it,
+# because 34 is not zero and the tool said the ratios were applied.
+# ---------------------------------------------------------------------------
+
+
+class MinimumUsableExtentConstantTests(unittest.TestCase):
+    def test_pinned_to_the_swift_side_value(self):
+        # Mirrors `PaneFirstPaintAudit.minimumUsableExtent`. Pinned to the
+        # literal so that changing the floor is a deliberate edit in both
+        # languages, not a silent one-sided drift.
+        self.assertEqual(launch_smoke.MINIMUM_USABLE_EXTENT, 120.0)
+
+    def test_the_measured_failure_is_below_the_floor_and_its_correct_share_is_not(self):
+        # The constant is only meaningful if it actually separates the
+        # measured failure from the measured correct value.
+        self.assertLess(CLAMPED_PANE_WIDTH, launch_smoke.MINIMUM_USABLE_EXTENT)
+        self.assertLess(34.0, launch_smoke.MINIMUM_USABLE_EXTENT)
+        self.assertGreaterEqual(HEALTHY_WIDTH, launch_smoke.MINIMUM_USABLE_EXTENT)
+        self.assertGreaterEqual(HEALTHY_HEIGHT, launch_smoke.MINIMUM_USABLE_EXTENT)
+
+
+class UndersizedReasonsTests(unittest.TestCase):
+    """`_undersized_reasons(pane)` -- which axes of one `panesMeasured` entry
+    are non-zero but unusable, in a deterministic order (width before
+    height). Empty is the answer for every pane that is fine, out of scope,
+    or zero-size; zero-size belongs to
+    `collapsed_geometry_violations_from_rows`, and the two populations must
+    never double-report the same pane (`cause` is capped at three joined
+    entries, so a duplicate can crowd out a genuinely distinct third).
+    """
+
+    def _reasons(self, **kwargs):
+        return launch_smoke._undersized_reasons(make_pane(**kwargs))
+
+    # -- empty for panes there is nothing to say about --
+
+    def test_a_pane_with_no_window_yields_no_reasons(self):
+        self.assertEqual(
+            self._reasons(has_window=False, bounds_width=44.0, bounds_height=44.0), ()
+        )
+
+    def test_a_pane_that_has_not_completed_a_layout_pass_yields_no_reasons(self):
+        self.assertEqual(
+            self._reasons(layout_pass_count=0, bounds_width=44.0, bounds_height=44.0), ()
+        )
+
+    def test_a_healthy_pane_yields_no_reasons(self):
+        self.assertEqual(
+            self._reasons(bounds_width=HEALTHY_WIDTH, bounds_height=HEALTHY_HEIGHT), ()
+        )
+
+    def test_a_zero_or_negative_axis_yields_no_reasons_because_that_is_the_other_population(self):
+        for width, height in [(0.0, 44.0), (44.0, 0.0), (0.0, 0.0),
+                              (-1.0, 44.0), (44.0, -1.0)]:
+            with self.subTest(bounds=(width, height)):
+                self.assertEqual(
+                    self._reasons(bounds_width=width, bounds_height=height), (),
+                    "a zero/negative axis belongs to collapsed_geometry_"
+                    "violations_from_rows; reporting it here too would let one "
+                    "pane occupy two of the three slots in a FAIL cause",
+                )
+
+    # -- the reasons themselves, in the pinned order --
+
+    def test_a_narrow_but_tall_enough_pane_is_too_narrow_only(self):
+        self.assertEqual(
+            self._reasons(bounds_width=CLAMPED_PANE_WIDTH,
+                          bounds_height=CLAMPED_PANE_HEIGHT),
+            ("tooNarrow",),
+        )
+
+    def test_a_wide_but_short_pane_is_too_short_only(self):
+        self.assertEqual(
+            self._reasons(bounds_width=639.5, bounds_height=36.0), ("tooShort",)
+        )
+
+    def test_a_pane_small_on_both_axes_reports_width_before_height(self):
+        self.assertEqual(
+            self._reasons(bounds_width=48.0, bounds_height=10.0),
+            ("tooNarrow", "tooShort"),
+            "the order is part of the contract -- it is what makes the "
+            "operator-facing summary string deterministic and dedupable",
+        )
+
+    # -- the boundary --
+
+    def test_exactly_the_minimum_usable_extent_is_fine_on_both_axes(self):
+        floor = launch_smoke.MINIMUM_USABLE_EXTENT
+        self.assertEqual(self._reasons(bounds_width=floor, bounds_height=floor), ())
+
+    def test_a_hair_below_the_minimum_usable_extent_is_not_fine(self):
+        floor = launch_smoke.MINIMUM_USABLE_EXTENT
+        self.assertEqual(
+            self._reasons(bounds_width=floor - 0.5, bounds_height=floor), ("tooNarrow",)
+        )
+        self.assertEqual(
+            self._reasons(bounds_width=floor, bounds_height=floor - 0.5), ("tooShort",)
+        )
+
+    # -- absent keys --
+
+    def test_a_pane_dict_with_no_keys_at_all_yields_no_reasons_rather_than_raising(self):
+        self.assertEqual(launch_smoke._undersized_reasons({}), ())
+
+    def test_absent_bounds_default_to_zero_rather_than_raising(self):
+        self.assertEqual(
+            launch_smoke._undersized_reasons(
+                {"paneId": "detail.0", "hasWindow": True, "layoutPassCount": 1}
+            ),
+            (),
+        )
+
+    def test_absent_window_and_layout_pass_keys_default_to_out_of_scope(self):
+        self.assertEqual(
+            launch_smoke._undersized_reasons(
+                {"paneId": "detail.0", "boundsWidth": 44.0, "boundsHeight": 44.0}
+            ),
+            (),
+        )
+
+    def test_a_null_layout_pass_count_does_not_raise(self):
+        self.assertEqual(
+            launch_smoke._undersized_reasons(
+                {"paneId": "detail.0", "hasWindow": True, "layoutPassCount": None,
+                 "boundsWidth": 44.0, "boundsHeight": 44.0}
+            ),
+            (),
+        )
+
+
+def small_pane(pane_id, width, height, **kwargs):
+    """A judged pane (window, one completed layout pass) at an explicit size."""
+    return make_pane(pane_id, has_content=False, bounds_width=width,
+                     bounds_height=height, **kwargs)
+
+
+class UndersizedPanesPerRowSettleRuleTests(unittest.TestCase):
+    """`undersized_panes_per_row(rows)` mirrors
+    `PaneFirstPaintAudit.shouldReport`: a healthy pane legitimately passes
+    through small extents on its way to a real size, and the extents it
+    passes through OVERLAP the real 34pt failure (48x10 and 639.5x36 were
+    both measured on panes that ended up entirely healthy), so no threshold
+    can separate them. The settle rule is what separates them instead: a
+    pane counts only once the OFFENDING axis has stopped moving. A gate that
+    flakes is a gate people learn to ignore.
+    """
+
+    @staticmethod
+    def _per_row(*pane_lists):
+        rows = tuple(make_row(panes=list(panes)) for panes in pane_lists)
+        return rows, launch_smoke.undersized_panes_per_row(rows)
+
+    # -- the positional contract --
+
+    def test_returns_one_entry_per_input_row_in_order_including_clean_rows(self):
+        rows, result = self._per_row(
+            [small_pane("detail.0", CLAMPED_PANE_WIDTH, CLAMPED_PANE_HEIGHT)],
+            [small_pane("detail.0", CLAMPED_PANE_WIDTH, CLAMPED_PANE_HEIGHT)],
+            [healthy_pane("queue")],
+            [],
+        )
+        self.assertEqual(
+            len(result), len(rows),
+            "a caller depends on positional correspondence with `rows`; a row "
+            "with no violations must still occupy its slot",
+        )
+        for index, (returned_row, _violations) in enumerate(result):
+            with self.subTest(row=index):
+                self.assertIs(returned_row, rows[index])
+        self.assertEqual(
+            [len(v) for _row, v in result], [0, 1, 0, 0]
+        )
+
+    def test_no_rows_yields_no_entries(self):
+        self.assertEqual(launch_smoke.undersized_panes_per_row(()), [])
+
+    def test_every_violations_value_is_a_tuple_even_when_empty(self):
+        _rows, result = self._per_row([healthy_pane("queue")], [])
+        for _row, violations in result:
+            self.assertIsInstance(violations, tuple)
+
+    # -- the first observation never counts --
+
+    def test_a_panes_first_observation_is_never_a_violation(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", CLAMPED_PANE_WIDTH, CLAMPED_PANE_HEIGHT)]
+        )
+        self.assertEqual(
+            [v for _row, v in result], [()],
+            "there is nothing to compare a first observation against, so a "
+            "single sampled row can never FAIL this check on its own",
+        )
+
+    def test_forty_eight_by_ten_seen_once_is_not_a_violation(self):
+        # Measured on the reproduction bench, on a pane that ended up
+        # entirely healthy.
+        _rows, result = self._per_row([small_pane("detail.0", 48.0, 10.0)])
+        self.assertEqual([v for _row, v in result], [()])
+
+    # -- the measured pairs --
+
+    def test_44x434_5_then_44x385_5_is_a_violation_width_pinned_height_still_arriving(self):
+        # The real failure: the offending axis (width) is pinned at its
+        # floor while the healthy axis is still moving. A rule that required
+        # BOTH axes to hold would never have caught this.
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5)],
+            [small_pane("detail.0", 44.0, 385.5)],
+        )
+        first, second = [v for _row, v in result]
+        self.assertEqual(first, ())
+        self.assertEqual(len(second), 1, second)
+        self.assertIn("tooSmall(tooNarrow)", second[0].summary)
+        self.assertIn("bounds=44.0x385.5", second[0].summary)
+
+    def test_639_5x36_then_639_5x56_is_not_a_violation_the_offending_axis_moved(self):
+        # Also measured on the bench, also on a pane that ended up healthy:
+        # the offending axis here is HEIGHT, and it moved, so the pane is
+        # still arriving rather than stuck.
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 639.5, 36.0)],
+            [small_pane("detail.0", 639.5, 56.0)],
+        )
+        self.assertEqual([v for _row, v in result], [(), ()])
+
+    def test_a_healthy_axis_may_move_freely_without_excusing_the_offending_one(self):
+        # The complement of the pair above, stated as the rule: only the
+        # offending axis has to hold.
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 300.0)],
+            [small_pane("detail.0", 44.0, 899.0)],
+        )
+        self.assertEqual(len(result[1][1]), 1)
+
+    def test_both_axes_offending_requires_both_to_hold(self):
+        _rows, held = self._per_row(
+            [small_pane("detail.0", 48.0, 10.0)],
+            [small_pane("detail.0", 48.0, 10.0)],
+        )
+        self.assertEqual(len(held[1][1]), 1)
+
+        _rows, one_moved = self._per_row(
+            [small_pane("detail.0", 48.0, 10.0)],
+            [small_pane("detail.0", 48.0, 12.0)],
+        )
+        self.assertEqual(
+            one_moved[1][1], (),
+            "when both axes offend, a single axis still moving means the "
+            "pane is still arriving",
+        )
+
+    # -- previous observation is per-paneId, not per-row-index --
+
+    def test_two_interleaved_panes_are_tracked_independently_across_rows(self):
+        # If "previous observation" were per-row-index rather than per
+        # paneId, row 2's `detail.1` (at index 0 of its row) would be
+        # compared against `detail.0`'s 44x434.5 and would NOT settle -- so
+        # this fixture discriminates between the two implementations.
+        def narrow():
+            return small_pane("detail.0", 44.0, 434.5)
+
+        def short():
+            return small_pane("detail.1", 639.5, 36.0)
+
+        _rows, result = self._per_row(
+            [narrow(), short()],
+            [narrow()],            # detail.1 absent from this row entirely
+            [short()],
+        )
+        row0, row1, row2 = [v for _row, v in result]
+        self.assertEqual(row0, (), "both panes are on their first observation")
+        self.assertEqual(len(row1), 1)
+        self.assertIn("pane=detail.0", row1[0].summary)
+        self.assertEqual(
+            len(row2), 1,
+            "detail.1's previous observation is its own, two rows back -- "
+            "being absent from the intervening row must not reset it",
+        )
+        self.assertIn("pane=detail.1", row2[0].summary)
+
+    def test_a_pane_absent_from_a_row_does_not_have_its_history_overwritten(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5)],
+            [healthy_pane("queue")],
+            [small_pane("detail.0", 44.0, 434.5)],
+        )
+        self.assertEqual(
+            len(result[2][1]), 1,
+            "detail.0 held 44pt across the gap; an intervening row about a "
+            "different pane says nothing about it",
+        )
+
+    # -- small -> healthy -> small --
+
+    def test_a_pane_that_recovers_and_collapses_again_is_clean_on_the_healthy_row(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5)],
+            [small_pane("detail.0", HEALTHY_WIDTH, 434.5)],
+            [small_pane("detail.0", 44.0, 434.5)],
+            [small_pane("detail.0", 44.0, 434.5)],
+        )
+        collapsed_first, healthy, small_again, still_small = [v for _row, v in result]
+        self.assertEqual(collapsed_first, (), "first observation")
+        self.assertEqual(healthy, (), "a healthy pane is not a violation")
+        self.assertEqual(
+            small_again, (),
+            "the first small-again observation compares against the HEALTHY "
+            "one, so the offending axis moved and the pane is still arriving",
+        )
+        self.assertEqual(len(still_small), 1, "and only now has it settled")
+
+    # -- scope: the same preconditions the rest of the geometry gates use --
+
+    def test_a_pane_without_a_window_is_never_a_violation_however_settled(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5, has_window=False)],
+            [small_pane("detail.0", 44.0, 434.5, has_window=False)],
+        )
+        self.assertEqual([v for _row, v in result], [(), ()])
+
+    def test_a_pane_with_no_completed_layout_pass_is_never_a_violation(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5, layout_pass_count=0)],
+            [small_pane("detail.0", 44.0, 434.5, layout_pass_count=0)],
+        )
+        self.assertEqual([v for _row, v in result], [(), ()])
+
+    def test_a_row_with_no_panes_measured_key_is_tolerated(self):
+        rows = ({"pid": 100},)
+        self.assertEqual(launch_smoke.undersized_panes_per_row(rows), [(rows[0], ())])
+
+    def test_a_settled_zero_size_pane_is_left_to_the_zero_size_population(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 0.0, 44.0)],
+            [small_pane("detail.0", 0.0, 44.0)],
+        )
+        self.assertEqual([v for _row, v in result], [(), ()])
+
+
+class UndersizedAndCollapsedPopulationsAreDisjointTests(unittest.TestCase):
+    """No pane observation may appear in both `collapsed_geometry_violations_
+    from_rows` and `undersized_pane_violations_from_rows`. Both feed a FAIL
+    `cause` that is capped at three joined entries, so one pane reported
+    twice can crowd a genuinely distinct third violation out of the report a
+    human reads.
+    """
+
+    def test_across_a_grid_of_sizes_no_pane_is_reported_by_both(self):
+        extents = [-1.0, 0.0, 1.0, CLAMPED_PANE_WIDTH,
+                   launch_smoke.MINIMUM_USABLE_EXTENT - 0.5,
+                   launch_smoke.MINIMUM_USABLE_EXTENT, HEALTHY_WIDTH]
+        for width in extents:
+            for height in extents:
+                with self.subTest(bounds=(width, height)):
+                    rows = tuple(
+                        make_row(panes=[small_pane("detail.0", width, height)])
+                        for _ in range(3)
+                    )
+                    collapsed = launch_smoke.collapsed_geometry_violations_from_rows(rows)
+                    undersized = launch_smoke.undersized_pane_violations_from_rows(rows)
+                    self.assertFalse(
+                        collapsed and undersized,
+                        f"{width}x{height} was reported by both populations: "
+                        f"{collapsed} / {undersized}",
+                    )
+
+    def test_the_grid_actually_exercises_both_populations(self):
+        # Otherwise the disjointness above could hold by neither ever firing.
+        collapsed_rows = tuple(
+            make_row(panes=[small_pane("detail.0", 0.0, 434.5)]) for _ in range(2)
+        )
+        undersized_rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]) for _ in range(2)
+        )
+        self.assertTrue(
+            launch_smoke.collapsed_geometry_violations_from_rows(collapsed_rows)
+        )
+        self.assertTrue(
+            launch_smoke.undersized_pane_violations_from_rows(undersized_rows)
+        )
+
+
+class UndersizedPaneViolationsFromRowsTests(unittest.TestCase):
+    """One summary string per DISTINCT violating (paneId, width, height) --
+    the same rate-limiting spirit as the Swift side's `violationKey`. The
+    strings are operator-facing: they are what lands in the FAIL `cause`.
+    """
+
+    def test_a_pane_stuck_at_the_same_size_across_ten_rows_yields_one_entry(self):
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]) for _ in range(10)
+        )
+        self.assertEqual(len(launch_smoke.undersized_pane_violations_from_rows(rows)), 1)
+
+    def test_a_stuck_pane_yields_one_entry_even_as_its_layout_pass_count_climbs(self):
+        # The test above cannot catch this on its own: `small_pane` defaults
+        # every row to the same `layoutPassCount`, so a dedup key that
+        # wrongly included the pass counter would still collapse to one
+        # entry there and look correct.
+        #
+        # A real stuck pane relays out, so its counter climbs every row. If
+        # the key includes it, nothing deduplicates at all -- which is
+        # precisely the defect this fix had to repair on the Swift side,
+        # where it flooded the log thousands of times in a single run. And
+        # `cause` is capped at three joined entries, so the repeats would
+        # crowd out genuinely distinct panes from ever being named.
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=n)])
+            for n in range(1, 11)
+        )
+        violations = launch_smoke.undersized_pane_violations_from_rows(rows)
+        self.assertEqual(
+            len(violations), 1,
+            f"one stuck pane must report once however many times it relaid out; got "
+            f"{len(violations)}:\n" + "\n".join(violations),
+        )
+
+    def test_the_reported_summary_still_names_the_layout_pass_count(self):
+        # The counter is excluded from the dedup KEY, not from the report --
+        # it is the first thing an operator wants when reading a FAIL.
+        rows = (
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=3)]),
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=4)]),
+        )
+        violations = launch_smoke.undersized_pane_violations_from_rows(rows)
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("layoutPasses=4", violations[0])
+
+    def test_the_same_pane_settled_at_two_different_sizes_yields_two_entries(self):
+        rows = (
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]),
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]),
+            make_row(panes=[small_pane("detail.0", 50.0, 434.5)]),
+            make_row(panes=[small_pane("detail.0", 50.0, 434.5)]),
+        )
+        violations = launch_smoke.undersized_pane_violations_from_rows(rows)
+        self.assertEqual(len(violations), 2, violations)
+        self.assertIn("bounds=44.0x434.5", violations[0])
+        self.assertIn("bounds=50.0x434.5", violations[1])
+
+    def test_two_distinct_panes_at_the_same_size_are_each_reported(self):
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5),
+                            small_pane("detail.1", 44.0, 434.5)])
+            for _ in range(2)
+        )
+        self.assertEqual(len(launch_smoke.undersized_pane_violations_from_rows(rows)), 2)
+
+    def test_no_rows_yields_no_violations(self):
+        self.assertEqual(launch_smoke.undersized_pane_violations_from_rows(()), ())
+
+    def test_a_healthy_run_yields_no_violations(self):
+        self.assertEqual(
+            launch_smoke.undersized_pane_violations_from_rows(healthy_evidence().rows), ()
+        )
+
+    def test_summary_string_matches_the_documented_operator_facing_shape(self):
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=3)])
+            for _ in range(2)
+        )
+        self.assertEqual(
+            launch_smoke.undersized_pane_violations_from_rows(rows),
+            (
+                "pane=detail.0 hasWindow=true layoutPasses=3 "
+                "bounds=44.0x434.5 verdict=tooSmall(tooNarrow)",
+            ),
+        )
+
+    def test_summary_string_names_both_axes_when_both_offend(self):
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 48.0, 10.0, layout_pass_count=2)])
+            for _ in range(2)
+        )
+        self.assertEqual(
+            launch_smoke.undersized_pane_violations_from_rows(rows),
+            (
+                "pane=detail.0 hasWindow=true layoutPasses=2 "
+                "bounds=48.0x10.0 verdict=tooSmall(tooNarrow,tooShort)",
+            ),
+        )
+
+
+class DishonestRatioClaimsFromRowsTests(unittest.TestCase):
+    """The D5 invariant, and the point of the whole fix: no snapshot may
+    report every laid-out split as having applied its ratios while it also
+    contains an unusably small pane.
+
+    Measured on a live reproduction bench against
+    `tests/fixtures/focus_layout_clamped.json`:
+
+        origin/main (unfixed)  splitsLaidOut 3, applied 3, four 44pt panes
+        this branch (fixed)    splitsLaidOut 3, applied 1, four 44pt panes
+    """
+
+    def test_the_unfixed_branch_claiming_three_of_three_applied_is_dishonest(self):
+        claims = launch_smoke.dishonest_ratio_claims_from_rows(
+            clamped_bench_rows(splits_ratios_applied=3, splits_laid_out=3)
+        )
+        self.assertEqual(
+            claims,
+            ("splitsLaidOut=3 splitsRatiosApplied=3 while 4 pane(s) in the "
+             "same snapshot are unusably small",),
+        )
+
+    def test_this_branch_claiming_one_of_three_applied_is_honest(self):
+        self.assertEqual(
+            launch_smoke.dishonest_ratio_claims_from_rows(
+                clamped_bench_rows(splits_ratios_applied=1, splits_laid_out=3)
+            ),
+            (),
+            "reporting 1 of 3 applied is the fix working: the split that "
+            "could not reach its ratios is no longer counted as having "
+            "applied them",
+        )
+
+    def test_a_healthy_run_is_vacuously_honest_whatever_the_counts_say(self):
+        for applied, laid_out in [(2, 2), (0, 2), (3, 2), (0, 0)]:
+            with self.subTest(applied=applied, laid_out=laid_out):
+                rows = tuple(
+                    make_row(pid=100, split_nodes_rendered=2, leaves_rendered=4,
+                             splits_laid_out=laid_out, splits_ratios_applied=applied,
+                             panes=[healthy_pane("queue"), healthy_pane("diff")])
+                    for _ in range(3)
+                )
+                self.assertEqual(
+                    launch_smoke.dishonest_ratio_claims_from_rows(rows), (),
+                    "there is nothing to be dishonest ABOUT when every pane "
+                    "is a sensible size -- this must be silently correct, "
+                    "not accidentally flagging",
+                )
+
+    def test_absent_split_shape_fields_are_skipped_not_flagged(self):
+        # An older diagnostics row that predates these fields must not be
+        # read as a violation.
+        for laid_out, applied in [(None, None), (None, 3), (3, None)]:
+            with self.subTest(splitsLaidOut=laid_out, splitsRatiosApplied=applied):
+                rows = clamped_bench_rows(splits_ratios_applied=applied,
+                                          splits_laid_out=laid_out)
+                self.assertEqual(launch_smoke.dishonest_ratio_claims_from_rows(rows), ())
+
+    def test_zero_splits_laid_out_is_skipped(self):
+        rows = clamped_bench_rows(splits_ratios_applied=0, splits_laid_out=0)
+        self.assertEqual(launch_smoke.dishonest_ratio_claims_from_rows(rows), ())
+
+    def test_more_applied_than_laid_out_is_nonsensical_and_must_not_read_as_honest(self):
+        claims = launch_smoke.dishonest_ratio_claims_from_rows(
+            clamped_bench_rows(splits_ratios_applied=4, splits_laid_out=3)
+        )
+        self.assertEqual(
+            claims,
+            ("splitsLaidOut=3 splitsRatiosApplied=4 while 4 pane(s) in the "
+             "same snapshot are unusably small",),
+        )
+
+    def test_an_undersized_pane_that_has_not_settled_yet_is_not_flagged(self):
+        # Inherits the settle rule: a pane still on its way to a real size
+        # is not evidence that anything was clamped.
+        rows = (
+            make_row(pid=100, splits_laid_out=3, splits_ratios_applied=3,
+                     panes=[small_pane("detail.0", 44.0, 434.5)]),
+            make_row(pid=100, splits_laid_out=3, splits_ratios_applied=3,
+                     panes=[small_pane("detail.0", 60.0, 434.5)]),
+        )
+        self.assertEqual(launch_smoke.dishonest_ratio_claims_from_rows(rows), ())
+
+    def test_only_the_rows_that_actually_claimed_it_are_flagged(self):
+        honest = make_row(pid=100, splits_laid_out=3, splits_ratios_applied=1,
+                          panes=clamped_detail_panes())
+        dishonest = make_row(pid=100, splits_laid_out=3, splits_ratios_applied=3,
+                             panes=clamped_detail_panes())
+        rows = (honest, dishonest, honest, dishonest)
+        self.assertEqual(
+            len(launch_smoke.dishonest_ratio_claims_from_rows(rows)), 2
+        )
+
+    def test_no_rows_yields_no_claims(self):
+        self.assertEqual(launch_smoke.dishonest_ratio_claims_from_rows(()), ())
+
+
+class RowsWithUndersizedPanesTests(unittest.TestCase):
+    """The denominator that stops `ratios-claimed-honestly` passing by vacuum
+    in silence. Counts ROWS, not panes.
+    """
+
+    def test_a_row_with_three_undersized_panes_counts_once(self):
+        def three_undersized():
+            return [small_pane(f"detail.{i}", 44.0, 434.5) for i in range(3)]
+
+        rows = tuple(make_row(panes=three_undersized()) for _ in range(3))
+        self.assertEqual(
+            launch_smoke.rows_with_undersized_panes(rows), 2,
+            "rows 2 and 3 each carry three settled undersized panes and each "
+            "counts once; row 1 is every pane's first observation",
+        )
+        self.assertEqual(
+            len(launch_smoke.undersized_pane_violations_from_rows(rows)), 3,
+            "the pane-wise population is 3 -- the contrast is the whole point "
+            "of counting rows separately",
+        )
+
+    def test_zero_for_a_healthy_run(self):
+        self.assertEqual(
+            launch_smoke.rows_with_undersized_panes(healthy_evidence().rows), 0
+        )
+
+    def test_zero_for_no_rows(self):
+        self.assertEqual(launch_smoke.rows_with_undersized_panes(()), 0)
+
+    def test_counts_every_row_that_carries_a_settled_violation(self):
+        rows = clamped_bench_rows(splits_ratios_applied=3, repeats=5)
+        self.assertEqual(launch_smoke.rows_with_undersized_panes(rows), 4)
+
+    def test_a_row_whose_undersized_pane_has_not_settled_does_not_count(self):
+        rows = (
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]),
+            make_row(panes=[small_pane("detail.0", 60.0, 434.5)]),
+        )
+        self.assertEqual(launch_smoke.rows_with_undersized_panes(rows), 0)
+
+
+class NoUndersizedLaidOutPaneDetectorTests(unittest.TestCase):
+    KEY = "no-undersized-laid-out-pane"
+
+    def _verdict(self, ev):
+        return keyed(launch_smoke.evaluate_evidence(ev))[self.KEY]
+
+    def test_passes_when_no_pane_settled_below_the_floor(self):
+        v = self._verdict(healthy_evidence())
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIsNone(v.cause)
+
+    def test_fails_when_a_pane_settled_below_the_floor(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        v = self._verdict(ev)
+        self.assertEqual(v.state, launch_smoke.FAIL)
+        self.assertIn("tooSmall(tooNarrow)", v.cause)
+
+    def test_the_whole_run_fails_when_a_pane_settled_below_the_floor(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        verdicts = launch_smoke.evaluate_evidence(ev)
+        state, cause = launch_smoke.aggregate(verdicts)
+        self.assertEqual(state, launch_smoke.FAIL)
+        self.assertTrue(cause)
+        self.assertEqual(launch_smoke.exit_code_for(state), 1)
+
+    def test_cause_names_at_most_three_entries(self):
+        rows = tuple(
+            make_row(pid=100, panes=[small_pane(f"detail.{i}", 44.0, 434.5)
+                                     for i in range(5)])
+            for _ in range(2)
+        )
+        ev = evidence_from_rows(rows)
+        self.assertEqual(len(ev.undersized_pane_violations), 5)
+        v = self._verdict(ev)
+        self.assertEqual(
+            v.cause.split("; "), list(ev.undersized_pane_violations[:3]),
+            "the cause is a human-facing line, capped at three entries",
+        )
+
+    def test_measured_names_the_judged_population_and_the_floor(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        v = self._verdict(ev)
+        self.assertIn(f"{ev.geometry_panes_judged} pane(s) judged", v.measured)
+        self.assertIn("120pt", v.measured)
+
+    def test_is_a_gate_and_is_never_inconclusive(self):
+        self.assertEqual(launch_smoke.registration(self.KEY).kind, launch_smoke.GATE)
+        fixtures = [
+            launch_smoke.Evidence.empty(),
+            healthy_evidence(),
+            evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1)),
+            evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3)),
+        ]
+        for ev in fixtures:
+            with self.subTest(fixture=id(ev)):
+                self.assertIn(
+                    self._verdict(ev).state, {launch_smoke.PASS, launch_smoke.FAIL}
+                )
+
+
+class RatiosClaimedHonestlyDetectorTests(unittest.TestCase):
+    KEY = "ratios-claimed-honestly"
+
+    def _verdict(self, ev):
+        return keyed(launch_smoke.evaluate_evidence(ev))[self.KEY]
+
+    def test_passes_when_no_row_claimed_a_ratio_it_did_not_get(self):
+        v = self._verdict(healthy_evidence())
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIsNone(v.cause)
+
+    def test_fails_on_the_unfixed_branch_bench(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3))
+        v = self._verdict(ev)
+        self.assertEqual(v.state, launch_smoke.FAIL)
+        self.assertIn("splitsLaidOut=3 splitsRatiosApplied=3", v.cause)
+
+    def test_passes_on_this_branch_bench_even_though_the_panes_are_still_small(self):
+        # The revert demonstration, end to end: the SAME collapsed panes, the
+        # SAME fixture -- only the honesty of `splitsRatiosApplied` differs.
+        # The collapse still FAILs its own gate; what this gate grades is
+        # whether the tool told the truth about it.
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        self.assertEqual(self._verdict(ev).state, launch_smoke.PASS)
+        self.assertEqual(
+            keyed(launch_smoke.evaluate_evidence(ev))["no-undersized-laid-out-pane"].state,
+            launch_smoke.FAIL,
+        )
+
+    def test_cause_names_at_most_three_entries(self):
+        rows = clamped_bench_rows(splits_ratios_applied=3, repeats=6)
+        ev = evidence_from_rows(rows)
+        self.assertEqual(len(ev.dishonest_ratio_claims), 5)
+        v = self._verdict(ev)
+        self.assertEqual(v.cause.split("; "), list(ev.dishonest_ratio_claims[:3]))
+
+    def test_measured_reports_the_row_denominator_so_a_vacuous_pass_says_so_out_loud(self):
+        v = self._verdict(healthy_evidence())
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIn("0 row(s) had an undersized pane to grade against", v.measured)
+        self.assertEqual(
+            v.observations, 0,
+            "a detector that passed because it had nothing to grade must say "
+            "so; passing by vacuum in silence is the defect this whole suite "
+            "exists to prevent",
+        )
+
+    def test_measured_reports_a_non_zero_denominator_when_there_was_something_to_grade(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        v = self._verdict(ev)
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIn("1 row(s) had an undersized pane to grade against", v.measured)
+        self.assertIn("0 of them still claimed", v.measured)
+        self.assertEqual(v.observations, 1)
+
+    def test_is_a_gate_and_is_never_inconclusive(self):
+        self.assertEqual(launch_smoke.registration(self.KEY).kind, launch_smoke.GATE)
+        fixtures = [
+            launch_smoke.Evidence.empty(),
+            healthy_evidence(),
+            evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1)),
+            evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3)),
+        ]
+        for ev in fixtures:
+            with self.subTest(fixture=id(ev)):
+                self.assertIn(
+                    self._verdict(ev).state, {launch_smoke.PASS, launch_smoke.FAIL}
+                )
+
+
+class NewDetectorsAreRegisteredExactlyOnceTests(unittest.TestCase):
+    NEW_KEYS = ("no-undersized-laid-out-pane", "ratios-claimed-honestly")
+
+    def test_each_appears_exactly_once_in_the_registry(self):
+        keys = [r.key for r in launch_smoke.CRITERIA]
+        for key in self.NEW_KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(keys.count(key), 1)
+
+    def test_each_appears_exactly_once_per_evaluation_in_registry_order(self):
+        for label, ev in [
+            ("EMPTY", launch_smoke.Evidence.empty()),
+            ("HEALTHY", healthy_evidence()),
+            ("UNFIXED-BENCH",
+             evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3))),
+            ("FIXED-BENCH",
+             evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))),
+        ]:
+            with self.subTest(fixture=label):
+                keys = [v.key for v in launch_smoke.evaluate_evidence(ev)]
+                self.assertEqual(keys, [r.key for r in launch_smoke.CRITERIA])
+                for key in self.NEW_KEYS:
+                    self.assertEqual(keys.count(key), 1)
+
+    def test_the_collapse_gate_is_reported_before_the_honesty_gate(self):
+        keys = [r.key for r in launch_smoke.CRITERIA]
+        self.assertLess(
+            keys.index("no-undersized-laid-out-pane"),
+            keys.index("ratios-claimed-honestly"),
+            "the collapse comes before the lie about it in the report a human "
+            "reads top to bottom",
+        )
+
+    def test_evidence_empty_still_produces_one_verdict_per_detector_without_raising(self):
+        verdicts = launch_smoke.evaluate_evidence(launch_smoke.Evidence.empty())
+        self.assertEqual([v.key for v in verdicts], [r.key for r in launch_smoke.CRITERIA])
+        raised = [v for v in verdicts if "detector raised" in (v.measured or "")]
+        self.assertEqual(raised, [], "no detector may raise on barren evidence")
+
+
+class HealthyFixtureIsGenuinelyHealthyTests(unittest.TestCase):
+    """Anti-drift on the fixture the vacuity tests lean on: every violation
+    population `healthy_evidence()` declares must be exactly what its own
+    rows produce. Without this, a "healthy" fixture can quietly assert
+    `undersized_pane_violations=()` over rows that would produce three of
+    them, and `EvaluateKnownGoodEvidenceTests` would be proving nothing.
+
+    This is not hypothetical -- `make_pane`'s default bounds are 100x50,
+    BELOW the 120pt usable floor on both axes.
+    """
+
+    def test_every_row_derived_population_matches_what_the_rows_produce(self):
+        ev = healthy_evidence()
+        derived = evidence_from_rows(ev.rows, base=ev)
+        for field in ("notdrawable_violations", "panes_scanned",
+                      "collapsed_geometry_violations", "geometry_panes_judged",
+                      "undersized_pane_violations", "dishonest_ratio_claims",
+                      "rows_with_undersized_panes"):
+            with self.subTest(field=field):
+                self.assertEqual(getattr(ev, field), getattr(derived, field))
+
+    def test_the_default_make_pane_size_really_is_below_the_usable_floor(self):
+        # Pins the reason `healthy_pane` exists: if the defaults ever become
+        # usable sizes, this test says so rather than leaving a helper nobody
+        # understands.
+        default = make_pane("detail.0", has_content=False)
+        self.assertEqual(
+            launch_smoke._undersized_reasons(default), ("tooNarrow", "tooShort")
+        )
+
+
+class ClampedFixtureTests(unittest.TestCase):
+    """`tests/fixtures/focus_layout_clamped.json` is what makes
+    `ratios-claimed-honestly` bite (`--fixture clamped`). If it ever stops
+    asking for a ratio it cannot get, the revert demonstration silently stops
+    demonstrating anything -- it would pass on both branches and prove
+    neither.
+    """
+
+    #: The window width the reproduction bench measured against. The 44pt
+    #: panes come out of dividing ~3% of this four ways.
+    BENCH_WINDOW_WIDTH = 1760.0
+
+    def test_it_parses_as_a_non_empty_list_of_focus_layout_frames(self):
+        frames = load_clamped_fixture_frames()
+        self.assertIsInstance(frames, list)
+        self.assertTrue(frames)
+        for frame in frames:
+            with self.subTest(tag=frame.get("tag")):
+                self.assertEqual(frame["type"], "focus_layout")
+                self.assertTrue(frame.get("tag"))
+                self.assertIn("tree", frame)
+
+    def test_the_script_knows_it_by_name(self):
+        self.assertEqual(launch_smoke.FIXTURES["clamped"], "focus_layout_clamped.json")
+        self.assertEqual(
+            os.path.basename(CLAMPED_FIXTURE_PATH),
+            launch_smoke.FIXTURES["clamped"],
+        )
+        self.assertNotEqual(
+            launch_smoke.DEFAULT_FIXTURE, "clamped",
+            "the unsatisfiable fixture must never be the default -- it FAILs "
+            "no-undersized-laid-out-pane by construction",
+        )
+
+    @staticmethod
+    def _splits(tree):
+        """Every `split` node in the tree, outermost first."""
+        found = []
+        if tree.get("kind") == "split":
+            found.append(tree)
+        for child in tree.get("children", []):
+            found.extend(ClampedFixtureTests._splits(child))
+        return found
+
+    def test_every_frame_asks_a_nested_split_for_a_share_it_cannot_divide(self):
+        frames = load_clamped_fixture_frames()
+        for frame in frames:
+            with self.subTest(tag=frame.get("tag")):
+                unreachable = []
+                for split in self._splits(frame["tree"]):
+                    ratios = split["ratios"]
+                    children = split["children"]
+                    self.assertEqual(len(ratios), len(children))
+                    self.assertAlmostEqual(sum(ratios), 1.0, places=6)
+                    for ratio, child in zip(ratios, children):
+                        if child.get("kind") != "split":
+                            continue
+                        grandchildren = len(child["children"])
+                        share = self.BENCH_WINDOW_WIDTH * ratio / grandchildren
+                        if share < launch_smoke.MINIMUM_USABLE_EXTENT:
+                            unreachable.append((ratio, grandchildren, share))
+                self.assertTrue(
+                    unreachable,
+                    "no nested split in this frame is asked for a share it "
+                    "cannot divide into usable panes -- the clamped fixture "
+                    "no longer demonstrates a clamp",
+                )
+                ratio, grandchildren, share = unreachable[0]
+                self.assertLessEqual(ratio, 0.05, "the ~3% share the bench measured")
+                self.assertGreaterEqual(
+                    grandchildren, 4, "divided among four detail children"
+                )
+                self.assertLess(share, launch_smoke.MINIMUM_USABLE_EXTENT)
+
+    def test_it_is_a_different_tree_from_the_healthy_split_fixture(self):
+        # If the two fixtures ever converge, `--fixture clamped` stops being
+        # a distinct experiment.
+        clamped = load_clamped_fixture_frames()
+        healthy = load_fixture_frames()
+        self.assertNotEqual(
+            [f["tree"] for f in clamped], [f["tree"] for f in healthy]
+        )
+        for frame in clamped:
+            with self.subTest(tag=frame.get("tag")):
+                splits, leaves = FixtureShapeConstantsTests._count_splits_and_leaves(
+                    frame["tree"]
+                )
+                self.assertEqual(splits, CLAMPED_SPLITS_PER_FOCUS)
+                self.assertEqual(leaves, CLAMPED_LEAVES_PER_FOCUS)
+
+
+
+# ---------------------------------------------------------------------------
+# Fixture daemon: a real AF_UNIX listener, exercised over a real socket.
+# ---------------------------------------------------------------------------
+
+
+class FixtureDaemonTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.socket_path = os.path.join(self.tmpdir.name, "nostromd.sock")
+        self.frames = load_fixture_frames()
+        self.daemon = launch_smoke.FixtureDaemon(self.socket_path, self.frames)
+        self.daemon.start()
+        self.addCleanup(self.daemon.stop)
+
+    def _connect(self):
+        sock = launch_smoke.ipc_connect(self.socket_path, timeout=3.0)
+        self.addCleanup(sock.close)
+        return sock
+
+    def test_hello_then_subscribe_yields_welcome_then_every_frame_in_order(self):
+        sock = self._connect()
+        launch_smoke.ipc_write_frame(
+            sock, {"type": "hello", "client_id": "redd-test", "protocol_version": 4}
+        )
+        welcome = launch_smoke.ipc_read_frame(sock)
+        self.assertEqual(welcome["type"], "welcome")
+        self.assertEqual(welcome["protocol_version"], 4)
+        self.assertIn("daemon_pid", welcome)
+
+        launch_smoke.ipc_write_frame(
+            sock, {"type": "subscribe", "topics": ["layout"], "renders_decisions": False}
+        )
+        received = [launch_smoke.ipc_read_frame(sock) for _ in range(len(self.frames))]
+        self.assertEqual(received, self.frames)
+
+    def test_subscribe_then_hello_defensive_ordering_still_delivers_every_frame_once(self):
+        sock = self._connect()
+        launch_smoke.ipc_write_frame(
+            sock, {"type": "subscribe", "topics": ["layout"], "renders_decisions": False}
+        )
+        launch_smoke.ipc_write_frame(
+            sock, {"type": "hello", "client_id": "redd-test-2", "protocol_version": 4}
+        )
+        all_frames = [
+            launch_smoke.ipc_read_frame(sock) for _ in range(len(self.frames) + 1)
+        ]
+
+        welcomes = [f for f in all_frames if f.get("type") == "welcome"]
+        others = [f for f in all_frames if f.get("type") != "welcome"]
+        self.assertEqual(len(welcomes), 1, f"expected exactly one welcome, got {all_frames}")
+        self.assertEqual(others, self.frames)
+
+    def test_unknown_frame_type_mid_stream_is_drained_and_logged_without_closing_the_connection(self):
+        sock = self._connect()
+        launch_smoke.ipc_write_frame(
+            sock, {"type": "hello", "client_id": "redd-test-3", "protocol_version": 4}
+        )
+        launch_smoke.ipc_read_frame(sock)  # welcome
+        launch_smoke.ipc_write_frame(
+            sock, {"type": "subscribe", "topics": ["layout"], "renders_decisions": False}
+        )
+        for _ in range(len(self.frames)):
+            launch_smoke.ipc_read_frame(sock)
+
+        # An unknown/unhandled frame type, sent mid-stream. Must be drained
+        # and logged, not close the connection or crash the daemon.
+        launch_smoke.ipc_write_frame(sock, {"type": "session_spawn", "tag": "perri"})
+
+        # The connection must still be alive and responsive afterward.
+        launch_smoke.ipc_write_frame(sock, {"type": "ping"})
+        pong = launch_smoke.ipc_read_frame(sock)
+        self.assertEqual(pong["type"], "pong")
+
+        self.assertTrue(
+            _wait_until(lambda: "session_spawn" in self.daemon.log),
+            f"session_spawn never appeared in daemon.log: {self.daemon.log}",
+        )
+
+    def test_stop_is_safe_to_call_more_than_once(self):
+        self.daemon.stop()
+        self.daemon.stop()  # must not raise
+
+
+if __name__ == "__main__":
+    unittest.main()

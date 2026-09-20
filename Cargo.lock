@@ -2314,6 +2314,7 @@ name = "nostromo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -2334,6 +2335,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "ratatui-image",
+ "regex",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

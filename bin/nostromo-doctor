@@ -29,6 +29,7 @@ execution, filesystem globbing) are verified manually — see the manual
 verification checklist in the PR description / docs/nostromo-doctor.md.
 """
 
+import copy
 import datetime
 import glob
 import json
@@ -1161,6 +1162,164 @@ def check_pane_registry(ctx):
     return CheckResult(name, STATUS_OK, detail, None)
 
 
+# ── check 10: ambient activity hook installed ───────────────────────────────
+#
+# Read-only detection for the activity-path wedge's `nostromo-activity-hook`
+# producer (see docs/activity.md). No auto-remediation here — `--fix` (below)
+# is the only thing that writes `settings.json`, and only when explicitly
+# invoked; this check just reports and recommends, like every other check.
+
+ACTIVITY_HOOK_BIN_NAME = "nostromo-activity-hook"
+ACTIVITY_HOOK_EVENTS = ("PostToolUse", "SubagentStart", "SubagentStop")
+
+
+def _claude_settings_path():
+    return os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+
+
+def _load_json_object(path):
+    """Parse `path` as a JSON object. `None` on any I/O/parse failure or if
+    the top-level value isn't an object — never raises."""
+    try:
+        with open(path) as f:
+            value = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _hook_commands_for_event(settings, event_name):
+    """All `command` strings registered under hooks.<event_name>[*].hooks[*].
+
+    Tolerant of any shape deviation (missing keys, wrong types) — a settings
+    file hand-edited into a weird shape must never crash this, just report
+    fewer commands than are actually there.
+    """
+    commands = []
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    entries = hooks.get(event_name) if isinstance(hooks, dict) else None
+    if not isinstance(entries, list):
+        return commands
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for hook in entry.get("hooks", []) or []:
+            if isinstance(hook, dict) and isinstance(hook.get("command"), str):
+                commands.append(hook["command"])
+    return commands
+
+
+def _event_hook_installed(settings, event_name):
+    """Does `event_name` already have a command naming the hook binary
+    registered under it?"""
+    return any(ACTIVITY_HOOK_BIN_NAME in cmd for cmd in _hook_commands_for_event(settings, event_name))
+
+
+def classify_activity_hook_installation(settings):
+    """Which of ACTIVITY_HOOK_EVENTS are missing a command naming the hook
+    binary. Empty list == fully installed. `settings=None` (missing/
+    unparseable file) is treated as every event missing."""
+    if settings is None:
+        return list(ACTIVITY_HOOK_EVENTS)
+    return [event_name for event_name in ACTIVITY_HOOK_EVENTS if not _event_hook_installed(settings, event_name)]
+
+
+def check_activity_hook(ctx):
+    name = "ambient activity hook"
+    path = _claude_settings_path()
+    settings = _load_json_object(path)
+    missing = classify_activity_hook_installation(settings)
+
+    if not missing:
+        return CheckResult(
+            name, STATUS_OK,
+            "installed for {}".format(", ".join(ACTIVITY_HOOK_EVENTS)),
+            None,
+        )
+
+    if settings is None:
+        detail = "{} not found or unparseable".format(path)
+    else:
+        detail = "missing for: {}".format(", ".join(missing))
+    return CheckResult(
+        name, STATUS_WARN, detail,
+        "ambient activity events won't appear until the hook is installed — run `nostromo doctor --fix`",
+    )
+
+
+# ── --fix: install the ambient activity hook ────────────────────────────────
+#
+# The ONLY code path in this file that writes `settings.json`, and only when
+# `--fix` is passed explicitly on the command line (never as a side effect of
+# a plain `nostromo-doctor` run). Idempotent: re-running never duplicates an
+# entry that already names the hook binary, and never disturbs any existing,
+# unrelated hook entries for the same event.
+
+
+def _activity_hook_binary_path():
+    """Prefer an already-installed binary; fall back to the conventional
+    cargo-install location so `--fix` still writes a usable command even
+    before `cargo install`/`make install` has run once."""
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(home, ".local", "bin", ACTIVITY_HOOK_BIN_NAME),
+        os.path.join(home, ".cargo", "bin", ACTIVITY_HOOK_BIN_NAME),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return candidates[0]
+
+
+def add_activity_hook_entries(settings, hook_command):
+    """Return a NEW settings dict (the input is never mutated) with
+    `hook_command` registered under every `ACTIVITY_HOOK_EVENTS` entry that
+    doesn't already name the hook binary. Existing hook entries for the same
+    event (for any other tool) are preserved untouched."""
+    updated = copy.deepcopy(settings) if isinstance(settings, dict) else {}
+    hooks = updated.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        updated["hooks"] = hooks
+
+    for event_name in ACTIVITY_HOOK_EVENTS:
+        if _event_hook_installed(updated, event_name):
+            continue
+        entries = hooks.get(event_name)
+        if not isinstance(entries, list):
+            entries = []
+        entries.append({
+            "matcher": "*",
+            "hooks": [{"type": "command", "command": hook_command}],
+        })
+        hooks[event_name] = entries
+
+    return updated
+
+
+def fix_activity_hook(path=None):
+    """Install the ambient activity hook into `path` (default: the real
+    `~/.claude/settings.json`). Returns the updated settings dict.
+
+    Writes via a sibling temp file + `os.replace` (atomic on the same
+    filesystem) so a crash mid-write can never leave a truncated/corrupt
+    settings file — the operator's existing hooks are precious.
+    """
+    path = path or _claude_settings_path()
+    settings = _load_json_object(path) or {}
+    updated = add_activity_hook_entries(settings, _activity_hook_binary_path())
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(updated, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+    return updated
+
+
 # ── runner ───────────────────────────────────────────────────────────────────
 
 CHECKS = [
@@ -1173,6 +1332,7 @@ CHECKS = [
     check_daemon_errors,
     check_session_progress,
     check_pane_registry,
+    check_activity_hook,
 ]
 
 
@@ -1194,6 +1354,14 @@ def run_checks(ctx, checks=CHECKS):
 
 
 def main():
+    if "--fix" in sys.argv[1:]:
+        path = _claude_settings_path()
+        fix_activity_hook(path)
+        print("Installed the ambient activity hook in {} for {}.".format(
+            path, ", ".join(ACTIVITY_HOOK_EVENTS)
+        ))
+        return 0
+
     ctx = build_context()
     results = run_checks(ctx)
     print(format_report(results))

@@ -66,6 +66,7 @@ fn fake_pr() -> PrSnapshot {
         head_sha: String::new(),
         diff_too_large: false,
         generated_at: None,
+        ..Default::default()
     }
 }
 

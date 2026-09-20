@@ -68,9 +68,8 @@ class StatusBarView: NSView {
 
         // Subscribe to store
         let store = AppStore.shared
-        Publishers.CombineLatest4(
+        Publishers.CombineLatest3(
             store.$motherStatus,
-            store.$recentActivity,
             store.$rateLimits,
             store.$posture
         )
@@ -103,18 +102,11 @@ class StatusBarView: NSView {
         // Mother segment
         if !store.motherStatus.isEmpty {
             out.append(motherSegment(store.motherStatus))
-            out.append(sep())
         }
 
-        // Activity feed — most recent event
-        if let ev = store.recentActivity.last {
-            let summary = ev.summary.count > 40
-                ? String(ev.summary.prefix(37)) + "…"
-                : ev.summary
-            out.append(muted("⚙ \(ev.agent): \(summary)"))
-        } else {
-            out.append(muted("⚙ —"))
-        }
+        // Activity is no longer shown here — the ActivityTickerView overlay
+        // (see MainLayout) is now the single place that surfaces it, so the
+        // same information isn't rendered in two places at once (D9).
 
         return out
     }

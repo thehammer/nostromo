@@ -374,6 +374,7 @@ async fn perri_get_current_pr_returns_snapshot() {
         head_sha: String::new(),
         diff_too_large: false,
         generated_at: None,
+        ..Default::default()
     };
     let state = seeded_state(None, Some(snap), None, None, None, vec![], None, None, None);
 
@@ -406,6 +407,7 @@ async fn perri_get_state_composite() {
         head_sha: String::new(),
         diff_too_large: false,
         generated_at: None,
+        ..Default::default()
     };
     let state = seeded_state(
         Some(queue),
@@ -419,7 +421,7 @@ async fn perri_get_state_composite() {
         None,
     );
 
-    let result = perri::get_state(&state);
+    let result = perri::get_state(&state, None);
     let queue_arr = result["queue"]
         .as_array()
         .expect("queue should be an array");
@@ -931,5 +933,21 @@ async fn dispatch_unknown_tool_returns_unknown_tool() {
             assert_eq!(name, "completely.unknown.tool");
         }
         tools::ToolResult::Ok(_) => panic!("expected UnknownTool, got Ok"),
+        // W5 — curated-agent-views: a withdrawn tool is a *different* outcome
+        // from an unknown one, and this test is specifically about the latter.
+        tools::ToolResult::Forbidden(_) => panic!("expected UnknownTool, got Forbidden"),
     }
+}
+
+// ── W6: decision modals tool surface ─────────────────────────────────────────
+
+#[test]
+fn nostromo_ask_decision_must_be_listed_in_tool_descriptors() {
+    let descriptors = tools::tool_descriptors();
+    assert!(
+        descriptors
+            .iter()
+            .any(|d| d["name"] == "nostromo.ask_decision"),
+        "nostromo.ask_decision must be listed in tool_descriptors()"
+    );
 }

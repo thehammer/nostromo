@@ -21,6 +21,19 @@ public struct PerriPRRowModel: Identifiable, Equatable {
     public let ciState:     CiState
     /// `true` when the PR has new activity since last review.
     public let newActivity: Bool
+    /// `true` when an agent has pointed at this row — the rendered form of an
+    /// `Anchor.queueRow` / `Emphasis.queueRow` on the pane's `PaneAddress`
+    /// (W5 — curated-agent-views).
+    ///
+    /// **Visual only.** It is not selection: it does not change the daemon's
+    /// selected index, does not change current-PR state, and does not change
+    /// what a subsequent operator action acts on. Marking a row and then
+    /// triggering the queue's approve affordance must not approve the marked
+    /// PR. A show is the agent pointing, not the agent choosing.
+    ///
+    /// Defaulted, so every existing caller keeps compiling and keeps rendering
+    /// exactly what it rendered before.
+    public let marked: Bool
 
     public init(
         id:          String,
@@ -30,7 +43,8 @@ public struct PerriPRRowModel: Identifiable, Equatable {
         author:      String,
         bucket:      String,
         ciState:     CiState,
-        newActivity: Bool
+        newActivity: Bool,
+        marked:      Bool = false
     ) {
         self.id          = id
         self.number      = number
@@ -40,5 +54,6 @@ public struct PerriPRRowModel: Identifiable, Equatable {
         self.bucket      = bucket
         self.ciState     = ciState
         self.newActivity = newActivity
+        self.marked      = marked
     }
 }

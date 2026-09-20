@@ -103,7 +103,7 @@ enum MarkdownRenderer {
         )
         return NSAttributedString(string: text, attributes: [
             .font: font,
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: Theme.fg,
             .paragraphStyle: style,
         ])
     }
@@ -179,8 +179,8 @@ enum MarkdownRenderer {
                 let codeFont = Theme.firaCode(size: 12)
                 let codeAttrs: [NSAttributedString.Key: Any] = [
                     .font: codeFont,
-                    .foregroundColor: NSColor.labelColor,
-                    .backgroundColor: NSColor.tertiaryLabelColor.withAlphaComponent(0.12),
+                    .foregroundColor: Theme.fg,
+                    .backgroundColor: NSColor.white.withAlphaComponent(0.12),
                 ]
                 str.replaceCharacters(in: span.range, with: NSAttributedString(string: inner, attributes: codeAttrs))
 
@@ -192,7 +192,7 @@ enum MarkdownRenderer {
                 let boldFont = NSFontManager.shared.convert(baseFont, toHaveTrait: .boldFontMask)
                 let attrs: [NSAttributedString.Key: Any] = [
                     .font: boldFont,
-                    .foregroundColor: NSColor.labelColor,
+                    .foregroundColor: Theme.fg,
                 ]
                 str.replaceCharacters(in: span.range, with: NSAttributedString(string: inner, attributes: attrs))
 
@@ -206,7 +206,7 @@ enum MarkdownRenderer {
                 let italicFont = NSFontManager.shared.convert(baseFont, toHaveTrait: .italicFontMask)
                 let attrs: [NSAttributedString.Key: Any] = [
                     .font: italicFont,
-                    .foregroundColor: NSColor.labelColor,
+                    .foregroundColor: Theme.fg,
                 ]
                 str.replaceCharacters(in: span.range, with: NSAttributedString(string: inner, attributes: attrs))
             }
@@ -220,14 +220,38 @@ enum MarkdownRenderer {
 /// Appears as a rounded rectangle with `controlBackgroundColor` fill, a 1px
 /// `separatorColor` border, and 12pt inner padding on all sides.
 ///
-/// Self-sizes to content via `layout()` — no fixed height needed.
+/// Self-sizes to content through `intrinsicContentSize`, measured off to the
+/// side by a single shared text-layout stack.
+///
+/// ## Why not `layout()`
+///
+/// This view used to compute its height inside `layout()` and write it into an
+/// active height constraint. Mutating a constraint constant *during* a layout
+/// pass re-dirties the constraint engine and schedules another pass. Every
+/// card's height feeds its turn, which feeds the document view, so each of N
+/// cards re-invalidated a system whose variable count was O(N). That is the
+/// mechanism behind the incident's `sample`: 100 % CPU sustained for a full
+/// five-second window, effectively all of it in `CoreAutoLayout` /
+/// `NSISEngine` (`expression_merge`, `NSISLinExpIncrementConstant`) — a solver
+/// that never reached a fixed point rather than a transient spike.
+///
+/// Frame-positioned turn views also need a height that is knowable *before*
+/// insertion, which a height discovered during layout cannot provide.
+///
+/// So: measurement happens in `measuredHeight(markdown:width:)` against one
+/// shared `NSTextStorage`/`NSLayoutManager`/`NSTextContainer` (one per app, not
+/// one per card), memoised in an `NSCache`. `layout()` now only sizes the text
+/// container; it touches no constraint.
 final class MarkdownCardView: NSView {
 
     private let textView = NSTextView()
-    private var heightConstraint: NSLayoutConstraint!
+    private let markdown: String
     private let padding: CGFloat = 12
+    /// Width the current `intrinsicContentSize` was computed for.
+    private var measuredWidth: CGFloat = -1
 
     init(markdown: String) {
+        self.markdown = markdown
         super.init(frame: .zero)
         setupLayer()
         setupTextView()
@@ -235,8 +259,69 @@ final class MarkdownCardView: NSView {
         textView.textStorage?.setAttributedString(
             MarkdownRenderer.render(markdown, baseFont: baseFont)
         )
-        heightConstraint = heightAnchor.constraint(equalToConstant: 60)
-        heightConstraint.isActive = true
+    }
+
+    // MARK: - Measurement
+
+    /// One measuring stack for the whole app. Main-thread only.
+    private static let measurer: (storage: NSTextStorage,
+                                  layout: NSLayoutManager,
+                                  container: NSTextContainer) = {
+        let storage   = NSTextStorage()
+        let layout    = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: 100,
+                                                     height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        container.widthTracksTextView = false
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        return (storage, layout, container)
+    }()
+
+    private static let heightCache: NSCache<NSString, NSNumber> = {
+        let cache = NSCache<NSString, NSNumber>()
+        cache.countLimit = 2_000
+        return cache
+    }()
+
+    /// Rendered height of `markdown` laid out to `width` points of card width.
+    static func measuredHeight(markdown: String, width: CGFloat) -> CGFloat {
+        let padding: CGFloat = 12
+        let textWidth = max(width - padding * 2, 1)
+        let key = "\(markdown.hashValue)|\(Int(textWidth.rounded()))" as NSString
+        if let cached = heightCache.object(forKey: key) { return CGFloat(cached.doubleValue) }
+
+        let m = measurer
+        m.container.size = NSSize(width: textWidth, height: .greatestFiniteMagnitude)
+        m.storage.setAttributedString(
+            MarkdownRenderer.render(markdown, baseFont: NSFont.systemFont(ofSize: 13)))
+        m.layout.ensureLayout(for: m.container)
+        let height = m.layout.usedRect(for: m.container).height + padding * 2
+
+        heightCache.setObject(NSNumber(value: Double(height)), forKey: key)
+        return height
+    }
+
+    /// The width this card will be laid out at, when the caller already knows
+    /// it. See `WidthPresettable`.
+    ///
+    /// Without it the first `intrinsicContentSize` falls back to 400 pt,
+    /// `layout()` then notices the real `bounds.width` and invalidates, and the
+    /// correct height only arrives on a *second* solve — so every measurement
+    /// of every markdown block paid for two. The width was never actually
+    /// unknown: it is the block width `ChatTurnView` computes arithmetically
+    /// before anything is built.
+    var presetWidth: CGFloat? {
+        didSet {
+            guard presetWidth != oldValue else { return }
+            invalidateIntrinsicContentSize()
+        }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let width = presetWidth ?? (bounds.width > 0 ? bounds.width : 400)
+        return NSSize(width: NSView.noIntrinsicMetric,
+                      height: Self.measuredHeight(markdown: markdown, width: width))
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -280,26 +365,64 @@ final class MarkdownCardView: NSView {
             height: CGFloat.greatestFiniteMagnitude
         )
 
-        if let layoutManager = textView.layoutManager,
-           let container = textView.textContainer {
-            layoutManager.ensureLayout(for: container)
-            let usedRect = layoutManager.usedRect(for: container)
-            let newHeight = usedRect.height + padding * 2
-            if abs(newHeight - heightConstraint.constant) > 0.5 {
-                heightConstraint.constant = newHeight
-            }
+        // Height follows width, and width is only known once laid out. Invalidating
+        // the *intrinsic* size is the sanctioned way to say so — unlike writing a
+        // constraint constant, it converges: the next pass sees an unchanged width
+        // and invalidates nothing.
+        if abs(bounds.width - measuredWidth) > 0.5 {
+            measuredWidth = bounds.width
+            invalidateIntrinsicContentSize()
         }
+    }
+
+    // MARK: - Window attachment
+
+    /// Forces a fresh layout ensure + redraw the moment this view has a real window.
+    ///
+    /// `ReplView.measure()` measures a brand-new turn's whole island — including
+    /// every `MarkdownCardView` nested inside it — while it is completely
+    /// detached: no superview, no window, ever (see that function's own doc
+    /// comment). That's deliberate and necessary for the virtualizer, which
+    /// needs each turn's exact height *before* it can be positioned. But it
+    /// means this card's `textView` computes its glyph layout for the very
+    /// first time while windowless, and a card carrying a large, real turn
+    /// (the kind big enough to actually notice) has been observed rendering
+    /// as an empty box at the right size once finally attached — correct
+    /// geometry, nothing painted. `invalidateLayout` + `ensureLayout` here,
+    /// at the one moment `window` actually becomes non-nil, forces AppKit to
+    /// redo (not just reuse) the glyph generation with a real window/screen
+    /// behind it, regardless of the precise reason the windowless pass left
+    /// it unpainted.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer,
+              let storage = textView.textStorage
+        else { return }
+        layoutManager.invalidateLayout(forCharacterRange: NSRange(location: 0, length: storage.length),
+                                        actualCharacterRange: nil)
+        layoutManager.ensureLayout(for: textContainer)
+        textView.needsDisplay = true
+        needsDisplay = true
     }
 
     // MARK: - Appearance
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateLayerColors()
-    }
-
+    /// Fixed dark-theme colors, not `NSColor.controlBackgroundColor`/`.separatorColor`.
+    ///
+    /// This card used to use those system-adaptive colors, which resolve against
+    /// the Mac's actual System Settings ▸ Appearance — light or dark — rather
+    /// than Nostromo's own always-dark theme (every sibling view in this file's
+    /// pane, `ToolResultView`, `ToolCallChipView`, etc., hardcodes a literal
+    /// `Theme`/`NSColor(white:...)` value for exactly this reason: the app never
+    /// sets `NSApp.appearance`, so nothing forces these otherwise). On a Mac set
+    /// to Light Mode, `.controlBackgroundColor` resolves to near-white with
+    /// near-black text — a card that looks blank at a glance sitting incongruously
+    /// in Nostromo's otherwise-dark UI. There is no longer an appearance-change
+    /// override here because these colors no longer depend on it.
     private func updateLayerColors() {
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        layer?.borderColor     = NSColor.separatorColor.cgColor
+        layer?.backgroundColor = Theme.bgBar.cgColor
+        layer?.borderColor     = Theme.borderInactive.withAlphaComponent(0.6).cgColor
     }
 }

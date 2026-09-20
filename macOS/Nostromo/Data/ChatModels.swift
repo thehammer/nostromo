@@ -3,15 +3,162 @@ import Foundation
 // MARK: - Turn (one user→assistant exchange)
 
 /// One complete user→assistant exchange. Blocks accumulate live as Claude streams.
+///
+/// Two distinct notions of identity live on this type, and conflating them is
+/// what produced the reconnect duplication bug (see `TurnReconciler`):
+///
+///   - `id` is **view identity**. Assigned once, when the client first sees a
+///     turn, and carried forward across every reattach. `ReplView` keys its
+///     materialized views by it.
+///   - `(epoch, daemonId)` is the turn's **current wire address**, rewritten on
+///     every reattach. The daemon re-numbers turns from `t0` each time its
+///     `SessionTranscript` is rebuilt, so a bare `daemonId` is ambiguous across
+///     daemon restarts.
 struct ChatTurn: Identifiable {
-    let id         = UUID()
-    let userInput:   String
-    let timestamp:   Date
+    /// Reassigned only by `carryingIdentity(of:)`, on the reconcile path.
+    private(set) var id: UUID
+    /// The user's message. Mutable because `TurnPayloadStore` swaps the full
+    /// text for a bounded prefix when the turn goes cold.
+    var userInput:   String
+    var timestamp:   Date
+    /// The daemon's raw ISO-8601 timestamp string, exactly as it appeared in the
+    /// record. `timestamp` is lossy for identity purposes — a turn with no
+    /// timestamp in the stream decodes to `Date()`, which differs on every
+    /// reattach — so cross-epoch matching uses this instead.
+    var timestampRaw: String?  = nil
     var blocks:      [TurnBlock] = []
     var isComplete:  Bool        = false
-    /// The daemon's stable turn id (monotonic per transcript), used to apply
-    /// incremental `TurnDelta`s to the right turn. Nil for locally-built turns.
+    /// The daemon's turn id **within the current epoch**, used to apply
+    /// incremental `TurnDelta`s to the right turn. Nil for locally-built turns
+    /// (optimistic echoes) until the matching `turnStarted` delta adopts them.
     var daemonId:    String?     = nil
+    /// Which daemon-side transcript lifetime `daemonId` belongs to. Incremented
+    /// by `ChatSession` on every attach snapshot. Delta lookups filter on the
+    /// current epoch so a re-issued `t30` can never land on an ancient turn.
+    var epoch:       Int         = 0
+    /// Non-nil for the synthetic turns that keep the transcript honest about
+    /// history it cannot show. These carry no daemon address and never match
+    /// during reconciliation.
+    var marker:      Marker?     = nil
+    /// Original content lengths, retained when `TurnPayloadStore` truncated this
+    /// turn's text into a skeleton. Nil while the turn holds its full payload.
+    ///
+    /// Without this a cold turn would estimate its height from the 512-character
+    /// prefix that survived truncation, and a 40 KB turn would claim to be three
+    /// lines tall — collapsing the document and destroying the scroll position.
+    var truncatedLengths: TruncatedLengths? = nil
+
+    /// Character counts for a turn whose text has been compressed away.
+    struct TruncatedLengths {
+        let userInput: Int
+        /// Parallel to `ChatTurn.blocks`.
+        let blocks: [Int]
+    }
+
+    /// A synthetic, operator-visible statement about missing history.
+    enum Marker: Equatable {
+        /// The client was away for longer than the daemon's attach window, so
+        /// turns between the retained history and the snapshot are missing.
+        case gap
+        /// Retention hit `TurnPayloadStore.maxRetainedTurns` and the oldest
+        /// turns were dropped. Pinned at the top of the transcript.
+        case historyUnavailable
+    }
+
+    var isGapMarker: Bool { marker == .gap }
+
+    init(id: UUID = UUID(),
+         userInput: String,
+         timestamp: Date,
+         timestampRaw: String? = nil,
+         blocks: [TurnBlock] = [],
+         isComplete: Bool = false,
+         daemonId: String? = nil,
+         epoch: Int = 0,
+         marker: Marker? = nil) {
+        self.id           = id
+        self.userInput    = userInput
+        self.timestamp    = timestamp
+        self.timestampRaw = timestampRaw
+        self.blocks       = blocks
+        self.isComplete   = isComplete
+        self.daemonId     = daemonId
+        self.epoch        = epoch
+        self.marker       = marker
+    }
+
+    /// A marker turn, rendered as a plain statement rather than a chat exchange.
+    static func marker(_ kind: Marker, timestamp: Date = Date()) -> ChatTurn {
+        // The synthetic timestamp is what keeps two markers apart. Sharing one
+        // `contentKey` would collide them in the virtualizer's height cache and
+        // in its index-by-key lookup, so a scroll anchor resting on a gap marker
+        // could resolve to the unavailable-history marker after a splice and
+        // jump the operator's position to the top of the transcript.
+        ChatTurn(userInput: "", timestamp: timestamp,
+                 timestampRaw: "marker-\(kind)-\(timestamp.timeIntervalSince1970)",
+                 isComplete: true, marker: kind)
+    }
+
+    /// This turn, wearing `other`'s view identity.
+    ///
+    /// The reconciler's whole job in one method: an attach snapshot carries the
+    /// current wire address for a turn we already have, and the turn's *view*
+    /// identity must survive that. `id` is otherwise immutable — reassigning it
+    /// anywhere else would orphan a materialized view.
+    func carryingIdentity(of other: ChatTurn) -> ChatTurn {
+        var out = self
+        out.id = other.id
+        return out
+    }
+}
+
+// MARK: - Cross-epoch identity
+
+extension ChatTurn {
+
+    /// Identity of the underlying record entry, independent of which daemon
+    /// epoch delivered it.
+    ///
+    /// The daemon's own turn ids restart at `t0` on every restart
+    /// (`stream_json.rs` `alloc_id`), so they cannot anchor identity. What *is*
+    /// stable is the pair (record timestamp, user text): both come from the same
+    /// JSONL line whether the daemon parsed it live or re-read it from disk.
+    var identityKey: String {
+        "\(timestampRaw ?? "-")|\(userInput.prefix(Self.identityPrefix))"
+    }
+
+    /// How much of `userInput` participates in identity.
+    ///
+    /// Must be **≤ `TurnPayloadStore.prefixLength`**, or a turn that has been
+    /// compacted would compute a different `identityKey` than its uncompacted
+    /// self: the reconciler would then fail to match it against the snapshot and
+    /// insert a gap marker claiming history is missing when it is right there.
+    static let identityPrefix = 240
+
+    /// `identityKey` plus the turn's durable block shape.
+    ///
+    /// Used as the height-cache key in `TurnListVirtualizer` (rendered height is
+    /// a function of block shape) — **not** as the reconciliation match key. See
+    /// `TurnReconciler.matches` for why block shape can legitimately differ
+    /// between two views of the same turn.
+    var contentKey: String {
+        let durable = blocks.filter { $0.isDurable }
+        return "\(identityKey)|\(durable.count)|\(durable.map { $0.kindCode }.joined())"
+    }
+
+    /// Character count of the user's message before any truncation.
+    var userInputLength: Int {
+        truncatedLengths?.userInput ?? userInput.count
+    }
+
+    /// Character count of the block at `index` before any truncation.
+    func contentLength(ofBlockAt index: Int) -> Int {
+        if let lengths = truncatedLengths, index < lengths.blocks.count {
+            return lengths.blocks[index]
+        }
+        guard index < blocks.count else { return 0 }
+        return blocks[index].contentCharCount
+    }
 }
 
 // MARK: - Block types
@@ -23,6 +170,85 @@ enum TurnBlock {
     case resultSummary(ResultSummaryData)
     case errorMessage(String)
     case askQuestion(AskQuestionData)
+}
+
+extension TurnBlock {
+
+    /// Single-character code for this block's kind, used to build
+    /// `ChatTurn.contentKey` and to key height estimation.
+    var kindCode: String {
+        switch self {
+        case .text:          return "t"
+        case .toolCall:      return "c"
+        case .toolResult:    return "r"
+        case .resultSummary: return "s"
+        case .errorMessage:  return "e"
+        case .askQuestion:   return "q"
+        }
+    }
+
+    /// False for blocks the daemon synthesises from the *live* stream but cannot
+    /// reproduce when it re-reads the record from disk.
+    ///
+    /// `resultSummary` comes from a `result` line, and `errorMessage` from an
+    /// unexpected child exit; neither appears in the stored session JSONL
+    /// (`stream_json.rs` notes "stored JSONL has no `result` lines"). So the same
+    /// turn has one block shape when watched live and another after a daemon
+    /// restart re-parses it. Excluding them keeps `contentKey` stable across
+    /// that boundary.
+    var isDurable: Bool {
+        switch self {
+        case .resultSummary, .errorMessage: return false
+        default:                            return true
+        }
+    }
+
+    /// Approximate character count of the text this block renders. Drives height
+    /// estimation.
+    ///
+    /// `utf8.count` rather than `count`: `String.count` walks the string to
+    /// count graphemes, so this was O(bytes) and it runs on the streaming turn
+    /// once per arriving block — making the cost of a token proportional to how
+    /// much that turn had already emitted, i.e. quadratic within a single long
+    /// turn. `utf8.count` is O(1) for a native string. It over-counts non-ASCII,
+    /// which rounds height estimates up; the measured height replaces the
+    /// estimate the moment the turn materializes anyway.
+    var contentCharCount: Int {
+        switch self {
+        case .text(let s):          return s.utf8.count
+        case .toolCall(let d):      return d.inputSummary.utf8.count
+        case .toolResult(let d):    return d.content.utf8.count
+        case .resultSummary:        return 0
+        case .errorMessage(let m):  return m.utf8.count
+        case .askQuestion(let d):   return d.question.utf8.count
+        }
+    }
+
+    /// Whether `TurnHeightEstimator` needs this block's content length at all.
+    /// A collapsed tool result costs one disclosure row however large it is, so
+    /// measuring a 256 KB payload to render a fixed-height row is pure waste.
+    var heightDependsOnContentLength: Bool {
+        switch self {
+        case .toolCall, .resultSummary:   return false
+        case .toolResult(let d):          return d.isError
+        default:                          return true
+        }
+    }
+
+    /// Rough uncompressed size of this block's payload, in bytes. Used by
+    /// `TranscriptDiagnostics`.
+    var payloadByteCount: Int {
+        switch self {
+        case .text(let s):          return s.utf8.count
+        case .toolCall(let d):      return d.inputSummary.utf8.count + d.inputFull.utf8.count
+        case .toolResult(let d):    return d.content.utf8.count
+        case .resultSummary:        return 0
+        case .errorMessage(let m):  return m.utf8.count
+        case .askQuestion(let d):
+            return d.question.utf8.count + d.header.utf8.count
+                + d.options.reduce(0) { $0 + $1.label.utf8.count + $1.description.utf8.count }
+        }
+    }
 }
 
 struct ToolCallData {

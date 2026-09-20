@@ -126,6 +126,27 @@ impl SuppressStore {
         );
     }
 
+    /// Drop the suppression entry for `(repo, number)`.  Returns `true` if an
+    /// entry was actually removed (the caller should then `save()`).
+    ///
+    /// Used by the targeted relay path when a probe observes a HEAD SHA that
+    /// differs from the one an entry was recorded against.  `is_suppressed()`
+    /// already declines to hide the PR in that case, so clearing changes nothing
+    /// *now* — it matters when the author force-pushes **back** to the approved
+    /// SHA, which would otherwise silently re-suppress a PR whose approval no
+    /// longer stands.
+    pub fn clear(&mut self, repo: &str, number: u64) -> bool {
+        self.entries.remove(&(repo.to_owned(), number)).is_some()
+    }
+
+    /// The HEAD SHA a suppression entry for `(repo, number)` was recorded
+    /// against, regardless of TTL.  `None` when there is no entry.
+    pub fn recorded_sha(&self, repo: &str, number: u64) -> Option<&str> {
+        self.entries
+            .get(&(repo.to_owned(), number))
+            .map(|e| e.head_sha.as_str())
+    }
+
     /// Returns `true` iff the PR should be suppressed from the queue:
     /// - An entry exists for `(repo, number)`.
     /// - Its `head_sha` **exactly matches** `head_sha` (empty string never matches).

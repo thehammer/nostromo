@@ -19,9 +19,11 @@ use crate::{
         perri_queue::PrQueueSnapshot,
         rate_limits::{BudgetPosture, RateLimits},
         teri_todos::TeriTodosSnapshot,
+        tickets::{TicketCache, TicketRegistry},
     },
     event::AppEvent,
-    ipc::{pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
+    ipc::{decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
+    mcp::tool_stats::ToolStats,
     mother::{MotherJob, MotherStatus},
 };
 
@@ -91,6 +93,21 @@ impl Default for PerriDaemonState {
     }
 }
 
+/// The `ticket` view's provider registry and its short-TTL fetch cache (W4 —
+/// curated-agent-views, D5). Held on `DaemonMcpBackend` next to
+/// `PerriDaemonState`, for the same reason: this is per-daemon state a
+/// tool handler needs regardless of which focus/pane called it.
+///
+/// `Default` builds an *empty* registry (no providers registered) — correct
+/// for every test that doesn't itself exercise a ticket source. Production
+/// startup (`src/bin/nostromd.rs`) builds its own with the real `jira`
+/// provider registered instead.
+#[derive(Clone, Default)]
+pub struct TicketRegistryState {
+    pub registry: Arc<TicketRegistry>,
+    pub cache: Arc<TicketCache>,
+}
+
 /// Backend for an MCP server hosted **inside `nostromd`** (rather than the TUI).
 ///
 /// The TUI routes pane mutations through `event_tx` → `AppEvent::McpCommand` →
@@ -111,6 +128,13 @@ pub struct DaemonMcpBackend {
     pub broadcast_tx: broadcast::Sender<ServerMsg>,
     /// Perri-specific daemon state (current-PR file writes, selected index).
     pub perri: PerriDaemonState,
+    /// Shared decision-modal registry (`nostromo.ask_decision`) — also handed
+    /// to `Server::bind` so the IPC layer can route `ClientMsg::DecisionAnswer`
+    /// and track `Topic::Decision` subscribers into the same registry.
+    pub decisions: Arc<Mutex<DecisionRegistry>>,
+    /// The `ticket` view's provider registry + TTL cache (W4 —
+    /// curated-agent-views).
+    pub tickets: TicketRegistryState,
 }
 
 // ── shared state ───────────────────────────────────────────────────────────────
@@ -167,6 +191,15 @@ pub struct McpSharedState {
 
     /// Mirror of the most recent `AppEvent::PostureChanged`.
     pub budget_posture_rx: watch::Receiver<Option<BudgetPosture>>,
+
+    /// On-demand MCP tool-dispatch latency store (see [`crate::mcp::tool_stats`]).
+    ///
+    /// Shared across every connection because `McpSharedState` is
+    /// `Arc`-cheap-clone. Created once per MCP server (inside `new`, not as a
+    /// constructor parameter — `new` already has ten arguments and is
+    /// `#[allow(clippy::too_many_arguments)]`), so for the `nostromd`-hosted
+    /// server its uptime is effectively daemon uptime.
+    pub tool_stats: Arc<ToolStats>,
 }
 
 impl McpSharedState {
@@ -198,6 +231,7 @@ impl McpSharedState {
             mother_status_rx,
             rate_limits_rx,
             budget_posture_rx,
+            tool_stats: Arc::new(ToolStats::new()),
         }
     }
 

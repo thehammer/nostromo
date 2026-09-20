@@ -7,8 +7,10 @@
 //!           `nostromo.clear_status_segment`.
 
 pub mod apply_layout;
+pub mod ask_decision;
 pub mod create_focus;
 pub mod create_pane;
+pub mod daemon_diagnostics;
 pub mod fred;
 pub mod get_self;
 pub mod get_view_state;
@@ -20,7 +22,9 @@ pub mod notify;
 pub mod perri;
 pub mod perri_mutators;
 pub mod refresh_pane;
+pub mod render_state;
 pub mod set_pane;
+pub mod show;
 pub mod status_segment;
 pub mod switch_view;
 pub mod teri;
@@ -257,12 +261,13 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "nostromo.refresh_pane_content",
-            "description": "Refresh one pane's content from a registered server-side data source — the daemon fetches and shapes the data itself, so you never hand-build the payload. Use this to pull a known source (e.g. perri.list_pr_queue) into your own pane; use set_pane_content instead to push content you authored yourself (freeform text, an error, an explicit loading state). Content only: emits one PaneContent broadcast, never re-declares geometry, so an operator's dragged split ratios survive. Shows a transient Loading state then the fetched content in one call. Errors: unknown_source, fetch_failed, unidentified_caller, invalid_args, not_supported.",
+            "description": "Refresh one pane's content from a registered server-side data source — the daemon fetches and shapes the data itself, so you never hand-build the payload. Use this to pull a known source (e.g. perri.list_pr_queue) into your own pane; use set_pane_content instead to push content you authored yourself (freeform text, an error, an explicit loading state). Content only: emits one PaneContent broadcast, never re-declares geometry, so an operator's dragged split ratios survive. Shows a transient Loading state then the fetched content in one call. A refusal (a line past EOF, a path that does not exist, an unresolvable revision) leaves a pane that already has content untouched. Errors: unknown_source, fetch_failed, invalid_params, unknown_path, path_escapes_root, not_utf8, anchor_beyond_eof, invalid_emphasis_range, unresolvable_revision, unidentified_caller, invalid_args, not_supported.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "pane_id":     { "type": "string", "description": "Pane to refresh" },
-                    "source":      { "type": "string", "description": "Registered fetcher name from the same closed registry apply_layout uses (e.g. 'perri.list_pr_queue', 'perri.get_current_pr')" },
+                    "source":      { "type": "string", "description": "Registered fetcher name from the same closed registry apply_layout uses: 'perri.list_pr_queue', 'perri.get_current_pr', 'perri.get_pr_diff', 'nostromo.get_file'" },
+                    "params":      { "type": "object", "description": "Source-specific arguments, persisted with the binding so a daemon restart repaints the same thing. nostromo.get_file: { path (required, repo-relative), revision? ('working', a git rev, or omit for the PR-under-review head SHA), anchor_line?, emphasis?: [{start,end}], reason? }. perri.get_pr_diff: { anchor?: {kind:'line', path?, line}, emphasis?: [{kind:'line_range', path?, start, end}], reason? }. The other two sources take none." },
                     "placeholder": { "type": "string", "description": "Shown as text when the source yields empty/null data (e.g. no PR currently loaded)" },
                     "view_id":     { "type": "string", "description": "Focus/view id owning the pane; omit to target the caller's own focus" }
                 },
@@ -297,7 +302,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         // ── Phase 3: Perri mutations ───────────────────────────────────────
         json!({
             "name": "perri.load_pr",
-            "description": "Load a pull request into Perri's diff pane. Writes current-pr.json and triggers the native watcher. When hosted in nostromd (daemon): pushes the diff pane's content itself (your `highlights`, if given, become the pane's final content; otherwise a Loading state followed by a server-rendered PR summary once the refetch catches up — bounded by a settle timeout), and moves the agent-scoped selected index to this PR if it's in the current queue. May return `{ \"ok\": true, \"pending\": true }` when the refetch is still in flight after the settle timeout — that is success-with-fetch-pending, not a failure to retry. When hosted in the standalone TUI: writes the file and returns once `PerriView` has applied it, with no pane-push/pending behavior. Errors: invalid_args, not_supported (daemon only, when Perri's state dir isn't configured), io_error, event_loop_closed, event_loop_timeout (TUI only).",
+            "description": "Load a pull request into Perri's diff pane. Writes current-pr.json and triggers the native watcher. When hosted in nostromd (daemon): pushes the diff pane's content itself (your `highlights`, if given, become the pane's final content; otherwise a Loading state followed by a server-rendered PR summary once the refetch catches up — bounded by a settle timeout), and moves the agent-scoped selected index to this PR if it's in the current queue. If the refetch doesn't settle, the result carries BOTH `pending` and `retryable` plus a `detail` string — branch on `retryable`, not `pending`: `{ \"pending\": true, \"retryable\": true }` means the fetch is still in flight and asking again later is reasonable; `{ \"pending\": false, \"retryable\": false }` means the PR source task itself is gone and retrying can never help. Neither field is present when the refetch settled normally. `ok` is `true` in every case — the pin was written and the panes were painted regardless. When hosted in the standalone TUI: writes the file and returns once `PerriView` has applied it, with no pane-push/pending behavior. Errors: invalid_args, not_supported (daemon only, when Perri's state dir isn't configured), io_error, event_loop_closed, event_loop_timeout (TUI only).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -440,7 +445,72 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "required": ["view_id", "segment_id"]
             }
         }),
+        // ── decision modals (W6) ────────────────────────────────────────────
+        json!({
+            "name": "nostromo.ask_decision",
+            "description": "Pose a decision as a modal over the window and block until the operator answers, dismisses it, or the call times out. Not a content channel: there is no free-form content field — only a bounded prompt, an optional bounded detail string, and 2+ labelled choices. Returns { ok: true, choice_id } when the operator picks an option, or { ok: true, outcome: \"dismissed\" } when the modal is dismissed without choosing (a distinct outcome, not a default choice). Errors: invalid_args (fewer than two choices, duplicate choice ids, an empty/over-long prompt, detail, or label), no_operator (no client is subscribed to receive it — returned immediately rather than blocking), timeout (nobody answered within timeout_secs), cancelled (the asking session died while this call was outstanding), not_supported (TUI-hosted only — there is no window to attach a sheet to).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "The question, shown at the top of the modal (max 2000 chars)" },
+                    "detail": { "type": "string", "description": "Optional short supporting text shown below the prompt (max 2000 chars)" },
+                    "choices": {
+                        "type": "array",
+                        "description": "2 or more labelled choices",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id":     { "type": "string", "description": "Stable id returned as choice_id when this option is picked" },
+                                "label":  { "type": "string", "description": "Button label (max 200 chars)" },
+                                "detail": { "type": "string", "description": "Optional short supporting text for this option (max 2000 chars)" }
+                            },
+                            "required": ["id", "label"]
+                        }
+                    },
+                    "context_pane_id": { "type": "string", "description": "Optional reference to a pane already showing relevant context — never content itself" },
+                    "view_id": { "type": "string", "description": "Focus/view id to attach the modal to; omit to target the caller's own focus" },
+                    "timeout_secs": { "type": "integer", "description": "Seconds to wait for an answer before returning timeout (default 300, capped at 3600)" }
+                },
+                "required": ["prompt", "choices"]
+            }
+        }),
+        // ── the curated view surface (W5 — curated-agent-views) ──────────────
+        show::descriptor(),
+        // ── render-state visibility (W1) ──────────────────────────────────────
+        json!({
+            "name": "nostromo.get_render_state",
+            "description": "Reports, per attached window, whether the set of panes a focus's client actually built matches the set the daemon expects (its PaneRegistry tree) — the daemon only ever knows the structure it was told to build, so this is how to check a show/apply_layout call reached the client without asking for a screenshot. IMPORTANT — this reports hierarchy MEMBERSHIP, not visibility: agrees: true means every expected pane exists in the view hierarchy, and says nothing about whether any of them has a usable size, is on screen, or was painted. A detail region 34pt wide, or one hidden behind another view, reports agrees: true with no missing and no extra. If the operator says they cannot see something this tool calls fine, believe the operator and ask for a screenshot or Debug > Copy pane diagnostics; do not quote this tool back at them. A tag no window has ever reported for returns windows: [] and agrees_everywhere: null — never true; a missing report must never be mistaken for agreement. Also available as the render_state section of nostromo.get_view_state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view_id": { "type": "string", "description": "Focus/view id to inspect; omit to target the caller's own focus" }
+                },
+                "required": []
+            }
+        }),
+        // ── diagnostics ──────────────────────────────────────────────────────
+        json!({
+            "name": "nostromo.get_daemon_diagnostics",
+            "description": "Returns an on-demand latency snapshot for the daemon's MCP tool surface: per-tool call counts and p50/p95/max wall-clock durations in ms, plus process uptime and total call count. In-memory and bounded (last 256 samples per tool); resets on daemon restart. p50/p95 are over the retained window; calls and max are all-time.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        }),
     ]
+}
+
+/// The tool surface a caller may see, after the operator's policy has been
+/// applied (W5 — curated-agent-views, B8/D7).
+///
+/// [`tool_descriptors`] stays unfiltered and is what tests and docs enumerate;
+/// this is what `tools/list` answers with. With no policy armed — the shipped
+/// default — the two are the same list, byte for byte, which is what keeps
+/// every agent's surface unchanged until an operator says otherwise.
+pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) -> Vec<Value> {
+    let policy = crate::mcp::tool_policy::load();
+    if policy.is_empty() {
+        return tool_descriptors();
+    }
+    let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id).await;
+    crate::mcp::tool_policy::filter_descriptors(tool_descriptors(), policy.denied_for(agent.as_deref()))
 }
 
 // ── tool dispatch ─────────────────────────────────────────────────────────────
@@ -451,15 +521,62 @@ pub enum ToolResult {
     Ok(Vec<Value>),
     /// Tool name not recognised.
     UnknownTool(String),
+    /// The tool exists, but the operator's policy withdraws it from this
+    /// caller (W5 — curated-agent-views, B8/D7).
+    ///
+    /// Deliberately distinct from [`ToolResult::UnknownTool`]: an agent that
+    /// gets "no such tool" for a tool that plainly exists will conclude the
+    /// daemon is broken and retry, where "not available to you" is a fact it
+    /// can act on. The PRD asks for exactly this distinction.
+    Forbidden(String),
 }
 
 /// Dispatch a `tools/call` request.
+///
+/// This is the single timing point for the whole tool surface: it wraps
+/// [`dispatch_inner`] and, on success, records the elapsed wall-clock time in
+/// `state.tool_stats` keyed by `name`. Unknown tool names are deliberately
+/// excluded — recording them would let a misbehaving caller grow the stats
+/// map without bound, since `name` is caller-supplied and unvalidated.
 pub async fn dispatch(
     name: &str,
     arguments: Option<&Value>,
     state: &McpSharedState,
     pty_id: Option<&str>,
 ) -> ToolResult {
+    let started = std::time::Instant::now();
+    let result = dispatch_inner(name, arguments, state, pty_id).await;
+    if matches!(result, ToolResult::Ok(_)) {
+        state.tool_stats.record(name, started.elapsed());
+    }
+    result
+}
+
+/// Perform the actual `tools/call` dispatch.
+async fn dispatch_inner(
+    name: &str,
+    arguments: Option<&Value>,
+    state: &McpSharedState,
+    pty_id: Option<&str>,
+) -> ToolResult {
+    // ── per-caller withdrawal (W5 — curated-agent-views, B8/D7) ─────────────
+    //
+    // Checked here rather than only in `tools/list`, because filtering the
+    // list alone is advisory: an agent can call a name it never saw, and a
+    // drifting prompt will. This is the half of the criterion that actually
+    // holds. Skipped entirely when nothing is denied — the shipped default —
+    // so an unarmed deployment pays one failed file read per call and no
+    // agent-name resolution at all.
+    {
+        let policy = crate::mcp::tool_policy::load();
+        if !policy.is_empty() {
+            let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id).await;
+            if policy.denies(agent.as_deref(), name) {
+                return ToolResult::Forbidden(name.to_string());
+            }
+        }
+    }
+
     let content = match name {
         // ── Phase 1 ────────────────────────────────────────────────────────
         "nostromo.get_self" => get_self::handle(state, pty_id).await,
@@ -485,7 +602,7 @@ pub async fn dispatch(
         // ── Phase 2: Perri ────────────────────────────────────────────────
         "perri.list_pr_queue" => perri::list_pr_queue(state),
         "perri.get_current_pr" => perri::get_current_pr(state),
-        "perri.get_state" => perri::get_state(state),
+        "perri.get_state" => perri::get_state(state, pty_id),
 
         // ── Phase 2: Fred ─────────────────────────────────────────────────
         "fred.list_unread_emails" => fred::list_unread_emails(state),
@@ -610,6 +727,27 @@ pub async fn dispatch(
             status_segment::clear(state, &args).await
         }
 
+        // ── decision modals (W6) ───────────────────────────────────────────
+        "nostromo.ask_decision" => {
+            let args = arguments.cloned().unwrap_or_default();
+            ask_decision::handle(state, &args, pty_id).await
+        }
+
+        // ── the curated view surface (W5 — curated-agent-views) ──────────────
+        "nostromo.show" => {
+            let args = arguments.cloned().unwrap_or_default();
+            show::show(state, &args, pty_id).await
+        }
+
+        // ── render-state visibility (W1) ──────────────────────────────────────
+        "nostromo.get_render_state" => {
+            let args = arguments.cloned().unwrap_or_default();
+            render_state::handle(state, &args, pty_id).await
+        }
+
+        // ── diagnostics ──────────────────────────────────────────────────────
+        "nostromo.get_daemon_diagnostics" => daemon_diagnostics::handle(state),
+
         other => return ToolResult::UnknownTool(other.to_string()),
     };
 
@@ -625,4 +763,33 @@ fn parse_args<T: serde::de::DeserializeOwned>(arguments: Option<&Value>) -> Resu
         .unwrap_or(Value::Object(Default::default()));
     serde_json::from_value(v)
         .map_err(|e| json!({ "error": "invalid_args", "detail": e.to_string() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── activity-path wedge: no agent-callable control over the stream ───────
+
+    /// The PRD names this the constraint most likely to get quietly violated
+    /// by a well-meaning convenience: no MCP tool may write to, filter, tag,
+    /// or suppress an ambient activity stream. Asserted here by enumerating
+    /// the actual registered tool surface, not by inspection — this fails
+    /// the moment anyone adds a `nostromo.*activity*` tool, wherever in this
+    /// module it's registered.
+    #[test]
+    fn no_registered_tool_name_mentions_activity() {
+        let names: Vec<String> = tool_descriptors()
+            .iter()
+            .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        assert!(!names.is_empty(), "sanity: the tool registry must not be empty");
+        for name in &names {
+            assert!(
+                !name.to_lowercase().contains("activity"),
+                "found an activity-related MCP tool ({name}) — no agent-callable \
+                 control over the ambient activity stream is permitted"
+            );
+        }
+    }
 }

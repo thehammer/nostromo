@@ -1,0 +1,50 @@
+# Placement rules for the curated view surface (`nostromo.show`).
+#
+# W5 — curated-agent-views. This is the compiled-in default; an operator
+# override at `~/.nostromo/views.yaml` shadows it wholesale and is re-read on
+# every call, so changing a rule needs no daemon rebuild and no restart. The
+# same precedence and no-caching discipline `~/.nostromo/layouts/<name>.yaml`
+# already follows for named layouts.
+#
+# The PRD's stated signal that this whole approach needs revisiting is
+# per-view-type special cases accumulating *in the engine*. Everything below is
+# the engine's entire input: if a rule can't be said here, it doesn't get said
+# in Rust either.
+
+regions:
+  # The PR review queue's home. Never tabbed — R1.
+  queue:
+    tabbed: false
+    # The pane id this region occupies. Used both to find the region when a
+    # tree predates region tagging and to name the pane when the region has to
+    # be created.
+    pane: queue
+    # Ordered candidates for bringing this region into existence, first whose
+    # `relative_to` pane is a live leaf wins. `show` must work from a bare
+    # focus without the caller reaching for `apply_layout`, which is exactly
+    # what these describe.
+    create:
+      - { relative_to: repl, position: split_above, ratios: [0.6, 0.4] }
+
+  # Everything the agent points at during a review. Tabbed — R1/R3/R4.
+  detail:
+    tabbed: true
+    tab_cap: 6
+    evict: least_recently_focused_unpinned
+    # New tab pane ids are `<pane_prefix>.<n>`, `n` the smallest integer not
+    # already taken in the focus. A function of state alone, so the same show
+    # sequence from the same start always produces the same ids.
+    pane_prefix: detail
+    create:
+      - { relative_to: queue, position: split_right, ratios: [0.5, 0.5] }
+      - { relative_to: repl, position: split_above, ratios: [0.6, 0.4] }
+
+# `order` is R3: a new tab lands at the position its type dictates, then by
+# identity within a type, so tab position is a function of content and never of
+# arrival order.
+views:
+  review_queue: { region: queue, order: 0 }
+  pr_conversation: { region: detail, order: 1 }
+  pr_diff: { region: detail, order: 2 }
+  ticket: { region: detail, order: 3 }
+  file: { region: detail, order: 4 }

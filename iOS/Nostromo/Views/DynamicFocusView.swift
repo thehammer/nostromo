@@ -1,16 +1,63 @@
 // Nostromo iOS — DynamicFocusView.swift
 //
-// Renders a focus's agent-authored pane tree on iOS.
+// Renders a focus's agent-authored pane tree on iOS (W5 — ios-curated-view-
+// parity rewrite).
 //
-// On iOS, real split views are impractical on a small screen.  This view
-// renders panes "by meaning not geometry": the `repl` pane is always the
-// primary tab (backed by TranscriptView), and additional agent-created panes
-// become extra tabs whose content is rendered from the `PaneContentWire`
-// pushed by `set_pane_content`.
+// On iOS, real split views are impractical on a small screen, so the tree is
+// flattened "by meaning not geometry" into a single horizontal tab strip
+// (`TabStripView`) via `TabPlan.build` — the `repl` pane is always first
+// (backed by `TranscriptView`), and every other agent-created pane follows
+// in tree order. When there is only a single `repl` pane (the initial
+// state), the strip is suppressed entirely, exactly as before.
 //
-// When there is only a single `repl` pane (the initial state), the TabView
-// chrome is suppressed entirely so the layout is identical to the previous
-// direct-to-TranscriptView navigation.
+// This replaces the old per-pane `TabView`/`.tabItem` structure, which (a)
+// nested a second bottom tab bar inside the app's own root five-tab bar, (b)
+// labelled tabs via `paneId.capitalized` — the one place a raw pane id was
+// user-visible anywhere in the app, and (c) never read the daemon's `active`
+// index or `focused_pane` hint, so a deliberate `nostromo.show` never
+// actually brought its tab to front on iOS. All three are fixed here:
+// labels come from `TabPlan` (never a pane id), and frontmost-ness comes
+// from `DaemonStore.focusRegionStates` (`FocusRegionState`), which honours
+// `active`/`focused_pane` on a structural layout change while never fighting
+// the operator's own tab choice on a content-only republish (D4).
+//
+// Every pane's content view is instantiated once via `ForEach(id: \.paneId)`
+// and kept resident (visibility toggled via `.opacity`/`.allowsHitTesting`),
+// not conditionally rebuilt on tab switch — the same "resident views, pure
+// visibility toggle" technique macOS's `TabRegionView` uses so scroll
+// position and view-local state survive a tab switch with no bookkeeping.
+// `FocusRegionState` (in `DaemonStore`, not view `@State`) is what survives
+// beyond that — a tree rebuild, backgrounding, or (W6) a width-class change.
+//
+// W6 (ios-curated-view-parity) adds the SECOND presentation. This file is
+// the ONE place in the whole app that reads `@Environment(\.horizontalSizeClass)`
+// — mapped once through `WidthClass`, passed down as a value, never re-read
+// — and the one place that branches on it. Nothing anywhere branches on the
+// device: no `UIDevice`, no `userInterfaceIdiom`, no `UIScreen`, no
+// orientation notification, no size threshold in points. Both halves of the
+// PRD's rule ("an iPad in a narrow multitasking window presents the compact
+// layout; a phone never presents the regular one") follow from the size
+// class for free, and both break the moment anything else is consulted;
+// `tests/ios_policy/test_ios_view_policy.py` enforces that as an explicit
+// allowlist so adding a consumer requires editing the policy and therefore
+// noticing.
+//
+// The width class is the ONLY branch. Every renderer, every addressing
+// behaviour, the ticker, the unread marks, the `reason` captions and the
+// decision surface are identical in both presentations — compact and
+// regular differ in how regions are ARRANGED and in nothing else. The
+// compact path below is W5's, called through unchanged rather than
+// reimplemented, and `LayoutPlanTests` asserts that equality directly.
+//
+// Losslessness across a live width-class change (D5) is achieved by having
+// almost nothing to lose: frontmost tabs and unread marks were never in the
+// view (they're in `DaemonStore`'s `FocusRegionState`, keyed by region path,
+// and region paths are a pure function of the tree rather than of the
+// presentation), and the activity sheet is presented from HERE — above the
+// hierarchy a width change destroys — rather than from inside a region.
+// Scroll position is the one thing that needs an explicit save and restore,
+// because a compact/regular change genuinely restructures the view tree and
+// the container that held a `ScrollView` is simply gone.
 
 import SwiftUI
 import NostromoKit
@@ -23,44 +70,176 @@ struct DynamicFocusView: View {
     let client:      NetworkClient
 
     @EnvironmentObject var store: DaemonStore
-    @State private var selectedTab: String = "repl"
+    /// Presents `ActivityStreamsSheet` (D5) — owned here, at the focus-view
+    /// level, rather than by `TranscriptView` or `PaneSurfaceView`, so it
+    /// survives a tab switch or rotation without disappearing underneath
+    /// the operator.
+    @State private var showActivitySheet = false
+
+    /// THE width read — the only one in the app (D1). Read here, mapped once
+    /// through `WidthClass`, and passed downward as a value; never re-read
+    /// further down the tree, and never consulted alongside anything about
+    /// the device.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    /// The region path used for the compact, single-strip presentation.
+    private static let regionPath = FocusRegionState.compactRegion
+
+    /// `nil` (SwiftUI reporting no size class) and compact both mean
+    /// compact — the rule lives in `WidthClass.from(isRegular:)` so it is a
+    /// tested function rather than an inline `?? .compact` inside a view.
+    private var width: WidthClass {
+        WidthClass.from(isRegular: horizontalSizeClass.map { $0 == .regular })
+    }
 
     var body: some View {
-        let layout  = store.focusLayouts[tag] ?? FocusLayoutModel.initial
-        let paneIds = layout.tree.paneIds
+        let layout = store.focusLayouts[tag] ?? FocusLayoutModel.initial
+        let plan   = layoutPlan(tree: layout.tree, width: width, content: layout.paneContent)
 
-        if paneIds.count <= 1 {
-            // Single pane: no tab chrome; identical to the previous TranscriptView experience.
-            transcriptView
-        } else {
-            // Multiple panes: TabView with repl first, then agent-created panes.
-            TabView(selection: $selectedTab) {
-                transcriptView
-                    .tag("repl")
-                    .tabItem { Label("Repl", systemImage: "terminal") }
-
-                ForEach(paneIds.filter { $0 != "repl" }, id: \.self) { paneId in
-                    PaneTab(
-                        paneId: paneId,
-                        content: layout.paneContent[paneId],
-                        freshness: layout.paneFreshness[paneId]
-                    )
-                        .environmentObject(store)
-                        .navigationTitle(paneId.capitalized)
-                        .navigationBarTitleDisplayMode(.inline)
-                        .tag(paneId)
-                        .tabItem {
-                            Label(paneId.capitalized, systemImage: "rectangle.split.2x1")
-                        }
+        Group {
+            switch plan {
+            case .singleRegion(let entries):
+                if entries.count <= 1 {
+                    // Single pane: no tab chrome; identical to the previous
+                    // TranscriptView experience.
+                    transcriptView
+                } else {
+                    tabbedContent(plan: entries, layout: layout)
                 }
-            }
-            .navigationTitle(selectedTab == "repl" ? displayName : selectedTab.capitalized)
-            .navigationBarTitleDisplayMode(.inline)
-            // Reset to repl if the selected pane is removed by reset_panes.
-            .onChange(of: paneIds) { _, newIds in
-                if !newIds.contains(selectedTab) { selectedTab = "repl" }
+            case .regions(let node):
+                regionContent(node: node, layout: layout)
             }
         }
+        // Presented from the focus view — ABOVE the region hierarchy a
+        // width-class change tears down — so an open activity surface
+        // survives a rotation or a multitasking resize (W4 D5, W6 D5). A
+        // sheet presented from inside a region would vanish under the
+        // operator the instant the iPad turned; the L2 policy suite asserts
+        // structurally that none is.
+        .sheet(isPresented: $showActivitySheet) {
+            ActivityStreamsSheet(model: activityModel)
+        }
+        // D8: published downward as a VALUE so a surface renderer never has
+        // to re-read the size class. The sole intended consumer is the
+        // `pr_diff` renderer (W8), whose file-list-beside-hunks arrangement
+        // at regular width is a property of that renderer rather than of the
+        // region layout. Nothing else may read it — the L2 policy suite
+        // holds an explicit allowlist.
+        .environment(\.nostromoWidthClass, width)
+    }
+
+    // MARK: - Regular width: real regions (W6)
+
+    /// The daemon's splits as real, simultaneously-visible regions. The
+    /// arrangement comes entirely from `layoutPlan`; this view supplies only
+    /// the per-pane surfaces, which are the same ones the compact strip
+    /// renders.
+    private func regionContent(node: RegionNode, layout: FocusLayoutModel) -> some View {
+        let region = store.focusRegionStates[tag] ?? FocusRegionState()
+        return RegionContainerView(
+            node:           node,
+            region:         region,
+            contentVersion: layout.paneContentVersion,
+            reason:         { paneId in layout.paneAddress[paneId]?.reason },
+            onSelect:       { regionPath, paneId in
+                store.selectPane(tag: tag, regionPath: regionPath, paneId: paneId)
+            },
+            surface:        { paneId in paneContentView(for: paneId, layout: layout) }
+        )
+        .navigationTitle(displayName)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    // MARK: - Multi-pane presentation
+
+    /// The tab strip plus its resident, visibility-toggled pane content —
+    /// only ever reached when `plan` has more than one entry (see `body`).
+    private func tabbedContent(plan: [TabPlanEntry], layout: FocusLayoutModel) -> some View {
+        let region    = store.focusRegionStates[tag] ?? FocusRegionState()
+        let available = plan.map(\.paneId)
+        let frontmost = region.frontmostPane(for: Self.regionPath, available: available, fallback: "repl")
+        let reason    = layout.paneAddress[frontmost]?.reason
+
+        return VStack(spacing: 0) {
+            TabStripView(
+                entries: plan,
+                frontmostPaneId: frontmost,
+                reason: reason,
+                isUnread: { paneId in
+                    region.isUnread(
+                        paneId: paneId, regionPath: Self.regionPath,
+                        contentVersion: layout.paneContentVersion[paneId] ?? 0
+                    )
+                },
+                onSelect: { paneId in
+                    store.selectPane(tag: tag, regionPath: Self.regionPath, paneId: paneId)
+                }
+            )
+
+            ZStack {
+                ForEach(plan, id: \.paneId) { entry in
+                    paneContentView(for: entry.paneId, layout: layout)
+                        .opacity(entry.paneId == frontmost ? 1 : 0)
+                        .allowsHitTesting(entry.paneId == frontmost)
+                        .accessibilityHidden(entry.paneId != frontmost)
+                }
+            }
+        }
+        .navigationTitle(plan.first(where: { $0.paneId == frontmost })?.label ?? displayName)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    // MARK: - Per-pane content
+
+    @ViewBuilder
+    private func paneContentView(for paneId: String, layout: FocusLayoutModel) -> some View {
+        if paneId == "repl" {
+            transcriptView
+        } else {
+            PaneSurfaceView(
+                paneId:    paneId,
+                content:   layout.paneContent[paneId],
+                freshness: layout.paneFreshness[paneId],
+                address:   layout.paneAddress[paneId],
+                saveScrollKey: { key in store.setScrollKey(tag: tag, paneId: paneId, key: key) },
+                restoreScroll: { range in
+                    store.scrollRestore(tag: tag, paneId: paneId, visibleRange: range)
+                },
+                saveDiffFileScrollKey: { file, key in
+                    store.setDiffFileScrollKey(tag: tag, paneId: paneId, file: file, key: key)
+                },
+                restoreDiffFileScrollKey: { file, range in
+                    store.diffFileScrollRestore(tag: tag, paneId: paneId, file: file, visibleRange: range)
+                },
+                saveSelectedDiffFile: { path, identity in
+                    store.setSelectedDiffFile(tag: tag, paneId: paneId, path: path, identity: identity)
+                },
+                restoreSelectedDiffFile: { identity in
+                    store.selectedDiffFile(tag: tag, paneId: paneId, identity: identity)
+                }
+            )
+            .environmentObject(store)
+            // Ambient activity (W4, D3): a plain bottom inset on non-repl
+            // surfaces, which have no input bar of their own to compose
+            // above. Re-hosted here after the W5 rewrite (D9) — every
+            // non-repl surface still carries the ticker.
+            .safeAreaInset(edge: .bottom) { activityTicker }
+        }
+    }
+
+    // MARK: - Ambient activity (ios-curated-view-parity W4)
+
+    /// This focus's assembled activity model — an empty (neutral "waiting")
+    /// model when nothing has arrived for this tag yet, never `nil`.
+    private var activityModel: ActivityStreamModel {
+        store.activityModels[tag] ?? ActivityStreamModel()
+    }
+
+    private var activityTicker: some View {
+        ActivityTickerBar(
+            text: activityModel.displayText(health: store.activityHealth),
+            onTap: { showActivitySheet = true }
+        )
     }
 
     // MARK: - Sub-views
@@ -71,257 +250,16 @@ struct DynamicFocusView: View {
             displayName: displayName,
             agentName:   agentName,
             viewName:    viewName,
-            client:      client
+            client:      client,
+            // Owned by `DaemonStore`, not by the view (D5): a width-class
+            // change rebuilds this hierarchy, and a view-owned store would
+            // blank the transcript and re-request it from the daemon.
+            store:       store.transcriptStore(for: tag),
+            saveScrollKey: { key in store.setScrollKey(tag: tag, paneId: "repl", key: key) },
+            restoreScroll: { range in
+                store.scrollRestore(tag: tag, paneId: "repl", visibleRange: range)
+            },
+            bottomAccessory: { activityTicker }
         )
-    }
-}
-
-// MARK: - PaneTab
-
-/// A single non-repl pane rendered from `PaneContentWire` content.
-/// Receives `DaemonStore` via `@EnvironmentObject` for `pr_list` action dispatch.
-private struct PaneTab: View {
-    let paneId:    String
-    let content:   PaneContentWire?
-    let freshness: PaneFreshness?
-
-    @EnvironmentObject var store: DaemonStore
-
-    /// Staged pending approval — set on first swipe tap; cleared on cancel or after
-    /// the confirmation dialog fires. Mirrors the pattern in `PerriView`.
-    @State private var pendingApproval: (repo: String, number: Int)?
-
-    private let bucketOrder: [(label: String, key: String)] = [
-        ("Requested",    "requested"),
-        ("Needs Review", "needs_review"),
-        ("Changes Req",  "changes_req"),
-        ("Dependabot",   "dependabot"),
-    ]
-
-    var body: some View {
-        Group {
-            switch content {
-            case nil:
-                ScrollView { waitingView }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .text(let text):
-                ScrollView { textView(text) }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .jsonSnapshot(let value):
-                ScrollView { jsonView(value) }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .prList(let items):
-                prListView(items)
-            case .loading:
-                ScrollView {
-                    VStack(spacing: 8) {
-                        Spacer(minLength: 60)
-                        ProgressView()
-                        Text("Refreshing…")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                        Spacer()
-                    }.frame(maxWidth: .infinity)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .error(let msg):
-                ScrollView {
-                    VStack(spacing: 8) {
-                        Spacer(minLength: 60)
-                        Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
-                        Text(msg)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 16)
-                        Spacer()
-                    }.frame(maxWidth: .infinity)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .unknown(let raw):
-                ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        // D11: a quiet as-of footnote when this pane's data hasn't refreshed in
-        // a while. Never shown for a normal transient miss — only `badlyStale`
-        // (never `stale`) is rendered, and it disappears on the next push with
-        // no agent action.
-        .overlay(alignment: .bottomTrailing) {
-            if let freshness, freshness.badlyStale {
-                Text(staleLabelText(freshness))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .padding(.trailing, 6)
-                    .padding(.bottom, 4)
-            }
-        }
-        // Confirmation gate — nothing reaches GitHub until the user taps "Approve" here.
-        // This mirrors the existing PerriView swipe-to-approve + pendingApproval pattern.
-        .confirmationDialog(
-            pendingApproval.map { "Approve PR #\($0.number) in \($0.repo)?" } ?? "",
-            isPresented: Binding(
-                get:  { pendingApproval != nil },
-                set:  { if !$0 { pendingApproval = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            if let item = pendingApproval {
-                Button("Approve") {
-                    store.perriApprove(number: item.number, repo: item.repo)
-                    pendingApproval = nil
-                }
-            }
-            Button("Cancel", role: .cancel) { pendingApproval = nil }
-        } message: {
-            Text("The approval will be posted to GitHub. The PR will leave the queue once the index catches up.")
-        }
-    }
-
-    // MARK: - pr_list renderer
-
-    @ViewBuilder
-    private func prListView(_ items: [PrListItemModel]) -> some View {
-        if items.isEmpty {
-            ScrollView {
-                VStack {
-                    Spacer(minLength: 60)
-                    Text("No PRs in queue")
-                        .font(.system(size: 13, weight: .regular, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
-            }
-        } else {
-            List {
-                ForEach(bucketOrder, id: \.key) { bucket in
-                    let group = items.filter { $0.bucket == bucket.key }
-                    if !group.isEmpty {
-                        Section(bucket.label) {
-                            ForEach(group) { item in
-                                NostromoKit.PerriPRRow(
-                                    model:  item.toRowModel(),
-                                    onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
-                                    onClear: {}
-                                )
-                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                    Button {
-                                        // First tap only stages the approval — confirmation
-                                        // dialog fires before anything is sent to GitHub.
-                                        pendingApproval = (repo: item.repo, number: item.number)
-                                    } label: {
-                                        Label("Approve", systemImage: "checkmark.seal.fill")
-                                    }
-                                    .tint(.green)
-                                }
-                            }
-                        }
-                    }
-                }
-                // Overflow — items with unrecognised bucket strings
-                let knownBuckets = Set(bucketOrder.map(\.key))
-                let overflow = items.filter { !knownBuckets.contains($0.bucket) }
-                if !overflow.isEmpty {
-                    Section("Other") {
-                        ForEach(overflow) { item in
-                            NostromoKit.PerriPRRow(
-                                model:  item.toRowModel(),
-                                onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
-                                onClear: {}
-                            )
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button {
-                                    pendingApproval = (repo: item.repo, number: item.number)
-                                } label: {
-                                    Label("Approve", systemImage: "checkmark.seal.fill")
-                                }
-                                .tint(.green)
-                            }
-                        }
-                    }
-                }
-            }
-            .listStyle(.insetGrouped)
-        }
-    }
-
-    // MARK: - Staleness footnote
-
-    private func staleLabelText(_ freshness: PaneFreshness) -> String {
-        guard let asOf = freshness.asOf else { return "stale" }
-        let formatter = DateFormatter()
-        formatter.dateStyle = .none
-        formatter.timeStyle = .short
-        return "stale · as of \(formatter.string(from: asOf))"
-    }
-
-    // MARK: - Text / JSON renderers
-
-    private var waitingView: some View {
-        VStack {
-            Spacer(minLength: 60)
-            Text("waiting for content…")
-                .font(.system(size: 13, weight: .regular, design: .monospaced))
-                .foregroundStyle(.tertiary)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func textView(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 13, weight: .regular, design: .monospaced))
-            .foregroundStyle(.primary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .textSelection(.enabled)
-    }
-
-    private func jsonView(_ value: Any) -> some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(jsonRows(from: value)) { row in
-                HStack(alignment: .top, spacing: 8) {
-                    Text(row.key)
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(minWidth: 80, alignment: .trailing)
-                    Text(row.value)
-                        .font(.system(size: 12, weight: .regular, design: .monospaced))
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(.vertical, 4)
-                .padding(.horizontal, 12)
-            }
-        }
-    }
-
-    // MARK: - JSON helpers
-
-    private struct JsonRow: Identifiable {
-        let key: String
-        let value: String
-        var id: String { key }
-    }
-
-    private func jsonRows(from value: Any) -> [JsonRow] {
-        if let dict = value as? [String: Any] {
-            return dict.map { k, v in JsonRow(key: k, value: jsonString(v)) }
-                       .sorted { $0.key < $1.key }
-        }
-        if let arr = value as? [Any] {
-            return arr.enumerated().map { i, v in JsonRow(key: "\(i)", value: jsonString(v)) }
-        }
-        return [JsonRow(key: "value", value: jsonString(value))]
-    }
-
-    private func jsonString(_ value: Any) -> String {
-        if let s = value as? String { return s }
-        if let b = value as? Bool   { return b ? "true" : "false" }
-        if let i = value as? Int    { return "\(i)" }
-        if let d = value as? Double { return "\(d)" }
-        if let arr = value as? [Any] {
-            return "[\(arr.map { jsonString($0) }.joined(separator: ", "))]"
-        }
-        if let dict = value as? [String: Any] {
-            let pairs = dict.map { "\($0.key): \(jsonString($0.value))" }.joined(separator: ", ")
-            return "{\(pairs)}"
-        }
-        return "\(value)"
     }
 }

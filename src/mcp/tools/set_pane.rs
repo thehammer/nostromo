@@ -66,6 +66,8 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
             .lock()
             .unwrap()
             .unbind_source(&view_id, &pane_id);
+        // W1 (curated-agent-views): agent-authored content never carries an
+        // address in this wedge — see `pane_sources::broadcast_pane_content`.
         broadcast_pane_content(daemon, &view_id, &pane_id, wire, None);
         return json!({ "ok": true });
     }

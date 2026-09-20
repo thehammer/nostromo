@@ -75,6 +75,7 @@ async fn codec_client_msg_hello_round_trip() {
 async fn codec_client_msg_subscribe_round_trip() {
     let msg = ClientMsg::Subscribe {
         topics: vec![Topic::Activity, Topic::MotherJobs, Topic::MotherStatusline],
+        renders_decisions: false,
     };
     let bytes = serde_json::to_vec(&msg).unwrap();
     let (mut reader, mut writer) = tokio::io::duplex(256);
@@ -82,7 +83,7 @@ async fn codec_client_msg_subscribe_round_trip() {
     drop(writer);
     let got_bytes = read_frame(&mut reader).await.unwrap();
     let got: ClientMsg = serde_json::from_slice(&got_bytes).unwrap();
-    assert!(matches!(got, ClientMsg::Subscribe { topics } if topics.len() == 3));
+    assert!(matches!(got, ClientMsg::Subscribe { topics, .. } if topics.len() == 3));
 }
 
 #[tokio::test]

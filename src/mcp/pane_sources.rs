@@ -36,9 +36,13 @@ use tracing::debug;
 use crate::data::perri_pr::PrSnapshot;
 use crate::data::perri_queue::PrQueueSnapshot;
 use crate::ipc::pane_registry::PaneContentProvider;
-use crate::ipc::protocol::{PaneContentWire, PaneFreshness, ServerMsg};
+use crate::ipc::protocol::{PaneAddress, PaneContentWire, PaneFreshness, ServerMsg};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
-use crate::mcp::tools::apply_layout::{self, SOURCE_CURRENT_PR, SOURCE_PR_QUEUE};
+use crate::mcp::tools::apply_layout::{self, FetchArgs, SOURCE_PR_QUEUE};
+// Only used by this module's tests below (the broadcaster itself iterates
+// `apply_layout::PR_BACKED_SOURCES` instead of naming these individually).
+#[cfg(test)]
+use crate::mcp::tools::apply_layout::{SOURCE_CURRENT_PR, SOURCE_PR_CONVERSATION, SOURCE_PR_DIFF};
 
 /// How long a source can go without producing good data before a pane
 /// carrying its content is marked `badly_stale` (D6). Derived from the
@@ -75,17 +79,58 @@ pub(crate) fn broadcast_pane_content(
     content: PaneContentWire,
     freshness: Option<PaneFreshness>,
 ) {
+    broadcast_pane_content_with_address(daemon, tag, pane_id, content, freshness, None);
+}
+
+/// [`broadcast_pane_content`] plus an optional [`PaneAddress`] (W1 —
+/// curated-agent-views). Still the one choke point every daemon-side
+/// `PaneContent` send goes through — `broadcast_pane_content` is a thin
+/// `address: None` wrapper over this rather than a second implementation, so
+/// "mark the pane painted" and "never re-send `Loading` over existing
+/// content" can't drift between callers that do and don't address a pane.
+pub(crate) fn broadcast_pane_content_with_address(
+    daemon: &DaemonMcpBackend,
+    tag: &str,
+    pane_id: &str,
+    content: PaneContentWire,
+    freshness: Option<PaneFreshness>,
+    address: Option<PaneAddress>,
+) {
     let _ = daemon.broadcast_tx.send(ServerMsg::PaneContent {
         tag: tag.to_string(),
         pane_id: pane_id.to_string(),
         content,
         freshness,
+        address,
     });
     daemon
         .pane_registry
         .lock()
         .unwrap()
         .mark_painted(tag, pane_id);
+}
+
+/// Fetch a bound pane's current content and address, given its persisted
+/// `params` — the pair every automatic-repaint path below needs out of a
+/// fetch, computed together because both must derive from the exact same
+/// `params` value. Returns `None` when the fetch fails, mirroring the "skip a
+/// binding whose fetch fails" rule every caller already applies.
+///
+/// Freshness is deliberately not part of this trio: three of the four callers
+/// compute it independently right after (once, from `state`, not from the
+/// fetch), and `reevaluate_staleness` needs its freshness *before* deciding
+/// whether to fetch at all — folding it in here would either recompute it
+/// twice or contort this signature for one caller's early-exit.
+fn fetch_bound_content(
+    state: &McpSharedState,
+    tag: &str,
+    source: &str,
+    params: Option<&serde_json::Value>,
+) -> Option<(PaneContentWire, Option<PaneAddress>)> {
+    let args = FetchArgs::bound(tag, params);
+    let content = apply_layout::fetch(source, state, args).ok()?;
+    let address = apply_layout::address(source, params);
+    Some((content, address))
 }
 
 /// Broadcast `PaneContentWire::Loading` only if `(tag, pane_id)` has never
@@ -126,14 +171,16 @@ pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
     let bindings = daemon.pane_registry.lock().unwrap().all_bindings();
     bindings
         .into_iter()
-        .filter_map(|(tag, pane_id, source)| {
-            let content = apply_layout::fetch(&source, state, None).ok()?;
-            let fr = apply_layout::freshness(&source, state);
+        .filter_map(|(tag, pane_id, binding)| {
+            let (content, address) =
+                fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())?;
+            let fr = apply_layout::freshness(&binding.source, state);
             Some(ServerMsg::PaneContent {
                 tag,
                 pane_id,
                 content,
                 freshness: Some(fr),
+                address,
             })
         })
         .collect()
@@ -151,12 +198,14 @@ pub fn repaint_bound_panes(state: &McpSharedState) {
         return;
     };
     let bindings = daemon.pane_registry.lock().unwrap().all_bindings();
-    for (tag, pane_id, source) in bindings {
-        let Ok(content) = apply_layout::fetch(&source, state, None) else {
+    for (tag, pane_id, binding) in bindings {
+        let Some((content, address)) =
+            fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())
+        else {
             continue;
         };
-        let fr = apply_layout::freshness(&source, state);
-        broadcast_pane_content(daemon, &tag, &pane_id, content, Some(fr));
+        let fr = apply_layout::freshness(&binding.source, state);
+        broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }
 }
 
@@ -173,10 +222,15 @@ impl PaneContentProvider for McpPaneContentProvider {
 
 // ── the broadcaster (D7) ─────────────────────────────────────────────────────
 
-/// `(tag, pane_id) -> (content, freshness)` last actually broadcast by this
-/// process, used both to dedup an unchanged push and to know which panes the
-/// staleness ticker is allowed to re-evaluate (see the module doc comment).
-type LastSent = HashMap<(String, String), (PaneContentWire, PaneFreshness)>;
+/// `(tag, pane_id) -> (content, freshness, address)` last actually broadcast
+/// by this process, used both to dedup an unchanged push and to know which
+/// panes the staleness ticker is allowed to re-evaluate (see the module doc
+/// comment). `address` (W1 — curated-agent-views) is part of the dedup key
+/// so an address-only change is a real change and gets broadcast — the
+/// automatic broadcaster below always fetches with `address: None` (no known
+/// source produces one yet), so this only matters once a future source
+/// starts attaching one.
+type LastSent = HashMap<(String, String), (PaneContentWire, PaneFreshness, Option<PaneAddress>)>;
 
 /// Watches the PR-queue and current-PR watch channels and, on every change,
 /// re-fetches and re-broadcasts content for every binding pointed at that
@@ -201,7 +255,14 @@ pub async fn run_pane_source_broadcaster(
             }
             result = pr_rx.changed() => {
                 if result.is_err() { break; }
-                push_for_source(&state, SOURCE_CURRENT_PR, &mut last_sent);
+                // All three PR-backed sources read the same snapshot, so one
+                // watch change feeds all of them. `nostromo.get_file` is
+                // deliberately absent here: a file pane is a snapshot of a
+                // revision, and there is no channel that could tell it
+                // otherwise (W2 — D2).
+                for source in apply_layout::PR_BACKED_SOURCES {
+                    push_for_source(&state, source, &mut last_sent);
+                }
             }
             _ = ticker.tick() => {
                 reevaluate_staleness(&state, &mut last_sent);
@@ -220,27 +281,28 @@ fn push_for_source(state: &McpSharedState, source: &str, last_sent: &mut LastSen
     let Some(daemon) = &state.daemon else {
         return;
     };
-    let targets: Vec<(String, String)> = daemon
+    let targets: Vec<(String, String, Option<serde_json::Value>)> = daemon
         .pane_registry
         .lock()
         .unwrap()
         .all_bindings()
         .into_iter()
-        .filter(|(_, _, s)| s == source)
-        .map(|(tag, pane_id, _)| (tag, pane_id))
+        .filter(|(_, _, b)| b.source == source)
+        .map(|(tag, pane_id, b)| (tag, pane_id, b.params))
         .collect();
 
-    for (tag, pane_id) in targets {
-        let Ok(content) = apply_layout::fetch(source, state, None) else {
+    for (tag, pane_id, params) in targets {
+        let Some((content, address)) = fetch_bound_content(state, &tag, source, params.as_ref())
+        else {
             continue;
         };
         let fr = apply_layout::freshness(source, state);
         let key = (tag.clone(), pane_id.clone());
-        if last_sent.get(&key) == Some(&(content.clone(), fr.clone())) {
+        if last_sent.get(&key) == Some(&(content.clone(), fr.clone(), address.clone())) {
             continue;
         }
-        last_sent.insert(key, (content.clone(), fr.clone()));
-        broadcast_pane_content(daemon, &tag, &pane_id, content, Some(fr));
+        last_sent.insert(key, (content.clone(), fr.clone(), address.clone()));
+        broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }
 }
 
@@ -256,20 +318,23 @@ fn reevaluate_staleness(state: &McpSharedState, last_sent: &mut LastSent) {
     };
     let bindings = daemon.pane_registry.lock().unwrap().all_bindings();
 
-    for (tag, pane_id, source) in bindings {
+    for (tag, pane_id, binding) in bindings {
         let key = (tag.clone(), pane_id.clone());
-        let Some((_, prev_fr)) = last_sent.get(&key) else {
+        let Some((_, prev_fr, _)) = last_sent.get(&key) else {
             continue;
         };
+        let source = binding.source;
         let fr = apply_layout::freshness(&source, state);
         if prev_fr.badly_stale == fr.badly_stale {
             continue;
         }
-        let Ok(content) = apply_layout::fetch(&source, state, None) else {
+        let Some((content, address)) =
+            fetch_bound_content(state, &tag, &source, binding.params.as_ref())
+        else {
             continue;
         };
-        last_sent.insert(key, (content.clone(), fr.clone()));
-        broadcast_pane_content(daemon, &tag, &pane_id, content, Some(fr));
+        last_sent.insert(key, (content.clone(), fr.clone(), address.clone()));
+        broadcast_pane_content_with_address(daemon, &tag, &pane_id, content, Some(fr), address);
     }
 }
 
@@ -360,6 +425,28 @@ mod tests {
         .unwrap()
     }
 
+    /// Like [`pr_snapshot`], but with explicit `stale`/`error`/`generated_at`
+    /// — used to simulate a source that is failing repeatedly while pinning
+    /// `generated_at` at whatever the test wants (i.e. a correct error path
+    /// that does *not* re-stamp it on every failed poll).
+    fn pr_snapshot_with_status(
+        repo: &str,
+        number: u64,
+        title: &str,
+        stale: bool,
+        error: Option<&str>,
+        generated_at: Option<chrono::DateTime<Utc>>,
+    ) -> PrSnapshot {
+        serde_json::from_value(json!({
+            "pr_number": number, "repo": repo, "title": title,
+            "author": "alice", "url": "https://example.com", "diff": "",
+            "stale": stale, "error": error, "additions": 1, "deletions": 1,
+            "changed_files": 1, "head_sha": "abc123", "diff_too_large": false,
+            "generated_at": generated_at
+        }))
+        .unwrap()
+    }
+
     // ── broadcast_pane_content ───────────────────────────────────────────────
 
     #[test]
@@ -402,11 +489,13 @@ mod tests {
                 pane_id,
                 content,
                 freshness,
+                address,
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
                 assert!(matches!(content, PaneContentWire::Text { text } if text == "hi"));
                 assert!(freshness.is_none());
+                assert!(address.is_none(), "broadcast_pane_content must default address to None");
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -443,6 +532,73 @@ mod tests {
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
+    }
+
+    // ── broadcast_pane_content_with_address (W1 — curated-agent-views) ───────
+
+    #[test]
+    fn broadcast_pane_content_with_address_attaches_the_given_address() {
+        let (state, mut bcast, _qtx, _ptx) = make_state();
+        {
+            let daemon = state.daemon.as_ref().unwrap();
+            let mut reg = daemon.pane_registry.lock().unwrap();
+            reg.init_focus("perri");
+            reg.create_pane("perri", "ticket", SplitPosition::Right, "repl")
+                .unwrap();
+        }
+        let daemon = state.daemon.as_ref().unwrap();
+
+        let address = PaneAddress {
+            anchor: None,
+            emphasis: vec![],
+            reason: Some("opened from the queue".into()),
+        };
+        broadcast_pane_content_with_address(
+            daemon,
+            "perri",
+            "ticket",
+            PaneContentWire::Text { text: "CORE-1234".into() },
+            None,
+            Some(address.clone()),
+        );
+
+        match bcast.try_recv().unwrap() {
+            ServerMsg::PaneContent { address: a, .. } => assert_eq!(a, Some(address)),
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn last_sent_dedup_tuple_treats_an_address_only_difference_as_a_real_change() {
+        // Mirrors the daemon-side dedup key `push_for_source` compares against
+        // (D5): `LastSent` stores `(content, freshness, address)`, so two
+        // otherwise-identical entries differing only by address must NOT
+        // compare equal — an address-only change is a real change and must
+        // not be silently swallowed as a duplicate.
+        let content = PaneContentWire::Text { text: "hi".into() };
+        let freshness = PaneFreshness::default();
+
+        let no_address: (PaneContentWire, PaneFreshness, Option<PaneAddress>) =
+            (content.clone(), freshness.clone(), None);
+        let with_address: (PaneContentWire, PaneFreshness, Option<PaneAddress>) = (
+            content.clone(),
+            freshness.clone(),
+            Some(PaneAddress {
+                anchor: None,
+                emphasis: vec![],
+                reason: Some("flagged".into()),
+            }),
+        );
+
+        assert_ne!(
+            no_address, with_address,
+            "an address-only difference must make the dedup tuple unequal"
+        );
+        assert_eq!(
+            no_address,
+            (content, freshness, None),
+            "sanity: identical tuples (including address) must still compare equal"
+        );
     }
 
     // ── broadcast_loading_if_first_paint ─────────────────────────────────────
@@ -790,6 +946,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pr_source_stale_past_five_minutes_gets_flagged_badly_stale() {
+        tokio::time::pause();
+        let (state, mut bcast, _queue_tx, pr_tx) = make_state();
+        bind_pane(&state, "perri", "diff", "perri.get_current_pr");
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        // The PR source was last genuinely fresh 6 minutes ago, and has been
+        // failing on every poll since. A correct error path never re-stamps
+        // `generated_at` on failure, so `as_of` stays pinned at `stale_since`
+        // across every one of these retries — only simulated time moves.
+        let stale_since = Utc::now() - ChronoDuration::minutes(6);
+        for _ in 0..4 {
+            pr_tx
+                .send(Some(pr_snapshot_with_status(
+                    "acme/web",
+                    42,
+                    "Add widget",
+                    true,
+                    Some("boom"),
+                    Some(stale_since),
+                )))
+                .unwrap();
+            tokio::time::advance(Duration::from_secs(30)).await;
+        }
+
+        let mut saw_badly_stale = false;
+        while let Ok(Ok(msg)) =
+            tokio::time::timeout(Duration::from_millis(200), bcast.recv()).await
+        {
+            match msg {
+                ServerMsg::PaneContent {
+                    tag,
+                    pane_id,
+                    content,
+                    freshness,
+                    ..
+                } => {
+                    assert_eq!(tag, "perri");
+                    assert_eq!(pane_id, "diff");
+                    assert!(matches!(content, PaneContentWire::Text { .. }));
+                    if freshness
+                        .expect("freshness must be attached once data is known-stale")
+                        .badly_stale
+                    {
+                        saw_badly_stale = true;
+                    }
+                }
+                other => panic!("expected PaneContent, got {other:?}"),
+            }
+        }
+
+        assert!(
+            saw_badly_stale,
+            "a PR source stuck in a repeated-failure loop for over five minutes \
+             (with `generated_at` never re-stamped by the error path) must \
+             eventually be flagged badly_stale"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn recovering_from_badly_stale_pushes_freshness_with_badly_stale_false() {
         tokio::time::pause();
         let (state, mut bcast, queue_tx, _pr_tx) = make_state();
@@ -975,6 +1198,139 @@ mod tests {
             }
         }
         assert!(checked_any, "expected at least one push during this run");
+
+        handle.abort();
+    }
+
+    // ── perri.get_pr_conversation (W3 — curated-agent-views) ─────────────────
+
+    #[tokio::test]
+    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation() {
+        let (state, mut bcast, _qtx, pr_tx) = make_state();
+        bind_pane(&state, "perri", "conversation", SOURCE_PR_CONVERSATION);
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        pr_tx
+            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_millis(200), bcast.recv())
+            .await
+            .expect("a push within 200ms")
+            .unwrap();
+        match msg {
+            ServerMsg::PaneContent {
+                tag,
+                pane_id,
+                content,
+                ..
+            } => {
+                assert_eq!(tag, "perri");
+                assert_eq!(pane_id, "conversation");
+                assert!(matches!(content, PaneContentWire::PrConversation { .. }));
+            }
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound() {
+        let (state, mut bcast, _qtx, pr_tx) = make_state();
+        bind_pane(&state, "perri", "diff_text", SOURCE_CURRENT_PR);
+        bind_pane(&state, "perri", "diff_structured", SOURCE_PR_DIFF);
+        bind_pane(&state, "perri", "conversation", SOURCE_PR_CONVERSATION);
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        pr_tx
+            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .unwrap();
+
+        let mut seen_panes = std::collections::HashSet::new();
+        for _ in 0..3 {
+            match tokio::time::timeout(Duration::from_millis(200), bcast.recv())
+                .await
+                .expect("a push within 200ms")
+                .unwrap()
+            {
+                ServerMsg::PaneContent { tag, pane_id, .. } => {
+                    assert_eq!(tag, "perri");
+                    seen_panes.insert(pane_id);
+                }
+                other => panic!("expected PaneContent, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            seen_panes,
+            ["diff_text".to_string(), "diff_structured".to_string(), "conversation".to_string()]
+                .into_iter()
+                .collect(),
+            "one PR-watch change must push all three PR-backed sources, each exactly once"
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), bcast.recv())
+                .await
+                .is_err(),
+            "no fourth push"
+        );
+
+        handle.abort();
+    }
+
+    // ── nostromo.get_file is deliberately not watch-driven (W2 — D2) ─────────
+
+    #[tokio::test]
+    async fn pane_bound_to_get_file_source_is_never_repainted_by_the_pr_watch_channel() {
+        let (state, mut bcast, _qtx, pr_tx) = make_state();
+        // Binding "file" to nostromo.get_file with no params is fine here: the
+        // broadcaster's on-change handlers never dispatch this source at all,
+        // so there is nothing to fetch and nothing to fail.
+        bind_pane(&state, "cody", "file", "nostromo.get_file");
+        // A control pane on a genuinely watch-driven source, so this test also
+        // proves the broadcaster is alive and reacting to this exact change —
+        // silence alone wouldn't distinguish "correctly excluded" from "the
+        // broadcaster never ran".
+        bind_pane(&state, "cody", "diff", "perri.get_current_pr");
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        pr_tx
+            .send(Some(pr_snapshot("acme/web", 42, "Add widget")))
+            .unwrap();
+
+        // The control pane gets its push...
+        let msg = tokio::time::timeout(Duration::from_millis(200), bcast.recv())
+            .await
+            .expect("a push within 200ms")
+            .unwrap();
+        match msg {
+            ServerMsg::PaneContent { pane_id, .. } => assert_eq!(pane_id, "diff"),
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+
+        // ...and nothing else follows — in particular, nothing for "file".
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), bcast.recv())
+                .await
+                .is_err(),
+            "a pane bound to nostromo.get_file must never be repainted by the PR watch channel"
+        );
 
         handle.abort();
     }

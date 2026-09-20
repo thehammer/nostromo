@@ -24,13 +24,32 @@ struct ClientHello: Encodable {
 // MARK: - Subscribe
 
 /// Subscribe to one or more broadcast topic streams.
+///
+/// `rendersDecisions` declares that this client can actually present a
+/// decision-modal request to a human and answer it — the fact
+/// `nostromo.ask_decision` needs before it will submit a request rather than
+/// fail fast with `no_operator`. Naming `"decision"` in `topics` makes the
+/// same claim; either is sufficient. Mirrors `ClientMsg::Subscribe` in
+/// `src/ipc/protocol.rs`.
+///
+/// `init` gives `rendersDecisions` no default value deliberately — every
+/// construction site must state it explicitly, so a future flip to `true`
+/// (once a client can actually render a decision) is a visible, one-word diff
+/// rather than an easy-to-miss omission.
 struct ClientSubscribe: Encodable {
-    let type_  = "subscribe"
-    let topics: [String]
+    let type_:            String = "subscribe"
+    let topics:            [String]
+    let rendersDecisions:  Bool
+
+    init(topics: [String], rendersDecisions: Bool) {
+        self.topics = topics
+        self.rendersDecisions = rendersDecisions
+    }
 
     enum CodingKeys: String, CodingKey {
-        case type_  = "type"
+        case type_            = "type"
         case topics
+        case rendersDecisions = "renders_decisions"
     }
 }
 
@@ -187,4 +206,62 @@ public struct ClientPerriAction: Encodable {
         case prNumber = "pr_number"
         case repo
     }
+}
+
+// MARK: - DecisionAnswer
+
+/// Answer a `decision_request` (W6 decision modals).
+/// Mirrors `ClientMsg::DecisionAnswer` in `src/ipc/protocol.rs`.
+///
+/// `choiceId: nil` means dismissed without choosing — a distinct, meaningful
+/// outcome, not a default choice — so unlike most optional fields on this
+/// wire, `choice_id` is always present, as a string or as `null`.
+///
+/// This is why `encode(to:)` is hand-written rather than synthesized:
+/// Swift's compiler-generated `Encodable` conformance encodes an `Optional`
+/// property with `encodeIfPresent`, which **omits** the key entirely when
+/// `nil` — exactly the ambiguous-with-"an old peer that didn't understand
+/// this field" shape this type's own doc comment (and
+/// `src/ipc/protocol.rs`'s `ClientMsg::DecisionAnswer`) says `choice_id`
+/// must never have.
+public struct ClientDecisionAnswer: Encodable {
+    let type_: String = "decision_answer"
+    public let requestId: String
+    public let choiceId: String?
+
+    public init(requestId: String, choiceId: String?) {
+        self.requestId = requestId
+        self.choiceId = choiceId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_     = "type"
+        case requestId = "request_id"
+        case choiceId  = "choice_id"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type_, forKey: .type_)
+        try container.encode(requestId, forKey: .requestId)
+        // `encode`, not `encodeIfPresent` — a nil choiceId must serialize as
+        // an explicit JSON `null`, never as an absent key.
+        try container.encode(choiceId, forKey: .choiceId)
+    }
+}
+
+// MARK: - ActivitySnapshotRequest
+
+/// Request a full ambient-activity snapshot (all streams) for one focus.
+/// The daemon replies with a `ServerMsg.activitySnapshot`.
+/// Mirrors `ClientMsg::ActivitySnapshotRequest` in `src/ipc/protocol.rs`.
+public struct ClientActivitySnapshotRequest: Encodable {
+    let type_: String = "activity_snapshot_request"
+    public let tag: String
+
+    public init(tag: String) {
+        self.tag = tag
+    }
+
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
 }

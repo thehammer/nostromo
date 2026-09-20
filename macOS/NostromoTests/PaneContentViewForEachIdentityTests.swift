@@ -1,0 +1,121 @@
+import XCTest
+
+// `PaneContentView.swift` is a SwiftUI view and NOT compiled into this test
+// target (same situation as `CodeContentView.swift` — see
+// `CodeContentViewTests.swift`), so it's read as raw source text. This is a
+// fitness function, not a behavioural test: it pins the `ForEach` call sites
+// in the `pr_list` renderer to an explicit `id: \.bucketScopedId`, which is
+// what stops SwiftUI from reusing/recycling a PR row when that PR moves
+// between buckets (the row's default `Identifiable.id` — `"\(repo)#\(number)"`
+// — doesn't change on a bucket move, so a bare `ForEach(group) { ... }` /
+// `ForEach(overflow) { ... }` can silently show the PR's previous bucket's
+// badge under its new section header). The value-level `bucketScopedId`
+// tests in `PaneContentWireTests` don't exercise the view at all, so without
+// this fitness function the call sites could regress back to the bare form
+// while every other test in the suite stays green.
+final class PaneContentViewForEachIdentityTests: XCTestCase {
+
+    // MARK: The bucket-grouped and overflow ForEach loops key off bucketScopedId
+
+    func testPrListForEachLoopsAreKeyedByBucketScopedId() throws {
+        let source = try Self.paneContentViewSource()
+
+        let occurrences = Self.occurrenceCount(of: "id: \\.bucketScopedId", in: source)
+        XCTAssertGreaterThanOrEqual(occurrences, 2, """
+            expected at least two `id: \\.bucketScopedId` call sites in the pr_list renderer — one for \
+            `ForEach(group, ...)` and one for `ForEach(overflow, ...)` — found \(occurrences). Without an \
+            explicit bucket-scoped identity, a PR moving between buckets keeps its default `id` and \
+            SwiftUI can recycle the old row, rendering a stale bucket badge.
+            """)
+    }
+
+    func testGroupForEachNeverFallsBackToDefaultIdentity() throws {
+        let source = try Self.paneContentViewSource()
+
+        XCTAssertFalse(source.contains("ForEach(group) {"), """
+            `ForEach(group) { ... }` (no explicit `id:`) reintroduces the stale-badge bug: it falls back \
+            to PrListItemModel's default Identifiable id, which excludes `bucket`, so a PR that changes \
+            bucket keeps its old row identity and can render the previous bucket's badge.
+            """)
+    }
+
+    func testOverflowForEachNeverFallsBackToDefaultIdentity() throws {
+        let source = try Self.paneContentViewSource()
+
+        XCTAssertFalse(source.contains("ForEach(overflow) {"), """
+            `ForEach(overflow) { ... }` (no explicit `id:`) reintroduces the stale-badge bug: it falls \
+            back to PrListItemModel's default Identifiable id, which excludes `bucket`, so a PR that \
+            changes bucket keeps its old row identity and can render the previous bucket's badge.
+            """)
+    }
+
+    // MARK: The iOS Perri tab's queue ForEach keys off bucketScopedId too
+    //
+    // Same defect, second independent rendering path: PerriView renders
+    // `PrQueueItem` (not `PrListItemModel`), and its queue `ForEach` is a
+    // second, wholly separate call site from PaneContentView's. This is
+    // deliberately added to the *same* fitness function (not a new file) so
+    // there is one test that knows about every bucket-partitioned `ForEach`
+    // in the app.
+
+    func testPerriViewQueueForEachIsKeyedByBucketScopedId() throws {
+        let source = try Self.perriViewSource()
+
+        XCTAssertTrue(source.contains("id: \\.bucketScopedId"), """
+            expected `ForEach(items, id: \\.bucketScopedId)` in PerriView's queue section — without an \
+            explicit bucket-scoped identity, a PR moving between buckets keeps its default `id` \
+            (`PrQueueItem.id`, which excludes `bucket`) and SwiftUI can recycle the old row, rendering a \
+            stale bucket badge.
+            """)
+    }
+
+    func testPerriViewQueueForEachNeverFallsBackToDefaultIdentity() throws {
+        let source = try Self.perriViewSource()
+
+        XCTAssertFalse(source.contains("ForEach(items) {"), """
+            `ForEach(items) { ... }` (no explicit `id:`) reintroduces the stale-badge bug: it falls back \
+            to PrQueueItem's default Identifiable id, which excludes `bucket`, so a PR that changes \
+            bucket keeps its old row identity and can render the previous bucket's badge.
+            """)
+    }
+
+    // MARK: - Helpers
+
+    /// `PaneContentView.swift` is not compiled into this target, so it has to
+    /// be read as text — same idiom as `CodeContentViewTests.codeContentViewSource()`.
+    private static func paneContentViewSource() throws -> String {
+        try String(contentsOf: sourceRoot.appendingPathComponent("UI/Views/PaneContentView.swift"), encoding: .utf8)
+    }
+
+    private static var sourceRoot: URL {
+        URL(fileURLWithPath: #filePath)          // …/macOS/NostromoTests/PaneContentViewForEachIdentityTests.swift
+            .deletingLastPathComponent()          // …/macOS/NostromoTests
+            .deletingLastPathComponent()          // …/macOS
+            .appendingPathComponent("Nostromo")
+    }
+
+    /// `PerriView.swift` (iOS target) is not compiled into this macOS test
+    /// target either, so it's read as raw text, same idiom as
+    /// `paneContentViewSource()` above.
+    private static func perriViewSource() throws -> String {
+        try String(contentsOf: repoRoot.appendingPathComponent("iOS/Nostromo/Views/PerriView.swift"), encoding: .utf8)
+    }
+
+    private static var repoRoot: URL {
+        URL(fileURLWithPath: #filePath)          // …/macOS/NostromoTests/PaneContentViewForEachIdentityTests.swift
+            .deletingLastPathComponent()          // …/macOS/NostromoTests
+            .deletingLastPathComponent()          // …/macOS
+            .deletingLastPathComponent()          // repo root
+    }
+
+    /// Number of non-overlapping occurrences of `needle` in `source`.
+    private static func occurrenceCount(of needle: String, in source: String) -> Int {
+        var count = 0
+        var searchStart = source.startIndex
+        while let range = source.range(of: needle, range: searchStart..<source.endIndex) {
+            count += 1
+            searchStart = range.upperBound
+        }
+        return count
+    }
+}

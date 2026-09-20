@@ -48,16 +48,16 @@ use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 
+use super::decisions::DecisionRegistry;
 use super::pane_registry::{PaneContentProvider, PaneRegistry, PerriStateProvider};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
-use super::stream_json::{load_scrollback, SessionState, SessionTranscript, Turn, TurnDelta};
+use super::stream_json::{
+    load_scrollback, SessionState, SessionTranscript, TurnDelta, SCROLLBACK_TURNS,
+};
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
 /// operators with a non-standard install).
 pub const CLAUDE_BIN_ENV: &str = "NOSTROMO_CLAUDE_BIN";
-
-/// How many scrollback turns to replay when resuming a session.
-const SCROLLBACK_TURNS: usize = 30;
 
 /// Crash-loop guard: at most this many auto-restarts within the sliding window.
 const MAX_RESTARTS: u32 = 3;
@@ -252,6 +252,24 @@ pub struct SessionManager {
     /// [`SessionManager::configure_perri_state_provider`]; `None` in tests /
     /// non-daemon use.
     perri_state_provider: Option<Arc<dyn PerriStateProvider>>,
+    /// Shared decision-modal registry. Set by the daemon via
+    /// [`SessionManager::configure_decisions`]; `None` in tests / non-daemon
+    /// use. When a session goes permanently down (explicit stop or the
+    /// crash-loop guard tripping), its tag's pending decision requests are
+    /// cancelled here (D3/W6) — a decision nobody can answer must not block
+    /// its caller forever.
+    decisions: Option<Arc<Mutex<DecisionRegistry>>>,
+    /// Reverse index: `claude` session id -> focus tag. Maintained at
+    /// [`SessionManager::spawn_session`] and [`SessionManager::restart`] as
+    /// each `effective_id` is resolved; seedable from the on-disk id store
+    /// via [`SessionManager::seed_reverse_index`] for sessions spawned by a
+    /// daemon process that predates this index (activity-path wedge D7).
+    session_reverse: HashMap<String, String>,
+    /// Bounded, attributed ambient-activity streams (activity-path wedge).
+    /// Lives here — not threaded separately through `Server`/`McpSharedState`
+    /// — because attribution needs exactly the state this type already owns
+    /// (the live `sessions` map and the `session_reverse` index).
+    activity_store: crate::activity::store::ActivityStore,
 }
 
 impl SessionManager {
@@ -270,6 +288,9 @@ impl SessionManager {
             mcp_config: None,
             pane_content_provider: None,
             perri_state_provider: None,
+            decisions: None,
+            session_reverse: HashMap::new(),
+            activity_store: crate::activity::store::ActivityStore::new(),
         }
     }
 
@@ -301,6 +322,12 @@ impl SessionManager {
         self.pane_content_provider = Some(provider);
     }
 
+    /// Wire the shared decision-modal registry so a session going
+    /// permanently down cancels its tag's pending decisions (D3/W6).
+    pub fn configure_decisions(&mut self, registry: Arc<Mutex<DecisionRegistry>>) {
+        self.decisions = Some(registry);
+    }
+
     /// Access the pane-content provider (if wired up).
     pub fn pane_content_provider(&self) -> Option<Arc<dyn PaneContentProvider>> {
         self.pane_content_provider.clone()
@@ -322,6 +349,107 @@ impl SessionManager {
         &self,
     ) -> Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ServerMsg>>>> {
         Arc::clone(&self.client_senders)
+    }
+
+    // ── session-id reverse index (activity-path wedge) ────────────────────────
+
+    /// Look up the focus tag that owns a `claude` session id, via the
+    /// in-memory reverse index maintained by [`SessionManager::spawn_session`]
+    /// and [`SessionManager::restart`]. Returns `None` for an id the daemon
+    /// has never resolved a tag for — the unattributed path (attribution
+    /// policy itself lives in `activity::store`, not here).
+    pub fn tag_for_session_id(&self, session_id: &str) -> Option<String> {
+        self.session_reverse.get(session_id).cloned()
+    }
+
+    /// Populate the reverse index from the on-disk `tag -> session_id` store.
+    /// Covers sessions spawned by a daemon process that predates this index
+    /// (e.g. across a daemon upgrade) — their reverse mapping only ever lived
+    /// in memory, so a fresh process must reseed it from what's persisted.
+    pub fn seed_reverse_index(&mut self) {
+        for (tag, sid) in load_id_store(&self.store_path) {
+            self.session_reverse.insert(sid, tag);
+        }
+    }
+
+    // ── ambient activity (activity-path wedge) ────────────────────────────────
+
+    /// Does the daemon know `tag` as a focus — either a session has been
+    /// spawned under it, or it's present in the Mac-pushed focus registry?
+    /// Used to resolve `ActivityEvent::focus_tag` before falling back to the
+    /// session-id reverse index (D2).
+    fn knows_focus(&self, tag: &str) -> bool {
+        self.sessions.contains_key(tag) || self.focus_registry.iter().any(|f| f.tag == tag)
+    }
+
+    /// Resolve attribution for one raw activity event, in the order the PRD
+    /// specifies: `focus_tag` (if it names a focus the daemon knows), then
+    /// the `session_id` reverse index, then unattributed — never dropped,
+    /// never assigned to an arbitrary focus.
+    fn resolve_attribution(
+        &self,
+        event: &crate::agent_bus::ActivityEvent,
+    ) -> crate::activity::store::Attribution {
+        use crate::activity::store::Attribution;
+
+        let tag = event
+            .focus_tag
+            .as_ref()
+            .filter(|tag| self.knows_focus(tag))
+            .cloned()
+            .or_else(|| {
+                event
+                    .session_id
+                    .as_ref()
+                    .and_then(|sid| self.tag_for_session_id(sid))
+            });
+
+        match (tag, &event.agent_id) {
+            (Some(tag), Some(agent_id)) => Attribution::Subagent {
+                tag,
+                agent_id: agent_id.clone(),
+            },
+            (Some(tag), None) => Attribution::Focus { tag },
+            (None, _) => Attribution::Unattributed,
+        }
+    }
+
+    /// Resolve attribution and ingest one raw activity event (from the
+    /// `activity.jsonl` tailer) into the bounded activity store, returning
+    /// the finalized (attributed, `seq`-assigned, scrubbed) event for
+    /// broadcast.
+    pub fn ingest_activity_event(
+        &mut self,
+        event: crate::agent_bus::ActivityEvent,
+    ) -> crate::agent_bus::ActivityEvent {
+        let attribution = self.resolve_attribution(&event);
+        self.activity_store.ingest(event, attribution)
+    }
+
+    /// Every activity stream (main + subagent) known for `tag`.
+    pub fn activity_streams_for_focus(
+        &self,
+        tag: &str,
+    ) -> Vec<crate::activity::store::ActivityStreamSnapshot> {
+        self.activity_store.streams_for_focus(tag)
+    }
+
+    /// Every focus tag the daemon currently knows of — sessions plus the
+    /// Mac-pushed registry — for attach-replay fan-out.
+    pub fn known_focus_tags(&self) -> Vec<String> {
+        let mut tags: Vec<String> = self.sessions.keys().cloned().collect();
+        for f in &self.focus_registry {
+            if !tags.contains(&f.tag) {
+                tags.push(f.tag.clone());
+            }
+        }
+        tags
+    }
+
+    /// Ambient-activity ingestion health verdict (store-local only — see
+    /// [`crate::activity::store::ActivityStore::health`]).
+    pub fn activity_health(&self) -> crate::activity::store::ActivityHealth {
+        self.activity_store.health()
     }
 
     // ── spawn ───────────────────────────────────────────────────────────────
@@ -350,6 +478,7 @@ impl SessionManager {
             Some(id) => (id, true),
             None => (Uuid::new_v4().to_string(), false),
         };
+        self.session_reverse.insert(effective_id.clone(), tag.clone());
 
         let program = resolve_claude()?;
         let args = build_claude_args(
@@ -430,6 +559,11 @@ impl SessionManager {
                 cmd.env("NOSTROMO_MCP_SOCKET", socket);
                 cmd.env("NOSTROMO_PTY_ID", &tag);
                 cmd.env("NOSTROMO_VIEW_ID", &tag);
+                // Attribution (activity-path wedge): lets the
+                // `nostromo-activity-hook` producer stamp every hook payload
+                // with the owning focus tag directly, with no session-id
+                // reverse lookup needed on the fast path.
+                cmd.env("NOSTROMO_FOCUS_TAG", &tag);
                 cmd.arg("--mcp-config").arg(config);
             }
         }
@@ -601,7 +735,6 @@ impl SessionManager {
                 .get_mut(tag)
                 .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
             session.attached_clients.insert(client_id.to_string());
-            let mut turns = session.shared.transcript.lock().unwrap().snapshot();
             // Cap what a freshly-attaching client receives to the last
             // SCROLLBACK_TURNS turns — mirrors the cap already applied when
             // loading scrollback at spawn time (`load_scrollback`). Without
@@ -610,10 +743,16 @@ impl SessionManager {
             // gets re-applied) sends its entire accumulated in-memory
             // history to any client that attaches later. A GUI client
             // rendering that as one flat turn list can peg Auto Layout
-            // trying to lay out thousands of historical turns at once.
-            if turns.len() > SCROLLBACK_TURNS {
-                turns = turns.split_off(turns.len() - SCROLLBACK_TURNS);
-            }
+            // trying to lay out thousands of historical turns at once. The
+            // live transcript is itself now bounded (RETAINED_TURNS /
+            // RETAINED_BYTES), so this only clones the tail actually served
+            // rather than the whole retained history.
+            let turns = session
+                .shared
+                .transcript
+                .lock()
+                .unwrap()
+                .recent_turns(SCROLLBACK_TURNS);
             let state = session.state();
             let rx = session.shared.event_tx.subscribe();
             (turns, state, rx)
@@ -717,6 +856,14 @@ impl SessionManager {
             }
             debug!(tag, "session stopped");
         }
+        // The session is going down (permanently, or about to be respawned by
+        // `restart`/`new_session`, both of which call this first) — either
+        // way, nobody can answer a decision addressed to this tag right now.
+        // A `restart` that lands moments later gets a *fresh* decision if the
+        // agent asks again; it never inherits the cancelled one.
+        if let Some(reg) = &self.decisions {
+            reg.lock().unwrap().cancel_tag(tag);
+        }
     }
 
     /// Stop then respawn with `--resume <session_id>`, preserving the set of
@@ -755,6 +902,7 @@ impl SessionManager {
             // Test stub / fixed program: replay it verbatim.
             Some((program, args)) => {
                 let effective_id = sid.unwrap_or_else(|| Uuid::new_v4().to_string());
+                self.session_reverse.insert(effective_id.clone(), tag.to_string());
                 let managed = self.spawn_managed(
                     tag.to_string(),
                     agent,
@@ -942,6 +1090,12 @@ impl SessionManager {
                         reason: StopReason::CrashLoopGuard,
                     });
                 }
+                // The session will not auto-restart — cancel any decision
+                // pending for this tag rather than leaving its caller blocked
+                // on a session that is never coming back on its own.
+                if let Some(reg) = &self.decisions {
+                    reg.lock().unwrap().cancel_tag(&tag);
+                }
             } else if wants_recovery {
                 // Exit-code-aware restart policy:
                 //   exit 0 or signal (None) → restart immediately (clean shutdown).
@@ -1002,6 +1156,16 @@ impl SessionManager {
     }
 
     /// Whether `tag` currently has a live (non-exited) session child.
+    /// The working directory `tag`'s session was spawned in, if it has one.
+    ///
+    /// This is the root every file read for that focus is resolved against
+    /// (W2 — curated-agent-views): a focus's session cwd is the only
+    /// definition of "the repo" the daemon has, and confining reads to it is
+    /// what makes `path_escapes_root` enforceable.
+    pub fn cwd_for(&self, tag: &str) -> Option<PathBuf> {
+        self.sessions.get(tag).and_then(|s| s.cwd.clone())
+    }
+
     pub fn has_live_session(&self, tag: &str) -> bool {
         self.sessions.get(tag).map(|s| s.alive()).unwrap_or(false)
     }
@@ -1043,6 +1207,13 @@ impl SessionManager {
             }
         }
         self.client_senders.lock().unwrap().remove(client_id);
+
+        // Drop any rendered-shape reports this connection contributed (W1 —
+        // render-state-visibility) — a closed window's report must not
+        // outlive the connection that sent it.
+        if let Some(reg) = &self.pane_registry {
+            reg.lock().unwrap().prune_rendered_shapes_for_conn(client_id);
+        }
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
@@ -1064,17 +1235,26 @@ impl SessionManager {
 
     /// Scan all sessions for pending summary emissions.  Called from the
     /// supervisor tick immediately after `reap_and_recover`.  For each session
-    /// whose `summary_sent` flag is still false, derives a summary from
-    /// `turns[0].user_input` and broadcasts it to all clients.  The flag is
-    /// set to `true` before the broadcast so a second tick is a no-op even if
-    /// the send fails.
+    /// whose `summary_sent` flag is still false, derives a summary from the
+    /// transcript's first user prompt and broadcasts it to all clients.  The
+    /// flag is set to `true` before the broadcast so a second tick is a no-op
+    /// even if the send fails.
     pub fn emit_pending_summaries(&self) {
         for (tag, session) in &self.sessions {
             if session.summary_sent.load(Ordering::SeqCst) {
                 continue;
             }
-            let turns = session.shared.transcript.lock().unwrap().snapshot();
-            if let Some(summary) = derive_summary(&turns) {
+            let first = session
+                .shared
+                .transcript
+                .lock()
+                .unwrap()
+                .first_user_input()
+                .map(str::to_owned);
+            let Some(first) = first else {
+                continue;
+            };
+            if let Some(summary) = derive_summary(&first) {
                 session.summary_sent.store(true, Ordering::SeqCst);
                 self.send_to_all_clients(ServerMsg::SessionSummaryUpdate {
                     tag: tag.clone(),
@@ -1375,14 +1555,12 @@ fn augment_path(cmd: &mut Command) {
 
 // ── summary derivation ────────────────────────────────────────────────────────
 
-/// Derive a short display summary from the first user turn.
+/// Derive a short display summary from the first user turn's raw text.
 ///
 /// - Collapses newlines and runs of whitespace to a single space.
 /// - Returns `None` for empty / whitespace-only input.
 /// - Truncates to 40 chars (by `char` count) with a `…` suffix if longer.
-fn derive_summary(turns: &[Turn]) -> Option<String> {
-    let raw = turns.first().map(|t| t.user_input.as_str())?;
-
+fn derive_summary(raw: &str) -> Option<String> {
     // Collapse all whitespace (including newlines) to single spaces, then trim.
     let collapsed: String = raw
         .chars()
@@ -1420,7 +1598,7 @@ pub fn default_store_path() -> PathBuf {
         .join("daemon-sessions.json")
 }
 
-fn load_id_store(path: &std::path::Path) -> HashMap<String, String> {
+pub(crate) fn load_id_store(path: &std::path::Path) -> HashMap<String, String> {
     std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -1477,35 +1655,25 @@ mod tests {
 
     // ── derive_summary ────────────────────────────────────────────────────────
 
-    fn make_turns(user_input: &str) -> Vec<Turn> {
-        vec![Turn {
-            id: "t0".into(),
-            user_input: user_input.into(),
-            timestamp: None,
-            blocks: vec![],
-            is_complete: false,
-        }]
-    }
-
     #[test]
     fn derive_summary_short_passthrough() {
-        let turns = make_turns("Build the auth flow");
-        assert_eq!(derive_summary(&turns), Some("Build the auth flow".into()));
+        assert_eq!(
+            derive_summary("Build the auth flow"),
+            Some("Build the auth flow".into())
+        );
     }
 
     #[test]
     fn derive_summary_exactly_40_chars_not_truncated() {
         // 40 chars — should pass through unchanged
         let input = "a".repeat(40);
-        let turns = make_turns(&input);
-        assert_eq!(derive_summary(&turns), Some(input));
+        assert_eq!(derive_summary(&input), Some(input));
     }
 
     #[test]
     fn derive_summary_41_chars_gets_ellipsis() {
         let input = "a".repeat(41);
-        let turns = make_turns(&input);
-        let result = derive_summary(&turns).unwrap();
+        let result = derive_summary(&input).unwrap();
         assert!(result.ends_with('\u{2026}'), "should end with ellipsis: {result:?}");
         // The truncated part is 40 chars + 1 ellipsis codepoint
         assert_eq!(result.chars().count(), 41);
@@ -1513,31 +1681,66 @@ mod tests {
 
     #[test]
     fn derive_summary_collapses_newlines() {
-        let turns = make_turns("Fix the bug\nin the login\r\nmodule");
-        assert_eq!(derive_summary(&turns), Some("Fix the bug in the login module".into()));
+        assert_eq!(
+            derive_summary("Fix the bug\nin the login\r\nmodule"),
+            Some("Fix the bug in the login module".into())
+        );
     }
 
     #[test]
     fn derive_summary_collapses_extra_spaces() {
-        let turns = make_turns("  lots   of   spaces  ");
-        assert_eq!(derive_summary(&turns), Some("lots of spaces".into()));
+        assert_eq!(
+            derive_summary("  lots   of   spaces  "),
+            Some("lots of spaces".into())
+        );
     }
 
     #[test]
     fn derive_summary_empty_returns_none() {
-        let turns = make_turns("");
-        assert_eq!(derive_summary(&turns), None);
+        assert_eq!(derive_summary(""), None);
     }
 
     #[test]
     fn derive_summary_whitespace_only_returns_none() {
-        let turns = make_turns("   \n\t\r\n   ");
-        assert_eq!(derive_summary(&turns), None);
+        assert_eq!(derive_summary("   \n\t\r\n   "), None);
     }
 
     #[test]
-    fn derive_summary_no_turns_returns_none() {
-        assert_eq!(derive_summary(&[]), None);
+    fn derive_summary_empty_str_returns_none() {
+        assert_eq!(derive_summary(""), None);
+    }
+
+    #[test]
+    fn summary_survives_transcript_trimming() {
+        use super::super::stream_json::RETAINED_TURNS;
+
+        // Regression guard for RC3: the session summary must not silently
+        // change or disappear once old turns get trimmed away by
+        // SessionTranscript's retention bound.
+        let mut t = SessionTranscript::new();
+        let total = RETAINED_TURNS + 50;
+        for i in 0..total {
+            let text = if i == 0 {
+                "first request".to_string()
+            } else {
+                format!("turn {i}")
+            };
+            let _ = t.ingest_line(&format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"{text}"}},"isReplay":true}}"#
+            ));
+            let _ = t.ingest_line(
+                r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}"#,
+            );
+        }
+
+        let first_input = t
+            .first_user_input()
+            .expect("first_user_input must survive trimming past RETAINED_TURNS");
+        assert_eq!(
+            derive_summary(first_input),
+            Some("first request".to_string()),
+            "the session summary must not silently change or disappear once old turns are trimmed"
+        );
     }
 
     // ── arg construction ──────────────────────────────────────────────────────
@@ -1636,6 +1839,135 @@ mod tests {
         let p = resolve_claude().unwrap();
         assert_eq!(p, PathBuf::from("/custom/path/to/claude"));
         std::env::remove_var(CLAUDE_BIN_ENV);
+    }
+
+    // ── session-id reverse index (activity-path wedge) ────────────────────────
+    //
+    // `CLAUDE_BIN_ENV` is pointed at `/bin/sh` so `spawn_session` performs a
+    // real spawn (exercising the real `effective_id` resolution path) without
+    // touching the real `claude` binary. `/bin/sh` chokes on the claude-style
+    // flags and exits almost immediately — irrelevant here, since these tests
+    // only assert on the reverse index, which is populated synchronously by
+    // `spawn_session`/`restart` before the child's behavior matters at all.
+
+    #[tokio::test]
+    async fn after_spawn_session_tag_for_session_id_resolves() {
+        std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        let effective_id = mgr
+            .spawn_session("cody-1".into(), "cody".into(), "Cody".into(), None, None, false)
+            .unwrap()
+            .expect("a fresh session id is always resolved");
+        assert_eq!(
+            mgr.tag_for_session_id(&effective_id),
+            Some("cody-1".to_string())
+        );
+        std::env::remove_var(CLAUDE_BIN_ENV);
+    }
+
+    #[tokio::test]
+    async fn after_restart_tag_for_session_id_still_resolves() {
+        std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        let effective_id = mgr
+            .spawn_session("cody-2".into(), "cody".into(), "Cody".into(), None, None, false)
+            .unwrap()
+            .expect("a fresh session id is always resolved");
+
+        mgr.restart("cody-2").unwrap();
+
+        assert_eq!(
+            mgr.tag_for_session_id(&effective_id),
+            Some("cody-2".to_string()),
+            "restart must keep the reverse index resolvable for the (possibly reused) session id"
+        );
+        std::env::remove_var(CLAUDE_BIN_ENV);
+    }
+
+    #[test]
+    fn seed_reverse_index_populates_from_on_disk_store() {
+        let path = tmp_store();
+        save_id(&path, "fred", Some("sid-fred"));
+        save_id(&path, "teri", Some("sid-teri"));
+
+        let mut mgr = SessionManager::with_store_path(path.clone());
+        assert_eq!(
+            mgr.tag_for_session_id("sid-fred"),
+            None,
+            "the reverse index must not be populated before seeding"
+        );
+
+        mgr.seed_reverse_index();
+
+        assert_eq!(mgr.tag_for_session_id("sid-fred"), Some("fred".to_string()));
+        assert_eq!(mgr.tag_for_session_id("sid-teri"), Some("teri".to_string()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tag_for_session_id_returns_none_for_unknown_id() {
+        let mgr = SessionManager::with_store_path(tmp_store());
+        assert_eq!(mgr.tag_for_session_id("no-such-session-id"), None);
+    }
+
+    // ── activity attribution resolution (activity-path wedge D2) ──────────────
+
+    fn raw_activity_event(focus_tag: Option<&str>, session_id: Option<&str>) -> crate::agent_bus::ActivityEvent {
+        crate::agent_bus::ActivityEvent {
+            ts: chrono::Utc::now(),
+            agent: "claude".into(),
+            kind: "tool_use".into(),
+            summary: "reading a file".into(),
+            focus_tag: focus_tag.map(str::to_string),
+            session_id: session_id.map(str::to_string),
+            agent_id: None,
+            agent_type: None,
+            parent_agent_id: None,
+            tool_name: None,
+            tool_use_id: None,
+            cwd: None,
+            seq: None,
+        }
+    }
+
+    #[test]
+    fn an_event_with_a_focus_tag_the_daemon_knows_is_attributed_to_that_focus() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![FocusMeta {
+            tag: "fred".into(),
+            display_name: "Fred".into(),
+            agent_name: "fred".into(),
+            project_name: None,
+            org: None,
+            is_built_in: true,
+            session_summary: None,
+        }]);
+
+        let finalized = mgr.ingest_activity_event(raw_activity_event(Some("fred"), None));
+        assert_eq!(finalized.focus_tag.as_deref(), Some("fred"));
+        assert_eq!(finalized.seq, Some(0), "an attributed event must be seq-assigned");
+        assert_eq!(mgr.activity_streams_for_focus("fred").len(), 1);
+    }
+
+    #[test]
+    fn an_unknown_focus_tag_falls_back_to_the_session_id_reverse_index() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.session_reverse.insert("sess-1".into(), "cody-1".into());
+
+        // "cody-1" is not in the registry/sessions map, but the session id
+        // resolves via the reverse index — the fallback must still find it.
+        let finalized = mgr.ingest_activity_event(raw_activity_event(Some("cody-1"), Some("sess-1")));
+        assert_eq!(mgr.activity_streams_for_focus("cody-1").len(), 1, "{finalized:?}");
+    }
+
+    #[test]
+    fn an_event_with_no_resolvable_focus_or_session_is_unattributed_not_dropped() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.ingest_activity_event(raw_activity_event(None, None));
+        // Never silently dropped, and never assigned to an arbitrary focus.
+        assert!(mgr.activity_streams_for_focus("mother").is_empty());
+        assert!(mgr.activity_health().ingesting);
     }
 
     // ── manager mechanics with a stub child ───────────────────────────────────

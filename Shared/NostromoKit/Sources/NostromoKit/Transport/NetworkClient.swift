@@ -231,7 +231,14 @@ public final class NetworkClient: ObservableObject {
     private func sendHello() {
         send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4))
         // Phase 0: subscribe to all topics (empty list = "everything").
-        send(ClientSubscribe(topics: []))
+        // rendersDecisions: true — ios-curated-view-parity W3 gave iOS a
+        // real decision-modal surface (DaemonStore.pendingDecisions /
+        // DecisionStore / DecisionSheetView), so this client can now
+        // actually present and answer a `decision_request`. This claim is
+        // earned, not aspirational: `DaemonStore.handle`'s `.decisionRequest`
+        // arm is what makes it true, and a test ties the two together so
+        // they can't silently drift apart in either direction.
+        send(ClientSubscribe(topics: [], rendersDecisions: true))
     }
 
     // MARK: - Send

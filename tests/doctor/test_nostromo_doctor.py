@@ -15,7 +15,10 @@ Run with:
 import datetime
 import importlib.machinery
 import importlib.util
+import json
 import os
+import shutil
+import tempfile
 import unittest
 
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "bin", "nostromo-doctor")
@@ -836,6 +839,177 @@ class ClassifySessionSignalTests(unittest.TestCase):
                     self.assertEqual(status, doctor.STATUS_WARN)
                 else:
                     self.assertEqual(status, doctor.STATUS_OK)
+
+
+# ── ambient activity hook detection / --fix (activity-path wedge D7) ────────
+#
+# These tests only ever touch a TempDir-scoped settings file — never the
+# operator's real `~/.claude/settings.json`. `fix_activity_hook` and
+# `check_activity_hook` both take/derive a path, so no test here can reach
+# outside its own sandbox.
+
+
+def _installed_settings(command="/Users/hammer/.local/bin/nostromo-activity-hook"):
+    return {
+        "hooks": {
+            "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}],
+            "SubagentStart": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}],
+            "SubagentStop": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}],
+        }
+    }
+
+
+class ClassifyActivityHookInstallationTests(unittest.TestCase):
+    def test_fully_installed_settings_have_no_missing_events(self):
+        self.assertEqual(doctor.classify_activity_hook_installation(_installed_settings()), [])
+
+    def test_none_settings_reports_every_event_missing(self):
+        self.assertEqual(
+            doctor.classify_activity_hook_installation(None),
+            list(doctor.ACTIVITY_HOOK_EVENTS),
+        )
+
+    def test_empty_dict_settings_reports_every_event_missing(self):
+        self.assertEqual(
+            doctor.classify_activity_hook_installation({}),
+            list(doctor.ACTIVITY_HOOK_EVENTS),
+        )
+
+    def test_missing_one_event_is_reported_precisely(self):
+        settings = _installed_settings()
+        del settings["hooks"]["SubagentStop"]
+        self.assertEqual(doctor.classify_activity_hook_installation(settings), ["SubagentStop"])
+
+    def test_an_unrelated_hook_for_the_same_event_does_not_count_as_installed(self):
+        settings = {
+            "hooks": {
+                "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "/usr/bin/some-other-hook"}]}],
+            }
+        }
+        self.assertIn("PostToolUse", doctor.classify_activity_hook_installation(settings))
+
+    def test_malformed_hooks_shape_does_not_crash_and_reports_missing(self):
+        settings = {"hooks": "not a dict"}
+        self.assertEqual(
+            doctor.classify_activity_hook_installation(settings),
+            list(doctor.ACTIVITY_HOOK_EVENTS),
+        )
+
+
+class CheckActivityHookTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.settings_path = os.path.join(self.tmpdir, "settings.json")
+        self._real_path_fn = doctor._claude_settings_path
+        doctor._claude_settings_path = lambda: self.settings_path
+
+    def tearDown(self):
+        doctor._claude_settings_path = self._real_path_fn
+
+    def _write(self, obj):
+        with open(self.settings_path, "w") as f:
+            json.dump(obj, f)
+
+    def test_missing_settings_file_is_warn_with_a_fix_next_step(self):
+        result = doctor.check_activity_hook({})
+        self.assertEqual(result.status, doctor.STATUS_WARN)
+        self.assertIn("doctor --fix", result.next_step)
+
+    def test_fully_installed_is_ok_with_no_next_step(self):
+        self._write(_installed_settings())
+        result = doctor.check_activity_hook({})
+        self.assertEqual(result.status, doctor.STATUS_OK)
+        self.assertIsNone(result.next_step)
+
+    def test_partially_installed_is_warn_and_names_the_missing_events(self):
+        settings = _installed_settings()
+        del settings["hooks"]["SubagentStart"]
+        self._write(settings)
+        result = doctor.check_activity_hook({})
+        self.assertEqual(result.status, doctor.STATUS_WARN)
+        self.assertIn("SubagentStart", result.detail)
+
+
+class AddActivityHookEntriesTests(unittest.TestCase):
+    def test_adds_all_three_events_to_empty_settings(self):
+        updated = doctor.add_activity_hook_entries({}, "/path/to/nostromo-activity-hook")
+        self.assertEqual(doctor.classify_activity_hook_installation(updated), [])
+
+    def test_never_duplicates_an_already_installed_event(self):
+        settings = _installed_settings(command="/path/to/nostromo-activity-hook")
+        updated = doctor.add_activity_hook_entries(settings, "/path/to/nostromo-activity-hook")
+        for event_name in doctor.ACTIVITY_HOOK_EVENTS:
+            self.assertEqual(len(updated["hooks"][event_name]), 1)
+
+    def test_preserves_an_existing_unrelated_hook_for_the_same_event(self):
+        settings = {
+            "hooks": {
+                "PostToolUse": [{"matcher": "*.py", "hooks": [{"type": "command", "command": "/usr/bin/lint-hook"}]}],
+            }
+        }
+        updated = doctor.add_activity_hook_entries(settings, "/path/to/nostromo-activity-hook")
+        commands = doctor._hook_commands_for_event(updated, "PostToolUse")
+        self.assertIn("/usr/bin/lint-hook", commands)
+        self.assertTrue(any("nostromo-activity-hook" in c for c in commands))
+
+    def test_preserves_unrelated_top_level_settings_keys(self):
+        settings = {"otherSetting": "preserve me", "hooks": {}}
+        updated = doctor.add_activity_hook_entries(settings, "/path/to/nostromo-activity-hook")
+        self.assertEqual(updated["otherSetting"], "preserve me")
+
+    def test_does_not_mutate_the_input_settings_dict(self):
+        settings = {}
+        doctor.add_activity_hook_entries(settings, "/path/to/nostromo-activity-hook")
+        self.assertEqual(settings, {}, "the caller's dict must never be mutated in place")
+
+    def test_none_settings_is_treated_as_empty(self):
+        updated = doctor.add_activity_hook_entries(None, "/path/to/nostromo-activity-hook")
+        self.assertEqual(doctor.classify_activity_hook_installation(updated), [])
+
+
+class FixActivityHookTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.settings_path = os.path.join(self.tmpdir, "nested", "settings.json")
+
+    def test_fix_creates_missing_parent_directories(self):
+        doctor.fix_activity_hook(self.settings_path)
+        self.assertTrue(os.path.isfile(self.settings_path))
+
+    def test_fix_writes_a_settings_file_the_check_then_reports_as_installed(self):
+        doctor.fix_activity_hook(self.settings_path)
+        with open(self.settings_path) as f:
+            written = json.load(f)
+        self.assertEqual(doctor.classify_activity_hook_installation(written), [])
+
+    def test_fix_is_idempotent_across_repeated_runs(self):
+        doctor.fix_activity_hook(self.settings_path)
+        doctor.fix_activity_hook(self.settings_path)
+        with open(self.settings_path) as f:
+            written = json.load(f)
+        for event_name in doctor.ACTIVITY_HOOK_EVENTS:
+            self.assertEqual(len(written["hooks"][event_name]), 1, "must not duplicate on repeated --fix runs")
+
+    def test_fix_preserves_a_pre_existing_unrelated_setting(self):
+        os.makedirs(os.path.dirname(self.settings_path))
+        with open(self.settings_path, "w") as f:
+            json.dump({"someOtherSetting": True}, f)
+        doctor.fix_activity_hook(self.settings_path)
+        with open(self.settings_path) as f:
+            written = json.load(f)
+        self.assertEqual(written["someOtherSetting"], True)
+
+    def test_fix_never_touches_the_real_operators_settings_path_by_default(self):
+        # Sanity guard on the test suite itself: every test above passes an
+        # explicit `path`, and `fix_activity_hook`'s default only resolves
+        # `~/.claude/settings.json` when called with no argument at all. This
+        # test documents that contract without ever calling the no-arg form.
+        import inspect
+        sig = inspect.signature(doctor.fix_activity_hook)
+        self.assertIn("path", sig.parameters)
+        self.assertIsNone(sig.parameters["path"].default)
 
 
 if __name__ == "__main__":

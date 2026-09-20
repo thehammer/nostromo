@@ -13,6 +13,8 @@
 		AA0000000000000000000013 /* NostromoWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000003 /* NostromoWindow.swift */; };
 		AA0000020000000000000101 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000001 /* Models.swift */; };
 		AA0000020000000000000102 /* NostromodClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002 /* NostromodClient.swift */; };
+		JJ0000000000000000000011 /* IPCLatencyStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000001 /* IPCLatencyStats.swift */; };
+		JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000002 /* DaemonDiagnostics.swift */; };
 		AA0000020000000000000103 /* FileWatchers.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000003 /* FileWatchers.swift */; };
 		AA0000020000000000000104 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000004 /* AppStore.swift */; };
 		AA0000020000000000000105 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000005 /* Theme.swift */; };
@@ -46,16 +48,131 @@
 		CC00000000000000000000A3 /* Theme.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000005 /* Theme.swift */; };
 		CC00000000000000000000A4 /* DiffColoring.swift in TestSources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000B0 /* DiffColoring.swift */; };
 		CC00000000000000000000A5 /* DiffColoring.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000B0 /* DiffColoring.swift */; };
+		LL0000000000000000000101 /* CodeDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000001 /* CodeDocument.swift */; };
+		LL0000000000000000000201 /* CodeDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000001 /* CodeDocument.swift */; };
+		LL0000000000000000000102 /* DiffDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000002 /* DiffDocument.swift */; };
+		LL0000000000000000000202 /* DiffDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000002 /* DiffDocument.swift */; };
+		LL0000000000000000000103 /* ScrollDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000003 /* ScrollDecision.swift */; };
+		LL0000000000000000000203 /* ScrollDecision.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000003 /* ScrollDecision.swift */; };
+		LL0000000000000000000104 /* DiffAttributedString.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000004 /* DiffAttributedString.swift */; };
+		LL0000000000000000000204 /* DiffAttributedString.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000004 /* DiffAttributedString.swift */; };
+		LL0000000000000000000105 /* CodeContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000005 /* CodeContentView.swift */; };
+		LL0000000000000000000106 /* RowOffsetIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000010 /* RowOffsetIndex.swift */; };
+		LL0000000000000000000205 /* RowOffsetIndex.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000010 /* RowOffsetIndex.swift */; };
+		LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000006 /* CodeDocumentTests.swift */; };
+		LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000007 /* DiffDocumentTests.swift */; };
+		LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000008 /* ScrollDecisionTests.swift */; };
+		LL0000000000000000000304 /* CodeContentViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000009 /* CodeContentViewTests.swift */; };
+		LL0000000000000000000305 /* RowOffsetIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000011 /* RowOffsetIndexTests.swift */; };
+		LL0000000000000000000107 /* CodePaneRenderAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000012 /* CodePaneRenderAudit.swift */; };
+		LL0000000000000000000206 /* CodePaneRenderAudit.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000012 /* CodePaneRenderAudit.swift */; };
+		LL0000000000000000000306 /* CodePaneRenderAuditTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000013 /* CodePaneRenderAuditTests.swift */; };
 		DD00000000000000000000A1 /* SessionHealthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD00000000000000000000A0 /* SessionHealthTests.swift */; };
 		DD00000000000000000000A2 /* NostromodClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002 /* NostromodClient.swift */; };
+		JJ0000000000000000000012 /* IPCLatencyStats.swift in TestSources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000001 /* IPCLatencyStats.swift */; };
+		JJ0000000000000000000014 /* IPCLatencyStatsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */; };
 		DD00000000000000000000A3 /* ChatModels.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000030 /* ChatModels.swift */; };
 		DD00000000000000000000A4 /* ChatSession.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000031 /* ChatSession.swift */; };
 		FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
 		FF00000000000000000000A3 /* SidenavGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000A1 /* SidenavGrouping.swift */; };
 		FF00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000B1 /* SidenavGroupingTests.swift */; };
 		HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */; };
+		ZZ0000000000000000000002 /* PaneAddressDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000000001 /* PaneAddressDecodeTests.swift */; };
+		KK0000000000000000000011 /* LayoutChangeClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000001 /* LayoutChangeClassifier.swift */; };
+		KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000001 /* LayoutChangeClassifier.swift */; };
+		KK0000000000000000000021 /* TabRegionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000002 /* TabRegionView.swift */; };
+		KK0000000000000000000022 /* TabRegionView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000002 /* TabRegionView.swift */; };
+		TB0000000000000000000002 /* TabRegionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TB0000000000000000000001 /* TabRegionViewTests.swift */; };
+		KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */; };
+		QQ0000000000000000000101 /* PaneRenderPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000001 /* PaneRenderPlan.swift */; };
+		QQ0000000000000000000102 /* PaneRenderPlan.swift in TestSources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000001 /* PaneRenderPlan.swift */; };
+		QQ0000000000000000000201 /* RatioSolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000002 /* RatioSolver.swift */; };
+		QQ0000000000000000000202 /* RatioSolver.swift in TestSources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000002 /* RatioSolver.swift */; };
+		QQ0000000000000000000301 /* PaneRenderPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000003 /* PaneRenderPlanTests.swift */; };
+		QQ0000000000000000000401 /* RatioSolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000004 /* RatioSolverTests.swift */; };
+		QQ0000000000000000000501 /* DynamicFocusViewWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */; };
+		RR0000000000000000000101 /* PRDetailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000001 /* PRDetailCache.swift */; };
+		RR0000000000000000000102 /* PRDetailCache.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000001 /* PRDetailCache.swift */; };
+		RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RR0000000000000000000003 /* PRDetailCacheTests.swift */; };
+		WW0000000000000000000001 /* DiffPaneSummaryPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000000 /* DiffPaneSummaryPolicyTests.swift */; };
+		WW0000000000000000000003 /* DiffPaneSummaryWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */; };
+		XX0000000000000000000011 /* NotificationDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = XX0000000000000000000001 /* NotificationDecodeTests.swift */; };
+		XX0000000000000000000012 /* MainLayoutNotificationWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */; };
+		YY0000000000000000000002 /* PaneContentViewForEachIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = YY0000000000000000000001 /* PaneContentViewForEachIdentityTests.swift */; };
+		WW0000000000000000000005 /* DiffPaneSummaryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */; };
+		WW0000000000000000000006 /* DiffPaneSummaryPolicy.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */; };
+		TT0000000000000000000001 /* ChatSessionDetachTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT0000000000000000000000 /* ChatSessionDetachTests.swift */; };
+		UU0000000000000000000001 /* PerFocusEvictionWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */; };
+		QQ0000000000000000000601 /* RatioPersistencePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000006 /* RatioPersistencePolicy.swift */; };
+		QQ0000000000000000000602 /* RatioPersistencePolicy.swift in TestSources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000006 /* RatioPersistencePolicy.swift */; };
+		QQ0000000000000000000701 /* RatioPersistencePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QQ0000000000000000000007 /* RatioPersistencePolicyTests.swift */; };
+		VV0000000000000000000101 /* PaneFirstPaintAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = VV0000000000000000000001 /* PaneFirstPaintAudit.swift */; };
+		RA0000000000000000000101 /* RatioApplicationAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = RA0000000000000000000001 /* RatioApplicationAudit.swift */; };
+		RA0000000000000000000102 /* RatioApplicationAudit.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RA0000000000000000000001 /* RatioApplicationAudit.swift */; };
+		RA0000000000000000000201 /* RatioApplicationAuditTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RA0000000000000000000002 /* RatioApplicationAuditTests.swift */; };
+		VV0000000000000000000102 /* PaneFirstPaintAudit.swift in TestSources */ = {isa = PBXBuildFile; fileRef = VV0000000000000000000001 /* PaneFirstPaintAudit.swift */; };
+		VV0000000000000000000201 /* PaneFirstPaintAuditTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = VV0000000000000000000002 /* PaneFirstPaintAuditTests.swift */; };
 		CC00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
 		GG00000000000000000000C1 /* NostromoKit in Frameworks (NostromoTests) */ = {isa = PBXBuildFile; productRef = CC00000100000000000000AA /* NostromoKit */; };
+		HH000000000000000000011 /* TurnReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000010 /* TurnReconciler.swift */; };
+		HH000000000000000000012 /* TurnReconciler.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000010 /* TurnReconciler.swift */; };
+		HH000000000000000000021 /* TurnPayloadStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000020 /* TurnPayloadStore.swift */; };
+		HH000000000000000000022 /* TurnPayloadStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000020 /* TurnPayloadStore.swift */; };
+		HH000000000000000000031 /* ThumbnailLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000030 /* ThumbnailLoader.swift */; };
+		HH000000000000000000041 /* MemoryWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000040 /* MemoryWatchdog.swift */; };
+		HH000000000000000000042 /* MemoryWatchdog.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000040 /* MemoryWatchdog.swift */; };
+		HH000000000000000000051 /* TranscriptDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000050 /* TranscriptDiagnostics.swift */; };
+		LL0000000000000000000108 /* PaneContentDump.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000014 /* PaneContentDump.swift */; };
+		LL0000000000000000000109 /* PaneContentDump.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000014 /* PaneContentDump.swift */; };
+		HH000000000000000000061 /* TranscriptLoadHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000060 /* TranscriptLoadHarness.swift */; };
+		HH000000000000000000071 /* TurnListVirtualizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000070 /* TurnListVirtualizer.swift */; };
+		HH000000000000000000072 /* TurnListVirtualizer.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000070 /* TurnListVirtualizer.swift */; };
+		HH000000000000000000081 /* TurnHeightEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000080 /* TurnHeightEstimator.swift */; };
+		HH000000000000000000082 /* TurnHeightEstimator.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000080 /* TurnHeightEstimator.swift */; };
+		HH000000000000000000102 /* TurnReconcilerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000100 /* TurnReconcilerTests.swift */; };
+		HH000000000000000000112 /* TurnPayloadStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000110 /* TurnPayloadStoreTests.swift */; };
+		HH000000000000000000122 /* TurnListVirtualizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000120 /* TurnListVirtualizerTests.swift */; };
+		HH000000000000000000132 /* TurnHeightEstimatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000130 /* TurnHeightEstimatorTests.swift */; };
+		TT000000000000000000042 /* ChatTurnViewLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000040 /* ChatTurnViewLayoutTests.swift */; };
+		HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000140 /* ImageDecodePolicyTests.swift */; };
+		HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000150 /* MemoryWatchdogTests.swift */; };
+		II000000000000000000011 /* TurnInteractionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000010 /* TurnInteractionStore.swift */; };
+		II000000000000000000012 /* TurnInteractionStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000010 /* TurnInteractionStore.swift */; };
+		II000000000000000000021 /* AskQuestionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000020 /* AskQuestionView.swift */; };
+		II000000000000000000022 /* AskQuestionView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000020 /* AskQuestionView.swift */; };
+		II000000000000000000031 /* ToolResultView.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000030 /* ToolResultView.swift */; };
+		II000000000000000000032 /* ToolResultView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000030 /* ToolResultView.swift */; };
+		TT000000000000000000011 /* ChatTurnView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000010 /* ChatTurnView.swift */; };
+		TT000000000000000000012 /* ChatTurnView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000010 /* ChatTurnView.swift */; };
+		TT000000000000000000021 /* MarkdownTableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000020 /* MarkdownTableView.swift */; };
+		TT000000000000000000022 /* MarkdownTableView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000020 /* MarkdownTableView.swift */; };
+		TT000000000000000000032 /* MarkdownCardView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000C0 /* MarkdownCardView.swift */; };
+		II000000000000000000041 /* LoadHarnessTargeting.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000040 /* LoadHarnessTargeting.swift */; };
+		II000000000000000000042 /* LoadHarnessTargeting.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000040 /* LoadHarnessTargeting.swift */; };
+		II000000000000000000102 /* TurnInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000100 /* TurnInteractionTests.swift */; };
+		II000000000000000000112 /* ChatSessionCompactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000110 /* ChatSessionCompactionTests.swift */; };
+		II000000000000000000122 /* LoadHarnessTargetingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000120 /* LoadHarnessTargetingTests.swift */; };
+		OO000000000000000000011 /* DecisionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000010 /* DecisionStore.swift */; };
+		OO000000000000000000012 /* DecisionStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000010 /* DecisionStore.swift */; };
+		OO000000000000000000021 /* DecisionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000020 /* DecisionSheet.swift */; };
+		OO000000000000000000031 /* DecisionPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000030 /* DecisionPresenter.swift */; };
+		KK000000000000000000102 /* DecisionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000100 /* DecisionStoreTests.swift */; };
+		MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
+		MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
+		MM0000000000000000000102 /* ConversationContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000002 /* ConversationContentView.swift */; };
+		OO0000000000000000000101 /* TicketBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000001 /* TicketBlockDocument.swift */; };
+		OO0000000000000000000201 /* TicketBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000001 /* TicketBlockDocument.swift */; };
+		OO0000000000000000000102 /* TicketContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000002 /* TicketContentView.swift */; };
+		NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */; };
+		PP000000000000000000002 /* ActivityStreamModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000001 /* ActivityStreamModel.swift */; };
+		PP000000000000000000003 /* ActivityStreamModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000001 /* ActivityStreamModel.swift */; };
+		PP000000000000000000005 /* ActivityTickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000004 /* ActivityTickerView.swift */; };
+		PP000000000000000000007 /* ActivityEventDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000006 /* ActivityEventDecodeTests.swift */; };
+		PP000000000000000000009 /* ActivityStreamModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000008 /* ActivityStreamModelTests.swift */; };
+		PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000010 /* ActivityTickerWiringTests.swift */; };
+		PP000000000000000000013 /* StatusBarActivityRemovalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */; };
+		PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP0000000000000000000001 /* TicketBlockDocumentTests.swift */; };
+
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -95,11 +212,95 @@
 		BB00000000000000000000C2 /* PhaseRibbonTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhaseRibbonTests.swift; sourceTree = "<group>"; };
 		CC00000000000000000000A0 /* PerriModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriModelTests.swift; sourceTree = "<group>"; };
 		CC00000000000000000000B0 /* DiffColoring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffColoring.swift; sourceTree = "<group>"; };
+		LL0000000000000000000001 /* CodeDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeDocument.swift; sourceTree = "<group>"; };
+		LL0000000000000000000002 /* DiffDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffDocument.swift; sourceTree = "<group>"; };
+		LL0000000000000000000003 /* ScrollDecision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDecision.swift; sourceTree = "<group>"; };
+		LL0000000000000000000004 /* DiffAttributedString.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffAttributedString.swift; sourceTree = "<group>"; };
+		LL0000000000000000000005 /* CodeContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeContentView.swift; sourceTree = "<group>"; };
+		LL0000000000000000000010 /* RowOffsetIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowOffsetIndex.swift; sourceTree = "<group>"; };
+		LL0000000000000000000006 /* CodeDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeDocumentTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000007 /* DiffDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffDocumentTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000008 /* ScrollDecisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDecisionTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000009 /* CodeContentViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeContentViewTests.swift; sourceTree = "<group>"; };
+		YY0000000000000000000001 /* PaneContentViewForEachIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentViewForEachIdentityTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000011 /* RowOffsetIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowOffsetIndexTests.swift; sourceTree = "<group>"; };
+		LL0000000000000000000012 /* CodePaneRenderAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodePaneRenderAudit.swift; sourceTree = "<group>"; };
+		LL0000000000000000000013 /* CodePaneRenderAuditTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodePaneRenderAuditTests.swift; sourceTree = "<group>"; };
 		DD00000000000000000000A0 /* SessionHealthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHealthTests.swift; sourceTree = "<group>"; };
 		FF00000000000000000000A1 /* SidenavGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGrouping.swift; sourceTree = "<group>"; };
 		FF00000000000000000000B1 /* SidenavGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavGroupingTests.swift; sourceTree = "<group>"; };
 		HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentWireEqualityTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000000001 /* PaneAddressDecodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAddressDecodeTests.swift; sourceTree = "<group>"; };
+		KK0000000000000000000001 /* LayoutChangeClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifier.swift; sourceTree = "<group>"; };
+		KK0000000000000000000002 /* TabRegionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRegionView.swift; sourceTree = "<group>"; };
+		KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutChangeClassifierTests.swift; sourceTree = "<group>"; };
+		TB0000000000000000000001 /* TabRegionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRegionViewTests.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000001 /* PaneRenderPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneRenderPlan.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000002 /* RatioSolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioSolver.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000003 /* PaneRenderPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneRenderPlanTests.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000004 /* RatioSolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioSolverTests.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicFocusViewWiringTests.swift; sourceTree = "<group>"; };
+		RR0000000000000000000001 /* PRDetailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRDetailCache.swift; sourceTree = "<group>"; };
+		RR0000000000000000000003 /* PRDetailCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRDetailCacheTests.swift; sourceTree = "<group>"; };
+		WW0000000000000000000000 /* DiffPaneSummaryPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffPaneSummaryPolicyTests.swift; sourceTree = "<group>"; };
+		WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffPaneSummaryWiringTests.swift; sourceTree = "<group>"; };
+		WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffPaneSummaryPolicy.swift; sourceTree = "<group>"; };
+		TT0000000000000000000000 /* ChatSessionDetachTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionDetachTests.swift; sourceTree = "<group>"; };
+		XX0000000000000000000001 /* NotificationDecodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationDecodeTests.swift; sourceTree = "<group>"; };
+		XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainLayoutNotificationWiringTests.swift; sourceTree = "<group>"; };
+		UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerFocusEvictionWiringTests.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000006 /* RatioPersistencePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioPersistencePolicy.swift; sourceTree = "<group>"; };
+		QQ0000000000000000000007 /* RatioPersistencePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioPersistencePolicyTests.swift; sourceTree = "<group>"; };
+		VV0000000000000000000001 /* PaneFirstPaintAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneFirstPaintAudit.swift; sourceTree = "<group>"; };
+		RA0000000000000000000001 /* RatioApplicationAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioApplicationAudit.swift; sourceTree = "<group>"; };
+		RA0000000000000000000002 /* RatioApplicationAuditTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatioApplicationAuditTests.swift; sourceTree = "<group>"; };
+		VV0000000000000000000002 /* PaneFirstPaintAuditTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneFirstPaintAuditTests.swift; sourceTree = "<group>"; };
+		PP0000000000000000000001 /* TicketBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocumentTests.swift; sourceTree = "<group>"; };
+		JJ0000000000000000000001 /* IPCLatencyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStats.swift; sourceTree = "<group>"; };
+		JJ0000000000000000000002 /* DaemonDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDiagnostics.swift; sourceTree = "<group>"; };
+		JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCLatencyStatsTests.swift; sourceTree = "<group>"; };
 		BB00000000000000000000G1 /* NostromoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NostromoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		HH000000000000000000010 /* TurnReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnReconciler.swift; sourceTree = "<group>"; };
+		HH000000000000000000020 /* TurnPayloadStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPayloadStore.swift; sourceTree = "<group>"; };
+		HH000000000000000000030 /* ThumbnailLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailLoader.swift; sourceTree = "<group>"; };
+		HH000000000000000000040 /* MemoryWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdog.swift; sourceTree = "<group>"; };
+		HH000000000000000000050 /* TranscriptDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptDiagnostics.swift; sourceTree = "<group>"; };
+		LL0000000000000000000014 /* PaneContentDump.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentDump.swift; sourceTree = "<group>"; };
+		HH000000000000000000060 /* TranscriptLoadHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptLoadHarness.swift; sourceTree = "<group>"; };
+		HH000000000000000000070 /* TurnListVirtualizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnListVirtualizer.swift; sourceTree = "<group>"; };
+		HH000000000000000000080 /* TurnHeightEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnHeightEstimator.swift; sourceTree = "<group>"; };
+		HH000000000000000000100 /* TurnReconcilerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnReconcilerTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000110 /* TurnPayloadStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPayloadStoreTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000120 /* TurnListVirtualizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnListVirtualizerTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000130 /* TurnHeightEstimatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnHeightEstimatorTests.swift; sourceTree = "<group>"; };
+		TT000000000000000000040 /* ChatTurnViewLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTurnViewLayoutTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000140 /* ImageDecodePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDecodePolicyTests.swift; sourceTree = "<group>"; };
+		HH000000000000000000150 /* MemoryWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdogTests.swift; sourceTree = "<group>"; };
+		II000000000000000000010 /* TurnInteractionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionStore.swift; sourceTree = "<group>"; };
+		II000000000000000000020 /* AskQuestionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskQuestionView.swift; sourceTree = "<group>"; };
+		II000000000000000000030 /* ToolResultView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolResultView.swift; sourceTree = "<group>"; };
+		TT000000000000000000010 /* ChatTurnView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTurnView.swift; sourceTree = "<group>"; };
+		TT000000000000000000020 /* MarkdownTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableView.swift; sourceTree = "<group>"; };
+		II000000000000000000040 /* LoadHarnessTargeting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadHarnessTargeting.swift; sourceTree = "<group>"; };
+		II000000000000000000100 /* TurnInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionTests.swift; sourceTree = "<group>"; };
+		II000000000000000000110 /* ChatSessionCompactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionCompactionTests.swift; sourceTree = "<group>"; };
+		II000000000000000000120 /* LoadHarnessTargetingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadHarnessTargetingTests.swift; sourceTree = "<group>"; };
+		OO000000000000000000010 /* DecisionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStore.swift; sourceTree = "<group>"; };
+		OO000000000000000000020 /* DecisionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheet.swift; sourceTree = "<group>"; };
+		OO000000000000000000030 /* DecisionPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionPresenter.swift; sourceTree = "<group>"; };
+		OO000000000000000000100 /* DecisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStoreTests.swift; sourceTree = "<group>"; };
+		MM0000000000000000000001 /* MarkdownBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocument.swift; sourceTree = "<group>"; };
+		MM0000000000000000000002 /* ConversationContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationContentView.swift; sourceTree = "<group>"; };
+		NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocumentTests.swift; sourceTree = "<group>"; };
+		PP000000000000000000001 /* ActivityStreamModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamModel.swift; sourceTree = "<group>"; };
+		PP000000000000000000004 /* ActivityTickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityTickerView.swift; sourceTree = "<group>"; };
+		PP000000000000000000006 /* ActivityEventDecodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityEventDecodeTests.swift; sourceTree = "<group>"; };
+		PP000000000000000000008 /* ActivityStreamModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamModelTests.swift; sourceTree = "<group>"; };
+		PP000000000000000000010 /* ActivityTickerWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityTickerWiringTests.swift; sourceTree = "<group>"; };
+		PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarActivityRemovalTests.swift; sourceTree = "<group>"; };
+		OO0000000000000000000001 /* TicketBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocument.swift; sourceTree = "<group>"; };
+		OO0000000000000000000002 /* TicketContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketContentView.swift; sourceTree = "<group>"; };
+
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -157,15 +358,27 @@
 		AA0000020000000000000010 /* Data */ = {
 			isa = PBXGroup;
 			children = (
+				HH000000000000000000010 /* TurnReconciler.swift */,
+				HH000000000000000000020 /* TurnPayloadStore.swift */,
+				HH000000000000000000030 /* ThumbnailLoader.swift */,
+				HH000000000000000000040 /* MemoryWatchdog.swift */,
+				HH000000000000000000050 /* TranscriptDiagnostics.swift */,
+				LL0000000000000000000014 /* PaneContentDump.swift */,
+				HH000000000000000000060 /* TranscriptLoadHarness.swift */,
+				II000000000000000000040 /* LoadHarnessTargeting.swift */,
 				AA0000020000000000000001 /* Models.swift */,
 				AA0000020000000000000002 /* NostromodClient.swift */,
 				AA0000020000000000000003 /* FileWatchers.swift */,
 				AA0000020000000000000004 /* AppStore.swift */,
+				RR0000000000000000000001 /* PRDetailCache.swift */,
+				WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */,
 				BB00000000000000000000A1 /* MotherBrokerClient.swift */,
 				GG00000000000000000000A1 /* ProcessRunner.swift */,
 				AA0000020000000000000030 /* ChatModels.swift */,
 				AA0000020000000000000031 /* ChatSession.swift */,
 				AA0000020000000000000032 /* FocusStore.swift */,
+				JJ0000000000000000000001 /* IPCLatencyStats.swift */,
+				JJ0000000000000000000002 /* DaemonDiagnostics.swift */,
 			);
 			path = Data;
 			sourceTree = "<group>";
@@ -173,6 +386,9 @@
 		AA0000020000000000000011 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				HH000000000000000000070 /* TurnListVirtualizer.swift */,
+				HH000000000000000000080 /* TurnHeightEstimator.swift */,
+				II000000000000000000010 /* TurnInteractionStore.swift */,
 				AA0000020000000000000005 /* Theme.swift */,
 				AA0000020000000000000006 /* TabBarView.swift */,
 				AA0000020000000000000007 /* StatusBarView.swift */,
@@ -181,8 +397,27 @@
 				AA0000020000000000000040 /* ToastBannerView.swift */,
 				AA0000020000000000000041 /* SessionHealthStatusView.swift */,
 				AA0000020000000000000024 /* CreateFocusSheet.swift */,
+				OO000000000000000000010 /* DecisionStore.swift */,
+				OO000000000000000000020 /* DecisionSheet.swift */,
+				OO000000000000000000030 /* DecisionPresenter.swift */,
 				FF00000000000000000000A1 /* SidenavGrouping.swift */,
 				CC00000000000000000000B0 /* DiffColoring.swift */,
+				LL0000000000000000000001 /* CodeDocument.swift */,
+				LL0000000000000000000002 /* DiffDocument.swift */,
+				LL0000000000000000000003 /* ScrollDecision.swift */,
+				LL0000000000000000000004 /* DiffAttributedString.swift */,
+				LL0000000000000000000010 /* RowOffsetIndex.swift */,
+				LL0000000000000000000012 /* CodePaneRenderAudit.swift */,
+				MM0000000000000000000001 /* MarkdownBlockDocument.swift */,
+				OO0000000000000000000001 /* TicketBlockDocument.swift */,
+				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
+				QQ0000000000000000000001 /* PaneRenderPlan.swift */,
+				QQ0000000000000000000002 /* RatioSolver.swift */,
+				QQ0000000000000000000006 /* RatioPersistencePolicy.swift */,
+				VV0000000000000000000001 /* PaneFirstPaintAudit.swift */,
+				RA0000000000000000000001 /* RatioApplicationAudit.swift */,
+				PP000000000000000000001 /* ActivityStreamModel.swift */,
+				PP000000000000000000004 /* ActivityTickerView.swift */,
 				AA0000020000000000000021 /* Views */,
 			);
 			path = UI;
@@ -196,9 +431,17 @@
 				AA0000020000000000000025 /* FredView.swift */,
 				EE00000000000000000000A0 /* QuickActionStripView.swift */,
 				AA0000020000000000000023 /* ReplView.swift */,
+				II000000000000000000020 /* AskQuestionView.swift */,
+				II000000000000000000030 /* ToolResultView.swift */,
+				TT000000000000000000010 /* ChatTurnView.swift */,
+				TT000000000000000000020 /* MarkdownTableView.swift */,
 				EE00000000000000000000C0 /* MarkdownCardView.swift */,
 				EE00000000000000000000D0 /* DynamicFocusView.swift */,
 				EE00000000000000000000E0 /* PaneContentView.swift */,
+				KK0000000000000000000002 /* TabRegionView.swift */,
+				LL0000000000000000000005 /* CodeContentView.swift */,
+				MM0000000000000000000002 /* ConversationContentView.swift */,
+				OO0000000000000000000002 /* TicketContentView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -206,6 +449,22 @@
 		BB00000000000000000000C1 /* NostromoTests */ = {
 			isa = PBXGroup;
 			children = (
+				LL0000000000000000000006 /* CodeDocumentTests.swift */,
+				LL0000000000000000000007 /* DiffDocumentTests.swift */,
+				LL0000000000000000000008 /* ScrollDecisionTests.swift */,
+				LL0000000000000000000009 /* CodeContentViewTests.swift */,
+				LL0000000000000000000011 /* RowOffsetIndexTests.swift */,
+				LL0000000000000000000013 /* CodePaneRenderAuditTests.swift */,
+				HH000000000000000000100 /* TurnReconcilerTests.swift */,
+				HH000000000000000000110 /* TurnPayloadStoreTests.swift */,
+				HH000000000000000000120 /* TurnListVirtualizerTests.swift */,
+				HH000000000000000000130 /* TurnHeightEstimatorTests.swift */,
+				TT000000000000000000040 /* ChatTurnViewLayoutTests.swift */,
+				HH000000000000000000140 /* ImageDecodePolicyTests.swift */,
+				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
+				II000000000000000000100 /* TurnInteractionTests.swift */,
+				II000000000000000000110 /* ChatSessionCompactionTests.swift */,
+				II000000000000000000120 /* LoadHarnessTargetingTests.swift */,
 				BB00000000000000000000B1 /* MotherBrokerClientTests.swift */,
 				BB00000000000000000000C2 /* PhaseRibbonTests.swift */,
 				CC00000000000000000000A0 /* PerriModelTests.swift */,
@@ -213,6 +472,32 @@
 				FF00000000000000000000B1 /* SidenavGroupingTests.swift */,
 				GG00000000000000000000B1 /* ProcessRunnerTests.swift */,
 				HH00000000000000000000A0 /* PaneContentWireEqualityTests.swift */,
+				ZZ0000000000000000000001 /* PaneAddressDecodeTests.swift */,
+				JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */,
+				KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */,
+				TB0000000000000000000001 /* TabRegionViewTests.swift */,
+				QQ0000000000000000000003 /* PaneRenderPlanTests.swift */,
+				QQ0000000000000000000004 /* RatioSolverTests.swift */,
+				QQ0000000000000000000005 /* DynamicFocusViewWiringTests.swift */,
+				QQ0000000000000000000007 /* RatioPersistencePolicyTests.swift */,
+				VV0000000000000000000002 /* PaneFirstPaintAuditTests.swift */,
+				RA0000000000000000000002 /* RatioApplicationAuditTests.swift */,
+				OO000000000000000000100 /* DecisionStoreTests.swift */,
+				NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */,
+				PP000000000000000000006 /* ActivityEventDecodeTests.swift */,
+				PP000000000000000000008 /* ActivityStreamModelTests.swift */,
+				PP000000000000000000010 /* ActivityTickerWiringTests.swift */,
+				PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */,
+				PP0000000000000000000001 /* TicketBlockDocumentTests.swift */,
+				RR0000000000000000000003 /* PRDetailCacheTests.swift */,
+				TT0000000000000000000000 /* ChatSessionDetachTests.swift */,
+				UU0000000000000000000000 /* PerFocusEvictionWiringTests.swift */,
+				WW0000000000000000000000 /* DiffPaneSummaryPolicyTests.swift */,
+				WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */,
+				XX0000000000000000000001 /* NotificationDecodeTests.swift */,
+				XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */,
+				YY0000000000000000000001 /* PaneContentViewForEachIdentityTests.swift */,
+
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -307,6 +592,15 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				HH000000000000000000011 /* TurnReconciler.swift in Sources */,
+				HH000000000000000000021 /* TurnPayloadStore.swift in Sources */,
+				HH000000000000000000031 /* ThumbnailLoader.swift in Sources */,
+				HH000000000000000000041 /* MemoryWatchdog.swift in Sources */,
+				HH000000000000000000051 /* TranscriptDiagnostics.swift in Sources */,
+				LL0000000000000000000108 /* PaneContentDump.swift in Sources */,
+				HH000000000000000000061 /* TranscriptLoadHarness.swift in Sources */,
+				HH000000000000000000071 /* TurnListVirtualizer.swift in Sources */,
+				HH000000000000000000081 /* TurnHeightEstimator.swift in Sources */,
 				AA0000000000000000000011 /* main.swift in Sources */,
 				AA0000000000000000000012 /* AppDelegate.swift in Sources */,
 				AA0000000000000000000013 /* NostromoWindow.swift in Sources */,
@@ -335,8 +629,41 @@
 				AA0000020000000000000124 /* CreateFocusSheet.swift in Sources */,
 				BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */,
 				CC00000000000000000000A5 /* DiffColoring.swift in Sources */,
+				LL0000000000000000000101 /* CodeDocument.swift in Sources */,
+				LL0000000000000000000102 /* DiffDocument.swift in Sources */,
+				LL0000000000000000000103 /* ScrollDecision.swift in Sources */,
+				LL0000000000000000000104 /* DiffAttributedString.swift in Sources */,
+				LL0000000000000000000105 /* CodeContentView.swift in Sources */,
+				LL0000000000000000000106 /* RowOffsetIndex.swift in Sources */,
+				LL0000000000000000000107 /* CodePaneRenderAudit.swift in Sources */,
+				MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */,
+				MM0000000000000000000102 /* ConversationContentView.swift in Sources */,
+				OO0000000000000000000101 /* TicketBlockDocument.swift in Sources */,
+				OO0000000000000000000102 /* TicketContentView.swift in Sources */,
 				FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */,
 				GG00000000000000000000A2 /* ProcessRunner.swift in Sources */,
+				II000000000000000000011 /* TurnInteractionStore.swift in Sources */,
+				II000000000000000000021 /* AskQuestionView.swift in Sources */,
+				II000000000000000000031 /* ToolResultView.swift in Sources */,
+				TT000000000000000000011 /* ChatTurnView.swift in Sources */,
+				TT000000000000000000021 /* MarkdownTableView.swift in Sources */,
+				II000000000000000000041 /* LoadHarnessTargeting.swift in Sources */,
+				JJ0000000000000000000011 /* IPCLatencyStats.swift in Sources */,
+				JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */,
+				KK0000000000000000000011 /* LayoutChangeClassifier.swift in Sources */,
+				KK0000000000000000000021 /* TabRegionView.swift in Sources */,
+				QQ0000000000000000000101 /* PaneRenderPlan.swift in Sources */,
+				QQ0000000000000000000201 /* RatioSolver.swift in Sources */,
+				QQ0000000000000000000601 /* RatioPersistencePolicy.swift in Sources */,
+				VV0000000000000000000101 /* PaneFirstPaintAudit.swift in Sources */,
+				RA0000000000000000000101 /* RatioApplicationAudit.swift in Sources */,
+				OO000000000000000000011 /* DecisionStore.swift in Sources */,
+				OO000000000000000000021 /* DecisionSheet.swift in Sources */,
+				OO000000000000000000031 /* DecisionPresenter.swift in Sources */,
+				PP000000000000000000002 /* ActivityStreamModel.swift in Sources */,
+				PP000000000000000000005 /* ActivityTickerView.swift in Sources */,
+				RR0000000000000000000101 /* PRDetailCache.swift in Sources */,
+				WW0000000000000000000005 /* DiffPaneSummaryPolicy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -344,6 +671,18 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				HH000000000000000000012 /* TurnReconciler.swift in TestSources */,
+				HH000000000000000000022 /* TurnPayloadStore.swift in TestSources */,
+				HH000000000000000000042 /* MemoryWatchdog.swift in TestSources */,
+				HH000000000000000000072 /* TurnListVirtualizer.swift in TestSources */,
+				HH000000000000000000082 /* TurnHeightEstimator.swift in TestSources */,
+				HH000000000000000000102 /* TurnReconcilerTests.swift in Sources */,
+				HH000000000000000000112 /* TurnPayloadStoreTests.swift in Sources */,
+				HH000000000000000000122 /* TurnListVirtualizerTests.swift in Sources */,
+				HH000000000000000000132 /* TurnHeightEstimatorTests.swift in Sources */,
+				TT000000000000000000042 /* ChatTurnViewLayoutTests.swift in Sources */,
+				HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */,
+				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
 				BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */,
 				BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */,
 				BB00000000000000000000B4 /* Models.swift in TestSources */,
@@ -351,8 +690,23 @@
 				CC00000000000000000000A1 /* PerriModelTests.swift in Sources */,
 				CC00000000000000000000A3 /* Theme.swift in TestSources */,
 				CC00000000000000000000A4 /* DiffColoring.swift in TestSources */,
+				LL0000000000000000000201 /* CodeDocument.swift in TestSources */,
+				LL0000000000000000000202 /* DiffDocument.swift in TestSources */,
+				LL0000000000000000000203 /* ScrollDecision.swift in TestSources */,
+				LL0000000000000000000204 /* DiffAttributedString.swift in TestSources */,
+				LL0000000000000000000205 /* RowOffsetIndex.swift in TestSources */,
+				LL0000000000000000000206 /* CodePaneRenderAudit.swift in TestSources */,
+				MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */,
+				OO0000000000000000000201 /* TicketBlockDocument.swift in TestSources */,
+				LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */,
+				LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */,
+				LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */,
+				LL0000000000000000000304 /* CodeContentViewTests.swift in Sources */,
+				LL0000000000000000000305 /* RowOffsetIndexTests.swift in Sources */,
+				LL0000000000000000000306 /* CodePaneRenderAuditTests.swift in Sources */,
 				DD00000000000000000000A1 /* SessionHealthTests.swift in Sources */,
 				DD00000000000000000000A2 /* NostromodClient.swift in TestSources */,
+				LL0000000000000000000109 /* PaneContentDump.swift in TestSources */,
 				DD00000000000000000000A3 /* ChatModels.swift in TestSources */,
 				DD00000000000000000000A4 /* ChatSession.swift in TestSources */,
 				FF00000000000000000000A3 /* SidenavGrouping.swift in TestSources */,
@@ -360,6 +714,54 @@
 				GG00000000000000000000A3 /* ProcessRunner.swift in TestSources */,
 				GG00000000000000000000B2 /* ProcessRunnerTests.swift in Sources */,
 				HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */,
+				ZZ0000000000000000000002 /* PaneAddressDecodeTests.swift in Sources */,
+				II000000000000000000012 /* TurnInteractionStore.swift in TestSources */,
+				II000000000000000000022 /* AskQuestionView.swift in TestSources */,
+				II000000000000000000032 /* ToolResultView.swift in TestSources */,
+				TT000000000000000000012 /* ChatTurnView.swift in TestSources */,
+				TT000000000000000000022 /* MarkdownTableView.swift in TestSources */,
+				TT000000000000000000032 /* MarkdownCardView.swift in TestSources */,
+				II000000000000000000042 /* LoadHarnessTargeting.swift in TestSources */,
+				II000000000000000000102 /* TurnInteractionTests.swift in Sources */,
+				II000000000000000000112 /* ChatSessionCompactionTests.swift in Sources */,
+				II000000000000000000122 /* LoadHarnessTargetingTests.swift in Sources */,
+				JJ0000000000000000000012 /* IPCLatencyStats.swift in TestSources */,
+				JJ0000000000000000000014 /* IPCLatencyStatsTests.swift in Sources */,
+				KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */,
+				KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */,
+				KK0000000000000000000022 /* TabRegionView.swift in TestSources */,
+				TB0000000000000000000002 /* TabRegionViewTests.swift in Sources */,
+				QQ0000000000000000000102 /* PaneRenderPlan.swift in TestSources */,
+				QQ0000000000000000000202 /* RatioSolver.swift in TestSources */,
+				QQ0000000000000000000602 /* RatioPersistencePolicy.swift in TestSources */,
+				QQ0000000000000000000301 /* PaneRenderPlanTests.swift in Sources */,
+				QQ0000000000000000000401 /* RatioSolverTests.swift in Sources */,
+				QQ0000000000000000000501 /* DynamicFocusViewWiringTests.swift in Sources */,
+				QQ0000000000000000000701 /* RatioPersistencePolicyTests.swift in Sources */,
+				VV0000000000000000000102 /* PaneFirstPaintAudit.swift in TestSources */,
+				VV0000000000000000000201 /* PaneFirstPaintAuditTests.swift in Sources */,
+				RA0000000000000000000102 /* RatioApplicationAudit.swift in TestSources */,
+				RA0000000000000000000201 /* RatioApplicationAuditTests.swift in Sources */,
+				OO000000000000000000012 /* DecisionStore.swift in TestSources */,
+				KK000000000000000000102 /* DecisionStoreTests.swift in Sources */,
+				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,
+				PP000000000000000000003 /* ActivityStreamModel.swift in TestSources */,
+				PP000000000000000000007 /* ActivityEventDecodeTests.swift in Sources */,
+				PP000000000000000000009 /* ActivityStreamModelTests.swift in Sources */,
+				PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */,
+				PP000000000000000000013 /* StatusBarActivityRemovalTests.swift in Sources */,
+				PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */,
+				RR0000000000000000000102 /* PRDetailCache.swift in TestSources */,
+				RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */,
+				WW0000000000000000000006 /* DiffPaneSummaryPolicy.swift in TestSources */,
+				TT0000000000000000000001 /* ChatSessionDetachTests.swift in Sources */,
+				UU0000000000000000000001 /* PerFocusEvictionWiringTests.swift in Sources */,
+				WW0000000000000000000001 /* DiffPaneSummaryPolicyTests.swift in Sources */,
+				WW0000000000000000000003 /* DiffPaneSummaryWiringTests.swift in Sources */,
+				XX0000000000000000000011 /* NotificationDecodeTests.swift in Sources */,
+				XX0000000000000000000012 /* MainLayoutNotificationWiringTests.swift in Sources */,
+				YY0000000000000000000002 /* PaneContentViewForEachIdentityTests.swift in Sources */,
+
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

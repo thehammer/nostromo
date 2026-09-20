@@ -28,7 +28,11 @@ use uuid::Uuid;
 
 use super::{
     codec::{read_frame, write_frame},
-    protocol::{ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic, MIN_CLIENT_VERSION, PROTOCOL_VERSION},
+    decisions::{AnswerOutcome, DecisionRegistry},
+    protocol::{
+        ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
+        MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+    },
     pty_manager::PtyManager,
     session_manager::SessionManager,
 };
@@ -48,11 +52,17 @@ impl Server {
     /// `perri_state_dir` is forwarded to the `PerriAction` handler so the
     /// `"approve"` arm can write the Phase 1 approval signal (approvals.jsonl +
     /// queue.dirty) for instant queue suppression.
+    ///
+    /// `decisions` is the shared decision-modal registry (W6) — also handed to
+    /// `DaemonMcpBackend` so `nostromo.ask_decision` and this IPC layer share
+    /// one source of truth for outstanding requests and `Topic::Decision`
+    /// subscribers.
     pub fn bind(
         socket_path: &Path,
         pty_mgr: Arc<Mutex<PtyManager>>,
         session_mgr: Arc<Mutex<SessionManager>>,
         perri_state_dir: PathBuf,
+        decisions: Arc<Mutex<DecisionRegistry>>,
     ) -> Result<Self> {
         // Remove stale socket file so bind doesn't fail.
         let _ = std::fs::remove_file(socket_path);
@@ -74,7 +84,7 @@ impl Server {
         let path = socket_path.to_path_buf();
 
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr, perri_state_dir).await {
+            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr, perri_state_dir, decisions).await {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -98,17 +108,19 @@ impl Server {
     /// Both transports run the identical `handle_client` handshake loop, so iOS
     /// (and any other TCP peer) behaves exactly like the macOS TUI client.
     ///
-    /// `perri_state_dir` is forwarded identically to [`Server::bind`].
+    /// `perri_state_dir` and `decisions` are forwarded identically to
+    /// [`Server::bind`].
     pub fn bind_tcp(
         &self,
         listener: TcpListener,
         pty_mgr: Arc<Mutex<PtyManager>>,
         session_mgr: Arc<Mutex<SessionManager>>,
         perri_state_dir: PathBuf,
+        decisions: Arc<Mutex<DecisionRegistry>>,
     ) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr, perri_state_dir).await {
+            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr, perri_state_dir, decisions).await {
                 warn!("TCP IPC accept loop exited: {e:#}");
             }
         });
@@ -129,6 +141,7 @@ async fn accept_loop(
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
+    decisions: Arc<Mutex<DecisionRegistry>>,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -138,8 +151,9 @@ async fn accept_loop(
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
+                let decisions = Arc::clone(&decisions);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd).await {
+                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions).await {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -157,6 +171,7 @@ async fn accept_loop_tcp(
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
+    decisions: Arc<Mutex<DecisionRegistry>>,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -167,8 +182,9 @@ async fn accept_loop_tcp(
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
+                let decisions = Arc::clone(&decisions);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd).await {
+                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions).await {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -195,6 +211,7 @@ async fn handle_client<S>(
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
+    decisions: Arc<Mutex<DecisionRegistry>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite,
@@ -249,18 +266,33 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let topics: Vec<Topic> = match sub {
-        ClientMsg::Subscribe { topics } => topics,
+    let (topics, renders_decisions): (Vec<Topic>, bool) = match sub {
+        ClientMsg::Subscribe { topics, renders_decisions } => (topics, renders_decisions),
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
-            vec![]
+            (vec![], false)
         }
         other => {
             anyhow::bail!("expected Subscribe, got {other:?}");
         }
     };
 
-    info!(claimed_id, conn_key, ?topics, "client subscribed");
+    info!(claimed_id, conn_key, ?topics, renders_decisions, "client subscribed");
+
+    // ── Decision-modal operator accounting (W6) ───────────────────────────────
+    // An empty `topics` list still means "deliver everything" for routing (see
+    // `message_matches_topics`) — that is unchanged. But it no longer ALSO
+    // means "I am an operator": a client that can't render a decision (e.g.
+    // iOS, which subscribes with `topics: []` to get every broadcast) must not
+    // be counted, or `nostromo.ask_decision`'s `no_operator` fail-fast gate is
+    // defeated by a client that can never answer. A connection counts as an
+    // operator iff it named `Topic::Decision` explicitly, or set
+    // `renders_decisions: true` — the only way to make that claim without a
+    // full topic enumeration when subscribing to everything.
+    let is_operator = topics.contains(&Topic::Decision) || renders_decisions;
+    if is_operator {
+        decisions.lock().unwrap().add_operator(&conn_key);
+    }
 
     // ── Register per-client targeted channel ──────────────────────────────────
     // Use `conn_key` (server-minted UUID) as the registry key — not the
@@ -311,17 +343,63 @@ where
         // Appended after the FocusLayout replay so structure always precedes
         // content on the wire, matching every other broadcast in this protocol.
         {
-            let mgr = session_mgr.lock().unwrap();
-            if let Some(provider) = mgr.pane_content_provider() {
+            // Clone the provider handle and drop the lock before calling into
+            // it — `bound_pane_contents()` can reach a `get_file`-bound pane's
+            // `file_root()`, which locks this exact `Arc<Mutex<SessionManager>>`
+            // again to resolve the focus's cwd. `std::sync::Mutex` is not
+            // reentrant, so holding the guard across that call self-deadlocks
+            // the connection handler the moment any pane is bound to
+            // `nostromo.get_file` — on every reconnect and every daemon-restart
+            // replay, not as a rare corner case.
+            let provider = session_mgr.lock().unwrap().pane_content_provider();
+            if let Some(provider) = provider {
                 snapshots.extend(provider.bound_pane_contents());
             }
         }
-        for msg in snapshots {
-            let bytes = serde_json::to_vec(&msg).unwrap_or_default();
-            if !bytes.is_empty() {
-                let _ = write_frame(&mut writer, &bytes).await;
-            }
-        }
+        replay_messages(&mut writer, snapshots).await;
+    }
+
+    // ── Activity replay — snapshot + health on (re)connect ────────────────────
+    // A reconnecting client must never be left presenting a stale last-known
+    // event as if it were current, and it must be able to tell a genuinely
+    // quiet focus apart from a broken ingestion path — so both a snapshot per
+    // known focus and one health verdict are pushed immediately on attach,
+    // mirroring the Layout replay above (D4).
+    if subscribed(&topics, Topic::Activity) {
+        let (snapshots, health_msg): (Vec<ServerMsg>, ServerMsg) = {
+            let mgr = session_mgr.lock().unwrap();
+            let snapshots = mgr
+                .known_focus_tags()
+                .into_iter()
+                .map(|tag| {
+                    let streams = activity_streams_wire(&mgr, &tag);
+                    ServerMsg::ActivitySnapshot { tag, streams }
+                })
+                .collect();
+
+            let hook_installed = crate::activity::hook_status::hook_installed(
+                &crate::activity::hook_status::default_settings_path(),
+            );
+            let health = mgr.activity_health();
+            let reason = if health.ingesting {
+                None
+            } else if hook_installed {
+                Some("activity hook installed but no event has arrived yet".to_string())
+            } else {
+                Some(
+                    "activity hook not installed — run `nostromo doctor --fix` to install it"
+                        .to_string(),
+                )
+            };
+            let health_msg = ServerMsg::ActivityHealth {
+                ingesting: health.ingesting,
+                reason,
+                last_event_at: health.last_event_at,
+                hook_installed,
+            };
+            (snapshots, health_msg)
+        };
+        replay_messages(&mut writer, snapshots.into_iter().chain(std::iter::once(health_msg))).await;
     }
 
     // ── Perri replay — push the current queue/current-PR to a new client ──
@@ -393,7 +471,7 @@ where
                                 continue;
                             }
                         };
-                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir);
+                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -419,14 +497,42 @@ where
         let mut mgr = session_mgr.lock().unwrap();
         mgr.on_client_disconnect(&conn_key);
     }
+    if is_operator {
+        decisions.lock().unwrap().remove_operator(&conn_key);
+    }
 
     result
+}
+
+/// Serialize and write each message in order, best-effort: a message that
+/// fails to serialize (or serializes to nothing) is skipped rather than
+/// aborting the rest of the replay, and a write failure is swallowed — the
+/// client will find out on its next read once the socket is actually down.
+/// Shared by the Layout and Activity replay blocks in `handle_client`, which
+/// both push an ordered batch of `ServerMsg`s to a freshly (re)connected
+/// client before entering the main loop.
+async fn replay_messages<W>(writer: &mut W, messages: impl IntoIterator<Item = ServerMsg>)
+where
+    W: AsyncWrite + Unpin,
+{
+    for msg in messages {
+        let bytes = serde_json::to_vec(&msg).unwrap_or_default();
+        if !bytes.is_empty() {
+            let _ = write_frame(writer, &bytes).await;
+        }
+    }
 }
 
 // ── PTY command dispatch ──────────────────────────────────────────────────────
 
 /// `conn_key` is the server-minted UUID for this connection (not the
 /// client-supplied `client_id` from the Hello frame).
+///
+/// Eight shared-state handles, one per subsystem this dispatch touches —
+/// matches the existing precedent on `McpSharedState::new` (ten arguments,
+/// same allowance) rather than introducing a bundling struct for a single
+/// internal dispatch function.
+#[allow(clippy::too_many_arguments)]
 fn handle_client_msg(
     msg: ClientMsg,
     conn_key: &str,
@@ -435,6 +541,7 @@ fn handle_client_msg(
     targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
     broadcast_tx: &broadcast::Sender<ServerMsg>,
     perri_state_dir: &Path,
+    decisions: &Arc<Mutex<DecisionRegistry>>,
 ) {
     match msg {
         ClientMsg::Ping => {
@@ -667,16 +774,70 @@ fn handle_client_msg(
                 if let Err(e) = crate::perri_cli::run_perri_action(&action, pr_number, repo.as_deref(), &psd).await {
                     tracing::warn!(conn, %action, "PerriAction failed: {e:#}");
                 }
-                // The native Perri sources watch dirty-file sentinels; for
-                // "load_pr"/"clear" the `perri` CLI writes those sentinels.
-                // For "approve" the handler writes approvals.jsonl + queue.dirty
-                // directly so the broadcaster fires without a separate re-poll.
+                // The native Perri sources watch dirty-file sentinels; all
+                // three actions write their own sentinels in-process now.
+                // "load_pr"/"clear" write through `perri_current_pr`
+                // (current-pr.dirty, and "clear" also touches queue.dirty).
+                // "approve" writes approvals.jsonl + queue.dirty directly.
+                // Either way the broadcaster fires without a separate re-poll.
             });
+        }
+
+        ClientMsg::DecisionAnswer { request_id, choice_id } => {
+            let outcome = decisions.lock().unwrap().answer(&request_id, choice_id);
+            match outcome {
+                AnswerOutcome::Answered { promoted } => {
+                    if let Some(msg) = promoted {
+                        let _ = broadcast_tx.send(*msg);
+                    }
+                }
+                AnswerOutcome::AlreadyAnswered => {
+                    warn!(conn_key, %request_id, "DecisionAnswer for an already-answered request");
+                }
+                AnswerOutcome::UnknownRequest => {
+                    warn!(conn_key, %request_id, "DecisionAnswer for an unknown request_id");
+                }
+            }
+        }
+
+        ClientMsg::ActivitySnapshotRequest { tag } => {
+            let streams = {
+                let mgr = session_mgr.lock().unwrap();
+                activity_streams_wire(&mgr, &tag)
+            };
+            let _ = targeted_tx.send(ServerMsg::ActivitySnapshot { tag, streams });
+        }
+
+        ClientMsg::RenderedShape {
+            tag,
+            window_id,
+            pane_ids,
+            rendered_at,
+        } => {
+            let mgr = session_mgr.lock().unwrap();
+            if let Some(reg) = mgr.pane_registry() {
+                reg.lock().unwrap()
+                    .record_rendered_shape(conn_key, &window_id, &tag, pane_ids, rendered_at);
+            }
         }
 
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
     }
+}
+
+/// Snapshot one focus's activity streams into their wire form.
+fn activity_streams_wire(mgr: &SessionManager, tag: &str) -> Vec<ActivityStreamWire> {
+    mgr.activity_streams_for_focus(tag)
+        .into_iter()
+        .map(|s| ActivityStreamWire {
+            agent_id: s.agent_id,
+            agent_type: s.agent_type,
+            parent_agent_id: s.parent_agent_id,
+            events: s.events,
+            finished: s.finished,
+        })
+        .collect()
 }
 
 // ── topic filter ──────────────────────────────────────────────────────────────
@@ -691,7 +852,9 @@ fn subscribed(topics: &[Topic], topic: Topic) -> bool {
 
 fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
     match msg {
-        ServerMsg::Activity(_) => subscribed(topics, Topic::Activity),
+        ServerMsg::Activity(_)
+        | ServerMsg::ActivitySnapshot { .. }
+        | ServerMsg::ActivityHealth { .. } => subscribed(topics, Topic::Activity),
         ServerMsg::MotherJobs { .. } => subscribed(topics, Topic::MotherJobs),
         ServerMsg::MotherStatusline(_) => subscribed(topics, Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => subscribed(topics, Topic::MotherJobs),
@@ -700,14 +863,186 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::FocusRegistryUpdated { .. } => subscribed(topics, Topic::Focuses),
         ServerMsg::PerriState { .. } => subscribed(topics, Topic::Perri),
         ServerMsg::FredState { .. } => subscribed(topics, Topic::Fred),
-        // Agent-authored pane layout broadcasts (Phase 1).
+        // Agent-authored pane layout broadcasts (Phase 1). `Notification`
+        // (W5 — current-pr-collision) reuses this topic rather than adding
+        // a new one, deliberately: every client that already renders
+        // FocusLayout/PaneContent has already subscribed to it, so an older
+        // client can't silently miss a Notification just because it never
+        // learned about a topic that postdates it.
         ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }
-        | ServerMsg::FocusCreated { .. } => subscribed(topics, Topic::Layout),
+        | ServerMsg::FocusCreated { .. }
+        | ServerMsg::Notification { .. } => subscribed(topics, Topic::Layout),
+        ServerMsg::DecisionRequest { .. } | ServerMsg::DecisionResolved { .. } => {
+            subscribed(topics, Topic::Decision)
+        }
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,
         // PTY + control messages are always forwarded (handled via targeted channel).
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::protocol::DecisionChoice;
+
+    fn sample_decision_request() -> ServerMsg {
+        ServerMsg::DecisionRequest {
+            tag: "mother".into(),
+            request_id: "req-1".into(),
+            prompt: "Ship it?".into(),
+            detail: None,
+            choices: vec![
+                DecisionChoice {
+                    id: "approve".into(),
+                    label: "Approve".into(),
+                    detail: None,
+                },
+                DecisionChoice {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    detail: None,
+                },
+            ],
+            context_pane_id: None,
+        }
+    }
+
+    #[test]
+    fn decision_request_matches_when_subscribed_to_the_decision_topic() {
+        assert!(message_matches_topics(
+            &sample_decision_request(),
+            &[Topic::Decision]
+        ));
+    }
+
+    #[test]
+    fn decision_request_does_not_match_a_subscription_to_some_other_topic() {
+        assert!(!message_matches_topics(
+            &sample_decision_request(),
+            &[Topic::Activity]
+        ));
+    }
+
+    #[test]
+    fn decision_request_matches_an_empty_topic_list_meaning_everything() {
+        assert!(message_matches_topics(&sample_decision_request(), &[]));
+    }
+
+    // ── DecisionResolved routes under Topic::Decision too (multi-window fix) ──
+    //
+    // Every window's sheet needs to learn a request resolved, not just the
+    // window whose sheet the operator actually used — that propagation rides
+    // the same Topic::Decision gate as the original DecisionRequest.
+
+    fn sample_decision_resolved() -> ServerMsg {
+        ServerMsg::DecisionResolved {
+            tag: "mother".into(),
+            request_id: "req-1".into(),
+            resolution: crate::ipc::protocol::DecisionResolution::Answered,
+            choice_id: Some("approve".into()),
+        }
+    }
+
+    #[test]
+    fn decision_resolved_matches_when_subscribed_to_the_decision_topic() {
+        assert!(message_matches_topics(
+            &sample_decision_resolved(),
+            &[Topic::Decision]
+        ));
+    }
+
+    #[test]
+    fn decision_resolved_does_not_match_a_subscription_to_some_other_topic() {
+        assert!(!message_matches_topics(
+            &sample_decision_resolved(),
+            &[Topic::Activity]
+        ));
+    }
+
+    #[test]
+    fn decision_resolved_matches_an_empty_topic_list_meaning_everything() {
+        assert!(message_matches_topics(&sample_decision_resolved(), &[]));
+    }
+
+    // ── ServerMsg::Notification routes under Topic::Layout (W5 —
+    // current-pr-collision) ───────────────────────────────────────────────────
+    //
+    // Reuses the existing topic the macOS client already subscribes to for
+    // pane-layout traffic — no new `Topic` variant, no client-side
+    // subscribe-list change needed. No production caller sends a
+    // `Notification` yet (that lands a wedge later), so this is proven
+    // directly: the pure predicate, and — because nothing else exercises this
+    // path — the real `tokio::sync::broadcast` transport end to end.
+
+    fn sample_notification() -> ServerMsg {
+        ServerMsg::Notification {
+            tag: "perri".into(),
+            level: crate::ipc::protocol::NotificationLevel::Warning,
+            message: "test".into(),
+        }
+    }
+
+    #[test]
+    fn notification_matches_when_subscribed_to_the_layout_topic() {
+        assert!(message_matches_topics(&sample_notification(), &[Topic::Layout]));
+    }
+
+    #[test]
+    fn notification_does_not_match_a_subscription_to_some_other_topic() {
+        assert!(!message_matches_topics(&sample_notification(), &[Topic::Activity]));
+    }
+
+    #[test]
+    fn notification_matches_an_empty_topic_list_meaning_everything() {
+        assert!(message_matches_topics(&sample_notification(), &[]));
+    }
+
+    #[tokio::test]
+    async fn a_notification_sent_through_a_real_broadcast_channel_still_carries_its_tag_and_topic_gate(
+    ) {
+        // Proves the actual `tokio::sync::broadcast` plumbing carries the
+        // variant intact end to end — not just the pure predicate above —
+        // since no real trigger calls this path for at least one more wedge
+        // and it must still be demonstrably wired correctly today.
+        let (tx, mut rx) = broadcast::channel::<ServerMsg>(8);
+        tx.send(sample_notification()).expect("send into a fresh channel");
+
+        let received = rx.recv().await.expect("receive back out");
+
+        assert!(message_matches_topics(&received, &[Topic::Layout]));
+        assert!(!message_matches_topics(&received, &[Topic::Activity]));
+        match received {
+            ServerMsg::Notification { tag, .. } => assert_eq!(tag, "perri"),
+            other => panic!("expected Notification, got {other:?}"),
+        }
+    }
+
+    // ── ambient activity routes under Topic::Activity ─────────────────────────
+
+    #[test]
+    fn activity_snapshot_and_health_route_under_topic_activity() {
+        let snapshot = ServerMsg::ActivitySnapshot {
+            tag: "cody-1".into(),
+            streams: Vec::<ActivityStreamWire>::new(),
+        };
+        let health = ServerMsg::ActivityHealth {
+            ingesting: true,
+            reason: None,
+            last_event_at: None,
+            hook_installed: true,
+        };
+
+        assert!(message_matches_topics(&snapshot, &[Topic::Activity]));
+        assert!(message_matches_topics(&health, &[Topic::Activity]));
+
+        // A subscription to an unrelated topic must not see either message
+        // (empty `topics` is the "no filter" wildcard, so use a concrete,
+        // different topic here).
+        assert!(!message_matches_topics(&snapshot, &[Topic::Fred]));
+        assert!(!message_matches_topics(&health, &[Topic::Fred]));
     }
 }

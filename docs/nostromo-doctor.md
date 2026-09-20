@@ -67,6 +67,31 @@ noise:
    this check only reduced-form covers the richer daemon-internal cross-check
    the PRD flagged as the first thing to defer if it required daemon-internal
    coupling; this implementation reads only the JSON registry file.
+10. **Ambient activity hook** — reports whether `~/.claude/settings.json`
+    registers the `nostromo-activity-hook` producer (see `docs/activity.md`)
+    for all three of `PostToolUse`/`SubagentStart`/`SubagentStop`. WARNs
+    (never FAILs) when the file is missing/unparseable or the hook is
+    missing for any of the three events, naming the missing event(s).
+
+## Installing the ambient activity hook: `--fix`
+
+```
+bin/nostromo-doctor --fix
+```
+
+The **only** flag this tool has, and the only thing in it that writes
+`~/.claude/settings.json` — a plain `nostromo-doctor` run never touches it.
+Registers `nostromo-activity-hook` (preferring an already-installed binary
+under `~/.local/bin` or `~/.cargo/bin`) against `PostToolUse`, `SubagentStart`,
+and `SubagentStop`. Idempotent: re-running never duplicates an entry that
+already names the hook binary, and never disturbs an existing, unrelated
+hook entry for the same event. Writes via a sibling temp file + atomic
+rename, so a crash mid-write can't corrupt or truncate the operator's
+existing settings.
+
+`--fix` skips every other check — it does not run the report, and no other
+check in this tool ever writes anything (see "What's intentionally out of
+scope" below).
 
 ## Output & exit-code contract
 
@@ -120,3 +145,8 @@ No JSON output mode, no background/scheduled operation, no auto-remediation
 (this tool reports and recommends — it never kills a process, runs
 `make install`, or restarts the daemon), no historical trending. See the PRD
 for the full list and rationale.
+
+`--fix` is the one deliberate exception: installing the ambient activity
+hook is a config write, not a remediation of a running process, and it only
+ever happens when the operator explicitly passes `--fix` — never as a side
+effect of a plain check run.

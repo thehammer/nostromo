@@ -4,6 +4,12 @@ import Combine
 import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "store")
+/// Shared with `DynamicFocusView.swift`'s render-path logging (same
+/// subsystem/category there) so `log show --predicate 'category == "panes"'`
+/// reads as one timeline: FocusLayout/PaneContent frame arrival here,
+/// reconcile/content-push/layout on the render side. Counts, ids, kinds and
+/// geometry only — never pane content.
+private let panesLog = Logger(subsystem: "com.hammer.nostromo", category: "panes")
 
 /// Shared observable state for the whole app.
 ///
@@ -30,8 +36,18 @@ class AppStore: ObservableObject {
     @Published private(set) var rateLimits: RateLimits?     = nil
     @Published private(set) var posture:    PostureSnapshot? = nil
 
-    // Activity
-    @Published private(set) var recentActivity: [ActivityEvent] = []
+    // Activity — one assembled ActivityStreamModel per focus tag (keyed by
+    // ActivityEvent.focusTag, or "unattributed" for events the daemon
+    // couldn't resolve to a known focus — never dropped, never guessed at).
+    // `ActivityStreamStore` bounds both axes: each model's own retention
+    // (event count per stream, subagent stream entry count) and the number
+    // of tracked focus tags itself — see the 2026-09-02 "unbounded memory
+    // growth" bug doc and ActivityStreamModel.swift's retention constants.
+    @Published private(set) var activityStreams = ActivityStreamStore()
+    /// Daemon-wide ambient-activity ingestion health. Defaults optimistic
+    /// (ingesting) until the first real `ActivityHealth` frame arrives on
+    /// connect, so a fresh launch doesn't flash a false "not receiving" state.
+    @Published private(set) var activityHealth = ActivityHealthState(ingesting: true, reason: nil, hookInstalled: true)
 
     // Teri todos
     @Published private(set) var teriTodos:            TeriTodosSnapshot? = nil
@@ -53,36 +69,192 @@ class AppStore: ObservableObject {
     // Active focus agent tag — set by MainLayout on every focus switch.
     @Published private(set) var activeFocusAgentTag: String?      = nil
 
+    // Active focus SESSION tag — distinct from activeFocusAgentTag above.
+    // Built-in focuses have agentTag == sessionTag (Focus.sessionTag), which
+    // is why ActivityTickerView keying off activeFocusAgentTag looked fine
+    // by coincidence; a project-scoped focus's sessionTag is
+    // "\(agentTag)-\(id.prefix(8))", and that's what the daemon actually
+    // stamps every activity event's focus_tag with (NOSTROMO_FOCUS_TAG, see
+    // session_manager.rs), so the ticker must key off THIS, not the agent
+    // tag. Set by MainLayout alongside activeFocusAgentTag, not instead of
+    // it — PaceBarsView/StatusBarView are unrelated consumers of the agent
+    // tag and must not regress.
+    @Published private(set) var activeFocusSessionTag: String?    = nil
+
     // Agent-authored pane layout (Phase 1).
     // Keyed by focus tag; updated from FocusLayout / PaneContent broadcasts.
+    // An entry's lifetime now exactly matches its focus's: `evictPerFocusState`
+    // removes it the moment `FocusStore` reports the focus gone (see `start()`
+    // and `fix/per-focus-state-eviction`). A built-in focus can never be
+    // removed from `FocusStore`, so its entry is never evicted either.
     @Published private(set) var focusLayouts: [String: FocusLayoutModel] = [:]
 
     // Session health — keyed by focus agent tag.
     // Updated from the IPC stream for every tag the client sees events for,
     // so the sidebar badge can render for any opened focus without the active
     // focus view being visible. `.healthy` entries are omitted (implicitly healthy).
+    // An entry's lifetime now ends with its focus, via `evictPerFocusState`.
     @Published private(set) var sessionHealth: [String: SessionHealth] = [:]
+
+    // Daemon-driven decision modal (multi-window decision-sheet fix). Plain
+    // `PassthroughSubject`s, NOT `@Published` — deliberately. `@Published`
+    // replays its CURRENT value to every new subscriber, which is exactly
+    // how a window opened mid-decision (a display attached while a request
+    // is outstanding) would acquire a duplicate sheet the instant it
+    // subscribes. A subject has no replay: a late subscriber sees nothing
+    // until the next event, so presentation stays keyed to a single
+    // subscriber (`DecisionPresenter`) rather than to "whoever's listening
+    // right now". Same precedent as `FileWatchers.shared.thresholdEvents`.
+    //
+    // `decisionRequests` fires once per `decision_request` frame;
+    // `decisionResolutions` fires once per `decision_resolved` frame (the
+    // backstop that lets `DecisionPresenter` close a live sheet for reasons
+    // the app itself couldn't otherwise know about: a timeout, a cancelled
+    // session, or a second connected client).
+    let decisionRequests = PassthroughSubject<PendingDecision, Never>()
+    let decisionResolutions = PassthroughSubject<ResolvedDecision, Never>()
 
     // MARK: - Internals
 
-    private let client  = NostromodClient()
+    /// Exposed so `TranscriptLoadHarness` can inject synthetic daemon traffic
+    /// through the real production code path rather than a parallel one.
+    let client = NostromodClient()
     private let broker  = MotherBrokerClient()
     private var cancellables     = Set<AnyCancellable>()
-    /// Per-PR detail cache keyed by "{repo-with-dashes}-{number}".
-    private var prDetailCache: [String: PRDetail] = [:]
+    /// Per-PR detail cache keyed by "{repo-with-dashes}-{number}", bounded by
+    /// an LRU eviction policy budgeted primarily in bytes
+    /// (`PRDetailCache.maxRetainedDiffBytes`, 8 MiB) with a secondary entry
+    /// cap (`PRDetailCache.maxRetainedEntries`, 64). See `PRDetailCache` for
+    /// the policy itself.
+    private var prDetailCache = PRDetailCache()
     /// The item whose detail the user most recently requested; used to ignore stale fetches.
     private var pendingSelection: PRQueueItem?
 
     /// In-memory job map keyed by id — folded from broker snapshot + events.
     private var jobMap: [String: MotherJob] = [:]
 
-    /// Shared ChatSession instances keyed by agent tag.
+    /// Shared ChatSession instances keyed by agent tag. Like `focusLayouts`,
+    /// an entry's lifetime now exactly matches its focus's — see
+    /// `evictPerFocusState` and `start()`'s `FocusStore.shared.focusRemovals`
+    /// subscription. The removed session is also `detach()`ed (not just
+    /// dropped), which is what stops it re-issuing `session_spawn` on the
+    /// next daemon reconnect (see `ChatSession.detach()`).
     private var sessionRegistry: [String: ChatSession] = [:]
 
     private init() {}
 
+    // MARK: - Memory self-defense
+
+    /// Live transcript panes, weakly held, so the watchdog can tell them to shed.
+    private let transcriptPanes = NSHashTable<ReplView>.weakObjects()
+    private let watchdog = MemoryWatchdog()
+    /// Where shed/warning toasts are shown. Set by `MainLayout`.
+    var onMemoryToast: ((String, ToastSeverity) -> Void)?
+    /// Where daemon `ServerMsg.notification` broadcasts are shown (W5 —
+    /// current-pr-collision) — the same toast banner surface as
+    /// `onMemoryToast`, set alongside it by `MainLayout`. No production
+    /// trigger sends one yet; a later wedge (the same-PR advisory) does.
+    var onNotification: ((String, ToastSeverity) -> Void)?
+
+    func registerTranscriptPane(_ pane: ReplView) {
+        transcriptPanes.add(pane)
+    }
+
+    /// Live code/diff panes, weakly held — mirrors `transcriptPanes` exactly,
+    /// but for Debug ▸ Copy code-pane diagnostics rather than the memory
+    /// watchdog (diagnostics job:
+    /// `.claude/plans/instrument-code-pane-render-diagnostics.md`).
+    private let codePanes = NSHashTable<CodeContentView>.weakObjects()
+
+    func registerCodePane(_ pane: CodeContentView) {
+        codePanes.add(pane)
+    }
+
+    /// One block per live code/diff pane: its render-audit report, which
+    /// document kind it has loaded, row/label counts, and a truncated
+    /// preview of its first few rows — enough to tell "the model is empty"
+    /// from "the model is fine and the paint is not" without a debugger.
+    func codePaneDiagnosticsReport() -> String {
+        let panes = codePanes.allObjects
+        guard !panes.isEmpty else { return "no live code/diff panes" }
+        return panes.map { pane in
+            let measurements = pane.currentMeasurements()
+            let preview = pane.firstRowsPreview()
+                .enumerated()
+                .map { "  [\($0.offset)] \($0.element)" }
+                .joined(separator: "\n")
+            return """
+                kind: \(pane.loadedKindDescription)
+                \(CodePaneRenderAudit.report(of: measurements))
+                first rows:
+                \(preview.isEmpty ? "  (none)" : preview)
+                """
+        }.joined(separator: "\n---\n")
+    }
+
+    /// Every live agent-authored content pane, weakly held — mirrors
+    /// `transcriptPanes` exactly. Registration must never be what keeps a
+    /// pane alive; it exists only so "Copy pane diagnostics" (AppDelegate's
+    /// Debug menu) can report on every pane currently on screen without a
+    /// debugger.
+    private let panes = NSHashTable<PaneContentNSView>.weakObjects()
+
+    func registerPane(_ pane: PaneContentNSView) {
+        panes.add(pane)
+    }
+
+    /// One line per live pane — content kind, sibling-renderer visibility,
+    /// owning focus tag, and the `PaneFirstPaintAudit` verdict — everything
+    /// needed to tell "the model is empty" from "the model is fine and the
+    /// geometry is not" without a debugger. Never includes pane content.
+    func paneDiagnosticsReport() -> String {
+        let lines = panes.allObjects.map { $0.diagnosticsLine() }.sorted()
+        guard !lines.isEmpty else { return "No live panes." }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Verbatim `PaneFirstPaintAudit.Measurements` for every live
+    /// agent-authored pane, reusing the same `panes` registry
+    /// `paneDiagnosticsReport()` reads — no second registry. Consumed by
+    /// `TranscriptDiagnostics.snapshot()` (W1 — launch-smoke-test) and by
+    /// `reconcile`'s own launch-layout observability note.
+    func currentPaneMeasurements() -> [PaneFirstPaintAudit.Measurements] {
+        panes.allObjects.map { $0.currentMeasurements() }
+    }
+
+    /// Start watching the app's own footprint. Called once, from `AppDelegate`.
+    func startMemoryWatchdog() {
+        // `done` is called once every pane has finished compacting, so the
+        // watchdog measures memory that has actually been freed rather than
+        // memory it has only asked for. Two panes can share one `ChatSession`
+        // (same tag): the second `compactBatch` finds every candidate already in
+        // flight, returns `false`, and its completion fires immediately — so the
+        // group still balances.
+        watchdog.onShed = { [weak self] done in
+            guard let self else { done(); return }
+            let panes = self.transcriptPanes.allObjects
+            guard !panes.isEmpty else { done(); return }
+            let group = DispatchGroup()
+            for pane in panes {
+                group.enter()
+                pane.shedMaterializedViews { group.leave() }
+            }
+            group.notify(queue: .main) { done() }
+        }
+        watchdog.onWarn = { [weak self] title, detail in
+            self?.onMemoryToast?("\(title) — \(detail)", .warning)
+        }
+        watchdog.start()
+    }
+
     // MARK: - Session registry
 
+    /// Returns the shared `ChatSession` for `tag`, creating one if none
+    /// exists yet. This is a **lazy creator**, which is exactly why the
+    /// ordering in `FocusStore.remove(_:)` matters (see its comment): any
+    /// caller that reaches this after a focus is removed but before every
+    /// view holding a reference to its old session has let go would silently
+    /// recreate — and re-spawn — the session eviction just removed.
     func session(for tag: String, agentName: String? = nil, displayName: String? = nil,
                  workingDirectory: String? = nil) -> ChatSession {
         if let s = sessionRegistry[tag] { return s }
@@ -95,6 +267,34 @@ class AppStore: ObservableObject {
     // MARK: - Active focus
 
     func setActiveFocusAgentTag(_ tag: String?) { activeFocusAgentTag = tag }
+    func setActiveFocusSessionTag(_ tag: String?) { activeFocusSessionTag = tag }
+
+    // MARK: - Decision modal (multi-window decision-sheet fix)
+
+    /// Forward the operator's answer to the daemon. Claiming the answer into
+    /// `DecisionStore` is `DecisionSheet`'s job, not this one (it happens
+    /// before this is even called) — this method only puts the frame on the
+    /// wire. There is no local state here to clear: liveness/presentation
+    /// tracking lives entirely in `DecisionStore`/`DecisionPresenter` now.
+    func answerDecision(requestId: String, choiceId: String?) {
+        client.decisionAnswer(requestId: requestId, choiceId: choiceId)
+    }
+
+    // MARK: - Ambient activity (activity-path wedge)
+
+    /// Key `activityStreams` is stored under for an event the daemon could
+    /// not attribute to a known focus — never dropped, never guessed onto an
+    /// arbitrary tab. Aliases `ActivityStreamStore.unattributedTag`, which is
+    /// the canonical value — `AppStore.swift` isn't part of
+    /// `ActivityStreamModel.swift`'s dual `Sources`/`TestSources` membership,
+    /// so the constant itself must live there, not here.
+    static let unattributedActivityKey = ActivityStreamStore.unattributedTag
+
+    /// The `ActivityStreamModel` for `tag`, or an empty (neutral "waiting")
+    /// model if nothing has arrived for it yet.
+    func activityModel(for tag: String) -> ActivityStreamModel {
+        activityStreams.model(for: tag)
+    }
 
     /// Return the ChatSession for `tag` if one has already been created (lazy —
     /// does not create a new session). Used by health UI that needs to call
@@ -167,7 +367,15 @@ class AppStore: ObservableObject {
             .store(in: &cancellables)
 
         FileWatchers.shared.start()
-        client.start()
+        // Under the load harness the daemon connection is suppressed entirely, so
+        // a measurement run never contends with — or is polluted by — live
+        // sessions. The harness drives `client.messages` / `client.connected`
+        // itself, which is the same path the daemon's traffic takes.
+        if TranscriptLoadHarness.isActive {
+            TranscriptLoadHarness.startIfRequested(client: client)
+        } else {
+            client.start()
+        }
         broker.start()
 
         // Fallback poll: `mother list --format json` every 30 s reconciles any
@@ -191,6 +399,19 @@ class AppStore: ObservableObject {
             .sink { [weak self] _ in self?.pushFocusRegistry() }
             .store(in: &cancellables)
 
+        // Per-focus state dies with the focus (fix/per-focus-state-eviction).
+        // Keyed on focus REMOVAL specifically — never on a session-lifecycle
+        // event (`.sessionExited`, `.sessionDown`, `.sessionState(.crashed)`)
+        // — because every one of those is non-terminal (a benign stop, a
+        // supervisor retry, a resumable daemon-side session) and evicting on
+        // one would drop state for a session the operator could still return
+        // to. A focus being removed is the one point its transcript becomes
+        // permanently unreachable through the UI — see `FocusStore.focusRemovals`.
+        FocusStore.shared.focusRemovals
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] focus in self?.evictPerFocusState(tag: focus.sessionTag) }
+            .store(in: &cancellables)
+
         // Perri queue: the daemon keeps the "queue" pane live on its own via
         // the live-pane-sources source-binding broadcaster — no FSEvents
         // watcher and no periodic bash shell-out needed on this side anymore.
@@ -201,6 +422,37 @@ class AppStore: ObservableObject {
 
     private func pushFocusRegistry() {
         client.focusRegistryPush(FocusStore.shared.wireProjection())
+    }
+
+    /// Per-focus state dies with the focus. Called once per `focusRemovals`
+    /// event (`start()`), never on any other schedule. Evicts `focusLayouts`,
+    /// `sessionRegistry` (detached, not merely dropped — that is what stops
+    /// the daemon-side session from being respawned on the next reconnect),
+    /// and `sessionHealth`.
+    ///
+    /// Deliberately does NOT touch `activityStreams`: `ActivityStreamStore`
+    /// bounds its own tag count internally (LRU eviction over
+    /// `maxTrackedFocusTags`) and hands back a fresh empty model for any tag
+    /// it has already dropped, so it cannot grow without bound the way the
+    /// other three maps could. Its lack of *focus-removal* pruning is a
+    /// separate, lower-severity hygiene gap, not the retention bug this hook
+    /// exists to close — see `ActivityStreamStore` for details.
+    ///
+    /// `TranscriptDiagnostics.forgetTag` IS in scope here, even though it
+    /// looks like the same shape of tag-keyed cleanup as `activityStreams`:
+    /// it is emitter bookkeeping for a number a human reads in the
+    /// diagnostics stream (`splitNodesRendered`), not app state another
+    /// queued fix owns, and — unlike `activityStreams` — leaving it unpruned
+    /// produces an actively wrong, permanently inflated count rather than a
+    /// merely stale one. It only covers focus *removal*; the window-close and
+    /// multi-window staleness this doesn't cover is tracked as its own filed
+    /// bug (`.claude/bugs/open/2026-09-04-renderedtreeshapebytag-still-goes-
+    /// stale-on-window-close.md`).
+    private func evictPerFocusState(tag: String) {
+        focusLayouts.removeValue(forKey: tag)
+        sessionRegistry.removeValue(forKey: tag)?.detach()
+        sessionHealth.removeValue(forKey: tag)
+        TranscriptDiagnostics.forgetTag(tag)
     }
 
     // MARK: - Broker event fold
@@ -443,11 +695,15 @@ class AppStore: ObservableObject {
         let key = prDetailCacheKey(item)
 
         // Cache hit: SHA matches (or we don't have a SHA yet — accept on TTL grounds).
-        if let cached = prDetailCache[key],
-           (item.headSha.isEmpty || cached.headSha == item.headSha) {
-            perriDetail        = cached
-            perriDetailLoading = false
-            return
+        if let cached = prDetailCache.detail(forKey: key) {
+            if item.headSha.isEmpty || cached.headSha == item.headSha {
+                perriDetail        = cached
+                perriDetailLoading = false
+                return
+            }
+            // Stale: the SHA moved on. Free the entry rather than retaining a
+            // diff for a commit that no longer exists.
+            prDetailCache.remove(forKey: key)
         }
 
         // Cache miss: show loading state and ask the daemon.
@@ -499,8 +755,8 @@ class AppStore: ObservableObject {
     /// Called when FileWatchers receives an updated PRDetail from current-pr-detail.json.
     private func handleDetailUpdate(_ detail: PRDetail?) {
         guard let detail else { return }
-        let key = "\(detail.repo.replacingOccurrences(of: "/", with: "-"))-\(detail.prNumber ?? 0)"
-        prDetailCache[key] = detail
+        let key = PRDetailCache.key(repo: detail.repo, number: detail.prNumber ?? 0)
+        prDetailCache.store(detail, forKey: key, protecting: pendingSelectionCacheKey)
 
         // Only publish if this matches the currently-pending selection.
         guard let pending = pendingSelection,
@@ -526,7 +782,7 @@ class AppStore: ObservableObject {
             else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.prDetailCache[key] = detail
+                self.prDetailCache.store(detail, forKey: key, protecting: self.pendingSelectionCacheKey)
                 // Only satisfy if still pending for this item.
                 guard let still = self.pendingSelection,
                       detail.repo == still.repo,
@@ -597,28 +853,41 @@ class AppStore: ObservableObject {
         }
 
         // ── Diff ──────────────────────────────────────────────────────────────
-        lines.append(divider)
-        if detail.diffTooLarge {
-            lines.append("⚠  Diff too large — open in GitHub to view.")
-        } else if detail.diff.isEmpty {
-            lines.append("No diff available.")
-        } else {
-            // Cap at ~150 lines — enough for most PRs, avoids flooding the pane
-            let diffLines = detail.diff.components(separatedBy: "\n")
-            let cap = 150
-            lines += diffLines.prefix(cap)
-            if diffLines.count > cap {
-                lines.append("… \(diffLines.count - cap) more lines — open GitHub for the full diff.")
-            }
-        }
+        // Deliberately absent (W2 — curated-agent-views). This used to append
+        // the first 150 diff lines and a "… N more lines" apology. The diff
+        // now has a real renderer — the daemon's `perri.get_pr_diff` source
+        // parses it per file/hunk/line and `CodeContentView` draws it with a
+        // gutter — so this function's job shrinks to the header/links/stats/CI
+        // summary it was actually good at. A client-side line budget was the
+        // silent truncation the PRD set out to remove.
 
+        // Never overwrite a pane the daemon is driving with structured content
+        // (W2), and never write a pane that doesn't exist in this focus's
+        // current tree — in `perri-curated` there is no pane literally named
+        // `diff` (its detail panes are `detail.0`/`detail.1`), so writing
+        // blind here invents a pane id the daemon never sent. This writes
+        // `focusLayouts` directly, bypassing the `.paneContent` handler
+        // entirely, so without the ownership half of this guard a `Diff` or
+        // `Code` push would be clobbered within milliseconds of arriving and
+        // the pane would flicker back to a text summary on every PR load.
+        // `nil` and `.text` are the states this function has always owned.
+        let existing = focusLayouts["perri"]?.paneContent[DiffPaneSummaryPolicy.paneId]
+        guard DiffPaneSummaryPolicy.shouldWriteSummary(tree: focusLayouts["perri"]?.tree, existing: existing)
+        else { return }
         var model = focusLayouts["perri"] ?? FocusLayoutModel.initial
-        model.paneContent["diff"] = .text(lines.joined(separator: "\n"))
+        model.paneContent[DiffPaneSummaryPolicy.paneId] = .text(lines.joined(separator: "\n"))
         focusLayouts["perri"] = model
     }
 
     private func prDetailCacheKey(_ item: PRQueueItem) -> String {
-        "\(item.repo.replacingOccurrences(of: "/", with: "-"))-\(item.number)"
+        PRDetailCache.key(repo: item.repo, number: item.number)
+    }
+
+    /// The cache key that must be exempt from eviction right now: the PR the
+    /// operator is actively viewing (or awaiting), if any. Passed as
+    /// `protecting:` to every `prDetailCache.store` call.
+    private var pendingSelectionCacheKey: String? {
+        pendingSelection.map(prDetailCacheKey)
     }
 
     private static func findBinary(_ name: String) -> URL? {
@@ -663,8 +932,39 @@ class AppStore: ObservableObject {
 
         case .activity(let ev):
             log.debug("activity: \(ev.agent, privacy: .public) — \(ev.summary, privacy: .public)")
-            recentActivity.append(ev)
-            if recentActivity.count > 64 { recentActivity.removeFirst() }
+            let tag = ev.focusTag ?? Self.unattributedActivityKey
+            // Read-modify-write, not `activityStreams[tag, default:].ingest(ev)`
+            // or a remove-then-reinsert — deliberately. `ActivityStreamModel`'s
+            // arrays are now bounded (≤2000 events store-wide), so the
+            // non-unique-reference deep copy this shape can cause is bounded
+            // constant work, not the unbounded-O(n²) cost `ChatSession.swift`'s
+            // `turns` comment (:63-75) documents avoiding for an *unbounded*
+            // array. Don't "improve" this without measuring: `@Published`
+            // has no `_modify`, `default:` subscript access depends on
+            // Combine's willSet timing rather than a language guarantee, and
+            // remove-then-reinsert fires the publisher twice per event —
+            // doubling `render()` on every `ActivityTickerView` in every
+            // attached-display window, inside a fix for a memory bug.
+            let gapDetected = activityStreams.ingest(ev, tag: tag)
+            if gapDetected {
+                // A seq gap means this stream may already be presenting an
+                // incomplete record — re-sync from a full daemon snapshot
+                // rather than silently continue with a hole in the history.
+                log.debug("activity seq gap detected for \(tag, privacy: .public) — requesting a fresh snapshot")
+                client.requestActivitySnapshot(tag: tag)
+            }
+
+        case .activitySnapshot(let tag, let streams):
+            var model = ActivityStreamModel()
+            for stream in streams {
+                for event in stream.events {
+                    model.ingest(event)
+                }
+            }
+            activityStreams.replace(tag: tag, with: model)
+
+        case .activityHealth(let ingesting, let reason, _, let hookInstalled):
+            activityHealth = ActivityHealthState(ingesting: ingesting, reason: reason, hookInstalled: hookInstalled)
 
         case .error(let msg):
             log.error("Daemon error: \(msg, privacy: .public)")
@@ -713,33 +1013,107 @@ class AppStore: ObservableObject {
         // ── agent-authored pane layout (Phase 1) ─────────────────────────────
         case .focusLayout(let tag, let tree, let focusedPane):
             // Structural update — rebuild the tree for this focus. Content is
-            // preserved (content pushes are decoupled from layout geometry).
+            // preserved (content pushes are decoupled from layout geometry)
+            // for every pane id that's still IN the new tree.
+            //
+            // A pane id that left the tree gets its content/freshness/address
+            // dropped here rather than carried forward. The daemon reuses
+            // pane ids (`new_pane_id` allocates the lowest free `detail.<n>`,
+            // and a PR change tears down and re-issues a curated region's
+            // tabs wholesale) — without this prune, a recycled pane id would
+            // render from its *previous* occupant's content the instant
+            // `DynamicFocusView.renderLayout`'s closing `updateContent` call
+            // ran, until the `PaneContent` frame that always follows a
+            // structural `FocusLayout` broadcast caught up. Dropping it here
+            // means a recycled pane starts from "waiting for content…" — a
+            // brief, honest placeholder — instead of someone else's PR.
+            //
+            // Deliberately still read-modify-write, not
+            // `removeValue`-then-reinsert: the latter would restore unique
+            // ownership of the inner dictionaries (same non-uniqueness/copy
+            // cost documented at `ChatSession.swift:63-75`) but fires
+            // `@Published` TWICE per push, doubling `handleLayoutUpdate` on
+            // every `DynamicFocusView` in every window — inside a fix for
+            // redundant re-rendering. The entry-count leak this file's other
+            // fix (`evictPerFocusState`) closes is what actually bounds this
+            // dictionary; this shape is measured, not assumed, to be fine.
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
             model.tree        = tree
             model.focusedPane = focusedPane
+            let livePaneIds = Set(tree.paneIds)
+            let droppedContentCount = model.paneContent.keys.filter { !livePaneIds.contains($0) }.count
+            model.paneContent   = Self.pruned(model.paneContent,   keeping: livePaneIds)
+            model.paneFreshness = Self.pruned(model.paneFreshness, keeping: livePaneIds)
+            model.paneAddress   = Self.pruned(model.paneAddress,   keeping: livePaneIds)
             focusLayouts[tag] = model
+            panesLog.debug("""
+                focusLayout tag=\(tag, privacy: .public) paneIds=\(Array(livePaneIds).sorted(), privacy: .public) \
+                prunedContentEntries=\(droppedContentCount, privacy: .public)
+                """)
 
-        case .paneContent(let tag, let paneId, let content, let freshness):
+        case .paneContent(let tag, let paneId, let content, let freshness, let address):
             // Content update — update the leaf without touching tree geometry so
             // operator drag-resizes survive.
+            //
+            // Read-modify-write, deliberately not restructured — see the
+            // identical note on the `.focusLayout` arm above. Now that
+            // `.jsonSnapshot`/`.unknown` compare structurally (D6), the no-op
+            // guard below actually fires for them too, which is the real fix
+            // for the redundant-@Published-write cost this shape has always
+            // paid — not a change to the shape itself.
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
             let existingContent = model.paneContent[paneId]
+            let kindLabel = Self.paneContentKindLabel(content)
             // A `.loading` update must never clobber content the operator is
             // already looking at — render it only on first paint (D10): no
             // prior content for this pane, or the prior content was itself
             // `.loading`.
             if content == .loading, let existingContent, existingContent != .loading {
+                panesLog.debug("""
+                    paneContent SWALLOWED (loading-clobber guard) tag=\(tag, privacy: .public) \
+                    pane=\(paneId, privacy: .public)
+                    """)
                 return
             }
-            // No-op write guard (D9): an idempotent push (identical content
-            // and freshness) causes zero @Published churn downstream — no
-            // flicker, no scroll reset, no spinner.
-            if existingContent == content && model.paneFreshness[paneId] == freshness {
+            // No-op write guard (D9): an idempotent push (identical content,
+            // freshness, and address) causes zero @Published churn downstream
+            // — no flicker, no scroll reset, no spinner. An address-only
+            // change (W1) must NOT be swallowed here, which is why it's part
+            // of this comparison.
+            if existingContent == content
+                && model.paneFreshness[paneId] == freshness
+                && model.paneAddress[paneId] == address {
+                panesLog.debug("""
+                    paneContent SWALLOWED (no-op guard) tag=\(tag, privacy: .public) pane=\(paneId, privacy: .public) \
+                    kind=\(kindLabel, privacy: .public)
+                    """)
                 return
             }
+            panesLog.debug("""
+                paneContent tag=\(tag, privacy: .public) pane=\(paneId, privacy: .public) kind=\(kindLabel, privacy: .public)
+                """)
             model.paneContent[paneId] = content
             model.paneFreshness[paneId] = freshness
+            model.paneAddress[paneId] = address
             focusLayouts[tag] = model
+
+        case .decisionRequest(let tag, let requestId, let prompt, let detail, let choices, let contextPaneId):
+            // Published once, to whichever single subscriber is listening
+            // (`DecisionPresenter`) — nothing here decides presentation or
+            // touches `DecisionStore`.
+            decisionRequests.send(PendingDecision(tag: tag, requestId: requestId, prompt: prompt,
+                                                  detail: detail, choices: choices, contextPaneId: contextPaneId))
+
+        case .decisionResolved(let tag, let requestId, let resolution, let choiceId):
+            decisionResolutions.send(ResolvedDecision(tag: tag, requestId: requestId,
+                                                       resolution: resolution, choiceId: choiceId))
+
+        case .notification(_, let level, let message):
+            // No per-focus routing yet (same global banner surface
+            // onMemoryToast already uses) — `tag` is carried on the wire for
+            // a later, more targeted presentation but unused here today.
+            let severity: ToastSeverity = level == "alert" ? .alert : (level == "warning" ? .warning : .info)
+            onNotification?(message, severity)
 
         case .focusCreated(let meta):
             // An agent-spawned focus was created — add it to FocusStore so the
@@ -762,6 +1136,37 @@ class AppStore: ObservableObject {
             sessionHealth.removeValue(forKey: tag)
         } else {
             sessionHealth[tag] = health
+        }
+    }
+
+    /// Drop every entry of `dict` whose key isn't in `ids` — shared by the
+    /// `.focusLayout` handler's three parallel prunes (`paneContent`,
+    /// `paneFreshness`, `paneAddress`) down to the pane ids the incoming tree
+    /// actually names. One named helper instead of three copies of the same
+    /// filter closure keeps it visually obvious all three follow identical
+    /// pruning rules (see `docs/mcp/panes.md`'s "Pane ids are recycled" section
+    /// for why this prune exists at all).
+    private static func pruned<Value>(_ dict: [String: Value], keeping ids: Set<String>) -> [String: Value] {
+        dict.filter { ids.contains($0.key) }
+    }
+
+    /// A short, content-free label for `PaneContentWire` — counts/ids/kinds
+    /// only, never the payload itself. Duplicated (not shared) with
+    /// `DynamicFocusView.contentKindLabel`: same shape, different file, and
+    /// three similar lines beat a premature cross-file abstraction for
+    /// something this small.
+    private static func paneContentKindLabel(_ content: PaneContentWire) -> String {
+        switch content {
+        case .text:           return "text"
+        case .jsonSnapshot:   return "jsonSnapshot"
+        case .prList:         return "prList"
+        case .loading:        return "loading"
+        case .error:          return "error"
+        case .code:           return "code"
+        case .diff:           return "diff"
+        case .prConversation: return "prConversation"
+        case .ticket:         return "ticket"
+        case .unknown:        return "unknown"
         }
     }
 }

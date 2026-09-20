@@ -7,6 +7,7 @@
 pub mod break_glass;
 pub mod daemon_bridge;
 pub mod dirty_file;
+pub mod file_source;
 pub mod fred_calendar;
 pub mod fred_calendar_native;
 pub mod fred_mailbox;
@@ -20,6 +21,7 @@ pub mod perri_pr;
 pub mod perri_pr_native;
 pub mod perri_queue;
 pub mod perri_queue_native;
+pub mod perri_queue_targeted;
 pub mod perri_suppress;
 pub mod relay_client;
 pub mod posture_events_watcher;
@@ -27,6 +29,8 @@ pub mod rate_limits;
 pub mod rate_limits_watcher;
 pub mod right_panel_source;
 pub mod teri_todos;
+pub mod tickets;
+pub mod unified_diff;
 
 use std::time::Duration;
 
