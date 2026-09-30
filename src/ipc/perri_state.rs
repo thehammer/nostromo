@@ -106,3 +106,162 @@ impl PerriStateProvider for WatchPerriStateProvider {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::data::perri_queue::PrQueueItem;
+
+    fn pr(repo: &str, number: u64) -> PrSnapshot {
+        PrSnapshot {
+            pr_number: Some(number),
+            repo: repo.to_owned(),
+            title: format!("{repo}#{number}"),
+            ..Default::default()
+        }
+    }
+
+    fn prs(entries: &[(&str, PrSnapshot)]) -> PrSnapshots {
+        let map: HashMap<String, Arc<PrSnapshot>> = entries
+            .iter()
+            .map(|(tag, snap)| ((*tag).to_owned(), Arc::new(snap.clone())))
+            .collect();
+        Arc::new(map)
+    }
+
+    fn queue() -> PrQueueSnapshot {
+        PrQueueSnapshot {
+            generated_at: None,
+            items: vec![PrQueueItem {
+                repo: "acme/web".into(),
+                number: 42,
+                title: "feat: add auth".into(),
+                author: "alice".into(),
+                bucket: "requested".into(),
+                new_activity: false,
+                url: "https://github.com/acme/web/pull/42".into(),
+                ci_state: Default::default(),
+                head_sha: "abc123".into(),
+                is_bot: false,
+            }],
+            stale: false,
+            error: None,
+        }
+    }
+
+    /// A `(repo, number)` PR identity.
+    type Pr = (String, u64);
+
+    /// `(tag, queue repos, current (repo, number))` — the parts of a frame
+    /// these tests compare.
+    fn parts(msg: &ServerMsg) -> (String, Vec<Pr>, Option<Pr>) {
+        match msg {
+            ServerMsg::PerriState {
+                tag,
+                queue,
+                current,
+            } => (
+                tag.clone(),
+                queue.iter().map(|i| (i.repo.clone(), i.number)).collect(),
+                current
+                    .as_ref()
+                    .map(|c| (c.repo.clone(), c.pr_number.unwrap_or_default())),
+            ),
+            other => panic!("expected PerriState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_perri_state_addresses_the_frame_to_its_tag_and_carries_that_focus_s_pr() {
+        let q = queue();
+        let snap = pr("acme/api", 7);
+
+        let (tag, queue_items, current) =
+            parts(&build_perri_state("reviewer-two", Some(&q), Some(&snap)));
+        assert_eq!(tag, "reviewer-two");
+        assert_eq!(queue_items, vec![("acme/web".to_owned(), 42)]);
+        assert_eq!(current, Some(("acme/api".to_owned(), 7)));
+
+        let (tag, queue_items, current) = parts(&build_perri_state("perri", None, None));
+        assert_eq!(tag, "perri");
+        assert!(queue_items.is_empty(), "a None queue is an empty list");
+        assert_eq!(current, None, "a focus with no PR carries no current");
+    }
+
+    #[test]
+    fn perri_state_tags_floors_at_the_builtin_focus_when_nothing_is_known() {
+        assert_eq!(
+            perri_state_tags(Vec::<String>::new(), &prs(&[])),
+            vec![BUILTIN_PERRI_TAG.to_owned()],
+            "with no registry and no pins the fleet-wide queue must still have a frame \
+             to travel on"
+        );
+    }
+
+    #[test]
+    fn perri_state_tags_is_the_sorted_union_of_registered_and_pinned_focuses() {
+        let pinned = prs(&[("zeta", pr("acme/web", 1)), ("alpha", pr("acme/api", 2))]);
+        let registry = vec!["mid".to_owned(), "alpha".to_owned(), "no-pr".to_owned()];
+
+        assert_eq!(
+            perri_state_tags(registry, &pinned),
+            vec!["alpha", "mid", "no-pr", "zeta"],
+            "every registered focus — PR or not — plus every pinned one, once each, sorted"
+        );
+        assert_eq!(
+            perri_state_tags(vec!["mid".to_owned()], &prs(&[])),
+            vec!["mid"],
+            "the builtin floor applies only when there is no focus at all"
+        );
+    }
+
+    #[test]
+    fn perri_states_is_empty_before_anything_has_been_fetched() {
+        let (_qtx, queue_rx) = watch::channel(None::<PrQueueSnapshot>);
+        let (_ptx, pr_rx) = watch::channel(crate::data::perri_pr::no_prs());
+        let provider = WatchPerriStateProvider::new(queue_rx, pr_rx);
+
+        assert!(
+            provider
+                .perri_states(&["perri".to_owned(), "reviewer-two".to_owned()])
+                .is_empty(),
+            "no queue and no pins means there is no state to replay — not an empty frame"
+        );
+    }
+
+    #[test]
+    fn perri_states_sends_one_frame_per_focus_each_with_its_own_pr_and_the_shared_queue() {
+        let (_qtx, queue_rx) = watch::channel(Some(queue()));
+        let (_ptx, pr_rx) = watch::channel(prs(&[
+            ("perri", pr("acme/web", 42)),
+            ("reviewer-two", pr("acme/api", 7)),
+        ]));
+        let provider = WatchPerriStateProvider::new(queue_rx, pr_rx);
+
+        let frames: Vec<_> = provider
+            .perri_states(&["perri".to_owned(), "reviewer-two".to_owned()])
+            .iter()
+            .map(parts)
+            .collect();
+        let fleet_queue = vec![("acme/web".to_owned(), 42)];
+        assert_eq!(
+            frames,
+            vec![
+                (
+                    "perri".to_owned(),
+                    fleet_queue.clone(),
+                    Some(("acme/web".to_owned(), 42))
+                ),
+                (
+                    "reviewer-two".to_owned(),
+                    fleet_queue,
+                    Some(("acme/api".to_owned(), 7))
+                ),
+            ],
+            "one frame per focus, each carrying only its own PR and the same fleet-wide queue"
+        );
+    }
+}

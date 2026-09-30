@@ -2402,3 +2402,138 @@ async fn load_pr_paints_loading_for_the_recreated_tabs_without_waiting_on_a_fetc
         );
     }
 }
+
+// ── #161's rebuild meets W7's isolation ───────────────────────────────────────
+
+/// A focus's pane tree, serialized — "byte-identical" means this string.
+fn tree_json(harness: &Harness, tag: &str) -> String {
+    let daemon = harness.state.daemon.as_ref().unwrap();
+    let reg = daemon.pane_registry.lock().unwrap();
+    serde_json::to_string(&reg.get(tag).cloned()).unwrap()
+}
+
+/// Open the curated layout with a pr_conversation + pr_diff detail region for
+/// `repo#number`, from `tag`'s own connection.
+async fn curated_focus_with_detail_region<W: AsyncWriteExt + Unpin, R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    writer: &mut W,
+    repo: &str,
+    number: u64,
+) {
+    let res = call_tool_bounded(
+        reader,
+        writer,
+        2,
+        "nostromo.apply_layout",
+        json!({ "name": "perri-curated" }),
+        BOUND,
+    )
+    .await;
+    assert_eq!(res["ok"], true, "{res}");
+    for (id, view) in [(3, "pr_conversation"), (4, "pr_diff")] {
+        let res = call_tool_bounded(
+            reader,
+            writer,
+            id,
+            "nostromo.show",
+            json!({ "type": view, "target": { "repo": repo, "number": number } }),
+            BOUND,
+        )
+        .await;
+        assert_eq!(res["ok"], true, "nostromo.show {view} should succeed: {res}");
+    }
+    assert_eq!(
+        detail_pane_ids(&get_self(reader, writer, 5).await).len(),
+        2,
+        "sanity: the detail region has both tabs"
+    );
+}
+
+/// `perri.load_pr` for focus B (named by `view_id`, from focus A's own
+/// connection) rebuilds *B's* detail region for the new PR — and touches
+/// nothing of A's: not its pane tree, not its pin.
+#[tokio::test]
+async fn load_pr_in_one_focus_rebuilds_only_that_focus_s_detail_region() {
+    let harness = make_daemon_state();
+    let (_server, socket) = serve(&harness, "rebuild-one-focus").await;
+    let mut bcast = harness.state.daemon.as_ref().unwrap().broadcast_tx.subscribe();
+
+    let (mut ra, mut wa) = connect(&socket, "focus-a").await;
+    let (mut rb, mut wb) = connect(&socket, "focus-b").await;
+
+    curated_focus_with_detail_region(&mut ra, &mut wa, "acme/web", 42).await;
+    curated_focus_with_detail_region(&mut rb, &mut wb, "acme/web", 42).await;
+    let res = call_tool_bounded(
+        &mut ra,
+        &mut wa,
+        6,
+        "perri.load_pr",
+        json!({ "number": 42, "repo": "acme/web", "highlights": "focus A's review" }),
+        BOUND,
+    )
+    .await;
+    assert_eq!(res["ok"], true, "{res}");
+
+    let a_tree_before = tree_json(&harness, "focus-a");
+    let a_pin_before = pin_bytes(&harness, "focus-a");
+    assert!(a_pin_before.is_some(), "sanity: focus A holds a pin");
+    let _ = drain_broadcasts(&mut bcast);
+
+    // A *different* PR, into focus B, requested from focus A's connection.
+    let res = call_tool_bounded(
+        &mut ra,
+        &mut wa,
+        7,
+        "perri.load_pr",
+        json!({ "number": 99, "repo": "acme/web", "highlights": "check auth", "view_id": "focus-b" }),
+        BOUND,
+    )
+    .await;
+    assert_eq!(res["ok"], true, "{res}");
+    assert_eq!(pinned(&harness, "focus-b"), ("acme/web".into(), 99));
+
+    // B's detail region was rebuilt, for the new PR.
+    let b_detail = detail_pane_ids(&get_self(&mut rb, &mut wb, 6).await);
+    assert_eq!(
+        b_detail.len(),
+        2,
+        "focus B's detail region must be rebuilt with both tabs: {b_detail:?}"
+    );
+    {
+        let daemon = harness.state.daemon.as_ref().unwrap();
+        let reg = daemon.pane_registry.lock().unwrap();
+        for pane in &b_detail {
+            let params = reg
+                .binding_for("focus-b", pane)
+                .and_then(|b| b.params.clone())
+                .unwrap_or_else(|| panic!("rebuilt tab {pane} must be bound with PR params"));
+            assert_eq!(
+                (params["repo"].as_str(), params["number"].as_u64()),
+                (Some("acme/web"), Some(99)),
+                "focus B's rebuilt tab {pane} must show the new PR"
+            );
+        }
+    }
+
+    // A is untouched: same tree, same pin, and nothing pushed to it.
+    assert_eq!(
+        tree_json(&harness, "focus-a"),
+        a_tree_before,
+        "a pickup in focus B must leave focus A's pane tree byte-identical"
+    );
+    assert_eq!(
+        pin_bytes(&harness, "focus-a"),
+        a_pin_before,
+        "a pickup in focus B must leave focus A's pin byte-identical"
+    );
+    let touched_a: Vec<_> = drain_broadcasts(&mut bcast)
+        .into_iter()
+        .filter(|m| {
+            matches!(m, ServerMsg::PaneContent { tag, .. } | ServerMsg::FocusLayout { tag, .. } if tag == "focus-a")
+        })
+        .collect();
+    assert!(
+        touched_a.is_empty(),
+        "nothing about focus B's pickup may be pushed to focus A: {touched_a:?}"
+    );
+}

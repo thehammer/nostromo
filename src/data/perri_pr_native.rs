@@ -2835,6 +2835,110 @@ mod tests {
         assert_cached_diff_served_but_marked_stale(&snap, "an expired token on the diff read");
     }
 
+    // ── a degraded pass keeps the last success's `generated_at` (#160 × W7) ──
+    //
+    // `generated_at` is `PaneFreshness::as_of`, and `badly_stale` is
+    // `stale && (as_of is None || now - as_of > 300s)`. `fetch_pr` publishes a
+    // degraded pass with `None` (it cannot know when the cached body was
+    // current), so without `fetch_all` carrying the previous same-pin
+    // timestamp forward, a single failed poll would flag a review badly stale
+    // at once instead of after five minutes — and #160's "a failure never
+    // moves `generated_at`" would not hold.
+
+    /// Warm pass, then a 500 on the diff: the cached diff is served, marked
+    /// stale, and dated exactly when the warm pass succeeded.
+    #[tokio::test]
+    async fn a_degraded_pass_carries_forward_the_last_successful_generated_at_for_the_same_pin() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        perri_current_pr::write_pointer(dir.path(), FOCUS_A, SHARED_PR, SHARED_REPO, None).unwrap();
+        let source = source_pinned_at(dir.path());
+        let client = client_pointed_at(&server.uri());
+
+        mount_fetchable_pr(&server, SHARED_REPO, SHARED_PR, FRESH_TITLE).await;
+        let warm = source
+            .fetch_all(&client, &crate::data::perri_pr::no_prs(), None)
+            .await;
+        let warm_at = warm[FOCUS_A].generated_at;
+        assert!(warm_at.is_some(), "a wholly successful pass stamps generated_at");
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(pr_request_path(SHARED_REPO, SHARED_PR)))
+            .and(header("accept", GITHUB_DIFF_ACCEPT))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        mount_pr_metadata(&server, SHARED_REPO, SHARED_PR, FRESH_TITLE).await;
+
+        let after = source.fetch_all(&client, &warm, None).await;
+        let snap = &after[FOCUS_A];
+        assert!(snap.stale, "a pass that served a cached diff is stale");
+        assert!(
+            snap.diff.contains(MOUNTED_DIFF),
+            "the cached diff is still served: {:?}",
+            snap.diff
+        );
+        assert_eq!(
+            snap.generated_at, warm_at,
+            "a degraded pass must keep the last successful fetch's timestamp — `None` would \
+             make one failed poll badly stale immediately, and *now* would hide a failure loop"
+        );
+    }
+
+    /// The carry-forward is only for the *same* pin: a previous snapshot of a
+    /// different PR says nothing about when this PR's cached body was current,
+    /// so a degraded pass with no same-pin history stays `None`.
+    #[tokio::test]
+    async fn a_degraded_pass_with_no_same_pin_previous_snapshot_leaves_generated_at_unset() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        crate::data::perri_queue_native::API_BASE_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(server.uri()));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        perri_current_pr::write_pointer(dir.path(), FOCUS_A, SHARED_PR, SHARED_REPO, None).unwrap();
+        let source = source_pinned_at(dir.path());
+        let client = client_pointed_at(&server.uri());
+
+        mount_fetchable_pr(&server, SHARED_REPO, SHARED_PR, FRESH_TITLE).await;
+        let warm = source
+            .fetch_all(&client, &crate::data::perri_pr::no_prs(), None)
+            .await;
+        assert!(warm[FOCUS_A].generated_at.is_some());
+
+        // The focus's previous snapshot is of a *different* PR, still dated.
+        let mut other_pr = (*warm[FOCUS_A]).clone();
+        other_pr.pr_number = Some(SHARED_PR + 1);
+        let previous = crate::data::perri_pr::one_pr(FOCUS_A, other_pr);
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(pr_request_path(SHARED_REPO, SHARED_PR)))
+            .and(header("accept", GITHUB_DIFF_ACCEPT))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        mount_pr_metadata(&server, SHARED_REPO, SHARED_PR, FRESH_TITLE).await;
+
+        let after = source.fetch_all(&client, &previous, None).await;
+        let snap = &after[FOCUS_A];
+        assert!(snap.stale, "the pass served a cached diff, so it is stale");
+        assert!(snap.diff.contains(MOUNTED_DIFF), "the cached diff is still served");
+        assert_eq!(
+            snap.generated_at, None,
+            "another PR's timestamp must not date this PR's cached content"
+        );
+    }
+
     // ── the *other* two degraded inputs (W7 — D5.1) ─────────────────────────
     //
     // `fetch_pr` marks a snapshot degraded on two independent readings —
