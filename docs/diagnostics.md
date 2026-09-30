@@ -40,7 +40,28 @@ macOS ▸ Debug menu (⌘⇧-prefixed shortcuts throughout — the app reserves 
   anything and, on every layout pass, judges the pane's drawable size via
   `PaneFirstPaintAudit`. That verdict logs at `.error`, rate-limited to once
   per distinct verdict, if a pane has content, is in a window, and has been
-  laid out — but doesn't have a real width and height.
+  laid out — but doesn't have a usable size. Two distinct verdicts:
+  `notDrawable(zeroWidth|zeroHeight)` for a pane with no drawable size at
+  all, and `tooSmall(tooNarrow|tooShort)` for one with a perfectly real size
+  that is nonetheless below `PaneFirstPaintAudit.minimumUsableExtent`
+  (120pt) — see "Too small to use" below.
+- `RatioSplitView.layout()` logs at `.error`, **once per split**, when a
+  split's requested ratios turn out to be unreachable:
+  `split ratios unreachable: requested … achieved … worstDelta=… bounds=… children=…`.
+  This is the line that says "the layout settled somewhere other than where
+  the daemon asked", and it is the direct signal for the 2026-09-04 /
+  2026-09-08 detail-region collapse.
+- `TabRegionView.selectTab` logs the pane id being selected and the pane id
+  it was previously active, on every call — both the local, no-daemon-round-
+  trip click path and the daemon-driven `focused_pane` path go through here.
+- `TabButtonView.didClick` logs the tab's label the instant AppKit delivers
+  the click, before `selectTab` runs. Silence here on a real click means the
+  click never reached the button at all — the 2026-09-08 zero-height-buttons
+  signature (see "Zero-height tab buttons" below), not a selection bug.
+- `TabButtonView` logs its own geometry once, after its first layout pass:
+  `bounds`, `clickButton.frame`, and `captionField.frame`. One-shot per
+  button, not per relayout, so opening a detail region with several tabs
+  doesn't spam the timeline.
 
 **Every line here is counts, ids, kinds and geometry only. No pane
 content — no repo name, PR title, file path or diff text — is ever written
@@ -69,6 +90,97 @@ per-window report the macOS client sends at the end of every
 attached window. See `docs/mcp/tools.md`'s "Render-state visibility (W1)"
 section for the full shape, error codes, and the "no report is not the same
 as agreement" rule.
+
+## "Too small to use" — the `tooSmall` verdict
+
+`PaneFirstPaintAudit` originally fired only on a pane with **zero** width or
+height. On 2026-09-08 the detail region collapsed to **34 points wide** in a
+1760pt split whose correct share was 879.5pt, stayed there, and tripped
+nothing: 34 is not zero. Every other instrument missed it for the same
+reason — `nostromo.get_render_state` saw a hierarchy member, the launch
+smoke's `splitsRatiosApplied` read a boolean that was `true` regardless, and
+no unit test asserted achieved geometry at all.
+
+So the audit now distinguishes two unhealthy verdicts under the same four
+preconditions (has content, not loading, in a window, has laid out at least
+once):
+
+| Verdict | Fires when | Catches |
+| --- | --- | --- |
+| `notDrawable(zeroWidth\|zeroHeight)` | an axis is `<= 0` | a pane with no drawable size at all — unchanged meaning |
+| `tooSmall(tooNarrow\|tooShort)` | both axes `> 0`, at least one `< 120pt` | a pane that exists, has real geometry, and still shows the operator nothing — the collapsed-split signature |
+
+The two populations are disjoint: zero wins, so a zero-width pane is never
+also reported as `tooSmall`.
+
+**`tooSmall` waits for the offending axis to stop moving.** A healthy pane
+legitimately passes through small extents while laying out — measured on the
+reproduction bench at `48 x 10` and `639.5 x 36` on panes that ended up
+entirely healthy, both of which *overlap* the real 34pt failure. No
+threshold can separate them, so the discriminator is whether the axis that
+is too small holds the same value across two consecutive layout passes. A
+pane still arriving is still changing; a collapsed split axis is pinned.
+`PaneFirstPaintAudit.shouldReport` is that rule, and it is why this tripwire
+does not fire on every launch. The standing rule this file's audits all
+follow: a tripwire that fires on a healthy pane is worse than no tripwire.
+
+## Zero-height tab buttons (2026-09-08)
+
+The split-collapse fix above landed a real tab strip in the detail region,
+and immediately exposed a second, unrelated defect: `TabRegionView`'s
+`stripStack` (an `NSStackView`) defaults to `.centerY` cross-axis alignment,
+which sizes each arranged `TabButtonView` to its own fitting height rather
+than stretching it — and `TabButtonView` had no height constraint and
+nothing anchored to its own bottom, so that fitting height was 0. Its
+full-bleed `clickButton` was therefore also 0pt tall, so a click at a tab's
+visible center hit nothing (`hitTest` returned `nil` or the stack view
+itself, never the button), while the label/caption text fields kept drawing
+past the 0pt button into the content pane below (AppKit does not clip
+subviews by default).
+
+This is the same shape as the split-collapse bug: the view rendered
+plausibly, every existing instrument was silent (`TabRegionView` had *no*
+logging at all before this fix — see `didClick`/`selectTab`/first-layout
+geometry above), and the failure was only visible by measuring rendered
+geometry. Fixed by pinning each tab button's top/bottom to the strip (so it
+gets a real height to hit-test against), anchoring the button's own content
+to its bottom with `>=` constraints (so the view has a self-derived minimum
+height instead of trusting an unmoored constant), and widening the
+`stripHeight` constant from 26 to 34 to fit a label line plus a caption line.
+`macOS/NostromoTests/TabRegionViewTests.swift` asserts both: every tab's
+click target has nonzero height and is what `hitTest` actually returns at
+that tab's center, and a caption's rendered frame stays within its own
+button's bounds.
+
+## The launch smoke check's fixtures
+
+`bin/nostromo-launch-smoke` serves a committed fixture to a real app launch.
+`--fixture` picks which:
+
+| `--fixture` | File | What it is for |
+| --- | --- | --- |
+| `split` (default) | `tests/fixtures/focus_layout_split.json` | The product shape: a queue pane beside a two-tab `detail` region, above a repl. Every automated caller uses this, and it must PASS. |
+| `clamped` | `tests/fixtures/focus_layout_clamped.json` | A split whose requested ratios are genuinely unreachable — a four-child region given 3% of the width, so its panes settle at 44pt. **Expected to FAIL** `no-undersized-laid-out-pane` by construction. |
+
+The default fixture gained the tabs region in
+`fix/detail-region-split-collapse`: this check is the repo's only automated
+real-AppKit end-to-end coverage, and until then it had never once rendered
+the node type the product's primary interaction depends on.
+
+The `clamped` fixture exists to make the `ratios-claimed-honestly` gate
+bite. Run against it:
+
+```sh
+bin/nostromo-launch-smoke --fixture clamped
+```
+
+    origin/main (before the fix)   splitsRatiosApplied 3 of 3 laid out, no error logged
+    with the fix                   splitsRatiosApplied 1 of 3 laid out, two `.error` lines
+
+That difference is the whole point of the fix stated as an observation: a
+split that did not achieve its ratios must not be counted as having applied
+them. Before, `splitsRatiosApplied` certified the exact failure this check
+exists to catch as a success.
 
 ## Code-pane render audit
 
@@ -139,6 +251,66 @@ Note this is a **separate** log category from `panes` above — `codepane` is
 specific to the code/diff render path's own internal audit; `panes` covers
 the broader daemon-to-view pipeline every pane kind goes through.
 
+## The `transcript` log category
+
+`ReplView.swift`'s own category, `com.hammer.nostromo` / `transcript`, for
+the cost of laying a turn out.
+
+```sh
+log show --predicate 'subsystem == "com.hammer.nostromo" AND category == "transcript"' \
+  --last 1h --info
+```
+
+Two things live here:
+
+- An `os_signpost` interval named `measure` around **every**
+  `ReplView.measure()` call, always on. Open the log in Instruments'
+  points-of-interest track to see measurement cost against the rest of the
+  timeline.
+- One `.error` line per `measure()` call that takes longer than
+  `ReplView.measureBudgetSeconds` (250 ms — the same budget
+  `makeTurnView`'s hydration comment measures itself against):
+
+  ```
+  slow measure: tag=perri turn=4182 blocks=164 subviews=1300 constraints=983
+                reason=remeasure elapsed=9964.7ms budget=250ms
+  ```
+
+  `reason` distinguishes `materialize` — a turn entering the viewport for
+  the first time — from `remeasure`, a turn whose blocks changed while it
+  was already materialized. They fail differently: `materialize` is paid
+  once per turn, `remeasure` is paid again on *every* streamed block, and
+  it was `remeasure` the 2026-09-09 freeze sat in. `subviews` and
+  `constraints` are walked only on this already-slow path, never on the
+  fast one.
+
+Why it exists: before 2026-09-10 `measure()` carried no instrumentation of
+any kind, so a call that took three and a half minutes and a call that took
+three milliseconds were indistinguishable from every counter and every log
+this app had. Diagnosing the beachball needed a live `sample` of the running
+process. See
+`.claude/bugs/resolved/2026-09-09-replview-s-auto-layout-measurement-pass-can-peg-the-main-thread-indefinitely-on-a-large-turn.md`.
+
+Counts, ids and durations only. No turn content is ever written.
+
+### The matching counters
+
+`TranscriptDiagnostics` reports the same thing numerically, so a run can be
+graded without reading a log. Per pane:
+
+- `slowMeasures` — how many `measure()` calls blew the budget in this pane's
+  lifetime.
+- `worstMeasureMs` — the worst single call, reported even when nothing was
+  slow, so a healthy run says how much headroom it actually had.
+
+And once per report line, `measureBudgetMs`: the budget **the build itself
+used**, so `macOS/scripts/transcript-load-report.py`'s `measure-budget` row
+grades against that rather than a number copied into the script.
+
+Neither counter is visible from turn or view counts: during the freeze the
+pane held a perfectly ordinary number of turns and materialized views the
+entire time, so memory, materialization and retention all read green.
+
 ## The `wire` log category
 
 A third category on the same subsystem, for the wire decoders in
@@ -198,6 +370,30 @@ Appends one JSON line per interval to
 diagnostics report (`TranscriptDiagnostics`), the same JSON **Copy transcript
 diagnostics** puts on the pasteboard. Used by
 `macOS/scripts/transcript-load-test.sh`.
+
+## `NOSTROMO_LOAD_BIG_TURN_BLOCKS`
+
+```sh
+NOSTROMO_LOAD_BIG_TURN_BLOCKS=160
+NOSTROMO_LOAD_BIG_TURN_TABLE_ROWS=60   # default 60
+```
+
+Makes `TranscriptLoadHarness` deliver **one deliberately-large turn** — N
+alternating tool-call/tool-result blocks, a findings card and a markdown
+table — before its ordinary traffic, streamed a block at a time so each
+append re-measures the turn.
+
+The rest of the harness drives five thousand *small* turns, which is the axis
+that was always fast. Nothing had ever driven one large turn, which is why
+`ReplView.measure()`'s superlinear region went untested until it froze the
+app. Grade a run with the `measure-budget` row of
+`macOS/scripts/transcript-load-report.py`:
+
+```sh
+NOSTROMO_LOAD_BIG_TURN_BLOCKS=160 macOS/scripts/transcript-load-test.sh 2000 1
+```
+
+Unset (the default), the harness behaves exactly as before.
 
 ## `NOSTROMO_DIAG_PATH`
 

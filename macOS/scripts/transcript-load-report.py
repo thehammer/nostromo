@@ -512,6 +512,7 @@ LIMIT_MONOTONIC = "0 (below the retention cap)"
 LIMIT_THROUGHPUT = "final >= 0.5x initial"
 LIMIT_CPU = "0 < cpu < 2 %"
 LIMIT_SAMPLE_FRAMES = "0 frames"
+LIMIT_MEASURE_BUDGET = "worst <= the build's own budget, 0 slow calls"
 
 
 @criterion("samples-are-from-this-run", limit=LIMIT_RUN_IDENTITY, kind=STREAM)
@@ -748,6 +749,75 @@ def _documented_view_cap(ev):
     return graded(key, name, observations=len(reported),
                   ok=value == MATERIALIZED_LIMIT, measured=f"{value}",
                   limit=LIMIT_VIEW_CAP)
+
+
+@criterion("measure-budget", limit=LIMIT_MEASURE_BUDGET)
+def _measure_budget(ev):
+    """No single `ReplView.measure()` call blew its wall-clock budget.
+
+    This is the row that would have caught the 2026-09-09 beachball, and the
+    reason it did not exist is the reason that incident needed a live `sample`
+    of the running process to diagnose: a `measure()` call taking three and a
+    half minutes and one taking three milliseconds were indistinguishable from
+    every counter this report had. The pane kept a perfectly ordinary number of
+    turns and views the whole time it was frozen, so memory, materialization
+    and retention all read green.
+
+    Graded against the budget **the build itself reported** (`measureBudgetMs`),
+    not a number copied into this script — a limit that can drift from the
+    thing it limits is a limit nobody is enforcing.
+
+    Two ways to be non-passing besides being over budget, both instances of the
+    house rule that a criterion must not be satisfied by the absence of its
+    subject: no pane reported a measurement at all, and every pane reported a
+    worst measurement of exactly zero. Both mean the view layer was never
+    measured, which is not the same as being fast.
+
+    Drive one deliberately-large turn with `NOSTROMO_LOAD_BIG_TURN_BLOCKS` —
+    the many-small-turns profile is the axis that was already fast, and it is
+    precisely why the superlinear region went untested for so long.
+    """
+    key = "measure-budget"
+    name = "worst single measure() call"
+    budgets = [row["measureBudgetMs"] for row in ev.rows
+               if row.get("measureBudgetMs") is not None]
+    # Both fields, not one: a pane that reports a worst duration but no slow
+    # count is half-instrumented, and reading the missing half as a zero is the
+    # exact shape of "satisfied by the absence of what it measures".
+    panes = [pane for pane in driven_pane_samples(ev.rows)
+             if pane.get("worstMeasureMs") is not None
+             and pane.get("slowMeasures") is not None]
+
+    if not budgets:
+        return graded(key, name, observations=0, ok=False,
+                      measured="no sample reported the build's measure budget",
+                      limit=LIMIT_MEASURE_BUDGET)
+    if not panes:
+        return graded(key, name, observations=0, ok=False,
+                      measured="no driven pane reported both a worst "
+                               "measurement and a slow-measure count",
+                      limit=LIMIT_MEASURE_BUDGET)
+
+    budget = agreed(budgets)
+    if budget is None:
+        return failed(key, name, observations=len(budgets),
+                      measured=f"samples disagree on the budget: {sorted(set(budgets))}",
+                      limit=LIMIT_MEASURE_BUDGET)
+
+    worst = max(pane["worstMeasureMs"] for pane in panes)
+    slow = max(pane["slowMeasures"] for pane in panes)
+
+    if worst <= 0:
+        return graded(key, name, observations=0, ok=False,
+                      measured="every pane reported a 0 ms worst measurement — "
+                               "the view layer was never measured",
+                      limit=LIMIT_MEASURE_BUDGET)
+
+    return graded(key, name, observations=len(panes),
+                  ok=worst <= budget and slow == 0,
+                  measured=f"{worst:.0f} ms worst against a {budget:.0f} ms budget, "
+                           f"{plural(slow, 'call')} over it",
+                  limit=LIMIT_MEASURE_BUDGET)
 
 
 @criterion("harness-targeting", limit=LIMIT_HARNESS)

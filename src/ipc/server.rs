@@ -368,7 +368,7 @@ where
     // per registered focus so the client starts with a complete picture.
     // `focused_pane` is omitted (None) — the registry does not persist it;
     // the agent's next `set_pane_focus` call will re-establish it.
-    if topics.contains(&Topic::Layout) {
+    if subscribed(&topics, Topic::Layout) {
         let mut snapshots: Vec<ServerMsg> = {
             let mgr = session_mgr.lock().unwrap();
             if let Some(reg) = mgr.pane_registry() {
@@ -452,6 +452,32 @@ where
             snapshots.into_iter().chain(std::iter::once(health_msg)),
         )
         .await;
+    }
+
+    // ── Perri replay — push the current queue/current-PR to a new client ──
+    // `PerriState` is only broadcast on watch change, and the daemon's one
+    // initial broadcast happens at daemon start, not per attach. Without this
+    // a client attaching to a running daemon shows an empty PR list for up to
+    // `pr_queue_poll_secs` (60s) — visible on iOS, whose Perri tab and tab
+    // badge read `DaemonStore.perriQueue`.
+    //
+    // Per focus (W7 — D7), exactly like the broadcaster: one frame for each
+    // focus the daemon would address, each carrying only that focus's PR.
+    // The provider lives inside `SessionManager`, so take what it needs under
+    // the lock and call it after the lock is released.
+    if subscribed(&topics, Topic::Perri) {
+        let (provider, focus_tags) = {
+            let mgr = session_mgr.lock().unwrap();
+            let tags: Vec<String> = mgr.focus_registry().into_iter().map(|f| f.tag).collect();
+            (mgr.perri_state_provider(), tags)
+        };
+        let frames = provider.map(|p| p.perri_states(&focus_tags)).unwrap_or_default();
+        for msg in frames {
+            let bytes = serde_json::to_vec(&msg).unwrap_or_default();
+            if !bytes.is_empty() {
+                let _ = write_frame(&mut writer, &bytes).await;
+            }
+        }
     }
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
@@ -964,22 +990,27 @@ fn activity_streams_wire(mgr: &SessionManager, tag: &str) -> Vec<ActivityStreamW
 
 // ── topic filter ──────────────────────────────────────────────────────────────
 
+/// A client that subscribed with an empty topic list gets everything — the
+/// rule `message_matches_topics` applies to broadcasts. Attach-replay gates
+/// must use this too, or a client (iOS sends `topics: []`) silently receives
+/// live broadcasts for a topic it was never replayed.
+fn subscribed(topics: &[Topic], topic: Topic) -> bool {
+    topics.is_empty() || topics.contains(&topic)
+}
+
 fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
-    if topics.is_empty() {
-        return true;
-    }
     match msg {
         ServerMsg::Activity(_)
         | ServerMsg::ActivitySnapshot { .. }
-        | ServerMsg::ActivityHealth { .. } => topics.contains(&Topic::Activity),
-        ServerMsg::MotherJobs { .. } => topics.contains(&Topic::MotherJobs),
-        ServerMsg::MotherStatusline(_) => topics.contains(&Topic::MotherStatusline),
-        ServerMsg::MotherAwaitDetected(_) => topics.contains(&Topic::MotherJobs),
-        ServerMsg::MotherPeek { .. } => topics.contains(&Topic::MotherPeek),
-        ServerMsg::TeriState { .. } => topics.contains(&Topic::Teri),
-        ServerMsg::FocusRegistryUpdated { .. } => topics.contains(&Topic::Focuses),
-        ServerMsg::PerriState { .. } => topics.contains(&Topic::Perri),
-        ServerMsg::FredState { .. } => topics.contains(&Topic::Fred),
+        | ServerMsg::ActivityHealth { .. } => subscribed(topics, Topic::Activity),
+        ServerMsg::MotherJobs { .. } => subscribed(topics, Topic::MotherJobs),
+        ServerMsg::MotherStatusline(_) => subscribed(topics, Topic::MotherStatusline),
+        ServerMsg::MotherAwaitDetected(_) => subscribed(topics, Topic::MotherJobs),
+        ServerMsg::MotherPeek { .. } => subscribed(topics, Topic::MotherPeek),
+        ServerMsg::TeriState { .. } => subscribed(topics, Topic::Teri),
+        ServerMsg::FocusRegistryUpdated { .. } => subscribed(topics, Topic::Focuses),
+        ServerMsg::PerriState { .. } => subscribed(topics, Topic::Perri),
+        ServerMsg::FredState { .. } => subscribed(topics, Topic::Fred),
         // Agent-authored pane layout broadcasts (Phase 1). `Notification`
         // (W5 — current-pr-collision) reuses this topic rather than adding
         // a new one, deliberately: every client that already renders
@@ -989,9 +1020,9 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }
         | ServerMsg::FocusCreated { .. }
-        | ServerMsg::Notification { .. } => topics.contains(&Topic::Layout),
+        | ServerMsg::Notification { .. } => subscribed(topics, Topic::Layout),
         ServerMsg::DecisionRequest { .. } | ServerMsg::DecisionResolved { .. } => {
-            topics.contains(&Topic::Decision)
+            subscribed(topics, Topic::Decision)
         }
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.

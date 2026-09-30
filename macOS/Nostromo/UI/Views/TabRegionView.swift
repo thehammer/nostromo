@@ -1,4 +1,14 @@
 import AppKit
+import os
+
+/// `panes` — shared with `DynamicFocusView`/`AppStore` (`docs/diagnostics.md`).
+/// `TabRegionView` had zero logging until the 2026-09-08 zero-height-buttons
+/// bug: neither "did a click ever reach `didClick`" nor "what height did a
+/// tab button actually get" was observable, which is why both the dead click
+/// and the clipped caption shipped unnoticed. Keep these lines even though
+/// the bug is fixed — they're the only way the next regression here is
+/// diagnosable from the timeline instead of a screenshot.
+private let log = Logger(subsystem: "com.hammer.nostromo", category: "panes")
 
 /// Renders a `PaneTree.tabs` node: a tab strip over a stack of **resident**
 /// child views (W1 — curated-agent-views).
@@ -91,6 +101,17 @@ final class TabRegionView: NSView {
             }
             tabButtons[tab.paneId] = button
             stripStack.addArrangedSubview(button)
+            // `stripStack`'s cross-axis alignment defaults to `.centerY` — an
+            // NSStackView never stretches arranged subviews on the cross
+            // axis (`.fillEqually` above governs only the horizontal axis),
+            // so without this pin every button sizes to its own fitting
+            // height, which `TabButtonView` has none of. Pinned explicitly
+            // top+bottom, the button (and its full-bleed `clickButton`) gets
+            // the strip's real height, so `hitTest` has something to hit.
+            NSLayoutConstraint.activate([
+                button.topAnchor.constraint(equalTo: stripStack.topAnchor),
+                button.bottomAnchor.constraint(equalTo: stripStack.bottomAnchor),
+            ])
 
             tab.view.translatesAutoresizingMaskIntoConstraints = false
             contentContainer.addSubview(tab.view)
@@ -105,7 +126,15 @@ final class TabRegionView: NSView {
         refreshVisibilityAndSelection()
     }
 
-    private static let stripHeight: CGFloat = 26
+    /// 3pt top pad + 15pt label line + 13pt caption line + 3pt bottom pad =
+    /// 34. Predates the caption feature (was 26, tall enough only for the
+    /// label); kept as an explicit constant rather than computed via Auto
+    /// Layout fitting, so the strip has one stable height regardless of
+    /// whether any tab currently has a caption set — `TabButtonView`'s own
+    /// `>=` bottom constraints (D2) assert this is tall enough for its
+    /// content rather than silently clipping again if a font or padding
+    /// value here changes without this constant being updated to match.
+    private static let stripHeight: CGFloat = 34
 
     // MARK: - Public API
 
@@ -116,6 +145,7 @@ final class TabRegionView: NSView {
     /// daemon-driven `focused_pane` hint that names one of this node's tabs.
     func selectTab(_ paneId: String) {
         guard tabs.contains(where: { $0.paneId == paneId }) else { return }
+        log.debug("TabRegionView.selectTab paneId=\(paneId, privacy: .public) previouslyActive=\(self.activePaneId, privacy: .public)")
         activePaneId = paneId
         unreadPaneIds.remove(paneId)
         refreshVisibilityAndSelection()
@@ -163,6 +193,12 @@ private final class TabButtonView: NSView {
     private let captionField = NSTextField(labelWithString: "")
     private let unreadDot = NSView()
     private let clickButton = NSButton()
+
+    /// One-shot: logged after the first layout pass only, so opening a
+    /// detail region with several tabs doesn't spam one line per button per
+    /// relayout — this is a "did the button get real geometry" check, not a
+    /// per-frame trace.
+    private var didLogFirstLayoutGeometry = false
 
     init(label: String, onClick: @escaping () -> Void) {
         self.label = label
@@ -223,10 +259,40 @@ private final class TabButtonView: NSView {
             clickButton.leadingAnchor.constraint(equalTo: leadingAnchor),
             clickButton.trailingAnchor.constraint(equalTo: trailingAnchor),
             clickButton.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            // Give this view a real fitting height of its own, independent
+            // of the strip's externally-pinned height (D1 above) — without
+            // this, `TabButtonView`'s fitting height stays 0 and its size
+            // is entirely at the mercy of whatever constant `stripHeight`
+            // happens to be, with nothing to catch it drifting too short.
+            // `>=` rather than `==` so a hidden caption doesn't shrink the
+            // required minimum: these stay active regardless of
+            // `captionField.isHidden`, so the strip's height never jolts
+            // when a caption is set or cleared (D3's stability rule).
+            bottomAnchor.constraint(greaterThanOrEqualTo: labelField.bottomAnchor, constant: Self.bottomPadding),
+            bottomAnchor.constraint(greaterThanOrEqualTo: captionField.bottomAnchor, constant: Self.bottomPadding),
+            bottomAnchor.constraint(greaterThanOrEqualTo: unreadDot.bottomAnchor, constant: Self.bottomPadding),
         ])
     }
 
-    @objc private func didClick() { onClick() }
+    private static let bottomPadding: CGFloat = 3
+
+    override func layout() {
+        super.layout()
+        guard !didLogFirstLayoutGeometry else { return }
+        didLogFirstLayoutGeometry = true
+        log.debug("""
+            TabButtonView first layout label=\(self.label, privacy: .public) \
+            bounds=\(String(describing: self.bounds), privacy: .public) \
+            clickButton.frame=\(String(describing: self.clickButton.frame), privacy: .public) \
+            captionField.frame=\(String(describing: self.captionField.frame), privacy: .public)
+            """)
+    }
+
+    @objc private func didClick() {
+        log.debug("TabButtonView.didClick label=\(self.label, privacy: .public)")
+        onClick()
+    }
 
     func setSelected(_ selected: Bool) {
         layer?.backgroundColor = (selected ? Theme.bgBarActive : Theme.bgBar).cgColor

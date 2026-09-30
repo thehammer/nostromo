@@ -264,7 +264,25 @@ async fn load_pr_daemon(
     // operator never sees the new PR's content sitting beside the old PR's
     // evidence. A no-op for a focus with no curated regions, which is every
     // focus still driving `perri-standard` through the raw tools.
+    //
+    // D1 (fix-gui-pr-pickup-detail-region): that teardown can empty the
+    // tabbed detail region entirely, and `reset_for_pr_change` removes an
+    // emptied region rather than leave it lingering (D5) — with no
+    // `nostromo.show` call to follow (the GUI's "click a PR row" path calls
+    // only `load_pr`), nothing would ever rebuild it. So: rebuild it exactly
+    // when the reset just made it disappear — it existed a moment ago and
+    // does not now. A region that *survives* the reset (e.g. a paramless
+    // `pr_diff` tab whose identity already fell back to whatever PR just
+    // became current) needs no rebuild; recreating on top of it would push
+    // fresh content into a pane that's already correctly tracking the new
+    // PR. A focus that never had a detail region gets nothing conjured into
+    // it, and `perri-standard` (no such region at all) is untouched either
+    // way.
+    let had_detail_region = show::has_detail_region(daemon, &tag);
     show::reset_for_pr_change(daemon, &tag, Some((repo, number)));
+    if had_detail_region && !show::has_detail_region(daemon, &tag) {
+        show::recreate_detail_region_for_pr(daemon, &tag, repo, number);
+    }
 
     // D1/D2: resolve which of the focus's *live* panes load_pr may push its
     // plain-text summary/highlights to, from the freshly pruned tree/bindings
@@ -1084,6 +1102,9 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
+        // "absent means settled": a `Matched` wait must not carry a
+        // `retryable` verdict at all — there's nothing to retry.
+        assert!(result.get("retryable").is_none());
 
         // make_daemon_state() already painted "diff" via the perri-standard
         // apply_layout call, so D5 suppresses the Loading push here — the
@@ -1120,6 +1141,9 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
         assert!(result.get("pending").is_none());
+        // "absent means settled" — see the sibling assertion in
+        // `load_pr_no_highlights_with_snapshot_already_published`.
+        assert!(result.get("retryable").is_none());
 
         // make_daemon_state() already painted "diff" via the perri-standard
         // apply_layout call, so D5 suppresses the Loading push here.
@@ -1132,17 +1156,74 @@ mod tests {
 
     #[tokio::test]
     async fn load_pr_no_highlights_times_out_leaves_pane_on_text_not_loading() {
-        let (state, _tmp, mut bcast) = make_daemon_state().await;
-        // perri_pr_rx stays at its default None — never matches.
+        let (mut state, _tmp, mut bcast) = make_daemon_state().await;
+        // A *live* sender that is kept alive for the whole test (bound to
+        // `_tx`, which only drops at the end of this function) but never
+        // publishes a matching snapshot. This is what makes the wait a
+        // genuine elapsed-settle-timeout (`SnapshotWait::TimedOut`) rather
+        // than a dropped-sender one (`SnapshotWait::SourceGone`, covered by
+        // `load_pr_no_highlights_source_task_gone_reports_not_retryable`
+        // below).
+        //
+        // Under W7, `McpSharedState::for_test` keeps its `perri_pr_tx`
+        // alive (`src/mcp/state.rs`), so the default `perri_pr_rx` would
+        // also time out rather than report `SourceGone`. The explicit
+        // override stays anyway: it makes this test's mechanics independent
+        // of that harness detail, and its name and intent match what it
+        // actually exercises.
+        let (_tx, pr_rx) = watch::channel(crate::data::perri_pr::no_prs());
+        state.perri_pr_rx = pr_rx;
 
         let args = json!({ "number": 99, "repo": "acme/web" });
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
         assert_eq!(result["pending"], true);
+        assert_eq!(
+            result["retryable"], true,
+            "a genuine settle-timeout (the source may still be alive and fetching) \
+             must be reported as retryable, unlike a dead source"
+        );
 
         // make_daemon_state() already painted "diff" via the perri-standard
         // apply_layout call, so D5 suppresses the Loading push here — the
         // pane goes straight to the "still loading" placeholder text.
+        let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
+        match content {
+            PaneContentWire::Text { text } => assert!(text.contains("acme/web#99")),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// The counterpart to the `TimedOut` case above: the `PerriPrNativeSource`
+    /// task has exited (its `watch::Sender` dropped — e.g. `build_client()`
+    /// failed in `run()`), so no fetch is in flight and none ever will be
+    /// without a daemon restart. An agent that only checks `pending` can't
+    /// tell this apart from "still loading, ask again shortly" and would
+    /// retry forever; `retryable: false` is the signal that distinguishes
+    /// them. The pushed pane content is unchanged from the `TimedOut` case —
+    /// only the reported fields differ.
+    #[tokio::test]
+    async fn load_pr_no_highlights_source_task_gone_reports_not_retryable() {
+        let (mut state, _tmp, mut bcast) = make_daemon_state().await;
+        let (tx, pr_rx) = watch::channel(crate::data::perri_pr::no_prs());
+        drop(tx); // the source task's sender is gone before the wait even starts
+        state.perri_pr_rx = pr_rx;
+
+        let args = json!({ "number": 99, "repo": "acme/web" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            result["pending"], false,
+            "a dead source is not 'still fetching' — pending must be false, not true"
+        );
+        assert_eq!(
+            result["retryable"], false,
+            "retrying can never help once the source task itself is gone"
+        );
+
+        // Same placeholder text as the TimedOut case — only pending/retryable
+        // differ, the pane content path is shared.
         let (_pane_id, content) = recv_pane_content(&mut bcast).await; // final
         match content {
             PaneContentWire::Text { text } => assert!(text.contains("acme/web#99")),
@@ -1272,15 +1353,15 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(daemon.perri.selected_index.load(Ordering::SeqCst), 1);
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        assert_eq!(daemon.perri.selected_index.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
     async fn load_pr_leaves_selected_index_unchanged_when_pr_not_in_queue() {
         let (mut state, _tmp, _bcast) = make_daemon_state().await;
-        if let Some(daemon) = &state.daemon {
+        {
+            let daemon = state.daemon.as_ref().unwrap();
             daemon.perri.selected_index.store(3, Ordering::SeqCst);
         }
         seed_queue(&mut state, json!([]));
@@ -1289,9 +1370,8 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(daemon.perri.selected_index.load(Ordering::SeqCst), 3);
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        assert_eq!(daemon.perri.selected_index.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -1600,34 +1680,23 @@ mod tests {
         let (state, _tmp, _bcast) = make_daemon_state().await;
         // make_daemon_state() applies "perri-standard", which binds "diff" to
         // perri.get_current_pr — confirm the starting point before mutating.
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(
-                daemon
-                    .pane_registry
-                    .lock()
-                    .unwrap()
-                    .source_for("perri", "diff"),
-                Some("perri.get_current_pr")
-            );
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        assert_eq!(
+            daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+            Some("perri.get_current_pr")
+        );
 
         let args = json!({ "number": 42, "repo": "acme/web", "highlights": "check auth" });
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(
-                daemon
-                    .pane_registry
-                    .lock()
-                    .unwrap()
-                    .source_for("perri", "diff"),
-                None,
-                "agent-authored highlights are final content — the diff pane must no \
-                 longer be considered live, or the broadcaster would clobber them on \
-                 the next queue/PR change"
-            );
-        }
+        assert_eq!(
+            daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+            None,
+            "agent-authored highlights are final content — the diff pane must no \
+             longer be considered live, or the broadcaster would clobber them on \
+             the next queue/PR change"
+        );
     }
 
     #[tokio::test]
@@ -1638,18 +1707,13 @@ mod tests {
         let result = load_pr(&state, &args, Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            assert_eq!(
-                daemon
-                    .pane_registry
-                    .lock()
-                    .unwrap()
-                    .source_for("perri", "diff"),
-                Some("perri.get_current_pr"),
-                "no-highlights load_pr must keep (or re-establish) the diff pane's \
-                 live binding, since its rendered content came from that source"
-            );
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        assert_eq!(
+            daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+            Some("perri.get_current_pr"),
+            "no-highlights load_pr must keep (or re-establish) the diff pane's \
+             live binding, since its rendered content came from that source"
+        );
     }
 
     // ── clear_current_pr ─────────────────────────────────────────────────────
@@ -1694,19 +1758,18 @@ mod tests {
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["ok"], true);
 
-        if let Some(daemon) = &state.daemon {
-            let reg = daemon.pane_registry.lock().unwrap();
-            assert_eq!(
-                reg.source_for("perri", "diff"),
-                Some("perri.get_current_pr"),
-                "clearing the current PR must leave diff ready to go live again \
-                 the moment a PR is loaded"
-            );
-            assert_eq!(
-                reg.source_for("perri", "queue"),
-                Some("perri.list_pr_queue")
-            );
-        }
+        let daemon = state.daemon.as_ref().unwrap();
+        let reg = daemon.pane_registry.lock().unwrap();
+        assert_eq!(
+            reg.source_for("perri", "diff"),
+            Some("perri.get_current_pr"),
+            "clearing the current PR must leave diff ready to go live again \
+             the moment a PR is loaded"
+        );
+        assert_eq!(
+            reg.source_for("perri", "queue"),
+            Some("perri.list_pr_queue")
+        );
     }
 
     #[tokio::test]

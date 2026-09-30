@@ -21,7 +21,7 @@ The governing discipline, copied from
 passes on evidence that measured nothing is worse than no detector at all,
 because it converts "we didn't check" into "we checked and it's fine". So the
 universal vacuity tests below are parameterised over the live `CRITERIA`
-registry, not over today's list of seven detector keys — a detector added
+registry, not over today's list of nine detector keys — a detector added
 tomorrow with no barren-input defence is a detector nobody checked.
 
 Run with:
@@ -41,6 +41,13 @@ import unittest
 REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 SCRIPT_PATH = os.path.join(REPO_ROOT, "bin", "nostromo-launch-smoke")
 FIXTURE_FRAMES_PATH = os.path.join(REPO_ROOT, "tests", "fixtures", "focus_layout_split.json")
+# The deliberately-unsatisfiable fixture behind `--fixture clamped`: a nested
+# split handed ~3% of the width and asked to divide it four ways. It exists
+# to make `ratios-claimed-honestly` bite, and is expected to FAIL
+# `no-undersized-laid-out-pane` by construction.
+CLAMPED_FIXTURE_PATH = os.path.join(
+    REPO_ROOT, "tests", "fixtures", "focus_layout_clamped.json"
+)
 
 # The script is extensionless (bin/nostromo-launch-smoke, not .py), so
 # spec_from_file_location can't infer a loader from the suffix and returns
@@ -81,6 +88,24 @@ def make_pane(
     }
 
 
+#: A width/height comfortably above `MINIMUM_USABLE_EXTENT` (120pt). The
+#: `make_pane` defaults (100x50) predate that floor and are BELOW it on both
+#: axes, so a fixture built from them is not a healthy pane any more — it is
+#: exactly the `tooSmall` shape `no-undersized-laid-out-pane` exists to
+#: catch. Every "this run is healthy" fixture therefore states its bounds
+#: explicitly through this helper rather than inheriting the defaults.
+HEALTHY_WIDTH = 879.5
+HEALTHY_HEIGHT = 434.5
+
+
+def healthy_pane(pane_id="queue", **kwargs):
+    """A `panesMeasured` entry that is healthy on every axis every detector
+    grades — non-zero AND at or above `MINIMUM_USABLE_EXTENT`."""
+    kwargs.setdefault("bounds_width", HEALTHY_WIDTH)
+    kwargs.setdefault("bounds_height", HEALTHY_HEIGHT)
+    return make_pane(pane_id, **kwargs)
+
+
 def make_row(*, pid=100, run_id="run-1", splits_ratios_applied=None,
              split_nodes_rendered=None, leaves_rendered=None, splits_laid_out=None,
              panes=None):
@@ -112,11 +137,11 @@ def healthy_evidence():
         launched_pid=100,
         rows=(
             make_row(pid=100, splits_ratios_applied=2, splits_laid_out=2,
-                     split_nodes_rendered=2, leaves_rendered=3,
-                     panes=[make_pane("queue"), make_pane("diff")]),
+                     split_nodes_rendered=2, leaves_rendered=4,
+                     panes=[healthy_pane("queue"), healthy_pane("diff")]),
             make_row(pid=100, splits_ratios_applied=2, splits_laid_out=2,
-                     split_nodes_rendered=2, leaves_rendered=3,
-                     panes=[make_pane("queue"), make_pane("diff")]),
+                     split_nodes_rendered=2, leaves_rendered=4,
+                     panes=[healthy_pane("queue"), healthy_pane("diff")]),
         ),
         observed_pids=(100,),
         another_instance_pid=None,
@@ -126,7 +151,17 @@ def healthy_evidence():
         crash_reports_dir_present=True,
         crash_reports_attributed_pids=(),
         notdrawable_violations=(),
-        panes_scanned=4,
+        # Two DISTINCT paneIds (queue, diff) across the two rows -- the same
+        # thing `build_evidence` counts. This said 4 (pane OBSERVATIONS, not
+        # distinct panes) until `HealthyFixtureIsGenuinelyHealthyTests`
+        # started re-deriving it from the rows.
+        panes_scanned=2,
+        # ...and this was never set at all, so the "known good" fixture
+        # asserted every detector PASSed while reporting it had judged zero
+        # panes for geometry -- the exact "passed because it measured
+        # nothing" shape this suite exists to prevent, in the fixture rather
+        # than in the module.
+        geometry_panes_judged=2,
         window_seconds=15.0,
     )
 
@@ -134,6 +169,86 @@ def healthy_evidence():
 def load_fixture_frames():
     with open(FIXTURE_FRAMES_PATH) as f:
         return json.load(f)
+
+
+def load_clamped_fixture_frames():
+    with open(CLAMPED_FIXTURE_PATH) as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# The 34pt collapse, as measured on the reproduction bench.
+# ---------------------------------------------------------------------------
+
+#: Measured on the live reproduction bench against
+#: `tests/fixtures/focus_layout_clamped.json`: a nested split handed ~3% of a
+#: 1760pt window and asked to divide it four ways, so each detail pane settles
+#: at 44pt wide. Real, non-zero, and entirely unusable — which is exactly why
+#: none of the four instruments watching for a collapse ever saw it, and why
+#: the floor this suite pins is a MINIMUM extent rather than "> 0".
+CLAMPED_PANE_WIDTH = 44.0
+CLAMPED_PANE_HEIGHT = 434.5
+
+#: The clamped fixture's own tree shape: outer split (inner split + repl),
+#: inner split (queue + nested split), nested split (6 detail leaves) — 3
+#: splits, 8 leaves. Deliberately NOT a whole multiple of the split
+#: fixture's shape; see `ClampedFixtureTests`.
+#:
+#: Six detail leaves rather than four, and 2% of the width rather than 3, so
+#: the resulting miss clears `RatioApplicationAudit.defaultTolerance` with
+#: room to spare. The four-leaf version missed by 11 points against a
+#: tolerance that later had to widen to 10 — too close to be a dependable
+#: demonstration.
+CLAMPED_SPLITS_PER_FOCUS = 3
+CLAMPED_LEAVES_PER_FOCUS = 8
+
+
+def clamped_detail_panes():
+    """The four detail-region panes, each clamped to 44pt wide."""
+    return [
+        make_pane(f"detail.{i}", has_content=False,
+                  bounds_width=CLAMPED_PANE_WIDTH, bounds_height=CLAMPED_PANE_HEIGHT)
+        for i in range(4)
+    ]
+
+
+def clamped_bench_rows(*, splits_ratios_applied, splits_laid_out=3, repeats=2):
+    """`repeats` identical snapshots of the clamped bench.
+
+    The repeat is load-bearing, not padding: the settle rule means a pane's
+    FIRST observation can never be a violation, so a single snapshot of a
+    permanently-collapsed pane proves nothing and must not.
+    """
+    return tuple(
+        make_row(pid=100,
+                 split_nodes_rendered=CLAMPED_SPLITS_PER_FOCUS,
+                 leaves_rendered=CLAMPED_LEAVES_PER_FOCUS,
+                 splits_laid_out=splits_laid_out,
+                 splits_ratios_applied=splits_ratios_applied,
+                 panes=[healthy_pane("queue")] + clamped_detail_panes())
+        for _ in range(repeats)
+    )
+
+
+def evidence_from_rows(rows, base=None):
+    """An Evidence whose row-derived populations are re-derived from `rows`
+    by the module's own extractors, exactly as `build_evidence` does — so a
+    fixture can never claim a violation population its own rows do not
+    produce, nor hide one they do."""
+    ev = healthy_evidence() if base is None else base
+    return ev._replace(
+        rows=rows,
+        notdrawable_violations=launch_smoke.notdrawable_violations_from_rows(rows),
+        panes_scanned=len({p.get("paneId") for row in rows
+                           for p in (row.get("panesMeasured") or [])}),
+        collapsed_geometry_violations=(
+            launch_smoke.collapsed_geometry_violations_from_rows(rows)),
+        geometry_panes_judged=launch_smoke.geometry_judged_pane_count(rows),
+        undersized_pane_violations=(
+            launch_smoke.undersized_pane_violations_from_rows(rows)),
+        dishonest_ratio_claims=launch_smoke.dishonest_ratio_claims_from_rows(rows),
+        rows_with_undersized_panes=launch_smoke.rows_with_undersized_panes(rows),
+    )
 
 
 def keyed(verdicts):
@@ -217,6 +332,9 @@ class EvidenceEmptyTests(unittest.TestCase):
         self.assertEqual(ev.panes_scanned, 0)
         self.assertEqual(ev.collapsed_geometry_violations, ())
         self.assertEqual(ev.geometry_panes_judged, 0)
+        self.assertEqual(ev.undersized_pane_violations, ())
+        self.assertEqual(ev.dishonest_ratio_claims, ())
+        self.assertEqual(ev.rows_with_undersized_panes, 0)
         self.assertEqual(ev.window_seconds, 0.0)
 
 
@@ -288,12 +406,20 @@ EXPECTED_REACH_KEYS = frozenset({
 EXPECTED_GATE_KEYS = frozenset({
     "alive-at-window-end", "no-attributable-crash-report", "cpu-settled",
     "no-zero-size-laid-out-pane",
+    # D6/D5, added by fix/detail-region-split-collapse. The detail region
+    # collapsed to 34pt wide in a 1760pt split whose correct share was
+    # 879.5pt, and `splitsRatiosApplied` — this tool's own shape check —
+    # certified it as a success, because `applyRatios` returned an
+    # unverified `true`. `no-undersized-laid-out-pane` grades the collapse;
+    # `ratios-claimed-honestly` grades the certification.
+    "no-undersized-laid-out-pane",
+    "ratios-claimed-honestly",
 })
 
 
 class DetectorRegistryPinTests(unittest.TestCase):
-    def test_exactly_seven_detectors_are_registered(self):
-        self.assertEqual(len(launch_smoke.CRITERIA), 7)
+    def test_exactly_nine_detectors_are_registered(self):
+        self.assertEqual(len(launch_smoke.CRITERIA), 9)
 
     def test_reach_keys_are_pinned_exactly(self):
         self.assertEqual(
@@ -438,11 +564,33 @@ class UniversalVacuityTests(unittest.TestCase):
     this detector exists to catch.
     """
 
-    #: Detectors that may legitimately PASS on `Evidence.empty()`. Exactly
-    #: one entry, pinned here the same way transcript-load-report.py pins
-    #: its STREAM/PROCESS partition — widening this is a visible, deliberate
-    #: edit, not a silent drift.
-    VACUOUS_PASS_EXEMPT = frozenset({"no-zero-size-laid-out-pane"})
+    #: Detectors that may legitimately PASS on `Evidence.empty()`. Pinned
+    #: here the same way transcript-load-report.py pins its STREAM/PROCESS
+    #: partition — widening this is a visible, deliberate edit, not a silent
+    #: drift.
+    #:
+    #: All three are geometry gates over the same `panesMeasured`
+    #: population, and all three share the exemption for the same reason:
+    #: "no pane was in a state anyone could judge" is not "a pane was judged
+    #: and it was wrong". `no-undersized-laid-out-pane` is graded on exactly
+    #: the population `no-zero-size-laid-out-pane` is (see that detector's
+    #: comment: same panes, disjoint predicate), so it inherits the
+    #: exemption verbatim. `ratios-claimed-honestly` is vacuous by
+    #: construction on any run with no undersized pane — including a
+    #: perfectly healthy one — which is precisely why its `measured` names
+    #: the row denominator out loud (see
+    #: `RatiosClaimedHonestlyDetectorTests.test_measured_names_the_row_
+    #: denominator_so_a_vacuous_pass_says_so`) instead of passing by vacuum
+    #: in silence.
+    #:
+    #: The non-vacuity these two DO carry is enforced elsewhere, not here:
+    #: `rows_with_undersized_panes` is reported on every run, and
+    #: `CriterionSensitivityTests` proves each can be flipped off PASS.
+    VACUOUS_PASS_EXEMPT = frozenset({
+        "no-zero-size-laid-out-pane",
+        "no-undersized-laid-out-pane",
+        "ratios-claimed-honestly",
+    })
 
     def test_no_registered_detector_passes_on_evidence_empty_except_the_pinned_exemption(self):
         verdicts = launch_smoke.evaluate_evidence(launch_smoke.Evidence.empty())
@@ -454,10 +602,20 @@ class UniversalVacuityTests(unittest.TestCase):
             offenders, [],
             f"detectors passed on Evidence.empty(): {[v.key for v in offenders]}",
         )
-        # And the exempted detector really does still PASS here — otherwise
-        # the exemption itself would be dead code nobody's fixture exercises.
-        exempted = keyed(verdicts)[next(iter(self.VACUOUS_PASS_EXEMPT))]
-        self.assertEqual(exempted.state, launch_smoke.PASS)
+        # And every exempted detector really does still PASS here —
+        # otherwise the exemption itself would be dead code nobody's fixture
+        # exercises. Checked per-key, not just for one representative: an
+        # entry that no longer needs the exemption should be deleted from
+        # it, not left to rot.
+        by_key = keyed(verdicts)
+        for key in sorted(self.VACUOUS_PASS_EXEMPT):
+            with self.subTest(exempt=key):
+                self.assertIn(key, by_key, f"{key} is exempted but not registered")
+                self.assertEqual(
+                    by_key[key].state, launch_smoke.PASS,
+                    f"{key} no longer PASSes on Evidence.empty(); it does not "
+                    f"need the exemption and must be removed from it",
+                )
 
     def test_no_registered_detector_is_inconclusive_since_gate_never_is_and_reach_never_fails(self):
         # Every verdict on Evidence.empty() is either INCONCLUSIVE (a REACH
@@ -575,12 +733,12 @@ def mutate_split_ratios_never_applied():
 
 def mutate_split_shape_did_not_match_fixture():
     # The outer split never rendered at all -- 1 split / 2 leaves is not a
-    # whole multiple of the fixture's own 2-split/3-leaf shape.
+    # whole multiple of the fixture's own 2-split/4-leaf shape.
     return (
         healthy_evidence()._replace(
             rows=(make_row(pid=100, split_nodes_rendered=1, leaves_rendered=2,
                            splits_laid_out=1, splits_ratios_applied=1,
-                           panes=[make_pane("queue"), make_pane("diff")]),),
+                           panes=[healthy_pane("queue"), healthy_pane("diff")]),),
         ),
         launch_smoke.INCONCLUSIVE,
         "rendered layout shape did not match the fixture",
@@ -590,13 +748,13 @@ def mutate_split_shape_did_not_match_fixture():
 def mutate_split_ratios_not_all_applied():
     # The literal f2 bug: the outer split's ratio never came back from
     # setPosition, so splitsRatiosApplied (1) trails splitNodesRendered (2)
-    # even though the fixture's own shape (2 splits, 3 leaves) fully
+    # even though the fixture's own shape (2 splits, 4 leaves) fully
     # rendered and laid out.
     return (
         healthy_evidence()._replace(
-            rows=(make_row(pid=100, split_nodes_rendered=2, leaves_rendered=3,
+            rows=(make_row(pid=100, split_nodes_rendered=2, leaves_rendered=4,
                            splits_laid_out=2, splits_ratios_applied=1,
-                           panes=[make_pane("queue"), make_pane("diff")]),),
+                           panes=[healthy_pane("queue"), healthy_pane("diff")]),),
         ),
         launch_smoke.INCONCLUSIVE,
         "not every rendered split applied its ratios",
@@ -692,6 +850,35 @@ def mutate_collapsed_geometry_pane_without_content():
     )
 
 
+def mutate_undersized_pane_settled_below_the_usable_floor():
+    # D6, the literal bug: four detail panes settled at 44pt wide in a split
+    # whose correct share was 879.5pt. Non-zero on both axes, so the
+    # zero-size gate above cannot see it; `splitsRatiosApplied` is left at 1
+    # of 3 here (the FIXED branch's honest reading) so this mutation flips
+    # `no-undersized-laid-out-pane` and nothing else — the collapse itself,
+    # graded independently of whether the tool lied about it.
+    return (
+        evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1)),
+        launch_smoke.FAIL,
+        "verdict=tooSmall(tooNarrow)",
+    )
+
+
+def mutate_dishonest_ratio_claim():
+    # D5, the certification of the bug as a success: the same four 44pt
+    # panes, with the UNFIXED branch's `splitsRatiosApplied` of 3 of 3 laid
+    # out. Unlike every other mutation here this one necessarily trips a
+    # second detector (`no-undersized-laid-out-pane`) as well, and that is
+    # the invariant, not a leak in the fixture: "claimed every split applied
+    # its ratios" is only dishonest in the presence of an unusably small
+    # pane, so the two conditions cannot be separated by construction.
+    return (
+        evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3)),
+        launch_smoke.FAIL,
+        "splitsLaidOut=3 splitsRatiosApplied=3",
+    )
+
+
 #: registry key -> list of (builder returning (evidence, expected_state,
 #: cause_substring_or_None)) — every registered detector must appear at least
 #: once. `cause_substring_or_None` is only checked when not None, since the
@@ -728,6 +915,8 @@ SENSITIVITY = {
         mutate_zero_size_pane_violation,
         mutate_collapsed_geometry_pane_without_content,
     ],
+    "no-undersized-laid-out-pane": [mutate_undersized_pane_settled_below_the_usable_floor],
+    "ratios-claimed-honestly": [mutate_dishonest_ratio_claim],
 }
 
 #: All the (evidence, ...) fixtures the sensitivity mutations produce, used to
@@ -1505,7 +1694,7 @@ class SplitLayoutAgreementTests(unittest.TestCase):
         return launch_smoke.split_layout_agreement(tuple(rows))
 
     def test_fully_applied_and_laid_out_shape_passes(self):
-        row = make_row(split_nodes_rendered=2, leaves_rendered=3,
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
                         splits_laid_out=2, splits_ratios_applied=2)
         self.assertTrue(self._agreement(row).ok)
 
@@ -1513,14 +1702,14 @@ class SplitLayoutAgreementTests(unittest.TestCase):
         # The literal f2 bug: the outer split never returned from
         # setPosition, so splitsRatiosApplied (1) trails splitNodesRendered
         # (2) even though the tree fully rendered.
-        row = make_row(split_nodes_rendered=2, leaves_rendered=3,
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
                         splits_laid_out=2, splits_ratios_applied=1)
         result = self._agreement(row)
         self.assertFalse(result.ok)
         self.assertEqual(result.cause, "not every rendered split applied its ratios")
 
     def test_laid_out_corroboration_is_also_required(self):
-        row = make_row(split_nodes_rendered=2, leaves_rendered=3,
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
                         splits_laid_out=1, splits_ratios_applied=2)
         result = self._agreement(row)
         self.assertFalse(result.ok)
@@ -1528,7 +1717,7 @@ class SplitLayoutAgreementTests(unittest.TestCase):
 
     def test_a_shape_that_is_not_a_whole_multiple_of_the_fixture_does_not_match(self):
         # The outer split never rendered at all -- 1 split / 2 leaves is not
-        # a whole multiple of the fixture's 2-split/3-leaf shape.
+        # a whole multiple of the fixture's 2-split/4-leaf shape.
         row = make_row(split_nodes_rendered=1, leaves_rendered=2,
                         splits_laid_out=1, splits_ratios_applied=1)
         result = self._agreement(row)
@@ -1536,12 +1725,12 @@ class SplitLayoutAgreementTests(unittest.TestCase):
         self.assertEqual(result.cause, "rendered layout shape did not match the fixture")
 
     def test_four_focuses_worth_is_still_a_whole_multiple_and_passes(self):
-        row = make_row(split_nodes_rendered=8, leaves_rendered=12,
+        row = make_row(split_nodes_rendered=8, leaves_rendered=16,
                         splits_laid_out=8, splits_ratios_applied=8)
         self.assertTrue(self._agreement(row).ok)
 
     def test_four_focuses_worth_with_one_split_short_of_applied_fails(self):
-        row = make_row(split_nodes_rendered=8, leaves_rendered=12,
+        row = make_row(split_nodes_rendered=8, leaves_rendered=16,
                         splits_laid_out=8, splits_ratios_applied=7)
         result = self._agreement(row)
         self.assertFalse(result.ok)
@@ -1555,16 +1744,16 @@ class SplitLayoutAgreementTests(unittest.TestCase):
         self.assertEqual(result.cause, "multi-pane layout not reached")
 
     def test_agreement_is_per_row_one_passing_row_is_enough(self):
-        row_a = make_row(split_nodes_rendered=2, leaves_rendered=3,
+        row_a = make_row(split_nodes_rendered=2, leaves_rendered=4,
                           splits_laid_out=1, splits_ratios_applied=1)
-        row_b = make_row(split_nodes_rendered=2, leaves_rendered=3,
+        row_b = make_row(split_nodes_rendered=2, leaves_rendered=4,
                           splits_laid_out=2, splits_ratios_applied=2)
         self.assertTrue(self._agreement(row_a, row_b).ok)
 
     def test_neither_row_individually_satisfying_applied_ge_rendered_fails(self):
-        row_a = make_row(split_nodes_rendered=2, leaves_rendered=3,
+        row_a = make_row(split_nodes_rendered=2, leaves_rendered=4,
                           splits_laid_out=2, splits_ratios_applied=1)
-        row_b = make_row(split_nodes_rendered=8, leaves_rendered=12,
+        row_b = make_row(split_nodes_rendered=8, leaves_rendered=16,
                           splits_laid_out=8, splits_ratios_applied=2)
         self.assertFalse(self._agreement(row_a, row_b).ok)
 
@@ -1592,14 +1781,14 @@ class SplitLayoutAgreementTests(unittest.TestCase):
         # None into 0, which is < rendered -- misreporting this as "not
         # every rendered split applied its ratios" when the app never said
         # whether it laid out.
-        row = make_row(split_nodes_rendered=2, leaves_rendered=3,
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
                         splits_laid_out=None, splits_ratios_applied=2)
         result = self._agreement(row)
         self.assertFalse(result.ok)
         self.assertEqual(result.cause, "diagnostics row omitted the split shape fields")
 
     def test_missing_splits_ratios_applied_yields_the_missing_telemetry_cause(self):
-        row = make_row(split_nodes_rendered=2, leaves_rendered=3,
+        row = make_row(split_nodes_rendered=2, leaves_rendered=4,
                         splits_laid_out=2, splits_ratios_applied=None)
         result = self._agreement(row)
         self.assertFalse(result.ok)
@@ -1612,7 +1801,7 @@ class SplitLayoutAgreementTests(unittest.TestCase):
         # the complete ones.
         incomplete = make_row(split_nodes_rendered=2, leaves_rendered=None,
                               splits_laid_out=None, splits_ratios_applied=None)
-        complete = make_row(split_nodes_rendered=2, leaves_rendered=3,
+        complete = make_row(split_nodes_rendered=2, leaves_rendered=4,
                             splits_laid_out=2, splits_ratios_applied=2)
         result = self._agreement(incomplete, complete)
         self.assertTrue(result.ok)
@@ -2249,8 +2438,15 @@ class FixtureShapeConstantsTests(unittest.TestCase):
 
     @staticmethod
     def _count_splits_and_leaves(tree):
-        if tree["kind"] == "split":
-            splits, leaves = 1, 0
+        if tree["kind"] in ("split", "tabs"):
+            # A `tabs` node is a container, not a split: it contributes 0 to
+            # the split count (it does not lay out an NSSplitView and has no
+            # ratios to apply) while its children are ordinary leaves. This
+            # is why `FIXTURE_LEAVES_PER_FOCUS` went 3 -> 4 when the `diff`
+            # leaf became a two-tab detail region, and
+            # `FIXTURE_SPLIT_NODES_PER_FOCUS` stayed at 2.
+            splits = 1 if tree["kind"] == "split" else 0
+            leaves = 0
             for child in tree["children"]:
                 child_splits, child_leaves = (
                     FixtureShapeConstantsTests._count_splits_and_leaves(child)
@@ -2270,6 +2466,928 @@ class FixtureShapeConstantsTests(unittest.TestCase):
                 splits, leaves = self._count_splits_and_leaves(frame["tree"])
                 self.assertEqual(splits, launch_smoke.FIXTURE_SPLIT_NODES_PER_FOCUS)
                 self.assertEqual(leaves, launch_smoke.FIXTURE_LEAVES_PER_FOCUS)
+
+
+# ---------------------------------------------------------------------------
+# D6/D5: the 34pt collapse and the tool's own certification of it.
+#
+# The detail region collapsed to 34pt wide in a 1760pt split whose correct
+# share was 879.5pt each -- requested [0.5, 0.5], achieved 0.9807/0.0193 --
+# and never recovered. `applyRatios` called `NSSplitView.setPosition`, which
+# AppKit silently clamped, then returned `true` unconditionally, so
+# `splitsRatiosApplied` -- the shape check THIS tool grades -- certified the
+# failure as a success. Four instruments and a live QA pass all missed it,
+# because 34 is not zero and the tool said the ratios were applied.
+# ---------------------------------------------------------------------------
+
+
+class MinimumUsableExtentConstantTests(unittest.TestCase):
+    def test_pinned_to_the_swift_side_value(self):
+        # Mirrors `PaneFirstPaintAudit.minimumUsableExtent`. Pinned to the
+        # literal so that changing the floor is a deliberate edit in both
+        # languages, not a silent one-sided drift.
+        self.assertEqual(launch_smoke.MINIMUM_USABLE_EXTENT, 120.0)
+
+    def test_the_measured_failure_is_below_the_floor_and_its_correct_share_is_not(self):
+        # The constant is only meaningful if it actually separates the
+        # measured failure from the measured correct value.
+        self.assertLess(CLAMPED_PANE_WIDTH, launch_smoke.MINIMUM_USABLE_EXTENT)
+        self.assertLess(34.0, launch_smoke.MINIMUM_USABLE_EXTENT)
+        self.assertGreaterEqual(HEALTHY_WIDTH, launch_smoke.MINIMUM_USABLE_EXTENT)
+        self.assertGreaterEqual(HEALTHY_HEIGHT, launch_smoke.MINIMUM_USABLE_EXTENT)
+
+
+class UndersizedReasonsTests(unittest.TestCase):
+    """`_undersized_reasons(pane)` -- which axes of one `panesMeasured` entry
+    are non-zero but unusable, in a deterministic order (width before
+    height). Empty is the answer for every pane that is fine, out of scope,
+    or zero-size; zero-size belongs to
+    `collapsed_geometry_violations_from_rows`, and the two populations must
+    never double-report the same pane (`cause` is capped at three joined
+    entries, so a duplicate can crowd out a genuinely distinct third).
+    """
+
+    def _reasons(self, **kwargs):
+        return launch_smoke._undersized_reasons(make_pane(**kwargs))
+
+    # -- empty for panes there is nothing to say about --
+
+    def test_a_pane_with_no_window_yields_no_reasons(self):
+        self.assertEqual(
+            self._reasons(has_window=False, bounds_width=44.0, bounds_height=44.0), ()
+        )
+
+    def test_a_pane_that_has_not_completed_a_layout_pass_yields_no_reasons(self):
+        self.assertEqual(
+            self._reasons(layout_pass_count=0, bounds_width=44.0, bounds_height=44.0), ()
+        )
+
+    def test_a_healthy_pane_yields_no_reasons(self):
+        self.assertEqual(
+            self._reasons(bounds_width=HEALTHY_WIDTH, bounds_height=HEALTHY_HEIGHT), ()
+        )
+
+    def test_a_zero_or_negative_axis_yields_no_reasons_because_that_is_the_other_population(self):
+        for width, height in [(0.0, 44.0), (44.0, 0.0), (0.0, 0.0),
+                              (-1.0, 44.0), (44.0, -1.0)]:
+            with self.subTest(bounds=(width, height)):
+                self.assertEqual(
+                    self._reasons(bounds_width=width, bounds_height=height), (),
+                    "a zero/negative axis belongs to collapsed_geometry_"
+                    "violations_from_rows; reporting it here too would let one "
+                    "pane occupy two of the three slots in a FAIL cause",
+                )
+
+    # -- the reasons themselves, in the pinned order --
+
+    def test_a_narrow_but_tall_enough_pane_is_too_narrow_only(self):
+        self.assertEqual(
+            self._reasons(bounds_width=CLAMPED_PANE_WIDTH,
+                          bounds_height=CLAMPED_PANE_HEIGHT),
+            ("tooNarrow",),
+        )
+
+    def test_a_wide_but_short_pane_is_too_short_only(self):
+        self.assertEqual(
+            self._reasons(bounds_width=639.5, bounds_height=36.0), ("tooShort",)
+        )
+
+    def test_a_pane_small_on_both_axes_reports_width_before_height(self):
+        self.assertEqual(
+            self._reasons(bounds_width=48.0, bounds_height=10.0),
+            ("tooNarrow", "tooShort"),
+            "the order is part of the contract -- it is what makes the "
+            "operator-facing summary string deterministic and dedupable",
+        )
+
+    # -- the boundary --
+
+    def test_exactly_the_minimum_usable_extent_is_fine_on_both_axes(self):
+        floor = launch_smoke.MINIMUM_USABLE_EXTENT
+        self.assertEqual(self._reasons(bounds_width=floor, bounds_height=floor), ())
+
+    def test_a_hair_below_the_minimum_usable_extent_is_not_fine(self):
+        floor = launch_smoke.MINIMUM_USABLE_EXTENT
+        self.assertEqual(
+            self._reasons(bounds_width=floor - 0.5, bounds_height=floor), ("tooNarrow",)
+        )
+        self.assertEqual(
+            self._reasons(bounds_width=floor, bounds_height=floor - 0.5), ("tooShort",)
+        )
+
+    # -- absent keys --
+
+    def test_a_pane_dict_with_no_keys_at_all_yields_no_reasons_rather_than_raising(self):
+        self.assertEqual(launch_smoke._undersized_reasons({}), ())
+
+    def test_absent_bounds_default_to_zero_rather_than_raising(self):
+        self.assertEqual(
+            launch_smoke._undersized_reasons(
+                {"paneId": "detail.0", "hasWindow": True, "layoutPassCount": 1}
+            ),
+            (),
+        )
+
+    def test_absent_window_and_layout_pass_keys_default_to_out_of_scope(self):
+        self.assertEqual(
+            launch_smoke._undersized_reasons(
+                {"paneId": "detail.0", "boundsWidth": 44.0, "boundsHeight": 44.0}
+            ),
+            (),
+        )
+
+    def test_a_null_layout_pass_count_does_not_raise(self):
+        self.assertEqual(
+            launch_smoke._undersized_reasons(
+                {"paneId": "detail.0", "hasWindow": True, "layoutPassCount": None,
+                 "boundsWidth": 44.0, "boundsHeight": 44.0}
+            ),
+            (),
+        )
+
+
+def small_pane(pane_id, width, height, **kwargs):
+    """A judged pane (window, one completed layout pass) at an explicit size."""
+    return make_pane(pane_id, has_content=False, bounds_width=width,
+                     bounds_height=height, **kwargs)
+
+
+class UndersizedPanesPerRowSettleRuleTests(unittest.TestCase):
+    """`undersized_panes_per_row(rows)` mirrors
+    `PaneFirstPaintAudit.shouldReport`: a healthy pane legitimately passes
+    through small extents on its way to a real size, and the extents it
+    passes through OVERLAP the real 34pt failure (48x10 and 639.5x36 were
+    both measured on panes that ended up entirely healthy), so no threshold
+    can separate them. The settle rule is what separates them instead: a
+    pane counts only once the OFFENDING axis has stopped moving. A gate that
+    flakes is a gate people learn to ignore.
+    """
+
+    @staticmethod
+    def _per_row(*pane_lists):
+        rows = tuple(make_row(panes=list(panes)) for panes in pane_lists)
+        return rows, launch_smoke.undersized_panes_per_row(rows)
+
+    # -- the positional contract --
+
+    def test_returns_one_entry_per_input_row_in_order_including_clean_rows(self):
+        rows, result = self._per_row(
+            [small_pane("detail.0", CLAMPED_PANE_WIDTH, CLAMPED_PANE_HEIGHT)],
+            [small_pane("detail.0", CLAMPED_PANE_WIDTH, CLAMPED_PANE_HEIGHT)],
+            [healthy_pane("queue")],
+            [],
+        )
+        self.assertEqual(
+            len(result), len(rows),
+            "a caller depends on positional correspondence with `rows`; a row "
+            "with no violations must still occupy its slot",
+        )
+        for index, (returned_row, _violations) in enumerate(result):
+            with self.subTest(row=index):
+                self.assertIs(returned_row, rows[index])
+        self.assertEqual(
+            [len(v) for _row, v in result], [0, 1, 0, 0]
+        )
+
+    def test_no_rows_yields_no_entries(self):
+        self.assertEqual(launch_smoke.undersized_panes_per_row(()), [])
+
+    def test_every_violations_value_is_a_tuple_even_when_empty(self):
+        _rows, result = self._per_row([healthy_pane("queue")], [])
+        for _row, violations in result:
+            self.assertIsInstance(violations, tuple)
+
+    # -- the first observation never counts --
+
+    def test_a_panes_first_observation_is_never_a_violation(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", CLAMPED_PANE_WIDTH, CLAMPED_PANE_HEIGHT)]
+        )
+        self.assertEqual(
+            [v for _row, v in result], [()],
+            "there is nothing to compare a first observation against, so a "
+            "single sampled row can never FAIL this check on its own",
+        )
+
+    def test_forty_eight_by_ten_seen_once_is_not_a_violation(self):
+        # Measured on the reproduction bench, on a pane that ended up
+        # entirely healthy.
+        _rows, result = self._per_row([small_pane("detail.0", 48.0, 10.0)])
+        self.assertEqual([v for _row, v in result], [()])
+
+    # -- the measured pairs --
+
+    def test_44x434_5_then_44x385_5_is_a_violation_width_pinned_height_still_arriving(self):
+        # The real failure: the offending axis (width) is pinned at its
+        # floor while the healthy axis is still moving. A rule that required
+        # BOTH axes to hold would never have caught this.
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5)],
+            [small_pane("detail.0", 44.0, 385.5)],
+        )
+        first, second = [v for _row, v in result]
+        self.assertEqual(first, ())
+        self.assertEqual(len(second), 1, second)
+        self.assertIn("tooSmall(tooNarrow)", second[0].summary)
+        self.assertIn("bounds=44.0x385.5", second[0].summary)
+
+    def test_639_5x36_then_639_5x56_is_not_a_violation_the_offending_axis_moved(self):
+        # Also measured on the bench, also on a pane that ended up healthy:
+        # the offending axis here is HEIGHT, and it moved, so the pane is
+        # still arriving rather than stuck.
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 639.5, 36.0)],
+            [small_pane("detail.0", 639.5, 56.0)],
+        )
+        self.assertEqual([v for _row, v in result], [(), ()])
+
+    def test_a_healthy_axis_may_move_freely_without_excusing_the_offending_one(self):
+        # The complement of the pair above, stated as the rule: only the
+        # offending axis has to hold.
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 300.0)],
+            [small_pane("detail.0", 44.0, 899.0)],
+        )
+        self.assertEqual(len(result[1][1]), 1)
+
+    def test_both_axes_offending_requires_both_to_hold(self):
+        _rows, held = self._per_row(
+            [small_pane("detail.0", 48.0, 10.0)],
+            [small_pane("detail.0", 48.0, 10.0)],
+        )
+        self.assertEqual(len(held[1][1]), 1)
+
+        _rows, one_moved = self._per_row(
+            [small_pane("detail.0", 48.0, 10.0)],
+            [small_pane("detail.0", 48.0, 12.0)],
+        )
+        self.assertEqual(
+            one_moved[1][1], (),
+            "when both axes offend, a single axis still moving means the "
+            "pane is still arriving",
+        )
+
+    # -- previous observation is per-paneId, not per-row-index --
+
+    def test_two_interleaved_panes_are_tracked_independently_across_rows(self):
+        # If "previous observation" were per-row-index rather than per
+        # paneId, row 2's `detail.1` (at index 0 of its row) would be
+        # compared against `detail.0`'s 44x434.5 and would NOT settle -- so
+        # this fixture discriminates between the two implementations.
+        def narrow():
+            return small_pane("detail.0", 44.0, 434.5)
+
+        def short():
+            return small_pane("detail.1", 639.5, 36.0)
+
+        _rows, result = self._per_row(
+            [narrow(), short()],
+            [narrow()],            # detail.1 absent from this row entirely
+            [short()],
+        )
+        row0, row1, row2 = [v for _row, v in result]
+        self.assertEqual(row0, (), "both panes are on their first observation")
+        self.assertEqual(len(row1), 1)
+        self.assertIn("pane=detail.0", row1[0].summary)
+        self.assertEqual(
+            len(row2), 1,
+            "detail.1's previous observation is its own, two rows back -- "
+            "being absent from the intervening row must not reset it",
+        )
+        self.assertIn("pane=detail.1", row2[0].summary)
+
+    def test_a_pane_absent_from_a_row_does_not_have_its_history_overwritten(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5)],
+            [healthy_pane("queue")],
+            [small_pane("detail.0", 44.0, 434.5)],
+        )
+        self.assertEqual(
+            len(result[2][1]), 1,
+            "detail.0 held 44pt across the gap; an intervening row about a "
+            "different pane says nothing about it",
+        )
+
+    # -- small -> healthy -> small --
+
+    def test_a_pane_that_recovers_and_collapses_again_is_clean_on_the_healthy_row(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5)],
+            [small_pane("detail.0", HEALTHY_WIDTH, 434.5)],
+            [small_pane("detail.0", 44.0, 434.5)],
+            [small_pane("detail.0", 44.0, 434.5)],
+        )
+        collapsed_first, healthy, small_again, still_small = [v for _row, v in result]
+        self.assertEqual(collapsed_first, (), "first observation")
+        self.assertEqual(healthy, (), "a healthy pane is not a violation")
+        self.assertEqual(
+            small_again, (),
+            "the first small-again observation compares against the HEALTHY "
+            "one, so the offending axis moved and the pane is still arriving",
+        )
+        self.assertEqual(len(still_small), 1, "and only now has it settled")
+
+    # -- scope: the same preconditions the rest of the geometry gates use --
+
+    def test_a_pane_without_a_window_is_never_a_violation_however_settled(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5, has_window=False)],
+            [small_pane("detail.0", 44.0, 434.5, has_window=False)],
+        )
+        self.assertEqual([v for _row, v in result], [(), ()])
+
+    def test_a_pane_with_no_completed_layout_pass_is_never_a_violation(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 44.0, 434.5, layout_pass_count=0)],
+            [small_pane("detail.0", 44.0, 434.5, layout_pass_count=0)],
+        )
+        self.assertEqual([v for _row, v in result], [(), ()])
+
+    def test_a_row_with_no_panes_measured_key_is_tolerated(self):
+        rows = ({"pid": 100},)
+        self.assertEqual(launch_smoke.undersized_panes_per_row(rows), [(rows[0], ())])
+
+    def test_a_settled_zero_size_pane_is_left_to_the_zero_size_population(self):
+        _rows, result = self._per_row(
+            [small_pane("detail.0", 0.0, 44.0)],
+            [small_pane("detail.0", 0.0, 44.0)],
+        )
+        self.assertEqual([v for _row, v in result], [(), ()])
+
+
+class UndersizedAndCollapsedPopulationsAreDisjointTests(unittest.TestCase):
+    """No pane observation may appear in both `collapsed_geometry_violations_
+    from_rows` and `undersized_pane_violations_from_rows`. Both feed a FAIL
+    `cause` that is capped at three joined entries, so one pane reported
+    twice can crowd a genuinely distinct third violation out of the report a
+    human reads.
+    """
+
+    def test_across_a_grid_of_sizes_no_pane_is_reported_by_both(self):
+        extents = [-1.0, 0.0, 1.0, CLAMPED_PANE_WIDTH,
+                   launch_smoke.MINIMUM_USABLE_EXTENT - 0.5,
+                   launch_smoke.MINIMUM_USABLE_EXTENT, HEALTHY_WIDTH]
+        for width in extents:
+            for height in extents:
+                with self.subTest(bounds=(width, height)):
+                    rows = tuple(
+                        make_row(panes=[small_pane("detail.0", width, height)])
+                        for _ in range(3)
+                    )
+                    collapsed = launch_smoke.collapsed_geometry_violations_from_rows(rows)
+                    undersized = launch_smoke.undersized_pane_violations_from_rows(rows)
+                    self.assertFalse(
+                        collapsed and undersized,
+                        f"{width}x{height} was reported by both populations: "
+                        f"{collapsed} / {undersized}",
+                    )
+
+    def test_the_grid_actually_exercises_both_populations(self):
+        # Otherwise the disjointness above could hold by neither ever firing.
+        collapsed_rows = tuple(
+            make_row(panes=[small_pane("detail.0", 0.0, 434.5)]) for _ in range(2)
+        )
+        undersized_rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]) for _ in range(2)
+        )
+        self.assertTrue(
+            launch_smoke.collapsed_geometry_violations_from_rows(collapsed_rows)
+        )
+        self.assertTrue(
+            launch_smoke.undersized_pane_violations_from_rows(undersized_rows)
+        )
+
+
+class UndersizedPaneViolationsFromRowsTests(unittest.TestCase):
+    """One summary string per DISTINCT violating (paneId, width, height) --
+    the same rate-limiting spirit as the Swift side's `violationKey`. The
+    strings are operator-facing: they are what lands in the FAIL `cause`.
+    """
+
+    def test_a_pane_stuck_at_the_same_size_across_ten_rows_yields_one_entry(self):
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]) for _ in range(10)
+        )
+        self.assertEqual(len(launch_smoke.undersized_pane_violations_from_rows(rows)), 1)
+
+    def test_a_stuck_pane_yields_one_entry_even_as_its_layout_pass_count_climbs(self):
+        # The test above cannot catch this on its own: `small_pane` defaults
+        # every row to the same `layoutPassCount`, so a dedup key that
+        # wrongly included the pass counter would still collapse to one
+        # entry there and look correct.
+        #
+        # A real stuck pane relays out, so its counter climbs every row. If
+        # the key includes it, nothing deduplicates at all -- which is
+        # precisely the defect this fix had to repair on the Swift side,
+        # where it flooded the log thousands of times in a single run. And
+        # `cause` is capped at three joined entries, so the repeats would
+        # crowd out genuinely distinct panes from ever being named.
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=n)])
+            for n in range(1, 11)
+        )
+        violations = launch_smoke.undersized_pane_violations_from_rows(rows)
+        self.assertEqual(
+            len(violations), 1,
+            f"one stuck pane must report once however many times it relaid out; got "
+            f"{len(violations)}:\n" + "\n".join(violations),
+        )
+
+    def test_the_reported_summary_still_names_the_layout_pass_count(self):
+        # The counter is excluded from the dedup KEY, not from the report --
+        # it is the first thing an operator wants when reading a FAIL.
+        rows = (
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=3)]),
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=4)]),
+        )
+        violations = launch_smoke.undersized_pane_violations_from_rows(rows)
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("layoutPasses=4", violations[0])
+
+    def test_the_same_pane_settled_at_two_different_sizes_yields_two_entries(self):
+        rows = (
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]),
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]),
+            make_row(panes=[small_pane("detail.0", 50.0, 434.5)]),
+            make_row(panes=[small_pane("detail.0", 50.0, 434.5)]),
+        )
+        violations = launch_smoke.undersized_pane_violations_from_rows(rows)
+        self.assertEqual(len(violations), 2, violations)
+        self.assertIn("bounds=44.0x434.5", violations[0])
+        self.assertIn("bounds=50.0x434.5", violations[1])
+
+    def test_two_distinct_panes_at_the_same_size_are_each_reported(self):
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5),
+                            small_pane("detail.1", 44.0, 434.5)])
+            for _ in range(2)
+        )
+        self.assertEqual(len(launch_smoke.undersized_pane_violations_from_rows(rows)), 2)
+
+    def test_no_rows_yields_no_violations(self):
+        self.assertEqual(launch_smoke.undersized_pane_violations_from_rows(()), ())
+
+    def test_a_healthy_run_yields_no_violations(self):
+        self.assertEqual(
+            launch_smoke.undersized_pane_violations_from_rows(healthy_evidence().rows), ()
+        )
+
+    def test_summary_string_matches_the_documented_operator_facing_shape(self):
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5, layout_pass_count=3)])
+            for _ in range(2)
+        )
+        self.assertEqual(
+            launch_smoke.undersized_pane_violations_from_rows(rows),
+            (
+                "pane=detail.0 hasWindow=true layoutPasses=3 "
+                "bounds=44.0x434.5 verdict=tooSmall(tooNarrow)",
+            ),
+        )
+
+    def test_summary_string_names_both_axes_when_both_offend(self):
+        rows = tuple(
+            make_row(panes=[small_pane("detail.0", 48.0, 10.0, layout_pass_count=2)])
+            for _ in range(2)
+        )
+        self.assertEqual(
+            launch_smoke.undersized_pane_violations_from_rows(rows),
+            (
+                "pane=detail.0 hasWindow=true layoutPasses=2 "
+                "bounds=48.0x10.0 verdict=tooSmall(tooNarrow,tooShort)",
+            ),
+        )
+
+
+class DishonestRatioClaimsFromRowsTests(unittest.TestCase):
+    """The D5 invariant, and the point of the whole fix: no snapshot may
+    report every laid-out split as having applied its ratios while it also
+    contains an unusably small pane.
+
+    Measured on a live reproduction bench against
+    `tests/fixtures/focus_layout_clamped.json`:
+
+        origin/main (unfixed)  splitsLaidOut 3, applied 3, four 44pt panes
+        this branch (fixed)    splitsLaidOut 3, applied 1, four 44pt panes
+    """
+
+    def test_the_unfixed_branch_claiming_three_of_three_applied_is_dishonest(self):
+        claims = launch_smoke.dishonest_ratio_claims_from_rows(
+            clamped_bench_rows(splits_ratios_applied=3, splits_laid_out=3)
+        )
+        self.assertEqual(
+            claims,
+            ("splitsLaidOut=3 splitsRatiosApplied=3 while 4 pane(s) in the "
+             "same snapshot are unusably small",),
+        )
+
+    def test_this_branch_claiming_one_of_three_applied_is_honest(self):
+        self.assertEqual(
+            launch_smoke.dishonest_ratio_claims_from_rows(
+                clamped_bench_rows(splits_ratios_applied=1, splits_laid_out=3)
+            ),
+            (),
+            "reporting 1 of 3 applied is the fix working: the split that "
+            "could not reach its ratios is no longer counted as having "
+            "applied them",
+        )
+
+    def test_a_healthy_run_is_vacuously_honest_whatever_the_counts_say(self):
+        for applied, laid_out in [(2, 2), (0, 2), (3, 2), (0, 0)]:
+            with self.subTest(applied=applied, laid_out=laid_out):
+                rows = tuple(
+                    make_row(pid=100, split_nodes_rendered=2, leaves_rendered=4,
+                             splits_laid_out=laid_out, splits_ratios_applied=applied,
+                             panes=[healthy_pane("queue"), healthy_pane("diff")])
+                    for _ in range(3)
+                )
+                self.assertEqual(
+                    launch_smoke.dishonest_ratio_claims_from_rows(rows), (),
+                    "there is nothing to be dishonest ABOUT when every pane "
+                    "is a sensible size -- this must be silently correct, "
+                    "not accidentally flagging",
+                )
+
+    def test_absent_split_shape_fields_are_skipped_not_flagged(self):
+        # An older diagnostics row that predates these fields must not be
+        # read as a violation.
+        for laid_out, applied in [(None, None), (None, 3), (3, None)]:
+            with self.subTest(splitsLaidOut=laid_out, splitsRatiosApplied=applied):
+                rows = clamped_bench_rows(splits_ratios_applied=applied,
+                                          splits_laid_out=laid_out)
+                self.assertEqual(launch_smoke.dishonest_ratio_claims_from_rows(rows), ())
+
+    def test_zero_splits_laid_out_is_skipped(self):
+        rows = clamped_bench_rows(splits_ratios_applied=0, splits_laid_out=0)
+        self.assertEqual(launch_smoke.dishonest_ratio_claims_from_rows(rows), ())
+
+    def test_more_applied_than_laid_out_is_nonsensical_and_must_not_read_as_honest(self):
+        claims = launch_smoke.dishonest_ratio_claims_from_rows(
+            clamped_bench_rows(splits_ratios_applied=4, splits_laid_out=3)
+        )
+        self.assertEqual(
+            claims,
+            ("splitsLaidOut=3 splitsRatiosApplied=4 while 4 pane(s) in the "
+             "same snapshot are unusably small",),
+        )
+
+    def test_an_undersized_pane_that_has_not_settled_yet_is_not_flagged(self):
+        # Inherits the settle rule: a pane still on its way to a real size
+        # is not evidence that anything was clamped.
+        rows = (
+            make_row(pid=100, splits_laid_out=3, splits_ratios_applied=3,
+                     panes=[small_pane("detail.0", 44.0, 434.5)]),
+            make_row(pid=100, splits_laid_out=3, splits_ratios_applied=3,
+                     panes=[small_pane("detail.0", 60.0, 434.5)]),
+        )
+        self.assertEqual(launch_smoke.dishonest_ratio_claims_from_rows(rows), ())
+
+    def test_only_the_rows_that_actually_claimed_it_are_flagged(self):
+        honest = make_row(pid=100, splits_laid_out=3, splits_ratios_applied=1,
+                          panes=clamped_detail_panes())
+        dishonest = make_row(pid=100, splits_laid_out=3, splits_ratios_applied=3,
+                             panes=clamped_detail_panes())
+        rows = (honest, dishonest, honest, dishonest)
+        self.assertEqual(
+            len(launch_smoke.dishonest_ratio_claims_from_rows(rows)), 2
+        )
+
+    def test_no_rows_yields_no_claims(self):
+        self.assertEqual(launch_smoke.dishonest_ratio_claims_from_rows(()), ())
+
+
+class RowsWithUndersizedPanesTests(unittest.TestCase):
+    """The denominator that stops `ratios-claimed-honestly` passing by vacuum
+    in silence. Counts ROWS, not panes.
+    """
+
+    def test_a_row_with_three_undersized_panes_counts_once(self):
+        def three_undersized():
+            return [small_pane(f"detail.{i}", 44.0, 434.5) for i in range(3)]
+
+        rows = tuple(make_row(panes=three_undersized()) for _ in range(3))
+        self.assertEqual(
+            launch_smoke.rows_with_undersized_panes(rows), 2,
+            "rows 2 and 3 each carry three settled undersized panes and each "
+            "counts once; row 1 is every pane's first observation",
+        )
+        self.assertEqual(
+            len(launch_smoke.undersized_pane_violations_from_rows(rows)), 3,
+            "the pane-wise population is 3 -- the contrast is the whole point "
+            "of counting rows separately",
+        )
+
+    def test_zero_for_a_healthy_run(self):
+        self.assertEqual(
+            launch_smoke.rows_with_undersized_panes(healthy_evidence().rows), 0
+        )
+
+    def test_zero_for_no_rows(self):
+        self.assertEqual(launch_smoke.rows_with_undersized_panes(()), 0)
+
+    def test_counts_every_row_that_carries_a_settled_violation(self):
+        rows = clamped_bench_rows(splits_ratios_applied=3, repeats=5)
+        self.assertEqual(launch_smoke.rows_with_undersized_panes(rows), 4)
+
+    def test_a_row_whose_undersized_pane_has_not_settled_does_not_count(self):
+        rows = (
+            make_row(panes=[small_pane("detail.0", 44.0, 434.5)]),
+            make_row(panes=[small_pane("detail.0", 60.0, 434.5)]),
+        )
+        self.assertEqual(launch_smoke.rows_with_undersized_panes(rows), 0)
+
+
+class NoUndersizedLaidOutPaneDetectorTests(unittest.TestCase):
+    KEY = "no-undersized-laid-out-pane"
+
+    def _verdict(self, ev):
+        return keyed(launch_smoke.evaluate_evidence(ev))[self.KEY]
+
+    def test_passes_when_no_pane_settled_below_the_floor(self):
+        v = self._verdict(healthy_evidence())
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIsNone(v.cause)
+
+    def test_fails_when_a_pane_settled_below_the_floor(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        v = self._verdict(ev)
+        self.assertEqual(v.state, launch_smoke.FAIL)
+        self.assertIn("tooSmall(tooNarrow)", v.cause)
+
+    def test_the_whole_run_fails_when_a_pane_settled_below_the_floor(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        verdicts = launch_smoke.evaluate_evidence(ev)
+        state, cause = launch_smoke.aggregate(verdicts)
+        self.assertEqual(state, launch_smoke.FAIL)
+        self.assertTrue(cause)
+        self.assertEqual(launch_smoke.exit_code_for(state), 1)
+
+    def test_cause_names_at_most_three_entries(self):
+        rows = tuple(
+            make_row(pid=100, panes=[small_pane(f"detail.{i}", 44.0, 434.5)
+                                     for i in range(5)])
+            for _ in range(2)
+        )
+        ev = evidence_from_rows(rows)
+        self.assertEqual(len(ev.undersized_pane_violations), 5)
+        v = self._verdict(ev)
+        self.assertEqual(
+            v.cause.split("; "), list(ev.undersized_pane_violations[:3]),
+            "the cause is a human-facing line, capped at three entries",
+        )
+
+    def test_measured_names_the_judged_population_and_the_floor(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        v = self._verdict(ev)
+        self.assertIn(f"{ev.geometry_panes_judged} pane(s) judged", v.measured)
+        self.assertIn("120pt", v.measured)
+
+    def test_is_a_gate_and_is_never_inconclusive(self):
+        self.assertEqual(launch_smoke.registration(self.KEY).kind, launch_smoke.GATE)
+        fixtures = [
+            launch_smoke.Evidence.empty(),
+            healthy_evidence(),
+            evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1)),
+            evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3)),
+        ]
+        for ev in fixtures:
+            with self.subTest(fixture=id(ev)):
+                self.assertIn(
+                    self._verdict(ev).state, {launch_smoke.PASS, launch_smoke.FAIL}
+                )
+
+
+class RatiosClaimedHonestlyDetectorTests(unittest.TestCase):
+    KEY = "ratios-claimed-honestly"
+
+    def _verdict(self, ev):
+        return keyed(launch_smoke.evaluate_evidence(ev))[self.KEY]
+
+    def test_passes_when_no_row_claimed_a_ratio_it_did_not_get(self):
+        v = self._verdict(healthy_evidence())
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIsNone(v.cause)
+
+    def test_fails_on_the_unfixed_branch_bench(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3))
+        v = self._verdict(ev)
+        self.assertEqual(v.state, launch_smoke.FAIL)
+        self.assertIn("splitsLaidOut=3 splitsRatiosApplied=3", v.cause)
+
+    def test_passes_on_this_branch_bench_even_though_the_panes_are_still_small(self):
+        # The revert demonstration, end to end: the SAME collapsed panes, the
+        # SAME fixture -- only the honesty of `splitsRatiosApplied` differs.
+        # The collapse still FAILs its own gate; what this gate grades is
+        # whether the tool told the truth about it.
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        self.assertEqual(self._verdict(ev).state, launch_smoke.PASS)
+        self.assertEqual(
+            keyed(launch_smoke.evaluate_evidence(ev))["no-undersized-laid-out-pane"].state,
+            launch_smoke.FAIL,
+        )
+
+    def test_cause_names_at_most_three_entries(self):
+        rows = clamped_bench_rows(splits_ratios_applied=3, repeats=6)
+        ev = evidence_from_rows(rows)
+        self.assertEqual(len(ev.dishonest_ratio_claims), 5)
+        v = self._verdict(ev)
+        self.assertEqual(v.cause.split("; "), list(ev.dishonest_ratio_claims[:3]))
+
+    def test_measured_reports_the_row_denominator_so_a_vacuous_pass_says_so_out_loud(self):
+        v = self._verdict(healthy_evidence())
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIn("0 row(s) had an undersized pane to grade against", v.measured)
+        self.assertEqual(
+            v.observations, 0,
+            "a detector that passed because it had nothing to grade must say "
+            "so; passing by vacuum in silence is the defect this whole suite "
+            "exists to prevent",
+        )
+
+    def test_measured_reports_a_non_zero_denominator_when_there_was_something_to_grade(self):
+        ev = evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))
+        v = self._verdict(ev)
+        self.assertEqual(v.state, launch_smoke.PASS)
+        self.assertIn("1 row(s) had an undersized pane to grade against", v.measured)
+        self.assertIn("0 of them still claimed", v.measured)
+        self.assertEqual(v.observations, 1)
+
+    def test_is_a_gate_and_is_never_inconclusive(self):
+        self.assertEqual(launch_smoke.registration(self.KEY).kind, launch_smoke.GATE)
+        fixtures = [
+            launch_smoke.Evidence.empty(),
+            healthy_evidence(),
+            evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1)),
+            evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3)),
+        ]
+        for ev in fixtures:
+            with self.subTest(fixture=id(ev)):
+                self.assertIn(
+                    self._verdict(ev).state, {launch_smoke.PASS, launch_smoke.FAIL}
+                )
+
+
+class NewDetectorsAreRegisteredExactlyOnceTests(unittest.TestCase):
+    NEW_KEYS = ("no-undersized-laid-out-pane", "ratios-claimed-honestly")
+
+    def test_each_appears_exactly_once_in_the_registry(self):
+        keys = [r.key for r in launch_smoke.CRITERIA]
+        for key in self.NEW_KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(keys.count(key), 1)
+
+    def test_each_appears_exactly_once_per_evaluation_in_registry_order(self):
+        for label, ev in [
+            ("EMPTY", launch_smoke.Evidence.empty()),
+            ("HEALTHY", healthy_evidence()),
+            ("UNFIXED-BENCH",
+             evidence_from_rows(clamped_bench_rows(splits_ratios_applied=3))),
+            ("FIXED-BENCH",
+             evidence_from_rows(clamped_bench_rows(splits_ratios_applied=1))),
+        ]:
+            with self.subTest(fixture=label):
+                keys = [v.key for v in launch_smoke.evaluate_evidence(ev)]
+                self.assertEqual(keys, [r.key for r in launch_smoke.CRITERIA])
+                for key in self.NEW_KEYS:
+                    self.assertEqual(keys.count(key), 1)
+
+    def test_the_collapse_gate_is_reported_before_the_honesty_gate(self):
+        keys = [r.key for r in launch_smoke.CRITERIA]
+        self.assertLess(
+            keys.index("no-undersized-laid-out-pane"),
+            keys.index("ratios-claimed-honestly"),
+            "the collapse comes before the lie about it in the report a human "
+            "reads top to bottom",
+        )
+
+    def test_evidence_empty_still_produces_one_verdict_per_detector_without_raising(self):
+        verdicts = launch_smoke.evaluate_evidence(launch_smoke.Evidence.empty())
+        self.assertEqual([v.key for v in verdicts], [r.key for r in launch_smoke.CRITERIA])
+        raised = [v for v in verdicts if "detector raised" in (v.measured or "")]
+        self.assertEqual(raised, [], "no detector may raise on barren evidence")
+
+
+class HealthyFixtureIsGenuinelyHealthyTests(unittest.TestCase):
+    """Anti-drift on the fixture the vacuity tests lean on: every violation
+    population `healthy_evidence()` declares must be exactly what its own
+    rows produce. Without this, a "healthy" fixture can quietly assert
+    `undersized_pane_violations=()` over rows that would produce three of
+    them, and `EvaluateKnownGoodEvidenceTests` would be proving nothing.
+
+    This is not hypothetical -- `make_pane`'s default bounds are 100x50,
+    BELOW the 120pt usable floor on both axes.
+    """
+
+    def test_every_row_derived_population_matches_what_the_rows_produce(self):
+        ev = healthy_evidence()
+        derived = evidence_from_rows(ev.rows, base=ev)
+        for field in ("notdrawable_violations", "panes_scanned",
+                      "collapsed_geometry_violations", "geometry_panes_judged",
+                      "undersized_pane_violations", "dishonest_ratio_claims",
+                      "rows_with_undersized_panes"):
+            with self.subTest(field=field):
+                self.assertEqual(getattr(ev, field), getattr(derived, field))
+
+    def test_the_default_make_pane_size_really_is_below_the_usable_floor(self):
+        # Pins the reason `healthy_pane` exists: if the defaults ever become
+        # usable sizes, this test says so rather than leaving a helper nobody
+        # understands.
+        default = make_pane("detail.0", has_content=False)
+        self.assertEqual(
+            launch_smoke._undersized_reasons(default), ("tooNarrow", "tooShort")
+        )
+
+
+class ClampedFixtureTests(unittest.TestCase):
+    """`tests/fixtures/focus_layout_clamped.json` is what makes
+    `ratios-claimed-honestly` bite (`--fixture clamped`). If it ever stops
+    asking for a ratio it cannot get, the revert demonstration silently stops
+    demonstrating anything -- it would pass on both branches and prove
+    neither.
+    """
+
+    #: The window width the reproduction bench measured against. The 44pt
+    #: panes come out of dividing ~3% of this four ways.
+    BENCH_WINDOW_WIDTH = 1760.0
+
+    def test_it_parses_as_a_non_empty_list_of_focus_layout_frames(self):
+        frames = load_clamped_fixture_frames()
+        self.assertIsInstance(frames, list)
+        self.assertTrue(frames)
+        for frame in frames:
+            with self.subTest(tag=frame.get("tag")):
+                self.assertEqual(frame["type"], "focus_layout")
+                self.assertTrue(frame.get("tag"))
+                self.assertIn("tree", frame)
+
+    def test_the_script_knows_it_by_name(self):
+        self.assertEqual(launch_smoke.FIXTURES["clamped"], "focus_layout_clamped.json")
+        self.assertEqual(
+            os.path.basename(CLAMPED_FIXTURE_PATH),
+            launch_smoke.FIXTURES["clamped"],
+        )
+        self.assertNotEqual(
+            launch_smoke.DEFAULT_FIXTURE, "clamped",
+            "the unsatisfiable fixture must never be the default -- it FAILs "
+            "no-undersized-laid-out-pane by construction",
+        )
+
+    @staticmethod
+    def _splits(tree):
+        """Every `split` node in the tree, outermost first."""
+        found = []
+        if tree.get("kind") == "split":
+            found.append(tree)
+        for child in tree.get("children", []):
+            found.extend(ClampedFixtureTests._splits(child))
+        return found
+
+    def test_every_frame_asks_a_nested_split_for_a_share_it_cannot_divide(self):
+        frames = load_clamped_fixture_frames()
+        for frame in frames:
+            with self.subTest(tag=frame.get("tag")):
+                unreachable = []
+                for split in self._splits(frame["tree"]):
+                    ratios = split["ratios"]
+                    children = split["children"]
+                    self.assertEqual(len(ratios), len(children))
+                    self.assertAlmostEqual(sum(ratios), 1.0, places=6)
+                    for ratio, child in zip(ratios, children):
+                        if child.get("kind") != "split":
+                            continue
+                        grandchildren = len(child["children"])
+                        share = self.BENCH_WINDOW_WIDTH * ratio / grandchildren
+                        if share < launch_smoke.MINIMUM_USABLE_EXTENT:
+                            unreachable.append((ratio, grandchildren, share))
+                self.assertTrue(
+                    unreachable,
+                    "no nested split in this frame is asked for a share it "
+                    "cannot divide into usable panes -- the clamped fixture "
+                    "no longer demonstrates a clamp",
+                )
+                ratio, grandchildren, share = unreachable[0]
+                self.assertLessEqual(ratio, 0.05, "the ~3% share the bench measured")
+                self.assertGreaterEqual(
+                    grandchildren, 4, "divided among four detail children"
+                )
+                self.assertLess(share, launch_smoke.MINIMUM_USABLE_EXTENT)
+
+    def test_it_is_a_different_tree_from_the_healthy_split_fixture(self):
+        # If the two fixtures ever converge, `--fixture clamped` stops being
+        # a distinct experiment.
+        clamped = load_clamped_fixture_frames()
+        healthy = load_fixture_frames()
+        self.assertNotEqual(
+            [f["tree"] for f in clamped], [f["tree"] for f in healthy]
+        )
+        for frame in clamped:
+            with self.subTest(tag=frame.get("tag")):
+                splits, leaves = FixtureShapeConstantsTests._count_splits_and_leaves(
+                    frame["tree"]
+                )
+                self.assertEqual(splits, CLAMPED_SPLITS_PER_FOCUS)
+                self.assertEqual(leaves, CLAMPED_LEAVES_PER_FOCUS)
+
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,13 @@ import NostromoKit
 /// copies; this file exercises only the macOS one.
 final class PaneContentWireEqualityTests: XCTestCase {
 
+    private let decoder = JSONDecoder()
+
+    private func decode(_ jsonString: String) throws -> PaneContentWire {
+        let data = Data(jsonString.utf8)
+        return try decoder.decode(PaneContentWire.self, from: data)
+    }
+
     private func makeItem(
         title: String = "feat: auth"
     ) -> PrListItemModel {
@@ -94,6 +101,16 @@ final class PaneContentWireEqualityTests: XCTestCase {
     // conservative choice just costs a spurious re-render of every pane in
     // every window on every daemon push, so it's reversed below.
 
+    func testJsonSnapshotIsReflexive() throws {
+        let value = try decode("""
+        {"kind": "json_snapshot", "value": {"a": {"b": [1, 2, 3]}}}
+        """)
+        XCTAssertEqual(
+            value, value,
+            "x == x must hold for .jsonSnapshot — Equatable's reflexivity requirement"
+        )
+    }
+
     func testJsonSnapshotCasesWithIdenticalPayloadsAreEqual() {
         let payload = JSONValue.object(["x": .int(1)])
         let lhs = PaneContentWire.jsonSnapshot(payload)
@@ -134,6 +151,16 @@ final class PaneContentWireEqualityTests: XCTestCase {
     // MARK: - .unknown
     //
     // Same inversion, same reasoning, as `.jsonSnapshot` above.
+
+    func testUnknownIsReflexive() throws {
+        let value = try decode("""
+        {"kind": "future_type_not_yet_known", "some_field": "some_value"}
+        """)
+        XCTAssertEqual(
+            value, value,
+            "x == x must hold for .unknown — Equatable's reflexivity requirement"
+        )
+    }
 
     func testUnknownCasesWithIdenticalPayloadsAreEqual() {
         let payload = JSONValue.object(["future_field": .string("value")])
@@ -527,12 +554,6 @@ final class PaneContentWireEqualityTests: XCTestCase {
     }
 
     // MARK: - .prConversation decoding (W3 — curated-agent-views)
-
-    private let decoder = JSONDecoder()
-
-    private func decode(_ jsonString: String) throws -> PaneContentWire {
-        try decoder.decode(PaneContentWire.self, from: Data(jsonString.utf8))
-    }
 
     func testPrConversationDecodesEveryFieldFromWireFormatJSON() throws {
         let json = """

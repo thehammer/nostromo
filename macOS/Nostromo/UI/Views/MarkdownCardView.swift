@@ -302,8 +302,24 @@ final class MarkdownCardView: NSView {
         return height
     }
 
+    /// The width this card will be laid out at, when the caller already knows
+    /// it. See `WidthPresettable`.
+    ///
+    /// Without it the first `intrinsicContentSize` falls back to 400 pt,
+    /// `layout()` then notices the real `bounds.width` and invalidates, and the
+    /// correct height only arrives on a *second* solve — so every measurement
+    /// of every markdown block paid for two. The width was never actually
+    /// unknown: it is the block width `ChatTurnView` computes arithmetically
+    /// before anything is built.
+    var presetWidth: CGFloat? {
+        didSet {
+            guard presetWidth != oldValue else { return }
+            invalidateIntrinsicContentSize()
+        }
+    }
+
     override var intrinsicContentSize: NSSize {
-        let width = bounds.width > 0 ? bounds.width : 400
+        let width = presetWidth ?? (bounds.width > 0 ? bounds.width : 400)
         return NSSize(width: NSView.noIntrinsicMetric,
                       height: Self.measuredHeight(markdown: markdown, width: width))
     }

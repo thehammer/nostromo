@@ -114,12 +114,20 @@ AGGREGATE_INCONCLUSIVE_CAUSES = frozenset({
 
 # The committed shape of tests/fixtures/focus_layout_split.json: each frame's
 # tree is one outer split containing one inner split (2 split nodes total)
-# and three leaves (queue/diff/repl). Pinned from both
-# tests/launch_smoke/test_launch_smoke.py (FixtureShapeConstantsTests) and
-# tests/launch_smoke_fixture.rs, so editing the fixture's shape without
-# editing these two constants fails the suite instead of quietly drifting.
+# and four leaves — queue, the detail region's two tabs, and repl. Pinned
+# from both tests/launch_smoke/test_launch_smoke.py
+# (FixtureShapeConstantsTests) and tests/launch_smoke_fixture.rs, so editing
+# the fixture's shape without editing these two constants fails the suite
+# instead of quietly drifting.
+#
+# The `diff` leaf became a two-tab `tabs` region in
+# fix/detail-region-split-collapse (D7): this check is the repo's only
+# automated real-AppKit end-to-end coverage, and until then it had never
+# once rendered the node type the product's primary interaction depends on.
+# A tabs node is not itself a split, so the split count is unchanged; its
+# two children are leaves, so the leaf count went from 3 to 4.
 FIXTURE_SPLIT_NODES_PER_FOCUS = 2
-FIXTURE_LEAVES_PER_FOCUS = 3
+FIXTURE_LEAVES_PER_FOCUS = 4
 
 Verdict = namedtuple("Verdict", ["key", "name", "state", "measured", "cause", "observations"])
 
@@ -185,6 +193,9 @@ class Evidence(namedtuple("Evidence", [
     "panes_scanned",
     "collapsed_geometry_violations",
     "geometry_panes_judged",
+    "undersized_pane_violations",
+    "dishonest_ratio_claims",
+    "rows_with_undersized_panes",
     "window_seconds",
 ])):
     """Everything a detector may look at.
@@ -219,6 +230,8 @@ class Evidence(namedtuple("Evidence", [
             crash_reports_dir_present=False, crash_reports_attributed_pids=(),
             notdrawable_violations=(), panes_scanned=0,
             collapsed_geometry_violations=(), geometry_panes_judged=0,
+            undersized_pane_violations=(), dishonest_ratio_claims=(),
+            rows_with_undersized_panes=0,
             window_seconds=0.0,
         )
 
@@ -378,6 +391,52 @@ def _no_zero_size_laid_out_pane(ev):
     cause = "; ".join(ev.collapsed_geometry_violations[:3])
     return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
                         observations=ev.panes_scanned)
+
+
+@detector("no-undersized-laid-out-pane", GATE)
+def _no_undersized_laid_out_pane(ev):
+    key, name = "no-undersized-laid-out-pane", "no undersized laid-out pane"
+    # The end-to-end half of D6. `no-zero-size-laid-out-pane` above catches a
+    # pane with no drawable size at all; this one catches a pane with a
+    # perfectly real size that is nonetheless too small to show the operator
+    # anything — the signature of a split whose ratios were clamped and never
+    # re-applied. That failure measured 34pt wide against a correct 879.5pt,
+    # was live-blocking for four days, and tripped none of the four
+    # instruments watching for it, because 34 is not zero.
+    #
+    # Graded on the same `panesMeasured` population as the zero-size gate but
+    # on a disjoint predicate (non-zero, below MINIMUM_USABLE_EXTENT), so a
+    # pane can never be reported by both.
+    ok = not ev.undersized_pane_violations
+    measured = (f"{ev.geometry_panes_judged} pane(s) judged for geometry, "
+                f"{len(ev.undersized_pane_violations)} settled below "
+                f"{MINIMUM_USABLE_EXTENT:.0f}pt on an axis")
+    cause = "; ".join(ev.undersized_pane_violations[:3])
+    return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
+                        observations=ev.geometry_panes_judged)
+
+
+@detector("ratios-claimed-honestly", GATE)
+def _ratios_claimed_honestly(ev):
+    key, name = "ratios-claimed-honestly", "split ratio claims are honest"
+    # D5. `splitsRatiosApplied` is this tool's own shape check; while
+    # `applyRatios` returned an unverified `true` it counted a split that had
+    # plainly failed to reach its ratios, so the check certified the exact
+    # failure it exists to catch. This asserts the property directly: no
+    # snapshot may report every laid-out split as applied while it also
+    # contains an unusably small pane.
+    #
+    # Vacuous on a healthy fixture by construction, which is why `measured`
+    # names how many rows were actually gradeable — see
+    # `tests/fixtures/focus_layout_clamped.json` and `--fixture clamped` for
+    # the run that makes this detector bite.
+    ok = not ev.dishonest_ratio_claims
+    measured = (f"{ev.rows_with_undersized_panes} row(s) had an undersized pane "
+                f"to grade against, {len(ev.dishonest_ratio_claims)} of them "
+                f"still claimed every laid-out split applied its ratios")
+    cause = "; ".join(ev.dishonest_ratio_claims[:3])
+    return gate_verdict(key, name, ok=ok, measured=measured, cause=cause,
+                        observations=ev.rows_with_undersized_panes)
 
 
 # ── evaluation ───────────────────────────────────────────────────────────────
@@ -795,6 +854,163 @@ def collapsed_geometry_violations_from_rows(rows):
     )
 
 
+UndersizedPane = namedtuple("UndersizedPane", ["key", "summary"])
+"""One undersized-pane observation. `key` is its rate-limit identity
+(everything but the layout-pass counter); `summary` is what gets reported."""
+
+
+MINIMUM_USABLE_EXTENT = 120.0
+"""Mirrors `PaneFirstPaintAudit.minimumUsableExtent`
+(macOS/Nostromo/UI/PaneFirstPaintAudit.swift). Below this many points on an
+axis, a pane that has a window and has laid out is not showing the operator
+anything usable. The failure this exists for measured 34pt wide where 879.5pt
+was correct."""
+
+
+def _undersized_reasons(pane):
+    """Which axes of one `panesMeasured` entry are non-zero but unusable, in
+    a deterministic order (width before height, matching the Swift side).
+    Empty for a pane that is fine, out of scope, or zero-size — zero belongs
+    to `collapsed_geometry_violations_from_rows`, and the two populations
+    must not double-report the same pane (`cause` is capped at three joined
+    entries below, so a duplicate can crowd out a genuinely distinct third)."""
+    if not (pane.get("hasWindow") and (pane.get("layoutPassCount") or 0) > 0):
+        return ()
+    width = pane.get("boundsWidth", 0)
+    height = pane.get("boundsHeight", 0)
+    if width <= 0 or height <= 0:
+        return ()
+    reasons = []
+    if width < MINIMUM_USABLE_EXTENT:
+        reasons.append("tooNarrow")
+    if height < MINIMUM_USABLE_EXTENT:
+        reasons.append("tooShort")
+    return tuple(reasons)
+
+
+def undersized_panes_per_row(rows):
+    """`[(row, (summary, ...)), ...]` — for each row in order, the panes that
+    are non-zero but too small to use, in the same spirit as
+    `PaneFirstPaintAudit`'s `.tooSmall` verdict (D6/D7).
+
+    Content-independent, for the same reason `collapsed_geometry_violations_
+    from_rows` is: the fixture daemon never pushes `pane_content`, so
+    `hasContent` is `False` on every real run and a content-gated predicate
+    would be satisfied by the absence of the thing it measures.
+
+    **Settle-gated**, mirroring `PaneFirstPaintAudit.shouldReport`. A healthy
+    pane legitimately passes through small extents on its way to a real size
+    — measured on this fix's reproduction bench at 48x10 and 639.5x36 on
+    panes that ended up entirely healthy, both of which overlap the real
+    34pt failure, so no threshold can separate them. A pane therefore counts
+    only when the **offending axis** holds the same value as the previous
+    observation of that same pane. A sampled row landing mid-layout can
+    never FAIL this check on its own, which matters more here than catching
+    a collapse one sample earlier: a gate that flakes is a gate people learn
+    to ignore.
+    """
+    previous = {}
+    out = []
+    for row in rows:
+        violations = []
+        for pane in row.get("panesMeasured") or []:
+            pane_id = pane.get("paneId")
+            width = pane.get("boundsWidth", 0)
+            height = pane.get("boundsHeight", 0)
+            prior = previous.get(pane_id)
+            previous[pane_id] = (width, height)
+            reasons = _undersized_reasons(pane)
+            if not reasons or prior is None:
+                continue
+            settled = all(
+                (prior[0] == width) if reason == "tooNarrow" else (prior[1] == height)
+                for reason in reasons
+            )
+            if not settled:
+                continue
+            violations.append(UndersizedPane(
+                key=f"pane={pane_id} bounds={width}x{height} "
+                    f"verdict=tooSmall({','.join(reasons)})",
+                summary=f"pane={pane_id} hasWindow={str(pane.get('hasWindow')).lower()} "
+                        f"layoutPasses={pane.get('layoutPassCount', 0)} "
+                        f"bounds={width}x{height} verdict=tooSmall({','.join(reasons)})",
+            ))
+        out.append((row, tuple(violations)))
+    return out
+
+
+def undersized_pane_violations_from_rows(rows):
+    """One summary string per DISTINCT violating pane state.
+
+    Deduplicated on `UndersizedPane.key`, which — like the Swift side's
+    `PaneFirstPaintAudit.violationKey` and for the same reason — deliberately
+    **excludes** `layoutPasses`. That counter increments on every layout
+    pass, so keying on the full summary deduplicates nothing at all: a pane
+    stuck at one bad size across ten diagnostics rows would report ten times.
+    That is not hypothetical — it is the exact defect this fix had to repair
+    on the Swift side, where it flooded the log thousands of times in a
+    single run, and `cause` below is capped at three joined entries, so the
+    repeats would crowd out genuinely distinct panes.
+
+    The reported string is still the full `summary`, pass count included —
+    it is the first thing an operator wants when reading a FAIL.
+    """
+    seen = set()
+    out = []
+    for _row, violations in undersized_panes_per_row(rows):
+        for violation in violations:
+            if violation.key in seen:
+                continue
+            seen.add(violation.key)
+            out.append(violation.summary)
+    return tuple(out)
+
+
+def dishonest_ratio_claims_from_rows(rows):
+    """Rows where every laid-out split claims its ratios were applied **while
+    a pane in the same snapshot is unusably small** (D5).
+
+    This is the invariant the whole fix turns on, stated as a property: a
+    split that did not achieve its ratios must not be counted as having
+    applied them. `splitsRatiosApplied` is what this very tool grades as its
+    shape check, and while `applyRatios` returned an unverified `true` it
+    certified the collapsed detail region as a success — which is precisely
+    how a live-blocking bug survived four review rounds and a QA pass.
+
+    Measured on this fix's reproduction bench, against
+    `tests/fixtures/focus_layout_clamped.json` (a split whose requested
+    ratios are genuinely unreachable, so four panes settle at 44pt):
+
+        origin/main   splitsRatiosApplied 3 of 3 laid out  -> dishonest
+        this branch   splitsRatiosApplied 1 of 3 laid out  -> honest
+
+    Vacuous on a healthy fixture, by construction — there is nothing to be
+    dishonest about when every pane is a sensible size — so the detector
+    reports how many rows it actually graded rather than passing by vacuum
+    in silence.
+    """
+    out = []
+    for row, violations in undersized_panes_per_row(rows):
+        if not violations:
+            continue
+        laid_out = row.get("splitsLaidOut")
+        applied = row.get("splitsRatiosApplied")
+        if laid_out is None or applied is None or laid_out == 0:
+            continue
+        if applied >= laid_out:
+            out.append(f"splitsLaidOut={laid_out} splitsRatiosApplied={applied} "
+                       f"while {len(violations)} pane(s) in the same snapshot "
+                       f"are unusably small")
+    return tuple(out)
+
+
+def rows_with_undersized_panes(rows):
+    """How many rows carried at least one settled undersized pane — the
+    denominator that stops `dishonest-ratio-claims` passing by vacuum
+    without saying so."""
+    return sum(1 for _row, violations in undersized_panes_per_row(rows) if violations)
+
+
 def geometry_judged_pane_count(rows):
     """Distinct paneIds across `rows` with a window and a completed layout
     pass — deliberately NOT requiring non-zero size (contrast
@@ -1021,7 +1237,18 @@ def _iso_now():
 # =============================================================================
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-FIXTURE_FRAMES_PATH = os.path.join(REPO_ROOT, "tests", "fixtures", "focus_layout_split.json")
+FIXTURE_DIR = os.path.join(REPO_ROOT, "tests", "fixtures")
+# `--fixture <name>` selects one of these. `split` is the default and the
+# only one any automated caller uses; `clamped` exists to make the
+# `ratios-claimed-honestly` gate bite (see that detector), and is expected to
+# FAIL `no-undersized-laid-out-pane` by construction — its whole point is a
+# split whose requested ratios cannot be reached.
+FIXTURES = {
+    "split": "focus_layout_split.json",
+    "clamped": "focus_layout_clamped.json",
+}
+DEFAULT_FIXTURE = "split"
+FIXTURE_FRAMES_PATH = os.path.join(FIXTURE_DIR, FIXTURES[DEFAULT_FIXTURE])
 PS_TIME_AWK = os.path.join(REPO_ROOT, "macOS", "scripts", "ps-time-seconds.awk")
 CLONE_BUNDLE_ID = "com.hammer.nostromo.smoke"
 CLONE_PLIST = os.path.expanduser(f"~/Library/Preferences/{CLONE_BUNDLE_ID}.plist")
@@ -1518,11 +1745,16 @@ def _cleanup(tmpdir, daemon, broker, proc):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _check_prerequisites(tools):
+def fixture_path(name):
+    """Absolute path of the committed fixture `name` selects."""
+    return os.path.join(FIXTURE_DIR, FIXTURES[name])
+
+
+def _check_prerequisites(tools, frames_path=FIXTURE_FRAMES_PATH):
     """Anything that makes a real run impossible before a build is even
     attempted. Raises `_PrerequisiteMissing`."""
-    if not os.path.isfile(FIXTURE_FRAMES_PATH):
-        raise _PrerequisiteMissing(f"missing fixture: {FIXTURE_FRAMES_PATH}")
+    if not os.path.isfile(frames_path):
+        raise _PrerequisiteMissing(f"missing fixture: {frames_path}")
     if not os.path.isfile(PS_TIME_AWK):
         raise _PrerequisiteMissing(f"missing awk script: {PS_TIME_AWK}")
     if not tools.get("ps"):
@@ -1653,6 +1885,9 @@ def _collect_evidence(launched_pid, diag_path, clone, alive_at_window_end, cpu_p
         panes_scanned=panes_scanned,
         collapsed_geometry_violations=collapsed_geometry_violations_from_rows(rows),
         geometry_panes_judged=geometry_judged_pane_count(rows),
+        undersized_pane_violations=undersized_pane_violations_from_rows(rows),
+        dishonest_ratio_claims=dishonest_ratio_claims_from_rows(rows),
+        rows_with_undersized_panes=rows_with_undersized_panes(rows),
         window_seconds=window_seconds,
     )
 
@@ -1687,7 +1922,8 @@ def run(args):
 
     try:
         tools = _resolve_tools()
-        _check_prerequisites(tools)
+        frames_path = fixture_path(getattr(args, "fixture", DEFAULT_FIXTURE))
+        _check_prerequisites(tools, frames_path)
 
         bundle = build_app(args.release, args.skip_build)
 
@@ -1698,7 +1934,7 @@ def run(args):
         diag_path = os.path.join(tmpdir, "diagnostics.jsonl")
         app_log_path = os.path.join(tmpdir, "app.log")
 
-        frames = json.loads(open(FIXTURE_FRAMES_PATH).read())
+        frames = json.loads(open(frames_path).read())
         daemon = FixtureDaemon(socket_path, frames)
         daemon.start()
         broker = BrokerStub(broker_socket_path)
@@ -1781,6 +2017,12 @@ def parse_args(argv):
                         help="use the Release build instead of Debug")
     parser.add_argument("--skip-build", action="store_true",
                         help="use whatever bundle is already built; do not rebuild")
+    parser.add_argument("--fixture", choices=sorted(FIXTURES), default=DEFAULT_FIXTURE,
+                        help="which committed fixture the daemon serves. 'clamped' "
+                             "asks for split ratios that cannot be reached and is "
+                             "expected to FAIL no-undersized-laid-out-pane by "
+                             "construction; it exists to make ratios-claimed-honestly "
+                             "bite (default: %(default)s)")
     return parser.parse_args(argv)
 
 

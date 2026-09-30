@@ -13,7 +13,7 @@
 //! - Owns PTY processes on behalf of TUI clients so they survive TUI restarts.
 //! - Removes the socket file on clean exit (SIGTERM / SIGINT).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +33,7 @@ use nostromo::{
         fred_calendar_native::FredCalendarNativeSource,
         fred_mailbox::MailboxSnapshot,
         fred_mailbox_native::FredMailboxNativeSource,
-        perri_pr::{PrSnapshot, PrSnapshots},
+        perri_pr::PrSnapshots,
         perri_pr_native::PerriPrNativeSource,
         perri_queue::PrQueueSnapshot,
         perri_queue_native::PerriQueueNativeSource,
@@ -41,8 +41,11 @@ use nostromo::{
         tickets::TicketProvider,
     },
     ipc::{
-        decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, PtyManager,
-        Server, SessionManager,
+        decisions::DecisionRegistry,
+        pane_registry::PaneRegistry,
+        perri_state::{build_perri_state, WatchPerriStateProvider},
+        protocol::ServerMsg,
+        PtyManager, Server, SessionManager,
     },
     mcp::{
         daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState,
@@ -204,6 +207,21 @@ async fn main() -> Result<()> {
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
     let perri_pr_rx_for_mcp = perri_pr_rx.clone();
     let perri_pr_refresh_tx_for_mcp = perri_pr_refresh_tx.clone();
+
+    // f1: attach-replay for `ServerMsg::PerriState` (see `PerriStateProvider`).
+    // Registered unconditionally, here — not inside the `write_bridge_mcp_config()`
+    // success arm below, where the D8 pane-content provider is registered. Perri
+    // replay has nothing to do with the MCP bridge; nesting it there would
+    // silently disable Perri replay on any machine where the bridge config can't
+    // be written. Registration order doesn't matter — the provider is read
+    // lazily at attach time.
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
+            perri_queue_rx.clone(),
+            perri_pr_rx.clone(),
+        )));
+    }
 
     // ── Mother jobs channel (spawned early so MCP state gets live receiver) ─────
     let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
@@ -570,52 +588,23 @@ async fn run_peek_poller(
 
 // ── perri broadcaster ─────────────────────────────────────────────────────────
 
-/// Build one focus's `ServerMsg::PerriState`.
-///
-/// Extracted as a free function so it can be unit-tested without a running daemon.
-fn build_perri_state(
-    tag: &str,
-    queue_snap: Option<&PrQueueSnapshot>,
-    pr_snap: Option<&PrSnapshot>,
-) -> ServerMsg {
-    ServerMsg::PerriState {
-        tag: tag.to_owned(),
-        queue: queue_snap.map(|s| s.items.clone()).unwrap_or_default(),
-        current: pr_snap.cloned().map(Box::new),
-    }
-}
-
-/// Every focus a `PerriState` frame could be addressed to: those with a PR
-/// under review, plus every focus the daemon knows about, so a focus with no
-/// PR is told *that* rather than being left with whatever it last heard.
+/// Every focus a `PerriState` frame could be addressed to — the lock-taking
+/// half of [`nostromo::ipc::perri_state::perri_state_tags`], which owns the
+/// selection rule (pinned ∪ registered, with the builtin-`perri` floor).
 fn perri_state_tags(session_mgr: &Arc<Mutex<SessionManager>>, prs: &PrSnapshots) -> Vec<String> {
-    let mut tags: BTreeSet<String> = prs.keys().cloned().collect();
     // `.unwrap()`, like every other `session_mgr` access in this file and in
     // `server.rs`. The `if let Ok(..)` this replaces silently degraded to
     // "only the focuses that hold a PR" on a poisoned mutex — defeating the
-    // documented purpose two lines above, and leaving every PR-less focus
-    // rendering its last state with nothing logged to say why.
-    tags.extend(
-        session_mgr
-            .lock()
-            .unwrap()
-            .focus_registry()
-            .into_iter()
-            .map(|f| f.tag),
-    );
-    // The `queue` half of every `PerriState` frame is fleet-wide (D9), but
-    // after W7 it can only travel *on* a per-focus frame. With no focus to
-    // address — before a client has pushed a registry, or briefly after one
-    // pushes an empty list on reconnect — the fleet would otherwise stop
-    // hearing about the queue entirely until the next non-empty push.
-    //
-    // The built-in `perri` focus exists in every deployment and cannot be
-    // removed (`FocusStore.remove` refuses it), so addressing it here is the
-    // honest floor rather than an invented recipient.
-    if tags.is_empty() {
-        tags.insert(nostromo::data::perri_current_pr::BUILTIN_PERRI_TAG.to_owned());
-    }
-    tags.into_iter().collect()
+    // purpose of addressing every known focus, and leaving every PR-less
+    // focus rendering its last state with nothing logged to say why.
+    let focus_tags: Vec<String> = session_mgr
+        .lock()
+        .unwrap()
+        .focus_registry()
+        .into_iter()
+        .map(|f| f.tag)
+        .collect();
+    nostromo::ipc::perri_state::perri_state_tags(focus_tags, prs)
 }
 
 /// Watch the Perri native sources and broadcast `PerriState` per focus (W7 — D7).

@@ -1322,6 +1322,12 @@ only its *revision* was global.
 The queue (`perri.list_pr_queue`) is deliberately **not** per-focus — every
 focus sees the same queue. Only the PR under review is scoped.
 
+The same split holds on the wire: `ServerMsg::PerriState` carries a `tag` and
+is sent once per focus, each frame with the fleet-wide `queue` and only that
+focus's `current`. Attach replay sends the same per-focus frames — one per
+focus the daemon would address, just the builtin `perri` focus when no focus
+is known yet, and none at all before the first fetch.
+
 `perri.get_current_pr`'s fetcher is intentionally a plain snapshot summary —
 rendering agent "highlights" requires the LLM and cannot happen server-side.
 The agent may overwrite the pane afterward with richer text via the existing

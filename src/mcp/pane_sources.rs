@@ -373,7 +373,7 @@ fn reevaluate_staleness(state: &McpSharedState, last_sent: &mut LastSent) {
 mod tests {
     use super::*;
 
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, Utc};
@@ -382,10 +382,9 @@ mod tests {
 
     use crate::data::perri_pr::{no_prs, one_pr, PrSnapshot, PrSnapshots};
     use crate::data::perri_queue::PrQueueSnapshot;
-    use crate::ipc::pane_registry::{PaneRegistry, SplitPosition, REPL_PANE_ID};
+    use crate::ipc::pane_registry::{SplitPosition, REPL_PANE_ID};
     use crate::ipc::protocol::{PaneContentWire, PaneFreshness, ServerMsg};
-    use crate::ipc::SessionManager;
-    use crate::mcp::{DaemonMcpBackend, McpSharedState};
+    use crate::mcp::McpSharedState;
 
     // ── test helpers ─────────────────────────────────────────────────────────
 
@@ -399,38 +398,20 @@ mod tests {
     );
 
     /// Build a daemon-hosted `McpSharedState` with fresh, test-owned
-    /// `perri_queue_rx`/`perri_pr_rx` watch channels (mirrors the
-    /// `make_state()` pattern in `apply_layout.rs`/`refresh_pane.rs`'s tests,
-    /// but also hands back the `Sender` halves so tests can push updates
-    /// after the broadcaster is already running).
+    /// `perri_queue_rx`/`perri_pr_rx` watch channels — a thin adapter over
+    /// `test_support::daemon_test_state()` that additionally hands back the
+    /// `Sender` halves so tests can push updates after the broadcaster is
+    /// already running.
     fn make_state() -> MakeStateResult {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
-            tmp.path().join("panes.json"),
-        )));
-        let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
-            tmp.path().join("sessions.json"),
-        )));
-        std::mem::forget(tmp);
-        let (broadcast_tx, bcast_rx) = broadcast::channel(64);
-        let backend = DaemonMcpBackend {
-            pane_registry,
-            session_mgr,
-            broadcast_tx,
-            perri: crate::mcp::PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(
-                crate::ipc::decisions::DecisionRegistry::default(),
-            )),
-            tickets: Default::default(),
-        };
-        let mut state = McpSharedState::for_daemon(backend);
+        let built = crate::mcp::test_support::daemon_test_state();
+        let mut state = built.state;
 
         let (queue_tx, queue_rx) = watch::channel(None::<PrQueueSnapshot>);
         let (pr_tx, pr_rx) = watch::channel(no_prs());
         state.perri_queue_rx = queue_rx;
         state.perri_pr_rx = pr_rx;
 
-        (state, bcast_rx, queue_tx, pr_tx)
+        (state, built.bcast_rx, queue_tx, pr_tx)
     }
 
     /// Register (if needed) and bind a leaf pane split straight off "repl".
@@ -472,6 +453,28 @@ mod tests {
             "author": "alice", "url": "https://example.com", "diff": "",
             "stale": false, "error": null, "additions": 1, "deletions": 1,
             "changed_files": 1, "head_sha": "abc123", "diff_too_large": false
+        }))
+        .unwrap()
+    }
+
+    /// Like [`pr_snapshot`], but with explicit `stale`/`error`/`generated_at`
+    /// — used to simulate a source that is failing repeatedly while pinning
+    /// `generated_at` at whatever the test wants (i.e. a correct error path
+    /// that does *not* re-stamp it on every failed poll).
+    fn pr_snapshot_with_status(
+        repo: &str,
+        number: u64,
+        title: &str,
+        stale: bool,
+        error: Option<&str>,
+        generated_at: Option<chrono::DateTime<Utc>>,
+    ) -> PrSnapshot {
+        serde_json::from_value(json!({
+            "pr_number": number, "repo": repo, "title": title,
+            "author": "alice", "url": "https://example.com", "diff": "",
+            "stale": stale, "error": error, "additions": 1, "deletions": 1,
+            "changed_files": 1, "head_sha": "abc123", "diff_too_large": false,
+            "generated_at": generated_at
         }))
         .unwrap()
     }
@@ -975,6 +978,76 @@ mod tests {
                 .await
                 .is_err(),
             "an unchanged badly-stale verdict must not re-broadcast on every tick"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pr_source_stale_past_five_minutes_gets_flagged_badly_stale() {
+        tokio::time::pause();
+        let (state, mut bcast, _queue_tx, pr_tx) = make_state();
+        bind_pane(&state, "perri", "diff", "perri.get_current_pr");
+
+        let handle = tokio::spawn(run_pane_source_broadcaster(
+            state.clone(),
+            state.perri_queue_rx.clone(),
+            state.perri_pr_rx.clone(),
+        ));
+
+        // The PR source was last genuinely fresh 6 minutes ago, and has been
+        // failing on every poll since. A correct error path never re-stamps
+        // `generated_at` on failure, so `as_of` stays pinned at `stale_since`
+        // across every one of these retries — only simulated time moves.
+        let stale_since = Utc::now() - ChronoDuration::minutes(6);
+        for _ in 0..4 {
+            pr_tx
+                .send(crate::data::perri_pr::one_pr(
+                    "perri",
+                    pr_snapshot_with_status(
+                        "acme/web",
+                        42,
+                        "Add widget",
+                        true,
+                        Some("boom"),
+                        Some(stale_since),
+                    ),
+                ))
+                .unwrap();
+            tokio::time::advance(Duration::from_secs(30)).await;
+        }
+
+        let mut saw_badly_stale = false;
+        while let Ok(Ok(msg)) =
+            tokio::time::timeout(Duration::from_millis(200), bcast.recv()).await
+        {
+            match msg {
+                ServerMsg::PaneContent {
+                    tag,
+                    pane_id,
+                    content,
+                    freshness,
+                    ..
+                } => {
+                    assert_eq!(tag, "perri");
+                    assert_eq!(pane_id, "diff");
+                    assert!(matches!(content, PaneContentWire::Text { .. }));
+                    if freshness
+                        .expect("freshness must be attached once data is known-stale")
+                        .badly_stale
+                    {
+                        saw_badly_stale = true;
+                    }
+                }
+                other => panic!("expected PaneContent, got {other:?}"),
+            }
+        }
+
+        assert!(
+            saw_badly_stale,
+            "a PR source stuck in a repeated-failure loop for over five minutes \
+             (with `generated_at` never re-stamped by the error path) must \
+             eventually be flagged badly_stale"
         );
 
         handle.abort();

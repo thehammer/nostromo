@@ -28,6 +28,14 @@ enum TranscriptDiagnostics {
         var compressedPayloadBytes: Int { get }
         var estimatedDocumentHeight: Double { get }
         var transcriptClearCount: Int { get }
+        /// How many `ReplView.measure()` calls in this pane's lifetime took
+        /// longer than `ReplView.measureBudgetSeconds`. Each one is a
+        /// synchronous main-thread stall the operator felt.
+        var slowMeasureCount: Int { get }
+        /// The worst single measurement seen, in milliseconds. Reported even
+        /// when nothing was slow, so a healthy run says how much headroom it
+        /// actually had rather than merely reporting a zero.
+        var worstMeasureMs: Double { get }
     }
 
     // MARK: - Registry
@@ -81,6 +89,13 @@ enum TranscriptDiagnostics {
         let compressedPayloadBytes: Int
         let estimatedDocHeight: Double
         let transcriptClears: Int
+        /// See `Reporting.slowMeasureCount`. The 2026-09-09 beachball was
+        /// invisible to every existing counter here — the pane was holding a
+        /// perfectly ordinary number of turns and views while the main thread
+        /// sat inside one Auto Layout solve — so measurement cost gets its own
+        /// pair of fields rather than being inferred from the others.
+        let slowMeasures: Int
+        let worstMeasureMs: Double
     }
 
     /// Identity for every line this process writes, generated once per launch.
@@ -121,6 +136,10 @@ enum TranscriptDiagnostics {
         let physFootprintBytes: Int
         let physFootprintMB: Double
         let maxMaterializedPerPane: Int
+        /// `ReplView.measureBudgetSeconds` in milliseconds, carried in the
+        /// stream so `transcript-load-report.py` grades against the budget the
+        /// build actually used instead of a number copied into the script.
+        let measureBudgetMs: Double
         let panes: [PaneReport]
         /// Total turns delivered by the load harness, when one is running.
         let turnsProcessed: Int?
@@ -248,7 +267,9 @@ enum TranscriptDiagnostics {
                               hotPayloadTurns: pane.hotPayloadTurnCount,
                               compressedPayloadBytes: pane.compressedPayloadBytes,
                               estimatedDocHeight: pane.estimatedDocumentHeight,
-                              transcriptClears: pane.transcriptClearCount)
+                              transcriptClears: pane.transcriptClearCount,
+                              slowMeasures: pane.slowMeasureCount,
+                              worstMeasureMs: pane.worstMeasureMs)
         }
         let splitReports = splits.allObjects.compactMap { $0 as? SplitReporting }
         let splitsLaidOutCount = splitReports.filter {
@@ -277,6 +298,7 @@ enum TranscriptDiagnostics {
                       physFootprintBytes: footprint,
                       physFootprintMB: (Double(footprint) / 1_048_576 * 10).rounded() / 10,
                       maxMaterializedPerPane: TurnListVirtualizer.maxMaterialized,
+                      measureBudgetMs: ReplView.measureBudgetSeconds * 1000,
                       panes: reports.sorted { $0.tag < $1.tag },
                       turnsProcessed: TranscriptLoadHarness.shared?.turnsDelivered,
                       harnessTargetedPanes: TranscriptLoadHarness.shared?.targetedPaneCount,

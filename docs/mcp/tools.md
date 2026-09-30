@@ -531,6 +531,27 @@ behavior:
   `perri.set_selected_index`) to this PR's position in the current queue,
   if it's there.
 
+  Before any of the above, closes every curated tab whose review context
+  just went stale (R8 — the same teardown described under
+  `perri.clear_current_pr` below): the previous PR's `pr_conversation`/
+  `pr_diff` tabs and any `file`/`ticket` tabs. On a curated focus this can
+  empty the tabbed detail region entirely, and an emptied region is removed
+  from the tree rather than left lingering. If the region existed a moment
+  before that happened, `load_pr` immediately rebuilds it for the *new* PR —
+  the same outcome `nostromo.show(pr_conversation)` followed by
+  `show(pr_diff)` would produce, so a caller that never calls `nostromo.show`
+  at all (the macOS GUI's "click a PR row" action, notably) still ends up
+  with a usable, visible detail region instead of one that silently vanished.
+  The rebuild does not fetch: each recreated tab is bound to its PR-backed
+  source and painted `Loading`, then filled in by the same watch-driven
+  broadcaster that already keeps a *surviving* `pr_conversation`/`pr_diff`
+  tab fresh across a PR change — so `load_pr` never blocks on this even if
+  the underlying PR fetch never resolves. A curated focus that never had a
+  detail region gets nothing conjured into it, and a `perri-standard` focus
+  (no such region at all) is completely unaffected. A later explicit
+  `nostromo.show` for the same PR re-anchors the rebuilt tabs (R2's identity
+  reuse) rather than duplicating them.
+
   On a curated focus whose only PR-content panes are `perri.get_pr_diff`/
   `perri.get_pr_conversation`-bound tabs, this resolves to **zero** targets:
   the call still succeeds, still writes the pointer file and signals the
@@ -576,10 +597,12 @@ behavior:
 ```
 
 **Output**: `{ "ok": true, "pane_ids": [...] }` (daemon — the resolved
-current-PR target pane ids actually pushed to, possibly empty), or `{ "ok":
-true, "pending": true, "detail": "..." }` (daemon, settle timeout), optionally
-with a `warnings` array. The standalone TUI path returns `{ "ok": true }`
-with no `pane_ids`.
+current-PR target pane ids actually pushed to, possibly empty), or — when the
+refetch didn't settle — `{ "ok": true, "pane_ids": [...], "pending": ...,
+"retryable": ..., "detail": "..." }` (daemon; see **"When the refetch doesn't
+settle"** above for the `pending`/`retryable` combinations), optionally with a
+`warnings` array. The standalone TUI path returns `{ "ok": true }` with no
+`pane_ids`.
 
 **Errors**: `invalid_args` (missing/zero `number`, missing/empty `repo`, a repo slug outside `owner/repo` form / `[A-Za-z0-9._-]`, or a focus tag that is not a safe filename), `unidentified_caller` (daemon only — no `view_id` and no usable `pty_id`), `not_supported` (daemon only — Perri's state dir isn't configured), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only — the daemon path never hits these; that's the bug this tool used to have).
 
@@ -1168,6 +1191,38 @@ rendered-but-not-expected (a stale pane the client hasn't torn down yet).
 `reported_at` is the *client's* timestamp, not the daemon's receipt time —
 `age_ms` is how long ago that window last checked in, which is what tells a
 caller whether a report is even worth trusting for the show it just issued.
+
+#### What this tool does **not** tell you
+
+**It reports hierarchy membership, not visibility.** `agrees: true` means
+every expected pane id exists in the client's view hierarchy. It says
+nothing about whether any of those panes has a usable size, sits on screen,
+is unobscured, or was ever painted.
+
+This is not a hypothetical gap. On 2026-09-08 all three windows reported
+`agrees: true`, `missing: []`, `extra: []` for
+`["queue", "detail.0", "detail.1", "repl"]`, freshly, twice, 65 seconds
+apart — while the detail region was **34 points wide** in a split whose
+correct share was 879.5 points, and the operator could see nothing but the
+queue. The region was a member of the hierarchy, so this tool was right, and
+useless. Reading it as "the screen is fine" is what kept a live-blocking bug
+invisible for four days
+(`.claude/bugs/open/2026-09-08-detail-region-hierarchy-self-reports-rendered-but-nothing-is-visibly-painted-on-w7.md`).
+
+Extending the per-window report to carry pane geometry would close this and
+is worth doing; it needs a `ClientMsg::RenderedShape` wire change and was
+deliberately left out of the fix for the collapse itself. Until then, the
+instruments that *can* answer "is it actually usable" are:
+
+- **Debug ▸ Copy pane diagnostics** (⌘⇧P) — per-pane bounds on demand.
+- The `panes` log category's `PaneFirstPaintAudit` line, which since
+  `fix/detail-region-split-collapse` reports `tooSmall` for a pane that is
+  non-zero but unusably small, not only one that is literally zero-sized.
+- A screenshot. Still the only thing that proves a human can see it.
+
+**If an operator says they cannot see something this tool calls fine,
+the operator is right.** An instrument trusted beyond what it measures is
+worse than no instrument, because it ends the investigation.
 
 **Errors**: `unidentified_caller` (no `view_id` and no caller `pty_id` to
 target), `not_supported` (non-daemon-hosted MCP server).
