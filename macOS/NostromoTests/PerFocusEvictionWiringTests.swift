@@ -201,6 +201,31 @@ final class PerFocusEvictionWiringTests: XCTestCase {
             """)
     }
 
+    // MARK: - W8: a late perri_state frame must not re-create an evicted focus's entry
+
+    /// Eviction alone is not enough: `perriDetailByTag[tag] = current` in the
+    /// `.perriState` arm would re-create the entry if a frame for an
+    /// already-closed focus arrives afterwards, and nothing would remove it.
+    func testPerriStateArmOnlyStoresForALiveFocus() throws {
+        let source = try Self.appStoreSource()
+        guard let arm = source.range(of: "case .perriState(let tag") else {
+            XCTFail("AppStore.swift no longer handles .perriState(let tag, …)")
+            return
+        }
+        let rest = String(source[arm.upperBound...])
+        let armBody = String(rest[..<(rest.range(of: "case .fredState")?.lowerBound ?? rest.endIndex)])
+        guard let writeRange = armBody.range(of: "perriDetailByTag[tag] = current") else {
+            XCTFail("the .perriState arm no longer writes perriDetailByTag[tag]")
+            return
+        }
+        let guardWindow = String(armBody[..<writeRange.lowerBound].suffix(200))
+        XCTAssertTrue(guardWindow.contains("FocusStore.shared.focuses"), """
+            The .perriState arm must only write perriDetailByTag[tag] for a tag FocusStore still \
+            holds — otherwise a late frame for a closed focus re-creates an entry that \
+            evictPerFocusState already removed and nothing ever prunes again.
+            """)
+    }
+
     // MARK: - W8: the per-focus PR label must never derive from the machine-wide activeFocusAgentTag global
 
     /// The single most important regression guard in this whole wedge (see

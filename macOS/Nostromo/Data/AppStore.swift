@@ -992,7 +992,12 @@ class AppStore: ObservableObject {
             // Per-focus PR under review (W8) — a frame for one focus must
             // never clobber another's entry, and clearing a focus's PR must
             // be reflected rather than leaving its last-known PR stuck.
-            if let current {
+            //
+            // A frame can arrive after its focus was closed and evicted
+            // (`evictPerFocusState`); writing it would re-create an entry that
+            // nothing removes again. Only a live focus may hold one, so an
+            // entry's lifetime really is its focus's.
+            if let current, FocusStore.shared.focuses.contains(where: { $0.sessionTag == tag }) {
                 perriDetailByTag[tag] = current
             } else {
                 perriDetailByTag.removeValue(forKey: tag)
