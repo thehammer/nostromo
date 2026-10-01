@@ -329,9 +329,9 @@ impl PlacementError {
             PlacementError::UnknownRegion(r) => {
                 format!("views.yaml declares no region named `{r}`")
             }
-            PlacementError::RegionNotTabbed(r) => format!(
-                "region `{r}` is not tabbed and already holds a different view"
-            ),
+            PlacementError::RegionNotTabbed(r) => {
+                format!("region `{r}` is not tabbed and already holds a different view")
+            }
             PlacementError::RegionNotCreatable(r) => format!(
                 "region `{r}` does not exist and none of its create rules names a live pane"
             ),

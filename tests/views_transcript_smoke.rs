@@ -86,7 +86,8 @@ async fn generic_view_renders_without_panic() {
 async fn perri_view_ctrl_t_toggles_transcript() {
     use nostromo::{
         data::{
-            perri_pr::PrSnapshot,
+            perri_current_pr::BUILTIN_PERRI_TAG,
+            perri_pr::{one_pr, PrSnapshot},
             perri_queue::{PrQueueItem, PrQueueSnapshot},
         },
         ui::widgets::syntect_cache::SyntectCache,
@@ -111,24 +112,27 @@ async fn perri_view_ctrl_t_toggles_transcript() {
         stale: false,
         error: None,
     }));
-    let (pr_tx, pr_rx) = watch::channel(Some(PrSnapshot {
-        pr_number: Some(1),
-        repo: "a/b".into(),
-        title: "t".into(),
-        author: "u".into(),
-        url: "https://github.com/a/b/pull/1".into(),
-        diff: "+hello".into(),
-        stale: false,
-        error: None,
-        ci_checks: vec![],
-        additions: 0,
-        deletions: 0,
-        changed_files: 0,
-        head_sha: String::new(),
-        diff_too_large: false,
-        generated_at: None,
-        ..Default::default()
-    }));
+    let (pr_tx, pr_rx) = watch::channel(one_pr(
+        BUILTIN_PERRI_TAG,
+        PrSnapshot {
+            pr_number: Some(1),
+            repo: "a/b".into(),
+            title: "t".into(),
+            author: "u".into(),
+            url: "https://github.com/a/b/pull/1".into(),
+            diff: "+hello".into(),
+            stale: false,
+            error: None,
+            ci_checks: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            head_sha: String::new(),
+            diff_too_large: false,
+            generated_at: None,
+            ..Default::default()
+        },
+    ));
     drop(q_tx);
     drop(pr_tx);
 

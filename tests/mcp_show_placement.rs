@@ -1028,6 +1028,9 @@ async fn a_caller_whose_agent_name_cannot_be_resolved_is_never_filtered() {
         let (mut reader, mut writer) = connect(&socket_path, "").await;
         let tools = list_tools(&mut reader, &mut writer, 2).await;
         assert_eq!(tools, unfiltered, "an empty pty_id must fail open");
+        // `call_tool` itself asserts the response carries no JSON-RPC error,
+        // which is what "the policy did not withdraw this tool" means — a
+        // withdrawal is a -32000..-32099 error, never a tool result.
         let res = call_tool(
             &mut reader,
             &mut writer,
@@ -1036,7 +1039,14 @@ async fn a_caller_whose_agent_name_cannot_be_resolved_is_never_filtered() {
             json!({ "name": "perri-standard" }),
         )
         .await;
-        assert_eq!(res["ok"], true, "and must not be refused: {res}");
+        // W7 — D4: an empty `pty_id` names no focus, and a layout applied to no
+        // focus paints nothing, so the tool refuses it on its own terms. That
+        // refusal is not the policy filtering this caller, which is what this
+        // test is about — assert it is the honest one and not a withdrawal.
+        assert_eq!(
+            res["error"], "unidentified_caller",
+            "an empty pty_id must be refused for want of a focus, not filtered: {res}"
+        );
     }
 
     // A tag with no focus-registry entry at all.

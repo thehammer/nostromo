@@ -18,6 +18,13 @@ pub struct GetViewStateInput {
 
 /// Handle `nostromo.get_view_state({ view_id })`.
 ///
+/// `view_id` here names a *view kind* (`"perri"`, `"fred"`, ...), which is not
+/// the same thing as the focus tag the daemon's addressing rule resolves —
+/// several focuses can be running the `perri` view. So `pty_id` is threaded in
+/// separately and is what Perri's state resolves its PR under review against
+/// (W7 — D3); a caller Nostromo can't place gets `current_pr: null` rather
+/// than whichever focus happened to pick up a PR most recently.
+///
 /// Every response gets a `render_state` section merged in (W1 —
 /// render-state-visibility, D7): reusing this already-reached-for tool is
 /// what makes the expected-vs-rendered comparison discoverable without an
@@ -25,9 +32,13 @@ pub struct GetViewStateInput {
 /// is keyed on `view_id` alone, so this holds even for the `unknown_view` /
 /// `{}` branches below — a view this handler doesn't recognise can still
 /// have panes and a render report against it.
-pub async fn handle(state: &McpSharedState, input: &GetViewStateInput) -> Value {
+pub async fn handle(
+    state: &McpSharedState,
+    input: &GetViewStateInput,
+    pty_id: Option<&str>,
+) -> Value {
     let mut result = match input.view_id.as_str() {
-        "perri" => perri::get_state(state, Some(input.view_id.as_str())),
+        "perri" => perri::get_state(state, pty_id.filter(|s| !s.is_empty())),
         "fred" => fred::get_state(state),
         "mother" => mother::get_status(state),
         "teri" => teri::list_todos(state),

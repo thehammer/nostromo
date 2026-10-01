@@ -96,7 +96,7 @@ pub async fn refresh_pane_content(
     };
     match fetch_async(&source, state, fetch_args).await {
         Ok(content) => {
-            let fr = freshness(&source, state);
+            let fr = freshness(&source, state, Some(&tag));
             broadcast_pane_content_with_address(
                 daemon,
                 &tag,
@@ -141,6 +141,7 @@ pub async fn refresh_pane_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::perri_pr::one_pr;
     use crate::ipc::protocol::ServerMsg;
     use tokio::sync::{broadcast, watch};
 
@@ -166,7 +167,8 @@ mod tests {
     }
 
     fn seeded_pr_state(state: McpSharedState) -> McpSharedState {
-        let (_ptx, pr_rx) = watch::channel(Some(
+        let (_ptx, pr_rx) = watch::channel(one_pr(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
                 "pr_number": 42, "repo": "acme/web", "title": "Add widget",
                 "author": "alice", "url": "https://example.com/42", "diff": "",
@@ -407,7 +409,8 @@ mod tests {
         diff_too_large: bool,
         changed_files: u64,
     ) -> McpSharedState {
-        let (_ptx, pr_rx) = watch::channel(Some(
+        let (_ptx, pr_rx) = watch::channel(one_pr(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
                 "pr_number": 42, "repo": "acme/web", "title": "Add widget",
                 "author": "alice", "url": "https://example.com/42", "diff": diff,
@@ -641,7 +644,8 @@ mod tests {
     // ── perri.get_pr_conversation (W3 — curated-agent-views) ──────────────────
 
     fn seeded_conversation_state(state: McpSharedState) -> McpSharedState {
-        let (_ptx, pr_rx) = watch::channel(Some(
+        let (_ptx, pr_rx) = watch::channel(one_pr(
+            "perri",
             serde_json::from_value::<crate::data::perri_pr::PrSnapshot>(serde_json::json!({
                 "pr_number": 42, "repo": "acme/web", "title": "Add widget",
                 "author": "alice", "url": "https://example.com/42", "diff": "",

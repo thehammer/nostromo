@@ -390,7 +390,7 @@ async fn attaching_client_gets_perri_state_replayed() {
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let (_queue_tx, queue_rx) = tokio::sync::watch::channel(Some(seeded_queue_snapshot()));
-    let (_pr_tx, pr_rx) = tokio::sync::watch::channel(None::<PrSnapshot>);
+    let (_pr_tx, pr_rx) = tokio::sync::watch::channel(nostromo::data::perri_pr::no_prs());
     {
         let mut mgr = session_mgr.lock().unwrap();
         mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
@@ -450,7 +450,7 @@ async fn attaching_client_with_empty_topics_gets_layout_and_perri_replayed() {
         tmp.path().join("sessions.json"),
     )));
     let (_queue_tx, queue_rx) = tokio::sync::watch::channel(Some(seeded_queue_snapshot()));
-    let (_pr_tx, pr_rx) = tokio::sync::watch::channel(None::<PrSnapshot>);
+    let (_pr_tx, pr_rx) = tokio::sync::watch::channel(nostromo::data::perri_pr::no_prs());
     {
         let mut mgr = session_mgr.lock().unwrap();
         mgr.configure_mcp_bridge(
@@ -525,7 +525,7 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
     // Both watch channels are still at their initial `None` — neither the PR
     // queue nor the current-PR source has fetched anything yet.
     let (_queue_tx, queue_rx) = tokio::sync::watch::channel(None::<PrQueueSnapshot>);
-    let (_pr_tx, pr_rx) = tokio::sync::watch::channel(None::<PrSnapshot>);
+    let (_pr_tx, pr_rx) = tokio::sync::watch::channel(nostromo::data::perri_pr::no_prs());
     {
         let mut mgr = session_mgr.lock().unwrap();
         mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
@@ -562,6 +562,108 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
         !saw_perri_state,
         "attaching before the Perri sources have ever fetched anything must not paint a \
          spurious empty PerriState over nothing — there is simply no state to replay yet"
+    );
+
+    drop(server);
+}
+
+/// W7 — D7 meets f1: attach replay is per focus, exactly like the
+/// broadcaster. Two focuses reviewing two different PRs must each get their
+/// own `PerriState` frame on attach, carrying their own `current` and never
+/// the other's — a single frame (the pre-W7 shape) would hand every focus one
+/// focus's PR, or none.
+#[tokio::test]
+async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() {
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("nostromd.sock");
+
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        tmp.path().join("sessions.json"),
+    )));
+    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
+    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+
+    fn pr(repo: &str, number: u64) -> Arc<PrSnapshot> {
+        Arc::new(PrSnapshot {
+            pr_number: Some(number),
+            repo: repo.into(),
+            title: format!("{repo}#{number}"),
+            ..Default::default()
+        })
+    }
+    fn focus(tag: &str) -> nostromo::ipc::protocol::FocusMeta {
+        nostromo::ipc::protocol::FocusMeta {
+            tag: tag.into(),
+            display_name: tag.into(),
+            agent_name: tag.into(),
+            project_name: None,
+            org: None,
+            is_built_in: false,
+            session_summary: None,
+        }
+    }
+    let prs: nostromo::data::perri_pr::PrSnapshots = Arc::new(
+        [
+            ("perri".to_owned(), pr("acme/web", 42)),
+            ("reviewer-two".to_owned(), pr("acme/api", 7)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let (_queue_tx, queue_rx) = tokio::sync::watch::channel(Some(seeded_queue_snapshot()));
+    let (_pr_tx, pr_rx) = tokio::sync::watch::channel(prs);
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.set_focus_registry(vec![focus("perri"), focus("reviewer-two")]);
+        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
+            queue_rx, pr_rx,
+        )));
+    }
+
+    let server = Server::bind(
+        &socket_path,
+        Arc::clone(&pty_mgr),
+        Arc::clone(&session_mgr),
+        tmp.path().join("perri-state"),
+        Arc::clone(&decisions),
+    )
+    .unwrap();
+
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    handshake(&mut stream, vec![Topic::Perri]).await;
+
+    let mut frames: Vec<(String, Option<(String, u64)>)> = Vec::new();
+    for _ in 0..8 {
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
+        {
+            Ok(m) => m,
+            Err(_) => break,
+        };
+        if let ServerMsg::PerriState {
+            tag,
+            queue,
+            current,
+        } = msg
+        {
+            assert!(
+                queue.iter().any(|item| item.repo == "acme/web" && item.number == 42),
+                "every replayed frame carries the fleet-wide queue: {tag}"
+            );
+            let current = current.map(|c| (c.repo, c.pr_number.unwrap_or_default()));
+            frames.push((tag, current));
+        }
+    }
+    frames.sort();
+
+    assert_eq!(
+        frames,
+        vec![
+            ("perri".to_owned(), Some(("acme/web".to_owned(), 42))),
+            ("reviewer-two".to_owned(), Some(("acme/api".to_owned(), 7))),
+        ],
+        "attach replay must send exactly one PerriState per focus, each carrying that \
+         focus's own PR and never the other's"
     );
 
     drop(server);

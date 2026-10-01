@@ -7,7 +7,8 @@ use ratatui::{backend::TestBackend, Terminal};
 use nostromo::views::View;
 use nostromo::{
     data::{
-        perri_pr::PrSnapshot,
+        perri_current_pr::BUILTIN_PERRI_TAG,
+        perri_pr::{one_pr, PrSnapshot},
         perri_queue::{PrQueueItem, PrQueueSnapshot},
     },
     ui::widgets::syntect_cache::SyntectCache,
@@ -88,7 +89,7 @@ fn perri_layout_renders_without_panic() {
     );
 
     let (q_tx, q_rx) = watch::channel(Some(fake_queue()));
-    let (pr_tx, pr_rx) = watch::channel(Some(fake_pr()));
+    let (pr_tx, pr_rx) = watch::channel(one_pr(BUILTIN_PERRI_TAG, fake_pr()));
     drop(q_tx);
     drop(pr_tx);
 

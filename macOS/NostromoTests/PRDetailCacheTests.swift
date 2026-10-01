@@ -15,7 +15,7 @@ final class PRDetailCacheTests: XCTestCase {
     /// Builds a `PRDetail` whose `diff` is exactly `diffByteCount` UTF-8 bytes
     /// (via a repeated ASCII character, so byte count == character count —
     /// no escaping concerns), decoded the same way production code decodes
-    /// `current-pr-detail.json` / per-PR cache files.
+    /// per-PR cache files.
     private static func makeDetail(
         repo: String = "acme/web",
         number: Int,

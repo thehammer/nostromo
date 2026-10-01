@@ -408,12 +408,19 @@ where
     // a client attaching to a running daemon shows an empty PR list for up to
     // `pr_queue_poll_secs` (60s) — visible on iOS, whose Perri tab and tab
     // badge read `DaemonStore.perriQueue`.
+    //
+    // Per focus (W7 — D7), exactly like the broadcaster: one frame for each
+    // focus the daemon would address, each carrying only that focus's PR.
+    // The provider lives inside `SessionManager`, so take what it needs under
+    // the lock and call it after the lock is released.
     if subscribed(&topics, Topic::Perri) {
-        let snapshot = {
+        let (provider, focus_tags) = {
             let mgr = session_mgr.lock().unwrap();
-            mgr.perri_state_provider().and_then(|p| p.perri_state())
+            let tags: Vec<String> = mgr.focus_registry().into_iter().map(|f| f.tag).collect();
+            (mgr.perri_state_provider(), tags)
         };
-        if let Some(msg) = snapshot {
+        let frames = provider.map(|p| p.perri_states(&focus_tags)).unwrap_or_default();
+        for msg in frames {
             let bytes = serde_json::to_vec(&msg).unwrap_or_default();
             if !bytes.is_empty() {
                 let _ = write_frame(&mut writer, &bytes).await;
@@ -713,10 +720,78 @@ fn handle_client_msg(
         }
 
         ClientMsg::FocusRegistryPush { focuses } => {
-            let updated = {
+            let (updated, departed, reconcilable, pane_registry) = {
                 let mut mgr = session_mgr.lock().unwrap();
-                mgr.set_focus_registry(focuses)
+                let (updated, departed) = mgr.set_focus_registry(focuses);
+                (
+                    updated,
+                    departed,
+                    mgr.reconcilable_focus_tags(),
+                    mgr.pane_registry(),
+                )
             };
+
+            // W7 — D8: a focus that is gone takes its per-focus state with it.
+            // This is the daemon's only signal that a focus was removed — the
+            // Mac detaches rather than stopping the session, so nothing else
+            // ever says so. `set_focus_registry` has already applied the
+            // reconnect and daemon-created guards, so anything here is a
+            // genuine departure.
+            //
+            // The pin is deleted outright rather than tombstoned, because
+            // `nostromo.create_focus` derives its tag deterministically from
+            // `(agent, title)` — close and recreate the same focus and the tag
+            // comes back. Anything less than deletion would hand the new focus
+            // the dead one's PR, which is the PRD's "a removed focus's pin
+            // never resurfaces" criterion failing.
+            for tag in &departed {
+                match crate::data::perri_current_pr::remove_pin(perri_state_dir, tag) {
+                    Ok(true) => {
+                        tracing::info!(tag = %tag, "focus removed — discarded its PR pin")
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(tag = %tag, "focus removed but its PR pin could not be discarded: {e}")
+                    }
+                }
+                if let Some(reg) = &pane_registry {
+                    if reg.lock().unwrap().remove_focus(tag) {
+                        tracing::info!(tag = %tag, "focus removed — discarded its pane tree and bindings");
+                    }
+                }
+            }
+
+            // W7 — D8 backstop. The loop above is the primary mechanism, and it
+            // only ever sees removals this daemon was running to witness. A
+            // focus removed while the daemon was down, or whose push was never
+            // delivered, leaves a pin on disk that no departure will ever name
+            // — and `nostromo.create_focus`'s deterministic tag means the next
+            // focus of the same name would be handed it.
+            //
+            // `reconcilable_focus_tags` is `None` until this daemon can vouch
+            // for a complete picture (see its doc comment), which is what keeps
+            // this from weakening D8a: it can never collect a pin the loop
+            // above would have spared.
+            if let Some(live) = reconcilable {
+                let sweep = crate::data::perri_current_pr::retain_pins(perri_state_dir, &live);
+                if !sweep.dropped.is_empty() {
+                    tracing::info!(
+                        tags = ?sweep.dropped,
+                        "discarded PR pins for focuses that no longer exist"
+                    );
+                }
+                // A backstop that tried and failed must not look like one that
+                // had nothing to do: the pins it could not remove are exactly
+                // the zombies it exists to stop, still on disk and still
+                // waiting for `create_focus` to hand them to a reused tag.
+                if !sweep.errors.is_empty() {
+                    tracing::warn!(
+                        errors = ?sweep.errors,
+                        "PR pins for departed focuses could not be discarded"
+                    );
+                }
+            }
+
             // Fan out to every connected, Focuses-subscribed client (incl. this one).
             let _ = broadcast_tx.send(ServerMsg::FocusRegistryUpdated { focuses: updated });
         }
@@ -767,11 +842,30 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::PerriAction { action, pr_number, repo } => {
+        ClientMsg::PerriAction {
+            action,
+            pr_number,
+            repo,
+            tag,
+        } => {
             let conn = conn_key.to_string();
             let psd = perri_state_dir.to_path_buf();
+            // W7: the PR under review belongs to a focus. A client that names
+            // one drives that focus; one that doesn't (a pre-W7 build) drives
+            // the built-in `perri` focus, which is where its single PR surface
+            // was.
+            let tag =
+                tag.unwrap_or_else(|| crate::data::perri_current_pr::BUILTIN_PERRI_TAG.to_owned());
             tokio::spawn(async move {
-                if let Err(e) = crate::perri_cli::run_perri_action(&action, pr_number, repo.as_deref(), &psd).await {
+                if let Err(e) = crate::perri_cli::run_perri_action(
+                    &action,
+                    pr_number,
+                    repo.as_deref(),
+                    &tag,
+                    &psd,
+                )
+                .await
+                {
                     tracing::warn!(conn, %action, "PerriAction failed: {e:#}");
                 }
                 // The native Perri sources watch dirty-file sentinels; all

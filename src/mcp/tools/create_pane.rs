@@ -15,14 +15,11 @@ use crate::ipc::pane_registry::SplitPosition;
 use crate::ipc::protocol::ServerMsg;
 use crate::mcp::state::McpSharedState;
 
-/// Resolve the focus tag a layout tool targets: an explicit `view_id`, else the
-/// caller's own focus (`pty_id` from the Hello frame, which in the daemon is the
-/// focus tag). Returns `None` when neither is available.
-fn target_tag<'a>(args: &'a Value, pty_id: Option<&'a str>) -> Option<&'a str> {
-    args.get("view_id")
-        .and_then(|v| v.as_str())
-        .or(pty_id)
-}
+// The focus-addressing rule lives in exactly one place — see
+// `apply_layout::target_tag`. This module kept a byte-identical copy until W7,
+// which made that rule decide *which PR a request resolves against*; two
+// copies of a rule that load-bearing is a drift waiting to happen.
+use crate::mcp::tools::apply_layout::target_tag;
 
 /// Handle `nostromo.create_pane`.
 pub async fn create_pane(state: &McpSharedState, args: &Value, pty_id: Option<&str>) -> Value {

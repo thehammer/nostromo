@@ -52,15 +52,21 @@ pub trait PaneContentProvider: Send + Sync {
     fn bound_pane_contents(&self) -> Vec<ServerMsg>;
 }
 
-/// Supplies the current Perri queue + current-PR snapshot for attach replay.
-/// `ServerMsg::PerriState` is otherwise only broadcast on watch change, so a
-/// client attaching to an already-running daemon would wait up to
-/// `pr_queue_poll_secs` (60s) for its first one. Implemented in
+/// Supplies the current Perri queue + per-focus PR snapshots for attach
+/// replay. `ServerMsg::PerriState` is otherwise only broadcast on watch
+/// change, so a client attaching to an already-running daemon would wait up
+/// to `pr_queue_poll_secs` (60s) for its first one. Implemented in
 /// `crate::ipc::perri_state` over the daemon's two watch receivers.
 pub trait PerriStateProvider: Send + Sync {
-    /// `Some(ServerMsg::PerriState { .. })`, or `None` if no snapshot has ever
-    /// been fetched yet.
-    fn perri_state(&self) -> Option<ServerMsg>;
+    /// One `ServerMsg::PerriState` per focus the daemon would address (W7 —
+    /// D7): `focus_tags` (the session registry) plus every pinned focus, or
+    /// the builtin `perri` focus when neither names one. Each frame carries
+    /// the fleet-wide queue and only that focus's `current`. An empty `Vec`
+    /// if nothing has ever been fetched yet.
+    ///
+    /// `focus_tags` is passed in rather than read here because the provider
+    /// is stored inside `SessionManager`: implementations must not lock it.
+    fn perri_states(&self, focus_tags: &[String]) -> Vec<ServerMsg>;
 }
 
 // ── errors ──────────────────────────────────────────────────────────────────
@@ -506,6 +512,28 @@ impl PaneRegistry {
         Ok(tree)
     }
 
+    /// Forget everything the registry knows about `tag`, because the focus
+    /// itself is gone (W7 — D8). Returns whether there was anything to forget.
+    ///
+    /// Every per-focus map is dropped, not just the tree: a focus that no
+    /// longer exists must not leave bindings that the broadcasters would keep
+    /// fetching for, nor a `painted` set that would suppress the first paint of
+    /// a *later* focus that reuses the tag. Tag reuse is not hypothetical —
+    /// `nostromo.create_focus` derives its tag deterministically from
+    /// `(agent, title)`, so create/close/recreate yields the same tag, and
+    /// `get_or_init` would otherwise resurrect the dead focus's tree under it.
+    pub fn remove_focus(&mut self, tag: &str) -> bool {
+        let had_tree = self.trees.remove(tag).is_some();
+        let had_bindings = self.bindings.remove(tag).is_some();
+        self.painted.remove(tag);
+        self.view_focus_lru.remove(tag);
+        let removed = had_tree || had_bindings;
+        if removed {
+            self.persist();
+        }
+        removed
+    }
+
     /// `set_pane_layout`: re-declare the layout for `tag`.
     ///
     /// Accepts two payload shapes (B3):
@@ -925,6 +953,91 @@ mod tests {
         let mut reg = PaneRegistry::in_memory();
         reg.init_focus("mother");
         assert_eq!(reg.pane_ids("mother"), vec!["repl".to_string()]);
+    }
+
+    // ── W7 — D8/D10: removing a focus ────────────────────────────────────────
+
+    #[test]
+    fn remove_focus_drops_the_tree_and_its_bindings() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("cody-core-1234");
+        reg.create_pane("cody-core-1234", "diff", SplitPosition::Right, REPL_PANE_ID)
+            .unwrap();
+        reg.bind_source("cody-core-1234", "diff", "perri.get_pr_diff");
+
+        assert!(reg.remove_focus("cody-core-1234"));
+
+        assert!(!reg.contains("cody-core-1234"));
+        assert!(
+            reg.all_bindings().is_empty(),
+            "a removed focus must leave no binding the broadcasters keep fetching for"
+        );
+        assert!(
+            !reg.remove_focus("cody-core-1234"),
+            "removing an already-removed focus reports nothing to remove"
+        );
+    }
+
+    /// D10, and the case the plan flags as the one that actually breaks.
+    /// `nostromo.create_focus` derives its tag deterministically from
+    /// `(agent, title)` — `derive_tag("cody", "CORE-1234")` is always
+    /// `"cody-core-1234"` — so create/close/recreate yields the *same* tag.
+    /// Without a genuine removal, `get_or_init` hands the new focus the dead
+    /// one's tree.
+    #[test]
+    fn a_recreated_focus_reusing_a_tag_gets_a_fresh_tree_not_the_dead_one_s() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("cody-core-1234");
+        reg.create_pane("cody-core-1234", "diff", SplitPosition::Right, REPL_PANE_ID)
+            .unwrap();
+        reg.bind_source("cody-core-1234", "diff", "perri.get_pr_diff");
+        reg.mark_painted("cody-core-1234", "diff");
+
+        reg.remove_focus("cody-core-1234");
+
+        // The focus comes back under the very same tag.
+        let tree = reg.get_or_init("cody-core-1234");
+
+        assert_eq!(
+            tree.pane_ids(),
+            vec![REPL_PANE_ID.to_string()],
+            "a reused tag must start from a fresh REPL leaf, not the dead focus's layout"
+        );
+        assert!(
+            reg.binding_for("cody-core-1234", "diff").is_none(),
+            "a reused tag must not inherit the dead focus's source bindings"
+        );
+        assert!(
+            !reg.has_been_painted("cody-core-1234", "diff"),
+            "a stale painted set would suppress the new focus's first paint"
+        );
+    }
+
+    #[test]
+    fn removing_one_focus_leaves_every_other_focus_untouched() {
+        let mut reg = PaneRegistry::in_memory();
+        // The repl pane cannot carry a binding, so give each focus a real
+        // content pane to bind.
+        for tag in ["perri", "cody"] {
+            reg.init_focus(tag);
+            reg.create_pane(tag, "diff", SplitPosition::Right, REPL_PANE_ID)
+                .unwrap();
+        }
+        reg.bind_source("perri", "diff", "perri.get_current_pr");
+        reg.bind_source("cody", "diff", "perri.get_pr_diff");
+
+        reg.remove_focus("cody");
+
+        assert!(reg.contains("perri"));
+        assert_eq!(
+            reg.source_for("perri", "diff"),
+            Some("perri.get_current_pr"),
+            "removing one focus must not disturb another's bindings"
+        );
+        assert!(
+            reg.source_for("cody", "diff").is_none(),
+            "the removed focus's binding is gone"
+        );
     }
 
     // ── 2a. create_pane Right puts new pane AFTER split leaf ─────────────────
