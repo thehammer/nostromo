@@ -110,6 +110,13 @@ struct DynamicFocusView: View {
                 regionContent(node: node, layout: layout)
             }
         }
+        // Per-focus PR under review (W8) — a fixed-height top bar, present
+        // for every layout kind (single pane, tabbed strip, or regular-width
+        // regions) rather than threaded through each branch individually, so
+        // it can never be silently missing from one of them. Same "never
+        // absent, never changes height" contract as `activityTicker` below,
+        // mirrored at the opposite edge.
+        .safeAreaInset(edge: .top) { prLabelBar }
         // Presented from the focus view — ABOVE the region hierarchy a
         // width-class change tears down — so an open activity surface
         // survives a rotation or a multitasking resize (W4 D5, W6 D5). A
@@ -240,6 +247,19 @@ struct DynamicFocusView: View {
             text: activityModel.displayText(health: store.activityHealth),
             onTap: { showActivitySheet = true }
         )
+    }
+
+    // MARK: - Per-focus PR under review (W8)
+
+    /// This focus's PR under review, or the explicit "no PR" string — never
+    /// empty, never absent. The PR always wins over any other candidate
+    /// (there's no session-summary/disambiguation fallback in a per-focus
+    /// view the way there is in the sidebar/focus-list row, so `fallback` is
+    /// always `nil` here).
+    private var prLabelBar: some View {
+        let pr = store.perriCurrentPr(for: tag)
+        let text = FocusPRLabel.secondary(repo: pr?.repo, number: pr?.prNumber, fallback: nil)
+        return PRLabelBar(text: text)
     }
 
     // MARK: - Sub-views

@@ -798,6 +798,53 @@ def check_ticker_survives_the_rewrite(files):
     return violations
 
 
+# --------------------------------------------------------------------------
+# W8 — per-focus-pr-indicator: the PR label bar
+# --------------------------------------------------------------------------
+
+def check_pr_label_bar_has_fixed_height(files):
+    """`PRLabelBar.swift` must render at a fixed, single-line height that an
+    arriving/updating PR label can never change.
+
+    Same mechanism as `check_ticker_bar_has_fixed_single_line_height` above
+    (wedge Decision D4 there), applied to the new top `safeAreaInset` this
+    wedge (W8, per-focus-pr-indicator) injects into `DynamicFocusView`,
+    mirroring how `ActivityTickerBar` is injected at the bottom: a height
+    that changes when the PR label loads or updates shifts the transcript's
+    scroll content inset under the operator. A missing file counts as a
+    violation too — an absent bar can't be pinned to a fixed height either.
+    """
+    violations = []
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "PRLabelBar.swift"), None)
+    path, source = match if match else ("iOS/Nostromo/Views/PRLabelBar.swift", "")
+
+    if "lineLimit(1)" not in source:
+        violations.append((path, "PRLabelBar.swift must call lineLimit(1)"))
+    if ".frame(height:" not in source:
+        violations.append((path, "PRLabelBar.swift must pin an explicit .frame(height:)"))
+    if "lineLimit(nil)" in source:
+        violations.append((path, "PRLabelBar.swift must never allow unbounded lineLimit(nil)"))
+    if "fixedSize(horizontal: false, vertical: true)" in source:
+        violations.append((path, "PRLabelBar.swift must never allow vertical growth via fixedSize"))
+    return violations
+
+
+def check_pr_label_bar_wired_into_dynamic_focus_view(files):
+    """`DynamicFocusView.swift` references `PRLabelBar`.
+
+    Mirrors `check_ticker_survives_the_rewrite` for the new top
+    `safeAreaInset` this wedge injects — the per-focus PR label must
+    actually be wired into the focus view (as a top inset, mirroring
+    `ActivityTickerBar`'s bottom inset), not merely exist as an unused file.
+    """
+    violations = []
+    match = next(((p, s) for p, s in files if os.path.basename(p) == "DynamicFocusView.swift"), None)
+    path, source = match if match else ("iOS/Nostromo/Views/DynamicFocusView.swift", "")
+    if "PRLabelBar" not in source:
+        violations.append((path, "DynamicFocusView.swift does not reference PRLabelBar"))
+    return violations
+
+
 
 # --------------------------------------------------------------------------
 # W6 — ios-curated-view-parity: two presentations, one width test.
@@ -1734,6 +1781,8 @@ CHECKS = (
     check_prose_surface_renders_every_resolution_case,
     check_no_client_side_markdown_parsing,
     check_lang_not_discarded_in_prose_surface,
+    check_pr_label_bar_has_fixed_height,
+    check_pr_label_bar_wired_into_dynamic_focus_view,
 )
 
 
@@ -2483,6 +2532,55 @@ class TickerSurvivesTheRewriteTests(unittest.TestCase):
     def test_passes_when_activitytickerbar_is_still_referenced(self):
         source = "private var activityTicker: some View { ActivityTickerBar(text: t, onTap: {}) }"
         self.assertEqual(check_ticker_survives_the_rewrite([("DynamicFocusView.swift", source)]), [])
+
+
+# --------------------------------------------------------------------------
+# W8 bites-tests — the PR label bar.
+# --------------------------------------------------------------------------
+
+class PRLabelBarFixedHeightTests(unittest.TestCase):
+    def test_bites_when_lineLimit_1_is_missing(self):
+        source = 'Text(label).frame(height: 28)'
+        violations = check_pr_label_bar_has_fixed_height([("PRLabelBar.swift", source)])
+        self.assertTrue(any("lineLimit(1)" in msg for _, msg in violations))
+
+    def test_bites_when_frame_height_is_missing(self):
+        source = 'Text(label).lineLimit(1)'
+        violations = check_pr_label_bar_has_fixed_height([("PRLabelBar.swift", source)])
+        self.assertTrue(any("frame(height:" in msg for _, msg in violations))
+
+    def test_bites_when_lineLimit_nil_is_present(self):
+        source = 'Text(label).lineLimit(nil).frame(height: 28)'
+        violations = check_pr_label_bar_has_fixed_height([("PRLabelBar.swift", source)])
+        self.assertTrue(any("lineLimit(nil)" in msg for _, msg in violations))
+
+    def test_bites_when_vertical_fixedSize_growth_is_present(self):
+        source = 'Text(label).lineLimit(1).frame(height: 28).fixedSize(horizontal: false, vertical: true)'
+        violations = check_pr_label_bar_has_fixed_height([("PRLabelBar.swift", source)])
+        self.assertTrue(any("fixedSize" in msg for _, msg in violations))
+
+    def test_bites_when_the_file_does_not_exist(self):
+        violations = check_pr_label_bar_has_fixed_height([("SomeOtherFile.swift", "irrelevant")])
+        self.assertTrue(len(violations) > 0)
+
+    def test_passes_on_a_fixed_single_line_bar(self):
+        source = 'Text(label).lineLimit(1).truncationMode(.tail).frame(height: 28)'
+        self.assertEqual(check_pr_label_bar_has_fixed_height([("PRLabelBar.swift", source)]), [])
+
+
+class PRLabelBarWiredIntoDynamicFocusViewTests(unittest.TestCase):
+    def test_bites_when_the_file_does_not_reference_prlabelbar(self):
+        source = "struct DynamicFocusView: View { var body: some View { EmptyView() } }"
+        violations = check_pr_label_bar_wired_into_dynamic_focus_view([("DynamicFocusView.swift", source)])
+        self.assertEqual(len(violations), 1)
+
+    def test_bites_when_the_file_is_missing_entirely(self):
+        violations = check_pr_label_bar_wired_into_dynamic_focus_view([("SomeOtherFile.swift", "irrelevant")])
+        self.assertEqual(len(violations), 1)
+
+    def test_passes_when_prlabelbar_is_still_referenced(self):
+        source = "private var prLabel: some View { PRLabelBar(repo: r, number: n) }"
+        self.assertEqual(check_pr_label_bar_wired_into_dynamic_focus_view([("DynamicFocusView.swift", source)]), [])
 
 
 # --------------------------------------------------------------------------
@@ -3576,6 +3674,14 @@ class RealIOSTreeTests(unittest.TestCase):
 
     def test_lang_not_discarded_in_prose_surface(self):
         violations = check_lang_not_discarded_in_prose_surface(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_pr_label_bar_has_a_fixed_height(self):
+        violations = check_pr_label_bar_has_fixed_height(self.files)
+        self.assertEqual(violations, [], violations)
+
+    def test_pr_label_bar_wired_into_dynamic_focus_view(self):
+        violations = check_pr_label_bar_wired_into_dynamic_focus_view(self.files)
         self.assertEqual(violations, [], violations)
 
 

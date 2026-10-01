@@ -1008,3 +1008,96 @@ final class DaemonStoreDecisionTests: XCTestCase {
         XCTAssertTrue(afterStop.isEmpty, "pendingDecisions must be cleared on disconnect")
     }
 }
+
+// MARK: - DaemonStorePerFocusPRTests (W8 — per-focus-pr-indicator)
+
+/// Verifies `DaemonStore`'s per-tag handling of `.perriState(tag:queue:current:)`
+/// broadcasts: `perriCurrentPr(for:)` is keyed by tag, a broadcast for one
+/// tag never clobbers another tag's entry, a `nil` current clears that tag's
+/// entry (not the whole dictionary), and an entry is evicted when its tag
+/// drops out of the live focus list — the same lifetime invariant
+/// `focusLayouts`/`sessionHealth`-style per-focus dictionaries already
+/// follow elsewhere in this codebase. Same construction technique as
+/// `DaemonStoreTests` above: a real `NetworkClient` that never calls
+/// `start()` (so no socket ever opens), messages pushed directly through its
+/// public `messages` subject, and a short sleep after each send to let
+/// `DaemonStore`'s `.receive(on: RunLoop.main)` pipeline flush.
+final class DaemonStorePerFocusPRTests: XCTestCase {
+
+    private func deliver(_ msg: ServerMsg, via client: NetworkClient) async {
+        await client.messages.send(msg)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+    }
+
+    private func makeSnapshot(repo: String, prNumber: Int) -> PrSnapshot {
+        PrSnapshot(
+            prNumber: prNumber, repo: repo, title: "t", author: "a",
+            url: "https://github.com/\(repo)/pull/\(prNumber)", diff: "", stale: false,
+            error: nil, ciChecks: [], additions: 0, deletions: 0, changedFiles: 0,
+            headSha: "sha-\(prNumber)", diffTooLarge: false
+        )
+    }
+
+    // MARK: - A broadcast for one tag is readable back via perriCurrentPr(for:)
+
+    func testPerriStateForATagIsReadableBackViaPerriCurrentPrForThatTag() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        let snapshot = makeSnapshot(repo: "acme/web", prNumber: 42)
+
+        await deliver(.perriState(tag: "focus1", queue: [], current: snapshot), via: client)
+
+        let stored = await store.perriCurrentPr(for: "focus1")
+        XCTAssertEqual(stored?.repo, "acme/web")
+        XCTAssertEqual(stored?.prNumber, 42)
+    }
+
+    // MARK: - Isolation: one focus's broadcast never clobbers another's
+
+    func testPerriStateForOneTagNeverClobbersADifferentTagsEntry() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(.perriState(tag: "focus1", queue: [], current: makeSnapshot(repo: "acme/web", prNumber: 1)), via: client)
+        await deliver(.perriState(tag: "focus2", queue: [], current: makeSnapshot(repo: "acme/api", prNumber: 2)), via: client)
+
+        let focus1 = await store.perriCurrentPr(for: "focus1")
+        let focus2 = await store.perriCurrentPr(for: "focus2")
+
+        XCTAssertEqual(focus1?.repo, "acme/web", "focus1's PR must be unchanged by focus2's broadcast")
+        XCTAssertEqual(focus1?.prNumber, 1)
+        XCTAssertEqual(focus2?.repo, "acme/api", "focus2's PR must reflect its own broadcast")
+        XCTAssertEqual(focus2?.prNumber, 2)
+    }
+
+    // MARK: - A nil current clears that tag's entry, not stuck showing the old PR
+
+    func testPerriStateWithNilCurrentClearsThatTagsEntry() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(.perriState(tag: "focus1", queue: [], current: makeSnapshot(repo: "acme/web", prNumber: 1)), via: client)
+        let before = await store.perriCurrentPr(for: "focus1")
+        XCTAssertNotNil(before, "sanity check: focus1 must have a PR before it's cleared")
+
+        await deliver(.perriState(tag: "focus1", queue: [], current: nil), via: client)
+        let after = await store.perriCurrentPr(for: "focus1")
+        XCTAssertNil(after, "a focus clearing its PR must be reflected, not stuck showing the old snapshot")
+    }
+
+    // MARK: - Eviction: a tag no longer in the live focus list is pruned
+
+    func testATagNoLongerInTheLiveFocusListIsEvictedFromPerriCurrentPr() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+
+        await deliver(.perriState(tag: "focus1", queue: [], current: makeSnapshot(repo: "acme/web", prNumber: 1)), via: client)
+        let before = await store.perriCurrentPr(for: "focus1")
+        XCTAssertNotNil(before, "sanity check: focus1 must have a PR before the eviction-triggering focus list arrives")
+
+        await deliver(.focusListResp([]), via: client)
+
+        let after = await store.perriCurrentPr(for: "focus1")
+        XCTAssertNil(after, "a tag dropped from the live focus list must be pruned from perriCurrentPr, same lifetime as focusLayouts/sessionHealth")
+    }
+}
