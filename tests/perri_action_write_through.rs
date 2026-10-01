@@ -45,10 +45,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
     send(
         stream,
-        &ClientMsg::Subscribe {
-            topics,
-            renders_decisions: false,
-        },
+        &ClientMsg::Subscribe { topics, renders_decisions: false },
     )
     .await;
 }
@@ -83,9 +80,7 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
         tmp.path().join("sessions.json"),
     )));
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(
-        nostromo::ipc::decisions::DecisionRegistry::default(),
-    ));
+    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let server = Server::bind(
         &socket_path,
@@ -146,9 +141,7 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
         tmp.path().join("sessions.json"),
     )));
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let decisions = Arc::new(Mutex::new(
-        nostromo::ipc::decisions::DecisionRegistry::default(),
-    ));
+    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let server = Server::bind(
         &socket_path,

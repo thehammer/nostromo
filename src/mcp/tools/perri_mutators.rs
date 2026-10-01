@@ -903,9 +903,7 @@ mod tests {
                 selected_index: Arc::new(AtomicUsize::new(0)),
                 settle_timeout: Duration::from_millis(50),
             },
-            decisions: Arc::new(Mutex::new(
-                crate::ipc::decisions::DecisionRegistry::default(),
-            )),
+            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
         };
         (McpSharedState::for_daemon(backend), broadcast_tx)
@@ -1323,9 +1321,7 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(
-                crate::ipc::decisions::DecisionRegistry::default(),
-            )),
+            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
         };
         let mut state = McpSharedState::for_daemon(backend);
@@ -1786,11 +1782,7 @@ mod tests {
         assert_eq!(load_result["ok"], true);
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon
-                    .pane_registry
-                    .lock()
-                    .unwrap()
-                    .source_for("perri", "diff"),
+                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
                 None,
                 "sanity: highlights must have severed diff's binding first"
             );
@@ -1803,11 +1795,7 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon
-                    .pane_registry
-                    .lock()
-                    .unwrap()
-                    .source_for("perri", "diff"),
+                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
                 Some("perri.get_current_pr"),
                 "clear_current_pr must rebind an unbound legacy diff pane so it goes live \
                  again the moment a PR loads"
@@ -1822,10 +1810,7 @@ mod tests {
                 if pane_id == "diff" && text == "No PR loaded."
             )
         });
-        assert!(
-            got_placeholder,
-            "expected diff to receive the placeholder; got {messages:?}"
-        );
+        assert!(got_placeholder, "expected diff to receive the placeholder; got {messages:?}");
     }
 
     #[tokio::test]
@@ -1835,10 +1820,7 @@ mod tests {
 
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["ok"], true);
-        assert!(
-            result.get("warnings").is_none(),
-            "unexpected warnings: {result}"
-        );
+        assert!(result.get("warnings").is_none(), "unexpected warnings: {result}");
         assert!(result["cleared"].is_array());
         assert!(result["queue"].is_array());
 
@@ -1931,11 +1913,7 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon
-                    .pane_registry
-                    .lock()
-                    .unwrap()
-                    .source_for("perri", "queue"),
+                daemon.pane_registry.lock().unwrap().source_for("perri", "queue"),
                 Some("perri.list_pr_queue")
             );
         }
@@ -2108,9 +2086,7 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(
-                crate::ipc::decisions::DecisionRegistry::default(),
-            )),
+            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
         };
         let state = McpSharedState::for_daemon(backend);
@@ -2377,13 +2353,9 @@ mod tests {
     fn registry_with_panes(tag: &str, ids: &[&str]) -> PaneRegistry {
         let mut children: Vec<PaneTree> = ids
             .iter()
-            .map(|id| PaneTree::Leaf {
-                pane_id: id.to_string(),
-            })
+            .map(|id| PaneTree::Leaf { pane_id: id.to_string() })
             .collect();
-        children.push(PaneTree::Leaf {
-            pane_id: "repl".into(),
-        });
+        children.push(PaneTree::Leaf { pane_id: "repl".into() });
         let n = children.len();
         let mut reg = PaneRegistry::in_memory();
         reg.get_or_init(tag);

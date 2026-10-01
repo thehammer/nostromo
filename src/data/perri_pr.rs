@@ -301,14 +301,8 @@ mod tests {
         let snap: PrSnapshot = serde_json::from_value(json).expect(
             "a pre-W3 PrSnapshot JSON literal (no body/threads/conversation_error) must still deserialize",
         );
-        assert_eq!(
-            snap.body, "",
-            "missing body must default to an empty string"
-        );
-        assert!(
-            snap.threads.is_empty(),
-            "missing threads must default to an empty vec"
-        );
+        assert_eq!(snap.body, "", "missing body must default to an empty string");
+        assert!(snap.threads.is_empty(), "missing threads must default to an empty vec");
         assert_eq!(
             snap.conversation_error, None,
             "missing conversation_error must default to None"

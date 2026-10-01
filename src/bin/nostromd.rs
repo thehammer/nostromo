@@ -47,9 +47,7 @@ use nostromo::{
         protocol::ServerMsg,
         PtyManager, Server, SessionManager,
     },
-    mcp::{
-        daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState,
-    },
+    mcp::{daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState},
     mother::{self, statusline_cache_path, MotherStatus},
 };
 
@@ -151,10 +149,7 @@ async fn main() -> Result<()> {
     // environments block multicast.  The guard MUST outlive the select! below.
     let _mdns_guard = match mdns::advertise(bound_tcp_addr.port()) {
         Ok(guard) => {
-            info!(
-                port = bound_tcp_addr.port(),
-                "mDNS advertising started (_nostromo._tcp.local.)"
-            );
+            info!(port = bound_tcp_addr.port(), "mDNS advertising started (_nostromo._tcp.local.)");
             Some(guard)
         }
         Err(e) => {
@@ -184,10 +179,7 @@ async fn main() -> Result<()> {
     // not just the one the operator actually used — learns a request is done
     // (multi-window decision-sheet fix). Must happen here, after `server.tx`
     // exists, not in the registry-construction block above.
-    decisions
-        .lock()
-        .unwrap()
-        .configure_broadcast(broadcast_tx.clone());
+    decisions.lock().unwrap().configure_broadcast(broadcast_tx.clone());
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
@@ -249,10 +241,7 @@ async fn main() -> Result<()> {
             // ATLASSIAN_* can tell why `ticket` shows are refused, without
             // ever logging the token itself.
             let jira_provider = Arc::new(nostromo::data::tickets::jira::JiraProvider::new(&config));
-            info!(
-                configured = jira_provider.is_configured(),
-                "jira ticket provider"
-            );
+            info!(configured = jira_provider.is_configured(), "jira ticket provider");
             let mut ticket_registry = nostromo::data::tickets::TicketRegistry::new();
             ticket_registry.register(jira_provider);
             let tickets = nostromo::mcp::TicketRegistryState {
@@ -363,7 +352,7 @@ async fn main() -> Result<()> {
     ));
 
     // ── Fred background sources ───────────────────────────────────────────────
-    let fred_mailbox_rx = FredMailboxNativeSource::spawn(config.clone());
+    let fred_mailbox_rx  = FredMailboxNativeSource::spawn(config.clone());
     let fred_calendar_rx = FredCalendarNativeSource::spawn(config.clone());
 
     // ── Teri todos source + broadcaster ───────────────────────────────────────
@@ -382,11 +371,7 @@ async fn main() -> Result<()> {
 
     // ── Fred broadcaster ──────────────────────────────────────────────────────
     let btx_fred = broadcast_tx.clone();
-    tokio::spawn(run_fred_broadcaster(
-        btx_fred,
-        fred_mailbox_rx,
-        fred_calendar_rx,
-    ));
+    tokio::spawn(run_fred_broadcaster(btx_fred, fred_mailbox_rx, fred_calendar_rx));
 
     // ── SIGTERM / SIGINT ──────────────────────────────────────────────────────
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -558,10 +543,10 @@ async fn run_peek_poller(
         // Send a terminal-clear for jobs that just left the active set.
         for id in active.difference(&currently_active) {
             let _ = tx.send(ServerMsg::MotherPeek {
-                job_id: id.clone(),
-                todos: vec![],
+                job_id:     id.clone(),
+                todos:      vec![],
                 tool_trail: vec![],
-                last_text: String::new(),
+                last_text:  String::new(),
             });
         }
 
@@ -572,10 +557,10 @@ async fn run_peek_poller(
             match mother::peek(id).await {
                 Ok(snap) => {
                     let _ = tx.send(ServerMsg::MotherPeek {
-                        job_id: id.clone(),
-                        todos: snap.todos,
+                        job_id:     id.clone(),
+                        todos:      snap.todos,
                         tool_trail: snap.tool_trail,
-                        last_text: snap.last_text.chars().take(200).collect(),
+                        last_text:  snap.last_text.chars().take(200).collect(),
                     });
                 }
                 Err(e) => {
@@ -701,7 +686,7 @@ fn build_fred_state(
     mailbox_rx: &tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
     calendar_rx: &tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
 ) -> ServerMsg {
-    let mailbox = mailbox_rx.borrow().clone().unwrap_or_default();
+    let mailbox  = mailbox_rx.borrow().clone().unwrap_or_default();
     let calendar = calendar_rx.borrow().clone().unwrap_or_default();
     ServerMsg::FredState { mailbox, calendar }
 }

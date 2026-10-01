@@ -99,15 +99,11 @@ pub async fn run_perri_action(
             //    write the exact commit-scoped suppression entry Phase 1 uses.
             let sha_output = tokio::process::Command::new(&gh)
                 .args([
-                    "pr",
-                    "view",
+                    "pr", "view",
                     &number.to_string(),
-                    "--repo",
-                    repo,
-                    "--json",
-                    "headRefOid",
-                    "-q",
-                    ".headRefOid",
+                    "--repo", repo,
+                    "--json", "headRefOid",
+                    "-q", ".headRefOid",
                 ])
                 .output()
                 .await
@@ -133,17 +129,17 @@ pub async fn run_perri_action(
             // leaking verbatim into approvals.jsonl.  A valid SHA is hex-only and
             // at least 7 chars; anything else is treated as a gh failure.
             if head_sha.len() < 7 || !head_sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                bail!("gh pr view returned an unexpected head sha for PR #{number}: {head_sha:?}");
+                bail!(
+                    "gh pr view returned an unexpected head sha for PR #{number}: {head_sha:?}"
+                );
             }
 
             // 2. Post the approval — no comment body (iOS approve is comment-free).
             let approve_status = tokio::process::Command::new(&gh)
                 .args([
-                    "pr",
-                    "review",
+                    "pr", "review",
                     &number.to_string(),
-                    "--repo",
-                    repo,
+                    "--repo", repo,
                     "--approve",
                 ])
                 .status()

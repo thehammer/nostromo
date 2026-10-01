@@ -572,10 +572,7 @@ async fn clear_current_pr_over_the_real_socket_closes_a_curated_pr_diff_tab() {
         bound,
     )
     .await;
-    assert_eq!(
-        res["ok"], true,
-        "nostromo.show should open the pr_diff tab: {res}"
-    );
+    assert_eq!(res["ok"], true, "nostromo.show should open the pr_diff tab: {res}");
 
     let res = call_tool_bounded(
         &mut reader,

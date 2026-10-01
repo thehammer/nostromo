@@ -527,10 +527,7 @@ mod tests {
                 assert_eq!(pane_id, "queue");
                 assert!(matches!(content, PaneContentWire::Text { text } if text == "hi"));
                 assert!(freshness.is_none());
-                assert!(
-                    address.is_none(),
-                    "broadcast_pane_content must default address to None"
-                );
+                assert!(address.is_none(), "broadcast_pane_content must default address to None");
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -592,9 +589,7 @@ mod tests {
             daemon,
             "perri",
             "ticket",
-            PaneContentWire::Text {
-                text: "CORE-1234".into(),
-            },
+            PaneContentWire::Text { text: "CORE-1234".into() },
             None,
             Some(address.clone()),
         );
@@ -963,8 +958,7 @@ mod tests {
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
-                let freshness =
-                    freshness.expect("freshness must be attached once data is known-stale");
+                let freshness = freshness.expect("freshness must be attached once data is known-stale");
                 assert!(freshness.badly_stale);
             }
             other => panic!("expected PaneContent, got {other:?}"),
@@ -1170,7 +1164,8 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
 
         let mut saw_any = false;
-        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
+        while let Ok(Ok(msg)) =
+            tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
         {
             saw_any = true;
             if let ServerMsg::PaneContent {
@@ -1223,7 +1218,8 @@ mod tests {
         tokio::time::advance(Duration::from_secs(61)).await;
 
         let mut checked_any = false;
-        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
+        while let Ok(Ok(msg)) =
+            tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
         {
             if let ServerMsg::PaneContent { content, .. } = msg {
                 checked_any = true;
@@ -1244,8 +1240,7 @@ mod tests {
     // ── perri.get_pr_conversation (W3 — curated-agent-views) ─────────────────
 
     #[tokio::test]
-    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation()
-    {
+    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation() {
         let (state, mut bcast, _qtx, pr_tx) = make_state();
         bind_pane(&state, "perri", "conversation", SOURCE_PR_CONVERSATION);
 
@@ -1281,8 +1276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound()
-    {
+    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound() {
         let (state, mut bcast, _qtx, pr_tx) = make_state();
         bind_pane(&state, "perri", "diff_text", SOURCE_CURRENT_PR);
         bind_pane(&state, "perri", "diff_structured", SOURCE_PR_DIFF);
@@ -1314,13 +1308,9 @@ mod tests {
         }
         assert_eq!(
             seen_panes,
-            [
-                "diff_text".to_string(),
-                "diff_structured".to_string(),
-                "conversation".to_string()
-            ]
-            .into_iter()
-            .collect(),
+            ["diff_text".to_string(), "diff_structured".to_string(), "conversation".to_string()]
+                .into_iter()
+                .collect(),
             "one PR-watch change must push all three PR-backed sources, each exactly once"
         );
 

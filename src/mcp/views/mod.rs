@@ -497,10 +497,7 @@ mod tests {
             ),
             "Diff"
         );
-        assert_eq!(
-            label_for(ViewType::ReviewQueue, &ViewIdentity::Singleton),
-            "Queue"
-        );
+        assert_eq!(label_for(ViewType::ReviewQueue, &ViewIdentity::Singleton), "Queue");
     }
 
     // ── 4. error codes are all distinct ───────────────────────────────────────
