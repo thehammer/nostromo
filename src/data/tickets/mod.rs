@@ -118,6 +118,9 @@ impl TicketError {
 
 /// One issue-tracker backend. `jira` is the only implementation in v1
 /// ([`jira::JiraProvider`]).
+// `async_trait` boxes `fetch`'s future, whose `Result` is already `#[must_use]`;
+// newer clippy flags the macro-generated attribute as `double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TicketProvider: Send + Sync {
     /// The registry key this provider answers to (e.g. `"jira"`).
