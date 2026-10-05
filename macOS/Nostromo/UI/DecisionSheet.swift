@@ -79,7 +79,7 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
         self.onAnswer = onAnswer
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 200),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -112,7 +112,16 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
     private func buildContent(prompt: String, detail: String?, choices: [Choice]) {
         guard let contentView = window?.contentView else { return }
 
-        let promptLabel = NSTextField(labelWithString: prompt)
+        // Cap the sheet's width. Without this, a long `prompt`/`detail` gives the
+        // labels a huge single-line intrinsic width and Auto Layout grows the
+        // sheet to fit it — off the edge of the screen. Wrapping labels with a
+        // `preferredMaxLayoutWidth` cap their intrinsic width so long text wraps
+        // inside the window's fixed `contentWidth`.
+        let contentWidth: CGFloat = 480
+        let textWidth = contentWidth - 40  // 20pt leading + trailing insets
+
+        let promptLabel = NSTextField(wrappingLabelWithString: prompt)
+        promptLabel.preferredMaxLayoutWidth = textWidth
         promptLabel.font = .systemFont(ofSize: 14, weight: .medium)
         promptLabel.textColor = .white
         promptLabel.lineBreakMode = .byWordWrapping
@@ -124,7 +133,8 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
         var topConstant: CGFloat = 12
 
         if let detail, !detail.isEmpty {
-            let detailLabel = NSTextField(labelWithString: detail)
+            let detailLabel = NSTextField(wrappingLabelWithString: detail)
+            detailLabel.preferredMaxLayoutWidth = textWidth
             detailLabel.font = .systemFont(ofSize: 11)
             detailLabel.textColor = .secondaryLabelColor
             detailLabel.lineBreakMode = .byWordWrapping
