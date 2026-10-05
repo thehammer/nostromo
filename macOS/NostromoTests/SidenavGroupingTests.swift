@@ -52,8 +52,9 @@ final class SidenavGroupingTests: XCTestCase {
                            "built-in at position \(index + 1) should be \(expected)")
             XCTAssertEqual(label, expected.capitalized,
                            "built-in label should be agentTag.capitalized")
-            XCTAssertEqual(secondary, NostromoKit.FocusPRLabel.noPR,
-                           "built-in pathless focuses with no PR show the explicit no-PR string (W8, D6)")
+            XCTAssertEqual(secondary,
+                           expected == "perri" ? NostromoKit.FocusPRLabel.noPR : "",
+                           "only Perri says 'No PR'; other built-ins have no summary yet, so an empty (but non-nil) second line")
             XCTAssertFalse(indented,
                            "built-in pathless focuses are not indented")
         }
@@ -83,8 +84,8 @@ final class SidenavGroupingTests: XCTestCase {
         }
         XCTAssertEqual(label, "Admin Portal",
                        "single Claudia in a repo: label is the repo name alone")
-        XCTAssertEqual(secondary, NostromoKit.FocusPRLabel.noPR,
-                       "single focus in repo with no PR shows the explicit no-PR string (W8, D6)")
+        XCTAssertEqual(secondary, "",
+                       "a non-Perri focus with no summary gets an empty but non-nil second line (keeps row height, D6)")
         XCTAssertFalse(indented,
                        "single focus in repo is not indented")
     }
@@ -114,8 +115,8 @@ final class SidenavGroupingTests: XCTestCase {
         }
         XCTAssertEqual(label, "Cody in Admin Portal",
                        "single non-Claudia: label is '<Agent> in <RepoName>'")
-        XCTAssertEqual(secondary, NostromoKit.FocusPRLabel.noPR,
-                       "single focus in repo with no PR shows the explicit no-PR string (W8, D6)")
+        XCTAssertEqual(secondary, "",
+                       "a non-Perri focus with no summary gets an empty but non-nil second line (keeps row height, D6)")
         XCTAssertFalse(indented)
     }
 
@@ -237,10 +238,10 @@ final class SidenavGroupingTests: XCTestCase {
             XCTFail("expected .focus rows at index 2 and 3"); return
         }
 
-        XCTAssertEqual(sec1, NostromoKit.FocusPRLabel.noPR,
-                       "different agentTags in same repo: no disambiguation needed and no PR, secondary is the explicit no-PR string (W8, D6)")
-        XCTAssertEqual(sec2, NostromoKit.FocusPRLabel.noPR,
-                       "different agentTags in same repo: no disambiguation needed and no PR, secondary is the explicit no-PR string (W8, D6)")
+        XCTAssertEqual(sec1, "",
+                       "different agentTags in same repo: no disambiguation needed and no summary, secondary is empty but non-nil (D6)")
+        XCTAssertEqual(sec2, "",
+                       "different agentTags in same repo: no disambiguation needed and no summary, secondary is empty but non-nil (D6)")
     }
 
     func testDisambiguation_emptySessionSummary_treatedAsAbsent() {
@@ -490,7 +491,7 @@ final class SidenavGroupingTests: XCTestCase {
     // non-nil secondary by design, superseding the old "no secondary"
     // behavior those two tests asserted).
 
-    func testBuiltInsWithNoPRsAnywhereStillGetANonNilNonEmptySecondary() {
+    func testBuiltInsWithNoPRsAnywhereStillGetANonNilSecondary() {
         let rows = buildNavRows(Focus.builtIns)
 
         var sawAFocusRow = false
@@ -498,13 +499,15 @@ final class SidenavGroupingTests: XCTestCase {
             guard case let .focus(f, label: _, secondary: secondary, indented: _) = row else { continue }
             sawAFocusRow = true
             XCTAssertNotNil(secondary, "built-in '\(f.agentTag)' must get a non-nil secondary now that every row renders one (D6)")
-            XCTAssertNotEqual(secondary, "", "built-in '\(f.agentTag)' must never get an empty-string secondary")
+            if f.agentTag == "perri" {
+                XCTAssertEqual(secondary, NostromoKit.FocusPRLabel.noPR, "Perri with nothing loaded says so explicitly")
+            }
         }
         XCTAssertTrue(sawAFocusRow, "sanity check: Focus.builtIns must actually produce .focus rows")
     }
 
     func testFocusWithAPrForEntryShowsThePrLabelAsSecondary() {
-        let f = makeFocus(id: "uuid-1", agent: "cody",
+        let f = makeFocus(id: "uuid-1", agent: "perri",
                           path: "/Users/hammer/Code/admin-portal", org: "Carefeed")
         let rows = buildNavRows([f]) { tag in
             tag == f.sessionTag ? (repo: "Carefeed/admin-portal", number: 1234) : (nil, nil)
@@ -533,7 +536,7 @@ final class SidenavGroupingTests: XCTestCase {
     }
 
     func testFocusWithBothASessionSummaryAndAPrForEntryShowsThePrNotTheSummary() {
-        let f1 = makeFocus(id: "uuid-4", agent: "cody",
+        let f1 = makeFocus(id: "uuid-4", agent: "perri",
                            path: "/Users/hammer/Code/admin-portal", org: "Carefeed",
                            summary: "Working on login flow")
         let f2 = makeFocus(id: "uuid-5", agent: "redd",
@@ -551,8 +554,8 @@ final class SidenavGroupingTests: XCTestCase {
     }
 
     func testTwoFocusesInTheSameRepoGroupWithDifferentPrForPRsGetDifferentSecondaries() {
-        let f1 = makeFocus(id: "uuid-6", agent: "cody", path: "/Users/hammer/Code/nostromo", org: "Carefeed")
-        let f2 = makeFocus(id: "uuid-7", agent: "redd", path: "/Users/hammer/Code/nostromo", org: "Carefeed")
+        let f1 = makeFocus(id: "uuid-6", agent: "perri", path: "/Users/hammer/Code/nostromo", org: "Carefeed")
+        let f2 = makeFocus(id: "uuid-7", agent: "perri", path: "/Users/hammer/Code/nostromo", org: "Carefeed")
         let rows = buildNavRows([f1, f2]) { tag in
             switch tag {
             case f1.sessionTag: return (repo: "Carefeed/nostromo", number: 10)
@@ -566,5 +569,44 @@ final class SidenavGroupingTests: XCTestCase {
             XCTFail("expected .focus rows at index 2 and 3"); return
         }
         XCTAssertNotEqual(secA, secB, "two different focuses' PRs in the same repo group must never collapse to the same secondary")
+    }
+
+    // MARK: - Only a Perri focus shows its PR; others show their session summary
+
+    func testNonPerriFocusNeverShowsAPrEvenWhenOneIsPinnedToIt() {
+        let f = makeFocus(id: "uuid-8", agent: "cody",
+                          path: "/Users/hammer/Code/admin-portal", org: "Carefeed",
+                          summary: "Fixing the login flow")
+        let rows = buildNavRows([f]) { _ in (repo: "Carefeed/admin-portal", number: 7) }
+
+        guard case let .focus(_, label: _, secondary: secondary, indented: _) = rows[1] else {
+            XCTFail("expected a .focus row at index 1"); return
+        }
+        XCTAssertEqual(secondary, "Fixing the login flow",
+                       "a non-Perri focus is about some other activity: it shows its summary, never a PR label")
+    }
+
+    func testPerriWithNothingLoadedSaysNoPrEvenWithASessionSummary() {
+        let f = makeFocus(id: "uuid-9", agent: "perri",
+                          path: "/Users/hammer/Code/admin-portal", org: "Carefeed",
+                          summary: "Reviewing the queue")
+        let rows = buildNavRows([f]) { _ in (nil, nil) }
+
+        guard case let .focus(_, label: _, secondary: secondary, indented: _) = rows[1] else {
+            XCTFail("expected a .focus row at index 1"); return
+        }
+        XCTAssertEqual(secondary, NostromoKit.FocusPRLabel.noPR,
+                       "Perri's second line answers 'which PR am I in', not narration")
+    }
+
+    func testPathlessNonPerriFocusShowsItsSessionSummary() {
+        var f = makeFocus(id: "fred", agent: "fred", path: nil, org: "Carefeed")
+        f.sessionSummary = "Triaging the inbox"
+        let rows = buildNavRows([f])
+
+        guard case let .focus(_, label: _, secondary: secondary, indented: _) = rows[1] else {
+            XCTFail("expected a .focus row at index 1"); return
+        }
+        XCTAssertEqual(secondary, "Triaging the inbox")
     }
 }
