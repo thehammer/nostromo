@@ -37,12 +37,13 @@ enum NavRow: Equatable {
 /// - Repo groups follow, sorted alphabetically by `repoName`.
 /// - A repo with exactly one focus emits a single `.focus` row (no repo header);
 ///   a repo with ≥2 focuses emits `.repoHeader` + indented `.focus` rows.
-/// - Disambiguation (`secondary`): the PR under review (via `prFor`) always wins
-///   when present (W8, D5 — identity beats narration); otherwise use `sessionSummary`
-///   when non-nil/empty; else use the first 8 chars of `id` only when two focuses in
-///   the same repo share an `agentTag` (Phase 1 fallback); otherwise an explicit
-///   "no PR" string (`FocusPRLabel.noPR`) — never `nil` (W8, D6: a row's height must
-///   not change when a PR loads or clears, so every row always has a secondary line).
+/// - Secondary line: a Perri focus shows its PR under review (via `prFor`), or
+///   "No PR" (`FocusPRLabel.noPR`) when it has none — the PR is the context of what
+///   Perri is doing. Every other agent's focus shows its `sessionSummary` when
+///   non-nil/empty, else the first 8 chars of `id` only when two focuses in the same
+///   repo share an `agentTag` (Phase 1 fallback), else "". Never `nil` (W8, D6: a
+///   row's height must not change when a summary or PR loads or clears, so every
+///   row always has a second line, empty or not).
 ///
 /// - Parameter prFor: Resolves a focus's `sessionTag` to its PR under review
 ///   (`repo`, `number`), both `nil` when it has none. Defaults to "no focus has a
@@ -53,11 +54,24 @@ func buildNavRows(
 ) -> [NavRow] {
     var rows: [NavRow] = []
 
-    // The PR under review always wins over any other candidate for the
-    // secondary line (D5); the result is never nil (D6).
-    func secondaryLine(forTag tag: String, fallback: String?) -> String {
-        let (repo, number) = prFor(tag)
-        return FocusPRLabel.secondary(repo: repo, number: number, fallback: fallback)
+    // Only a Perri focus shows its PR under review: that is the context of what
+    // it is doing. Every other agent's focus is about some other activity, so
+    // a PR label would be noise there; it shows its session summary (or a
+    // disambiguator) instead. A Perri focus with nothing loaded says "No PR"
+    // (the PRD's "a focus with none says it has none") rather than a stale
+    // session summary. Never nil, so every row keeps the same two-line height
+    // (D6) — a row with nothing to say gets "" rather than no second line.
+    func secondaryLine(for f: Focus, fallback: String?) -> String {
+        if f.agentTag.lowercased() == "perri" {
+            let (repo, number) = prFor(f.sessionTag)
+            return FocusPRLabel.secondary(repo: repo, number: number, fallback: nil)
+        }
+        return fallback ?? ""
+    }
+
+    func summaryOf(_ f: Focus) -> String? {
+        guard let summary = f.sessionSummary, !summary.isEmpty else { return nil }
+        return summary
     }
 
     // 1. Bucket by effectiveOrg
@@ -79,7 +93,7 @@ func buildNavRows(
         let pathless = orgFocuses.filter { $0.projectPath == nil }
         for f in sortedPathlessFocuses(pathless) {
             rows.append(.focus(f, label: f.agentTag.capitalized,
-                               secondary: secondaryLine(forTag: f.sessionTag, fallback: nil), indented: false))
+                               secondary: secondaryLine(for: f, fallback: summaryOf(f)), indented: false))
         }
 
         // b. Repo groups — alphabetical by repoName
@@ -98,7 +112,7 @@ func buildNavRows(
                     ? repoName
                     : "\(f.agentTag.capitalized) in \(repoName)"
                 rows.append(.focus(f, label: label,
-                                   secondary: secondaryLine(forTag: f.sessionTag, fallback: nil), indented: false))
+                                   secondary: secondaryLine(for: f, fallback: summaryOf(f)), indented: false))
             } else {
                 rows.append(.repoHeader(repoName))
 
@@ -116,7 +130,7 @@ func buildNavRows(
                         fallback = nil
                     }
                     rows.append(.focus(f, label: f.agentTag.capitalized,
-                                       secondary: secondaryLine(forTag: f.sessionTag, fallback: fallback), indented: true))
+                                       secondary: secondaryLine(for: f, fallback: fallback), indented: true))
                 }
             }
         }
