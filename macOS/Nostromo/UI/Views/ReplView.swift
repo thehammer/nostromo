@@ -1155,7 +1155,14 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         pendingImages.append(url)
 
         // Build a small thumbnail chip
-        let chip = NSView()
+        // An NSStackView, not a hand-wired container: the hand-built chain of
+        // sibling constraints was found (via `nostromo-app layout-issues`) to
+        // leave the thumbnail and ✕ zero-sized and the name pinned to a corner.
+        let chip = NSStackView()
+        chip.orientation = .horizontal
+        chip.alignment   = .centerY
+        chip.spacing     = 4
+        chip.edgeInsets  = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
         chip.wantsLayer  = true
         chip.layer?.cornerRadius = 4
         chip.layer?.backgroundColor = NSColor(white: 0.18, alpha: 1).cgColor
@@ -1169,14 +1176,12 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
             img?.image = thumbnail
         }
         img.translatesAutoresizingMaskIntoConstraints = false
-        chip.addSubview(img)
 
         let nameLabel = NSTextField(labelWithString: url.lastPathComponent)
         nameLabel.font          = .systemFont(ofSize: 9)
         nameLabel.textColor     = Theme.fgMuted
         nameLabel.lineBreakMode = .byTruncatingMiddle
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        chip.addSubview(nameLabel)
 
         let removeBtn = NSButton()
         removeBtn.title     = "✕"
@@ -1189,22 +1194,12 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         // Store the URL via associated object so the selector can find it
         objc_setAssociatedObject(removeBtn, &ReplInputBar.urlKey, url, .OBJC_ASSOCIATION_RETAIN)
         removeBtn.translatesAutoresizingMaskIntoConstraints = false
-        chip.addSubview(removeBtn)
 
+        [img, nameLabel, removeBtn].forEach { chip.addArrangedSubview($0) }
         NSLayoutConstraint.activate([
-            img.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 4),
-            img.centerYAnchor.constraint(equalTo: chip.centerYAnchor),
             img.widthAnchor.constraint(equalToConstant: 36),
             img.heightAnchor.constraint(equalToConstant: 36),
-
-            nameLabel.leadingAnchor.constraint(equalTo: img.trailingAnchor, constant: 4),
-            nameLabel.centerYAnchor.constraint(equalTo: chip.centerYAnchor),
             nameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 90),
-
-            removeBtn.leadingAnchor.constraint(equalTo: nameLabel.trailingAnchor, constant: 2),
-            removeBtn.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -4),
-            removeBtn.centerYAnchor.constraint(equalTo: chip.centerYAnchor),
-
             chip.heightAnchor.constraint(equalToConstant: 44),
         ])
 

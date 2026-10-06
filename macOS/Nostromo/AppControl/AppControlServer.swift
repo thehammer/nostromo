@@ -123,6 +123,7 @@ final class AppControlServer {
         case "windows":     return windowsInfo()
         case "tree":        return try tree(req)
         case "find":        return try find(req)
+        case "layout-issues": return try layoutIssues(req)
         case "click":       return try click(req)
         case "key":         return try key(req)
         case "type":        return try typeText(req)
@@ -157,6 +158,9 @@ final class AppControlServer {
              "frame": ["x": w.frame.minX, "y": w.frame.minY, "w": w.frame.width, "h": w.frame.height],
              "fullscreen": w.styleMask.contains(.fullScreen),
              "key": w.isKeyWindow,
+             "alpha": w.alphaValue,
+             "visible": w.occlusionState.contains(.visible),
+             "windowNumber": w.windowNumber,
              "sheet": w.attachedSheet.map { $0.title.isEmpty ? String(describing: type(of: $0)) : $0.title } as Any,
              "firstResponder": w.firstResponder.map { String(describing: type(of: $0)) } ?? "none"]
         }
@@ -195,12 +199,16 @@ final class AppControlServer {
     private func tree(_ req: AppControlRequest) throws -> Any {
         let w = try window(req)
         guard let cv = w.contentView else { throw AppControlError.failed("window has no content view") }
+        // A display that is asleep/locked suspends the display cycle, so pending
+        // layout may not have run; make the dump reflect the real layout.
+        cv.layoutSubtreeIfNeeded()
         return node(cv, in: w, depth: 0, maxDepth: req.int("depth") ?? 12, visibleOnly: true) ?? [:]
     }
 
     /// Views whose text, tooltip, label or class name contains `text` (case-insensitive).
     private func find(_ req: AppControlRequest) throws -> Any {
         let w = try window(req)
+        w.contentView?.layoutSubtreeIfNeeded()
         guard let needle = req.string("text")?.lowercased(), !needle.isEmpty else {
             throw AppControlError.badRequest("find needs \"text\"")
         }
@@ -224,6 +232,33 @@ final class AppControlServer {
             v.subviews.forEach(walk)
         }
         if let cv = w.contentView { walk(cv) }
+        return out
+    }
+
+    /// Auto Layout audit: views whose layout is ambiguous, or that ended up
+    /// zero-sized while holding constraints that should have sized them.
+    private func layoutIssues(_ req: AppControlRequest) throws -> Any {
+        let w = try window(req)
+        guard let cv = w.contentView else { throw AppControlError.failed("no content view") }
+        cv.layoutSubtreeIfNeeded()
+        var out: [[String: Any]] = []
+        func walk(_ v: NSView) {
+            if v.isHidden { return }
+            let h = v.constraintsAffectingLayout(for: .horizontal).count
+            let vt = v.constraintsAffectingLayout(for: .vertical).count
+            let zero = v.bounds.width == 0 || v.bounds.height == 0
+            if v.hasAmbiguousLayout || (zero && (h > 0 || vt > 0) && !v.translatesAutoresizingMaskIntoConstraints) {
+                var d: [String: Any] = ["class": String(describing: type(of: v)),
+                                        "ambiguous": v.hasAmbiguousLayout, "zeroSized": zero,
+                                        "frame": AppControlGeometry.topLeftRect(viewFrameInWindow: v.convert(v.bounds, to: nil),
+                                                                                 contentHeight: contentHeight(w)),
+                                        "constraints": v.constraints.map { "\($0)" }.prefix(8).map { $0 }]
+                if let t = text(of: v) { d["text"] = t }
+                out.append(d)
+            }
+            v.subviews.forEach(walk)
+        }
+        walk(cv)
         return out
     }
 
@@ -257,14 +292,30 @@ final class AppControlServer {
             guard let down = ev(.leftMouseDown), let up = ev(.leftMouseUp) else {
                 throw AppControlError.failed("could not synthesise mouse events")
             }
-            // Controls run a tracking loop on mouseDown that waits for the
-            // matching mouseUp in the queue, so queue the up first.
-            w.postEvent(up, atStart: false)
-            w.sendEvent(down)
+            // NSControls run a tracking loop on mouseDown that waits for the
+            // matching mouseUp in the event queue, so for them queue the up
+            // first. Everything else (gesture recognizers, plain mouseDown
+            // handlers) wants down then up delivered in order.
+            if isInsideControl(hit) {
+                w.postEvent(up, atStart: false)
+                w.sendEvent(down)
+            } else {
+                w.sendEvent(down)
+                w.sendEvent(up)
+            }
         }
         // Let the run loop drain the queued mouseUp and any resulting work.
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         return ["hit": hit.map { String(describing: type(of: $0)) } ?? "none"]
+    }
+
+    private func isInsideControl(_ v: NSView?) -> Bool {
+        var cur = v
+        while let c = cur {
+            if c is NSControl && !(c is NSTextField && !((c as! NSTextField).isEditable)) { return true }
+            cur = c.superview
+        }
+        return false
     }
 
     // MARK: - Keyboard
@@ -334,16 +385,54 @@ final class AppControlServer {
 
     // MARK: - Screenshot
 
+    /// Window screenshot. Preferred path asks the window server for this app's
+    /// own window (needs no Screen Recording permission for one's own windows)
+    /// via `CGWindowListCreateImage`, looked up dynamically because newer SDKs
+    /// mark it unavailable. Fallback is `cacheDisplay`, which is faithful for
+    /// ordinary views but paints layer-backed content (e.g. sheets) as blank.
+    private static func isUniform(_ rep: NSBitmapImageRep) -> Bool {
+        let w = rep.pixelsWide, h = rep.pixelsHigh
+        guard w > 1, h > 1, let first = rep.colorAt(x: 0, y: 0) else { return true }
+        for i in 0..<64 {
+            let x = (w - 1) * (i % 8) / 7, y = (h - 1) * (i / 8) / 7
+            if let c = rep.colorAt(x: x, y: y),
+               abs(c.redComponent - first.redComponent) > 0.02 || abs(c.greenComponent - first.greenComponent) > 0.02
+                || abs(c.blueComponent - first.blueComponent) > 0.02 { return false }
+        }
+        return true
+    }
+
     private func screenshot(_ req: AppControlRequest) throws -> Any {
         let w = try window(req)
-        guard let cv = w.contentView, let rep = cv.bitmapImageRepForCachingDisplay(in: cv.bounds) else {
-            throw AppControlError.failed("cannot capture window")
-        }
-        cv.cacheDisplay(in: cv.bounds, to: rep)
-        guard let png = rep.representation(using: .png, properties: [:]) else { throw AppControlError.failed("png encode failed") }
+        guard let cv = w.contentView else { throw AppControlError.failed("no content view") }
+        w.displayIfNeeded()
         let path = req.string("path") ?? NSTemporaryDirectory() + "nostromo-window-\(req.int("window") ?? 0).png"
+
+        typealias CreateImage = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+        var method = "cgwindow"
+        var rep: NSBitmapImageRep?
+        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") {   // RTLD_DEFAULT
+            let create = unsafeBitCast(sym, to: CreateImage.self)
+            // .optionIncludingWindow = 1<<3, boundsIgnoreFraming = 1<<0
+            if req.string("method") != "cache",
+               let cg = create(.null, 1 << 3, UInt32(w.windowNumber), 1 << 0)?.takeRetainedValue() {
+                let candidate = NSBitmapImageRep(cgImage: cg)
+                // A locked / asleep display is not composited, so the window
+                // server hands back a flat image. Treat that as "no capture".
+                if !Self.isUniform(candidate) { rep = candidate }
+            }
+        }
+        if rep == nil {
+            method = "cacheDisplay"
+            guard let r = cv.bitmapImageRepForCachingDisplay(in: cv.bounds) else { throw AppControlError.failed("cannot capture window") }
+            cv.cacheDisplay(in: cv.bounds, to: r)
+            rep = r
+        }
+        guard let out = rep, let png = out.representation(using: .png, properties: [:]) else {
+            throw AppControlError.failed("png encode failed")
+        }
         try png.write(to: URL(fileURLWithPath: path))
-        return ["path": path, "width": rep.pixelsWide, "height": rep.pixelsHigh]
+        return ["path": path, "width": out.pixelsWide, "height": out.pixelsHigh, "windowNumber": w.windowNumber, "method": method]
     }
 }
 
