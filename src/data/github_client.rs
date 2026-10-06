@@ -113,10 +113,10 @@ impl GithubClient {
         path: &str,
         git_ref: &str,
     ) -> Result<Option<String>> {
-        let url = format!("{base_url}/repos/{owner}/{repo}/contents/{path}");
+        let url = contents_url(base_url, owner, repo, path)?;
         let resp = self
             .http
-            .get(&url)
+            .get(url.clone())
             .query(&[("ref", git_ref)])
             .header(reqwest::header::ACCEPT, "application/vnd.github.raw")
             .header(
@@ -138,6 +138,24 @@ impl GithubClient {
         }
         resp.text().await.context("reading contents body").map(Some)
     }
+}
+
+/// The contents-API URL for `path` in `owner/repo`, built segment by segment so
+/// nothing in `owner`, `repo` or `path` can change what the request IS: each
+/// is percent-encoded as one path segment, so a `?`, `#`, `%`, space or `/`
+/// inside a segment cannot start a query, fragment or new segment, and a
+/// `..` is a literal (encoded) segment name rather than a climb. This request
+/// carries the daemon's GitHub bearer token, so "which endpoint does it hit"
+/// must not depend on agent-supplied text. Callers validate the path first
+/// (`file_source::validate_remote_path`); this is the second layer.
+fn contents_url(base_url: &str, owner: &str, repo: &str, path: &str) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(base_url).context("parsing the GitHub API base URL")?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("GitHub API base URL cannot carry a path"))?
+        .pop_if_empty()
+        .extend(["repos", owner, repo, "contents"])
+        .extend(path.split('/'));
+    Ok(url)
 }
 
 /// Builds the `reqwest::ClientBuilder` behind [`GithubClient::http`] — split
@@ -233,6 +251,44 @@ fn default_hosts_yml() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    // ── contents URL construction (security review, 2026-10-06) ──────────────
+
+    #[test]
+    fn contents_url_builds_the_ordinary_shape() {
+        let u = contents_url("https://api.github.com", "Carefeed", "referral-monitor", "docs/a.md").unwrap();
+        assert_eq!(u.as_str(), "https://api.github.com/repos/Carefeed/referral-monitor/contents/docs/a.md");
+    }
+
+    #[test]
+    fn contents_url_cannot_be_retargeted_by_the_path() {
+        // `?` and `#` stay inside the path as encoded characters: no query, no fragment.
+        let u = contents_url("https://api.github.com", "o", "r", "a?ref=evil#x").unwrap();
+        assert_eq!(u.query(), None, "a `?` in the path must not start a query: {u}");
+        assert_eq!(u.fragment(), None, "a `#` in the path must not start a fragment: {u}");
+        assert!(u.path().starts_with("/repos/o/r/contents/"));
+        // Spaces and a pre-encoded `..` are encoded, never interpreted.
+        let u = contents_url("https://api.github.com", "o", "r", "a b/%2e%2e/c").unwrap();
+        assert!(u.path().starts_with("/repos/o/r/contents/"), "{u}");
+        assert!(!u.path().contains(' '), "{u}");
+    }
+
+    #[test]
+    fn contents_url_cannot_climb_out_with_dot_segments_in_the_path_or_repo() {
+        for (owner, repo, path) in [("o", "r", "../../../user"), ("..", "x", "a.md"), ("o", "..", "a.md")] {
+            let u = contents_url("https://api.github.com", owner, repo, path).unwrap();
+            assert!(
+                u.path().starts_with("/repos/") && u.path().contains("/contents/"),
+                "{owner}/{repo}:{path} climbed out of /repos/../contents/: {u}"
+            );
+        }
+    }
+
+    #[test]
+    fn contents_url_tolerates_a_trailing_slash_on_the_base() {
+        let u = contents_url("http://127.0.0.1:1234/", "o", "r", "a.md").unwrap();
+        assert_eq!(u.as_str(), "http://127.0.0.1:1234/repos/o/r/contents/a.md");
+    }
+
     use super::*;
 
     /// `reqwest::Client` exposes no public getter for `connect_timeout`/

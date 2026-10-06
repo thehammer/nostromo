@@ -170,6 +170,12 @@ impl FileRequest {
             Some(_) => return Err(FileSourceError::InvalidParams),
         }
 
+        // A repo-qualified path is spliced into a GitHub URL: validate it here
+        // (see `validate_remote_path`), before anything is fetched.
+        if repo.is_some() {
+            validate_remote_path(&path)?;
+        }
+
         Ok(FileRequest {
             path,
             repo,
@@ -260,6 +266,31 @@ pub fn resolve_revision(
         }
     }
     WORKING_TREE.to_string()
+}
+
+/// Whether `path` is safe to splice into a GitHub contents URL.
+///
+/// A repo-qualified request skips the local checkout, so the checks that
+/// [`resolve_within_root`] makes for a local read never run — and the path goes
+/// straight into `…/repos/{owner}/{repo}/contents/{path}`, sent with the
+/// daemon's GitHub bearer token. Anything that could re-target that
+/// authenticated request is refused as [`FileSourceError::PathEscapesRoot`]:
+/// a `.`/`..` segment (URL normalisation would climb out of `/contents/`), an
+/// absolute or empty segment, `?`/`#` (rewrite the query/fragment), `%` (a
+/// pre-encoded `..`), a backslash, or any control character. Ordinary nested
+/// paths — including dot-directories like `.github/` and names that merely
+/// contain `..` such as `weird..name.rs` — are fine.
+pub fn validate_remote_path(path: &str) -> Result<(), FileSourceError> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.chars().any(|c| c.is_control() || matches!(c, '?' | '#' | '%' | '\\'))
+    {
+        return Err(FileSourceError::PathEscapesRoot);
+    }
+    if path.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return Err(FileSourceError::PathEscapesRoot);
+    }
+    Ok(())
 }
 
 /// The revision a repo-qualified request ([`FileRequest::repo`] is `Some`)
@@ -526,11 +557,19 @@ pub async fn read_from_github(
     revision: &str,
     path: &str,
 ) -> Result<String, FileSourceError> {
+    // Defence in depth at the one choke point every GitHub read goes through
+    // (the repo-qualified `file` view AND the pinned-PR fallback): validate the
+    // path before a token is resolved or a request is built.
+    validate_remote_path(path)?;
     let mut parts = repo.split('/');
     let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
         return Err(FileSourceError::UnresolvableRevision);
     };
     if owner.is_empty() || name.is_empty() {
+        return Err(FileSourceError::UnresolvableRevision);
+    }
+    // Same slug rule as every other entry point (rejects `.`/`..` components).
+    if crate::data::perri_current_pr::validate_repo_slug(repo).is_err() {
         return Err(FileSourceError::UnresolvableRevision);
     }
     let client = crate::data::github_client::GithubClient::new(None)
@@ -594,6 +633,48 @@ mod tests {
                 "repo {bad} must be refused"
             );
         }
+    }
+
+    // ── a repo-qualified path goes into a GitHub URL: it must not be able to
+    // re-target the authenticated request (security review of the repo option)
+
+    #[test]
+    fn a_repo_qualified_request_rejects_a_path_that_could_retarget_the_github_url() {
+        for bad in [
+            "../../../user", "a/../b", "./a", "a/./b", "/etc/passwd", "a//b", "a\\b",
+            "a?ref=main", "a#frag", "a%2e%2e/b", "a\nb", "..", ".", "a/..",
+        ] {
+            assert_eq!(
+                FileRequest::from_params(&json!({ "path": bad, "repo": "o/r" })),
+                Err(FileSourceError::PathEscapesRoot),
+                "path {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repo_qualified_request_still_accepts_ordinary_nested_paths() {
+        for ok in ["README.md", "docs/a b.md", "src/mcp/tools/apply_layout.rs", ".github/workflows/ci.yml", "a/.hidden/b", "weird..name.rs"] {
+            assert!(
+                FileRequest::from_params(&json!({ "path": ok, "repo": "o/r" })).is_ok(),
+                "path {ok:?} must be accepted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_from_github_refuses_a_traversal_path_before_any_network_call() {
+        // The choke point: also covers the pre-existing pinned-PR fallback.
+        // Must fail on the path itself, not on token resolution or HTTP.
+        assert_eq!(
+            read_from_github("o/r", "abc", "../../../user").await,
+            Err(FileSourceError::PathEscapesRoot)
+        );
+        assert_eq!(
+            read_from_github("../x", "abc", "a.md").await,
+            Err(FileSourceError::UnresolvableRevision),
+            "a dot-dot owner is not a repo"
+        );
     }
 
     #[test]
