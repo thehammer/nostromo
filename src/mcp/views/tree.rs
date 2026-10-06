@@ -189,6 +189,112 @@ fn normalise(ratios: &mut [f32]) {
     }
 }
 
+/// The label the queue tab carries.
+pub const QUEUE_LABEL: &str = "Queue";
+
+/// A review focus's default layout: the review queue as the one (and active)
+/// tab of the `detail` region, above the REPL. "Opened by default at launch".
+pub fn default_review_tree() -> PaneTree {
+    PaneTree::Split {
+        direction: SplitDirection::Vertical,
+        children: vec![
+            build_tabs(
+                "detail",
+                &[("queue".to_string(), QUEUE_LABEL.to_string())],
+                0,
+            ),
+            PaneTree::Leaf {
+                pane_id: "repl".to_string(),
+            },
+        ],
+        ratios: vec![0.6, 0.4],
+    }
+}
+
+/// True when `tree` holds a pane named `queue` that is NOT a tab — the old
+/// arrangement, where the queue was a region of its own beside the detail tabs.
+pub fn has_bare_queue(tree: &PaneTree) -> bool {
+    fn bare(node: &PaneTree) -> bool {
+        match node {
+            PaneTree::Leaf { pane_id } => pane_id == "queue",
+            PaneTree::Split { children, .. } => children.iter().any(bare),
+            // Anything inside a tabs node is a tab, not a bare pane.
+            PaneTree::Tabs { .. } => false,
+        }
+    }
+    bare(tree)
+}
+
+/// Migrate the old arrangement — a bare `queue` pane (usually beside the
+/// `detail` tabs) — to the new one, where the queue is the FIRST TAB of the
+/// `detail` region. Returns whether anything changed.
+///
+/// - A `detail` tabs node exists: the bare queue is removed from the layout (its
+///   parent split collapses, ratios renormalised) and becomes `detail`'s first
+///   tab, labelled [`QUEUE_LABEL`]; the frontmost tab stays the same tab.
+/// - There is no `detail` node (the queue was alone with the REPL): the bare
+///   queue pane is replaced by a `detail` node holding just the queue.
+///
+/// Idempotent: a tree with no bare queue is left alone.
+pub fn fold_queue_into_detail(tree: &mut PaneTree) -> bool {
+    if !has_bare_queue(tree) {
+        return false;
+    }
+    if tabs_region(tree, "detail").is_some() {
+        let is_bare_queue = |node: &PaneTree| matches!(node, PaneTree::Leaf { pane_id } if pane_id == "queue");
+        if !remove_where(tree, &is_bare_queue) {
+            return false;
+        }
+        insert_queue_tab_first(tree);
+        true
+    } else {
+        replace_bare_queue(tree)
+    }
+}
+
+/// Put `queue` at the front of the `detail` tabs node, keeping the same tab
+/// frontmost.
+fn insert_queue_tab_first(node: &mut PaneTree) -> bool {
+    match node {
+        PaneTree::Tabs {
+            children,
+            labels,
+            active,
+            region: Some(name),
+        } if name == "detail" => {
+            children.insert(
+                0,
+                PaneTree::Leaf {
+                    pane_id: "queue".to_string(),
+                },
+            );
+            labels.insert(0, QUEUE_LABEL.to_string());
+            *active += 1;
+            true
+        }
+        PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. } => {
+            children.iter_mut().any(insert_queue_tab_first)
+        }
+        PaneTree::Leaf { .. } => false,
+    }
+}
+
+/// Replace the bare `queue` leaf with a `detail` tabs node holding just it.
+fn replace_bare_queue(node: &mut PaneTree) -> bool {
+    match node {
+        PaneTree::Leaf { pane_id } if pane_id == "queue" => {
+            *node = build_tabs(
+                "detail",
+                &[("queue".to_string(), QUEUE_LABEL.to_string())],
+                0,
+            );
+            true
+        }
+        PaneTree::Split { children, .. } => children.iter_mut().any(replace_bare_queue),
+        PaneTree::Leaf { .. } | PaneTree::Tabs { .. } => false,
+    }
+}
+
 /// Every pane id live in `tree`, as a set.
 pub fn taken_pane_ids(tree: &PaneTree) -> std::collections::BTreeSet<String> {
     tree.pane_ids().into_iter().collect()
@@ -454,5 +560,91 @@ mod tests {
         }
         assert!(has_leaf(&tree, "detail.1"));
         assert!(!has_leaf(&tree, "detail.2"));
+    }
+
+    // ── queue as a tab: default layout + migration of the old arrangement ──────
+
+    #[test]
+    fn the_default_review_layout_is_the_queue_as_the_active_tab_above_the_repl() {
+        let tree = default_review_tree();
+        assert_eq!(tree.pane_ids(), vec!["queue".to_string(), "repl".to_string()]);
+        match tabs_region(&tree, "detail").expect("a detail tabs node") {
+            PaneTree::Tabs { labels, active, .. } => {
+                assert_eq!(labels, &vec!["Queue".to_string()]);
+                assert_eq!(*active, 0);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!has_bare_queue(&tree), "the queue is a tab, not a bare pane");
+    }
+
+    #[test]
+    fn a_bare_queue_is_detected_and_a_queue_tab_is_not() {
+        assert!(has_bare_queue(&curated()));
+        assert!(!has_bare_queue(&default_review_tree()));
+        assert!(!has_bare_queue(&PaneTree::Leaf { pane_id: "repl".into() }));
+    }
+
+    #[test]
+    fn migrating_a_queue_and_repl_layout_wraps_the_queue_in_a_detail_tab() {
+        let mut tree = curated();
+        assert!(fold_queue_into_detail(&mut tree));
+        assert_eq!(tree, default_review_tree());
+    }
+
+    #[test]
+    fn migrating_queue_beside_detail_makes_the_queue_the_first_tab_and_keeps_the_same_tab_frontmost() {
+        // The old arrangement: (queue | detail-tabs) over repl, detail.1 frontmost.
+        let mut tree = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Split {
+                    direction: SplitDirection::Horizontal,
+                    children: vec![leaf("queue"), detail(&["detail.0", "detail.1"], 1)],
+                    ratios: vec![0.5, 0.5],
+                },
+                leaf("repl"),
+            ],
+            ratios: vec![0.6, 0.4],
+        };
+
+        assert!(fold_queue_into_detail(&mut tree));
+
+        assert_eq!(
+            tree.pane_ids(),
+            vec!["queue".to_string(), "detail.0".to_string(), "detail.1".to_string(), "repl".to_string()]
+        );
+        match tabs_region(&tree, "detail").unwrap() {
+            PaneTree::Tabs { labels, active, children, .. } => {
+                assert_eq!(labels[0], "Queue");
+                assert_eq!(children.len(), 3);
+                assert_eq!(labels[*active], "DETAIL.1", "the tab that was frontmost still is");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The one-child horizontal split collapsed: detail now sits directly over the repl.
+        match &tree {
+            PaneTree::Split { children, ratios, .. } => {
+                assert_eq!(children.len(), 2);
+                assert_eq!(ratios.len(), 2);
+                assert!((ratios.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+            }
+            other => panic!("expected the outer split, got {other:?}"),
+        }
+        assert!(!has_bare_queue(&tree));
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_leaves_a_layout_without_a_bare_queue_alone() {
+        let mut tree = default_review_tree();
+        let before = tree.clone();
+        assert!(!fold_queue_into_detail(&mut tree));
+        assert_eq!(tree, before);
+
+        let mut once = curated();
+        assert!(fold_queue_into_detail(&mut once));
+        let after_once = once.clone();
+        assert!(!fold_queue_into_detail(&mut once), "a second pass must be a no-op");
+        assert_eq!(once, after_once);
     }
 }

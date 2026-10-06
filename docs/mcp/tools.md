@@ -1053,7 +1053,7 @@ downstream, as its own fetch-level error (`unknown_comment_id`,
 | `invalid_anchor` | `anchor` was present but the wrong kind for this view (`file` only — see above), or failed to deserialize as an `Anchor` at all. |
 | `invalid_emphasis` | An `emphasis` entry was the wrong kind for this view, `emphasis` wasn't an array, or an entry failed to deserialize as an `Emphasis`. |
 | `unknown_region` | `views.yaml` (compiled-in or override) names no such region for this view's type — only reachable through a broken override. |
-| `region_not_tabbed` | The view's home region already holds a *different* view and isn't tabbed (the queue region, in the compiled-in rules — R1). |
+| `region_not_tabbed` | The view's home region already holds a *different* view and isn't tabbed (R1). Not reachable with the compiled-in rules — the review queue is a tab of the tabbed `detail` region — only via an operator `views.yaml` override. |
 | `region_not_creatable` | The view's home region doesn't exist yet, and none of its `create` candidates in `views.yaml` names a pane currently live in this focus. |
 | `pane_id_taken` | Creating a non-tabbed region would need a pane id something else in this focus already holds. |
 | `invalid_views_config` | `views.yaml` (compiled-in or override) is malformed. |

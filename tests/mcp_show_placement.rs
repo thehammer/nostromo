@@ -343,8 +343,9 @@ async fn a_bare_focus_can_show_the_review_queue_through_show_alone_and_the_resul
 
     let (mut reader, mut writer) = connect(&socket_path, "perri").await;
 
-    // No raw pane tool is called anywhere in this test — the queue region
-    // does not exist yet, and `show` must create it itself (D5).
+    // No raw pane tool is called anywhere in this test — the detail region
+    // (which now holds the queue as its first tab) does not exist yet, and
+    // `show` must create it itself (D5).
     let res = call_tool(
         &mut reader,
         &mut writer,
@@ -355,11 +356,11 @@ async fn a_bare_focus_can_show_the_review_queue_through_show_alone_and_the_resul
     .await;
 
     assert_eq!(res["ok"], true);
-    assert_eq!(res["region"], "queue");
+    assert_eq!(res["region"], "detail", "the queue is a tab of the detail region");
     assert_eq!(res["pane_id"], "queue");
     assert_eq!(res["label"], "Queue");
     assert_eq!(res["tab_index"], 0);
-    assert_eq!(res["reused"], false, "the queue region did not exist yet");
+    assert_eq!(res["reused"], false, "the queue tab did not exist yet");
     assert_eq!(res["frontmost"], true);
     assert_eq!(res["evicted"], Value::Null);
 

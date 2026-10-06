@@ -81,6 +81,11 @@ pub enum SchemaNode {
         /// pane-id-centric vocabulary elsewhere, rather than an index that
         /// would silently drift if `tabs` were reordered.
         active: String,
+        /// The placement-engine region this node IS (e.g. `detail`), so
+        /// `nostromo.show` can find it again. Absent for an agent-authored tabs
+        /// node the engine knows nothing about.
+        #[serde(default)]
+        region: Option<String>,
     },
     Split {
         direction: SplitDirection,
@@ -110,7 +115,7 @@ impl SchemaNode {
                 children: children.iter().map(SchemaNode::to_pane_tree).collect(),
                 ratios: ratios.clone(),
             },
-            SchemaNode::Tabs { tabs, active } => {
+            SchemaNode::Tabs { tabs, active, region } => {
                 let active_index = tabs.iter().position(|t| &t.pane == active).unwrap_or(0);
                 PaneTree::Tabs {
                     children: tabs
@@ -121,7 +126,7 @@ impl SchemaNode {
                         .collect(),
                     labels: tabs.iter().map(|t| t.label.clone()).collect(),
                     active: active_index,
-                    region: None,
+                    region: region.clone(),
                 }
             }
         }

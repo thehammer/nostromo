@@ -126,7 +126,14 @@ pub fn place(
     };
 
     if !region_rule.tabbed {
-        return place_untabbed(state, req, region_name, region_rule, create_region);
+        return place_untabbed(
+            state,
+            req,
+            region_name,
+            region_rule,
+            view_rule.pane.as_deref(),
+            create_region,
+        );
     }
 
     // ── R8 — a show naming a different PR resets the review context ─────────
@@ -154,7 +161,12 @@ pub fn place(
             let (kept, closed): (Vec<LiveView>, Vec<LiveView>) = tabs
                 .into_iter()
                 .partition(|t| match t.view.as_ref().map(|v| &v.identity) {
-                    Some(id) => id.pr() == Some(requested_pr),
+                    // The queue is a singleton that belongs to no PR: it
+                    // survives every review-context change (it is the way
+                    // BACK to the queue).
+                    Some(id) => {
+                        id.pr() == Some(requested_pr) || matches!(id, super::ViewIdentity::Singleton)
+                    }
                     // A tab the curated layer doesn't recognise is not part of
                     // any review context, so a PR change leaves it alone.
                     None => true,
@@ -179,7 +191,7 @@ pub fn place(
     if let Some(matched_index) = matched {
         pane_id = tabs[matched_index].pane_id.clone();
     } else {
-        pane_id = new_pane_id(region_rule, state, &region_name)?;
+        pane_id = new_pane_id(region_rule, view_rule.pane.as_deref(), state, &region_name)?;
         // ── R4 — cap and eviction ───────────────────────────────────────────
         //
         // Evaluated *before* the insert, against the tabs that were already
@@ -247,6 +259,7 @@ fn place_untabbed(
     req: &ShowRequest,
     region_name: String,
     region_rule: &RegionRule,
+    view_rule_pane: Option<&str>,
     create_region: Option<RegionCreation>,
 ) -> Result<Placement, PlacementError> {
     let occupant = state.region(&region_name).and_then(|r| r.tabs.first());
@@ -262,7 +275,10 @@ fn place_untabbed(
             Some(v) => (tab.pane_id.clone(), v.identity == req.identity),
             None => (tab.pane_id.clone(), false),
         },
-        None => (new_pane_id(region_rule, state, &region_name)?, false),
+        None => (
+            new_pane_id(region_rule, view_rule_pane, state, &region_name)?,
+            false,
+        ),
     };
 
     let label = label_for(req.view_type, &req.identity);
@@ -380,9 +396,20 @@ fn pick_victim(
 /// sequence reproduces the same ids.
 fn new_pane_id(
     rule: &RegionRule,
+    fixed_pane: Option<&str>,
     state: &ViewState,
     region_name: &str,
 ) -> Result<String, PlacementError> {
+    // A view with its own fixed pane id (the review queue is `queue`) takes
+    // exactly that, tabbed region or not. `place` reuses a live tab with the
+    // same identity before it gets here, so the id being taken means something
+    // else holds it.
+    if let Some(pane) = fixed_pane {
+        if state.taken_pane_ids.contains(pane) {
+            return Err(PlacementError::PaneIdTaken(pane.to_string()));
+        }
+        return Ok(pane.to_string());
+    }
     if !rule.tabbed {
         let pane = rule
             .pane
@@ -494,21 +521,20 @@ mod tests {
         t
     }
 
-    /// A focus with `perri-curated`'s starting tree: a queue and a repl, no
-    /// detail region yet.
+    /// A bare focus: just a repl. The review queue is a TAB of the `detail`
+    /// region now (not a region of its own), so before anything is shown there
+    /// are no regions at all.
     fn curated_start() -> ViewState {
-        let mut regions = BTreeMap::new();
-        regions.insert(
-            "queue".to_string(),
-            RegionState {
-                tabs: vec![tab("queue", ViewType::ReviewQueue, ViewIdentity::Singleton, 0)],
-                active: Some(0),
-            },
-        );
         ViewState {
-            regions,
-            taken_pane_ids: taken(&["queue", "repl"]),
+            regions: BTreeMap::new(),
+            taken_pane_ids: taken(&["repl"]),
         }
+    }
+
+    /// The review queue as it lives in a real focus: a pinned tab, pane id
+    /// `queue`.
+    fn queue_tab() -> LiveView {
+        pinned(tab("queue", ViewType::ReviewQueue, ViewIdentity::Singleton, 0))
     }
 
     /// `curated_start` plus a detail region holding `tabs`, frontmost `active`.
@@ -533,15 +559,10 @@ mod tests {
     // ── 1. R1 — home region ───────────────────────────────────────────────────
 
     #[test]
-    fn review_queue_lands_in_the_queue_region_and_the_others_land_in_detail() {
+    fn every_view_type_lands_in_the_detail_region_including_the_queue() {
         let state = curated_start();
-        assert_eq!(
-            place(&cfg(), &state, &show(ViewType::ReviewQueue, ViewIdentity::Singleton))
-                .unwrap()
-                .region,
-            "queue"
-        );
         for (t, id) in [
+            (ViewType::ReviewQueue, ViewIdentity::Singleton),
             (ViewType::PrConversation, pr(94)),
             (ViewType::PrDiff, pr(94)),
             (ViewType::Ticket, ticket("CORE-1")),
@@ -552,15 +573,83 @@ mod tests {
     }
 
     #[test]
-    fn the_queue_region_is_never_tabbed() {
+    fn the_review_queue_is_a_tab_with_its_own_fixed_pane_id() {
         let p = place(
             &cfg(),
             &curated_start(),
             &show(ViewType::ReviewQueue, ViewIdentity::Singleton),
         )
         .unwrap();
-        assert!(!p.tabbed);
+        assert!(p.tabbed, "the queue is a tab now, not a region of its own");
+        assert_eq!(p.pane_id, "queue", "the queue keeps the pane id the whole system knows it by");
         assert_eq!(p.tab_order, vec!["queue"]);
+        assert_eq!(p.labels, vec!["Queue"]);
+    }
+
+    #[test]
+    fn the_queue_tab_sorts_first_whenever_it_is_added_to_a_region_that_has_other_tabs() {
+        let state = with_detail(
+            curated_start(),
+            vec![tab("detail.0", ViewType::PrDiff, pr(94), 1)],
+            0,
+        );
+        let p = place(&cfg(), &state, &show(ViewType::ReviewQueue, ViewIdentity::Singleton)).unwrap();
+        assert_eq!(p.tab_order, vec!["queue", "detail.0"]);
+        assert_eq!(p.tab_index, 0, "showing the queue brings it to front (R5)");
+    }
+
+    #[test]
+    fn showing_the_queue_again_reuses_its_tab_and_brings_it_to_front() {
+        let state = with_detail(
+            curated_start(),
+            vec![queue_tab(), tab("detail.0", ViewType::PrDiff, pr(94), 3)],
+            1,
+        );
+        let p = place(&cfg(), &state, &show(ViewType::ReviewQueue, ViewIdentity::Singleton)).unwrap();
+        assert!(p.reused, "R2: same identity, same tab");
+        assert_eq!(p.pane_id, "queue");
+        assert_eq!(p.tab_index, 0);
+        assert_eq!(p.tab_order, vec!["queue", "detail.0"], "no duplicate queue tab");
+    }
+
+    #[test]
+    fn the_queue_tab_is_never_evicted_even_when_it_is_the_least_recently_focused() {
+        // A full region (cap 6): the queue (rank 0, the oldest) plus five PR
+        // views. A new tab must evict someone, and it must not be the queue.
+        let mut tabs = vec![queue_tab()];
+        for n in 0..5u64 {
+            tabs.push(tab(&format!("detail.{n}"), ViewType::File, file(&format!("f{n}.rs")), n + 1));
+        }
+        let state = with_detail(curated_start(), tabs, 5);
+
+        let p = place(&cfg(), &state, &show(ViewType::File, file("new.rs"))).unwrap();
+
+        let victim = p.evicted.expect("the region is at its cap");
+        assert_ne!(victim, "queue", "the queue is pinned: always reachable");
+        assert!(p.tab_order.contains(&"queue".to_string()));
+    }
+
+    #[test]
+    fn a_pr_change_leaves_the_queue_tab_alone() {
+        // R8 closes the PREVIOUS PR's tabs. The queue belongs to no PR: it is the
+        // way back, so it must survive every review-context change.
+        let state = with_detail(
+            curated_start(),
+            vec![
+                queue_tab(),
+                tab("detail.0", ViewType::PrConversation, pr(94), 1),
+                tab("detail.1", ViewType::PrDiff, pr(94), 2),
+            ],
+            2,
+        );
+
+        let p = place(&cfg(), &state, &show(ViewType::PrDiff, pr(95))).unwrap();
+        assert!(!p.reset_closed.contains(&"queue".to_string()), "queue closed by R8: {:?}", p.reset_closed);
+        assert!(p.tab_order.contains(&"queue".to_string()));
+
+        let cleared = reset_for_pr_change(&cfg(), &state, None);
+        assert!(!cleared.contains(&"queue".to_string()), "clearing the PR closed the queue: {cleared:?}");
+        assert_eq!(cleared, vec!["detail.0", "detail.1"]);
     }
 
     #[test]
@@ -571,7 +660,18 @@ mod tests {
             "regions:\n  queue: { tabbed: false, pane: queue }\nviews:\n  review_queue: { region: queue, order: 0 }\n  file: { region: queue, order: 1 }\n",
         )
         .unwrap();
-        let err = place(&cfg, &curated_start(), &show(ViewType::File, file("a.rs"))).unwrap_err();
+        // A focus laid out the way an override like this describes: the queue
+        // alone in its own non-tabbed region.
+        let mut regions = BTreeMap::new();
+        regions.insert(
+            "queue".to_string(),
+            RegionState {
+                tabs: vec![tab("queue", ViewType::ReviewQueue, ViewIdentity::Singleton, 0)],
+                active: Some(0),
+            },
+        );
+        let state = ViewState { regions, taken_pane_ids: taken(&["queue", "repl"]) };
+        let err = place(&cfg, &state, &show(ViewType::File, file("a.rs"))).unwrap_err();
         assert_eq!(err.code(), "region_not_tabbed");
     }
 
@@ -973,7 +1073,7 @@ mod tests {
     // ── 7. D5 — region creation ───────────────────────────────────────────────
 
     #[test]
-    fn the_detail_region_is_created_by_splitting_the_queue_when_it_does_not_exist() {
+    fn the_detail_region_is_created_above_the_repl_when_it_does_not_exist() {
         let p = place(
             &cfg(),
             &curated_start(),
@@ -983,9 +1083,9 @@ mod tests {
         assert_eq!(
             p.create_region,
             Some(RegionCreation {
-                relative_to: "queue".into(),
-                position: "split_right".into(),
-                ratios: vec![0.5, 0.5],
+                relative_to: "repl".into(),
+                position: "split_above".into(),
+                ratios: vec![0.6, 0.4],
             })
         );
     }
