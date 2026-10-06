@@ -131,9 +131,13 @@ pub fn view_state(
             .get(pane_id)
             .and_then(|b| view_of_binding(b, current_pr));
         let pinned = view.as_ref().is_some_and(|v| {
-            matches!(v.view_type, ViewType::PrConversation | ViewType::PrDiff)
-                && v.identity.pr() == pinned_pr
-                && pinned_pr.is_some()
+            // The PR under review's conversation/diff are pinned; so is any view
+            // type the rules mark `pinned` (the review queue).
+            let rule_pins = cfg.view(v.view_type.as_str()).map(|r| r.pinned).unwrap_or(false);
+            rule_pins
+                || (matches!(v.view_type, ViewType::PrConversation | ViewType::PrDiff)
+                    && v.identity.pr() == pinned_pr
+                    && pinned_pr.is_some())
         });
         LiveView {
             pane_id: pane_id.to_string(),
@@ -367,18 +371,40 @@ mod tests {
     // ── 2. state derivation ───────────────────────────────────────────────────
 
     #[test]
-    fn the_queue_region_is_derived_from_a_live_queue_pane_and_its_binding() {
-        let tree = curated_with_detail(&[], 0);
+    fn the_queue_is_derived_as_a_pinned_tab_of_the_detail_region() {
+        // The queue lives IN the tabs node (as `queue`), alongside the review tabs.
+        let tree = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Tabs {
+                    children: vec![
+                        PaneTree::Leaf { pane_id: "queue".into() },
+                        PaneTree::Leaf { pane_id: "detail.0".into() },
+                    ],
+                    labels: vec!["Queue".into(), "Diff".into()],
+                    active: 0,
+                    region: Some("detail".into()),
+                },
+                PaneTree::Leaf { pane_id: "repl".into() },
+            ],
+            ratios: vec![0.6, 0.4],
+        };
         let mut bindings = BTreeMap::new();
         bindings.insert("queue".to_string(), binding(SOURCE_PR_QUEUE, None));
-        let state = view_state(&cfg(), &tree, &bindings, None, &[]);
-        let queue = state.region("queue").unwrap();
-        assert_eq!(queue.tabs.len(), 1);
-        assert_eq!(
-            queue.tabs[0].view.as_ref().unwrap().view_type,
-            ViewType::ReviewQueue
+        bindings.insert(
+            "detail.0".to_string(),
+            binding(SOURCE_PR_DIFF, Some(json!({"repo": "o/r", "number": 94}))),
         );
-        assert!(state.region("detail").is_none(), "no detail region yet");
+
+        // No PR under review: the diff tab is not pinned, but the queue is.
+        let state = view_state(&cfg(), &tree, &bindings, None, &[]);
+
+        let detail = state.region("detail").unwrap();
+        assert_eq!(detail.tabs.len(), 2);
+        assert_eq!(detail.tabs[0].pane_id, "queue");
+        assert_eq!(detail.tabs[0].view.as_ref().unwrap().view_type, ViewType::ReviewQueue);
+        assert!(detail.tabs[0].pinned, "the queue is always pinned");
+        assert!(!detail.tabs[1].pinned);
     }
 
     #[test]

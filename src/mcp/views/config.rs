@@ -100,6 +100,16 @@ pub struct ViewRule {
     pub region: String,
     /// R3: the type's position among the region's tabs. Lower sorts left.
     pub order: u32,
+    /// A fixed pane id for this view, instead of the region's generated
+    /// `<prefix>.<n>`. The review queue is `queue`: the pane id the whole system
+    /// (bindings, refresh, `load_pr`, the client's tab rules) already knows it
+    /// by, so it keeps that id when it becomes a tab.
+    #[serde(default)]
+    pub pane: Option<String>,
+    /// Never evicted by R4's cap, whatever its recency. The queue is the one
+    /// view that belongs to no PR and must always be reachable.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl ViewPlacementConfig {
@@ -211,9 +221,13 @@ mod tests {
     // ── 1. the compiled-in default ────────────────────────────────────────────
 
     #[test]
-    fn the_compiled_in_default_parses_and_declares_both_regions() {
+    fn the_compiled_in_default_parses_and_declares_one_tabbed_region() {
         let cfg = parse(COMPILED_IN).expect("compiled-in views.yaml must parse");
-        assert!(!cfg.regions["queue"].tabbed);
+        assert_eq!(
+            cfg.regions.keys().collect::<Vec<_>>(),
+            vec!["detail"],
+            "the queue is a tab of `detail`, not a region of its own"
+        );
         assert!(cfg.regions["detail"].tabbed);
         assert_eq!(cfg.regions["detail"].tab_cap, Some(6));
         assert_eq!(
@@ -225,14 +239,28 @@ mod tests {
     #[test]
     fn the_compiled_in_default_gives_every_v1_view_type_a_home_and_an_order() {
         let cfg = parse(COMPILED_IN).unwrap();
-        assert_eq!(cfg.view("review_queue").unwrap().region, "queue");
-        for t in ["pr_conversation", "pr_diff", "ticket", "file"] {
+        for t in ["review_queue", "pr_conversation", "pr_diff", "ticket", "file"] {
             assert_eq!(cfg.view(t).unwrap().region, "detail", "{t}");
         }
         let mut orders: Vec<u32> = cfg.views.values().map(|v| v.order).collect();
         orders.sort_unstable();
         orders.dedup();
         assert_eq!(orders.len(), cfg.views.len(), "orders must be distinct");
+    }
+
+    #[test]
+    fn the_review_queue_has_a_fixed_pane_id_is_pinned_and_sorts_first() {
+        let cfg = parse(COMPILED_IN).unwrap();
+        let queue = cfg.view("review_queue").unwrap();
+        assert_eq!(queue.pane.as_deref(), Some("queue"));
+        assert!(queue.pinned, "the queue must always be reachable: never evicted");
+        let min_order = cfg.views.values().map(|v| v.order).min().unwrap();
+        assert_eq!(queue.order, min_order, "the queue is the first tab");
+        for t in ["pr_conversation", "pr_diff", "ticket", "file"] {
+            let rule = cfg.view(t).unwrap();
+            assert_eq!(rule.pane, None, "{t} gets generated detail.N ids");
+            assert!(!rule.pinned, "{t}");
+        }
     }
 
     #[test]

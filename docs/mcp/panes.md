@@ -1011,7 +1011,7 @@ views:
 
 | Rule | Enforced |
 |---|---|
-| **R1** home region | `views.yaml`'s `views.<type>.region`, resolved in `placement::place`. A request whose home region doesn't exist yet gets a `create_region` intent (see below); a non-tabbed region already holding a *different* view refuses the show (`region_not_tabbed`) — this is what keeps the queue region single-purpose. |
+| **R1** home region | `views.yaml`'s `views.<type>.region`, resolved in `placement::place`. A request whose home region doesn't exist yet gets a `create_region` intent (see below); a non-tabbed region already holding a *different* view refuses the show (`region_not_tabbed`). The compiled-in rules have **one** region, the tabbed `detail`, which holds every view type **including the review queue**: the queue is its first tab (pane id `queue`, `pinned`, order 0), opened by default for a review focus. `region_not_tabbed` is now reachable only through an operator `views.yaml` override that declares a non-tabbed region. |
 | **R2** identity reuse | `placement::place` — a live tab whose `(view_type, identity)` matches the request is reused: re-anchored, re-labelled, brought to front. Anchor/emphasis/reason are not part of `ViewIdentity`, so "the same file at a different line" is the same view by construction, not by a special case. |
 | **R3** new identity, new tab | `placement::place`'s `insertion_index` — a new tab is inserted at the position `(views.<type>.order, identity.key())` dictates, so where a tab lands is a function of what it holds, never of arrival order. |
 | **R4** cap and eviction | `placement::place`'s `pick_victim`, run only when adding a *new* tab would push the region over `tab_cap`: the least-recently-focused tab that is neither frontmost nor pinned, ties breaking leftmost. A region every tab of which is pinned or frontmost simply runs one over the cap rather than refusing the show. |
@@ -1428,3 +1428,13 @@ A call that fails validation (`invalid_args`, `unidentified_caller`,
 - Teri `todos` will accept `JsonSnapshot` mutations (add/complete items).
 - Removing the dirty-file mechanism; replacing with direct push to `pr_rx`.
 - Pane-level focus (not just view-level) for multi-pane views.
+
+## The review queue is a tab (and what closes)
+
+A review focus (`perri`, `perri-<id>`) opens with the **review queue as the active — and only — tab of the `detail` region**, above the REPL (`views::tree::default_review_tree`, applied when the Mac app pushes its focus registry; `perri-curated` produces the same shape). PR conversation/diff, file and ticket views open as further tabs beside it.
+
+- **`views.yaml`** gives a view two optional fields: `pane` (a fixed pane id instead of `<prefix>.<n>` — the queue is `queue`) and `pinned` (never evicted by R4's cap). `review_queue` is `{ region: detail, order: 0, pane: queue, pinned: true }`.
+- **R8** (a PR change closes the previous PR's tabs) and `perri.clear_current_pr` close review tabs but **never the queue**: it belongs to no PR and is the way back. Clearing the last PR leaves exactly the default layout.
+- **`close_pane`** (the tab's ✕ button, `ClientMsg::ClosePane`) refuses the queue (by id `queue` *or* by its `perri.list_pr_queue` binding), the REPL, and anything that isn't a tab (`not_closable`).
+- **Migration.** A layout saved before this change — the queue as its own pane beside the detail tabs — is folded into the tabs (queue first, the same tab frontmost) the next time the Mac app pushes its focus registry, and on the first `nostromo.show`, whichever comes first. The `queue` pane keeps its id, so its binding survives.
+- `perri.load_pr` rebuilds the PR tabs after a PR change only when the focus *had review tabs* (not merely a non-empty region, which the queue makes always true).

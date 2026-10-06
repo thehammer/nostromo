@@ -352,6 +352,49 @@ impl PaneRegistry {
         self.set_layout(tag, &serde_json::json!({ "tree": new_tree }))
     }
 
+    /// Whether `tag` is a PR-review focus: the builtin `perri`, or a
+    /// project-scoped one (`perri-<id>`). Only these get the review queue as a
+    /// default tab.
+    pub fn is_review_focus(tag: &str) -> bool {
+        tag == "perri" || tag.starts_with("perri-")
+    }
+
+    /// Migrate an OLD layout — the queue as its own pane beside the detail tabs
+    /// (or beside the REPL) — so the queue is the first tab of the `detail`
+    /// region. Returns the new tree when it changed, `None` when there was
+    /// nothing to do. The `queue` pane keeps its id, and so its binding.
+    pub fn migrate_queue_into_detail(&mut self, tag: &str) -> Option<PaneTree> {
+        let mut tree = self.trees.get(tag).cloned()?;
+        if !crate::mcp::views::tree::fold_queue_into_detail(&mut tree) {
+            return None;
+        }
+        self.set_layout(tag, &serde_json::json!({ "tree": tree })).ok()
+    }
+
+    /// Give a review focus its default layout: the review queue as the active
+    /// tab of the `detail` region, above the REPL ("opened by default at
+    /// launch"), bound to the queue source so it fills and refreshes. A focus
+    /// that already has a layout keeps it (an old queue-beside-detail one is
+    /// migrated, see [`Self::migrate_queue_into_detail`]). Returns the tree when
+    /// anything changed. Not a review focus: untouched.
+    pub fn ensure_review_layout(&mut self, tag: &str) -> Option<PaneTree> {
+        if !Self::is_review_focus(tag) {
+            return None;
+        }
+        let current = self.get_or_init(tag);
+        if matches!(&current, PaneTree::Leaf { pane_id } if pane_id == "repl") {
+            let tree = self
+                .set_layout(
+                    tag,
+                    &serde_json::json!({ "tree": crate::mcp::views::tree::default_review_tree() }),
+                )
+                .ok()?;
+            self.bind_source(tag, "queue", crate::mcp::tools::apply_layout::SOURCE_PR_QUEUE);
+            return Some(tree);
+        }
+        self.migrate_queue_into_detail(tag)
+    }
+
     /// The source bound to `pane_id` within `tag`, if any.
     pub fn source_for(&self, tag: &str, pane_id: &str) -> Option<&str> {
         self.binding_for(tag, pane_id).map(|b| b.source.as_str())
@@ -2602,5 +2645,71 @@ mod tests {
         let mut reg = curated_registry(&["detail.0"]);
         assert_eq!(reg.close_tab("nobody", "detail.0"), Err(PaneError::UnknownView));
         assert_eq!(reg.close_tab("perri", "detail.9"), Err(PaneError::UnknownPane));
+    }
+
+    // ── review focus default layout + migration (the queue as a default tab) ───
+
+    #[test]
+    fn a_fresh_perri_focus_opens_with_the_review_queue_as_its_active_tab() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("perri");
+
+        let tree = reg.ensure_review_layout("perri").expect("a bare perri focus is seeded");
+
+        assert_eq!(tree.pane_ids(), vec!["queue".to_string(), "repl".to_string()]);
+        assert_eq!(
+            reg.source_for("perri", "queue"),
+            Some(crate::mcp::tools::apply_layout::SOURCE_PR_QUEUE),
+            "bound, so the queue fills and refreshes without anyone asking"
+        );
+        assert!(!crate::mcp::views::tree::has_bare_queue(&tree));
+    }
+
+    #[test]
+    fn a_project_scoped_perri_focus_is_a_review_focus_too() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("perri-a1b2c3d4");
+        assert!(reg.ensure_review_layout("perri-a1b2c3d4").is_some());
+    }
+
+    #[test]
+    fn other_agents_focuses_are_left_exactly_as_they_are() {
+        let mut reg = PaneRegistry::in_memory();
+        for tag in ["fred", "mother", "teri", "claudia-2D177DF1", "perriwinkle"] {
+            reg.init_focus(tag);
+            assert_eq!(reg.ensure_review_layout(tag), None, "{tag} must not get a review queue");
+            assert_eq!(reg.get(tag).cloned(), Some(PaneTree::repl_leaf()), "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_focus_that_already_has_the_queue_tab_is_not_touched_again() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("perri");
+        reg.ensure_review_layout("perri").unwrap();
+        let before = reg.get("perri").cloned();
+
+        assert_eq!(reg.ensure_review_layout("perri"), None, "idempotent");
+        assert_eq!(reg.get("perri").cloned(), before);
+    }
+
+    #[test]
+    fn an_old_queue_beside_detail_layout_is_migrated_and_keeps_its_bindings() {
+        let mut reg = curated_registry(&["detail.0", "detail.1"]); // queue | tabs over repl (the OLD shape)
+        assert!(crate::mcp::views::tree::has_bare_queue(&reg.get("perri").cloned().unwrap()));
+
+        let tree = reg.ensure_review_layout("perri").expect("migrated");
+
+        assert!(!crate::mcp::views::tree::has_bare_queue(&tree));
+        assert_eq!(
+            tree.pane_ids(),
+            vec!["queue".to_string(), "detail.0".to_string(), "detail.1".to_string(), "repl".to_string()]
+        );
+        assert_eq!(
+            reg.source_for("perri", "queue"),
+            Some(crate::mcp::tools::apply_layout::SOURCE_PR_QUEUE),
+            "the queue keeps its pane id, so its binding survives the migration"
+        );
+        assert!(reg.source_for("perri", "detail.0").is_some());
     }
 }

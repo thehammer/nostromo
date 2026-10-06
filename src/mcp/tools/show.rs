@@ -109,17 +109,30 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
     // *now* — reintroducing panes a concurrent R8 reset just closed (with no
     // binding, since that reset already pruned it), or clobbering a
     // concurrent show's own new tab — instead of refusing cleanly.
-    let (placement, tree_at_decide) = {
+    let (placement, tree_at_decide, migrated) = {
         let mut reg = daemon.pane_registry.lock().unwrap();
         reg.get_or_init(&tag);
+        // A layout from before the queue became a tab (the queue as its own
+        // pane beside the detail tabs) would refuse the queue's fixed pane id as
+        // already taken. Fold it into the tabs first so `show` works on any
+        // saved layout without the operator having to reset anything.
+        let migrated = reg.migrate_queue_into_detail(&tag);
         let view_state = current_view_state(daemon, state, &mut reg, &cfg, &tag);
         let placement = match placement::place(&cfg, &view_state, &request) {
             Ok(p) => p,
             Err(e) => return refusal(&e),
         };
         let tree_at_decide = reg.get(&tag).cloned();
-        (placement, tree_at_decide)
+        (placement, tree_at_decide, migrated)
     };
+    if let Some(tree) = migrated {
+        // Tell clients the layout changed even if this show goes on to be refused.
+        let _ = daemon.broadcast_tx.send(ServerMsg::FocusLayout {
+            tag: tag.clone(),
+            tree,
+            focused_pane: None,
+        });
+    }
 
     // ── fetch, still before any mutation ────────────────────────────────────
     //
@@ -340,9 +353,14 @@ pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<
     closed
 }
 
-/// Whether `tag`'s focus currently has a non-empty tabbed detail region — the
-/// region `pr_conversation`/`pr_diff` live in, per `views.yaml` (`detail`,
-/// `tabbed: true`).
+/// Whether `tag`'s focus currently has any REVIEW tab — a tab in the tabbed
+/// detail region (the region `pr_conversation`/`pr_diff` live in, per
+/// `views.yaml`) other than the review queue.
+///
+/// The queue is a tab of that region now, so "the region is non-empty" is true
+/// for every curated focus from the moment it opens and says nothing about
+/// whether a PR is being shown. What `perri.load_pr` needs to know is whether
+/// there were PR/file/ticket tabs for a PR change to tear down.
 ///
 /// Called by `perri.load_pr` *before* [`reset_for_pr_change`] tears the
 /// region down, so [`recreate_detail_region_for_pr`] only ever rebuilds a
@@ -351,7 +369,7 @@ pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<
 /// `perri-standard` focus — which has no region named here at all, its PR
 /// content living in a fixed `diff` leaf pane outside the `views.yaml` system
 /// entirely — always reads `false` here and sees no change whatsoever.
-pub fn has_detail_region(daemon: &DaemonMcpBackend, tag: &str) -> bool {
+pub fn has_review_tabs(daemon: &DaemonMcpBackend, tag: &str) -> bool {
     let Ok(cfg) = views_config::load() else {
         return false;
     };
@@ -365,10 +383,13 @@ pub fn has_detail_region(daemon: &DaemonMcpBackend, tag: &str) -> bool {
     let Some(tree) = reg.get(tag) else {
         return false;
     };
-    matches!(
-        view_tree::tabs_region(tree, &region_name),
-        Some(crate::ipc::protocol::PaneTree::Tabs { children, .. }) if !children.is_empty()
-    )
+    match view_tree::tabs_region(tree, &region_name) {
+        Some(crate::ipc::protocol::PaneTree::Tabs { children, .. }) => children
+            .iter()
+            .flat_map(|c| c.pane_ids())
+            .any(|id| id != "queue" && reg.source_for(tag, &id) != Some(SOURCE_PR_QUEUE)),
+        _ => false,
+    }
 }
 
 /// D1: rebuild the curated detail region for `(repo, number)` — the PR
@@ -377,7 +398,7 @@ pub fn has_detail_region(daemon: &DaemonMcpBackend, tag: &str) -> bool {
 /// the fetch.
 ///
 /// Called by `perri.load_pr` right after [`reset_for_pr_change`], and only
-/// when [`has_detail_region`] found one in place a moment before that reset
+/// when [`has_review_tabs`] found one in place a moment before that reset
 /// ran *and* the region is gone afterward — i.e. the reset just emptied it
 /// out from under the focus. A region that survives the reset (a paramless
 /// `pr_diff`/`pr_conversation` tab whose identity already fell back to the
@@ -990,24 +1011,40 @@ mod tests {
         registry(state).lock().unwrap().get(tag).cloned()
     }
 
-    /// Seed `tag` with `perri-curated`'s starting tree: a bound queue, a repl.
+    /// Seed `tag` with `perri-curated`'s starting tree: the review queue as the
+    /// first (and only) tab of the `detail` region, bound, above the repl.
     fn seed_curated(state: &McpSharedState, tag: &str) {
         let reg = registry(state);
         let mut reg = reg.lock().unwrap();
         reg.get_or_init(tag);
-        reg.set_layout(
-            tag,
-            &json!({ "tree": PaneTree::Split {
-                direction: SplitDirection::Vertical,
-                children: vec![
-                    PaneTree::Leaf { pane_id: "queue".into() },
-                    PaneTree::Leaf { pane_id: "repl".into() },
-                ],
-                ratios: vec![0.6, 0.4],
-            }}),
-        )
-        .unwrap();
+        reg.set_layout(tag, &json!({ "tree": view_tree::default_review_tree() })).unwrap();
         reg.bind_source(tag, "queue", SOURCE_PR_QUEUE);
+    }
+
+    /// Seed `tag` with the OLD arrangement (before the queue became a tab): the
+    /// queue as its own pane, beside a `detail` tabs node, over the repl.
+    fn seed_old_queue_beside_detail(state: &McpSharedState, tag: &str) {
+        let reg = registry(state);
+        let mut reg = reg.lock().unwrap();
+        reg.get_or_init(tag);
+        let old = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Split {
+                    direction: SplitDirection::Horizontal,
+                    children: vec![
+                        PaneTree::Leaf { pane_id: "queue".into() },
+                        view_tree::build_tabs("detail", &[("detail.0".into(), "Diff".into())], 0),
+                    ],
+                    ratios: vec![0.5, 0.5],
+                },
+                PaneTree::Leaf { pane_id: "repl".into() },
+            ],
+            ratios: vec![0.6, 0.4],
+        };
+        reg.set_layout(tag, &json!({ "tree": old })).unwrap();
+        reg.bind_source(tag, "queue", SOURCE_PR_QUEUE);
+        reg.bind_source_with_params(tag, "detail.0", SOURCE_PR_DIFF, Some(json!({"repo": "thehammer/nostromo", "number": 94})));
     }
 
     // ── 1. the closed vocabulary ──────────────────────────────────────────────
@@ -1131,7 +1168,7 @@ mod tests {
 
         let out = show(&state, &json!({ "type": "review_queue" }), Some("perri")).await;
         assert_eq!(out["ok"], true);
-        assert_eq!(out["region"], "queue");
+        assert_eq!(out["region"], "detail", "the queue is a tab of the detail region now");
         assert_eq!(out["pane_id"], "queue");
         assert_eq!(out["label"], "Queue");
         assert_eq!(out["tab_index"], 0);
@@ -1401,8 +1438,9 @@ mod tests {
         assert_eq!(tree_of(&state, "perri"), Some(PaneTree::repl_leaf()));
 
         let queue = show_ok(&state, json!({ "type": "review_queue" })).await;
-        assert_eq!(queue["region"], "queue");
+        assert_eq!(queue["region"], "detail", "the queue is the first tab of the detail region");
         assert_eq!(queue["pane_id"], "queue");
+        assert_eq!(queue["tab_index"], 0);
 
         let diff = show_ok(
             &state,
@@ -1420,21 +1458,32 @@ mod tests {
             1,
             "exactly one repl survives both region creations"
         );
-        assert!(view_tree::tabs_region(&tree, "detail").is_some());
+        let region = view_tree::tabs_region(&tree, "detail").expect("a detail region");
+        match region {
+            PaneTree::Tabs { children, .. } => {
+                assert_eq!(children[0].pane_ids(), vec!["queue".to_string()], "the queue is the first tab");
+                assert_eq!(children.len(), 2, "queue + diff");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn the_detail_region_is_created_on_the_first_show_that_needs_one() {
+    async fn a_pr_show_adds_a_tab_beside_the_queue_in_the_same_region() {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        assert!(view_tree::tabs_region(&tree_of(&state, "perri").unwrap(), "detail").is_none());
+        let before = tree_of(&state, "perri").unwrap();
+        assert!(view_tree::tabs_region(&before, "detail").is_some(), "the region exists from the start");
 
         show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
-        assert!(view_tree::tabs_region(&tree_of(&state, "perri").unwrap(), "detail").is_some());
+
+        let after = tree_of(&state, "perri").unwrap();
+        let ids = after.pane_ids();
+        assert_eq!(ids, vec!["queue".to_string(), "detail.0".to_string(), "repl".to_string()]);
     }
 
     #[tokio::test]
-    async fn the_detail_region_is_removed_when_its_last_tab_closes() {
+    async fn clearing_the_pr_closes_the_review_tabs_but_the_queue_tab_stays() {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
         let before = tree_of(&state, "perri").unwrap();
@@ -1447,15 +1496,39 @@ mod tests {
         .await;
         assert!(view_tree::tabs_region(&tree_of(&state, "perri").unwrap(), "detail").is_some());
 
-        // Clearing the PR under review closes every review tab (R8), which
-        // takes the region's last tab with it.
+        // Clearing the PR under review closes every review tab (R8). The queue
+        // belongs to no PR: it stays, as the way back.
         let daemon = state.daemon.as_ref().unwrap();
-        reset_for_pr_change(daemon, "perri", None);
+        let closed = reset_for_pr_change(daemon, "perri", None);
+        assert!(!closed.contains(&"queue".to_string()), "closed the queue: {closed:?}");
 
         let after = tree_of(&state, "perri").unwrap();
-        assert!(view_tree::tabs_region(&after, "detail").is_none());
-        assert_eq!(after, before, "back to exactly the pre-show tree");
+        assert!(view_tree::tabs_region(&after, "detail").is_some(), "the region survives: it still holds the queue");
+        assert_eq!(after, before, "back to exactly the pre-show tree: the queue as the only tab");
         assert_eq!(after.pane_ids().iter().filter(|id| *id == "repl").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_show_on_an_old_queue_beside_detail_layout_migrates_it_and_tells_clients() {
+        // A layout saved before the queue became a tab: the queue as its own pane.
+        // Showing anything must work on it (the queue's fixed pane id would
+        // otherwise be refused as taken) and must leave the queue as the first tab.
+        let (state, mut rx) = make_state();
+        seed_old_queue_beside_detail(&state, "perri");
+
+        let out = show_ok(&state, json!({ "type": "review_queue" })).await;
+
+        assert_eq!(out["region"], "detail");
+        assert_eq!(out["pane_id"], "queue");
+        let tree = tree_of(&state, "perri").unwrap();
+        assert!(!view_tree::has_bare_queue(&tree), "the queue is a tab now: {tree:?}");
+        assert_eq!(
+            tree.pane_ids(),
+            vec!["queue".to_string(), "detail.0".to_string(), "repl".to_string()]
+        );
+        // The migration itself was announced before the show's own layout.
+        let first = rx.recv().await.unwrap();
+        assert!(matches!(first, ServerMsg::FocusLayout { .. }), "{first:?}");
     }
 
     #[tokio::test]

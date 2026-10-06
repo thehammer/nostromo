@@ -278,9 +278,9 @@ async fn load_pr_daemon(
     // PR. A focus that never had a detail region gets nothing conjured into
     // it, and `perri-standard` (no such region at all) is untouched either
     // way.
-    let had_detail_region = show::has_detail_region(daemon, &tag);
+    let had_review_tabs = show::has_review_tabs(daemon, &tag);
     show::reset_for_pr_change(daemon, &tag, Some((repo, number)));
-    if had_detail_region && !show::has_detail_region(daemon, &tag) {
+    if had_review_tabs && !show::has_review_tabs(daemon, &tag) {
         show::recreate_detail_region_for_pr(daemon, &tag, repo, number);
     }
 

@@ -814,6 +814,24 @@ fn handle_client_msg(
                 }
             }
 
+            // A review focus (Perri) opens with the review queue as its first
+            // tab; an old queue-beside-detail layout is migrated to match. This
+            // is the moment the Mac app has just told us which focuses exist, so
+            // it covers launch. Clients are told the new tree like any layout
+            // change.
+            if let Some(reg) = &pane_registry {
+                let mut reg = reg.lock().unwrap();
+                for focus in &updated {
+                    if let Some(tree) = reg.ensure_review_layout(&focus.tag) {
+                        let _ = broadcast_tx.send(ServerMsg::FocusLayout {
+                            tag: focus.tag.clone(),
+                            tree,
+                            focused_pane: None,
+                        });
+                    }
+                }
+            }
+
             // Fan out to every connected, Focuses-subscribed client (incl. this one).
             let _ = broadcast_tx.send(ServerMsg::FocusRegistryUpdated { focuses: updated });
         }
