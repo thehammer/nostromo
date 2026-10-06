@@ -380,23 +380,7 @@ where
             let hook_installed = crate::activity::hook_status::hook_installed(
                 &crate::activity::hook_status::default_settings_path(),
             );
-            let health = mgr.activity_health();
-            let reason = if health.ingesting {
-                None
-            } else if hook_installed {
-                Some("activity hook installed but no event has arrived yet".to_string())
-            } else {
-                Some(
-                    "activity hook not installed — run `bin/nostromo-doctor --fix` to install it"
-                        .to_string(),
-                )
-            };
-            let health_msg = ServerMsg::ActivityHealth {
-                ingesting: health.ingesting,
-                reason,
-                last_event_at: health.last_event_at,
-                hook_installed,
-            };
+            let health_msg = activity_health_msg(&mgr, hook_installed);
             (snapshots, health_msg)
         };
         replay_messages(&mut writer, snapshots.into_iter().chain(std::iter::once(health_msg))).await;
@@ -978,6 +962,31 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
     }
 }
 
+/// The `ActivityHealth` verdict for `mgr`, given whether the ambient-activity
+/// hook is installed. Shared by the attach-time replay and by the broadcast
+/// the daemon sends when ingestion first begins, so a connected client's
+/// footer is corrected without a reconnect (it used to keep saying "install
+/// the hook" until the app relaunched).
+pub fn activity_health_msg(mgr: &SessionManager, hook_installed: bool) -> ServerMsg {
+    let health = mgr.activity_health();
+    let reason = if health.ingesting {
+        None
+    } else if hook_installed {
+        Some("activity hook installed but no event has arrived yet".to_string())
+    } else {
+        Some(
+            "activity hook not installed — run `bin/nostromo-doctor --fix` to install it"
+                .to_string(),
+        )
+    };
+    ServerMsg::ActivityHealth {
+        ingesting: health.ingesting,
+        reason,
+        last_event_at: health.last_event_at,
+        hook_installed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,5 +1147,45 @@ mod tests {
         // different topic here).
         assert!(!message_matches_topics(&snapshot, &[Topic::Fred]));
         assert!(!message_matches_topics(&health, &[Topic::Fred]));
+    }
+
+    #[test]
+    fn the_health_message_flips_from_a_reason_to_none_once_an_event_is_ingested() {
+        let mut mgr = SessionManager::with_store_path(
+            std::env::temp_dir().join(format!("nostromo-health-{}.json", std::process::id())),
+        );
+        match activity_health_msg(&mgr, false) {
+            ServerMsg::ActivityHealth { ingesting, reason, hook_installed, .. } => {
+                assert!(!ingesting);
+                assert!(!hook_installed);
+                assert!(reason.unwrap().contains("bin/nostromo-doctor --fix"));
+            }
+            other => panic!("expected ActivityHealth, got {other:?}"),
+        }
+
+        mgr.ingest_activity_event(crate::agent_bus::ActivityEvent {
+            ts: chrono::Utc::now(),
+            agent: "Bash".into(),
+            kind: "tool_use".into(),
+            summary: "ls".into(),
+            focus_tag: Some("fred".into()),
+            session_id: None,
+            agent_type: None,
+            tool_name: Some("Bash".into()),
+            tool_use_id: None,
+            cwd: None,
+            agent_id: None,
+            parent_agent_id: None,
+            seq: None,
+        });
+
+        match activity_health_msg(&mgr, true) {
+            ServerMsg::ActivityHealth { ingesting, reason, last_event_at, .. } => {
+                assert!(ingesting);
+                assert!(reason.is_none(), "a healthy ingest must clear the reason that told the operator to install the hook");
+                assert!(last_event_at.is_some());
+            }
+            other => panic!("expected ActivityHealth, got {other:?}"),
+        }
     }
 }

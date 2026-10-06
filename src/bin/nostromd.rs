@@ -325,10 +325,25 @@ async fn main() -> Result<()> {
             // all inside `SessionManager::ingest_activity_event` — before
             // broadcasting, so every subscriber sees the same finalized event
             // the daemon's own snapshot/health responses are built from.
-            let finalized = session_mgr_for_activity
-                .lock()
-                .unwrap()
-                .ingest_activity_event(ev);
+            let (finalized, health_update) = {
+                let mut mgr = session_mgr_for_activity.lock().unwrap();
+                let (finalized, became_ingesting) = mgr.ingest_activity_event_reporting(ev);
+                // The first event flips ingestion health; tell connected
+                // clients now rather than leaving them on the attach-time
+                // verdict ("install the hook") until they reconnect.
+                let health_update = became_ingesting.then(|| {
+                    nostromo::ipc::server::activity_health_msg(
+                        &mgr,
+                        nostromo::activity::hook_status::hook_installed(
+                            &nostromo::activity::hook_status::default_settings_path(),
+                        ),
+                    )
+                });
+                (finalized, health_update)
+            };
+            if let Some(msg) = health_update {
+                let _ = btx_activity.send(msg);
+            }
             let _ = btx_activity.send(ServerMsg::Activity(finalized));
         };
         if let Err(e) = tail_activity_jsonl(activity_path, on_event).await {
