@@ -32,6 +32,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // broadcasts no matter how many windows this launch ends up opening
         // (see DecisionPresenter's header comment for why that matters).
         DecisionPresenter.shared.start()
+        // Opt-in QA control socket (NOSTROMO_APP_CONTROL=1 or the AppControlEnabled default).
+        AppControlServer.shared.startIfEnabled(appDelegate: self)
         TranscriptDiagnostics.startStreamingIfRequested()
 
         // `NOSTROMO_WINDOW_MODE=smoke` (W1 — launch-smoke-test): open exactly

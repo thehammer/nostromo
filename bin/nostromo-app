@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Drive the running Nostromo macOS app over its QA control socket.
+
+The socket is opt-in (it can click anything in the app). Enable it with
+
+    defaults write com.hammer.nostromo.mac AppControlEnabled -bool true
+
+(or launch with NOSTROMO_APP_CONTROL=1) and relaunch the app. Coordinates are
+window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
+
+    nostromo-app ping
+    nostromo-app windows
+    nostromo-app tree   [-w N] [--depth D]
+    nostromo-app find   TEXT [-w N]
+    nostromo-app click  (--text TEXT [--index I] | X Y) [-w N] [--count C] [--mod cmd,shift]
+    nostromo-app key    CHARS [--mod cmd,shift] [-w N]
+    nostromo-app type   TEXT [-w N]
+    nostromo-app paste  (--image PATH | --text TEXT) [-w N]
+    nostromo-app drop   FILE [FILE...] (--text TEXT | --at X Y) [-w N]
+    nostromo-app screenshot [PATH] [-w N]
+"""
+import argparse, json, os, socket, sys
+
+SOCK = os.path.expanduser("~/.nostromo/app-control.sock")
+
+
+def call(req):
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(20)
+    try:
+        s.connect(SOCK)
+    except OSError as e:
+        sys.exit(f"cannot reach {SOCK}: {e}\n"
+                 "Is the app running with AppControlEnabled (see --help)?")
+    s.sendall((json.dumps(req) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    resp = json.loads(buf)
+    if not resp.get("ok"):
+        sys.exit(f"error: {resp.get('error')}")
+    return resp["result"]
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("-w", "--window", type=int, default=0)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("ping"); sub.add_parser("windows")
+    t = sub.add_parser("tree"); t.add_argument("--depth", type=int, default=12)
+    f = sub.add_parser("find"); f.add_argument("text")
+    c = sub.add_parser("click"); c.add_argument("xy", nargs="*", type=float)
+    c.add_argument("--text"); c.add_argument("--index", type=int, default=0)
+    c.add_argument("--count", type=int, default=1); c.add_argument("--mod", default="")
+    k = sub.add_parser("key"); k.add_argument("chars"); k.add_argument("--mod", default="")
+    k.add_argument("--key-code", type=int, default=0)
+    ty = sub.add_parser("type"); ty.add_argument("text")
+    pa = sub.add_parser("paste"); pa.add_argument("--image"); pa.add_argument("--text")
+    d = sub.add_parser("drop"); d.add_argument("files", nargs="+")
+    d.add_argument("--text"); d.add_argument("--at", nargs=2, type=float)
+    sc = sub.add_parser("screenshot"); sc.add_argument("path", nargs="?")
+    a = p.parse_args()
+
+    r = {"cmd": a.cmd, "window": a.window}
+    mods = [m for m in getattr(a, "mod", "").split(",") if m]
+    if a.cmd == "tree": r["depth"] = a.depth
+    elif a.cmd == "find": r["text"] = a.text
+    elif a.cmd == "click":
+        if a.text: r.update(text=a.text, index=a.index)
+        elif len(a.xy) == 2: r.update(x=a.xy[0], y=a.xy[1])
+        else: p.error("click needs --text or X Y")
+        r.update(count=a.count, modifiers=mods)
+    elif a.cmd == "key": r.update(chars=a.chars, modifiers=mods, keyCode=a.key_code)
+    elif a.cmd == "type": r["text"] = a.text
+    elif a.cmd == "paste":
+        if a.image: r["image"] = os.path.abspath(a.image)
+        elif a.text: r["text"] = a.text
+        else: p.error("paste needs --image or --text")
+    elif a.cmd == "drop":
+        r["files"] = [os.path.abspath(x) for x in a.files]
+        if a.text: r["text"] = a.text
+        elif a.at: r.update(x=a.at[0], y=a.at[1])
+        else: p.error("drop needs --text or --at X Y")
+    elif a.cmd == "screenshot" and a.path: r["path"] = os.path.abspath(a.path)
+    print(json.dumps(call(r), indent=2))
+
+
+if __name__ == "__main__":
+    main()
