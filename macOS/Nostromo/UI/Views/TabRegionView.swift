@@ -296,6 +296,7 @@ private final class TabButtonView: NSView {
 
     func setSelected(_ selected: Bool) {
         layer?.backgroundColor = (selected ? Theme.bgBarActive : Theme.bgBar).cgColor
+        captionField.textColor = selected ? Theme.tabCaptionOnActive : Theme.fgMuted
         labelField.font = selected ? Theme.tabFontBold : Theme.tabFont
     }
 
