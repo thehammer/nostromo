@@ -130,16 +130,10 @@ class ActivityTickerView: NSView {
     // MARK: - Hit testing passthrough
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // Let all non-ticker-subview clicks fall through to views underneath
-        // — the ticker never blocks interaction with the content pane it's
-        // drawn over.
-        for sub in subviews {
-            let converted = sub.convert(point, from: self)
-            if sub.bounds.contains(converted) {
-                return sub.hitTest(converted)
-            }
-        }
-        return nil
+        // Only the overlay's own subviews take clicks; everything else falls
+        // through to the views underneath. `point` is in the superview's
+        // coordinates — see `OverlayHitTest`.
+        OverlayHitTest.hit(in: self, at: point)
     }
 
     // MARK: - Rendering

@@ -102,14 +102,10 @@ class ToastBannerView: NSView {
     // MARK: - Hit testing passthrough
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // Let all non-toast-subview clicks fall through to views underneath.
-        for sub in subviews {
-            let converted = sub.convert(point, from: self)
-            if sub.bounds.contains(converted) {
-                return sub.hitTest(converted)
-            }
-        }
-        return nil
+        // Only the overlay's own subviews take clicks; everything else falls
+        // through to the views underneath. `point` is in the superview's
+        // coordinates — see `OverlayHitTest`.
+        OverlayHitTest.hit(in: self, at: point)
     }
 
     // MARK: - Layout helpers
