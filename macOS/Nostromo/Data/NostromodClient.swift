@@ -252,14 +252,14 @@ enum DaemonTurnBlock: Decodable {
     case text(String)
     case toolCall(toolName: String, inputSummary: String, inputFull: String)
     case toolResult(content: String, isError: Bool)
-    case resultSummary(durationMs: Int, costUsd: Double, isError: Bool)
+    case resultSummary(durationMs: Int, costUsd: Double, isError: Bool, interrupted: Bool = false)
     case errorMessage(String)
     case askQuestion(question: String, header: String, options: [DaemonAskOption], multiSelect: Bool)
 
     private enum K: String, CodingKey {
         case kind, text
         case toolName = "tool_name", inputSummary = "input_summary", inputFull = "input_full"
-        case content, isError = "is_error"
+        case content, isError = "is_error", interrupted
         case durationMs = "duration_ms", costUsd = "cost_usd"
         case message, question, header, options, multiSelect = "multi_select"
     }
@@ -279,7 +279,8 @@ enum DaemonTurnBlock: Decodable {
         case "result_summary":
             self = .resultSummary(durationMs: try c.decode(Int.self, forKey: .durationMs),
                                   costUsd: try c.decode(Double.self, forKey: .costUsd),
-                                  isError: try c.decode(Bool.self, forKey: .isError))
+                                  isError: try c.decode(Bool.self, forKey: .isError),
+                                  interrupted: try c.decodeIfPresent(Bool.self, forKey: .interrupted) ?? false)
         case "error_message":
             self = .errorMessage(try c.decode(String.self, forKey: .message))
         case "ask_question":
@@ -298,8 +299,10 @@ struct DaemonResultSummary: Decodable {
     let durationMs: Int
     let costUsd: Double
     let isError: Bool
+    /// Present only when the operator pressed Stop (older daemons omit it).
+    var interrupted: Bool? = nil
     enum CodingKeys: String, CodingKey {
-        case durationMs = "duration_ms", costUsd = "cost_usd", isError = "is_error"
+        case durationMs = "duration_ms", costUsd = "cost_usd", isError = "is_error", interrupted
     }
 }
 
@@ -368,6 +371,12 @@ private struct SessionSpawnMsg: Encodable {
 
 private struct SessionAttachMsg: Encodable {
     let type_ = "session_attach"
+    let tag: String
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+}
+
+private struct SessionInterruptMsg: Encodable {
+    let type_ = "session_interrupt"
     let tag: String
     enum CodingKeys: String, CodingKey { case type_ = "type", tag }
 }
@@ -565,6 +574,13 @@ class NostromodClient {
     /// Stop receiving deltas for a session without stopping the child.
     func sessionDetach(tag: String) {
         send(SessionDetachMsg(tag: tag), type: "session_detach", tag: tag)
+    }
+
+    /// Interrupt the turn this session is running (the Stop button). The
+    /// session stays alive; the daemon also drops any messages queued behind
+    /// the running turn. A no-op when the session is idle.
+    func sessionInterrupt(tag: String) {
+        send(SessionInterruptMsg(tag: tag), type: "session_interrupt", tag: tag)
     }
 
     /// Enqueue a user message; the daemon writes it to the child's stdin.

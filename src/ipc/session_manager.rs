@@ -788,6 +788,44 @@ impl SessionManager {
         Ok(())
     }
 
+    // ── interrupt ─────────────────────────────────────────────────────────────
+
+    /// Interrupt the turn `tag` is running (the Stop button) without killing the
+    /// session. Writes the stream-json `interrupt` control request to the
+    /// child's stdin; the CLI acknowledges immediately, ends the turn with an
+    /// error result, and stays alive for the next message (verified against a
+    /// real `claude`: `control_response success` at +0.0s, then
+    /// `result error_during_execution`, process still running).
+    ///
+    /// Stop means stop: messages queued behind the running turn are dropped, so
+    /// the end of the interrupted turn goes to idle instead of `drain_or_idle`
+    /// immediately starting the next queued message. The transcript is told, so
+    /// the result that ends this turn renders as "Interrupted", not a failure.
+    ///
+    /// A no-op ([`InterruptOutcome::NotRunning`]) when the session is idle.
+    pub fn interrupt(&mut self, tag: &str) -> Result<InterruptOutcome> {
+        let session = self
+            .sessions
+            .get(tag)
+            .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
+        if !session.alive() {
+            anyhow::bail!("session {tag} is not alive");
+        }
+        let running = matches!(
+            *session.shared.state.lock().unwrap(),
+            SessionState::MidTurn | SessionState::AwaitingPermission
+        );
+        if !running {
+            return Ok(InterruptOutcome::NotRunning);
+        }
+
+        session.shared.pending.lock().unwrap().clear();
+        session.shared.transcript.lock().unwrap().mark_interrupt_requested();
+        let request_id = format!("interrupt-{}", chrono::Utc::now().timestamp_millis());
+        write_control_request(&session.shared.stdin, &request_id, "interrupt")?;
+        Ok(InterruptOutcome::Requested)
+    }
+
     // ── attach / detach ─────────────────────────────────────────────────────
 
     /// Attach `client_id` to `tag`: send a `SessionTurns` snapshot + current
@@ -1595,6 +1633,38 @@ fn encode_images(paths: &[String]) -> Vec<EncodedImage> {
             }
         })
         .collect()
+}
+
+/// What [`SessionManager::interrupt`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptOutcome {
+    /// A turn was running; the interrupt was sent to the child.
+    Requested,
+    /// The session was idle: nothing to interrupt.
+    NotRunning,
+}
+
+/// Write one stream-json `control_request` frame (`subtype` is e.g.
+/// `"interrupt"`) to the child's stdin.
+fn write_control_request(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    request_id: &str,
+    subtype: &str,
+) -> Result<()> {
+    let frame = serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": subtype },
+    });
+    let mut line = serde_json::to_string(&frame)?;
+    line.push('\n');
+    let mut guard = stdin.lock().unwrap();
+    let stdin = guard
+        .as_mut()
+        .ok_or_else(|| anyhow!("session stdin is closed"))?;
+    stdin.write_all(line.as_bytes())?;
+    stdin.flush()?;
+    Ok(())
 }
 
 /// Write one stream-json user-message frame to the child's stdin.
@@ -2595,6 +2665,69 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].is_complete);
         assert_eq!(turns[0].user_input, "hi");
+    }
+
+    // ── interrupt (the Stop button) ───────────────────────────────────────────
+
+    /// A stub child that appends everything it reads on stdin to `out`, so a
+    /// test can see exactly which frames the manager wrote.
+    fn recording_stub(out: &std::path::Path) -> String {
+        format!("cat >> '{}'", out.display())
+    }
+
+    #[tokio::test]
+    async fn interrupt_writes_the_control_request_and_drops_queued_messages() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("stdin.log");
+        spawn_stub(&mut mgr, "perri", &recording_stub(&out));
+
+        mgr.send_user_message("perri", "first", &[]).unwrap(); // goes to the child; session is now mid-turn
+        mgr.send_user_message("perri", "queued behind it", &[]).unwrap(); // queued
+        assert_eq!(mgr.sessions["perri"].shared.pending.lock().unwrap().len(), 1);
+
+        let outcome = mgr.interrupt("perri").unwrap();
+
+        assert_eq!(outcome, InterruptOutcome::Requested);
+        assert!(
+            mgr.sessions["perri"].shared.pending.lock().unwrap().is_empty(),
+            "Stop means stop: a queued message must not start the moment the turn ends"
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let written = std::fs::read_to_string(&out).unwrap();
+        let frame: serde_json::Value = written
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_request")
+            .expect("a control_request frame must have been written to the child's stdin");
+        assert_eq!(frame["request"]["subtype"], "interrupt");
+        assert!(frame["request_id"].as_str().unwrap().starts_with("interrupt-"));
+        assert!(!written.contains("queued behind it"), "the queued message must never reach the child");
+        // The stub never exits on its own; stop it so its reader thread ends
+        // and the runtime can shut down.
+        mgr.stop("perri");
+    }
+
+    #[tokio::test]
+    async fn interrupt_on_an_idle_session_is_a_no_op_that_writes_nothing() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("stdin.log");
+        spawn_stub(&mut mgr, "perri", &recording_stub(&out));
+
+        let outcome = mgr.interrupt("perri").unwrap();
+
+        assert_eq!(outcome, InterruptOutcome::NotRunning);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let written = std::fs::read_to_string(&out).unwrap_or_default();
+        assert!(!written.contains("control_request"), "nothing to interrupt, nothing to send: {written:?}");
+        mgr.stop("perri");
+    }
+
+    #[test]
+    fn interrupting_an_unknown_session_is_an_error() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        assert!(mgr.interrupt("nobody").is_err());
     }
 
     #[tokio::test]

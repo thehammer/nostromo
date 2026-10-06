@@ -203,6 +203,7 @@ class ReplView: NSView {
             self.isPinnedToBottom = true
             self.session.send(text, images: images)
         }
+        inputBar.onInterrupt = { [weak self] in self?.session.interrupt() }
         addSubview(inputBar)
 
         inputBarHeightConstraint = inputBar.heightAnchor.constraint(equalToConstant: ReplInputBar.minHeight)
@@ -876,6 +877,8 @@ private class TranscriptDocumentView: NSView {
 private class ReplInputBar: NSView, NSTextViewDelegate {
 
     var onSend:        ((String, [URL]) -> Void)?
+    /// The Stop button / ⌘. — interrupt the running turn. Only reachable while one is running.
+    var onInterrupt:   (() -> Void)?
     /// Fired whenever the text grows/shrinks; passes the ideal total bar height.
     var onHeightChange: ((CGFloat) -> Void)?
 
@@ -887,6 +890,9 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
     let textView             = ChatTextView()
     private let placeholder  = NSTextField(labelWithString: "Message…")
     private let button       = NSButton()
+    private let stopButton   = NSButton()
+    private var textTrailingToSend: NSLayoutConstraint!
+    private var textTrailingToStop: NSLayoutConstraint!
     private let spinner      = NSProgressIndicator()
     /// Horizontal strip of image thumbnails shown above the text field when images are attached.
     private let imageTray    = NSStackView()
@@ -968,6 +974,25 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         button.translatesAutoresizingMaskIntoConstraints = false
         addSubview(button)
 
+        // Stop button — shown only while a turn is running. ⌘. is the macOS
+        // "cancel" shortcut; a hidden button's key equivalent never fires, so
+        // it can't interrupt an idle session by accident.
+        stopButton.bezelStyle = .inline
+        stopButton.isBordered = false
+        stopButton.wantsLayer = true
+        stopButton.layer?.backgroundColor = Theme.redSweater.withAlphaComponent(0.30).cgColor
+        stopButton.layer?.cornerRadius    = 5
+        stopButton.attributedTitle = NSAttributedString(string: "■ Stop", attributes: btnAttrs)
+        stopButton.toolTip        = "Interrupt Perri's current turn (⌘.)"
+        stopButton.keyEquivalent  = "."
+        stopButton.keyEquivalentModifierMask = .command
+        stopButton.target = self
+        stopButton.action = #selector(stopButtonAction)
+        stopButton.isHidden = true
+        stopButton.setAccessibilityLabel("Stop")
+        stopButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stopButton)
+
         // Spinner
         spinner.style                   = .spinning
         spinner.controlSize             = .small
@@ -983,6 +1008,11 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         imageTray.translatesAutoresizingMaskIntoConstraints = false
         addSubview(imageTray)
 
+        // The text view stops short of the Send button, or of the Stop button
+        // too while it is showing. Exactly one of these is active at a time.
+        textTrailingToSend = textScroll.trailingAnchor.constraint(equalTo: button.leadingAnchor, constant: -8)
+        textTrailingToStop = textScroll.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor, constant: -8)
+
         NSLayoutConstraint.activate([
             // Image tray sits above the text scroll view when visible
             imageTray.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -993,11 +1023,17 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
             textScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             textScroll.topAnchor.constraint(equalTo: border.bottomAnchor, constant: 9),
             textScroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
-            textScroll.trailingAnchor.constraint(equalTo: button.leadingAnchor, constant: -8),
 
             // Placeholder anchored to the text inset area
             placeholder.leadingAnchor.constraint(equalTo: textScroll.leadingAnchor, constant: 4),
             placeholder.topAnchor.constraint(equalTo: textScroll.topAnchor, constant: 6),
+
+            textTrailingToSend,
+
+            stopButton.trailingAnchor.constraint(equalTo: button.leadingAnchor, constant: -6),
+            stopButton.bottomAnchor.constraint(equalTo: button.bottomAnchor),
+            stopButton.widthAnchor.constraint(equalToConstant: 64),
+            stopButton.heightAnchor.constraint(equalToConstant: 26),
 
             button.trailingAnchor.constraint(equalTo: spinner.leadingAnchor, constant: -8),
             button.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
@@ -1019,6 +1055,8 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
     // MARK: Actions
 
     @objc private func sendButtonAction() { submitAction() }
+
+    @objc private func stopButtonAction() { onInterrupt?() }
 
     private func submitAction() {
         var text         = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1043,6 +1081,9 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
     // MARK: State
 
     func setRunning(_ running: Bool) {
+        stopButton.isHidden = !running
+        textTrailingToSend.isActive = !running
+        textTrailingToStop.isActive = running
         button.alphaValue = running ? 0.5 : 1.0
         running ? spinner.startAnimation(nil) : spinner.stopAnimation(nil)
     }

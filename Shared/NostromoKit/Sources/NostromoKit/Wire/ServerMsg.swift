@@ -263,7 +263,8 @@ public enum DaemonTurnBlock: Decodable {
     case text(String)
     case toolCall(toolName: String, inputSummary: String, inputFull: String)
     case toolResult(content: String, isError: Bool)
-    case resultSummary(durationMs: Int, costUsd: Double, isError: Bool)
+    /// `interrupted`: the operator pressed Stop — the CLI reports that as an error result, which clients render as "Interrupted", not a failure.
+    case resultSummary(durationMs: Int, costUsd: Double, isError: Bool, interrupted: Bool = false)
     case errorMessage(String)
     case askQuestion(question: String, header: String, options: [DaemonAskOption], multiSelect: Bool)
 
@@ -275,6 +276,7 @@ public enum DaemonTurnBlock: Decodable {
         case inputFull    = "input_full"
         case content
         case isError      = "is_error"
+        case interrupted
         case durationMs   = "duration_ms"
         case costUsd      = "cost_usd"
         case message
@@ -302,7 +304,8 @@ public enum DaemonTurnBlock: Decodable {
             self = .resultSummary(
                 durationMs: try c.decode(Int.self,    forKey: .durationMs),
                 costUsd:    try c.decode(Double.self, forKey: .costUsd),
-                isError:    try c.decode(Bool.self,   forKey: .isError)
+                isError:    try c.decode(Bool.self,   forKey: .isError),
+                interrupted: try c.decodeIfPresent(Bool.self, forKey: .interrupted) ?? false
             )
         case "error_message":
             self = .errorMessage(try c.decode(String.self, forKey: .message))
@@ -324,11 +327,14 @@ public struct DaemonResultSummary: Decodable {
     public let durationMs: Int
     public let costUsd:    Double
     public let isError:    Bool
+    /// See `DaemonTurnBlock.resultSummary`'s `interrupted`. Absent from older daemons → `nil`.
+    public let interrupted: Bool?
 
     enum CodingKeys: String, CodingKey {
         case durationMs = "duration_ms"
         case costUsd    = "cost_usd"
         case isError    = "is_error"
+        case interrupted
     }
 }
 

@@ -275,12 +275,12 @@ private struct BlockView: View {
             .background(Color.secondary.opacity(0.1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
-        case .resultSummary(let durationMs, _, let isError):
+        case .resultSummary(let durationMs, _, let isError, let interrupted):
             HStack(spacing: 6) {
-                Image(systemName: isError ? "xmark.circle" : "checkmark.circle")
+                Image(systemName: interrupted ? "stop.circle" : (isError ? "xmark.circle" : "checkmark.circle"))
                     .imageScale(.small)
-                    .foregroundStyle(isError ? Color.red : Color.green)
-                Text(isError ? "Failed" : "Done in \(durationMs / 1000)s")
+                    .foregroundStyle(interrupted ? Color.secondary : (isError ? Color.red : Color.green))
+                Text(interrupted ? "Interrupted" : (isError ? "Failed" : "Done in \(durationMs / 1000)s"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

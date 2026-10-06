@@ -851,8 +851,9 @@ class ResultChipView: NSView {
     init(data: ResultSummaryData) {
         super.init(frame: .zero)
 
-        let symbol = data.isError ? "✗" : "✓"
-        let color  = data.isError ? Theme.redSweater : Theme.sage
+        // An interrupted turn is the operator's own doing, not a failure: neutral, not red.
+        let symbol = data.interrupted ? "■" : (data.isError ? "✗" : "✓")
+        let color  = data.interrupted ? Theme.fgMuted : (data.isError ? Theme.redSweater : Theme.sage)
 
         let durationStr = data.durationMs >= 1000
             ? String(format: "%.1fs", Double(data.durationMs) / 1000)
@@ -860,7 +861,9 @@ class ResultChipView: NSView {
         let costStr = data.costUSD > 0
             ? String(format: " · $%.4f", data.costUSD)
             : ""
-        let labelStr = "\(symbol)  \(durationStr)\(costStr)"
+        let labelStr = data.interrupted
+            ? "\(symbol)  Interrupted · \(durationStr)\(costStr)"
+            : "\(symbol)  \(durationStr)\(costStr)"
 
         let label = NSTextField(labelWithString: labelStr)
         label.font      = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)

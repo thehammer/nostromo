@@ -899,6 +899,16 @@ pub enum ClientMsg {
         images: Vec<String>,
     },
 
+    /// Interrupt the turn the session is running right now (the Stop button),
+    /// leaving the session itself alive and ready for the next message. Distinct
+    /// from [`ClientMsg::SessionControl`]'s `Stop`, which kills the session. A
+    /// no-op when the session is idle. Also drops any messages queued behind
+    /// the running turn: Stop means stop, not "stop and immediately start the
+    /// next thing".
+    SessionInterrupt {
+        tag: String,
+    },
+
     /// Lifecycle control (stop / restart / new_session).
     SessionControl {
         tag: String,
@@ -1384,6 +1394,7 @@ mod tests {
         });
         round_trip_client(ClientMsg::SessionAttach { tag: "fred".into() });
         round_trip_client(ClientMsg::SessionDetach { tag: "fred".into() });
+        round_trip_client(ClientMsg::SessionInterrupt { tag: "fred".into() });
         round_trip_client(ClientMsg::SessionSend {
             tag: "fred".into(),
             text: "hello".into(),
@@ -1468,6 +1479,13 @@ mod tests {
             serde_json::to_string(&SessionAction::NewSession).unwrap(),
             "\"new_session\""
         );
+    }
+
+    #[test]
+    fn session_interrupt_serialises_as_session_interrupt() {
+        let v = serde_json::to_value(ClientMsg::SessionInterrupt { tag: "perri".into() }).unwrap();
+        assert_eq!(v.get("type").unwrap(), "session_interrupt");
+        assert_eq!(v.get("tag").unwrap(), "perri");
     }
 
     #[test]
