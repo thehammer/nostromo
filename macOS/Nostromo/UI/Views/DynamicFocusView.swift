@@ -669,10 +669,19 @@ final class DynamicFocusView: NSView {
     @discardableResult
     private func replaceInPlace(_ oldView: NSView, with newView: NSView) -> Bool {
         guard let parent = oldView.superview else { return false }
-        if let splitParent = parent as? NSSplitView, let idx = splitParent.arrangedSubviews.firstIndex(of: oldView) {
-            splitParent.removeArrangedSubview(oldView)
-            oldView.removeFromSuperview()
-            splitParent.insertArrangedSubview(newView, at: idx)
+        if let splitParent = parent as? NSSplitView, splitParent.arrangedSubviews.contains(oldView) {
+            // A fresh view inserted into an NSSplitView gets its *minimum*
+            // extent and its sibling takes the rest — measured live on
+            // 2026-10-06 as the PR detail region collapsing from half the
+            // window to ~34pt the moment a second tab joined it.
+            // `SplitViewSwap` hands the new view the old one's frame and
+            // returns the ratios as they stood, which are re-asserted below
+            // through the same verified-and-retried path every other ratio
+            // application takes (an operator-dragged ratio survives too).
+            if let preserved = SplitViewSwap.replace(oldView, with: newView, in: splitParent),
+               let ratioSplit = splitParent as? RatioSplitView {
+                ratioSplit.reassertRatios(preserved)
+            }
         } else {
             newView.translatesAutoresizingMaskIntoConstraints = false
             parent.addSubview(newView)
@@ -986,6 +995,20 @@ final class RatioSplitView: NSSplitView, TranscriptDiagnostics.SplitReporting {
     /// Cleared after that one re-check, so this can never turn into a loop
     /// that fights an operator dragging the divider.
     private var ratiosPendingConfirmation: [Double]?
+
+    /// Ask for `ratios` again after a structural swap of one child
+    /// (`SplitViewSwap`), resetting the retry/convergence state a previous,
+    /// finished application left behind so the next layout pass applies,
+    /// verifies and (if needed) retries them like a first application.
+    func reassertRatios(_ ratios: [Double]) {
+        guard ratios.count == arrangedSubviews.count, ratios.allSatisfy({ $0 > 0 }) else { return }
+        desiredRatios = ratios
+        ratiosApplied = false
+        ratiosAbandoned = false
+        lastAchievedRatios = nil
+        ratiosPendingConfirmation = nil
+        needsLayout = true
+    }
 
     var splitBoundsWidth: Double { Double(bounds.width) }
     var splitBoundsHeight: Double { Double(bounds.height) }
