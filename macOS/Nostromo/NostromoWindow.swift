@@ -42,9 +42,42 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     /// menu-bar manager that is mid-cleanup.
     private var displayChangePending = false
 
+    // MARK: - Startup retry (bounded + serialized)
+    //
+    // Crash path #4: at launch every window enters full-screen at once and one or
+    // more report `windowDidFailToEnterFullScreen`. Each used to retry every
+    // 0.5 s with no limit, firing `toggleFullScreen` into a transition that was
+    // still in flight on another window; AppKit then crashed in
+    // `_doSucceededToEnterFullScreen` and left an orphan "Nostromo" Space behind.
+    // Retries are now capped per window, wait for any in-flight transition on a
+    // sibling window, and back off.
+
+    /// Windows currently mid enter/exit transition (app-wide).
+    private static var transitioning = Set<ObjectIdentifier>()
+    private static let maxStartupRetries = 2
+    private var startupRetries = 0
+
+    deinit { Self.transitioning.remove(ObjectIdentifier(self)) }
+
+    private var inTransition: Bool { Self.transitioning.contains(ObjectIdentifier(self)) }
+
+    /// Run `body` once no NostromoWindow is mid-transition, polling every 0.5 s
+    /// for up to `budget` seconds; gives up (does nothing) past the budget.
+    private static func whenIdle(budget: TimeInterval, _ body: @escaping () -> Void) {
+        if transitioning.isEmpty { body(); return }
+        guard budget > 0 else {
+            winLog.warning("startup retry — gave up waiting for in-flight transitions")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            whenIdle(budget: budget - 0.5, body)
+        }
+    }
+
     // MARK: - NSWindowDelegate
 
     func windowWillEnterFullScreen(_ notification: Notification) {
+        Self.transitioning.insert(ObjectIdentifier(self))
         winLog.info("windowWillEnterFullScreen — \(self.title, privacy: .public)")
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.5
@@ -54,11 +87,14 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
 
     func windowDidEnterFullScreen(_ notification: Notification) {
         winLog.info("windowDidEnterFullScreen — \(self.title, privacy: .public)")
+        Self.transitioning.remove(ObjectIdentifier(self))
+        startupRetries = 0
         isReenteringFullScreen = false
         isPostExitReentry      = false
     }
 
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        Self.transitioning.remove(ObjectIdentifier(self))
         isReenteringFullScreen = false
 
         if isPostExitReentry {
@@ -71,21 +107,33 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
             return
         }
 
-        // Startup failure: one window in the simultaneous multi-window sequence
-        // occasionally fails. Retry after a short delay.
-        winLog.warning("windowDidFailToEnterFullScreen — startup retry in 0.5s (\(window.title, privacy: .public))")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak window] in
-            guard let window, !window.styleMask.contains(.fullScreen) else { return }
-            winLog.warning("windowDidFailToEnterFullScreen — retrying toggleFullScreen for \(window.title, privacy: .public)")
-            window.toggleFullScreen(nil)
+        // Startup failure: a window in the simultaneous multi-window sequence
+        // occasionally fails. Retry — but only a couple of times, only once no
+        // sibling is mid-transition, and with a growing delay.
+        guard startupRetries < Self.maxStartupRetries else {
+            winLog.warning("windowDidFailToEnterFullScreen — giving up after \(self.startupRetries) startup retries, leaving windowed (\(window.title, privacy: .public))")
+            return
+        }
+        startupRetries += 1
+        let delay = 1.0 * Double(startupRetries)
+        winLog.warning("windowDidFailToEnterFullScreen — startup retry \(self.startupRetries)/\(Self.maxStartupRetries) in \(delay)s (\(window.title, privacy: .public))")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak window] in
+            Self.whenIdle(budget: 5) {
+                guard let self, let window,
+                      !window.styleMask.contains(.fullScreen), !self.inTransition else { return }
+                winLog.warning("windowDidFailToEnterFullScreen — retrying toggleFullScreen for \(window.title, privacy: .public)")
+                window.toggleFullScreen(nil)
+            }
         }
     }
 
     func windowWillExitFullScreen(_ notification: Notification) {
+        Self.transitioning.insert(ObjectIdentifier(self))
         winLog.warning("windowWillExitFullScreen — \(self.title, privacy: .public) — will re-enter after exit completes")
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
+        Self.transitioning.remove(ObjectIdentifier(self))
         winLog.warning("windowDidExitFullScreen — \(self.title, privacy: .public) — scheduling re-entry")
         guard !isReenteringFullScreen else {
             winLog.warning("windowDidExitFullScreen — re-entry already in progress, skipping")
@@ -140,6 +188,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
 
     func windowDidFailToExitFullScreen(_ window: NSWindow) {
         winLog.warning("windowDidFailToExitFullScreen — \(self.title, privacy: .public)")
+        Self.transitioning.remove(ObjectIdentifier(self))
         isReenteringFullScreen = false
         isPostExitReentry      = false
     }
