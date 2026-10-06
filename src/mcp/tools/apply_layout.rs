@@ -393,6 +393,18 @@ pub(crate) fn fetch(
         }
         SOURCE_FILE => {
             let ctx = file_request_context(state, args)?;
+            if let Some(repo) = ctx.request.repo.clone() {
+                // The synchronous repaint paths cannot call the network, so a
+                // repo-qualified file is served from what `fetch_async`
+                // already read from GitHub (a revision is immutable, so the
+                // cache cannot be stale). A cold cache — e.g. after a daemon
+                // restart — is `unresolvable_revision`, the same answer the
+                // GitHub-fallback path gives on this branch today.
+                let text = file_source::remote_cache_get(&repo, &ctx.revision, &ctx.request.path)
+                    .ok_or(FileSourceError::UnresolvableRevision)?;
+                file_source::validate_against(&text, &ctx.request)?;
+                return Ok(code_content(ctx.request, ctx.revision, text));
+            }
             let text = file_source::read_at_revision(&ctx.root, &ctx.revision, &ctx.request.path)?;
             file_source::validate_against(&text, &ctx.request)?;
             Ok(code_content(ctx.request, ctx.revision, text))
@@ -596,6 +608,19 @@ pub(crate) async fn fetch_async(
     }
 
     let ctx = file_request_context(state, args)?;
+    if let Some(repo) = ctx.request.repo.clone() {
+        let text = match file_source::remote_cache_get(&repo, &ctx.revision, &ctx.request.path) {
+            Some(cached) => cached,
+            None => {
+                let fetched =
+                    file_source::read_from_github(&repo, &ctx.revision, &ctx.request.path).await?;
+                file_source::remote_cache_put(&repo, &ctx.revision, &ctx.request.path, &fetched);
+                fetched
+            }
+        };
+        file_source::validate_against(&text, &ctx.request)?;
+        return Ok(code_content(ctx.request, ctx.revision, text));
+    }
     let text = match file_source::read_at_revision(&ctx.root, &ctx.revision, &ctx.request.path) {
         Ok(text) => text,
         Err(FileSourceError::UnresolvableRevision) => resolve_via_github_fallback(&ctx).await?,
@@ -732,6 +757,21 @@ fn file_request_context(
     let request = FileRequest::from_params(params)?;
     let root = file_root(state, args.tag);
     let pin = pin_for_request(state, args.tag);
+
+    // A repo-qualified request names the repo its file lives in, so there is
+    // nothing to guess from the caller's working directory: no local checkout
+    // is consulted, and the W5 "is the pinned repo the one my cwd is rooted in"
+    // judgement doesn't apply — the caller already said which repo it means.
+    // The revision is the explicit one, else the pinned PR's head when that PR
+    // is in this same repo, else `revision_required` (never a guess).
+    if request.repo.is_some() {
+        let revision = file_source::resolve_remote_revision(
+            &request,
+            pin.as_ref().map(|p| (p.repo.as_str(), p.head_sha.as_str())),
+        )?;
+        return Ok(FileRequestContext { request, root, revision, pin, local_repo: None });
+    }
+
     let local_repo = file_source::local_repo_slug(&root);
     let revision = file_source::resolve_revision(
         &request,
@@ -2034,6 +2074,88 @@ mod tests {
             "an explicit revision that only a foreign pinned repo could serve must refuse \
              rather than fetch against a repo the caller's own session cwd doesn't match"
         );
+    }
+
+    // ── repo-qualified `file` requests (live QA 2026-10-06) ─────────────────
+    //
+    // These prove the ROUTING without touching the network: a cache hit is
+    // only reachable if the request was keyed by (repo, revision, path) and
+    // the local checkout was ignored.
+
+    fn repo_qualified_file_params(repo: &str, path: &str, revision: Option<&str>) -> Value {
+        let mut p = json!({ "path": path, "repo": repo });
+        if let Some(r) = revision {
+            p["revision"] = json!(r);
+        }
+        p
+    }
+
+    #[tokio::test]
+    async fn a_repo_qualified_file_is_read_by_repo_revision_and_path_not_from_the_local_checkout() {
+        let (state, _bcast) = make_state();
+        // A path that EXISTS in this repo's working tree, with different
+        // content than the "remote" copy.
+        file_source::remote_cache_put("acme/remote", "rev-1", "Cargo.toml", "REMOTE CONTENT\n");
+        let params = repo_qualified_file_params("acme/remote", "Cargo.toml", Some("rev-1"));
+
+        let content = fetch_async(
+            SOURCE_FILE,
+            &state,
+            FetchArgs { tag: Some("perri"), placeholder: None, params: Some(&params) },
+        )
+        .await
+        .expect("a cached repo-qualified read must succeed");
+
+        match content {
+            PaneContentWire::Code { text, revision, .. } => {
+                assert_eq!(text, "REMOTE CONTENT\n", "must not read this checkout's own Cargo.toml");
+                assert_eq!(revision, "rev-1");
+            }
+            other => panic!("expected Code, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repo_qualified_file_with_no_revision_and_no_matching_pin_says_revision_required() {
+        let (state, _bcast) = make_state();
+        let params = repo_qualified_file_params("acme/remote", "src/lib.rs", None);
+
+        let result = fetch_async(
+            SOURCE_FILE,
+            &state,
+            FetchArgs { tag: Some("perri"), placeholder: None, params: Some(&params) },
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Err(ApplyLayoutError::FileRefused(FileSourceError::RevisionRequired)),
+            "no checkout, no pin for that repo, no revision: refuse and name what is missing"
+        );
+    }
+
+    #[test]
+    fn the_synchronous_repaint_serves_a_repo_qualified_file_from_the_cache_and_refuses_a_cold_one() {
+        let (state, _bcast) = make_state();
+        file_source::remote_cache_put("acme/warm", "rev-9", "a/b.rs", "warm\n");
+
+        let warm = repo_qualified_file_params("acme/warm", "a/b.rs", Some("rev-9"));
+        let ok = fetch(
+            SOURCE_FILE,
+            &state,
+            FetchArgs { tag: Some("perri"), placeholder: None, params: Some(&warm) },
+        )
+        .expect("a warm cache must repaint");
+        assert!(matches!(ok, PaneContentWire::Code { ref text, .. } if text == "warm\n"));
+
+        let cold = repo_qualified_file_params("acme/cold", "a/b.rs", Some("rev-9"));
+        let err = fetch(
+            SOURCE_FILE,
+            &state,
+            FetchArgs { tag: Some("perri"), placeholder: None, params: Some(&cold) },
+        )
+        .unwrap_err();
+        assert_eq!(err, ApplyLayoutError::FileRefused(FileSourceError::UnresolvableRevision));
     }
 
     // TODO(cody): the test above drives a real `spawn_session` (with

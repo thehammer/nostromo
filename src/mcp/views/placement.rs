@@ -465,7 +465,7 @@ mod tests {
 
     fn file(path: &str) -> ViewIdentity {
         ViewIdentity::File {
-            path: path.into(),
+            repo: None, path: path.into(),
             revision: None,
         }
     }

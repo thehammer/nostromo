@@ -131,6 +131,10 @@ pub enum ViewIdentity {
     /// a caller cannot address a resolved SHA, so "the same file, resolve it
     /// for me" stays one identity across the review even as the head moves.
     File {
+        /// `owner/name` when the caller named the repo the file lives in
+        /// (so the same path in two repos is two tabs, not one); `None` for
+        /// the original caller-rooted behaviour.
+        repo: Option<String>,
         path: String,
         revision: Option<String>,
     },
@@ -145,10 +149,16 @@ impl ViewIdentity {
         match self {
             ViewIdentity::Singleton => String::new(),
             ViewIdentity::Pr { repo, number } => format!("{repo}#{number}"),
-            ViewIdentity::File { path, revision } => match revision {
-                Some(r) => format!("{path}@{r}"),
-                None => path.clone(),
-            },
+            ViewIdentity::File { repo, path, revision } => {
+                let base = match revision {
+                    Some(r) => format!("{path}@{r}"),
+                    None => path.clone(),
+                };
+                match repo {
+                    Some(repo) => format!("{repo}:{base}"),
+                    None => base,
+                }
+            }
             ViewIdentity::Ticket { provider, key } => format!("{provider}:{key}"),
         }
     }
@@ -399,11 +409,11 @@ mod tests {
         // There is nowhere to *put* an anchor on a `ViewIdentity`, which is
         // the point: R2's "one file, one tab" can't be broken by a caller.
         let a = ViewIdentity::File {
-            path: "src/a.rs".into(),
+            repo: None, path: "src/a.rs".into(),
             revision: None,
         };
         let b = ViewIdentity::File {
-            path: "src/a.rs".into(),
+            repo: None, path: "src/a.rs".into(),
             revision: None,
         };
         assert_eq!(a, b);
@@ -411,13 +421,28 @@ mod tests {
     }
 
     #[test]
+    fn a_file_identity_distinguishes_the_same_path_in_two_repos() {
+        // `docs/README.md` exists in nearly every repo. Without the repo in the
+        // identity, showing it from two PRs in two repos would silently reuse
+        // (re-anchor) one tab and show the wrong repo's content.
+        let a = ViewIdentity::File { repo: Some("o/one".into()), path: "README.md".into(), revision: None };
+        let b = ViewIdentity::File { repo: Some("o/two".into()), path: "README.md".into(), revision: None };
+        let local = ViewIdentity::File { repo: None, path: "README.md".into(), revision: None };
+        assert_ne!(a, b);
+        assert_ne!(a, local);
+        assert_ne!(a.key(), b.key());
+        assert!(a.key().contains("o/one"));
+        assert_eq!(local.key(), "README.md", "the repo-less key must stay exactly as before");
+    }
+
+    #[test]
     fn a_file_identity_distinguishes_two_revisions_of_the_same_path() {
         let working = ViewIdentity::File {
-            path: "src/a.rs".into(),
+            repo: None, path: "src/a.rs".into(),
             revision: None,
         };
         let pinned = ViewIdentity::File {
-            path: "src/a.rs".into(),
+            repo: None, path: "src/a.rs".into(),
             revision: Some("deadbeef".into()),
         };
         assert_ne!(working, pinned);
@@ -453,7 +478,7 @@ mod tests {
             label_for(
                 ViewType::File,
                 &ViewIdentity::File {
-                    path: "src/ipc/session_manager.rs".into(),
+                    repo: None, path: "src/ipc/session_manager.rs".into(),
                     revision: None
                 }
             ),

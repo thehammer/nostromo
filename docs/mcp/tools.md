@@ -987,7 +987,7 @@ Targets, and the anchor/emphasis kinds each type's own source acts on:
 | `review_queue` | *(none)* | `{kind:"queue_row", repo, number}` | `{kind:"queue_row", repo, number}` |
 | `pr_conversation` | `{repo, number}` | `{kind:"comment", id}` | `{kind:"comment", id}` |
 | `pr_diff` | `{repo, number}` | `{kind:"line", path?, line}` | `{kind:"line_range", path?, start, end}` |
-| `file` | `{path, revision?}` | `{kind:"line", line}` | `{kind:"line_range", start, end}` |
+| `file` | `{path, repo?, revision?}` | `{kind:"line", line}` | `{kind:"line_range", start, end}` |
 | `ticket` | `{provider, key}` | `{kind:"section", name}` (`name` may be `"comment:<n>"`) | `{kind:"section", name}` |
 
 `repo` must parse as `owner/name` — validated by the same slug check
@@ -1058,7 +1058,16 @@ downstream, as its own fetch-level error (`unknown_comment_id`,
 | `pane_id_taken` | Creating a non-tabbed region would need a pane id something else in this focus already holds. |
 | `invalid_views_config` | `views.yaml` (compiled-in or override) is malformed. |
 | `unknown_source` / `fetch_failed` | The view's underlying fetcher isn't in the closed registry, or ran but failed — the same codes `apply_layout`/`refresh_pane_content` surface. |
-| `invalid_params` / `unknown_path` / `path_escapes_root` / `not_utf8` / `anchor_beyond_eof` / `invalid_emphasis_range` / `unresolvable_revision` / `revision_repo_mismatch` | `file`'s fetch-level refusals (`FileSourceError`) — see `docs/mcp/panes.md`'s `code`/`diff` section. `revision_repo_mismatch` (W5 — current-pr-collision) is a request that resolved to a revision only a PR pinned to a *different* repo than the caller's own working directory could serve — refused rather than silently rendering that foreign repo's content. |
+| `invalid_params` / `unknown_path` / `path_escapes_root` / `not_utf8` / `anchor_beyond_eof` / `invalid_emphasis_range` / `unresolvable_revision` / `revision_repo_mismatch` / `revision_required` | `file`'s fetch-level refusals (`FileSourceError`) — see `docs/mcp/panes.md`'s `code`/`diff` section. `revision_repo_mismatch` (W5 — current-pr-collision) is a request that resolved to a revision only a PR pinned to a *different* repo than the caller's own working directory could serve — refused rather than silently rendering that foreign repo's content. |
+
+**`repo` — showing a file from the PR's repo when you aren't in a checkout of it.** A reviewer agent (Perri) runs from one working directory and reviews PRs in many repos, so for her a `file` request without `repo` can never succeed: the daemon resolves the path against the caller's own root, and the W5 guard (above) refuses a PR head revision from a repo that root isn't. Pass `repo` (`owner/name`, the same slug rule as a `{repo, number}` target) and the daemon **skips the local checkout entirely** and reads the file from GitHub at `revision`:
+
+- `revision` omitted → the pinned PR's head SHA **if that PR is in the same `repo`**; otherwise `revision_required` (there is no checkout to fall back to, and guessing a branch would silently serve content you didn't ask for).
+- The repo is part of the view's identity: `README.md` shown from two repos is two tabs, not one re-anchored tab.
+- Explicitly naming the repo is what makes this safe under W5: the guard exists to stop the daemon silently serving a foreign repo's content under an *implicit* repo; here the repo is stated, not inferred.
+- Reads are authenticated with the daemon's existing GitHub token and bounded by the same timeouts as the rest of the GitHub client. A successful read is cached in memory by `repo|revision|path` (a revision is immutable) so a repaint — which cannot call the network — can still serve it; after a daemon restart the cache is cold and a repaint returns `unresolvable_revision` until the file is shown again.
+
+`file` without `repo` is unchanged. It remains the right choice for an agent whose working directory *is* the repo.
 | `unknown_comment_id` | A `pr_conversation` anchor/emphasis named a comment id absent from the fetched conversation. |
 | `unsupported_provider` / `provider_unconfigured` / `unknown_ticket` / `unknown_section` | `ticket`'s fetch-level refusals — see `docs/mcp/panes.md`'s `ticket` section. |
 | `not_supported` | Called against a non-daemon-hosted MCP server. |

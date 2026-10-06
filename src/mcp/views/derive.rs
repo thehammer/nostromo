@@ -85,7 +85,13 @@ fn file_identity(params: &Value) -> Option<ViewIdentity> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    let repo = params
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     Some(ViewIdentity::File {
+        repo,
         path: path.to_string(),
         revision,
     })
@@ -288,7 +294,7 @@ mod tests {
         assert_eq!(
             v.identity,
             ViewIdentity::File {
-                path: "src/a.rs".into(),
+                repo: None, path: "src/a.rs".into(),
                 revision: Some("abc".into())
             }
         );
@@ -304,7 +310,7 @@ mod tests {
         assert_eq!(
             v.identity,
             ViewIdentity::File {
-                path: "src/a.rs".into(),
+                repo: None, path: "src/a.rs".into(),
                 revision: None
             }
         );
@@ -431,7 +437,7 @@ mod tests {
         assert_eq!(
             detail.tabs[1].view.as_ref().unwrap().identity,
             ViewIdentity::File {
-                path: "src/a.rs".into(),
+                repo: None, path: "src/a.rs".into(),
                 revision: None
             }
         );
