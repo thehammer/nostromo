@@ -82,6 +82,9 @@ enum TurnHeightEstimator {
         // anyway costs one wrong turn's worth of correction and keeps this
         // function free of `ReplView`'s rendering rules.
         let bubbleWidth = paneWidth * bubbleWidthFraction - 24
+        if !turn.imageURLs.isEmpty {
+            height += CGFloat(turn.imageURLs.count) * (UserBubbleView.imageSize.height + 6)
+        }
         if turn.userInputLength > 0 {
             height += bubbleChrome
                 + wrappedHeight(characters: turn.userInputLength,

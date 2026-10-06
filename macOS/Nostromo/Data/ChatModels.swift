@@ -20,6 +20,10 @@ struct ChatTurn: Identifiable {
     /// The user's message. Mutable because `TurnPayloadStore` swaps the full
     /// text for a bounded prefix when the turn goes cold.
     var userInput:   String
+    /// Image files the user attached to this message. Only the optimistic local
+    /// echo carries them (the daemon's replayed record holds no paths), so they
+    /// show for as long as this pane has been open.
+    var imageURLs:   [URL]       = []
     var timestamp:   Date
     /// The daemon's raw ISO-8601 timestamp string, exactly as it appeared in the
     /// record. `timestamp` is lossy for identity purposes — a turn with no

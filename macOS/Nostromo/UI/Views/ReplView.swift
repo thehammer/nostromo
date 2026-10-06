@@ -910,6 +910,9 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
     private let placeholder  = NSTextField(labelWithString: "Message…")
     private let button       = NSButton()
     private let stopButton   = NSButton()
+    private var textTopConstraint: NSLayoutConstraint!
+    /// Extra height the image tray takes above the text while chips are attached.
+    private static let trayExtra: CGFloat = 54
     private var textTrailingToSend: NSLayoutConstraint!
     private var textTrailingToStop: NSLayoutConstraint!
     private let spinner      = NSProgressIndicator()
@@ -1032,6 +1035,8 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         textTrailingToSend = textScroll.trailingAnchor.constraint(equalTo: button.leadingAnchor, constant: -8)
         textTrailingToStop = textScroll.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor, constant: -8)
 
+        textTopConstraint = textScroll.topAnchor.constraint(equalTo: border.bottomAnchor, constant: 9)
+
         NSLayoutConstraint.activate([
             // Image tray sits above the text scroll view when visible
             imageTray.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -1040,7 +1045,7 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
             imageTray.heightAnchor.constraint(equalToConstant: 48),
 
             textScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            textScroll.topAnchor.constraint(equalTo: border.bottomAnchor, constant: 9),
+            textTopConstraint,
             textScroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
 
             // Placeholder anchored to the text inset area
@@ -1086,7 +1091,7 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         // Allow send when images are present even with no text — synthesise a
         // description from filenames so Claude gets a non-empty message.
         if text.isEmpty && !imagesToSend.isEmpty {
-            text = imagesToSend.map { "[\($0.lastPathComponent)]" }.joined(separator: " ")
+            text = ChatSession.imageOnlyText
         }
         guard !text.isEmpty else { return }
         textView.string  = ""
@@ -1166,7 +1171,7 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         img.translatesAutoresizingMaskIntoConstraints = false
         chip.addSubview(img)
 
-        let nameLabel = NSTextField(labelWithString: url.lastPathComponent + " (name only)")
+        let nameLabel = NSTextField(labelWithString: url.lastPathComponent)
         nameLabel.font          = .systemFont(ofSize: 9)
         nameLabel.textColor     = Theme.fgMuted
         nameLabel.lineBreakMode = .byTruncatingMiddle
@@ -1204,12 +1209,20 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         ])
 
         imageTray.addArrangedSubview(chip)
-        imageTray.isHidden = false
-        // Bump bar height for the tray
-        onHeightChange?(idealBarHeight() + 54)
+        updateTrayLayout()
     }
 
     private static var urlKey = 0
+
+    /// Show the tray and push the text down below it (or hide it and give the
+    /// space back), then resize the bar. The tray is an overlay-free row above
+    /// the text: without moving the text, the chips sat on top of what you typed.
+    private func updateTrayLayout() {
+        let hasImages = !pendingImages.isEmpty
+        imageTray.isHidden = !hasImages
+        textTopConstraint.constant = hasImages ? 9 + Self.trayExtra : 9
+        onHeightChange?(idealBarHeight())
+    }
 
     /// Tear the tray down to nothing. `NSStackView.removeArrangedSubview` only
     /// stops managing a view; releasing it needs `removeFromSuperview` too.
@@ -1218,7 +1231,7 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
             imageTray.removeArrangedSubview(chip)
             chip.removeFromSuperview()
         }
-        imageTray.isHidden = true
+        updateTrayLayout()
     }
 
     @objc private func removeImageChip(_ sender: NSButton) {
@@ -1228,10 +1241,7 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         }
         imageTray.removeArrangedSubview(chip)
         chip.removeFromSuperview()
-        if pendingImages.isEmpty {
-            imageTray.isHidden = true
-            onHeightChange?(idealBarHeight())
-        }
+        updateTrayLayout()
     }
 
     // MARK: NSTextViewDelegate
@@ -1245,7 +1255,7 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
 
     private func idealBarHeight() -> CGFloat {
         let insets  = textView.textContainerInset.height * 2
-        let margins: CGFloat = 9 + 9 + 1
+        let margins: CGFloat = 9 + 9 + 1 + (pendingImages.isEmpty ? 0 : Self.trayExtra)
 
         // Use NSTextLayoutManager (macOS 12+) to avoid forcing NSLayoutManager
         // compatibility mode. Accessing textView.layoutManager on macOS 12+ downgrades

@@ -168,6 +168,44 @@ struct CheckRunApp {
     slug: Option<String>,
 }
 
+/// `GET /commits/{sha}/status` — the *legacy commit status* API. External CI
+/// that predates check runs (RWX, many Jenkins/Buildkite setups) reports here,
+/// and a check-runs query never sees it.
+#[derive(Deserialize)]
+struct CommitStatusResponse {
+    #[serde(default)]
+    statuses: Vec<CommitStatusEntry>,
+}
+
+#[derive(Deserialize)]
+struct CommitStatusEntry {
+    state: Option<String>,
+}
+
+/// Map a legacy commit-status `state` onto the check-run rollup. `failure` and
+/// `error` are both failed CI; `pending` is in flight; `success` is green.
+fn ci_state_from_commit_status(state: Option<&str>) -> CiState {
+    match state {
+        Some("failure" | "error") => CiState::Failure,
+        Some("pending") => CiState::Pending,
+        Some("success") => CiState::Success,
+        _ => CiState::Unknown,
+    }
+}
+
+/// Per-context legacy commit statuses in `body` as CI states.
+/// An unparseable body yields none (no verdict), never a failure.
+fn commit_status_states(body: &str) -> Vec<CiState> {
+    serde_json::from_str::<CommitStatusResponse>(body)
+        .map(|r| {
+            r.statuses
+                .iter()
+                .map(|e| ci_state_from_commit_status(e.state.as_deref()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ── Legacy check-suites shapes (kept for fetch_check_suites_failure) ─────────
 
 #[derive(Deserialize)]
@@ -1769,8 +1807,9 @@ pub async fn ci_state_for_sha(
 ///
 /// - `display_state` — rolled-up `CiState` over all check-runs (D1)
 /// - `actions_failure_filter` — `true` iff a GitHub Actions run has
-///   `conclusion == "failure"` (preserves the old check-suites filter
-///   semantics, D2)
+///   `conclusion == "failure"` (the old check-suites filter semantics, D2)
+///   **or** a legacy commit status is `failure`/`error` (RWX and other
+///   external CI report there, not as check runs)
 pub(crate) async fn fetch_check_runs_state(
     client: &GithubClient,
     repo: &str,
@@ -1786,16 +1825,28 @@ pub(crate) async fn fetch_check_runs_state(
 
     let resp: CheckRunsResponse = serde_json::from_str(&body).ok()?;
 
-    let display_state = CiState::rollup(
-        resp.check_runs
-            .iter()
-            .map(|r| CiState::from_check(r.status.as_deref(), r.conclusion.as_deref())),
-    );
+    // Legacy commit statuses (e.g. "RWX: CI") are invisible to check-runs. A
+    // failed read here is non-fatal: we simply have no extra evidence.
+    let status_url = format!("{}/repos/{repo}/commits/{sha}/status", api_base());
+    let status_states = match etag_get(client, &status_url, etags, body_cache).await {
+        Some(b) => commit_status_states(&b),
+        None => Vec::new(),
+    };
 
+    let run_states: Vec<CiState> = resp
+        .check_runs
+        .iter()
+        .map(|r| CiState::from_check(r.status.as_deref(), r.conclusion.as_deref()))
+        .collect();
+
+    let display_state = CiState::rollup(run_states.iter().copied().chain(status_states.iter().copied()));
+
+    // A failed GitHub Actions run, or any failed/errored commit status, drops
+    // the PR from the queue.
     let actions_failure = resp.check_runs.iter().any(|r| {
         r.app.as_ref().and_then(|a| a.slug.as_deref()) == Some("github-actions")
             && CiState::from_check(r.status.as_deref(), r.conclusion.as_deref()) == CiState::Failure
-    });
+    }) || status_states.contains(&CiState::Failure);
 
     Some((display_state, actions_failure))
 }
@@ -3138,5 +3189,31 @@ mod tests {
 
         let result = etag_get(&client, &url, &etags, &body_cache).await;
         assert_eq!(result, None);
+    }
+}
+
+#[cfg(test)]
+mod commit_status_tests {
+    use super::*;
+
+    #[test]
+    fn failure_and_error_statuses_are_failed_ci() {
+        let body = r#"{"state":"failure","statuses":[{"state":"failure","context":"RWX: CI"},{"state":"success","context":"x"}]}"#;
+        assert!(commit_status_states(body).contains(&CiState::Failure));
+        let body = r#"{"statuses":[{"state":"error","context":"ci"}]}"#;
+        assert!(commit_status_states(body).contains(&CiState::Failure));
+    }
+
+    #[test]
+    fn success_pending_and_empty_are_not_failures() {
+        let body = r#"{"state":"pending","statuses":[]}"#;
+        assert!(commit_status_states(body).is_empty());
+        let body = r#"{"statuses":[{"state":"success"},{"state":"pending"}]}"#;
+        assert!(!commit_status_states(body).contains(&CiState::Failure));
+    }
+
+    #[test]
+    fn unparseable_body_gives_no_verdict() {
+        assert!(commit_status_states("not json").is_empty());
     }
 }

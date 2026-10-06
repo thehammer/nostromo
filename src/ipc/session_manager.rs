@@ -1618,21 +1618,40 @@ fn media_type_for(path: &str) -> &'static str {
     }
 }
 
-fn encode_images(paths: &[String]) -> Vec<EncodedImage> {
+/// Encode each readable image; return the ones that could not be read as
+/// `(path, error)` so the caller can say so instead of silently sending a
+/// message with the image missing (the agent would otherwise go hunting for it).
+fn encode_images(paths: &[String]) -> (Vec<EncodedImage>, Vec<(String, String)>) {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    paths
-        .iter()
-        .filter_map(|p| match std::fs::read(p) {
-            Ok(bytes) => Some(EncodedImage {
+    let mut ok = Vec::new();
+    let mut failed = Vec::new();
+    for p in paths {
+        match std::fs::read(p) {
+            Ok(bytes) => ok.push(EncodedImage {
                 media_type: media_type_for(p).to_string(),
                 base64_data: STANDARD.encode(bytes),
             }),
             Err(e) => {
-                tracing::warn!(path = %p, "skipping unreadable image: {e}");
-                None
+                tracing::warn!(path = %p, "unreadable image: {e}");
+                failed.push((p.clone(), e.to_string()));
             }
-        })
-        .collect()
+        }
+    }
+    (ok, failed)
+}
+
+/// Text appended to a message when attachments could not be read.
+fn unreadable_images_note(failed: &[(String, String)]) -> String {
+    let list = failed
+        .iter()
+        .map(|(p, e)| format!("{p} ({e})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "\n\n[Nostromo could not read the attached image file(s): {list}. \
+         The image was NOT delivered; do not search the filesystem for it — \
+         ask the user to re-attach it.]"
+    )
 }
 
 /// What [`SessionManager::interrupt`] did.
@@ -1675,7 +1694,10 @@ fn write_user_frame(
     text: &str,
     images: &[String],
 ) -> Result<()> {
-    let encoded = encode_images(images);
+    let (encoded, failed) = encode_images(images);
+    let note = if failed.is_empty() { String::new() } else { unreadable_images_note(&failed) };
+    let text = format!("{text}{note}");
+    let text = text.as_str();
     let content = if encoded.is_empty() {
         serde_json::json!(text)
     } else {
@@ -3157,5 +3179,32 @@ mod tests {
             "restarted session must have an empty crash window"
         );
         assert!(s.alive(), "restarted session must be alive");
+    }
+}
+
+#[cfg(test)]
+mod image_encoding_tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_image_is_reported_not_silently_dropped() {
+        let (ok, failed) = encode_images(&["/definitely/not/here.png".to_string()]);
+        assert!(ok.is_empty());
+        assert_eq!(failed.len(), 1);
+        let note = unreadable_images_note(&failed);
+        assert!(note.contains("/definitely/not/here.png"));
+        assert!(note.contains("NOT delivered"));
+    }
+
+    #[test]
+    fn readable_image_is_encoded() {
+        let dir = std::env::temp_dir().join(format!("imgenc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.png");
+        std::fs::write(&f, [1u8, 2, 3]).unwrap();
+        let (ok, failed) = encode_images(&[f.to_string_lossy().to_string()]);
+        assert_eq!(ok.len(), 1);
+        assert!(failed.is_empty());
+        assert_eq!(ok[0].media_type, "image/png");
     }
 }

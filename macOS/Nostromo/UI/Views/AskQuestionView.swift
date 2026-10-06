@@ -71,6 +71,7 @@ final class AskQuestionView: NSView {
 
         // Question text
         let qLabel = NSTextField(labelWithString: data.question)
+        qLabel.isSelectable = true
         qLabel.font                 = .systemFont(ofSize: 13)
         qLabel.textColor            = Theme.fg
         qLabel.lineBreakMode        = .byWordWrapping

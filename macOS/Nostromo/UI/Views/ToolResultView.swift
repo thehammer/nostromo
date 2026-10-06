@@ -114,6 +114,7 @@ final class ToolResultView: NSView {
             : "(The full content of this tool result is no longer retained in this pane. "
               + "It remains in the Claude session transcript on disk.)"
         let label = NSTextField(labelWithString: body)
+        label.isSelectable = true   // copyable: text in the transcript must be selectable
         label.lineBreakMode        = .byCharWrapping
         label.maximumNumberOfLines = 0
         // This is raw tool output (shell text, JSON, diffs) — it must render

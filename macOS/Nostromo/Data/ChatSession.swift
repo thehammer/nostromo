@@ -217,6 +217,9 @@ class ChatSession: ObservableObject {
 
     // MARK: - Send
 
+    /// Message text sent when the user attaches images and types nothing.
+    static let imageOnlyText = "(image attached)"
+
     func send(_ text: String, images: [URL] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -226,7 +229,9 @@ class ChatSession: ObservableObject {
         // what felt laggy). The local turn has no daemonId; apply(.turnStarted)
         // adopts it when the daemon's matching turn arrives (dedupe by text), so
         // subsequent block deltas attach to it.
-        turns.append(ChatTurn(userInput: trimmed, timestamp: Date(), epoch: currentEpoch))
+        var echo = ChatTurn(userInput: trimmed, timestamp: Date(), epoch: currentEpoch)
+        echo.imageURLs = images
+        turns.append(echo)
         changes.send(.appended(index: turns.count - 1))
         client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path })
     }

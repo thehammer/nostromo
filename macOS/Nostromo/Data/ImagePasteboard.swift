@@ -18,12 +18,27 @@ enum ImagePasteboard {
         !fileImageURLs(from: pb).isEmpty || rawImageData(from: pb) != nil
     }
 
-    /// Image files for `pb`. File URLs win; raw image data is materialised to `tempDir`.
-    static func imageURLs(from pb: NSPasteboard,
-                          tempDir: URL = FileManager.default.temporaryDirectory
-                              .appendingPathComponent("nostromo-attachments", isDirectory: true)) -> [URL] {
+    /// Where attachments are staged. The daemon (a launchd agent) reads the
+    /// files, and it has no access to privacy-protected folders like Desktop or
+    /// Downloads — a screenshot dropped from there would silently never arrive.
+    /// The app can read the dropped file, so it copies it somewhere both can.
+    static var stagingDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".nostromo/attachments", isDirectory: true)
+    }
+
+    /// Image files for `pb`, staged in `tempDir` so the daemon can read them.
+    /// File URLs are copied there; raw image data is written there as a PNG.
+    static func imageURLs(from pb: NSPasteboard, tempDir: URL = ImagePasteboard.stagingDir) -> [URL] {
         let files = fileImageURLs(from: pb)
-        if !files.isEmpty { return files }
+        if !files.isEmpty {
+            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            return files.compactMap { src in
+                let dest = tempDir.appendingPathComponent("\(UUID().uuidString.prefix(8))-\(src.lastPathComponent)")
+                do { try FileManager.default.copyItem(at: src, to: dest); return dest }
+                catch { return nil }
+            }
+        }
         guard let data = rawImageData(from: pb), let png = pngData(from: data) else { return [] }
         do {
             try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)

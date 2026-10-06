@@ -29,7 +29,7 @@ final class ImagePasteboardTests: XCTestCase {
         XCTAssertNotNil(NSImage(contentsOf: urls[0]))
     }
 
-    func testImageFileURLIsUsedAsIs() throws {
+    func testImageFileIsCopiedIntoTheStagingDirForTheDaemon() throws {
         let dir = tempDir()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("shot.png")
@@ -37,7 +37,12 @@ final class ImagePasteboardTests: XCTestCase {
         let pb = NSPasteboard(name: NSPasteboard.Name("ipt-\(UUID().uuidString)"))
         pb.clearContents()
         pb.writeObjects([file as NSURL])
-        XCTAssertEqual(ImagePasteboard.imageURLs(from: pb, tempDir: tempDir()).map(\.lastPathComponent), ["shot.png"])
+        let staging = tempDir()
+        let urls = ImagePasteboard.imageURLs(from: pb, tempDir: staging)
+        XCTAssertEqual(urls.count, 1)
+        XCTAssertTrue(urls[0].path.hasPrefix(staging.path), "staged copy, not the original")
+        XCTAssertTrue(urls[0].lastPathComponent.hasSuffix("shot.png"))
+        XCTAssertEqual(try Data(contentsOf: urls[0]), try Data(contentsOf: file))
     }
 
     func testNonImageFileAndPlainTextAreIgnored() throws {
