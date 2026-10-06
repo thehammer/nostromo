@@ -86,6 +86,7 @@ class MarkdownTableView: NSView {
             for colIdx in 0..<colCount {
                 let text  = colIdx < rowData.count ? rowData[colIdx] : ""
                 let label = NSTextField(labelWithString: text)
+                label.isSelectable = true   // copyable: text in the transcript must be selectable
                 label.font = isHeader
                     ? .systemFont(ofSize: 11, weight: .semibold)
                     : .systemFont(ofSize: 11)

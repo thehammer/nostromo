@@ -262,7 +262,7 @@ class ChatTurnView: NSView, TurnIsland {
         // Suppress the bubble when the reply was injected by the confirm card — the
         // card's own chosen-state visuals already acknowledge the selection.
         if !turn.userInput.contains(Self.confirmReplySentinel) {
-            let bubble = UserBubbleView(text: turn.userInput)
+            let bubble = UserBubbleView(text: turn.userInput, imageURLs: turn.imageURLs)
             self.bubble = bubble
             bubbleWidthConstraint = attachIsland(bubble,
                                                  width: Self.bubbleWidth(paneWidth: islandWidth))
@@ -545,10 +545,17 @@ class ChatTurnView: NSView, TurnIsland {
 /// positions it as an island like every block, so it links to nothing.
 class UserBubbleView: NSView {
 
-    private let label: NSTextField
+    /// Fixed so the bubble's height is known without waiting on image decode.
+    static let imageSize = NSSize(width: 240, height: 150)
 
-    init(text: String) {
+    private let label: NSTextField
+    private let stack = NSStackView()
+    private var imageURLs: [URL]
+
+    init(text: String, imageURLs: [URL] = []) {
+        self.imageURLs = imageURLs
         label = NSTextField(labelWithString: text)
+        label.isSelectable = true   // copyable: text in the transcript must be selectable
         label.font                 = .systemFont(ofSize: 13)
         label.textColor            = Theme.fg
         label.lineBreakMode        = .byWordWrapping
@@ -566,13 +573,54 @@ class UserBubbleView: NSView {
         layer?.borderWidth     = 1
         layer?.borderColor     = Theme.cornflower.withAlphaComponent(0.35).cgColor
 
-        addSubview(label)
+        stack.orientation = .vertical
+        stack.alignment   = .leading
+        stack.spacing     = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        for url in imageURLs { stack.addArrangedSubview(makeImageView(url)) }
+        // An image-only message carries a placeholder the agent needs but the
+        // reader does not.
+        if !(text == ChatSession.imageOnlyText && !imageURLs.isEmpty) {
+            stack.addArrangedSubview(label)
+            label.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor).isActive = true
+        }
+
         NSLayoutConstraint.activate([
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
         ])
+    }
+
+    private func makeImageView(_ url: URL) -> NSImageView {
+        let iv = NSImageView()
+        iv.imageScaling = .scaleProportionallyUpOrDown
+        iv.imageAlignment = .alignLeft
+        iv.wantsLayer = true
+        iv.layer?.cornerRadius = 6
+        iv.layer?.masksToBounds = true
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        let size = Self.imageSize
+        iv.widthAnchor.constraint(equalToConstant: size.width).isActive = true
+        iv.heightAnchor.constraint(equalToConstant: size.height).isActive = true
+        // Decoded to thumbnail size, never source size (see ThumbnailLoader).
+        ThumbnailLoader.load(url, size: max(size.width, size.height), scale: 2) { [weak iv] image in
+            iv?.image = image
+        }
+        let click = NSClickGestureRecognizer(target: self, action: #selector(openImage(_:)))
+        iv.addGestureRecognizer(click)
+        iv.toolTip = "Open \(url.lastPathComponent)"
+        return iv
+    }
+
+    @objc private func openImage(_ g: NSClickGestureRecognizer) {
+        guard let iv = g.view,
+              let i = stack.arrangedSubviews.firstIndex(of: iv), i < imageURLs.count
+        else { return }
+        NSWorkspace.shared.open(imageURLs[i])
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -630,6 +678,7 @@ class TextBlockView: NSView, WidthPresettable {
             switch segment {
             case .paragraph(let txt):
                 let label = NSTextField(labelWithString: Self.stripMarkdown(txt))
+                label.isSelectable = true   // copyable: text in the transcript must be selectable
                 label.font                 = .systemFont(ofSize: 13)
                 label.textColor            = Theme.fg
                 label.lineBreakMode        = .byWordWrapping

@@ -999,14 +999,15 @@ async fn ci_completed_for_unknown_sha_is_ignored() {
 // Scoped reads
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// The honest one-call case, and the tightest cost assertion in the file.
+/// The honest two-call case (check-runs + legacy commit status), and the
+/// tightest cost assertion in the file.
 ///
 /// The queue's CI state is a rollup over *all* checks on the SHA and the drop
 /// filter is specifically "a GitHub Actions check failed", so one check's result
 /// decides neither — the rollup has to be re-read. But one check finishing must
 /// not perturb any other PR: no reordering, no field changes, nothing.
 #[tokio::test]
-async fn ci_completed_for_candidate_head_issues_exactly_one_non_search_request() {
+async fn ci_completed_for_candidate_head_issues_exactly_check_runs_plus_commit_status() {
     let server = MockServer::start().await;
     let mut h = Harness::new(&server);
     seed(&mut h.caches, candidate(42, "sha-42"));
@@ -1030,11 +1031,12 @@ async fn ci_completed_for_candidate_head_issues_exactly_one_non_search_request()
     assert_eq!(outcome, Outcome::Changed);
 
     let after = calls(&server).await;
-    assert_eq!(after.total - before.total, 1, "exactly one request");
+    // check-runs, plus /commits/{sha}/status for external CI such as RWX.
+    assert_eq!(after.total - before.total, 2, "exactly two requests");
     assert_eq!(
         after.check_runs - before.check_runs,
         1,
-        "and it is check-runs"
+        "one of them is check-runs"
     );
     assert_eq!(after.search, before.search, "zero search requests");
     assert_eq!(after.graphql, before.graphql, "zero GraphQL requests");

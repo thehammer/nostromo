@@ -337,7 +337,7 @@ final class MarkdownCardView: NSView {
 
     private func setupTextView() {
         textView.isEditable                 = false
-        textView.isSelectable               = false
+        textView.isSelectable               = true  // copyable
         textView.drawsBackground            = false
         textView.isHorizontallyResizable    = false
         textView.isVerticallyResizable      = true
