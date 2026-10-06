@@ -246,7 +246,7 @@ class ReplView: NSView {
                 strip.leadingAnchor.constraint(equalTo: leadingAnchor),
                 strip.trailingAnchor.constraint(equalTo: trailingAnchor),
                 strip.bottomAnchor.constraint(equalTo: contextMeter.topAnchor),
-                strip.heightAnchor.constraint(equalToConstant: 40),
+                strip.heightAnchor.constraint(equalToConstant: QuickActionStripView.height),
             ]
         }
 
@@ -651,11 +651,22 @@ class ReplView: NSView {
         }
     }
 
+    /// See `scrollToBottom()`: beyond any document height, below AppKit's 2^45 geometry limit.
+    static let scrollToBottomY: CGFloat = 1_000_000_000
+
     private func scrollToBottom() {
         // Scroll to an arbitrarily large Y — AppKit clamps to the actual maximum.
         // Avoids accessing documentView.frame: reading `.frame` on a dirty NSView
         // triggers a synchronous layout pass.
-        scrollView.contentView.scroll(NSPoint(x: 0, y: CGFloat.greatestFiniteMagnitude))
+        //
+        // "Arbitrarily large" must still be a VALID geometry value: this used to
+        // be `CGFloat.greatestFiniteMagnitude` (~1.8e308), and AppKit logged an
+        // `Invalid view geometry: value is greater than 35184372088832` Fault
+        // (2^45, its limit) on every call — a few per second while a transcript
+        // streams (found in live QA, 2026-10-06). `Self.scrollToBottomY` is far
+        // beyond any real document height (the longest transcript measured was
+        // ~1.1e7 points) yet far below that limit.
+        scrollView.contentView.scroll(NSPoint(x: 0, y: Self.scrollToBottomY))
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
