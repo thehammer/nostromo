@@ -65,6 +65,11 @@ pub enum FileSourceError {
     /// rather than silently serving that foreign PR's content against the
     /// wrong repo — see [`github_fallback_trusted`].
     RevisionRepoMismatch,
+    /// A request names a `repo` but no `revision`, and no PR pinned to *that*
+    /// repo supplies one. There is no checkout to fall back to for a
+    /// repo-qualified request, and guessing a branch would silently serve
+    /// content the caller didn't ask for — so refuse and say what's missing.
+    RevisionRequired,
 }
 
 impl FileSourceError {
@@ -79,6 +84,7 @@ impl FileSourceError {
             FileSourceError::InvalidEmphasisRange => "invalid_emphasis_range",
             FileSourceError::UnresolvableRevision => "unresolvable_revision",
             FileSourceError::RevisionRepoMismatch => "revision_repo_mismatch",
+            FileSourceError::RevisionRequired => "revision_required",
         }
     }
 }
@@ -91,6 +97,14 @@ pub const WORKING_TREE: &str = "working";
 pub struct FileRequest {
     /// Repo-relative path, as asked for.
     pub path: String,
+    /// `owner/name` of the repo `path` lives in, when the caller names one.
+    /// `Some` means "this file is in THAT repo, wherever my working directory
+    /// is": the daemon skips the local checkout entirely and reads it from
+    /// GitHub at `revision` (see [`resolve_remote_revision`]). An explicit repo
+    /// removes the ambiguity W5's `revision_repo_mismatch` guard exists to
+    /// refuse, so it satisfies that guard instead of bypassing it. `None` is
+    /// the original behaviour, resolved against the caller's own root.
+    pub repo: Option<String>,
     /// `None` means "resolve it for me" — see the module docs.
     pub revision: Option<String>,
     /// Where to scroll on arrival.
@@ -120,6 +134,18 @@ impl FileRequest {
             Some(_) => return Err(FileSourceError::InvalidParams),
         };
 
+        let repo = match obj.get("repo") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if !s.is_empty() => {
+                // The same slug check `perri.load_pr` and `nostromo.show` use —
+                // one validator, not three that could disagree.
+                crate::data::perri_current_pr::validate_repo_slug(s)
+                    .map_err(|_| FileSourceError::InvalidParams)?;
+                Some(s.clone())
+            }
+            Some(_) => return Err(FileSourceError::InvalidParams),
+        };
+
         let anchor_line = match obj.get("anchor_line") {
             None | Some(Value::Null) => None,
             Some(v) => {
@@ -144,8 +170,15 @@ impl FileRequest {
             Some(_) => return Err(FileSourceError::InvalidParams),
         }
 
+        // A repo-qualified path is spliced into a GitHub URL: validate it here
+        // (see `validate_remote_path`), before anything is fetched.
+        if repo.is_some() {
+            validate_remote_path(&path)?;
+        }
+
         Ok(FileRequest {
             path,
+            repo,
             revision,
             anchor_line,
             emphasis,
@@ -233,6 +266,87 @@ pub fn resolve_revision(
         }
     }
     WORKING_TREE.to_string()
+}
+
+/// Whether `path` is safe to splice into a GitHub contents URL.
+///
+/// A repo-qualified request skips the local checkout, so the checks that
+/// [`resolve_within_root`] makes for a local read never run — and the path goes
+/// straight into `…/repos/{owner}/{repo}/contents/{path}`, sent with the
+/// daemon's GitHub bearer token. Anything that could re-target that
+/// authenticated request is refused as [`FileSourceError::PathEscapesRoot`]:
+/// a `.`/`..` segment (URL normalisation would climb out of `/contents/`), an
+/// absolute or empty segment, `?`/`#` (rewrite the query/fragment), `%` (a
+/// pre-encoded `..`), a backslash, or any control character. Ordinary nested
+/// paths — including dot-directories like `.github/` and names that merely
+/// contain `..` such as `weird..name.rs` — are fine.
+pub fn validate_remote_path(path: &str) -> Result<(), FileSourceError> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.chars().any(|c| c.is_control() || matches!(c, '?' | '#' | '%' | '\\'))
+    {
+        return Err(FileSourceError::PathEscapesRoot);
+    }
+    if path.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return Err(FileSourceError::PathEscapesRoot);
+    }
+    Ok(())
+}
+
+/// The revision a repo-qualified request ([`FileRequest::repo`] is `Some`)
+/// reads at: the explicit `revision` if given, else the pinned PR's head SHA
+/// when that PR is in the SAME repo, else [`FileSourceError::RevisionRequired`].
+///
+/// There is deliberately no fallback to "the working tree" or a guessed
+/// branch: a repo-qualified request has no checkout, and quietly serving some
+/// other revision than the one the reviewer is looking at is exactly the
+/// silent-wrong-content failure this module exists to prevent.
+pub fn resolve_remote_revision(
+    request: &FileRequest,
+    pin: Option<(&str, &str)>,
+) -> Result<String, FileSourceError> {
+    if let Some(rev) = &request.revision {
+        return Ok(rev.clone());
+    }
+    match (request.repo.as_deref(), pin) {
+        (Some(repo), Some((pin_repo, head_sha))) if repo == pin_repo && !head_sha.is_empty() => {
+            Ok(head_sha.to_string())
+        }
+        _ => Err(FileSourceError::RevisionRequired),
+    }
+}
+
+/// Process-wide memory of files already read from GitHub, keyed by
+/// `repo|revision|path`. The synchronous repaint paths cannot call the network
+/// (see `apply_layout::fetch`), so without this a `file` pane that was shown
+/// from GitHub would fail to repaint the next time anything repainted it.
+/// A revision is immutable, so a cached entry never goes stale. Bounded: the
+/// whole map is cleared when it reaches [`REMOTE_CACHE_CAP`] entries.
+const REMOTE_CACHE_CAP: usize = 64;
+
+fn remote_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn remote_key(repo: &str, revision: &str, path: &str) -> String {
+    format!("{repo}|{revision}|{path}")
+}
+
+/// A previously read `repo`/`revision`/`path`, if any.
+pub fn remote_cache_get(repo: &str, revision: &str, path: &str) -> Option<String> {
+    remote_cache().lock().ok()?.get(&remote_key(repo, revision, path)).cloned()
+}
+
+/// Remember a successful GitHub read for [`remote_cache_get`].
+pub fn remote_cache_put(repo: &str, revision: &str, path: &str, text: &str) {
+    if let Ok(mut cache) = remote_cache().lock() {
+        if cache.len() >= REMOTE_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(remote_key(repo, revision, path), text.to_string());
+    }
 }
 
 /// Whether it is safe to trust `fallback_repo` — the repo a PR is pinned
@@ -443,11 +557,19 @@ pub async fn read_from_github(
     revision: &str,
     path: &str,
 ) -> Result<String, FileSourceError> {
+    // Defence in depth at the one choke point every GitHub read goes through
+    // (the repo-qualified `file` view AND the pinned-PR fallback): validate the
+    // path before a token is resolved or a request is built.
+    validate_remote_path(path)?;
     let mut parts = repo.split('/');
     let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
         return Err(FileSourceError::UnresolvableRevision);
     };
     if owner.is_empty() || name.is_empty() {
+        return Err(FileSourceError::UnresolvableRevision);
+    }
+    // Same slug rule as every other entry point (rejects `.`/`..` components).
+    if crate::data::perri_current_pr::validate_repo_slug(repo).is_err() {
         return Err(FileSourceError::UnresolvableRevision);
     }
     let client = crate::data::github_client::GithubClient::new(None)
@@ -478,9 +600,119 @@ mod tests {
             FileSourceError::RevisionRepoMismatch.code(),
             "revision_repo_mismatch"
         );
+        assert_eq!(FileSourceError::RevisionRequired.code(), "revision_required");
     }
 
     // ── FileRequest::from_params — malformed shapes are refused ──────────────
+
+    // ── repo-qualified requests (live QA 2026-10-06: `file` could never show a
+    // PR's file for an agent whose working directory isn't that repo) ─────────
+
+    #[test]
+    fn from_params_parses_an_explicit_repo() {
+        let req = FileRequest::from_params(&json!({
+            "path": "docs/a.md", "repo": "Carefeed/referral-monitor", "revision": "abc123"
+        }))
+        .unwrap();
+        assert_eq!(req.repo.as_deref(), Some("Carefeed/referral-monitor"));
+        assert_eq!(req.revision.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn from_params_leaves_repo_none_when_absent_so_old_callers_are_unchanged() {
+        let req = FileRequest::from_params(&json!({ "path": "a.rs" })).unwrap();
+        assert_eq!(req.repo, None);
+    }
+
+    #[test]
+    fn from_params_rejects_a_malformed_or_non_string_repo() {
+        for bad in [json!("noslash"), json!("a/b/c"), json!("org/repo;rm -rf /"), json!(42), json!(["a/b"])] {
+            assert_eq!(
+                FileRequest::from_params(&json!({ "path": "a.rs", "repo": bad.clone() })),
+                Err(FileSourceError::InvalidParams),
+                "repo {bad} must be refused"
+            );
+        }
+    }
+
+    // ── a repo-qualified path goes into a GitHub URL: it must not be able to
+    // re-target the authenticated request (security review of the repo option)
+
+    #[test]
+    fn a_repo_qualified_request_rejects_a_path_that_could_retarget_the_github_url() {
+        for bad in [
+            "../../../user", "a/../b", "./a", "a/./b", "/etc/passwd", "a//b", "a\\b",
+            "a?ref=main", "a#frag", "a%2e%2e/b", "a\nb", "..", ".", "a/..",
+        ] {
+            assert_eq!(
+                FileRequest::from_params(&json!({ "path": bad, "repo": "o/r" })),
+                Err(FileSourceError::PathEscapesRoot),
+                "path {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repo_qualified_request_still_accepts_ordinary_nested_paths() {
+        for ok in ["README.md", "docs/a b.md", "src/mcp/tools/apply_layout.rs", ".github/workflows/ci.yml", "a/.hidden/b", "weird..name.rs"] {
+            assert!(
+                FileRequest::from_params(&json!({ "path": ok, "repo": "o/r" })).is_ok(),
+                "path {ok:?} must be accepted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_from_github_refuses_a_traversal_path_before_any_network_call() {
+        // The choke point: also covers the pre-existing pinned-PR fallback.
+        // Must fail on the path itself, not on token resolution or HTTP.
+        assert_eq!(
+            read_from_github("o/r", "abc", "../../../user").await,
+            Err(FileSourceError::PathEscapesRoot)
+        );
+        assert_eq!(
+            read_from_github("../x", "abc", "a.md").await,
+            Err(FileSourceError::UnresolvableRevision),
+            "a dot-dot owner is not a repo"
+        );
+    }
+
+    #[test]
+    fn a_repo_qualified_request_reads_at_the_explicit_revision_first() {
+        let req = FileRequest { path: "a.rs".into(), repo: Some("o/r".into()), revision: Some("deadbeef".into()), ..Default::default() };
+        assert_eq!(resolve_remote_revision(&req, Some(("o/r", "headsha"))).unwrap(), "deadbeef");
+    }
+
+    #[test]
+    fn a_repo_qualified_request_defaults_to_the_pinned_prs_head_in_the_same_repo() {
+        let req = FileRequest { path: "a.rs".into(), repo: Some("o/r".into()), ..Default::default() };
+        assert_eq!(resolve_remote_revision(&req, Some(("o/r", "headsha"))).unwrap(), "headsha");
+    }
+
+    #[test]
+    fn a_repo_qualified_request_never_borrows_a_revision_from_a_pr_in_another_repo() {
+        let req = FileRequest { path: "a.rs".into(), repo: Some("o/r".into()), ..Default::default() };
+        assert_eq!(
+            resolve_remote_revision(&req, Some(("someone/else", "headsha"))),
+            Err(FileSourceError::RevisionRequired),
+            "serving another repo's head SHA against this repo is the wrong-content bug W5 closed"
+        );
+        assert_eq!(resolve_remote_revision(&req, None), Err(FileSourceError::RevisionRequired));
+        assert_eq!(
+            resolve_remote_revision(&req, Some(("o/r", ""))),
+            Err(FileSourceError::RevisionRequired),
+            "an empty head SHA is no revision at all"
+        );
+    }
+
+    #[test]
+    fn the_remote_cache_round_trips_and_keys_on_repo_revision_and_path() {
+        remote_cache_put("o/r", "rev1", "a.rs", "fn a() {}");
+        assert_eq!(remote_cache_get("o/r", "rev1", "a.rs").as_deref(), Some("fn a() {}"));
+        assert_eq!(remote_cache_get("o/r", "rev2", "a.rs"), None, "a different revision is a different file");
+        assert_eq!(remote_cache_get("o/other", "rev1", "a.rs"), None, "a different repo is a different file");
+        assert_eq!(remote_cache_get("o/r", "rev1", "b.rs"), None);
+    }
 
     #[test]
     fn from_params_rejects_a_non_object() {
@@ -605,6 +837,7 @@ mod tests {
     fn req_with_revision(revision: Option<&str>) -> FileRequest {
         FileRequest {
             path: "a.rs".into(),
+            repo: None,
             revision: revision.map(|s| s.to_string()),
             anchor_line: None,
             emphasis: vec![],
@@ -863,6 +1096,7 @@ mod tests {
     fn validate_against_rejects_anchor_past_eof() {
         let req = FileRequest {
             path: "a.rs".into(),
+            repo: None,
             revision: None,
             anchor_line: Some(3),
             emphasis: vec![],
@@ -877,6 +1111,7 @@ mod tests {
     fn validate_against_rejects_emphasis_end_past_eof() {
         let req = FileRequest {
             path: "a.rs".into(),
+            repo: None,
             revision: None,
             anchor_line: None,
             emphasis: vec![(1, 5)],
@@ -891,6 +1126,7 @@ mod tests {
     fn validate_against_accepts_anchor_exactly_on_last_line() {
         let req = FileRequest {
             path: "a.rs".into(),
+            repo: None,
             revision: None,
             anchor_line: Some(2),
             emphasis: vec![],

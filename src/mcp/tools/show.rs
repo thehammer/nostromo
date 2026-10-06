@@ -537,13 +537,25 @@ fn identity_from_target(
                 .get("path")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| bad("`{path, revision?}`; `path` is missing or empty"))?;
+                .ok_or_else(|| bad("`{path, repo?, revision?}`; `path` is missing or empty"))?;
             let revision = match obj.get("revision") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
                 Some(_) => return Err(bad("`revision` to be a non-empty string when present")),
             };
+            // Same slug validator `{repo, number}` targets use — one rule.
+            let repo = match obj.get("repo") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) if !s.is_empty() => {
+                    if let Err(e) = crate::data::perri_current_pr::validate_repo_slug(s) {
+                        return Err(PlacementError::InvalidTarget(e.to_string()));
+                    }
+                    Some(s.clone())
+                }
+                Some(_) => return Err(bad("`repo` to be an `owner/name` string when present")),
+            };
             Ok(ViewIdentity::File {
+                repo,
                 path: path.to_string(),
                 revision,
             })
@@ -590,8 +602,11 @@ fn source_params(
             params.insert("repo".into(), json!(repo));
             params.insert("number".into(), json!(number));
         }
-        ViewIdentity::File { path, revision } => {
+        ViewIdentity::File { repo, path, revision } => {
             params.insert("path".into(), json!(path));
+            if let Some(repo) = repo {
+                params.insert("repo".into(), json!(repo));
+            }
             if let Some(r) = revision {
                 params.insert("revision".into(), json!(r));
             }
@@ -860,7 +875,7 @@ Types and their targets:\n\
   review_queue    — the PR review queue. No target. anchor/emphasis: a queue row.\n\
   pr_conversation — a PR's description and comment threads. target {repo, number}.\n\
   pr_diff         — a PR's change, line-addressable. target {repo, number}.\n\
-  file            — a file at a revision, line-addressable. target {path, revision?}.\n\
+  file            — a file at a revision, line-addressable. target {path, repo?, revision?}. Pass `repo` (owner/name) to show a file that lives in the PR's repo when your own working directory is NOT a checkout of it (the usual case for a reviewer): it is read from GitHub at `revision`, defaulting to the pinned PR's head when that PR is in the same repo.\n\
   ticket          — an issue-tracker ticket. target {provider, key}.\n\n\
 Showing the same (type, target) twice reuses one tab and re-anchors it — showing the \
 same file at a different line is the same view, not a second tab. `activity` is not \
@@ -875,12 +890,12 @@ showable: the ambient activity stream is populated only by what actually happene
                 },
                 "target": {
                     "type": "object",
-                    "description": "Which one. Omitted for review_queue (a singleton); {repo, number} for pr_conversation/pr_diff; {path, revision?} for file; {provider, key} for ticket.",
+                    "description": "Which one. Omitted for review_queue (a singleton); {repo, number} for pr_conversation/pr_diff; {path, repo?, revision?} for file; {provider, key} for ticket.",
                     "properties": {
-                        "repo":     { "type": "string", "description": "owner/name — pr_conversation, pr_diff." },
+                        "repo":     { "type": "string", "description": "owner/name — pr_conversation, pr_diff; optional for file (read the file from that repo on GitHub instead of the local checkout)." },
                         "number":   { "type": "integer", "minimum": 1, "description": "PR number — pr_conversation, pr_diff." },
                         "path":     { "type": "string", "description": "Repo-relative path — file." },
-                        "revision": { "type": "string", "description": "Optional git revision — file. Defaults to the PR under review's head, else the working tree." },
+                        "revision": { "type": "string", "description": "Optional git revision — file. Defaults to the PR under review's head, else the working tree. With `repo`: defaults to the pinned PR's head if that PR is in the same repo, otherwise required." },
                         "provider": { "type": "string", "description": "Issue-tracker provider, e.g. \"jira\" — ticket." },
                         "key":      { "type": "string", "description": "Ticket key, e.g. \"CORE-2841\" — ticket." }
                     },
@@ -1209,7 +1224,7 @@ mod tests {
         for (view_type, identity) in [
             (ViewType::PrDiff, ViewIdentity::Pr { repo: "o/r".into(), number: 1 }),
             (ViewType::PrConversation, ViewIdentity::Pr { repo: "o/r".into(), number: 1 }),
-            (ViewType::File, ViewIdentity::File { path: "a.rs".into(), revision: None }),
+            (ViewType::File, ViewIdentity::File { repo: None, path: "a.rs".into(), revision: None }),
             (ViewType::Ticket, ViewIdentity::Ticket { provider: "jira".into(), key: "C-1".into() }),
         ] {
             let params =
@@ -1225,7 +1240,7 @@ mod tests {
         let params = source_params(
             ViewType::File,
             &ViewIdentity::File {
-                path: "src/a.rs".into(),
+                repo: None, path: "src/a.rs".into(),
                 revision: None,
             },
             &json!({
@@ -1304,17 +1319,45 @@ mod tests {
             )
             .unwrap(),
             ViewIdentity::File {
-                path: "a.rs".into(),
+                repo: None, path: "a.rs".into(),
                 revision: Some("abc".into())
             }
         );
         assert_eq!(
             identity_from_target(ViewType::File, Some(&json!({ "path": "a.rs" }))).unwrap(),
             ViewIdentity::File {
-                path: "a.rs".into(),
+                repo: None, path: "a.rs".into(),
                 revision: None
             }
         );
+    }
+
+    #[test]
+    fn a_file_target_may_name_the_repo_it_lives_in() {
+        assert_eq!(
+            identity_from_target(
+                ViewType::File,
+                Some(&json!({ "path": "docs/a.md", "repo": "Carefeed/referral-monitor", "revision": "abc" }))
+            )
+            .unwrap(),
+            ViewIdentity::File {
+                repo: Some("Carefeed/referral-monitor".into()),
+                path: "docs/a.md".into(),
+                revision: Some("abc".into())
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_target_with_a_malformed_or_non_string_repo_is_refused() {
+        for repo in [json!("evil"), json!("o/r/x"), json!("o/r$"), json!(7)] {
+            let err = identity_from_target(
+                ViewType::File,
+                Some(&json!({ "path": "a.rs", "repo": repo.clone() })),
+            )
+            .unwrap_err();
+            assert!(matches!(err, PlacementError::InvalidTarget(_)), "repo {repo} must be refused: {err:?}");
+        }
     }
 
     #[test]

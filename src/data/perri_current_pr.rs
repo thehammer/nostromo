@@ -117,6 +117,14 @@ pub fn validate_repo_slug(repo: &str) -> Result<(), PinError> {
             "{repo:?} contains characters outside [A-Za-z0-9._-]"
         )));
     }
+    // `.` is an allowed character, so `.` and `..` slipped through as whole
+    // components. Neither is a GitHub owner or repo name, and spliced into a
+    // URL or a path they re-target it (`../x` -> a different endpoint).
+    if matches!(owner, "." | "..") || matches!(name, "." | "..") {
+        return Err(PinError::InvalidRepo(format!(
+            "{repo:?} has a \".\" or \"..\" component"
+        )));
+    }
     Ok(())
 }
 
@@ -505,6 +513,18 @@ mod tests {
         assert!(validate_repo_slug("acme/").is_err());
         assert!(validate_repo_slug("/").is_err());
         assert!(validate_repo_slug("").is_err());
+    }
+
+    #[test]
+    fn validate_repo_slug_rejects_dot_and_dotdot_components() {
+        // `.` is an allowed character, so "../x" used to pass. Spliced into a
+        // URL or a filesystem path, a `..` owner/name re-targets the request
+        // (found reviewing the repo-qualified `file` view, 2026-10-06).
+        for bad in ["../x", "x/..", "./x", "x/.", "../..", "./."] {
+            assert!(validate_repo_slug(bad).is_err(), "{bad:?} must be rejected");
+        }
+        assert!(validate_repo_slug("a.b/c.d").is_ok(), "dots inside a name are fine");
+        assert!(validate_repo_slug(".github/x").is_ok(), "a leading dot is a real repo name");
     }
 
     #[test]
