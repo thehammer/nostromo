@@ -137,6 +137,45 @@ fn unconfigured_message(credentials_path: &Path) -> String {
     )
 }
 
+/// Expand `${NAME}` references in `value`, the way the shell that normally
+/// sources this file would: from variables defined earlier in the same file
+/// (`seen`), then from the process environment, else empty.
+///
+/// Only the braced form is expanded — a bare `$` (an API token may legitimately
+/// contain one) is left alone. The shared `~/.claude/credentials/.env` writes
+/// `ATLASSIAN_USER_EMAIL=${ATLASSIAN_EMAIL}`; taking that literally made the
+/// daemon log in to Jira as the string `${ATLASSIAN_EMAIL}`, which Jira answers
+/// as an anonymous request (404), surfaced as `unknown_ticket` for every real
+/// key. An unresolvable reference expands to empty, so `resolve_credentials`
+/// reports the provider as unconfigured instead of sending a bogus login.
+fn expand_braced_refs(value: &str, seen: &HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            Some(end) => {
+                let name = &after[..end];
+                let resolved = seen
+                    .get(name)
+                    .cloned()
+                    .or_else(|| std::env::var(name).ok())
+                    .unwrap_or_default();
+                out.push_str(&resolved);
+                rest = &after[end + 1..];
+            }
+            None => {
+                // Unterminated `${` — not a reference; keep it verbatim.
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Parse `KEY=VALUE` lines from a `.env`-style file. Missing/unreadable file
 /// returns an empty map rather than an error — the caller (`resolve_credentials`)
 /// treats "no file" and "file present but incomplete" identically.
@@ -155,11 +194,19 @@ fn read_env_file(path: &Path) -> HashMap<String, String> {
         };
         let k = k.trim().to_string();
         let mut v = v.trim().to_string();
-        if v.len() >= 2
-            && ((v.starts_with('"') && v.ends_with('"'))
-                || (v.starts_with('\'') && v.ends_with('\'')))
-        {
-            v = v[1..v.len() - 1].to_string();
+        // Shell semantics: single quotes are literal; double quotes and bare
+        // values expand `${NAME}` references.
+        let mut expand = true;
+        if v.len() >= 2 {
+            if v.starts_with('\'') && v.ends_with('\'') {
+                v = v[1..v.len() - 1].to_string();
+                expand = false;
+            } else if v.starts_with('"') && v.ends_with('"') {
+                v = v[1..v.len() - 1].to_string();
+            }
+        }
+        if expand {
+            v = expand_braced_refs(&v, &map);
         }
         map.insert(k, v);
     }
@@ -576,6 +623,82 @@ mod tests {
         assert_eq!(creds.email, "hammer@acme.com");
         assert_eq!(creds.token, "tok-from-env");
 
+        clear_env_vars();
+    }
+
+    // 1b. The shared credentials file is shell-style: values may reference
+    // other variables (`ATLASSIAN_USER_EMAIL=${ATLASSIAN_EMAIL}` in the real
+    // `~/.claude/credentials/.env`). The daemon used to take that value
+    // literally, log in to Jira as the string `${ATLASSIAN_EMAIL}`, and get
+    // Jira's anonymous-looks-like-404 answer — surfaced as `unknown_ticket`
+    // for every real key (live QA, 2026-10-06).
+    #[test]
+    fn a_braced_variable_reference_in_the_credentials_file_is_expanded() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env_vars();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".env");
+        std::fs::write(
+            &path,
+            "ATLASSIAN_SITE_NAME=file.atlassian.net\n\
+             ATLASSIAN_EMAIL=real@acme.com\n\
+             ATLASSIAN_USER_EMAIL=${ATLASSIAN_EMAIL}\n\
+             ATLASSIAN_API_TOKEN=tok-from-file\n",
+        )
+        .unwrap();
+
+        let config = Config { jira_credentials_path: Some(path), ..Config::default() };
+        let creds = resolve_credentials(&config).expect("credentials must resolve");
+        assert_eq!(creds.email, "real@acme.com", "the reference must be expanded, not taken literally");
+        clear_env_vars();
+    }
+
+    // 1c. An unresolvable reference is "not configured" — never a bogus
+    // literal login that Jira answers with a misleading 404.
+    #[test]
+    fn an_unresolvable_variable_reference_is_unconfigured_not_a_literal_login() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env_vars();
+        std::env::remove_var("QA_DEFINITELY_UNSET_VAR");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".env");
+        std::fs::write(
+            &path,
+            "ATLASSIAN_SITE_NAME=file.atlassian.net\n\
+             ATLASSIAN_USER_EMAIL=${QA_DEFINITELY_UNSET_VAR}\n\
+             ATLASSIAN_API_TOKEN=tok-from-file\n",
+        )
+        .unwrap();
+
+        let config = Config { jira_credentials_path: Some(path), ..Config::default() };
+        assert!(resolve_credentials(&config).is_none(),
+            "an empty-after-expansion email must resolve as unconfigured");
+        clear_env_vars();
+    }
+
+    // 1d. Expansion must not mangle values that merely contain `$` or are
+    // single-quoted (shell semantics: single quotes are literal).
+    #[test]
+    fn dollar_signs_without_braces_and_single_quoted_values_are_left_alone() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env_vars();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".env");
+        std::fs::write(
+            &path,
+            "ATLASSIAN_SITE_NAME=file.atlassian.net\n\
+             ATLASSIAN_USER_EMAIL='${NOT_EXPANDED}@acme.com'\n\
+             ATLASSIAN_API_TOKEN=tok$en-with-dollar\n",
+        )
+        .unwrap();
+
+        let config = Config { jira_credentials_path: Some(path), ..Config::default() };
+        let creds = resolve_credentials(&config).expect("credentials must resolve");
+        assert_eq!(creds.email, "${NOT_EXPANDED}@acme.com");
+        assert_eq!(creds.token, "tok$en-with-dollar");
         clear_env_vars();
     }
 
