@@ -238,7 +238,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             win.orderFront(nil)
         } else {
             win.makeKeyAndOrderFront(nil)
-            if !win.styleMask.contains(.fullScreen) {
+            // Stagger: entering full-screen on every display in the same instant
+            // is what makes a window fail (and its retry crash AppKit). One
+            // window per 0.7 s keeps transitions from overlapping.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7 * Double(index)) { [weak win] in
+                guard let win, !win.styleMask.contains(.fullScreen) else { return }
                 win.toggleFullScreen(nil)
             }
         }
