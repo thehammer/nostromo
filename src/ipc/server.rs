@@ -387,7 +387,7 @@ where
                 Some("activity hook installed but no event has arrived yet".to_string())
             } else {
                 Some(
-                    "activity hook not installed — run `nostromo doctor --fix` to install it"
+                    "activity hook not installed — run `bin/nostromo-doctor --fix` to install it"
                         .to_string(),
                 )
             };

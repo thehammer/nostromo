@@ -41,7 +41,7 @@ hook events in `~/.claude/settings.json`:
 }
 ```
 
-Run `nostromo doctor` to check whether it's installed, and `nostromo doctor
+Run `bin/nostromo-doctor` to check whether it's installed, and `bin/nostromo-doctor
 --fix` to install it (idempotent — never duplicates an entry, never disturbs
 an existing unrelated hook for the same event). See `docs/nostromo-doctor.md`.
 
@@ -132,7 +132,7 @@ in the record.
 `ServerMsg::ActivityHealth` reports whether the feed is actually receiving
 events, distinguishing "the hook isn't installed" from "the hook is
 installed but nothing has arrived yet" — the ticker names the concrete fix
-(`nostromo doctor --fix`) rather than silently continuing to show the last
+(`bin/nostromo-doctor --fix`) rather than silently continuing to show the last
 known event during an outage.
 
 ## Surface

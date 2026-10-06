@@ -25,7 +25,7 @@ struct ActivityAgentStream {
 /// focus — regardless of how much history is cached — and the ticker must
 /// say so rather than silently keep showing the last-known event.
 /// `hookInstalled` distinguishes the two different "not ingesting" causes:
-/// the hook was never installed (fixed by installing it / `nostromo doctor`)
+/// the hook was never installed (fixed by installing it / `bin/nostromo-doctor`)
 /// versus the hook is installed but nothing has arrived yet (a different
 /// problem, needing different operator guidance).
 struct ActivityHealthState {
@@ -365,13 +365,13 @@ struct ActivityStreamModel {
     /// Operator-facing text for a non-ingesting health verdict. Never
     /// called when `health.ingesting == true`. Produces two distinct
     /// messages depending on `health.hookInstalled`: one naming the
-    /// install-the-hook / `nostromo doctor` fix, the other — for the
+    /// install-the-hook / `bin/nostromo-doctor` fix, the other — for the
     /// installed-but-silent case — naming a different, non-install fix.
     static func healthText(for health: ActivityHealthState) -> String {
         if health.hookInstalled {
             return "Not receiving activity — the hook is present but no events have arrived yet."
         }
-        return "Not receiving activity — install the hook (run `nostromo doctor --fix`) to enable it."
+        return "Not receiving activity — install the hook (run `bin/nostromo-doctor --fix`) to enable it."
     }
 
     // MARK: - Formatting
