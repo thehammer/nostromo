@@ -25,6 +25,11 @@ final class PaneContentModel: ObservableObject {
     @Published var address:   PaneAddress?
     @Published var onLoadPR:    (String, Int) -> Void = { _, _ in }
     @Published var onApprovePR: (String, Int) -> Void = { _, _ in }
+    /// The PR this pane's focus is reviewing right now (its pin), or the one the
+    /// operator just clicked — highlighted in a `pr_list`. Written by
+    /// `PaneContentNSView` (which follows the pin) and, optimistically, by the
+    /// host on a click so the highlight doesn't wait for the daemon round trip.
+    @Published var selectedPR: PRRef?
 }
 
 /// Thin SwiftUI wrapper that renders `PaneContentModel`'s current state
@@ -38,7 +43,13 @@ struct PaneContentHost: View {
         PaneContentView(
             content:     model.content,
             address:     model.address,
-            onLoadPR:    model.onLoadPR,
+            selectedPR:  model.selectedPR,
+            onLoadPR:    { repo, number in
+                // Highlight the clicked row immediately; the pin (authoritative)
+                // confirms or corrects it when the daemon answers.
+                model.selectedPR = PRRef(repo: repo, number: number)
+                model.onLoadPR(repo, number)
+            },
             onApprovePR: model.onApprovePR
         )
     }
@@ -63,6 +74,8 @@ struct PaneContentView: View {
     /// curated-agent-views). `pr_list` reads its `queue_row` anchor/emphasis
     /// to mark a row; the other kinds rendered here have no addressing yet.
     var address: PaneAddress? = nil
+    /// The PR to highlight in a `pr_list`: the one under review / just clicked.
+    var selectedPR: PRRef? = nil
     /// Called when the user loads a PR from a `pr_list` row. `(repo, number)`
     var onLoadPR:   (String, Int) -> Void = { _, _ in }
     /// Called when the user approves a PR from a `pr_list` row. `(repo, number)`
@@ -136,7 +149,10 @@ struct PaneContentView: View {
                             sectionHeader(bucket.label, count: group.count)
                             ForEach(group, id: \.bucketScopedId) { item in
                                 NostromoKit.PerriPRRow(
-                                    model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
+                                    model:  item.toRowModel(marked: PRSelection.isMarked(
+                                        repo: item.repo, number: item.number,
+                                        addressMarked: address?.marks(repo: item.repo, number: item.number) ?? false,
+                                        selected: selectedPR)),
                                     onLoad: { onLoadPR(item.repo, item.number) },
                                     onClear: {}
                                 )
@@ -154,7 +170,10 @@ struct PaneContentView: View {
                         sectionHeader("OTHER", count: overflow.count)
                         ForEach(overflow, id: \.bucketScopedId) { item in
                             NostromoKit.PerriPRRow(
-                                model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
+                                model:  item.toRowModel(marked: PRSelection.isMarked(
+                                        repo: item.repo, number: item.number,
+                                        addressMarked: address?.marks(repo: item.repo, number: item.number) ?? false,
+                                        selected: selectedPR)),
                                 onLoad: { onLoadPR(item.repo, item.number) },
                                 onClear: {}
                             )
