@@ -123,6 +123,9 @@
 		HH000000000000000000021 /* TurnPayloadStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000020 /* TurnPayloadStore.swift */; };
 		HH000000000000000000022 /* TurnPayloadStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000020 /* TurnPayloadStore.swift */; };
 		HH0000000000000000000A1 /* ImagePasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH0000000000000000000A0 /* ImagePasteboard.swift */; };
+		HH0000000000000000000B1 /* OverlayHitTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH0000000000000000000B0 /* OverlayHitTest.swift */; };
+		HH0000000000000000000B2 /* OverlayHitTest.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH0000000000000000000B0 /* OverlayHitTest.swift */; };
+		KK0000000000000000001C2 /* OverlayHitTestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000001C0 /* OverlayHitTestTests.swift */; };
 		HH0000000000000000000A3 /* ThumbnailLoader.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000030 /* ThumbnailLoader.swift */; };
 		HH0000000000000000000A2 /* ImagePasteboard.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH0000000000000000000A0 /* ImagePasteboard.swift */; };
 		HH000000000000000000031 /* ThumbnailLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000030 /* ThumbnailLoader.swift */; };
@@ -275,6 +278,8 @@
 		HH000000000000000000010 /* TurnReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnReconciler.swift; sourceTree = "<group>"; };
 		HH000000000000000000020 /* TurnPayloadStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPayloadStore.swift; sourceTree = "<group>"; };
 		HH0000000000000000000A0 /* ImagePasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePasteboard.swift; sourceTree = "<group>"; };
+		HH0000000000000000000B0 /* OverlayHitTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayHitTest.swift; sourceTree = "<group>"; };
+		OO0000000000000000001C0 /* OverlayHitTestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayHitTestTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000030 /* ThumbnailLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailLoader.swift; sourceTree = "<group>"; };
 		HH000000000000000000040 /* MemoryWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdog.swift; sourceTree = "<group>"; };
 		HH000000000000000000050 /* TranscriptDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptDiagnostics.swift; sourceTree = "<group>"; };
@@ -376,6 +381,7 @@
 				HH000000000000000000010 /* TurnReconciler.swift */,
 				HH000000000000000000020 /* TurnPayloadStore.swift */,
 				HH000000000000000000030 /* ThumbnailLoader.swift */,
+				HH0000000000000000000B0 /* OverlayHitTest.swift */,
 				HH0000000000000000000A0 /* ImagePasteboard.swift */,
 				HH000000000000000000040 /* MemoryWatchdog.swift */,
 				HH000000000000000000050 /* TranscriptDiagnostics.swift */,
@@ -501,6 +507,7 @@
 				VV0000000000000000000002 /* PaneFirstPaintAuditTests.swift */,
 				RA0000000000000000000002 /* RatioApplicationAuditTests.swift */,
 				OO000000000000000000100 /* DecisionStoreTests.swift */,
+				OO0000000000000000001C0 /* OverlayHitTestTests.swift */,
 				OO0000000000000000001B0 /* ImagePasteboardTests.swift */,
 				OO0000000000000000001A0 /* PostureScopedTests.swift */,
 				NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */,
@@ -616,6 +623,7 @@
 				HH000000000000000000011 /* TurnReconciler.swift in Sources */,
 				HH000000000000000000021 /* TurnPayloadStore.swift in Sources */,
 				HH000000000000000000031 /* ThumbnailLoader.swift in Sources */,
+				HH0000000000000000000B1 /* OverlayHitTest.swift in Sources */,
 				HH0000000000000000000A1 /* ImagePasteboard.swift in Sources */,
 				HH000000000000000000041 /* MemoryWatchdog.swift in Sources */,
 				HH000000000000000000051 /* TranscriptDiagnostics.swift in Sources */,
@@ -711,6 +719,7 @@
 				BB00000000000000000000B4 /* Models.swift in TestSources */,
 				HH0000000000000000000A2 /* ImagePasteboard.swift in TestSources */,
 				HH0000000000000000000A3 /* ThumbnailLoader.swift in TestSources */,
+				HH0000000000000000000B2 /* OverlayHitTest.swift in TestSources */,
 				BB00000000000000000000B5 /* PhaseRibbonTests.swift in Sources */,
 				CC00000000000000000000A1 /* PerriModelTests.swift in Sources */,
 				CC00000000000000000000A3 /* Theme.swift in TestSources */,
@@ -772,6 +781,7 @@
 				OO000000000000000000012 /* DecisionStore.swift in TestSources */,
 				KK000000000000000000102 /* DecisionStoreTests.swift in Sources */,
 				KK0000000000000000001B2 /* ImagePasteboardTests.swift in Sources */,
+				KK0000000000000000001C2 /* OverlayHitTestTests.swift in Sources */,
 				KK0000000000000000001A2 /* PostureScopedTests.swift in Sources */,
 				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,
 				PP000000000000000000003 /* ActivityStreamModel.swift in TestSources */,
