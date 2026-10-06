@@ -197,4 +197,34 @@ final class TabRegionViewCaptionGeometryTests: XCTestCase {
             "showing, or the whole detail region reflows underneath it when one appears/clears"
         )
     }
+
+    // MARK: - Contrast (live QA 2026-10-06: the selected tab's caption was 1.15:1)
+
+    private func relativeLuminance(_ color: NSColor) -> Double {
+        let c = color.usingColorSpace(.sRGB) ?? color
+        func lin(_ v: CGFloat) -> Double {
+            let d = Double(v)
+            return d <= 0.03928 ? d / 12.92 : pow((d + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * lin(c.redComponent) + 0.7152 * lin(c.greenComponent) + 0.0722 * lin(c.blueComponent)
+    }
+
+    private func contrastRatio(_ a: NSColor, _ b: NSColor) -> Double {
+        let (x, y) = (relativeLuminance(a), relativeLuminance(b))
+        return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+    }
+
+    func testSelectedTabLabelMeetsWCAGAA() {
+        XCTAssertGreaterThanOrEqual(contrastRatio(Theme.fg, Theme.bgBarActive), 4.5,
+            "the selected tab's label must be readable on its fill (was 2.48:1 on cornflower)")
+    }
+
+    func testSelectedTabCaptionMeetsWCAGAA() {
+        XCTAssertGreaterThanOrEqual(contrastRatio(Theme.tabCaptionOnActive, Theme.bgBarActive), 4.5,
+            "the `reason` caption on the selected tab must be readable (was 1.15:1: gray on cornflower)")
+    }
+
+    func testUnselectedTabCaptionMeetsWCAGAAOnTheBar() {
+        XCTAssertGreaterThanOrEqual(contrastRatio(Theme.fgMuted, Theme.bgBar), 4.5)
+    }
 }

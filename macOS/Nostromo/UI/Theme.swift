@@ -31,7 +31,15 @@ enum Theme {
 
     static let bg           = NSColor(calibratedWhite: 0.05, alpha: 1)
     static let bgBar        = NSColor(calibratedWhite: 0.07, alpha: 1)
-    static let bgBarActive  = cornflower
+    /// The selected tab's fill. Deliberately a deeper blue than `cornflower`:
+    /// on cornflower, the tab's own label (`fg`) measured 2.48:1 and its
+    /// dimmed caption 1.15:1 (live QA, 2026-10-06) — both far under the 4.5:1
+    /// WCAG AA minimum, which is why a caption "wasn't visible". On this fill
+    /// `fg` is ~6.4:1 and `tabCaptionOnActive` ~5.2:1 (pinned in
+    /// `TabRegionViewTests`).
+    static let bgBarActive  = NSColor(red: 40/255, green: 70/255, blue: 150/255, alpha: 1)
+    /// The dimmed caption's colour on the selected tab (see `bgBarActive`).
+    static let tabCaptionOnActive = NSColor(white: 200/255, alpha: 1)
 
     // MARK: - Fonts
 
