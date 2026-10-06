@@ -56,6 +56,11 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     private static var transitioning = Set<ObjectIdentifier>()
     private static let maxStartupRetries = 2
     private var startupRetries = 0
+    /// Set when startup retries are exhausted. The window stays windowed until
+    /// the next time it becomes key (you came back to it), when it gets one
+    /// fresh, serialized attempt — a locked or asleep display fails every
+    /// attempt, and bounded retries alone would leave it windowed for good.
+    private var gaveUpOnFullScreen = false
 
     deinit { Self.transitioning.remove(ObjectIdentifier(self)) }
 
@@ -76,6 +81,17 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
 
     // MARK: - NSWindowDelegate
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard gaveUpOnFullScreen, !styleMask.contains(.fullScreen), !inTransition else { return }
+        gaveUpOnFullScreen = false
+        startupRetries = 0
+        winLog.warning("windowDidBecomeKey — retrying full-screen once after an earlier give-up (\(self.title, privacy: .public))")
+        Self.whenIdle(budget: 5) { [weak self] in
+            guard let self, !self.styleMask.contains(.fullScreen), !self.inTransition else { return }
+            self.toggleFullScreen(nil)
+        }
+    }
+
     func windowWillEnterFullScreen(_ notification: Notification) {
         Self.transitioning.insert(ObjectIdentifier(self))
         winLog.info("windowWillEnterFullScreen — \(self.title, privacy: .public)")
@@ -89,6 +105,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         winLog.info("windowDidEnterFullScreen — \(self.title, privacy: .public)")
         Self.transitioning.remove(ObjectIdentifier(self))
         startupRetries = 0
+        gaveUpOnFullScreen = false
         isReenteringFullScreen = false
         isPostExitReentry      = false
     }
@@ -111,7 +128,8 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         // occasionally fails. Retry — but only a couple of times, only once no
         // sibling is mid-transition, and with a growing delay.
         guard startupRetries < Self.maxStartupRetries else {
-            winLog.warning("windowDidFailToEnterFullScreen — giving up after \(self.startupRetries) startup retries, leaving windowed (\(window.title, privacy: .public))")
+            winLog.warning("windowDidFailToEnterFullScreen — giving up after \(self.startupRetries) startup retries, leaving windowed until next activation (\(window.title, privacy: .public))")
+            gaveUpOnFullScreen = true
             return
         }
         startupRetries += 1
