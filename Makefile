@@ -45,7 +45,12 @@ install-daemon: daemon
 	@mkdir -p "$(HOME)/.local/bin"
 	@mkdir -p "$(HOME)/Library/LaunchAgents"
 	@mkdir -p "$(HOME)/.cache/nostromd/log"
-	cp target/release/nostromd "$(HOME)/.local/bin/nostromd"
+	@# Never overwrite the running binary in place: macOS caches the code signature per
+	@# vnode, so an in-place `cp` over a signed binary (and ~/.local/bin/nostromd is often a
+	@# symlink to ~/.cargo/bin/nostromd) makes launchd's next spawn die with
+	@# OS_REASON_CODESIGNING and crash-loop the daemon. Remove first (new inode), copy, re-sign.
+	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
+	  rm -f "$$real" && cp target/release/nostromd "$$real" && codesign --force -s - "$$real"
 	@echo "Installed nostromd to $(HOME)/.local/bin/nostromd"
 	sed \
 		-e 's|__PREFIX__|$(HOME)/.local|g' \
