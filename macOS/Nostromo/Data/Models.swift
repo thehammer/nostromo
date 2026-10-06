@@ -747,6 +747,8 @@ struct PostureSnapshot {
     let fiveHour:       WindowPace?
     let sevenDay:       WindowPace?
     let sonnetSevenDay: WindowPace?
+    /// Per-model weekly quotas from bishop's `scoped[]` (e.g. Fable), in order.
+    let scoped:         [(label: String, window: WindowPace)]
     /// Mother-attributable agents from the `agents` map.  Empty when absent.
     let agents:         [String: AgentSpend]
 
@@ -781,16 +783,36 @@ struct PostureSnapshot {
             fiveHour:       parseWindowPace(json["five_hour"]),
             sevenDay:       parseWindowPace(json["seven_day"]),
             sonnetSevenDay: parseSonnetWindow(json["models"], elapsedPct: parseWindowPace(json["seven_day"])?.elapsedPct),
+            scoped:         parseScoped(json["scoped"]),
             agents:         parseAgents(json["agents"])
         )
+    }
+
+    /// Parses bishop's `scoped[]`: `[{model, used_pct, elapsed_pct, pace?, resets_at?, severity}]`.
+    /// The row label is the model name's first letter (matches "S" for Sonnet).
+    static func parseScoped(_ v: Any?) -> [(label: String, window: WindowPace)] {
+        guard let arr = v as? [[String: Any]] else { return [] }
+        return arr.compactMap { d in
+            guard let model = d["model"] as? String, let first = model.first,
+                  let used = (d["used_pct"] as? NSNumber).map({ Float($0.doubleValue) }),
+                  let elapsed = (d["elapsed_pct"] as? NSNumber).map({ Float($0.doubleValue) })
+            else { return nil }
+            let pace: Float = (d["pace"] as? NSNumber).map({ Float($0.doubleValue) })
+                              ?? (elapsed > 0 ? used / elapsed : 0)
+            let resets = (d["resets_at"] as? NSNumber).map { TimeInterval($0.doubleValue) } ?? 0
+            return (String(first).uppercased(),
+                    WindowPace(usedPct: used, elapsedPct: elapsed, pace: pace, paceSmoothed: nil,
+                               resetsAt: resets, level: d["severity"] as? String ?? "normal"))
+        }
     }
 
     private static func parseWindowPace(_ v: Any?) -> WindowPace? {
         guard let d = v as? [String: Any] else { return nil }
         guard let used    = (d["used_pct"]    as? NSNumber).map({ Float($0.doubleValue) }),
-              let elapsed = (d["elapsed_pct"] as? NSNumber).map({ Float($0.doubleValue) }),
-              let resets  = (d["resets_at"]   as? NSNumber).map({ TimeInterval($0.doubleValue) })
+              let elapsed = (d["elapsed_pct"] as? NSNumber).map({ Float($0.doubleValue) })
         else { return nil }
+        // `resets_at` is null while a window hasn't started (e.g. idle 5h).
+        let resets = (d["resets_at"] as? NSNumber).map({ TimeInterval($0.doubleValue) }) ?? 0
         // bishop omits pace when the window is too new; compute from used/elapsed.
         let pace: Float = (d["pace"] as? NSNumber).map({ Float($0.doubleValue) })
                           ?? (elapsed > 0 ? used / elapsed : 0)

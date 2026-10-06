@@ -160,6 +160,7 @@
 		OO000000000000000000012 /* DecisionStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000010 /* DecisionStore.swift */; };
 		OO000000000000000000021 /* DecisionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000020 /* DecisionSheet.swift */; };
 		OO000000000000000000031 /* DecisionPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000030 /* DecisionPresenter.swift */; };
+		KK0000000000000000001A2 /* PostureScopedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000001A0 /* PostureScopedTests.swift */; };
 		KK000000000000000000102 /* DecisionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000100 /* DecisionStoreTests.swift */; };
 		MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
 		MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
@@ -295,6 +296,7 @@
 		OO000000000000000000010 /* DecisionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStore.swift; sourceTree = "<group>"; };
 		OO000000000000000000020 /* DecisionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheet.swift; sourceTree = "<group>"; };
 		OO000000000000000000030 /* DecisionPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionPresenter.swift; sourceTree = "<group>"; };
+		OO0000000000000000001A0 /* PostureScopedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostureScopedTests.swift; sourceTree = "<group>"; };
 		OO000000000000000000100 /* DecisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStoreTests.swift; sourceTree = "<group>"; };
 		MM0000000000000000000001 /* MarkdownBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocument.swift; sourceTree = "<group>"; };
 		MM0000000000000000000002 /* ConversationContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationContentView.swift; sourceTree = "<group>"; };
@@ -492,6 +494,7 @@
 				VV0000000000000000000002 /* PaneFirstPaintAuditTests.swift */,
 				RA0000000000000000000002 /* RatioApplicationAuditTests.swift */,
 				OO000000000000000000100 /* DecisionStoreTests.swift */,
+				OO0000000000000000001A0 /* PostureScopedTests.swift */,
 				NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */,
 				PP000000000000000000006 /* ActivityEventDecodeTests.swift */,
 				PP000000000000000000008 /* ActivityStreamModelTests.swift */,
@@ -757,6 +760,7 @@
 				RA0000000000000000000201 /* RatioApplicationAuditTests.swift in Sources */,
 				OO000000000000000000012 /* DecisionStore.swift in TestSources */,
 				KK000000000000000000102 /* DecisionStoreTests.swift in Sources */,
+				KK0000000000000000001A2 /* PostureScopedTests.swift in Sources */,
 				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,
 				PP000000000000000000003 /* ActivityStreamModel.swift in TestSources */,
 				PP000000000000000000007 /* ActivityEventDecodeTests.swift in Sources */,

@@ -3,7 +3,7 @@ import Combine
 
 /// Pace-bars / health-status strip — the fixed-height row just above the status bar.
 ///
-/// **Normal mode**: draws 2–3 horizontal gradient bars (5h, 7d, Sonnet 7d).
+/// **Normal mode**: draws 2–3 horizontal gradient bars (5h, 7d, Sonnet 7d, plus any per-model scoped quota such as Fable).
 /// **Health mode**: when the active focus session is unhealthy, replaces the bars
 /// with a plain-text status line and Restart / New session / Dismiss buttons.
 /// Switching the active focus re-evaluates which mode to show.
@@ -125,6 +125,7 @@ class PaceBarsView: NSView {
         if let w = posture.fiveHour       { bars.append(("5h",  w)) }
         if let w = posture.sevenDay       { bars.append(("7d",  w)) }
         if let w = posture.sonnetSevenDay { bars.append(("S",   w)) }
+        for (label, w) in posture.scoped  { bars.append((label, w)) }
 
         guard !bars.isEmpty else { return }
 
