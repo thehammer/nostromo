@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""A fake Mother broker for QA and tests — never touches the real ~/.mother.
+
+Speaks the same NDJSON protocol Nostromo's MotherBrokerClient expects
+(hello → subscribe → snapshot + live events; answer/cancel/retry/force-start
+commands acked). Point the app at it with MOTHER_BROKER_SOCK:
+
+    bin/fake-mother-broker --sock /tmp/fake-mother.sock --scenario basic &
+    open --env MOTHER_BROKER_SOCK=/tmp/fake-mother.sock /Applications/Nostromo.app
+
+A control socket (<sock>.ctl, NDJSON) lets a script drive the scenario while
+the app is watching:
+
+    {"op":"add_job","job":{...}}               queue a new job (emits "queued")
+    {"op":"event","kind":"running","job":"j1"} fold a state event + broadcast it
+    {"op":"emit","t":"current_activity","data":{"job":"j1","text":"..."}}  raw event
+    {"op":"drop"}                              disconnect all clients (reconnect test)
+    {"op":"commands"}                          commands received so far
+    {"op":"jobs"}                              current job table
+"""
+import argparse, json, os, socket, socketserver, sys, threading, time, uuid
+from datetime import datetime, timezone
+
+CAPS = ["state", "activity", "await", "current_activity", "quota"]
+
+
+def now_iso(offset=0.0):
+    return datetime.fromtimestamp(time.time() + offset, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def job(jid, title, state, repo="Carefeed/payments", *, age=300, started=None, finished=None, question=None,
+        paused_reason=None, kind=None, phases=None, cycles=None, adherence=None, tier=None):
+    return {
+        "id": jid, "state": state, "repo": repo, "isolation": "worktree", "title": title,
+        "created_at": now_iso(-age),
+        "started_at": now_iso(-started) if started is not None else None,
+        "finished_at": now_iso(-finished) if finished is not None else None,
+        "plan_path": f"/tmp/plans/{jid}.md", "question": question, "paused_reason": paused_reason,
+        "adherence_status": adherence, "current_tier": tier, "kind": kind,
+        "phases": phases or [], "cycles": cycles or [],
+    }
+
+
+def phase(agent, state, findings=None):
+    return {"agent": agent, "request_type": None, "state": state, "findings": findings}
+
+
+SCENARIOS = {
+    "empty": lambda: [],
+    "basic": lambda: [
+        job("j-run", "Add RWX sandbox for agents", "running", started=240,
+            phases=[phase("cody", "completed"), phase("redd", "running"), phase("marty", "pending")]),
+        job("j-ask", "Migrate billing job to queues", "awaiting", question="Keep the legacy retry config?", started=900),
+        job("j-pause", "Backfill invoices", "awaiting", paused_reason="quota", started=1500),
+        job("j-q1", "Bump nuxt in payments-v2", "queued", age=60),
+        job("j-q2", "Docs: update runbook", "ready", age=45),
+        job("j-pipe", "Pipeline: referral-monitor export", "running", kind="pipeline", started=3000,
+            cycles=[{"cycle": 1, "phases": [phase("cody", "completed"), phase("perri", "completed", 3)]},
+                    {"cycle": 2, "phases": [phase("cody", "running"), phase("perri", "pending")]}]),
+        job("j-ok", "Fix flaky spec", "succeeded", started=4000, finished=3600, adherence="pass"),
+        job("j-bad", "Upgrade Laravel", "failed", started=5000, finished=4800, adherence="fail"),
+        job("j-cx", "Spike: queue metrics", "cancelled", started=6000, finished=5900),
+    ],
+}
+SCENARIOS["busy"] = lambda: [job(f"j-{i}", f"Job number {i}", ["queued", "running", "succeeded", "failed"][i % 4],
+                                  age=100 + i * 30, started=50 + i * 10 if i % 4 else None) for i in range(40)]
+
+TERMINAL = {"succeeded", "failed", "cancelled"}
+
+
+class Broker:
+    def __init__(self, jobs):
+        self.lock = threading.RLock()
+        self.jobs = {j["id"]: j for j in jobs}
+        self.clients = []          # sockets of subscribed clients
+        self.all_conns = []
+        self.commands = []         # recorded commands (type, data)
+
+    # -- helpers -------------------------------------------------------------
+    @staticmethod
+    def env(direction, t, data, id_=None):
+        return {"v": 1, "dir": direction, "t": t, "id": id_ or str(uuid.uuid4()), "ts": now_iso(), "data": data}
+
+    @staticmethod
+    def send(sock, obj):
+        try:
+            sock.sendall((json.dumps(obj) + "\n").encode())
+            return True
+        except OSError:
+            return False
+
+    def broadcast(self, t, data):
+        with self.lock:
+            msg = self.env("event", t, data)
+            self.clients = [c for c in self.clients if self.send(c, msg)]
+
+    # -- state folding (mirrors the app's foldJobState) ------------------------
+    def fold(self, jid, kind, **extra):
+        with self.lock:
+            j = self.jobs[jid]
+            if kind in ("queued", "ready", "running", "succeeded", "failed", "cancelled"):
+                j["state"], j["question"], j["paused_reason"] = kind, None, None
+                if kind == "running" and not j.get("started_at"):
+                    j["started_at"] = now_iso()
+                if kind in TERMINAL:
+                    j["finished_at"] = now_iso()
+            elif kind == "awaiting_input":
+                j["state"], j["question"] = "awaiting", extra.get("question")
+            elif kind == "paused_for_quota":
+                j["state"], j["paused_reason"] = "awaiting", extra.get("paused_reason", "quota")
+            elif kind in ("resumed", "auto_resumed"):
+                j["state"] = "ready"
+            elif kind in ("retried", "escalated"):
+                j["state"] = extra.get("to_state", "ready")
+                j["finished_at"] = None
+            data = {"job": jid, **extra}
+            if kind == "queued":
+                data = dict(j)
+            self.broadcast(kind, data)
+
+    # -- commands --------------------------------------------------------------
+    def apply(self, ctype, data):
+        """Returns None on success or (code, message) on error."""
+        jid = data.get("job")
+        with self.lock:
+            self.commands.append({"type": ctype, "data": data})
+            j = self.jobs.get(jid)
+            if j is None:
+                return ("no_such_job", f"no job {jid}")
+            s = j["state"]
+            if ctype == "cancel":
+                if s in TERMINAL:
+                    return ("invalid_state", f"cannot cancel a {s} job")
+                self.fold(jid, "cancelled")
+            elif ctype == "retry":
+                if s not in ("failed", "cancelled"):
+                    return ("invalid_state", f"cannot retry a {s} job")
+                self.fold(jid, "retried", to_state="ready")
+            elif ctype == "force-start":
+                if s not in ("queued", "ready"):
+                    return ("invalid_state", f"cannot force-start a {s} job")
+                self.fold(jid, "running")
+            elif ctype == "answer":
+                if s != "awaiting":
+                    return ("invalid_state", f"job is {s}, not awaiting")
+                self.fold(jid, "running")
+            else:
+                return ("malformed", f"unknown command {ctype}")
+        return None
+
+    def snapshot(self):
+        with self.lock:
+            return list(self.jobs.values())
+
+
+def make_handler(broker):
+    class H(socketserver.StreamRequestHandler):
+        def handle(self):
+            sock = self.request
+            with broker.lock:
+                broker.all_conns.append(sock)
+            broker.send(sock, broker.env("event", "hello", {"protocol_version": 1, "capabilities": CAPS}))
+            for raw in self.rfile:
+                try:
+                    msg = json.loads(raw)
+                except ValueError:
+                    continue
+                if msg.get("dir") != "cmd":
+                    continue
+                t, id_, data = msg.get("t"), msg.get("id"), msg.get("data") or {}
+                if t == "subscribe":
+                    broker.send(sock, broker.env("ack", t, {"ok": True}, id_))
+                    broker.send(sock, broker.env("event", "snapshot", {"jobs": broker.snapshot()}))
+                    with broker.lock:
+                        broker.clients.append(sock)
+                else:
+                    err = broker.apply(t, data)
+                    body = {"ok": True} if err is None else {"ok": False, "error": {"code": err[0], "message": err[1]}}
+                    broker.send(sock, broker.env("ack", t, body, id_))
+    return H
+
+
+def make_ctl_handler(broker):
+    class C(socketserver.StreamRequestHandler):
+        def handle(self):
+            for raw in self.rfile:
+                try:
+                    req = json.loads(raw)
+                    out = {"ok": True, "result": self.run(req)}
+                except Exception as e:  # report, never crash the broker
+                    out = {"ok": False, "error": str(e)}
+                self.wfile.write((json.dumps(out) + "\n").encode())
+
+        def run(self, req):
+            op = req.get("op")
+            if op == "add_job":
+                j = req["job"]
+                with broker.lock:
+                    broker.jobs[j["id"]] = j
+                    broker.fold(j["id"], "queued")
+                return j["id"]
+            if op == "event":
+                kind = req["kind"]
+                extra = {k: v for k, v in req.items() if k not in ("op", "kind", "job")}
+                broker.fold(req["job"], kind, **extra)
+                return broker.jobs[req["job"]]["state"]
+            if op == "emit":
+                broker.broadcast(req["t"], req["data"])
+                return True
+            if op == "drop":
+                with broker.lock:
+                    conns, broker.all_conns, broker.clients = broker.all_conns, [], []
+                for c in conns:
+                    try:
+                        c.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                return len(conns)
+            if op == "commands":
+                return broker.commands
+            if op == "jobs":
+                return broker.snapshot()
+            raise ValueError(f"unknown op {op}")
+    return C
+
+
+class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def serve(sock_path, jobs, ping_secs=15.0):
+    """Start broker + control servers; returns (broker, servers). Caller shuts them down."""
+    for p in (sock_path, sock_path + ".ctl"):
+        if os.path.exists(p):
+            os.unlink(p)
+    broker = Broker(jobs)
+    main = UnixServer(sock_path, make_handler(broker))
+    ctl = UnixServer(sock_path + ".ctl", make_ctl_handler(broker))
+    for s in (main, ctl):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    if ping_secs:
+        def pinger():
+            while True:
+                time.sleep(ping_secs)
+                broker.broadcast("ping", {})
+        threading.Thread(target=pinger, daemon=True).start()
+    return broker, (main, ctl)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--sock", default="/tmp/fake-mother-broker.sock")
+    ap.add_argument("--scenario", default="basic", choices=sorted(SCENARIOS))
+    a = ap.parse_args()
+    if os.path.realpath(a.sock).startswith(os.path.expanduser("~/.mother")):
+        sys.exit("refusing to run on the real Mother's directory")
+    serve(a.sock, SCENARIOS[a.scenario]())
+    print(f"fake Mother broker: {a.sock} (control: {a.sock}.ctl) scenario={a.scenario}", flush=True)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
