@@ -41,7 +41,7 @@ final class ImagePasteboardTests: XCTestCase {
         let urls = ImagePasteboard.imageURLs(from: pb, tempDir: staging)
         XCTAssertEqual(urls.count, 1)
         XCTAssertTrue(urls[0].path.hasPrefix(staging.path), "staged copy, not the original")
-        XCTAssertTrue(urls[0].lastPathComponent.hasSuffix("shot.png"))
+        XCTAssertEqual(urls[0].lastPathComponent, "shot.png", "display name preserved")
         XCTAssertEqual(try Data(contentsOf: urls[0]), try Data(contentsOf: file))
     }
 

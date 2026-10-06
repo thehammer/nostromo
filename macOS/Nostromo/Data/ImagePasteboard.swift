@@ -34,8 +34,14 @@ enum ImagePasteboard {
         if !files.isEmpty {
             try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
             return files.compactMap { src in
-                let dest = tempDir.appendingPathComponent("\(UUID().uuidString.prefix(8))-\(src.lastPathComponent)")
-                do { try FileManager.default.copyItem(at: src, to: dest); return dest }
+                // One folder per file keeps the display name intact (chips and
+                // the agent see "Screenshot….png", not a uniquifying prefix).
+                let folder = tempDir.appendingPathComponent(String(UUID().uuidString.prefix(8)), isDirectory: true)
+                let dest = folder.appendingPathComponent(src.lastPathComponent)
+                do {
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try FileManager.default.copyItem(at: src, to: dest); return dest
+                }
                 catch { return nil }
             }
         }

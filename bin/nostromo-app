@@ -10,6 +10,7 @@ window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
 
     nostromo-app ping
     nostromo-app windows
+    nostromo-app layout-issues [-w N]     ambiguous / zero-sized Auto Layout views
     nostromo-app tree   [-w N] [--depth D]
     nostromo-app find   TEXT [-w N]
     nostromo-app click  (--text TEXT [--index I] | X Y) [-w N] [--count C] [--mod cmd,shift]
@@ -50,7 +51,7 @@ def main():
     p.add_argument("-w", "--window", type=int, default=0)
     p.add_argument("--sheet", action="store_true", help="target the sheet attached to the window")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("ping"); sub.add_parser("windows")
+    sub.add_parser("ping"); sub.add_parser("windows"); sub.add_parser("layout-issues")
     t = sub.add_parser("tree"); t.add_argument("--depth", type=int, default=12)
     f = sub.add_parser("find"); f.add_argument("text")
     c = sub.add_parser("click"); c.add_argument("xy", nargs="*", type=float)
