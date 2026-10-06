@@ -1,50 +1,60 @@
 import AppKit
 import Combine
+import os
 
 /// The single app-wide owner of decision-modal presentation.
 ///
-/// This exists to fix a real, observed bug: Nostromo opens one full-screen
-/// window per attached display, and `MainLayout` — instantiated once PER
-/// WINDOW — used to independently subscribe to decision requests and present
-/// its own sheet. One `nostromo.ask_decision` call produced N sheets, one per
-/// open window, and answering one didn't dismiss the others (the daemon's
-/// own answer-once guard was the only thing standing between that and a
-/// contradictory second answer reaching a live agent session). Centralizing
-/// presentation here, as the ONLY subscriber to
-/// `AppStore.shared.decisionRequests`, makes N-windows-means-N-sheets
-/// structurally impossible: `DecisionStore.claimPresentation` additionally
-/// belt-and-braces against even a future second invocation of this type.
+/// Nostromo opens one full-screen window per attached display, each on its own
+/// Space. An agent's `nostromo.ask_decision` call has to reach the operator
+/// wherever their attention is — and that cannot be predicted: the first
+/// version of this presenter picked ONE window (the key window, falling back to
+/// the main window, then the first visible one) and the operator found the
+/// sheet on a screen they weren't looking at, on a different window each time,
+/// sometimes on a Space that wasn't displayed at all (live report, 2026-10-06).
+///
+/// So a decision is presented on **every** Nostromo window, and answering it on
+/// any one of them closes it on all the others:
+///
+/// - **Exactly-once answering** is `DecisionStore.claimAnswer`'s job, not
+///   "only one window has a sheet". The sheet that wins the claim sends the
+///   answer; a sheet that loses it (a second tap landing before it closed) goes
+///   inert and never calls `onAnswer`. That atomic gate is what made the original
+///   bug — a sheet on every window answerable twice with contradictory
+///   choices — about *missing sibling dismissal*, not about showing on many
+///   windows.
+/// - **Sibling dismissal:** the answering sheet's `onAnswer` closes every other
+///   sheet for the request WITHOUT answering (`closeWithoutAnswering`), and a
+///   `DecisionResolved` notice from the daemon (answered on iOS, timed out,
+///   its session went away) closes all of them the same way.
+/// - **Windows that appear later** (a display plugged in, a new window) get a
+///   sheet for any decision still outstanding the moment they become key.
+///
+/// This type is still the ONLY subscriber to `AppStore.shared.decisionRequests`
+/// and the ONLY place a `DecisionSheet` is constructed: `MainLayout` is
+/// instantiated once per window and must not know a decision exists
+/// (`DecisionSheetWiringTests` pins both).
 ///
 /// Started once from `AppDelegate.applicationDidFinishLaunching`, beside
 /// `AppStore.shared.startMemoryWatchdog()`.
-///
-/// Every window is full-screen on its own Space, so presenting a decision on
-/// a window the operator isn't looking at strands it — the same failure the
-/// codebase's anti-`runModal()` convention already guards against (see
-/// `DecisionSheet`'s header comment). So presentation always targets
-/// `NSApp.keyWindow` (where the operator's attention is right now), falling
-/// back to `NSApp.mainWindow` (where they were last, when the app itself
-/// isn't frontmost — the common case: an agent asks while the operator is in
-/// another app), and finally the first visible window, so a request is never
-/// silently dropped purely for want of a "current" window.
 final class DecisionPresenter {
 
     static let shared = DecisionPresenter()
 
     private var cancellables = Set<AnyCancellable>()
+    private let log = Logger(subsystem: "com.hammer.nostromo", category: "decisions")
 
-    /// Every decision sheet this presenter currently has a strong reference
-    /// to, keyed by request id — not a single slot. The daemon explicitly
-    /// allows two DIFFERENT tags to each have an active decision at once
-    /// (mirrors the rationale the old per-window dictionary in `MainLayout`
-    /// used to document).
-    private var presentedSheets: [String: DecisionSheet] = [:]
-    /// Which window each currently-presented sheet is anchored to, so a
-    /// closing window can retarget (not silently drop) any sheet it hosts.
-    private var presentingWindow: [String: NostromoWindow] = [:]
-    /// The payload each currently-presented (or about-to-be-retargeted)
-    /// sheet was built from, so a retarget can re-present the same content
-    /// on a surviving window without needing a second `decision_request`.
+    /// One sheet, and the window it is attached to.
+    private struct Presented {
+        weak var window: NostromoWindow?
+        let sheet: DecisionSheet
+    }
+
+    /// Every decision sheet currently up, per request, keyed by window
+    /// identity — a request has one sheet PER WINDOW.
+    private var presented: [String: [ObjectIdentifier: Presented]] = [:]
+    /// The payload each outstanding request was built from, so a window that
+    /// appears (or a retarget) can present the same content without a second
+    /// `decision_request`.
     private var activeDecisions: [String: PendingDecision] = [:]
 
     private init() {}
@@ -66,17 +76,23 @@ final class DecisionPresenter {
             name: NSWindow.willCloseNotification,
             object: nil
         )
+        // A window that becomes key after a decision was posed (a display
+        // plugged in, a window opened) must show it too.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowDidBecomeKey(_:)),
+            name: NSWindow.didBecomeKeyNotification,
+            object: nil
+        )
     }
 
     // MARK: - Presentation
 
-    /// Present `decision` as a sheet on the target window, unless it's
-    /// already being presented (`claimPresentation` fails) or has already
-    /// been resolved (a `DecisionResolved` notice, or a prior local answer,
-    /// beat this event through the pipe). `excluded`, when set, rules out a
-    /// window that is itself in the process of closing (the retarget path
-    /// below) so a request never gets re-presented right back onto the
-    /// window that's going away.
+    /// Present `decision` on every Nostromo window, unless it is already being
+    /// presented (`claimPresentation` fails) or has already been resolved (a
+    /// `DecisionResolved` notice, or a prior local answer, beat this event
+    /// through the pipe). `excluded` rules out a window that is itself closing
+    /// (the retarget path) so a request is never re-presented onto it.
     private func present(_ decision: PendingDecision, excludingWindow excluded: NostromoWindow? = nil) {
         let requestId = decision.requestId
 
@@ -85,17 +101,36 @@ final class DecisionPresenter {
             DecisionStore.shared.releasePresentation(requestId: requestId)
             return
         }
-        guard let window = targetWindow(excluding: excluded) else {
+        let windows = targetWindows(excluding: excluded)
+        guard !windows.isEmpty else {
             // No window to present on right now (e.g. the last window is
-            // mid-close). Release the claim so a future retarget attempt, or
-            // a later re-delivery, can still present it. Leaves the request
+            // mid-close). Release the claim so a future retarget attempt, or a
+            // later re-delivery, can still present it. Leaves the request
             // outstanding for the daemon's own timeout to backstop.
             DecisionStore.shared.releasePresentation(requestId: requestId)
             return
         }
 
         activeDecisions[requestId] = decision
-        focusSession(tag: decision.tag, on: window)
+        // Bring the asking agent's focus forward where the operator is looking
+        // (the key window, else the first), not on every display: switching
+        // every window's focus just to ask a question would be intrusive.
+        if let primary = windows.first(where: { $0 === NSApp.keyWindow }) ?? windows.first {
+            focusSession(tag: decision.tag, on: primary)
+        }
+        log.info("decision \(requestId, privacy: .public) presenting on \(windows.count, privacy: .public) window(s)")
+        for window in windows {
+            attachSheet(for: decision, to: window)
+        }
+    }
+
+    /// Build one `DecisionSheet` for `decision` and begin it on `window`.
+    /// The sheet is registered under `(request, window)` BEFORE `beginSheet`,
+    /// so a close that races the presentation is already accounted for.
+    private func attachSheet(for decision: PendingDecision, to window: NostromoWindow) {
+        let requestId = decision.requestId
+        let windowKey = ObjectIdentifier(window)
+        guard presented[requestId]?[windowKey] == nil else { return }
 
         let choices = decision.choices.map { DecisionSheet.Choice(id: $0.id, label: $0.label, detail: $0.detail) }
         let sheet = DecisionSheet(
@@ -105,31 +140,51 @@ final class DecisionPresenter {
             choices: choices,
             store: DecisionStore.shared,
             resolution: DecisionStore.shared.resolution(for: requestId),
-            onAnswer: { choiceId in
+            onAnswer: { [weak self] choiceId in
                 AppStore.shared.answerDecision(requestId: requestId, choiceId: choiceId)
+                // Answered on this window: every other window's sheet for the
+                // same request is now moot — close them WITHOUT answering.
+                self?.dismissSiblings(of: requestId, answeredOn: windowKey)
             }
         )
-        presentedSheets[requestId] = sheet
-        presentingWindow[requestId] = window
+        presented[requestId, default: [:]][windowKey] = Presented(window: window, sheet: sheet)
 
-        // Identity-guarded: if this sheet has already been superseded (its
-        // request retargeted to another window, or resolved elsewhere) by
-        // the time this completion actually fires, `presentedSheets` will
-        // either be empty for this id or hold a DIFFERENT (newer) sheet —
-        // either way, this stale completion must not tear down live state.
+        // Identity-guarded: a stale completion (this sheet was superseded or
+        // retargeted before it fired) must not tear down a newer sheet's state.
         window.beginSheet(sheet.window!) { [weak self, weak sheet] _ in
-            guard let self, let sheet, self.presentedSheets[requestId] === sheet else { return }
-            self.finishPresenting(requestId: requestId)
+            guard let self, let sheet,
+                  self.presented[requestId]?[windowKey]?.sheet === sheet else { return }
+            self.sheetEnded(requestId: requestId, windowKey: windowKey)
+        }
+    }
+
+    /// Close every sheet for `requestId` except the one on `answeredOn`, without
+    /// answering. Each close fires that sheet's own completion handler, which
+    /// removes it via `sheetEnded`.
+    private func dismissSiblings(of requestId: String, answeredOn: ObjectIdentifier) {
+        guard let sheets = presented[requestId] else { return }
+        let siblings = sheets.filter { $0.key != answeredOn }
+        log.info("decision \(requestId, privacy: .public) answered; closing \(siblings.count, privacy: .public) sibling sheet(s)")
+        for entry in siblings.values {
+            entry.sheet.closeWithoutAnswering(reason: .supersededElsewhere)
+        }
+    }
+
+    /// One window's sheet for `requestId` ended (answered, dismissed, or
+    /// closed by us). When the last one is gone the request is done here.
+    private func sheetEnded(requestId: String, windowKey: ObjectIdentifier) {
+        presented[requestId]?.removeValue(forKey: windowKey)
+        if presented[requestId]?.isEmpty ?? true {
+            finishPresenting(requestId: requestId)
         }
     }
 
     /// A `ServerMsg::DecisionResolved` notice arrived — this request is done,
     /// however it happened (answered elsewhere, dismissed elsewhere, timed
-    /// out, or its owning session went away). Record the resolution locally
-    /// (so a late `decision_request` replay for the same id can never
-    /// reconstruct an armed sheet — RC4/D5) and, if this presenter currently
-    /// has a live sheet up for it, close it WITHOUT answering — this must
-    /// never itself send a `decision_answer`.
+    /// out, or its owning session went away). Record the resolution locally (so
+    /// a late `decision_request` replay for the same id can never reconstruct an
+    /// armed sheet — RC4/D5) and close EVERY sheet for it WITHOUT answering —
+    /// this must never itself send a `decision_answer`.
     private func handleResolved(_ resolved: ResolvedDecision) {
         let requestId = resolved.requestId
 
@@ -146,39 +201,51 @@ final class DecisionPresenter {
         }()
         _ = DecisionStore.shared.claimAnswer(requestId: requestId, record: record)
 
-        guard presentedSheets[requestId] != nil else { return }
-        presentedSheets[requestId]?.closeWithoutAnswering(reason: .supersededElsewhere)
+        guard let sheets = presented[requestId] else { return }
+        for entry in sheets.values {
+            entry.sheet.closeWithoutAnswering(reason: .supersededElsewhere)
+        }
         finishPresenting(requestId: requestId)
     }
 
-    /// The presenting window for one or more outstanding requests is about
-    /// to close (e.g. its display was disconnected). Each such sheet is
-    /// closed WITHOUT answering — a closing window must never be allowed to
-    /// answer Dismissed on the operator's behalf — and, if a surviving
-    /// window exists, immediately re-presented there so the request stays
-    /// live for the operator. If none survives, the request is left
-    /// outstanding for the daemon's own timeout.
+    /// A window is about to close (e.g. its display was disconnected). Its
+    /// sheet for each outstanding request is closed WITHOUT answering — a
+    /// closing window must never answer Dismissed on the operator's behalf.
+    /// Other windows keep their sheets, so nothing else needs doing; if THIS
+    /// was the last window showing the request, re-present it on a survivor so
+    /// it stays live for the operator (or, with none left, leave it for the
+    /// daemon's own timeout).
     @objc private func windowWillClose(_ notification: Notification) {
         guard let closingWindow = notification.object as? NostromoWindow else { return }
-        let affected = presentingWindow.filter { $0.value === closingWindow }.map(\.key)
-        guard !affected.isEmpty else { return }
+        let windowKey = ObjectIdentifier(closingWindow)
 
-        for requestId in affected {
-            guard presentedSheets[requestId] != nil else { continue }
-            let decision = activeDecisions[requestId]
-            presentedSheets[requestId]?.closeWithoutAnswering(reason: .retargeting)
-            finishPresenting(requestId: requestId)
-            if let decision {
-                present(decision, excludingWindow: closingWindow)
+        for requestId in Array(presented.keys) {
+            guard let entry = presented[requestId]?[windowKey] else { continue }
+            entry.sheet.closeWithoutAnswering(reason: .retargeting)
+            presented[requestId]?.removeValue(forKey: windowKey)
+
+            if presented[requestId]?.isEmpty ?? true {
+                let decision = activeDecisions[requestId]
+                finishPresenting(requestId: requestId)
+                if let decision {
+                    present(decision, excludingWindow: closingWindow)
+                }
             }
+        }
+    }
+
+    @objc private func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NostromoWindow else { return }
+        for (requestId, decision) in activeDecisions
+        where DecisionStore.shared.resolution(for: requestId) == nil {
+            attachSheet(for: decision, to: window)
         }
     }
 
     // MARK: - Private
 
     private func finishPresenting(requestId: String) {
-        presentedSheets.removeValue(forKey: requestId)
-        presentingWindow.removeValue(forKey: requestId)
+        presented.removeValue(forKey: requestId)
         activeDecisions.removeValue(forKey: requestId)
         DecisionStore.shared.releasePresentation(requestId: requestId)
     }
@@ -187,9 +254,11 @@ final class DecisionPresenter {
         (window.contentView as? MainLayout)?.focusSession(tag: tag)
     }
 
-    private func targetWindow(excluding excluded: NostromoWindow? = nil) -> NostromoWindow? {
-        if let key = NSApp.keyWindow as? NostromoWindow, key !== excluded { return key }
-        if let main = NSApp.mainWindow as? NostromoWindow, main !== excluded { return main }
-        return NSApp.windows.compactMap { $0 as? NostromoWindow }.first { $0.isVisible && $0 !== excluded }
+    /// Every Nostromo window, key window first. Not filtered by visibility or
+    /// Space: a window on a Space the operator isn't looking at can't strand the
+    /// request any more, because the sheet is on the others too.
+    private func targetWindows(excluding excluded: NostromoWindow? = nil) -> [NostromoWindow] {
+        let all = NSApp.windows.compactMap { $0 as? NostromoWindow }.filter { $0 !== excluded }
+        return all.sorted { lhs, _ in lhs === NSApp.keyWindow }
     }
 }
