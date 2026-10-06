@@ -3,7 +3,7 @@
 
 The socket is opt-in (it can click anything in the app). Enable it with
 
-    defaults write com.hammer.nostromo.mac AppControlEnabled -bool true
+    defaults write com.hammer.nostromo AppControlEnabled -bool true
 
 (or launch with NOSTROMO_APP_CONTROL=1) and relaunch the app. Coordinates are
 window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
@@ -48,6 +48,7 @@ def call(req):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-w", "--window", type=int, default=0)
+    p.add_argument("--sheet", action="store_true", help="target the sheet attached to the window")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ping"); sub.add_parser("windows")
     t = sub.add_parser("tree"); t.add_argument("--depth", type=int, default=12)
@@ -65,6 +66,7 @@ def main():
     a = p.parse_args()
 
     r = {"cmd": a.cmd, "window": a.window}
+    if a.sheet: r["sheet"] = True
     mods = [m for m in getattr(a, "mod", "").split(",") if m]
     if a.cmd == "tree": r["depth"] = a.depth
     elif a.cmd == "find": r["text"] = a.text

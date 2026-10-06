@@ -11,7 +11,7 @@ private let ctlLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "App
 /// `NOSTROMO_APP_CONTROL=1` is in the environment or the `AppControlEnabled`
 /// default is true:
 ///
-///     defaults write com.hammer.nostromo.mac AppControlEnabled -bool true
+///     defaults write com.hammer.nostromo AppControlEnabled -bool true
 ///
 /// The socket lives at `~/.nostromo/app-control.sock`, mode 0600 (owner only).
 /// Events are *synthesised and sent through `NSWindow.sendEvent`*, so they take
@@ -140,6 +140,12 @@ final class AppControlServer {
         guard let wins = appDelegate?.windows, wins.indices.contains(i) else {
             throw AppControlError.noSuchWindow(i)
         }
+        // `"sheet": true` targets the sheet attached to that window (New Focus,
+        // decision prompts…), which is a separate NSWindow.
+        if (req.args["sheet"] as? Bool) == true {
+            guard let sheet = wins[i].attachedSheet else { throw AppControlError.notFound("window \(i) has no sheet") }
+            return sheet
+        }
         return wins[i]
     }
 
@@ -151,6 +157,7 @@ final class AppControlServer {
              "frame": ["x": w.frame.minX, "y": w.frame.minY, "w": w.frame.width, "h": w.frame.height],
              "fullscreen": w.styleMask.contains(.fullScreen),
              "key": w.isKeyWindow,
+             "sheet": w.attachedSheet.map { $0.title.isEmpty ? String(describing: type(of: $0)) : $0.title } as Any,
              "firstResponder": w.firstResponder.map { String(describing: type(of: $0)) } ?? "none"]
         }
     }

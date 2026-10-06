@@ -8,11 +8,11 @@ a script or an agent instead of a human watching the screen.
 
 The socket can click anything in the app, so it is **opt-in**:
 
-    defaults write com.hammer.nostromo.mac AppControlEnabled -bool true   # then relaunch
+    defaults write com.hammer.nostromo AppControlEnabled -bool true   # then relaunch
     # or, for one launch:  open --env NOSTROMO_APP_CONTROL=1 /Applications/Nostromo.app
 
 It listens at `~/.nostromo/app-control.sock` (mode 0600, owner only). Turn it
-off with `defaults delete com.hammer.nostromo.mac AppControlEnabled`.
+off with `defaults delete com.hammer.nostromo AppControlEnabled`.
 
 ## Why events go through `sendEvent`
 
