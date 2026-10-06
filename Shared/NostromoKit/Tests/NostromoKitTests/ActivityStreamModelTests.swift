@@ -156,7 +156,7 @@ final class ActivityStreamModelTests: XCTestCase {
             for: ActivityHealthState(ingesting: false, reason: nil, hookInstalled: false))
         let lower = text.lowercased()
         XCTAssertTrue(lower.contains("doctor") || lower.contains("install"),
-                      "must name a concrete fix: installing the hook or `nostromo doctor`")
+                      "must name a concrete fix: installing the hook or `bin/nostromo-doctor`")
     }
 
     func testHealthTextNamesADifferentFixWhenHookIsInstalledButNothingHasArrived() {

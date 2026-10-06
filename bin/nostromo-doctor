@@ -1243,7 +1243,7 @@ def check_activity_hook(ctx):
         detail = "missing for: {}".format(", ".join(missing))
     return CheckResult(
         name, STATUS_WARN, detail,
-        "ambient activity events won't appear until the hook is installed — run `nostromo doctor --fix`",
+        "ambient activity events won't appear until the hook is installed — run `bin/nostromo-doctor --fix`",
     )
 
 
