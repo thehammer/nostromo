@@ -473,6 +473,23 @@ impl SessionManager {
         self.activity_store.ingest(event, attribution)
     }
 
+    /// [`Self::ingest_activity_event`], additionally reporting whether this
+    /// event is the one that flipped ingestion health from "never saw an
+    /// event" to "ingesting". The daemon broadcasts a fresh `ActivityHealth`
+    /// on exactly that transition: health is otherwise only sent in a
+    /// client's attach-time replay, so a long-lived GUI connection kept
+    /// showing "install the hook" long after the hook was installed and
+    /// events were flowing (live QA, 2026-10-06).
+    pub fn ingest_activity_event_reporting(
+        &mut self,
+        event: crate::agent_bus::ActivityEvent,
+    ) -> (crate::agent_bus::ActivityEvent, bool) {
+        let was_ingesting = self.activity_store.health().ingesting;
+        let finalized = self.ingest_activity_event(event);
+        let became_ingesting = !was_ingesting && self.activity_store.health().ingesting;
+        (finalized, became_ingesting)
+    }
+
     /// Every activity stream (main + subagent) known for `tag`.
     pub fn activity_streams_for_focus(
         &self,
@@ -2462,6 +2479,27 @@ mod tests {
         // Never silently dropped, and never assigned to an arbitrary focus.
         assert!(mgr.activity_streams_for_focus("mother").is_empty());
         assert!(mgr.activity_health().ingesting);
+    }
+
+    #[test]
+    fn the_first_ingested_event_reports_that_ingestion_just_began() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        assert!(!mgr.activity_health().ingesting);
+
+        let (_, became) = mgr.ingest_activity_event_reporting(raw_activity_event(Some("fred"), None));
+
+        assert!(became, "the event that flips health from quiet to ingesting must say so");
+        assert!(mgr.activity_health().ingesting);
+    }
+
+    #[test]
+    fn later_events_do_not_report_a_transition_again() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.ingest_activity_event_reporting(raw_activity_event(Some("fred"), None));
+
+        let (_, became) = mgr.ingest_activity_event_reporting(raw_activity_event(Some("fred"), None));
+
+        assert!(!became, "only the first event is a transition; the rest must not re-broadcast health");
     }
 
     // ── manager mechanics with a stub child ───────────────────────────────────
