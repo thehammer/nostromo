@@ -696,8 +696,8 @@ fn resolve_perri_targets(reg: &PaneRegistry, tag: &str) -> PerriTargets {
 ///   to `SOURCE_CURRENT_PR`. There is honestly nowhere for the summary to go
 ///   (Q2, unanswered here), so the correct behavior is silence: return no
 ///   targets, and `load_pr_daemon` pushes nothing and warns nothing.
-/// - The focus has *no* PR-content pane of any kind (`pr` is also empty) — a
-///   bare/pre-layout focus, not a deliberately curated one. Falling back to
+/// - The focus has *no* PR-content pane of any kind (`pr` is also empty) AND no
+///   queue pane — a bare/pre-layout focus, not a deliberately curated one. Falling back to
 ///   the legacy canonical `"diff"` name here preserves the existing
 ///   `unknown_pane` warning for a genuinely broken caller instead of going
 ///   silent on it too.
@@ -705,7 +705,12 @@ fn load_pr_targets(reg: &PaneRegistry, tag: &str) -> Vec<String> {
     let targets = resolve_perri_targets(reg, tag);
     if !targets.current_pr.is_empty() {
         targets.current_pr
-    } else if targets.pr.is_empty() {
+    } else if targets.pr.is_empty() && targets.queue.is_empty() {
+        // A focus with neither PR panes NOR a queue pane is bare/pre-layout:
+        // keep the legacy `"diff"` fallback so a genuinely broken caller still
+        // gets its `unknown_pane` warning. A queue pane means a curated layout
+        // that simply hasn't built its PR tabs yet (`load_pr` precedes
+        // `nostromo.show` in the prescribed flow) — silence, not a warning.
         vec!["diff".to_string()]
     } else {
         Vec::new()
@@ -1624,6 +1629,48 @@ mod tests {
                 .unwrap()
                 .exists(),
             "state mutation must still happen even when the pane is missing"
+        );
+    }
+
+    /// Live QA, 2026-10-06: the prescribed curated flow is `perri.load_pr`
+    /// FIRST, then `nostromo.show` for the conversation/diff tabs. At the
+    /// moment of `load_pr` a curated focus has its queue pane but no PR panes
+    /// yet — which used to match the "bare/pre-layout focus" fallback and
+    /// warn `unknown_pane` for the legacy `"diff"` id on EVERY pickup.
+    #[tokio::test]
+    async fn load_pr_on_a_curated_focus_that_has_a_queue_but_no_pr_panes_yet_is_silent() {
+        let (state, tmp, _bcast) = make_curated_daemon_state().await;
+        // Queue + repl only: exactly the layout between `show review_queue`
+        // and the first `show pr_conversation`.
+        {
+            let reg = state.daemon.as_ref().unwrap().pane_registry.clone();
+            let mut reg = reg.lock().unwrap();
+            reg.set_layout(
+                "perri",
+                &json!({ "tree": PaneTree::Split {
+                    direction: SplitDirection::Horizontal,
+                    children: vec![
+                        PaneTree::Leaf { pane_id: "queue".into() },
+                        PaneTree::Leaf { pane_id: "repl".into() },
+                    ],
+                    ratios: vec![0.6, 0.4],
+                }}),
+            )
+            .unwrap();
+        }
+
+        let args = json!({ "number": 42, "repo": "acme/web" });
+        let result = load_pr(&state, &args, Some("perri")).await;
+
+        assert_eq!(result["ok"], true);
+        assert!(
+            !has_unknown_pane_warning(&result),
+            "a curated focus mid-pickup (queue present, PR panes not built yet) must not warn: {result}"
+        );
+        assert_eq!(result["pane_ids"], json!([]));
+        assert!(
+            perri_current_pr::pin_path(&tmp.path().join("perri-state"), "perri").unwrap().exists(),
+            "the pin must still be written"
         );
     }
 
