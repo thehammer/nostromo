@@ -88,6 +88,9 @@ pub enum PaneError {
     /// A supplied layout payload was structurally invalid (bad tree, missing or
     /// duplicated repl, mismatched ratios, …).
     InvalidLayout,
+    /// The pane exists but may not be closed: the review queue and the REPL are
+    /// never closable, and neither is anything that isn't a tab.
+    NotClosable,
 }
 
 impl PaneError {
@@ -99,6 +102,7 @@ impl PaneError {
             PaneError::DuplicatePane => "duplicate_pane",
             PaneError::InvalidPosition => "invalid_position",
             PaneError::InvalidLayout => "invalid_layout",
+            PaneError::NotClosable => "not_closable",
         }
     }
 }
@@ -321,6 +325,31 @@ impl PaneRegistry {
         if removed {
             self.persist();
         }
+    }
+
+    /// Close the tab `pane_id` in `tag`'s layout (the tab's × button) and return
+    /// the new tree for broadcast.
+    ///
+    /// Never closable: the REPL, the review queue (by id `queue` or by its
+    /// `perri.list_pr_queue` binding — the queue is the one view that belongs to
+    /// no PR and must always be reachable), and anything that isn't a tab. Goes
+    /// through [`Self::set_layout`], so the registry's own invariants apply and
+    /// the closed pane's binding is pruned with it.
+    pub fn close_tab(&mut self, tag: &str, pane_id: &str) -> Result<PaneTree, PaneError> {
+        let tree = self.trees.get(tag).cloned().ok_or(PaneError::UnknownView)?;
+        if !tree.pane_ids().iter().any(|p| p == pane_id) {
+            return Err(PaneError::UnknownPane);
+        }
+        let is_queue = pane_id == "queue"
+            || self.source_for(tag, pane_id) == Some(crate::mcp::tools::apply_layout::SOURCE_PR_QUEUE);
+        if pane_id == "repl" || is_queue {
+            return Err(PaneError::NotClosable);
+        }
+        let mut new_tree = tree;
+        if !new_tree.remove_tab(pane_id) {
+            return Err(PaneError::NotClosable);
+        }
+        self.set_layout(tag, &serde_json::json!({ "tree": new_tree }))
     }
 
     /// The source bound to `pane_id` within `tag`, if any.
@@ -2494,5 +2523,84 @@ mod tests {
         let reports = reg.rendered_shapes_for_tag("perri");
         assert_eq!(reports.len(), 1, "the reconnect's fresher report must survive");
         assert_eq!(reports[0].1.pane_ids, vec!["repl", "queue"]);
+    }
+
+    // ── close_tab (the tab × button) ──────────────────────────────────────────
+
+    /// queue | detail-tabs over repl, bound the way a curated Perri focus is.
+    fn curated_registry(detail: &[&str]) -> PaneRegistry {
+        let mut reg = PaneRegistry::in_memory();
+        reg.get_or_init("perri");
+        let tabs = PaneTree::Tabs {
+            children: detail.iter().map(|d| PaneTree::Leaf { pane_id: (*d).into() }).collect(),
+            labels: detail.iter().map(|d| (*d).to_string()).collect(),
+            active: 0,
+            region: Some("detail".into()),
+        };
+        let tree = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Split {
+                    direction: SplitDirection::Horizontal,
+                    children: vec![PaneTree::Leaf { pane_id: "queue".into() }, tabs],
+                    ratios: vec![0.5, 0.5],
+                },
+                PaneTree::Leaf { pane_id: "repl".into() },
+            ],
+            ratios: vec![0.6, 0.4],
+        };
+        reg.set_layout("perri", &serde_json::json!({ "tree": tree })).unwrap();
+        reg.bind_source("perri", "queue", crate::mcp::tools::apply_layout::SOURCE_PR_QUEUE);
+        for d in detail {
+            reg.bind_source("perri", d, crate::mcp::tools::apply_layout::SOURCE_PR_DIFF);
+        }
+        reg
+    }
+
+    #[test]
+    fn close_tab_removes_a_detail_tab_and_prunes_its_binding() {
+        let mut reg = curated_registry(&["detail.0", "detail.1"]);
+
+        let tree = reg.close_tab("perri", "detail.1").unwrap();
+
+        assert!(!tree.pane_ids().contains(&"detail.1".to_string()));
+        assert!(tree.pane_ids().contains(&"detail.0".to_string()));
+        assert_eq!(reg.source_for("perri", "detail.1"), None, "the closed pane's binding must go with it");
+        assert!(reg.source_for("perri", "detail.0").is_some(), "its sibling's binding must stay");
+    }
+
+    #[test]
+    fn closing_the_last_detail_tab_removes_the_region_but_keeps_the_queue_and_repl() {
+        let mut reg = curated_registry(&["detail.0"]);
+
+        let tree = reg.close_tab("perri", "detail.0").unwrap();
+
+        assert_eq!(tree.pane_ids(), vec!["queue".to_string(), "repl".to_string()]);
+    }
+
+    #[test]
+    fn the_repl_and_the_queue_are_never_closable() {
+        let mut reg = curated_registry(&["detail.0"]);
+        let before = reg.get("perri").cloned().unwrap();
+
+        assert_eq!(reg.close_tab("perri", "repl"), Err(PaneError::NotClosable));
+        assert_eq!(reg.close_tab("perri", "queue"), Err(PaneError::NotClosable));
+        assert_eq!(reg.get("perri").cloned().unwrap(), before, "a refused close must change nothing");
+    }
+
+    #[test]
+    fn a_pane_bound_to_the_queue_source_is_not_closable_even_under_another_id() {
+        // The queue as a TAB (a later change) won't necessarily be called "queue".
+        let mut reg = curated_registry(&["detail.0", "detail.1"]);
+        reg.bind_source("perri", "detail.1", crate::mcp::tools::apply_layout::SOURCE_PR_QUEUE);
+
+        assert_eq!(reg.close_tab("perri", "detail.1"), Err(PaneError::NotClosable));
+    }
+
+    #[test]
+    fn closing_in_an_unknown_focus_or_an_unknown_pane_is_refused() {
+        let mut reg = curated_registry(&["detail.0"]);
+        assert_eq!(reg.close_tab("nobody", "detail.0"), Err(PaneError::UnknownView));
+        assert_eq!(reg.close_tab("perri", "detail.9"), Err(PaneError::UnknownPane));
     }
 }

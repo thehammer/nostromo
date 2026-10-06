@@ -112,6 +112,16 @@ struct ClientSessionDetach: Encodable {
     enum CodingKeys: String, CodingKey { case type_ = "type", tag }
 }
 
+/// Close one tab (the tab's × button). The daemon refuses the review queue and
+/// the REPL, and answers every client with the new layout.
+public struct ClientClosePane: Encodable {
+    let type_ = "close_pane"
+    public let tag: String
+    public let paneId: String
+    public init(tag: String, paneId: String) { self.tag = tag; self.paneId = paneId }
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, paneId = "pane_id" }
+}
+
 /// Interrupt the turn a session is running (the Stop button) without killing the
 /// session. Distinct from `ClientSessionControl`'s `"stop"`, which does kill it.
 public struct ClientSessionInterrupt: Encodable {

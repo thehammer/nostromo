@@ -552,6 +552,7 @@ final class DynamicFocusView: NSView {
     ) -> NSView {
         let (tabs, activePaneId) = buildTabs(children: children, labels: labels, active: active, tag: tag, path: path, reusing: previous)
         let region = TabRegionView(tabs: tabs, activePaneId: activePaneId)
+        wireTabClose(region)
         registerTabRegion(region, tabs: tabs, at: path)
         return region
     }
@@ -584,6 +585,15 @@ final class DynamicFocusView: NSView {
     /// Record `region`'s path and every one of its tabs' pane ids in the two
     /// lookup tables `applyFocusedPaneHint`/`updateContent` consult — shared
     /// by `makeTabsView` and `applyTabMembership`.
+    /// A tab's × asks the daemon to close that pane; the tab goes when the new
+    /// layout arrives (the daemon owns which tabs exist).
+    private func wireTabClose(_ region: TabRegionView) {
+        region.onCloseTab = { [weak self] paneId in
+            guard let self else { return }
+            AppStore.shared.client.closePane(tag: self.focus.sessionTag, paneId: paneId)
+        }
+    }
+
     private func registerTabRegion(_ region: TabRegionView, tabs: [TabRegionView.Tab], at path: String) {
         tabRegionsByPath[path] = region
         for tab in tabs {
@@ -642,6 +652,7 @@ final class DynamicFocusView: NSView {
                 let previousLeafViews = leafViews
                 let (tabs, activePaneId) = buildTabs(children: children, labels: labels, active: active, tag: focus.sessionTag, path: path, reusing: previousLeafViews)
                 let newRegion = TabRegionView(tabs: tabs, activePaneId: activePaneId)
+                wireTabClose(newRegion)
 
                 // `registerTabRegion` must never run for a swap that didn't
                 // actually land — that's exactly how a `TabRegionView`

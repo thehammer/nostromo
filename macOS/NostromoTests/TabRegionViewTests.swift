@@ -198,6 +198,20 @@ final class TabRegionViewCaptionGeometryTests: XCTestCase {
         )
     }
 
+    // MARK: - Which tabs get a close button
+
+    func testTheQueueAndTheReplAreNeverClosable() {
+        XCTAssertFalse(TabRegionView.isClosable(paneId: "queue"),
+                       "the queue belongs to no PR and must always be reachable")
+        XCTAssertFalse(TabRegionView.isClosable(paneId: "repl"))
+    }
+
+    func testReviewAndFileAndTicketTabsAreClosable() {
+        for id in ["detail.0", "detail.1", "detail.7"] {
+            XCTAssertTrue(TabRegionView.isClosable(paneId: id), "\(id)")
+        }
+    }
+
     // MARK: - Contrast (live QA 2026-10-06: the selected tab's caption was 1.15:1)
 
     private func relativeLuminance(_ color: NSColor) -> Double {

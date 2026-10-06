@@ -326,6 +326,89 @@ impl PaneTree {
             }
         }
     }
+
+    /// Close the tab `pane_id`: remove it from the tabs node that holds it.
+    /// Returns `false` — and changes nothing — when `pane_id` is not a tab (a
+    /// plain leaf such as `repl`, or an unknown id), or when it is the ONLY tab
+    /// of a tabs node that is the whole tree (there would be nothing left to
+    /// show).
+    ///
+    /// Keeps the node valid: `labels` stay parallel to `children`; `active`
+    /// keeps pointing at the same tab when a tab before it closes, moves to the
+    /// tab that slides into place (the next one, else the previous) when the
+    /// ACTIVE tab closes, and is untouched when a later tab closes. Closing a
+    /// tabs node's last tab removes the whole node, and a split left with one
+    /// child collapses into it (the registry's `children.len() >= 2` invariant),
+    /// with the remaining ratios renormalised.
+    pub fn remove_tab(&mut self, pane_id: &str) -> bool {
+        matches!(self.remove_tab_inner(pane_id), TabRemoval::Removed)
+    }
+
+    fn remove_tab_inner(&mut self, pane_id: &str) -> TabRemoval {
+        match self {
+            PaneTree::Tabs {
+                children,
+                labels,
+                active,
+                ..
+            } => {
+                let Some(index) = children
+                    .iter()
+                    .position(|c| matches!(c, PaneTree::Leaf { pane_id: p } if p == pane_id))
+                else {
+                    return TabRemoval::NotFound;
+                };
+                if children.len() == 1 {
+                    return TabRemoval::NodeEmptied;
+                }
+                children.remove(index);
+                if index < labels.len() {
+                    labels.remove(index);
+                }
+                if index < *active {
+                    *active -= 1;
+                } else if index == *active {
+                    *active = (*active).min(children.len() - 1);
+                }
+                TabRemoval::Removed
+            }
+            PaneTree::Split {
+                children, ratios, ..
+            } => {
+                for i in 0..children.len() {
+                    match children[i].remove_tab_inner(pane_id) {
+                        TabRemoval::NotFound => continue,
+                        TabRemoval::Removed => return TabRemoval::Removed,
+                        TabRemoval::NodeEmptied => {
+                            children.remove(i);
+                            if i < ratios.len() {
+                                ratios.remove(i);
+                            }
+                            let sum: f32 = ratios.iter().sum();
+                            if sum > 0.0 {
+                                ratios.iter_mut().for_each(|r| *r /= sum);
+                            }
+                            if children.len() == 1 {
+                                let only = children.remove(0);
+                                *self = only;
+                            }
+                            return TabRemoval::Removed;
+                        }
+                    }
+                }
+                TabRemoval::NotFound
+            }
+            PaneTree::Leaf { .. } => TabRemoval::NotFound,
+        }
+    }
+}
+
+/// What [`PaneTree::remove_tab_inner`] found.
+enum TabRemoval {
+    NotFound,
+    Removed,
+    /// The pane was the last tab of its tabs node: the parent removes the node.
+    NodeEmptied,
 }
 
 /// One item in a `pr_list` pane payload.
@@ -899,6 +982,14 @@ pub enum ClientMsg {
         images: Vec<String>,
     },
 
+    /// Close the tab `pane_id` in focus `tag` (the tab's × button). Refused for
+    /// the review queue and the REPL, which are never closable; see
+    /// `PaneRegistry::close_tab`.
+    ClosePane {
+        tag: String,
+        pane_id: String,
+    },
+
     /// Interrupt the turn the session is running right now (the Stop button),
     /// leaving the session itself alive and ready for the next message. Distinct
     /// from [`ClientMsg::SessionControl`]'s `Stop`, which kills the session. A
@@ -1395,6 +1486,7 @@ mod tests {
         round_trip_client(ClientMsg::SessionAttach { tag: "fred".into() });
         round_trip_client(ClientMsg::SessionDetach { tag: "fred".into() });
         round_trip_client(ClientMsg::SessionInterrupt { tag: "fred".into() });
+        round_trip_client(ClientMsg::ClosePane { tag: "perri".into(), pane_id: "detail.1".into() });
         round_trip_client(ClientMsg::SessionSend {
             tag: "fred".into(),
             text: "hello".into(),
@@ -3506,5 +3598,114 @@ mod tests {
         assert_eq!(json["assignee"], "Alice");
         let back: PaneContentWire = serde_json::from_value(json).unwrap();
         assert_eq!(back, content);
+    }
+
+    // ── PaneTree::remove_tab (the tab × button) ───────────────────────────────
+
+    fn leaf(id: &str) -> PaneTree {
+        PaneTree::Leaf { pane_id: id.into() }
+    }
+
+    fn tabs(ids: &[&str], active: usize) -> PaneTree {
+        PaneTree::Tabs {
+            children: ids.iter().map(|i| leaf(i)).collect(),
+            labels: ids.iter().map(|i| i.to_string()).collect(),
+            active,
+            region: Some("detail".into()),
+        }
+    }
+
+    /// queue | detail-tabs over repl — the shape a curated Perri focus has.
+    fn curated(detail: &[&str], active: usize) -> PaneTree {
+        PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Split {
+                    direction: SplitDirection::Horizontal,
+                    children: vec![leaf("queue"), tabs(detail, active)],
+                    ratios: vec![0.5, 0.5],
+                },
+                leaf("repl"),
+            ],
+            ratios: vec![0.6, 0.4],
+        }
+    }
+
+    fn only_tabs(tree: &PaneTree) -> (&Vec<PaneTree>, &Vec<String>, usize) {
+        match tree {
+            PaneTree::Tabs { children, labels, active, .. } => (children, labels, *active),
+            PaneTree::Split { children, .. } => children.iter().find_map(|c| {
+                if let PaneTree::Tabs { .. } | PaneTree::Split { .. } = c { Some(only_tabs(c)) } else { None }
+            }).expect("a tabs node"),
+            PaneTree::Leaf { .. } => panic!("no tabs node"),
+        }
+    }
+
+    #[test]
+    fn closing_a_tab_before_the_active_one_keeps_the_same_tab_active() {
+        let mut t = curated(&["detail.0", "detail.1", "detail.2"], 2);
+        assert!(t.remove_tab("detail.0"));
+        let (children, labels, active) = only_tabs(&t);
+        assert_eq!(labels, &vec!["detail.1".to_string(), "detail.2".to_string()]);
+        assert_eq!(children.len(), 2);
+        assert_eq!(active, 1, "detail.2 is now at index 1 and must still be the active tab");
+    }
+
+    #[test]
+    fn closing_the_active_tab_activates_the_one_that_slides_into_place() {
+        let mut t = curated(&["detail.0", "detail.1", "detail.2"], 1);
+        assert!(t.remove_tab("detail.1"));
+        let (_, labels, active) = only_tabs(&t);
+        assert_eq!(labels[active], "detail.2", "the next tab takes over");
+    }
+
+    #[test]
+    fn closing_the_active_last_tab_activates_the_previous_one() {
+        let mut t = curated(&["detail.0", "detail.1"], 1);
+        assert!(t.remove_tab("detail.1"));
+        let (_, labels, active) = only_tabs(&t);
+        assert_eq!(labels[active], "detail.0");
+    }
+
+    #[test]
+    fn closing_a_tab_after_the_active_one_leaves_active_alone() {
+        let mut t = curated(&["detail.0", "detail.1", "detail.2"], 0);
+        assert!(t.remove_tab("detail.2"));
+        let (_, labels, active) = only_tabs(&t);
+        assert_eq!(labels[active], "detail.0");
+    }
+
+    #[test]
+    fn closing_the_last_tab_removes_the_region_and_collapses_the_split() {
+        let mut t = curated(&["detail.0"], 0);
+        assert!(t.remove_tab("detail.0"));
+        // queue | (gone) collapses to the bare queue leaf; the outer split keeps repl.
+        assert_eq!(t.pane_ids(), vec!["queue".to_string(), "repl".to_string()]);
+        match &t {
+            PaneTree::Split { children, ratios, .. } => {
+                assert_eq!(children.len(), 2);
+                assert_eq!(ratios.len(), 2);
+                assert!((ratios.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+            }
+            other => panic!("expected the outer split to survive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pane_that_is_not_a_tab_is_not_removed() {
+        let mut t = curated(&["detail.0", "detail.1"], 0);
+        let before = t.clone();
+        assert!(!t.remove_tab("repl"), "a plain leaf is not a tab");
+        assert!(!t.remove_tab("queue"), "a plain leaf is not a tab");
+        assert!(!t.remove_tab("nope"), "an unknown id is not a tab");
+        assert_eq!(t, before, "a refused removal must change nothing");
+    }
+
+    #[test]
+    fn the_only_tab_of_a_tabs_node_that_is_the_whole_tree_is_not_removed() {
+        let mut t = tabs(&["detail.0"], 0);
+        let before = t.clone();
+        assert!(!t.remove_tab("detail.0"));
+        assert_eq!(t, before);
     }
 }

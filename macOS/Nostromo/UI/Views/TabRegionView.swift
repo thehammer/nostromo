@@ -52,6 +52,20 @@ final class TabRegionView: NSView {
     /// dimmed, truncated caption under the tab's label.
     private var captions: [String: String] = [:]
 
+    /// Whether the operator can close the tab for `paneId` with its × button.
+    /// The review queue and the REPL never can: the queue belongs to no PR and
+    /// must always be reachable. The daemon enforces the same rule; this only
+    /// decides whether to draw the button, so an un-closable tab doesn't offer
+    /// a control that would be refused.
+    static func isClosable(paneId: String) -> Bool {
+        paneId != "queue" && paneId != "repl"
+    }
+
+    /// Called when the operator clicks a tab's ×. The owner asks the daemon to
+    /// close the pane; the tab disappears when the new layout arrives (the
+    /// daemon, not this view, owns which tabs exist).
+    var onCloseTab: ((String) -> Void)?
+
     private let stripStack = NSStackView()
     private let contentContainer = NSView()
     private var tabButtons: [String: TabButtonView] = [:]
@@ -99,6 +113,8 @@ final class TabRegionView: NSView {
             let button = TabButtonView(label: tab.label) { [weak self] in
                 self?.selectTab(tab.paneId)
             }
+            button.closable = Self.isClosable(paneId: tab.paneId)
+            button.onClose = { [weak self] in self?.onCloseTab?(tab.paneId) }
             tabButtons[tab.paneId] = button
             stripStack.addArrangedSubview(button)
             // `stripStack`'s cross-axis alignment defaults to `.centerY` — an
@@ -193,6 +209,14 @@ private final class TabButtonView: NSView {
     private let captionField = NSTextField(labelWithString: "")
     private let unreadDot = NSView()
     private let clickButton = NSButton()
+    private let closeButton = NSButton()
+
+    /// Set (before the view is laid out) by the owning region.
+    var closable = false {
+        didSet { closeButton.isHidden = !closable; unreadTrailing.constant = closable ? -26 : -6 }
+    }
+    var onClose: (() -> Void)?
+    private var unreadTrailing: NSLayoutConstraint!
 
     /// One-shot: logged after the first layout pass only, so opening a
     /// detail region with several tabs doesn't spam one line per button per
@@ -237,10 +261,25 @@ private final class TabButtonView: NSView {
         clickButton.action = #selector(didClick)
         clickButton.translatesAutoresizingMaskIntoConstraints = false
 
+        // The × — above the full-bleed click button so it gets its own clicks.
+        closeButton.isBordered = false
+        closeButton.attributedTitle = NSAttributedString(string: "✕", attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: Theme.fg.withAlphaComponent(0.75),
+        ])
+        closeButton.target = self
+        closeButton.action = #selector(didClose)
+        closeButton.toolTip = "Close tab"
+        closeButton.setAccessibilityLabel("Close tab")
+        closeButton.isHidden = true
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+
         addSubview(labelField)
         addSubview(captionField)
         addSubview(unreadDot)
         addSubview(clickButton)
+        addSubview(closeButton)
+        unreadTrailing = unreadDot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6)
 
         NSLayoutConstraint.activate([
             labelField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
@@ -250,10 +289,17 @@ private final class TabButtonView: NSView {
             captionField.topAnchor.constraint(equalTo: labelField.bottomAnchor),
             captionField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
 
-            unreadDot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            unreadTrailing,
             unreadDot.centerYAnchor.constraint(equalTo: topAnchor, constant: 8),
             unreadDot.widthAnchor.constraint(equalToConstant: 6),
             unreadDot.heightAnchor.constraint(equalToConstant: 6),
+
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            closeButton.centerYAnchor.constraint(equalTo: topAnchor, constant: 11),
+            closeButton.widthAnchor.constraint(equalToConstant: 18),
+            closeButton.heightAnchor.constraint(equalToConstant: 18),
+            // The label never runs under the × (or the unread dot beside it).
+            labelField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -28),
 
             clickButton.topAnchor.constraint(equalTo: topAnchor),
             clickButton.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -287,6 +333,11 @@ private final class TabButtonView: NSView {
             clickButton.frame=\(String(describing: self.clickButton.frame), privacy: .public) \
             captionField.frame=\(String(describing: self.captionField.frame), privacy: .public)
             """)
+    }
+
+    @objc private func didClose() {
+        log.debug("TabButtonView.didClose label=\(self.label, privacy: .public)")
+        onClose?()
     }
 
     @objc private func didClick() {
