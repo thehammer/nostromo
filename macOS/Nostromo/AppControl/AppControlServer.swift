@@ -42,6 +42,11 @@ final class AppControlServer {
         try? FileManager.default.createDirectory(
             atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         unlink(path)
+        // Owner-only from the instant the socket exists (chmod after bind leaves
+        // a window), and the parent directory too.
+        chmod((path as NSString).deletingLastPathComponent, 0o700)
+        let oldMask = umask(0o177)
+        defer { umask(oldMask) }
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { ctlLog.error("socket() failed errno=\(errno)"); return }
@@ -76,6 +81,12 @@ final class AppControlServer {
 
     private func serve(_ fd: Int32) {
         defer { close(fd) }
+        // Defence in depth beyond the 0600 file mode: only our own user may drive the app.
+        var uid: uid_t = 0, gid: gid_t = 0
+        guard getpeereid(fd, &uid, &gid) == 0, uid == geteuid() else {
+            ctlLog.error("rejected app-control connection from another uid")
+            return
+        }
         var buffer = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
         while true {
