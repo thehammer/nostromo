@@ -1169,7 +1169,31 @@ final class PaneContentNSView: NSView {
     /// Set by `DynamicFocusView.makeLeafView` right after construction — the
     /// focus tag (e.g. "perri", "mother") this pane belongs to, purely for
     /// the operator-facing diagnostics report.
-    var focusTag: String = ""
+    var focusTag: String = "" {
+        didSet { if focusTag != oldValue { followPin() } }
+    }
+
+    private var pinCancellable: AnyCancellable?
+
+    /// Keep `model.selectedPR` equal to the PR this pane's focus is reviewing
+    /// (its pin, from `perri_state`), so a `pr_list` here highlights the row
+    /// Perri is on — and clears when she finishes. Per-focus (the same
+    /// `perriDetailByTag` the sidebar label reads), so another focus's PR never
+    /// lights a row in this focus's queue. Uses the value the publisher
+    /// delivers, not a re-read of the property (an `@Published` sink runs
+    /// before its value is stored).
+    private func followPin() {
+        let tag = focusTag
+        guard !tag.isEmpty else { pinCancellable = nil; return }
+        pinCancellable = AppStore.shared.$perriDetailByTag
+            .map { details -> PRRef? in
+                guard let d = details[tag], let number = d.prNumber else { return nil }
+                return PRRef(repo: d.repo, number: number)
+            }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] ref in self?.model.selectedPR = ref }
+    }
 
     /// The line-addressable renderer for the `code`/`diff` kinds (W2 —
     /// curated-agent-views). A persistent sibling of the hosting view, shown
