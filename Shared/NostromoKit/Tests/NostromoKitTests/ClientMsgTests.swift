@@ -16,6 +16,37 @@ final class ClientMsgTests: XCTestCase {
         )
     }
 
+    // MARK: - session_interrupt (the Stop button)
+
+    func testSessionInterruptEncodesAsSessionInterruptNotControlStop() throws {
+        // Stop-the-turn is a different message from `session_control: stop`,
+        // which kills the whole session. Mixing them up would make the Stop
+        // button end the agent's session instead of just its current turn.
+        let dict = try encode(ClientSessionInterrupt(tag: "perri"))
+        XCTAssertEqual(dict["type"] as? String, "session_interrupt")
+        XCTAssertEqual(dict["tag"] as? String, "perri")
+        XCTAssertNil(dict["action"], "an interrupt carries no lifecycle action")
+    }
+
+    // MARK: - result_summary: the `interrupted` flag
+
+    private func decodeBlock(_ json: String) throws -> DaemonTurnBlock {
+        try JSONDecoder().decode(DaemonTurnBlock.self, from: Data(json.utf8))
+    }
+
+    func testAnInterruptedResultSummaryDecodesWithItsFlag() throws {
+        let block = try decodeBlock(#"{"kind":"result_summary","duration_ms":3200,"cost_usd":0.1,"is_error":true,"interrupted":true}"#)
+        guard case let .resultSummary(_, _, isError, interrupted) = block else { return XCTFail("\(block)") }
+        XCTAssertTrue(isError)
+        XCTAssertTrue(interrupted, "the daemon's flag must reach the client so it can render 'Interrupted', not a failure")
+    }
+
+    func testAResultSummaryFromAnOlderDaemonDefaultsToNotInterrupted() throws {
+        let block = try decodeBlock(#"{"kind":"result_summary","duration_ms":10,"cost_usd":0.0,"is_error":false}"#)
+        guard case let .resultSummary(_, _, _, interrupted) = block else { return XCTFail("\(block)") }
+        XCTAssertFalse(interrupted)
+    }
+
     // MARK: - session_control: stop
 
     func testSessionControlStop() throws {

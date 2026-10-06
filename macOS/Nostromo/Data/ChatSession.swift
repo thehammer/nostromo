@@ -204,6 +204,17 @@ class ChatSession: ObservableObject {
         log.info("ChatSession[\(self.tag, privacy: .public)] new_session requested — respawned")
     }
 
+    // MARK: - Interrupt
+
+    /// Interrupt the turn that is running right now (the Stop button). The daemon
+    /// stops the turn but keeps the session alive, and drops anything queued
+    /// behind it. `isRunning` is not touched here: the daemon's `SessionState`
+    /// reconciles it once the turn actually ends.
+    func interrupt() {
+        guard isRunning else { return }
+        client.sessionInterrupt(tag: tag)
+    }
+
     // MARK: - Send
 
     func send(_ text: String, images: [URL] = []) {
@@ -433,7 +444,8 @@ class ChatSession: ObservableObject {
                 turns[i].blocks.append(.resultSummary(ResultSummaryData(
                     durationMs: summary.durationMs,
                     costUSD:    summary.costUsd,
-                    isError:    summary.isError)))
+                    isError:    summary.isError,
+                    interrupted: summary.interrupted ?? false)))
                 turns[i].isComplete = true
                 changes.send(.updatedBlocks(index: i, addedCount: 1))
             }
@@ -598,8 +610,8 @@ class ChatSession: ObservableObject {
             return .toolCall(ToolCallData(toolName: name, inputSummary: summary, inputFull: full))
         case .toolResult(let content, let isError):
             return .toolResult(ToolResultData(content: content, isError: isError))
-        case .resultSummary(let d, let c, let e):
-            return .resultSummary(ResultSummaryData(durationMs: d, costUSD: c, isError: e))
+        case .resultSummary(let d, let c, let e, let i):
+            return .resultSummary(ResultSummaryData(durationMs: d, costUSD: c, isError: e, interrupted: i))
         case .errorMessage(let m):
             return .errorMessage(m)
         case .askQuestion(let q, let h, let opts, let multi):

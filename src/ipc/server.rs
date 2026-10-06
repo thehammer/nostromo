@@ -675,6 +675,16 @@ fn handle_client_msg(
             }
         }
 
+        ClientMsg::SessionInterrupt { tag } => {
+            let mut mgr = session_mgr.lock().unwrap();
+            if let Err(e) = mgr.interrupt(&tag) {
+                warn!(conn_key, %tag, "SessionInterrupt error: {e}");
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: format!("SessionInterrupt failed: {e}"),
+                });
+            }
+        }
+
         ClientMsg::SessionControl { tag, action } => {
             let mut mgr = session_mgr.lock().unwrap();
             match action {

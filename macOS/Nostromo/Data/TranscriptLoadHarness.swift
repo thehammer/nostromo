@@ -308,7 +308,7 @@ final class TranscriptLoadHarness {
 
         client.messages.send(.sessionTurnDelta(tag: tag, delta: .turnCompleted(
             turnId: id,
-            summary: DaemonResultSummary(durationMs: 1_200, costUsd: 0.004, isError: false),
+            summary: DaemonResultSummary(durationMs: 1_200, costUsd: 0.004, isError: false, interrupted: nil),
             contextTokens: 40_000)))
     }
 
@@ -354,7 +354,7 @@ final class TranscriptLoadHarness {
                        blocks: blocks, isComplete: true))
         client.messages.send(.sessionTurnDelta(tag: tag, delta: .turnCompleted(
             turnId: id,
-            summary: DaemonResultSummary(durationMs: 9_876, costUsd: 0.21, isError: false),
+            summary: DaemonResultSummary(durationMs: 9_876, costUsd: 0.21, isError: false, interrupted: nil),
             contextTokens: 90_000)))
         log.info("""
             load harness: delivered one big turn of \(blocks.count, privacy: .public) blocks \

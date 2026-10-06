@@ -266,6 +266,9 @@ struct ResultSummaryData {
     let durationMs: Int
     let costUSD:    Double
     let isError:    Bool
+    /// The operator pressed Stop. The CLI reports an interrupted turn as an error
+    /// result; this keeps it from rendering as a failure.
+    var interrupted: Bool = false
 }
 
 /// Structured question extracted from an `AskUserQuestion` tool_use block.

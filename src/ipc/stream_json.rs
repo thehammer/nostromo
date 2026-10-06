@@ -96,6 +96,11 @@ pub enum TurnBlock {
         duration_ms: u64,
         cost_usd: f64,
         is_error: bool,
+        /// The operator pressed Stop: the CLI reports an interrupted turn as an
+        /// error result (`error_during_execution`), which is not a failure the
+        /// operator should be alarmed by — clients render it as "Interrupted".
+        #[serde(default)]
+        interrupted: bool,
     },
     ErrorMessage {
         message: String,
@@ -139,6 +144,9 @@ pub struct ResultSummary {
     pub duration_ms: u64,
     pub cost_usd: f64,
     pub is_error: bool,
+    /// See [`TurnBlock::ResultSummary::interrupted`].
+    #[serde(default)]
+    pub interrupted: bool,
 }
 
 /// Live session lifecycle state, broadcast as `SessionState`.
@@ -258,6 +266,10 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
                 .get("is_error")
                 .and_then(|x| x.as_bool())
                 .unwrap_or(false),
+            // Only the daemon knows an interrupt was requested; the transcript
+            // sets this when it consumes the result (see
+            // `SessionTranscript::mark_interrupt_requested`).
+            interrupted: false,
         })),
 
         // rate_limit_event and any other type render nothing.
@@ -634,11 +646,23 @@ pub struct SessionTranscript {
     /// never cleared by trimming, so the session summary (derived from it)
     /// doesn't change or disappear once old turns fall out of `turns`.
     first_user_input: Option<String>,
+    /// The operator asked to interrupt the in-flight turn; the next `result`
+    /// is rendered as "Interrupted" and clears this.
+    interrupt_pending: bool,
 }
 
 impl SessionTranscript {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record that the operator pressed Stop, so the `result` that ends the
+    /// interrupted turn is flagged [`ResultSummary::interrupted`] — exactly
+    /// once. The CLI reports an interrupt as `error_during_execution`
+    /// (`is_error: true`); without this the transcript would show a red failure
+    /// for something the operator did on purpose.
+    pub fn mark_interrupt_requested(&mut self) {
+        self.interrupt_pending = true;
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -751,12 +775,17 @@ impl SessionTranscript {
             }
 
             ParsedLine::Result(summary) => {
+                let summary = ResultSummary {
+                    interrupted: std::mem::take(&mut self.interrupt_pending),
+                    ..summary
+                };
                 let deltas = if let Some(turn) = self.turns.last_mut() {
                     let turn_id = turn.id.clone();
                     let block = TurnBlock::ResultSummary {
                         duration_ms: summary.duration_ms,
                         cost_usd: summary.cost_usd,
                         is_error: summary.is_error,
+                        interrupted: summary.interrupted,
                     };
                     self.retained_bytes += block_bytes(&block);
                     turn.blocks.push(block);
@@ -1141,8 +1170,56 @@ mod tests {
                 duration_ms: 1234,
                 cost_usd: 0.05,
                 is_error: false,
+                interrupted: false,
             }))
         );
+    }
+
+    #[test]
+    fn a_result_after_an_interrupt_request_is_marked_interrupted_exactly_once() {
+        // The CLI ends an interrupted turn with an error result
+        // (`error_during_execution`). The operator did that on purpose, so it
+        // must be flagged, and ONLY that result: the next turn is a normal one.
+        let mut t = SessionTranscript::new();
+        t.mark_interrupt_requested();
+        ingest_all(&mut t, SIMPLE);
+        ingest_all(&mut t, SIMPLE);
+
+        let results: Vec<bool> = t
+            .snapshot()
+            .iter()
+            .flat_map(|turn| turn.blocks.iter())
+            .filter_map(|b| match b {
+                TurnBlock::ResultSummary { interrupted, .. } => Some(*interrupted),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, vec![true, false], "first result interrupted, the next not");
+    }
+
+    #[test]
+    fn a_result_without_an_interrupt_request_is_not_interrupted() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, SIMPLE);
+        assert!(t.snapshot().iter().flat_map(|turn| turn.blocks.iter()).all(|b| !matches!(
+            b,
+            TurnBlock::ResultSummary { interrupted: true, .. }
+        )));
+    }
+
+    #[test]
+    fn the_completion_delta_carries_the_interrupted_flag_too() {
+        let mut t = SessionTranscript::new();
+        t.mark_interrupt_requested();
+        let mut saw = None;
+        for line in SIMPLE.lines() {
+            for d in t.ingest_line(line) {
+                if let TurnDelta::TurnCompleted { summary, .. } = d {
+                    saw = Some(summary.interrupted);
+                }
+            }
+        }
+        assert_eq!(saw, Some(true), "live clients get the flag on TurnCompleted, not only on replay");
     }
 
     #[test]
@@ -1427,6 +1504,7 @@ mod tests {
                 duration_ms: 10,
                 cost_usd: 0.1,
                 is_error: false,
+                interrupted: false,
             },
             TurnBlock::ErrorMessage {
                 message: "boom".into(),
@@ -1478,6 +1556,7 @@ mod tests {
                     duration_ms: 1,
                     cost_usd: 0.0,
                     is_error: false,
+                    interrupted: false,
                 },
                 context_tokens: None,
             },

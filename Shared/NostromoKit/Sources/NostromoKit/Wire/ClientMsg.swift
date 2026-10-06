@@ -112,6 +112,15 @@ struct ClientSessionDetach: Encodable {
     enum CodingKeys: String, CodingKey { case type_ = "type", tag }
 }
 
+/// Interrupt the turn a session is running (the Stop button) without killing the
+/// session. Distinct from `ClientSessionControl`'s `"stop"`, which does kill it.
+public struct ClientSessionInterrupt: Encodable {
+    let type_ = "session_interrupt"
+    public let tag: String
+    public init(tag: String) { self.tag = tag }
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+}
+
 public struct ClientSessionControl: Encodable {
     let type_:  String = "session_control"
     public let tag:    String
