@@ -675,6 +675,34 @@ fn handle_client_msg(
             }
         }
 
+        ClientMsg::ClosePane { tag, pane_id } => {
+            let mgr = session_mgr.lock().unwrap();
+            let Some(reg) = mgr.pane_registry() else {
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: "ClosePane failed: no pane registry".into(),
+                });
+                return;
+            };
+            let result = reg.lock().unwrap().close_tab(&tag, &pane_id);
+            match result {
+                Ok(tree) => {
+                    // Same broadcast every layout mutation uses, so every client
+                    // (each window, iOS) re-renders from the daemon's tree.
+                    let _ = broadcast_tx.send(ServerMsg::FocusLayout {
+                        tag,
+                        tree,
+                        focused_pane: None,
+                    });
+                }
+                Err(e) => {
+                    warn!(conn_key, %tag, %pane_id, "ClosePane refused: {}", e.code());
+                    let _ = targeted_tx.send(ServerMsg::Error {
+                        message: format!("ClosePane failed: {}", e.code()),
+                    });
+                }
+            }
+        }
+
         ClientMsg::SessionInterrupt { tag } => {
             let mut mgr = session_mgr.lock().unwrap();
             if let Err(e) = mgr.interrupt(&tag) {

@@ -16,6 +16,15 @@ final class ClientMsgTests: XCTestCase {
         )
     }
 
+    // MARK: - close_pane (the tab × button)
+
+    func testClosePaneEncodesTheTagAndPaneId() throws {
+        let dict = try encode(ClientClosePane(tag: "perri", paneId: "detail.1"))
+        XCTAssertEqual(dict["type"] as? String, "close_pane")
+        XCTAssertEqual(dict["tag"] as? String, "perri")
+        XCTAssertEqual(dict["pane_id"] as? String, "detail.1", "the wire key is snake_case, like the daemon's ClosePane")
+    }
+
     // MARK: - session_interrupt (the Stop button)
 
     func testSessionInterruptEncodesAsSessionInterruptNotControlStop() throws {

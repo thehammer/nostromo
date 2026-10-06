@@ -375,6 +375,13 @@ private struct SessionAttachMsg: Encodable {
     enum CodingKeys: String, CodingKey { case type_ = "type", tag }
 }
 
+private struct ClosePaneMsg: Encodable {
+    let type_ = "close_pane"
+    let tag: String
+    let paneId: String
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, paneId = "pane_id" }
+}
+
 private struct SessionInterruptMsg: Encodable {
     let type_ = "session_interrupt"
     let tag: String
@@ -574,6 +581,12 @@ class NostromodClient {
     /// Stop receiving deltas for a session without stopping the child.
     func sessionDetach(tag: String) {
         send(SessionDetachMsg(tag: tag), type: "session_detach", tag: tag)
+    }
+
+    /// Close a tab (its × button). The daemon refuses the review queue and the
+    /// REPL, and answers with the new layout for every client.
+    func closePane(tag: String, paneId: String) {
+        send(ClosePaneMsg(tag: tag, paneId: paneId), type: "close_pane", tag: tag)
     }
 
     /// Interrupt the turn this session is running (the Stop button). The
