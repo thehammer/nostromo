@@ -205,6 +205,8 @@ class ReplView: NSView {
         }
         inputBar.onInterrupt = { [weak self] in self?.session.interrupt() }
         addSubview(inputBar)
+        // The whole pane (transcript included) accepts image drops.
+        registerForDraggedTypes(ImagePasteboard.draggedTypes)
 
         inputBarHeightConstraint = inputBar.heightAnchor.constraint(equalToConstant: ReplInputBar.minHeight)
 
@@ -854,6 +856,23 @@ extension ReplView: TranscriptDiagnostics.Reporting {
 
 // MARK: - ReplClipView
 
+extension ReplView {
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard ImagePasteboard.hasImages(sender.draggingPasteboard) else { return [] }
+        inputBar.setDropHighlight(true)
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        inputBar.setDropHighlight(false)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        inputBar.setDropHighlight(false)
+        return inputBar.attachImages(from: sender.draggingPasteboard)
+    }
+}
+
 private class ReplClipView: NSClipView {
     override var isFlipped: Bool { true }
 }
@@ -1047,7 +1066,10 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
         ])
 
         // Register for image drag-and-drop
-        registerForDraggedTypes([.fileURL, .tiff, .png])
+        registerForDraggedTypes(ImagePasteboard.draggedTypes)
+        // NSTextView would otherwise swallow the drop (inserting a path) before the bar sees it.
+        textView.onImageDrop = { [weak self] pb in self?.attachImages(from: pb) ?? false }
+        textView.onDragHighlight = { [weak self] on in self?.setDropHighlight(on) }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -1094,39 +1116,33 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
 
     // MARK: Drag-and-drop (images)
 
-    private static let imageUTIs: Set<String> = ["public.image", "public.png", "public.jpeg",
-                                                  "public.tiff", "public.gif", "public.heic",
-                                                  "public.webp"]
-
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let urls = imageURLs(from: sender.draggingPasteboard)
-        guard !urls.isEmpty else { return [] }
-        layer?.borderWidth = 1
-        layer?.borderColor = Theme.cornflower.withAlphaComponent(0.6).cgColor
+        guard ImagePasteboard.hasImages(sender.draggingPasteboard) else { return [] }
+        setDropHighlight(true)
         return .copy
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
-        layer?.borderWidth = 0
+        setDropHighlight(false)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let urls = imageURLs(from: sender.draggingPasteboard)
-        guard !urls.isEmpty else { return false }
-        layer?.borderWidth = 0
-        urls.forEach { addImage($0) }
-        return true
+        setDropHighlight(false)
+        return attachImages(from: sender.draggingPasteboard)
     }
 
-    private func imageURLs(from pb: NSPasteboard) -> [URL] {
-        guard let items = pb.readObjects(forClasses: [NSURL.self],
-                                         options: [.urlReadingFileURLsOnly: true]) as? [URL]
-        else { return [] }
-        return items.filter { url in
-            guard let uti = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier
-            else { return false }
-            return Self.imageUTIs.contains(where: { UTTypeConformsTo(uti as CFString, $0 as CFString) })
-        }
+    func setDropHighlight(_ on: Bool) {
+        layer?.borderWidth = on ? 1 : 0
+        layer?.borderColor = Theme.cornflower.withAlphaComponent(0.6).cgColor
+    }
+
+    /// Attach every image on `pb` (file URLs or raw image data). False when none.
+    @discardableResult
+    func attachImages(from pb: NSPasteboard) -> Bool {
+        let urls = ImagePasteboard.imageURLs(from: pb)
+        guard !urls.isEmpty else { return false }
+        urls.forEach { addImage($0) }
+        return true
     }
 
     private func addImage(_ url: URL) {
@@ -1264,6 +1280,37 @@ private class ReplInputBar: NSView, NSTextViewDelegate {
 /// the macOS Photos permission prompt — image files come via drag-and-drop instead.
 private class ChatTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    /// Attach images from a drop/paste; returns false when the pasteboard had none.
+    var onImageDrop: ((NSPasteboard) -> Bool)?
+    var onDragHighlight: ((Bool) -> Void)?
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if ImagePasteboard.hasImages(sender.draggingPasteboard) {
+            onDragHighlight?(true)
+            return .copy
+        }
+        return super.draggingEntered(sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onDragHighlight?(false)
+        super.draggingExited(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        onDragHighlight?(false)
+        if ImagePasteboard.hasImages(sender.draggingPasteboard),
+           onImageDrop?(sender.draggingPasteboard) == true { return true }
+        return super.performDragOperation(sender)
+    }
+
+    /// ⌘V with an image on the clipboard attaches it; text pastes as before.
+    override func paste(_ sender: Any?) {
+        let pb = NSPasteboard.general
+        if pb.string(forType: .string) == nil,
+           ImagePasteboard.hasImages(pb), onImageDrop?(pb) == true { return }
+        super.paste(sender)
+    }
 
     override func keyDown(with event: NSEvent) {
         // keyCode 36 = Return; Shift+Return inserts a newline normally
