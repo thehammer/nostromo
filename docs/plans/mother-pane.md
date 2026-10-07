@@ -44,10 +44,11 @@ UI is reachable.
    gone" rather than closing under the user.
 
 ## Phases
-- **P0 (this PR):** failing QA scenario `scripts/qa/mother-queue.sh` against
+- **P0 (done):** failing QA scenario `scripts/qa/mother-queue.sh` against
   the fake broker. It is *expected to fail* until P1.
-- **P1:** host `mother_queue` in the Mother focus (list + inline detail +
-  actions). Scenario passes.
+- **P1 (done):** `mother_queue` hosted in the Mother focus (list + inline
+  detail + actions); `scripts/qa/mother-queue.sh` passes against the fake broker
+  (cancel and retry clicked in the real UI; broker received them).
 - **P2:** per-job tabs, ✕ close, selection ↔ tab sync.
 - **P3:** header controls the broker actually supports; polish (empty/offline
   states, keyboard navigation).
@@ -59,6 +60,13 @@ The scenario asserts: group headers and job titles render; clicking a job
 shows its detail; Cancel on a running job moves it to CANCELLED; Retry on a
 failed job moves it out of FAILED; the broker's `commands` log records exactly
 what the UI sent. Needs an awake, visible window (see `docs/app-control.md`).
+
+## Findings from the first live run
+- The 30 s `pollMotherList()` reconciles against the real `mother` CLI and deletes
+  jobs it doesn't list; with a non-default broker (QA) that wiped the fake jobs.
+  Now skipped when `MOTHER_BROKER_SOCK` is set. Archive still shells the real CLI.
+- The sidebar's `FlippedView` (TabBarView) reports ambiguous Auto Layout — a
+  pre-existing finding from `layout-issues`, not part of Mother.
 
 ## Open questions
 - Does Mother's broker expose pause-queue / clear-finished / archive? (The old
