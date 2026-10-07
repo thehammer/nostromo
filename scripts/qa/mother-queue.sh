@@ -36,7 +36,7 @@ import json, sys
 bad = [i for i in json.load(sys.stdin)
        if i["ambiguous"] and i["frame"]["x"] >= 160
        and not i["class"].startswith(("_NS", "NSText", "NSStackView"))]
-# NOTE: the job detail's key/value NSStackView rows report ambiguous layout (legacy
+# NOTE: key/value NSStackView rows in the job detail report ambiguous layout (legacy
 # MotherJobDetail.metaRow); they render fine, so they are skipped here, not fixed.
 sys.exit("layout issues: %s" % bad if bad else 0)'
 
