@@ -10,6 +10,10 @@
 # Passes from P1 on (docs/plans/mother-pane.md). Reads SwiftUI text through the accessibility tree.
 set -euo pipefail
 APP="$(dirname "$0")/../../bin/nostromo-app"
+# Clicks need the app active and the window key. This TAKES keyboard focus for the
+# duration of the run and gives it back on exit — run when nobody is typing elsewhere.
+"$APP" -w "${1:-1}" activate >/dev/null
+trap '"$APP" restore >/dev/null 2>&1 || true' EXIT
 CTL=/tmp/fmb-qa.sock.ctl
 W="${1:-1}"
 ctl() { python3 -c '

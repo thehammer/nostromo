@@ -5,6 +5,10 @@
 # Does not send a message (so it costs nothing and touches no agent).
 set -euo pipefail
 APP="$(dirname "$0")/../../bin/nostromo-app"
+# Clicks need the app active and the window key. This TAKES keyboard focus for the
+# duration of the run and gives it back on exit — run when nobody is typing elsewhere.
+"$APP" -w "${1:-0}" activate >/dev/null
+trap '"$APP" restore >/dev/null 2>&1 || true' EXIT
 IMG="$(mktemp -d)/qa-chip.png"
 python3 - "$IMG" <<'PY'
 import struct, sys, zlib

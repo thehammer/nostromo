@@ -4,6 +4,10 @@
 # Usage: mother-tabs.sh [window-index, default 1]
 set -euo pipefail
 APP="$(dirname "$0")/../../bin/nostromo-app"
+# Clicks need the app active and the window key. This TAKES keyboard focus for the
+# duration of the run and gives it back on exit — run when nobody is typing elsewhere.
+"$APP" -w "${1:-1}" activate >/dev/null
+trap '"$APP" restore >/dev/null 2>&1 || true' EXIT
 W="${1:-1}"
 
 "$APP" -w "$W" click --text "Mother"
