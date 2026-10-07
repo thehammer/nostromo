@@ -72,7 +72,12 @@ class MotherView: NSView {
 
     private let countsStrip = MotherCountsStrip()
     private let jobList     = MotherJobList()
-    private let jobDetail   = MotherJobDetail()
+    /// Right-hand side: one closable tab per opened job, plus a fixed
+    /// "Overview" tab holding the empty state. See docs/plans/mother-pane.md (P2).
+    private var tabRegion: TabRegionView!
+    private var jobDetails: [String: MotherJobDetail] = [:]
+    static let overviewPaneId = "mother_overview"
+    static func tabPaneId(for jobId: String) -> String { "mother_job:\(jobId)" }
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -89,7 +94,13 @@ class MotherView: NSView {
         divider.wantsLayer = true
         divider.layer?.backgroundColor = Theme.borderInactive.cgColor
 
-        for v in [countsStrip, jobList, divider, jobDetail] as [NSView] {
+        let overview = MotherOverviewView()
+        tabRegion = TabRegionView(
+            tabs: [TabRegionView.Tab(paneId: Self.overviewPaneId, label: "Overview", view: overview)],
+            activePaneId: Self.overviewPaneId)
+        tabRegion.onCloseTab = { [weak self] paneId in self?.closeJobTab(paneId) }
+
+        for v in [countsStrip, jobList, divider, tabRegion] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -113,16 +124,17 @@ class MotherView: NSView {
             divider.widthAnchor.constraint(equalToConstant: 1),
             divider.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            // Job detail — fills remaining width
-            jobDetail.topAnchor.constraint(equalTo: countsStrip.bottomAnchor),
-            jobDetail.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
-            jobDetail.trailingAnchor.constraint(equalTo: trailingAnchor),
-            jobDetail.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // Job tabs — fill remaining width
+            tabRegion.topAnchor.constraint(equalTo: countsStrip.bottomAnchor),
+            tabRegion.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
+            tabRegion.trailingAnchor.constraint(equalTo: trailingAnchor),
+            tabRegion.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
         // Wire selection
         jobList.onSelect = { [weak self] job in
-            self?.jobDetail.show(job)
+            guard let job else { return }
+            self?.openJobTab(job)
         }
 
         // Live data — empty state ("No jobs") shows until first jobs arrive
@@ -135,10 +147,53 @@ class MotherView: NSView {
     private func jobsDidChange(_ jobs: [MotherJob]) {
         log.debug("live jobs: \(jobs.count, privacy: .public)")
         jobList.update(jobs)
-        if let current = jobDetail.currentJobId {
-            jobDetail.show(jobs.first { $0.id == current })
+        // Keep every open tab current. A job that left the queue (archived,
+        // pruned) keeps its tab, showing the empty state, rather than the tab
+        // vanishing under the reader.
+        for (id, detail) in jobDetails {
+            detail.show(jobs.first { $0.id == id })
         }
     }
+
+    private func openJobTab(_ job: MotherJob) {
+        let paneId = Self.tabPaneId(for: job.id)
+        if tabRegion.hasTab(paneId) {
+            tabRegion.selectTab(paneId)
+            return
+        }
+        let detail = MotherJobDetail()
+        detail.show(job)
+        jobDetails[job.id] = detail
+        let label = job.title.isEmpty ? job.id : job.title
+        tabRegion.addTab(TabRegionView.Tab(paneId: paneId, label: label, view: detail))
+    }
+
+    private func closeJobTab(_ paneId: String) {
+        guard paneId.hasPrefix("mother_job:") else { return }
+        let jobId = String(paneId.dropFirst("mother_job:".count))
+        jobDetails.removeValue(forKey: jobId)?.show(nil)   // stop its log timer
+        tabRegion.removeTab(paneId)
+        jobList.clearSelection()   // so the same row can be clicked to reopen it
+    }
+}
+
+// MARK: - MotherOverviewView
+
+/// The Mother pane's fixed first tab: shown when no job tab is open.
+private class MotherOverviewView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        let label = NSTextField(labelWithString: "Select a job")
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = Theme.fgMuted
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 // MARK: - MotherCountsStrip
@@ -228,6 +283,9 @@ private class MotherCountsStrip: NSView {
 // MARK: - MotherJobListViewModel
 
 private class MotherJobListViewModel: ObservableObject {
+    /// Written by the owner to move the list's highlight (nil clears it, so a
+    /// row whose tab was closed can be clicked — and so reopened — again).
+    @Published var requestedSelection: String?
     @Published var jobs: [MotherJob] = []
     var onSelect: ((MotherJob?) -> Void)?
 
@@ -316,6 +374,9 @@ private struct MotherJobListSwiftUI: View {
         .onChange(of: selectedId) { _, newId in
             vm.onSelect?(vm.jobs.first { $0.id == newId })
         }
+        .onChange(of: vm.requestedSelection) { _, id in
+            if selectedId != id { selectedId = id }
+        }
     }
 
     /// Jobs grouped by state, sorted: awaiting → running → queued/ready → failed → succeeded/cancelled.
@@ -345,6 +406,13 @@ private struct MotherJobListSwiftUI: View {
 // MARK: - MotherJobList
 
 private class MotherJobList: NSView {
+
+    /// Clear the highlight. `requestedSelection` is usually already nil, which
+    /// SwiftUI would not report as a change, so go via a non-matching value.
+    func clearSelection() {
+        viewModel.requestedSelection = ""
+        DispatchQueue.main.async { [weak self] in self?.viewModel.requestedSelection = nil }
+    }
 
     var onSelect: ((MotherJob?) -> Void)? {
         didSet { viewModel.onSelect = onSelect }
