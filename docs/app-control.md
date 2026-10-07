@@ -46,7 +46,24 @@ screenshot or the `tree` dump can be passed straight to `click`.
     bin/nostromo-app screenshot /tmp/after-drop.png
     bin/nostromo-app key $'\r'                      # send
 
+## Scripted scenarios
+
+`wait TEXT [--gone] [--timeout S]` polls until a view with TEXT appears (or
+disappears) and exits non-zero on timeout; `expect TEXT [--absent]` is the
+one-shot form. With `layout-issues` these make shell scenarios that assert:
+see `scripts/qa/attach-chip.sh`. Scenarios click and drop in the live window,
+so run them when nobody is typing in it, and keep them away from anything that
+sends a message to an agent unless that is the point.
+
+Pair with `bin/fake-mother-broker` (launch the app with `MOTHER_BROKER_SOCK`)
+to drive Mother-queue UI with canned jobs.
+
 ## Limits
+
+Windows must be on-screen and awake: with displays locked or asleep the
+windows stay at alpha 0 and layout/screenshots are unreliable (`windows`
+reports `alpha` and `visible`).
+
 
 Drags are delivered to the destination view directly rather than through the
 window server, so cross-app drag mechanics (promised files, drag images) are

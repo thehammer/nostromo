@@ -27,6 +27,7 @@ python-test:
 	python3 -m unittest discover -s tests/ios_policy -v
 	python3 -m unittest discover -s tests/fake_mother -v
 	python3 -m unittest discover -s tests/hit_test_policy -v
+	python3 -m unittest discover -s tests/app_control -v
 	python3 -m unittest discover -s tests/launch_smoke -v
 	python3 -m unittest discover -s tests/ci_policy -v
 
