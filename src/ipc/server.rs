@@ -822,7 +822,10 @@ fn handle_client_msg(
             if let Some(reg) = &pane_registry {
                 let mut reg = reg.lock().unwrap();
                 for focus in &updated {
-                    if let Some(tree) = reg.ensure_review_layout(&focus.tag) {
+                    let seeded = reg
+                        .ensure_review_layout(&focus.tag)
+                        .or_else(|| reg.ensure_mother_layout(&focus.tag));
+                    if let Some(tree) = seeded {
                         let _ = broadcast_tx.send(ServerMsg::FocusLayout {
                             tag: focus.tag.clone(),
                             tree,
