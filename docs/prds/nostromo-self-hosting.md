@@ -435,3 +435,14 @@ session; Nostromo's structured rendering cannot share it.
 **Consequence for the roadmap:** phone access to Nostromo sessions needs a
 native client (the iOS app, or a web client served by the daemon) rather than
 Anthropic's relay. Handoff is the stopgap.
+
+## Owner decisions (2026-10-07)
+
+1. **Agent-initiated daemon restarts:** allowed without asking **once session
+   survival (requirement A) passes the 20-restart test**, with automatic
+   rollback and an after-the-fact notification as the safety net. Until then
+   the approval requirement in F stands.
+2. **Remote control:** wanted across the board (every agent, per-focus
+   opt-out). **On hold** — blocked for daemon-hosted stream-json sessions (see
+   the spike result above); revisit when that changes or a native client path
+   (iOS or daemon-served web) exists.
