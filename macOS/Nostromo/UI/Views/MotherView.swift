@@ -97,8 +97,17 @@ class MotherView: NSView {
         let overview = MotherOverviewView()
         tabRegion = TabRegionView(
             tabs: [TabRegionView.Tab(paneId: Self.overviewPaneId, label: "Overview", view: overview)],
-            activePaneId: Self.overviewPaneId)
+            activePaneId: Self.overviewPaneId, compactTabs: true)
         tabRegion.onCloseTab = { [weak self] paneId in self?.closeJobTab(paneId) }
+        // Mirror the active tab in the list highlight (Overview clears it).
+        tabRegion.onSelectTab = { [weak self] paneId in
+            guard let self else { return }
+            if paneId.hasPrefix("mother_job:") {
+                self.jobList.select(jobId: String(paneId.dropFirst("mother_job:".count)))
+            } else {
+                self.jobList.clearSelection()
+            }
+        }
 
         for v in [countsStrip, jobList, divider, tabRegion] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -406,6 +415,8 @@ private struct MotherJobListSwiftUI: View {
 // MARK: - MotherJobList
 
 private class MotherJobList: NSView {
+
+    func select(jobId: String) { viewModel.requestedSelection = jobId }
 
     /// Clear the highlight. `requestedSelection` is usually already nil, which
     /// SwiftUI would not report as a change, so go via a non-matching value.

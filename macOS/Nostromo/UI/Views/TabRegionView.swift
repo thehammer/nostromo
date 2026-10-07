@@ -66,11 +66,23 @@ final class TabRegionView: NSView {
     /// daemon, not this view, owns which tabs exist).
     var onCloseTab: ((String) -> Void)?
 
+    /// Called when a tab becomes frontmost by a local click or `selectTab`
+    /// (not for programmatic add/remove). Lets an owner mirror the selection.
+    var onSelectTab: ((String) -> Void)?
+
+    /// Compact tabs: each button is `compactTabWidth` wide (shrinking only
+    /// when the strip runs out of room) and left-aligned, instead of every tab
+    /// stretching to share the whole strip. For regions whose tab count is
+    /// open-ended (Mother job tabs). Fixed at init.
+    let compactTabs: Bool
+    static let compactTabWidth: CGFloat = 200
+
     private let stripStack = NSStackView()
     private let contentContainer = NSView()
     private var tabButtons: [String: TabButtonView] = [:]
 
-    init(tabs: [Tab], activePaneId: String) {
+    init(tabs: [Tab], activePaneId: String, compactTabs: Bool = false) {
+        self.compactTabs = compactTabs
         self.tabs = tabs
         self.activePaneId = tabs.contains(where: { $0.paneId == activePaneId })
             ? activePaneId
@@ -89,7 +101,8 @@ final class TabRegionView: NSView {
 
         stripStack.orientation = .horizontal
         stripStack.spacing = 0
-        stripStack.distribution = .fillEqually
+        stripStack.distribution = compactTabs ? .gravityAreas : .fillEqually
+        if compactTabs { stripStack.alignment = .top }
         stripStack.translatesAutoresizingMaskIntoConstraints = false
 
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -135,6 +148,12 @@ final class TabRegionView: NSView {
             button.topAnchor.constraint(equalTo: stripStack.topAnchor),
             button.bottomAnchor.constraint(equalTo: stripStack.bottomAnchor),
         ])
+        if compactTabs {
+            let preferred = button.widthAnchor.constraint(equalToConstant: Self.compactTabWidth)
+            preferred.priority = .init(740)          // yields when many tabs crowd the strip
+            preferred.isActive = true
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
+        }
 
         tab.view.translatesAutoresizingMaskIntoConstraints = false
         contentContainer.addSubview(tab.view)
@@ -169,6 +188,7 @@ final class TabRegionView: NSView {
         activePaneId = paneId
         unreadPaneIds.remove(paneId)
         refreshVisibilityAndSelection()
+        onSelectTab?(paneId)
     }
 
     /// Add a tab at the end (local tab sets such as the Mother job tabs; the
