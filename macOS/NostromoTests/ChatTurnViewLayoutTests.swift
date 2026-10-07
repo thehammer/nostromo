@@ -588,4 +588,18 @@ final class ChatTurnViewLayoutTests: XCTestCase {
         XCTAssertGreaterThan(abs(narrow600 - wide900), 1.0,
                              "narrowing the pane must actually re-wrap the prose block and change its height")
     }
+
+    // MARK: - Image-only bubbles hug their thumbnail
+
+    func testImageOnlyBubbleIsNarrowerThanATextBubbleInAWidePane() {
+        let text = ChatTurnView.bubbleWidth(paneWidth: 1500, imageOnly: false)
+        let image = ChatTurnView.bubbleWidth(paneWidth: 1500, imageOnly: true)
+        XCTAssertEqual(image, UserBubbleView.imageSize.width + 24, accuracy: 0.001)
+        XCTAssertLessThan(image, text)
+    }
+
+    func testImageOnlyBubbleNeverExceedsTheNormalBubbleInANarrowPane() {
+        let narrowText = ChatTurnView.bubbleWidth(paneWidth: 200, imageOnly: false)
+        XCTAssertEqual(ChatTurnView.bubbleWidth(paneWidth: 200, imageOnly: true), narrowText, accuracy: 0.001)
+    }
 }

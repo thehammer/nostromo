@@ -187,6 +187,15 @@ class ChatTurnView: NSView, TurnIsland {
         paneWidth * TurnHeightEstimator.bubbleWidthFraction
     }
 
+    /// An image-only message hugs its thumbnail instead of stretching to the
+    /// usual fraction of the pane (which left a 1500pt bubble around a 240pt image).
+    static func bubbleWidth(paneWidth: CGFloat, imageOnly: Bool) -> CGFloat {
+        let full = bubbleWidth(paneWidth: paneWidth)
+        return imageOnly ? min(full, UserBubbleView.imageSize.width + 24) : full
+    }
+
+    private var bubbleIsImageOnly = false
+
     // MARK: State
 
     private var widthConstraint: NSLayoutConstraint!
@@ -264,8 +273,9 @@ class ChatTurnView: NSView, TurnIsland {
         if !turn.userInput.contains(Self.confirmReplySentinel) {
             let bubble = UserBubbleView(text: turn.userInput, imageURLs: turn.imageURLs)
             self.bubble = bubble
+            bubbleIsImageOnly = turn.userInput == ChatSession.imageOnlyText && !turn.imageURLs.isEmpty
             bubbleWidthConstraint = attachIsland(bubble,
-                                                 width: Self.bubbleWidth(paneWidth: islandWidth))
+                                                 width: Self.bubbleWidth(paneWidth: islandWidth, imageOnly: bubbleIsImageOnly))
         }
 
         // Every block of an unrecoverable turn is truncated — the user bubble
@@ -452,7 +462,7 @@ class ChatTurnView: NSView, TurnIsland {
         needsFullRemeasure = false
 
         if let bubble {
-            let width = Self.bubbleWidth(paneWidth: islandWidth)
+            let width = Self.bubbleWidth(paneWidth: islandWidth, imageOnly: bubbleIsImageOnly)
             bubbleWidthConstraint?.constant = width
             bubbleHeight = Self.measureIsland(bubble, width: width)
         }
@@ -501,7 +511,7 @@ class ChatTurnView: NSView, TurnIsland {
 
         var y = Self.topPadding
         if let bubble {
-            let width = Self.bubbleWidth(paneWidth: islandWidth)
+            let width = Self.bubbleWidth(paneWidth: islandWidth, imageOnly: bubbleIsImageOnly)
             place(bubble, alignmentRect:
                     NSRect(x: islandWidth - Self.bubbleTrailingInset - width,
                            y: y, width: width, height: bubbleHeight))
