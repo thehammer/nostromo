@@ -52,7 +52,9 @@ UI is reachable.
 - **P2:** per-job tabs, ✕ close, selection ↔ tab sync.
 - **P2.1:** tab strip uses compact tabs (200pt, shrink to 70) and the list
   highlight follows the active tab (code in this PR; live check pending).
-- **P3:** header controls — see "What Mother's broker supports" below.
+- **P3 (done):** Escalate on failed jobs (confirm sheet, CLI `mother escalate --yes`) and a
+  Mother daemon status chip with Start (CLI `mother daemon status|start`, polled every 30 s;
+  skipped for a QA broker). "Archive finished" already exists as the list's Archive All.
 
 ## QA (tooling already in place)
 `bin/fake-mother-broker --scenario basic` + `bin/nostromo-app` (`click`,

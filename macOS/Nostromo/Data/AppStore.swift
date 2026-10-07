@@ -31,6 +31,8 @@ class AppStore: ObservableObject {
     @Published private(set) var brokerConnected:    Bool         = false
     /// Set on action failure; UI observes and clears after display.
     @Published private(set) var motherActionError:  String?      = nil
+    /// The Mother daemon's state from `mother daemon status` (polled; see `refreshMotherDaemon`).
+    @Published private(set) var motherDaemon:       MotherDaemonState = .unknown
 
     // Budget
     @Published private(set) var rateLimits: RateLimits?     = nil
@@ -387,8 +389,9 @@ class AppStore: ObservableObject {
         // The broker is authoritative for live events; this only catches stragglers.
         Timer.publish(every: 30, on: .main, in: .common)
             .autoconnect()
-            .sink { [weak self] _ in self?.pollMotherList() }
+            .sink { [weak self] _ in self?.pollMotherList(); self?.refreshMotherDaemon() }
             .store(in: &cancellables)
+        refreshMotherDaemon()
 
         // Phase 1: keep the daemon's focus registry mirrored from the Mac.
         client.connected
@@ -621,6 +624,59 @@ class AppStore: ObservableObject {
     func forceStartJob(_ id: String) {
         broker.forceStart(job: id) { [weak self] result in
             self?.handleActionResult(result, verb: "force-start")
+        }
+    }
+
+    /// Query `mother daemon status`. Skipped for a non-default broker (QA), whose
+    /// daemon is not the one the CLI talks to.
+    func refreshMotherDaemon() {
+        if ProcessInfo.processInfo.environment["MOTHER_BROKER_SOCK"] != nil {
+            motherDaemon = .unavailable(reason: "custom broker")
+            return
+        }
+        guard let bin = AppStore.findBinary("mother") else {
+            motherDaemon = .unavailable(reason: "mother not found")
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = ProcessRunner.runCapturingStdout(bin, arguments: ["daemon", "status"])
+            let state: MotherDaemonState = result.map {
+                MotherDaemonState.parse(stdout: String(data: $0.data, encoding: .utf8) ?? "", status: $0.status)
+            } ?? .stopped
+            DispatchQueue.main.async { self?.motherDaemon = state }
+        }
+    }
+
+    /// `mother daemon start`, then re-check shortly after.
+    func startMotherDaemon() {
+        guard ProcessInfo.processInfo.environment["MOTHER_BROKER_SOCK"] == nil,
+              let bin = AppStore.findBinary("mother") else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let r = ProcessRunner.runCapturingStdout(bin, arguments: ["daemon", "start"])
+            if let r, r.status != 0 {
+                DispatchQueue.main.async { self?.motherActionError = "mother daemon start failed (exit \(r.status))" }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self?.refreshMotherDaemon() }
+        }
+    }
+
+    /// Re-run a failed job on the next model tier (`mother escalate ID --yes`).
+    /// The caller confirms first: escalation costs more.
+    func escalateJob(_ id: String) {
+        guard ProcessInfo.processInfo.environment["MOTHER_BROKER_SOCK"] == nil else {
+            motherActionError = "escalate uses the mother CLI, which is not connected to this broker"
+            return
+        }
+        guard let bin = AppStore.findBinary("mother") else {
+            motherActionError = "mother binary not found"
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let r = ProcessRunner.runCapturingStdout(bin, arguments: ["escalate", id, "--yes"])
+            if r == nil || r!.status != 0 {
+                let out = r.flatMap { String(data: $0.data, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                DispatchQueue.main.async { self?.motherActionError = "escalate failed" + (out.isEmpty ? "" : ": \(out)") }
+            }
         }
     }
 

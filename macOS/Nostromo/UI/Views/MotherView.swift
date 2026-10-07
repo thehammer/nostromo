@@ -210,6 +210,8 @@ private class MotherOverviewView: NSView {
 private class MotherCountsStrip: NSView {
 
     private let stack = NSStackView()
+    private let daemonLabel = NSTextField(labelWithString: "")
+    private let startButton = NSButton()
     private var cancellables = Set<AnyCancellable>()
 
     override init(frame: NSRect) {
@@ -241,6 +243,32 @@ private class MotherCountsStrip: NSView {
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
 
+        // Daemon status, right-aligned: a dot + label, and a Start button when it is down.
+        daemonLabel.font = .systemFont(ofSize: 10)
+        daemonLabel.translatesAutoresizingMaskIntoConstraints = false
+        startButton.title = "Start"
+        startButton.bezelStyle = .inline
+        startButton.font = .systemFont(ofSize: 10, weight: .medium)
+        startButton.target = self
+        startButton.action = #selector(startDaemon)
+        startButton.isHidden = true
+        startButton.translatesAutoresizingMaskIntoConstraints = false
+        let daemonStack = NSStackView(views: [daemonLabel, startButton])
+        daemonStack.orientation = .horizontal
+        daemonStack.spacing = 10
+        daemonStack.alignment = .centerY
+        daemonStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(daemonStack)   // hidden Start is detached by the stack, so the label sits flush right
+        NSLayoutConstraint.activate([
+            daemonStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            daemonStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        renderDaemon(AppStore.shared.motherDaemon)
+        AppStore.shared.$motherDaemon
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] d in self?.renderDaemon(d) }
+            .store(in: &cancellables)
+
         // Render immediately with zeros, then live updates
         render(MotherStatus())
         AppStore.shared.$motherStatus
@@ -250,6 +278,24 @@ private class MotherCountsStrip: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func startDaemon() { AppStore.shared.startMotherDaemon() }
+
+    private func renderDaemon(_ d: MotherDaemonState) {
+        let color: NSColor
+        switch d {
+        case .running:     color = Theme.sage
+        case .stopped:     color = Theme.redSweater
+        default:           color = Theme.fgMuted
+        }
+        let dot = NSAttributedString(string: "● ", attributes: [.foregroundColor: color, .font: NSFont.systemFont(ofSize: 9)])
+        let text = NSAttributedString(string: d.label, attributes: [.foregroundColor: Theme.fgMuted, .font: NSFont.systemFont(ofSize: 10)])
+        let all = NSMutableAttributedString(attributedString: dot)
+        all.append(text)
+        daemonLabel.attributedStringValue = all
+        if case .running(let detail) = d, !detail.isEmpty { daemonLabel.toolTip = detail } else { daemonLabel.toolTip = nil }
+        startButton.isHidden = !d.isStopped
+    }
 
     private func render(_ s: MotherStatus) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -556,6 +602,7 @@ private class MotherJobDetail: NSView {
     private let retryButton      = NSButton(title: "Retry",       target: nil, action: nil)
     private let forceStartButton = NSButton(title: "Force-start", target: nil, action: nil)
     private let archiveButton    = NSButton(title: "Archive",     target: nil, action: nil)
+    private let escalateButton   = NSButton(title: "Escalate",    target: nil, action: nil)
     private let viewPlanButton   = NSButton(title: "View Plan",   target: nil, action: nil)
     private let actionErrorLabel = NSTextField(labelWithString: "")
     private let planSectionLabel  = NSTextField(labelWithString: "PLAN")
@@ -757,6 +804,9 @@ private class MotherJobDetail: NSView {
         forceStartButton.action = #selector(didForceStart)
         archiveButton.target    = self
         archiveButton.action    = #selector(didArchive)
+        escalateButton.target   = self
+        escalateButton.action   = #selector(didEscalate)
+        escalateButton.toolTip  = "Re-run this failed job on the next model tier (costs more)"
         viewPlanButton.target   = self
         viewPlanButton.action   = #selector(didViewPlan)
 
@@ -933,7 +983,10 @@ private class MotherJobDetail: NSView {
             widgets.append(btnRow)
 
         case "failed", "cancelled":
-            let btnRow = NSStackView(views: [retryButton, archiveButton])
+            // Escalate only makes sense for a failure; a cancelled job was stopped on purpose.
+            let btnRow = NSStackView(views: job.state == "failed"
+                ? [retryButton, escalateButton, archiveButton]
+                : [retryButton, archiveButton])
             btnRow.orientation = .horizontal
             btnRow.spacing     = 8
             btnRow.translatesAutoresizingMaskIntoConstraints = false
@@ -955,9 +1008,10 @@ private class MotherJobDetail: NSView {
 
         // Disable action buttons when broker is offline
         for btn in [answerButton, cancelButton, retryButton,
-                    forceStartButton, archiveButton, viewPlanButton] {
+                    forceStartButton, archiveButton, viewPlanButton, escalateButton] {
             btn.isEnabled = connected
         }
+        escalateButton.isEnabled = true   // goes through the CLI, not the broker
         // Archive and View Plan don't require broker — always enabled
         archiveButton.isEnabled  = true
         viewPlanButton.isEnabled = true
@@ -1060,6 +1114,18 @@ private class MotherJobDetail: NSView {
                 AppStore.shared.forceStartJob(job.id)
             }
         }
+    }
+
+    @objc private func didEscalate() {
+        guard let job = currentJob else { return }
+        let alert = NSAlert()
+        alert.messageText = "Escalate “\(job.title.isEmpty ? job.id : job.title)”?"
+        alert.informativeText = "This re-runs the failed job on the next model tier. A more capable model costs more."
+        alert.addButton(withTitle: "Escalate")
+        alert.addButton(withTitle: "Cancel")
+        // Sheet only (never a free-floating modal — see DecisionSheetWiringTests).
+        guard let window else { return }
+        alert.beginSheetModal(for: window) { if $0 == .alertFirstButtonReturn { AppStore.shared.escalateJob(job.id) } }
     }
 
     @objc private func didArchive() {
