@@ -10,6 +10,14 @@ export NOSTROMO_QA_SCREEN="$SCREEN"
 # duration of the run and gives it back on exit — run when nobody is typing elsewhere.
 "$APP" --screen "$SCREEN" activate >/dev/null
 trap '"$APP" restore >/dev/null 2>&1 || true' EXIT
+# Scenarios share the fake broker's state (cancel/retry mutate it): start from the scenario's jobs.
+ctl_reset() { python3 -c '
+import socket
+s = socket.socket(socket.AF_UNIX); s.connect("/tmp/fmb-qa.sock.ctl"); s.sendall(b"{\"op\":\"reset\"}\n")
+import json, sys
+r = json.loads(s.makefile().readline())
+sys.exit(0 if r.get("ok") else "fake broker reset failed: %s" % r)'; sleep 4; }
+ctl_reset
 W=0   # window selection is by display (below), never by index
 # Number of closable tabs = ✕ *buttons* (find also reports each button's inner text field).
 closers() { "$APP" --screen "$SCREEN" find "✕" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin) if x["class"] == "NSButton"))'; }

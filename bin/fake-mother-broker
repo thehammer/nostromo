@@ -15,6 +15,8 @@ the app is watching:
     {"op":"event","kind":"running","job":"j1"} fold a state event + broadcast it
     {"op":"emit","t":"current_activity","data":{"job":"j1","text":"..."}}  raw event
     {"op":"drop"}                              disconnect all clients (reconnect test)
+    {"op":"reset"}                             restore the scenario's jobs, clear recorded commands, then
+                                               drop clients so they reconnect and re-snapshot
     {"op":"commands"}                          commands received so far
     {"op":"jobs"}                              current job table
 """
@@ -216,6 +218,13 @@ def make_ctl_handler(broker):
                     except OSError:
                         pass
                 return len(conns)
+            if op == "reset":
+                if broker.scenario is None:
+                    raise ValueError("no scenario to reset to")
+                with broker.lock:
+                    broker.jobs = {j["id"]: j for j in broker.scenario()}
+                    broker.commands = []
+                return self.run({"op": "drop"})
             if op == "commands":
                 return broker.commands
             if op == "jobs":
@@ -229,12 +238,13 @@ class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     allow_reuse_address = True
 
 
-def serve(sock_path, jobs, ping_secs=15.0):
+def serve(sock_path, jobs, ping_secs=15.0, scenario=None):
     """Start broker + control servers; returns (broker, servers). Caller shuts them down."""
     for p in (sock_path, sock_path + ".ctl"):
         if os.path.exists(p):
             os.unlink(p)
     broker = Broker(jobs)
+    broker.scenario = scenario
     main = UnixServer(sock_path, make_handler(broker))
     ctl = UnixServer(sock_path + ".ctl", make_ctl_handler(broker))
     for s in (main, ctl):
@@ -255,7 +265,7 @@ def main():
     a = ap.parse_args()
     if os.path.realpath(a.sock).startswith(os.path.expanduser("~/.mother")):
         sys.exit("refusing to run on the real Mother's directory")
-    serve(a.sock, SCENARIOS[a.scenario]())
+    serve(a.sock, SCENARIOS[a.scenario](), scenario=SCENARIOS[a.scenario])
     print(f"fake Mother broker: {a.sock} (control: {a.sock}.ctl) scenario={a.scenario}", flush=True)
     try:
         while True:
