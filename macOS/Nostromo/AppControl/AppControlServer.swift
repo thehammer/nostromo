@@ -145,7 +145,17 @@ final class AppControlServer {
     // MARK: - Windows
 
     private func window(_ req: AppControlRequest) throws -> NSWindow {
-        let i = req.int("window") ?? 0
+        // `"screen": "Sceptre"` picks the window on the display whose name contains
+        // that text. Window *indices* are assigned at launch and can map to a
+        // different display after a relaunch, so scripts that must not touch the
+        // operator's own display select by screen.
+        var i = req.int("window") ?? 0
+        if let screenName = req.string("screen")?.lowercased() {
+            guard let found = appDelegate?.windows.firstIndex(where: {
+                $0.screen?.localizedName.lowercased().contains(screenName) == true
+            }) else { throw AppControlError.notFound("no window on a display named like \"\(screenName)\"") }
+            i = found
+        }
         guard let wins = appDelegate?.windows, wins.indices.contains(i) else {
             throw AppControlError.noSuchWindow(i)
         }
@@ -166,6 +176,7 @@ final class AppControlServer {
              "frame": ["x": w.frame.minX, "y": w.frame.minY, "w": w.frame.width, "h": w.frame.height],
              "fullscreen": w.styleMask.contains(.fullScreen),
              "key": w.isKeyWindow,
+             "screen": w.screen?.localizedName ?? "none",
              "alpha": w.alphaValue,
              "visible": w.occlusionState.contains(.visible),
              "windowNumber": w.windowNumber,
