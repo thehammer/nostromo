@@ -398,3 +398,40 @@ For engineering (Archie's homework, not the user's):
 - Whether A2 can be met at all, given that agents are children of the daemon
   today. This is a feasibility question to settle with evidence in the design
   loop.
+
+## Spike result — remote control on Claude Code 2.1.290 (2026-10-07)
+
+Run by Claudia against the installed CLI (2.1.290), account auth `claude.ai`
+(not API key). Success marker in `--debug-file` logs: `[remote-bridge] Created
+session cse_…` and `v2 transport connected`; absence of any `remote-bridge` /
+`bridge:` line means remote control never initialised.
+
+| Probe | Result |
+|---|---|
+| `claude -p --input-format stream-json --output-format stream-json --remote-control <name>` with a real prompt | **Inert.** The turn runs, no bridge log line at all. Same as the 2026-05-31 finding. |
+| Sending `/remote-control` as a stream-json user message | **Refused**: "/remote-control isn't available in this environment." No bridge activity. |
+| Interactive `claude --remote-control <name>` | **Works.** Session registered, transport connected. The account/org/machine allow remote control. |
+| `claude --resume <id> --remote-control <name>` on a session created via `-p` / stream-json | **Works.** Prior conversation loaded, `/remote-control is active · Continue here, on your phone, or at …`. This is the handoff path from `persistent-bidirectional-session-host.md`, re-confirmed on 2.1.290. Single writer: the stream-json process must be stopped first. |
+| Docs (code.claude.com remote-control) | Remote control is defined for interactive sessions and for `claude remote-control` server mode (which spawns *interactive* sessions on request from the phone/web; transcripts live on Anthropic's servers, not visible to a host program). Headless/SDK-driven sessions: **not documented**. Also unavailable with API-key auth, Bedrock/Vertex, `DISABLE_GROWTHBOOK`/non-essential-traffic flags, HIPAA/ZDR orgs; Team/Enterprise owners must enable it. |
+
+**Conclusion:** requirement D ("remote control on by default for every
+Nostromo-launched session") is **still blocked for daemon-hosted stream-json
+sessions**. What exists is the explicit **handoff**: stop the stream-json
+process, run `claude --resume <id> --remote-control <name>` interactively,
+and swap back afterwards. Phone and terminal can share an interactive
+session; Nostromo's structured rendering cannot share it.
+
+**Gotchas for whoever builds the handoff**
+- Interactive startup can stall on dialogs a headless host never sees (e.g.
+  "New MCP server found in this project" — needs Enter). A handoff must
+  pre-approve or drive them.
+- A session spawned from *inside* a remote-control/bridge session inherits
+  `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`,
+  `CLAUDE_CODE_SESSION_ID` and friends. The probe gave the same negative result
+  with and without scrubbing them, but spawns should scrub them anyway.
+- Each probe that registered left a stale session (`rc-clean-int`,
+  `rc-handoff`) in the account's Claude app list.
+
+**Consequence for the roadmap:** phone access to Nostromo sessions needs a
+native client (the iOS app, or a web client served by the daemon) rather than
+Anthropic's relay. Handoff is the stopgap.
