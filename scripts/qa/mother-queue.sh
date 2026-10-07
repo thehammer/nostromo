@@ -31,6 +31,20 @@ print(s.makefile().readline().strip())' "$CTL" "$1"; }
 "$APP" --screen "$SCREEN" expect "Upgrade Laravel"                           # failed
 "$APP" --screen "$SCREEN" expect "RUNNING"; "$APP" --screen "$SCREEN" expect "FAILED"   # group headers
 
+# 1b. exactly one section per state (regression: READY / QUEUED / READY), and the daemon chip
+for header in AWAITING RUNNING QUEUED READY FAILED; do
+  n=$("$APP" --screen "$SCREEN" find "$header" | python3 -c '
+import json, sys
+h = sys.argv[1]
+print(sum(1 for x in json.load(sys.stdin) if x["class"].startswith("ax:") and x.get("text") == h))' "$header")
+  [ "$n" -le 1 ] || { echo "section $header appears $n times"; exit 1; }
+done
+"$APP" --screen "$SCREEN" expect "Mother daemon: custom broker"   # QA broker: CLI daemon status is skipped
+
+# 1c. a failed job offers Escalate (and a running one does not)
+"$APP" --screen "$SCREEN" click --text "Upgrade Laravel"
+"$APP" --screen "$SCREEN" wait "Escalate" --timeout 5
+
 # 2. no broken layout in the pane
 "$APP" --screen "$SCREEN" layout-issues | python3 -c '
 import json, sys
