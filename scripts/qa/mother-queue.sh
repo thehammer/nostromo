@@ -7,7 +7,7 @@
 # Needs AppControlEnabled and a visible window. Pass the window index as $1
 # (default 1); it clicks the Mother sidebar entry in that window.
 #
-# STATUS: expected to FAIL until the Mother queue pane is hosted (docs/plans/mother-pane.md, P1).
+# Passes from P1 on (docs/plans/mother-pane.md). Reads SwiftUI text through the accessibility tree.
 set -euo pipefail
 APP="$(dirname "$0")/../../bin/nostromo-app"
 CTL=/tmp/fmb-qa.sock.ctl
@@ -28,7 +28,10 @@ print(s.makefile().readline().strip())' "$CTL" "$1"; }
 # 2. no broken layout in the pane
 "$APP" -w "$W" layout-issues | python3 -c '
 import json, sys
-bad = [i for i in json.load(sys.stdin) if i["ambiguous"] and i["class"] != "NSTextView"]
+# Content area only (x >= 160 skips the sidebar), and not AppKit-internal text plumbing.
+bad = [i for i in json.load(sys.stdin)
+       if i["ambiguous"] and i["frame"]["x"] >= 160
+       and not i["class"].startswith(("_NS", "NSText"))]
 sys.exit("layout issues: %s" % bad if bad else 0)'
 
 # 3. cancel a running job from the UI; the broker must receive exactly that command

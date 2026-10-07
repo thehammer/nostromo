@@ -46,6 +46,15 @@ screenshot or the `tree` dump can be passed straight to `click`.
     bin/nostromo-app screenshot /tmp/after-drop.png
     bin/nostromo-app key $'\r'                      # send
 
+## SwiftUI content
+
+SwiftUI draws its own text, so there is no `NSTextField` to find. With the
+control socket on, the app turns on the accessibility tree
+(`AXEnhancedUserInterface`) and `find` / `click --text` / `tree` also search the
+accessibility elements inside any `NSHostingView` — e.g. the Mother job list's
+titles and group headers. `nostromo-app ax [CLASS]` dumps the raw tree for
+debugging.
+
 ## Scripted scenarios
 
 `wait TEXT [--gone] [--timeout S]` polls until a view with TEXT appears (or

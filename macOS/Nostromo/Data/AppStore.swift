@@ -588,6 +588,10 @@ class AppStore: ObservableObject {
     private var motherPollInFlight = false
 
     private func pollMotherList() {
+        // A non-default broker (MOTHER_BROKER_SOCK — the fake broker used for QA)
+        // is not the Mother the `mother` CLI talks to; reconciling against the real
+        // CLI's list would delete every job the other broker reported.
+        guard ProcessInfo.processInfo.environment["MOTHER_BROKER_SOCK"] == nil else { return }
         guard !motherPollInFlight else { return }
         guard let bin = AppStore.findBinary("mother") else { return }
         motherPollInFlight = true
