@@ -330,3 +330,43 @@ enum TranscriptDiagnostics {
             "the logic test bundle has no real footprint source — inject MemoryWatchdog.footprint")
     }
 }
+
+// MARK: - MemoryPressureReport
+
+final class MemoryPressureReportTests: XCTestCase {
+
+    private let ps = """
+        454000 /Users/h/.local/bin/claude
+        300000 claude
+        761000 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization
+         90000 /Applications/Nostromo.app/Contents/MacOS/Nostromo
+        garbage line
+        notanumber foo
+        """
+
+    func testGroupsByExecutableNameAndSortsLargestFirst() {
+        let top = MemoryPressureReport.aggregate(psOutput: ps, limit: 3)
+        XCTAssertEqual(top.map(\.name), ["com.apple.Virtualization", "claude", "Nostromo"])
+        XCTAssertEqual(top[1].bytes, (454_000 + 300_000) * 1024)   // two claude processes, one line
+    }
+
+    func testLimitAndMalformedLinesAreHandled() {
+        XCTAssertEqual(MemoryPressureReport.aggregate(psOutput: ps, limit: 1).count, 1)
+        XCTAssertTrue(MemoryPressureReport.aggregate(psOutput: "", limit: 3).isEmpty)
+    }
+
+    func testDetailSaysNostromoIsNotTheCauseWhenItIsSmall() {
+        let d = MemoryPressureReport.systemPressureDetail(
+            footprintBytes: 163 * 1_048_576,
+            topProcesses: [.init(name: "claude", bytes: 2_800 * 1_048_576)])
+        XCTAssertTrue(d.contains("Nostromo is using 163 MB (not the cause)."), d)
+        XCTAssertTrue(d.contains("Largest: claude 2800 MB."), d)
+    }
+
+    func testDetailDoesNotExonerateALargeFootprint() {
+        let d = MemoryPressureReport.systemPressureDetail(footprintBytes: 1_300 * 1_048_576, topProcesses: [])
+        XCTAssertTrue(d.contains("1300 MB."), d)
+        XCTAssertFalse(d.contains("not the cause"), d)
+    }
+}
+
