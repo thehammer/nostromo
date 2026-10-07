@@ -35,7 +35,8 @@ class FakeBrokerTest(unittest.TestCase):
         # /tmp, not TMPDIR: unix socket paths are length-limited (SUN_LEN)
         self.dir = tempfile.mkdtemp(prefix="fmb", dir="/tmp")
         self.sock = os.path.join(self.dir, "b.sock")
-        self.broker, self.servers = fmb.serve(self.sock, fmb.SCENARIOS["basic"](), ping_secs=0)
+        self.broker, self.servers = fmb.serve(self.sock, fmb.SCENARIOS["basic"](), ping_secs=0,
+                                              scenario=fmb.SCENARIOS["basic"])
         self.conns = []
 
     def tearDown(self):
@@ -114,6 +115,19 @@ class FakeBrokerTest(unittest.TestCase):
         ctl.s.sendall((json.dumps({"op": "drop"}) + "\n").encode())
         self.assertGreaterEqual(ctl.read()["result"], 1)
         self.assertEqual(c.f.readline(), b"")   # connection closed → client must reconnect
+
+    def test_reset_restores_the_scenario_forgets_commands_and_drops_clients(self):
+        c, _ = self.subscribed()
+        c.send("cancel", {"job": "j-run"}, "x1"); c.read(); c.read()
+        self.assertEqual(self.broker.jobs["j-run"]["state"], "cancelled")
+        ctl = Conn(self.sock + ".ctl"); self.conns.append(ctl)
+        ctl.s.sendall((json.dumps({"op": "reset"}) + "\n").encode())
+        self.assertTrue(ctl.read()["ok"])
+        self.assertEqual(self.broker.jobs["j-run"]["state"], "running")
+        self.assertEqual(self.broker.commands, [])
+        self.assertEqual(c.f.readline(), b"")        # dropped: the app reconnects and re-snapshots
+        c2, jobs = self.subscribed()                  # a fresh client sees the restored jobs
+        self.assertEqual(next(j for j in jobs if j["id"] == "j-run")["state"], "running")
 
     def test_refuses_to_run_in_the_real_mother_directory(self):
         import subprocess
