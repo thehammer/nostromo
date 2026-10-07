@@ -95,10 +95,13 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     func windowWillEnterFullScreen(_ notification: Notification) {
         Self.transitioning.insert(ObjectIdentifier(self))
         winLog.info("windowWillEnterFullScreen — \(self.title, privacy: .public)")
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.5
-            animator().alphaValue = 1.0
-        }
+        // Set directly, not through `animator()`: a fade here runs under
+        // NSAnimationManager, which KVO-observes the window. Full-screen entry
+        // swaps windows underneath it (and we retry entry after display
+        // sleep/wake), and on completion AppKit raised an NSException from
+        // `-removeObserver:forKeyPath:` inside a display-link callback, which
+        // aborted the app (crash report 2026-10-07 10:17).
+        alphaValue = 1.0
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
