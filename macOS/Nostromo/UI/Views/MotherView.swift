@@ -1155,7 +1155,11 @@ private class MotherJobDetail: NSView {
         if let a = job.adherenceStatus { pairs.append(("Adherence", a)) }
 
         for (key, value) in pairs {
-            metaStack.addArrangedSubview(metaRow(key: key, value: value))
+            let row = metaRow(key: key, value: value)
+            metaStack.addArrangedSubview(row)
+            // The stack aligns .leading, which would let a row grow to its text's
+            // natural width; pin rows to the stack so long values wrap instead.
+            row.widthAnchor.constraint(lessThanOrEqualTo: metaStack.widthAnchor).isActive = true
         }
     }
 
@@ -1164,11 +1168,19 @@ private class MotherJobDetail: NSView {
         k.font      = .systemFont(ofSize: 10, weight: .medium)
         k.textColor = Theme.fgMuted
         k.setContentHuggingPriority(.required, for: .horizontal)
+        k.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let v = NSTextField(labelWithString: value)
+        // Wrap, never clip: a job's question can be several paragraphs long. The
+        // value yields horizontally (low compression resistance) and the row is
+        // bounded to the stack's width below, so the label wraps to the pane.
+        let v = NSTextField(wrappingLabelWithString: value)
         v.font          = Theme.monoFont
         v.textColor     = Theme.fg
-        v.lineBreakMode = .byTruncatingMiddle
+        v.lineBreakMode = .byWordWrapping
+        v.maximumNumberOfLines = 0
+        v.isSelectable  = true          // copyable
+        v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        v.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let row = NSStackView(views: [k, v])
         row.orientation = .horizontal
