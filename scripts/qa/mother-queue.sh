@@ -10,27 +10,29 @@
 # Passes from P1 on (docs/plans/mother-pane.md). Reads SwiftUI text through the accessibility tree.
 set -euo pipefail
 APP="$(dirname "$0")/../../bin/nostromo-app"
+SCREEN="${QA_SCREEN:-Sceptre}"   # the display reserved for QA; set QA_SCREEN to override
+export NOSTROMO_QA_SCREEN="$SCREEN"
 # Clicks need the app active and the window key. This TAKES keyboard focus for the
 # duration of the run and gives it back on exit — run when nobody is typing elsewhere.
-"$APP" -w "${1:-1}" activate >/dev/null
+"$APP" --screen "$SCREEN" activate >/dev/null
 trap '"$APP" restore >/dev/null 2>&1 || true' EXIT
 CTL=/tmp/fmb-qa.sock.ctl
-W="${1:-1}"
+W=0   # window selection is by display (below), never by index
 ctl() { python3 -c '
 import json, socket, sys
 s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall((sys.argv[2] + "\n").encode())
 print(s.makefile().readline().strip())' "$CTL" "$1"; }
 
-"$APP" -w "$W" click --text "Mother"
+"$APP" --screen "$SCREEN" click --text "Mother"
 
 # 1. groups and jobs from the broker snapshot are visible
-"$APP" -w "$W" wait "Add RWX sandbox for agents" --timeout 8      # running job
-"$APP" -w "$W" expect "Migrate billing job to queues"             # awaiting an answer
-"$APP" -w "$W" expect "Upgrade Laravel"                           # failed
-"$APP" -w "$W" expect "RUNNING"; "$APP" -w "$W" expect "FAILED"   # group headers
+"$APP" --screen "$SCREEN" wait "Add RWX sandbox for agents" --timeout 8      # running job
+"$APP" --screen "$SCREEN" expect "Migrate billing job to queues"             # awaiting an answer
+"$APP" --screen "$SCREEN" expect "Upgrade Laravel"                           # failed
+"$APP" --screen "$SCREEN" expect "RUNNING"; "$APP" --screen "$SCREEN" expect "FAILED"   # group headers
 
 # 2. no broken layout in the pane
-"$APP" -w "$W" layout-issues | python3 -c '
+"$APP" --screen "$SCREEN" layout-issues | python3 -c '
 import json, sys
 # Content area only (x >= 160 skips the sidebar), and not AppKit-internal text plumbing.
 bad = [i for i in json.load(sys.stdin)
@@ -41,9 +43,9 @@ bad = [i for i in json.load(sys.stdin)
 sys.exit("layout issues: %s" % bad if bad else 0)'
 
 # 3. cancel a running job from the UI; the broker must receive exactly that command
-"$APP" -w "$W" click --text "Add RWX sandbox for agents"
-"$APP" -w "$W" wait "Cancel job" --timeout 5
-"$APP" -w "$W" click --text "Cancel job"
+"$APP" --screen "$SCREEN" click --text "Add RWX sandbox for agents"
+"$APP" --screen "$SCREEN" wait "Cancel job" --timeout 5
+"$APP" --screen "$SCREEN" click --text "Cancel job"
 sleep 1
 ctl '{"op":"commands"}' | python3 -c '
 import json, sys
@@ -52,9 +54,9 @@ ok = any(c["type"] == "cancel" and c["data"]["job"] == "j-run" for c in cmds)
 sys.exit(0 if ok else "broker did not receive cancel for j-run: %s" % cmds)'
 
 # 4. retry a failed job
-"$APP" -w "$W" click --text "Upgrade Laravel"
-"$APP" -w "$W" wait "Retry" --timeout 5
-"$APP" -w "$W" click --text "Retry"
+"$APP" --screen "$SCREEN" click --text "Upgrade Laravel"
+"$APP" --screen "$SCREEN" wait "Retry" --timeout 5
+"$APP" --screen "$SCREEN" click --text "Retry"
 sleep 1
 ctl '{"op":"jobs"}' | python3 -c '
 import json, sys

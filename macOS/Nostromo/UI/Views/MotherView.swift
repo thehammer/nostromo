@@ -331,12 +331,6 @@ private class MotherJobListViewModel: ObservableObject {
 
 // MARK: - MotherJobListSwiftUI
 
-private struct JobGroup: Identifiable {
-    let state: String
-    var jobs: [MotherJob]
-    var id: String { state }
-}
-
 private struct MotherJobListSwiftUI: View {
     @ObservedObject var vm: MotherJobListViewModel
     @State private var selectedId: String?
@@ -389,27 +383,7 @@ private struct MotherJobListSwiftUI: View {
     }
 
     /// Jobs grouped by state, sorted: awaiting → running → queued/ready → failed → succeeded/cancelled.
-    private var groupedJobs: [JobGroup] {
-        let stateRank: [String: Int] = [
-            "awaiting": 0, "running": 1, "queued": 2, "ready": 2,
-            "failed": 3, "succeeded": 4, "cancelled": 4,
-        ]
-        let sorted = vm.jobs.sorted {
-            let a = stateRank[$0.state] ?? 5
-            let b = stateRank[$1.state] ?? 5
-            if a != b { return a < b }
-            return ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast)
-        }
-        var groups: [JobGroup] = []
-        for job in sorted {
-            if groups.last?.state == job.state {
-                groups[groups.count - 1].jobs.append(job)
-            } else {
-                groups.append(JobGroup(state: job.state, jobs: [job]))
-            }
-        }
-        return groups
-    }
+    private var groupedJobs: [MotherJobGroup] { MotherJobGrouping.groups(from: vm.jobs) }
 }
 
 // MARK: - MotherJobList

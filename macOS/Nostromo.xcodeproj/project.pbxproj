@@ -180,6 +180,9 @@
 		OO0000000000000000000201 /* TicketBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000001 /* TicketBlockDocument.swift */; };
 		OO0000000000000000000102 /* TicketContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000002 /* TicketContentView.swift */; };
 		NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */; };
+		MG0000000000000000000A1 /* MotherJobGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = MG0000000000000000000A0 /* MotherJobGrouping.swift */; };
+		MG0000000000000000000A2 /* MotherJobGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MG0000000000000000000A0 /* MotherJobGrouping.swift */; };
+		MG0000000000000000000B1 /* MotherJobGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MG0000000000000000000B0 /* MotherJobGroupingTests.swift */; };
 		PP000000000000000000002 /* ActivityStreamModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000001 /* ActivityStreamModel.swift */; };
 		PP000000000000000000003 /* ActivityStreamModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000001 /* ActivityStreamModel.swift */; };
 		PP000000000000000000005 /* ActivityTickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000004 /* ActivityTickerView.swift */; };
@@ -319,6 +322,8 @@
 		MM0000000000000000000001 /* MarkdownBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocument.swift; sourceTree = "<group>"; };
 		MM0000000000000000000002 /* ConversationContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationContentView.swift; sourceTree = "<group>"; };
 		NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocumentTests.swift; sourceTree = "<group>"; };
+		MG0000000000000000000A0 /* MotherJobGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobGrouping.swift; sourceTree = "<group>"; };
+		MG0000000000000000000B0 /* MotherJobGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobGroupingTests.swift; sourceTree = "<group>"; };
 		PP000000000000000000001 /* ActivityStreamModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamModel.swift; sourceTree = "<group>"; };
 		PP000000000000000000004 /* ActivityTickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityTickerView.swift; sourceTree = "<group>"; };
 		PP000000000000000000006 /* ActivityEventDecodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityEventDecodeTests.swift; sourceTree = "<group>"; };
@@ -456,6 +461,7 @@
 				VV0000000000000000000001 /* PaneFirstPaintAudit.swift */,
 				RA0000000000000000000001 /* RatioApplicationAudit.swift */,
 				PP000000000000000000001 /* ActivityStreamModel.swift */,
+				MG0000000000000000000A0 /* MotherJobGrouping.swift */,
 				PP000000000000000000004 /* ActivityTickerView.swift */,
 				AA0000020000000000000021 /* Views */,
 			);
@@ -524,6 +530,7 @@
 				VV0000000000000000000002 /* PaneFirstPaintAuditTests.swift */,
 				RA0000000000000000000002 /* RatioApplicationAuditTests.swift */,
 				OO000000000000000000100 /* DecisionStoreTests.swift */,
+				MG0000000000000000000B0 /* MotherJobGroupingTests.swift */,
 				OO0000000000000000001C0 /* OverlayHitTestTests.swift */,
 				AC0000000000000000000030 /* AppControlProtocolTests.swift */,
 				OO0000000000000000001B0 /* ImagePasteboardTests.swift */,
@@ -712,6 +719,7 @@
 				OO000000000000000000021 /* DecisionSheet.swift in Sources */,
 				OO000000000000000000031 /* DecisionPresenter.swift in Sources */,
 				PP000000000000000000002 /* ActivityStreamModel.swift in Sources */,
+				MG0000000000000000000A1 /* MotherJobGrouping.swift in Sources */,
 				PP000000000000000000005 /* ActivityTickerView.swift in Sources */,
 				RR0000000000000000000101 /* PRDetailCache.swift in Sources */,
 				WW0000000000000000000005 /* DiffPaneSummaryPolicy.swift in Sources */,
@@ -801,12 +809,14 @@
 				RA0000000000000000000201 /* RatioApplicationAuditTests.swift in Sources */,
 				OO000000000000000000012 /* DecisionStore.swift in TestSources */,
 				KK000000000000000000102 /* DecisionStoreTests.swift in Sources */,
+				MG0000000000000000000B1 /* MotherJobGroupingTests.swift in Sources */,
 				KK0000000000000000001B2 /* ImagePasteboardTests.swift in Sources */,
 				KK0000000000000000001C2 /* OverlayHitTestTests.swift in Sources */,
 				AC0000000000000000000031 /* AppControlProtocolTests.swift in Sources */,
 				KK0000000000000000001A2 /* PostureScopedTests.swift in Sources */,
 				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,
 				PP000000000000000000003 /* ActivityStreamModel.swift in TestSources */,
+				MG0000000000000000000A2 /* MotherJobGrouping.swift in TestSources */,
 				PP000000000000000000007 /* ActivityEventDecodeTests.swift in Sources */,
 				PP000000000000000000009 /* ActivityStreamModelTests.swift in Sources */,
 				PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */,
