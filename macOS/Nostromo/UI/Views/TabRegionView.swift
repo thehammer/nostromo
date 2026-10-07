@@ -58,7 +58,7 @@ final class TabRegionView: NSView {
     /// decides whether to draw the button, so an un-closable tab doesn't offer
     /// a control that would be refused.
     static func isClosable(paneId: String) -> Bool {
-        paneId != "queue" && paneId != "repl"
+        paneId != "queue" && paneId != "repl" && paneId != "mother_overview"
     }
 
     /// Called when the operator clicks a tab's ×. The owner asks the daemon to
@@ -109,37 +109,41 @@ final class TabRegionView: NSView {
             contentContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
-        for tab in tabs {
-            let button = TabButtonView(label: tab.label) { [weak self] in
-                self?.selectTab(tab.paneId)
-            }
-            button.closable = Self.isClosable(paneId: tab.paneId)
-            button.onClose = { [weak self] in self?.onCloseTab?(tab.paneId) }
-            tabButtons[tab.paneId] = button
-            stripStack.addArrangedSubview(button)
-            // `stripStack`'s cross-axis alignment defaults to `.centerY` — an
-            // NSStackView never stretches arranged subviews on the cross
-            // axis (`.fillEqually` above governs only the horizontal axis),
-            // so without this pin every button sizes to its own fitting
-            // height, which `TabButtonView` has none of. Pinned explicitly
-            // top+bottom, the button (and its full-bleed `clickButton`) gets
-            // the strip's real height, so `hitTest` has something to hit.
-            NSLayoutConstraint.activate([
-                button.topAnchor.constraint(equalTo: stripStack.topAnchor),
-                button.bottomAnchor.constraint(equalTo: stripStack.bottomAnchor),
-            ])
-
-            tab.view.translatesAutoresizingMaskIntoConstraints = false
-            contentContainer.addSubview(tab.view)
-            NSLayoutConstraint.activate([
-                tab.view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
-                tab.view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
-                tab.view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-                tab.view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
-            ])
-        }
+        for tab in tabs { install(tab) }
 
         refreshVisibilityAndSelection()
+    }
+
+    /// Build the button for `tab`, add its view to the content container, and
+    /// pin both. Shared by initial setup and `addTab`.
+    private func install(_ tab: Tab) {
+        let button = TabButtonView(label: tab.label) { [weak self] in
+            self?.selectTab(tab.paneId)
+        }
+        button.closable = Self.isClosable(paneId: tab.paneId)
+        button.onClose = { [weak self] in self?.onCloseTab?(tab.paneId) }
+        tabButtons[tab.paneId] = button
+        stripStack.addArrangedSubview(button)
+        // `stripStack`'s cross-axis alignment defaults to `.centerY` — an
+        // NSStackView never stretches arranged subviews on the cross
+        // axis (`.fillEqually` above governs only the horizontal axis),
+        // so without this pin every button sizes to its own fitting
+        // height, which `TabButtonView` has none of. Pinned explicitly
+        // top+bottom, the button (and its full-bleed `clickButton`) gets
+        // the strip's real height, so `hitTest` has something to hit.
+        NSLayoutConstraint.activate([
+            button.topAnchor.constraint(equalTo: stripStack.topAnchor),
+            button.bottomAnchor.constraint(equalTo: stripStack.bottomAnchor),
+        ])
+
+        tab.view.translatesAutoresizingMaskIntoConstraints = false
+        contentContainer.addSubview(tab.view)
+        NSLayoutConstraint.activate([
+            tab.view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+            tab.view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            tab.view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            tab.view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+        ])
     }
 
     /// 3pt top pad + 15pt label line + 13pt caption line + 3pt bottom pad =
@@ -166,6 +170,33 @@ final class TabRegionView: NSView {
         unreadPaneIds.remove(paneId)
         refreshVisibilityAndSelection()
     }
+
+    /// Add a tab at the end (local tab sets such as the Mother job tabs; the
+    /// daemon-driven regions never call this). No-op if the id already exists.
+    func addTab(_ tab: Tab, activate: Bool = true) {
+        guard !tabs.contains(where: { $0.paneId == tab.paneId }) else { return }
+        tabs.append(tab)
+        install(tab)
+        if activate { activePaneId = tab.paneId; unreadPaneIds.remove(tab.paneId) }
+        refreshVisibilityAndSelection()
+    }
+
+    /// Remove a tab; if it was frontmost the previous neighbour (or first tab)
+    /// takes over. Removing the last tab is allowed and leaves an empty region.
+    func removeTab(_ paneId: String) {
+        guard let i = tabs.firstIndex(where: { $0.paneId == paneId }) else { return }
+        let tab = tabs.remove(at: i)
+        tabButtons.removeValue(forKey: paneId)?.removeFromSuperview()
+        tab.view.removeFromSuperview()
+        unreadPaneIds.remove(paneId)
+        captions.removeValue(forKey: paneId)
+        if activePaneId == paneId {
+            activePaneId = tabs.indices.contains(i - 1) ? tabs[i - 1].paneId : (tabs.first?.paneId ?? "")
+        }
+        refreshVisibilityAndSelection()
+    }
+
+    func hasTab(_ paneId: String) -> Bool { tabs.contains { $0.paneId == paneId } }
 
     /// Record a content push for `paneId`. Marks it unread (with no
     /// front-stealing) unless it's already the frontmost tab — a push for

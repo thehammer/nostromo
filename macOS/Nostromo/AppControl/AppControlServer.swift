@@ -130,6 +130,8 @@ final class AppControlServer {
         case "find":        return try find(req)
         case "layout-issues": return try layoutIssues(req)
         case "ax":          return try axDump(req)
+        case "activate":    return try activate(req)
+        case "restore":     return restoreFocus()
         case "click":       return try click(req)
         case "key":         return try key(req)
         case "type":        return try typeText(req)
@@ -344,6 +346,38 @@ final class AppControlServer {
         o["enhancedUI"] = NSApp.accessibilityAttributeValue(NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")) as Any
         o["cellRows"] = (t.accessibilityRows() ?? []).count
         return o
+    }
+
+    // MARK: - Focus
+
+    /// The app that was frontmost before `activate`, so `restore` can hand focus back.
+    private var previousFrontmost: NSRunningApplication?
+
+    /// Make the app active and a window key. Needed because AppKit ignores the
+    /// first click on a non-key window in an inactive app, so table selection and
+    /// other first-mouse-sensitive controls do nothing until then. This takes
+    /// keyboard focus from whatever the operator is using — scenarios call it
+    /// on purpose, run `restore` when done, and should only run while nobody is
+    /// typing elsewhere.
+    private func activate(_ req: AppControlRequest) throws -> Any {
+        let w = try window(req)
+        if !NSApp.isActive { previousFrontmost = NSWorkspace.shared.frontmostApplication }
+        NSApp.activate(ignoringOtherApps: true)
+        w.makeKeyAndOrderFront(nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        return ["active": NSApp.isActive, "key": w.isKeyWindow,
+                "previous": previousFrontmost?.bundleIdentifier as Any]
+    }
+
+    /// Hand keyboard focus back to the app that had it before `activate`.
+    private func restoreFocus() -> Any {
+        let prev = previousFrontmost
+        previousFrontmost = nil
+        if let prev, prev.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            prev.activate(options: [])
+            return ["restored": prev.bundleIdentifier as Any]
+        }
+        return ["restored": NSNull()]
     }
 
     // MARK: - Mouse

@@ -12,6 +12,8 @@ window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
     nostromo-app windows
     nostromo-app layout-issues [-w N]     ambiguous / zero-sized Auto Layout views
     nostromo-app ax     [CLASS-SUBSTRING]   raw accessibility tree of a (SwiftUI hosting) view
+    nostromo-app activate               make the app active + window key (TAKES keyboard focus; first clicks on a non-key window are otherwise ignored)
+    nostromo-app restore                hand focus back to the app that had it before `activate`
     nostromo-app tree   [-w N] [--depth D]
     nostromo-app find   TEXT [-w N]
     nostromo-app click  (--text TEXT [--index I] | X Y) [-w N] [--count C] [--mod cmd,shift]
@@ -77,7 +79,7 @@ def main():
     p.add_argument("-w", "--window", type=int, default=0)
     p.add_argument("--sheet", action="store_true", help="target the sheet attached to the window")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("ping"); sub.add_parser("windows"); sub.add_parser("layout-issues")
+    sub.add_parser("ping"); sub.add_parser("windows"); sub.add_parser("layout-issues"); sub.add_parser("activate"); sub.add_parser("restore")
     axp = sub.add_parser("ax"); axp.add_argument("cls", nargs="?", default="HostingView")
     t = sub.add_parser("tree"); t.add_argument("--depth", type=int, default=12)
     f = sub.add_parser("find"); f.add_argument("text")
