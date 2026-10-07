@@ -9,6 +9,8 @@ APP="$(dirname "$0")/../../bin/nostromo-app"
 "$APP" -w "${1:-1}" activate >/dev/null
 trap '"$APP" restore >/dev/null 2>&1 || true' EXIT
 W="${1:-1}"
+# Number of closable tabs = ✕ *buttons* (find also reports each button's inner text field).
+closers() { "$APP" -w "$W" find "✕" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin) if x["class"] == "NSButton"))'; }
 
 "$APP" -w "$W" click --text "Mother"
 "$APP" -w "$W" wait "Overview" --timeout 8                 # the fixed first tab
@@ -22,13 +24,13 @@ W="${1:-1}"
 # 2. open a second job: another tab; the first stays open
 "$APP" -w "$W" click --text "Upgrade Laravel"
 "$APP" -w "$W" wait "Retry" --timeout 5
-count=$("$APP" -w "$W" find "✕" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+count=$(closers)
 [ "$count" -ge 2 ] || { echo "expected 2 closable tabs, found $count"; exit 1; }
 
 # 3. close one with its ✕; one tab remains
-"$APP" -w "$W" click --text "✕" --index 0
+"$APP" -w "$W" click --text "✕" --index 0   # first match is the NSButton
 sleep 1
-count=$("$APP" -w "$W" find "✕" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+count=$(closers)
 [ "$count" -eq 1 ] || { echo "expected 1 closable tab after closing, found $count"; exit 1; }
 
 # 4. closing the last job tab returns to the Overview, and the row can be reopened
