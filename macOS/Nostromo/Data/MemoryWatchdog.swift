@@ -65,8 +65,7 @@ final class MemoryWatchdog {
                 log.error("OS reported critical memory pressure — shedding")
                 self.shed(reason: "the system reported critical memory pressure")
             } else {
-                self.warn(footprint: self.footprint(),
-                          detail: "The system is under memory pressure.")
+                self.warnAboutSystemPressure()
             }
         }
         pressure.resume()
@@ -99,6 +98,22 @@ final class MemoryWatchdog {
         onWarn?("Memory climbing",
                 detail + " Retained transcript content will be shed automatically "
                        + "if it keeps rising.")
+    }
+
+    /// The OS said the *machine* is short of memory. That is not evidence Nostromo
+    /// is the cause (every warning on 2026-10-07 fired with Nostromo at 92–317 MB,
+    /// against a 1.2 GB warning level), so say whose it is: our own footprint and
+    /// the biggest memory users by name.
+    private func warnAboutSystemPressure() {
+        guard !hasWarned else { return }
+        hasWarned = true
+        let ours = footprint()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let top = MemoryPressureReport.topProcesses(limit: 3)
+            let detail = MemoryPressureReport.systemPressureDetail(footprintBytes: ours, topProcesses: top)
+            log.warning("system memory pressure; nostromo=\(Self.megabytes(ours))MB; \(detail, privacy: .public)")
+            DispatchQueue.main.async { self?.onWarn?("Memory pressure", detail) }
+        }
     }
 
     /// Collapse every pane to its minimum materialization window, compress every
@@ -176,4 +191,55 @@ final class MemoryWatchdog {
     }
 
     private static func megabytes(_ bytes: Int) -> Int { bytes / 1_048_576 }
+}
+
+// MARK: - MemoryPressureReport
+
+/// Words for an OS memory-pressure warning: who is using the memory.
+enum MemoryPressureReport {
+
+    struct Usage: Equatable {
+        let name: String
+        let bytes: Int
+    }
+
+    /// Largest memory users, grouped by executable name (fourteen `claude`
+    /// processes are one line, not fourteen), from `ps -axo rss=,comm=`.
+    static func topProcesses(limit: Int,
+                             run: () -> String? = {
+        ProcessRunner.runCapturingStdout(URL(fileURLWithPath: "/bin/ps"),
+                                         arguments: ["-axo", "rss=,comm="])
+            .flatMap { String(data: $0.data, encoding: .utf8) }
+    }) -> [Usage] {
+        guard let output = run() else { return [] }
+        return aggregate(psOutput: output, limit: limit)
+    }
+
+    /// Pure parser: `   123456 /path/to/comm` lines (RSS in KiB) → top usages by name.
+    static func aggregate(psOutput: String, limit: Int) -> [Usage] {
+        var byName: [String: Int] = [:]
+        for line in psOutput.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let space = trimmed.firstIndex(of: " "),
+                  let kib = Int(trimmed[..<space]) else { continue }
+            let path = trimmed[trimmed.index(after: space)...].trimmingCharacters(in: .whitespaces)
+            let name = (path as NSString).lastPathComponent
+            guard !name.isEmpty else { continue }
+            byName[name, default: 0] += kib * 1024
+        }
+        return byName.map { Usage(name: $0.key, bytes: $0.value) }
+            .sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.name < $1.name }
+            .prefix(limit).map { $0 }
+    }
+
+    static func systemPressureDetail(footprintBytes: Int, topProcesses: [Usage]) -> String {
+        let mine = footprintBytes / 1_048_576
+        var s = "macOS reports memory pressure. Nostromo is using \(mine) MB"
+        s += mine < 1_000 ? " (not the cause)." : "."
+        if !topProcesses.isEmpty {
+            let list = topProcesses.map { "\($0.name) \($0.bytes / 1_048_576) MB" }.joined(separator: ", ")
+            s += " Largest: \(list)."
+        }
+        return s
+    }
 }
