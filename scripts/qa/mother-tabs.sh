@@ -9,6 +9,7 @@ export NOSTROMO_QA_SCREEN="$SCREEN"
 # Clicks need the app active and the window key. This TAKES keyboard focus for the
 # duration of the run and gives it back on exit — run when nobody is typing elsewhere.
 "$APP" --screen "$SCREEN" activate >/dev/null
+sleep 0.6   # let the window actually become key before the first click
 trap '"$APP" restore >/dev/null 2>&1 || true' EXIT
 # Scenarios share the fake broker's state (cancel/retry mutate it): start from the scenario's jobs.
 ctl_reset() { python3 -c '
@@ -49,5 +50,15 @@ sleep 1
 "$APP" --screen "$SCREEN" expect "✕" --absent
 "$APP" --screen "$SCREEN" click --text "Add RWX sandbox for agents"
 "$APP" --screen "$SCREEN" wait "Cancel job" --timeout 5
+
+# 5. a long, multi-line question wraps inside the pane instead of running off its right edge
+"$APP" --screen "$SCREEN" click --text "Migrate billing job to queues"
+"$APP" --screen "$SCREEN" wait "Keep the legacy retry config" --timeout 5
+"$APP" --screen "$SCREEN" windows | python3 -c '
+import json, subprocess, sys
+width = [w for w in json.load(sys.stdin) if "sceptre" in w["screen"].lower()][0]["frame"]["w"]
+hits = json.loads(subprocess.check_output(["'"$APP"'", "--screen", "'"$SCREEN"'", "find", "Keep the legacy retry config"]))
+over = [h for h in hits if h["frame"]["x"] + h["frame"]["w"] > width + 1]
+sys.exit("question runs past the pane edge (%d px window): %s" % (width, over) if over else 0)'
 
 echo "mother-tabs: PASS"

@@ -52,7 +52,11 @@ SCENARIOS = {
     "basic": lambda: [
         job("j-run", "Add RWX sandbox for agents", "running", started=240,
             phases=[phase("cody", "completed"), phase("redd", "running"), phase("marty", "pending")]),
-        job("j-ask", "Migrate billing job to queues", "awaiting", question="Keep the legacy retry config?", started=900),
+        job("j-ask", "Migrate billing job to queues", "awaiting", question=("Keep the legacy retry config? The plan says to drop it, but three callers still read it: "
+                  "billing-export, the nightly reconciler and the admin dashboard widget, which would silently fall back to defaults.\n"
+                  "  (A) Keep it and mark it deprecated, removing it in a follow-up once the callers move.\n"
+                  "  (B) Drop it now and update the three callers in this PR, widening the diff by about 200 lines.\n"
+                  "Current state: implementation and tests are done and green on branch fix/billing-retry-config, rebased on main, with option B applied."), started=900),
         job("j-pause", "Backfill invoices", "awaiting", paused_reason="quota", started=1500),
         job("j-q1", "Bump nuxt in payments-v2", "queued", age=60),
         job("j-q2", "Docs: update runbook", "ready", age=45),

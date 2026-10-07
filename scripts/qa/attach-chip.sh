@@ -8,6 +8,7 @@ APP="$(dirname "$0")/../../bin/nostromo-app"
 # Clicks need the app active and the window key. This TAKES keyboard focus for the
 # duration of the run and gives it back on exit — run when nobody is typing elsewhere.
 "$APP" -w "${1:-0}" activate >/dev/null
+sleep 0.6   # let the window actually become key before the first click
 trap '"$APP" restore >/dev/null 2>&1 || true' EXIT
 IMG="$(mktemp -d)/qa-chip.png"
 python3 - "$IMG" <<'PY'
