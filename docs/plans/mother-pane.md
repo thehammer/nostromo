@@ -50,8 +50,9 @@ UI is reachable.
   detail + actions); `scripts/qa/mother-queue.sh` passes against the fake broker
   (cancel and retry clicked in the real UI; broker received them).
 - **P2:** per-job tabs, ✕ close, selection ↔ tab sync.
-- **P3:** header controls the broker actually supports; polish (empty/offline
-  states, keyboard navigation).
+- **P2.1:** tab strip uses compact tabs (200pt, shrink to 70) and the list
+  highlight follows the active tab (code in this PR; live check pending).
+- **P3:** header controls — see "What Mother's broker supports" below.
 
 ## QA (tooling already in place)
 `bin/fake-mother-broker --scenario basic` + `bin/nostromo-app` (`click`,
@@ -68,7 +69,20 @@ what the UI sent. Needs an awake, visible window (see `docs/app-control.md`).
 - The sidebar's `FlippedView` (TabBarView) reports ambiguous Auto Layout — a
   pre-existing finding from `layout-issues`, not part of Mother.
 
+## What Mother's broker supports (checked 2026-10-07, `plugins/mother/broker/envelope.go`)
+Broker commands: `subscribe`, `unsubscribe`, `query_list`, `query_get`, `answer`,
+`cancel`, `retry`, `force-start`. **There is no pause-queue or clear-finished
+command.** Everything else is CLI-only: `escalate`, `reconcile`,
+`adherence-review`, `archive [--older-than DAYS]`, `add`, `plan`, `peek`,
+`logs`, `daemon start|stop|status`.
+
+So P3 header controls, honestly scoped:
+- **Escalate** on failed jobs (CLI `mother escalate ID --yes`), next to Retry.
+- **Archive finished…** with an age choice (CLI `mother archive --older-than N`);
+  the app already shells out `mother archive` per job via `archiveJob`.
+- **Mother daemon status** chip (CLI `mother daemon status`) with Start when down.
+- Not offered: pause/resume queue (no command exists; would need a broker change).
+
 ## Open questions
-- Does Mother's broker expose pause-queue / clear-finished / archive? (The old
-  view has an Archive button — check whether it talks to the broker or to disk.)
+- Pause-queue would need a new broker command in the Mother repo — worth filing there if wanted.
 - Should finished jobs older than N hours collapse? (Default: show last 24h.)
