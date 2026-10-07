@@ -2743,24 +2743,24 @@ mod tests {
 mod mother_layout_tests {
     use super::*;
 
-    fn reg() -> PaneRegistry {
-        PaneRegistry::new()
+    fn fresh() -> PaneRegistry {
+        PaneRegistry::in_memory()
     }
 
     #[test]
     fn a_bare_mother_focus_gets_the_queue_above_the_repl() {
-        let mut reg = reg();
+        let mut reg = fresh();
         let tree = reg.ensure_mother_layout("mother").expect("a bare mother focus is seeded");
         assert_eq!(tree.pane_ids(), vec!["mother_queue".to_string(), "repl".to_string()]);
     }
 
     #[test]
     fn it_is_idempotent_and_keeps_an_existing_layout() {
-        let mut reg = reg();
+        let mut reg = fresh();
         reg.ensure_mother_layout("mother").unwrap();
         assert_eq!(reg.ensure_mother_layout("mother"), None);
         // A focus the user or an agent already rearranged is left alone.
-        let mut reg2 = self::reg();
+        let mut reg2 = fresh();
         reg2.init_focus("mother");
         reg2.create_pane("mother", "notes", SplitPosition::Right, "repl").unwrap();
         assert_eq!(reg2.ensure_mother_layout("mother"), None);
@@ -2769,7 +2769,7 @@ mod mother_layout_tests {
 
     #[test]
     fn other_focuses_are_untouched() {
-        let mut reg = reg();
+        let mut reg = fresh();
         for tag in ["perri", "fred", "teri", "mother-x", "admin-portal"] {
             assert_eq!(reg.ensure_mother_layout(tag), None, "{tag}");
         }
@@ -2777,7 +2777,7 @@ mod mother_layout_tests {
 
     #[test]
     fn the_queue_pane_is_not_closable_as_a_tab() {
-        let mut reg = reg();
+        let mut reg = fresh();
         reg.ensure_mother_layout("mother").unwrap();
         assert_eq!(reg.close_tab("mother", "mother_queue"), Err(PaneError::NotClosable));
     }
