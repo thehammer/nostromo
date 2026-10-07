@@ -211,6 +211,22 @@ pub fn default_review_tree() -> PaneTree {
     }
 }
 
+/// The Mother focus's default layout: the native job-queue pane over the REPL.
+pub fn default_mother_tree() -> PaneTree {
+    PaneTree::Split {
+        direction: SplitDirection::Vertical,
+        children: vec![
+            PaneTree::Leaf {
+                pane_id: "mother_queue".to_string(),
+            },
+            PaneTree::Leaf {
+                pane_id: "repl".to_string(),
+            },
+        ],
+        ratios: vec![0.6, 0.4],
+    }
+}
+
 /// True when `tree` holds a pane named `queue` that is NOT a tab — the old
 /// arrangement, where the queue was a region of its own beside the detail tabs.
 pub fn has_bare_queue(tree: &PaneTree) -> bool {

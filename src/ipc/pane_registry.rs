@@ -395,6 +395,31 @@ impl PaneRegistry {
         self.migrate_queue_into_detail(tag)
     }
 
+    /// The Mother focus: the builtin `mother`.
+    pub fn is_mother_focus(tag: &str) -> bool {
+        tag == "mother"
+    }
+
+    /// Give the Mother focus its default layout: the native job-queue pane
+    /// (`mother_queue`, hosted by the Mac app and fed from the broker, so it has
+    /// no source binding) above the REPL. A Mother focus that already has a
+    /// layout keeps it. Returns the tree when anything changed; not the Mother
+    /// focus: untouched.
+    pub fn ensure_mother_layout(&mut self, tag: &str) -> Option<PaneTree> {
+        if !Self::is_mother_focus(tag) {
+            return None;
+        }
+        let current = self.get_or_init(tag);
+        if !matches!(&current, PaneTree::Leaf { pane_id } if pane_id == "repl") {
+            return None;
+        }
+        self.set_layout(
+            tag,
+            &serde_json::json!({ "tree": crate::mcp::views::tree::default_mother_tree() }),
+        )
+        .ok()
+    }
+
     /// The source bound to `pane_id` within `tag`, if any.
     pub fn source_for(&self, tag: &str, pane_id: &str) -> Option<&str> {
         self.binding_for(tag, pane_id).map(|b| b.source.as_str())
@@ -2711,5 +2736,49 @@ mod tests {
             "the queue keeps its pane id, so its binding survives the migration"
         );
         assert!(reg.source_for("perri", "detail.0").is_some());
+    }
+}
+
+#[cfg(test)]
+mod mother_layout_tests {
+    use super::*;
+
+    fn reg() -> PaneRegistry {
+        PaneRegistry::new()
+    }
+
+    #[test]
+    fn a_bare_mother_focus_gets_the_queue_above_the_repl() {
+        let mut reg = reg();
+        let tree = reg.ensure_mother_layout("mother").expect("a bare mother focus is seeded");
+        assert_eq!(tree.pane_ids(), vec!["mother_queue".to_string(), "repl".to_string()]);
+    }
+
+    #[test]
+    fn it_is_idempotent_and_keeps_an_existing_layout() {
+        let mut reg = reg();
+        reg.ensure_mother_layout("mother").unwrap();
+        assert_eq!(reg.ensure_mother_layout("mother"), None);
+        // A focus the user or an agent already rearranged is left alone.
+        let mut reg2 = self::reg();
+        reg2.init_focus("mother");
+        reg2.create_pane("mother", "notes", SplitPosition::Right, "repl").unwrap();
+        assert_eq!(reg2.ensure_mother_layout("mother"), None);
+        assert_eq!(reg2.pane_ids("mother"), vec!["repl", "notes"]);
+    }
+
+    #[test]
+    fn other_focuses_are_untouched() {
+        let mut reg = reg();
+        for tag in ["perri", "fred", "teri", "mother-x", "admin-portal"] {
+            assert_eq!(reg.ensure_mother_layout(tag), None, "{tag}");
+        }
+    }
+
+    #[test]
+    fn the_queue_pane_is_not_closable_as_a_tab() {
+        let mut reg = reg();
+        reg.ensure_mother_layout("mother").unwrap();
+        assert_eq!(reg.close_tab("mother", "mother_queue"), Err(PaneError::NotClosable));
     }
 }
