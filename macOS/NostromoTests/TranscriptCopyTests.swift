@@ -629,6 +629,49 @@ final class TranscriptSelectionSurvivalTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === label.currentEditor())
     }
 
+    /// `restore()` re-selects through `selectText(_:)`, which makes a field editor first
+    /// responder and can scroll the enclosing scroll view to show it. `ReplView.measure`
+    /// runs this for the turn being read on every streamed block, so a reader parked
+    /// elsewhere in the transcript must not be moved.
+    func testRestoreDoesNotMoveTheEnclosingScrollView() {
+        let paragraph = "A paragraph of assistant text that the operator wants to copy."
+        let turn = ChatTurn(userInput: "hi", timestamp: Date(),
+                            blocks: [.text(paragraph)], isComplete: false)
+        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState())
+        let window = makeWindow(NSSize(width: 900, height: 300))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 900, height: 300))
+        let doc = FlippedTestView(frame: NSRect(x: 0, y: 0, width: 900, height: 5000))
+        scroll.documentView = doc
+        window.contentView!.addSubview(scroll)
+        view.setIslandWidth(900)
+        // The selected turn sits far below the viewport the reader is looking at.
+        view.frame = NSRect(x: 0, y: 4000, width: 900, height: view.islandHeight())
+        doc.addSubview(view)
+        view.layoutSubtreeIfNeeded()
+        guard let label = textFields(in: view).first(where: { $0.stringValue == paragraph }) else {
+            return XCTFail("no paragraph label")
+        }
+        label.selectText(nil)
+        guard let editor = label.currentEditor() as? NSTextView else { return XCTFail("no field editor") }
+        editor.setSelectedRange(NSRange(location: 2, length: 9))
+
+        // The reader is looking at the top of the transcript.
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 0))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        let before = scroll.contentView.bounds.origin
+
+        let saved = TranscriptSelection.capture(in: view)
+        XCTAssertNotNil(saved)
+        view.removeFromSuperview()
+        doc.addSubview(view)
+        saved?.restore()
+
+        XCTAssertEqual(scroll.contentView.bounds.origin, before,
+                       "restoring a selection must not scroll the reader away")
+        XCTAssertEqual((label.currentEditor() as? NSTextView)?.selectedRange,
+                       NSRange(location: 2, length: 9), "the selection itself must still come back")
+    }
+
     func testCaptureIgnoresSelectionElsewhere() {
         guard let (view, window, _, _, _) = makeSelectedTurn() else {
             return XCTFail("could not select the paragraph")
@@ -662,4 +705,9 @@ final class TranscriptSelectionSurvivalTests: XCTestCase {
         XCTAssertTrue(body.contains("TranscriptSelection.capture"))
         XCTAssertTrue(body.contains(".restore()"))
     }
+}
+
+/// A flipped container so test geometry matches the transcript's document view.
+private final class FlippedTestView: NSView {
+    override var isFlipped: Bool { true }
 }
