@@ -93,6 +93,13 @@ class AppStore: ObservableObject {
     // tag and must not regress.
     @Published private(set) var activeFocusSessionTag: String?    = nil
 
+    // Focus tags with an outstanding request for the operator's attention
+    // (pending decisions today; notifications etc. can reuse it). App-wide, so
+    // every window's sidebar flags the same rows. The sidebar reads this and
+    // knows nothing about what raised it — `DecisionPresenter` is the writer.
+    @Published private(set) var attentionTags: Set<String> = []
+    private var attentionRegistry = AttentionRegistry()
+
     // Agent-authored pane layout (Phase 1).
     // Keyed by focus tag; updated from FocusLayout / PaneContent broadcasts.
     // An entry's lifetime now exactly matches its focus's: `evictPerFocusState`
@@ -292,6 +299,23 @@ class AppStore: ObservableObject {
     func setActiveFocusSessionTag(_ tag: String?) { activeFocusSessionTag = tag }
 
     // MARK: - Decision modal (multi-window decision-sheet fix)
+
+    /// Flag `tag` as needing the operator until `clearAttention(key:)` is called
+    /// for every `key` raised on it. Idempotent per key.
+    func raiseAttention(tag: String, key: String) {
+        attentionRegistry.raise(tag: tag, key: key)
+        publishAttention()
+    }
+
+    func clearAttention(key: String) {
+        attentionRegistry.clear(key: key)
+        publishAttention()
+    }
+
+    private func publishAttention() {
+        let tags = attentionRegistry.tags
+        if tags != attentionTags { attentionTags = tags }
+    }
 
     /// Forward the operator's answer to the daemon. Claiming the answer into
     /// `DecisionStore` is `DecisionSheet`'s job, not this one (it happens
@@ -1244,3 +1268,5 @@ class AppStore: ObservableObject {
         }
     }
 }
+
+extension AppStore: AttentionSink {}

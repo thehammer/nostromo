@@ -21,6 +21,10 @@ enum Theme {
     static let amber       = NSColor(red: 234/255, green: 179/255, blue:   8/255, alpha: 1)
     /// Red — alert / high load.
     static let redSweater  = NSColor(red: 239/255, green:  68/255, blue:  68/255, alpha: 1)
+    /// "This focus needs you" marker in the sidebar — violet, so it reads as
+    /// distinct from the cornflower selection highlight and the sage/amber/red
+    /// session-health dots on a dark background.
+    static let attention   = NSColor(red: 192/255, green: 132/255, blue: 252/255, alpha: 1)
     /// Cornflower — active tab / border highlight.
     static let cornflower  = NSColor(red: 100/255, green: 149/255, blue: 237/255, alpha: 1)
 

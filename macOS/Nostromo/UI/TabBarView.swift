@@ -29,6 +29,9 @@ class TabBarView: NSView {
     /// reads identically in every window by construction.
     private var currentFocuses: [Focus] = []
 
+    /// The rows last built, so an attention change can re-flag them without a rebuild.
+    private var currentRows: [NavRow] = []
+
     /// Set by MainLayout when the active focus changes. Drives highlight state.
     var activeFocus: Focus? {
         didSet {
@@ -153,6 +156,13 @@ class TabBarView: NSView {
             FocusStore.shared.focuses.compactMap { $0.projectPath }
         }
 
+        // Focuses with an outstanding request for the operator (a pending
+        // decision, today). Flags rows in place: no rebuild, no height change.
+        AppStore.shared.$attentionTags
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateAttention() }
+            .store(in: &cancellables)
+
         // Per-focus PR under review (W8) — rebuild the rows with fresh
         // labels whenever any focus's pin loads or clears. `perriDetailByTag`
         // is app-wide (not per-window), so every window's sidebar reacts to
@@ -193,6 +203,7 @@ class TabBarView: NSView {
             },
             branchFor: { $0.projectPath.flatMap { branches[$0] } }
         )
+        currentRows = rows
         var prev: NSView? = nil
         var isFirstOrg = true
 
@@ -281,6 +292,7 @@ class TabBarView: NSView {
 
         updateStates()
         updateSweaters()
+        updateAttention()
     }
 
     @objc private func renameTapped(_ sender: NSMenuItem) {
@@ -325,6 +337,14 @@ class TabBarView: NSView {
     @objc private func addTapped() { onAdd?() }
 
     // MARK: - State updates
+
+    private func updateAttention() {
+        let tags = AppStore.shared.attentionTags
+        for row in currentRows {
+            guard case .focus(let focus, _, _, _) = row else { continue }
+            items[focus.id]?.needsAttention = row.needsAttention(in: tags)
+        }
+    }
 
     private func updateStates() {
         items.forEach { id, item in item.isActive = (id == activeFocus?.id) }
@@ -441,136 +461,4 @@ private class RepoGroupView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
-}
-
-// MARK: - NavTabItem
-
-private class NavTabItem: NSView {
-
-    let focus: Focus
-    var onTap: (() -> Void)?
-
-    var isActive: Bool = false {
-        didSet { updateAppearance() }
-    }
-
-    var sweaterColor: NSColor? = nil {
-        didSet { updateAppearance() }
-    }
-
-    private let accentBar      = NSView()
-    private let label          = NSTextField(labelWithString: "")
-    private let dot            = NSView()
-    private let displayOverride: String
-    private let secondaryLabel: NSTextField?
-
-    init(focus: Focus, label displayLabel: String, secondary: String?, indented: Bool) {
-        self.focus           = focus
-        self.displayOverride = displayLabel
-        self.secondaryLabel  = secondary.map { text in
-            let tf = NSTextField(labelWithString: text)
-            tf.font           = Theme.navSubFont
-            tf.textColor      = Theme.fgMuted
-            tf.alignment      = .left
-            tf.lineBreakMode  = .byTruncatingTail
-            tf.maximumNumberOfLines = 1
-            tf.translatesAutoresizingMaskIntoConstraints = false
-            return tf
-        }
-        super.init(frame: .zero)
-        wantsLayer = true
-
-        let leadingInset: CGFloat = indented ? 6 + Theme.navChildIndent : 6
-
-        // Left accent bar — 3px, full height
-        accentBar.wantsLayer = true
-        accentBar.layer?.backgroundColor = Theme.cornflower.cgColor
-        accentBar.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(accentBar)
-        NSLayoutConstraint.activate([
-            accentBar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            accentBar.topAnchor.constraint(equalTo: topAnchor),
-            accentBar.bottomAnchor.constraint(equalTo: bottomAnchor),
-            accentBar.widthAnchor.constraint(equalToConstant: 3),
-        ])
-
-        // Primary label — left-aligned
-        label.stringValue    = displayLabel
-        label.font           = Theme.tabFont
-        label.textColor      = Theme.fgMuted
-        label.alignment      = .left
-        label.lineBreakMode  = .byTruncatingTail
-        label.isEditable     = false
-        label.isBordered     = false
-        label.drawsBackground = false
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
-
-        // Sweater dot — 6px circle, right-aligned, hidden by default
-        dot.wantsLayer = true
-        dot.layer?.cornerRadius = 3
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(dot)
-        NSLayoutConstraint.activate([
-            dot.widthAnchor.constraint(equalToConstant: 6),
-            dot.heightAnchor.constraint(equalToConstant: 6),
-            dot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-
-        // Label constraints — different depending on whether secondary is shown
-        if let sl = secondaryLabel {
-            addSubview(sl)
-            NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: leadingInset),
-                label.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -4),
-                label.bottomAnchor.constraint(equalTo: centerYAnchor, constant: -1),
-
-                sl.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: leadingInset),
-                sl.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -4),
-                sl.topAnchor.constraint(equalTo: centerYAnchor, constant: 3),
-            ])
-        } else {
-            NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: leadingInset),
-                label.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -4),
-                label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            ])
-        }
-
-        addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(tapped)))
-
-        updateAppearance()
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func tapped() { onTap?() }
-
-    private func updateAppearance() {
-        accentBar.isHidden = !isActive
-        layer?.backgroundColor = isActive
-            ? Theme.cornflower.withAlphaComponent(0.12).cgColor
-            : NSColor.clear.cgColor
-
-        if isActive {
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: Theme.tabFontBold, .foregroundColor: NSColor.white,
-            ]
-            label.attributedStringValue = NSAttributedString(string: displayOverride, attributes: attrs)
-        } else {
-            let color = sweaterColor ?? Theme.fgMuted
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: Theme.tabFont, .foregroundColor: color,
-            ]
-            label.attributedStringValue = NSAttributedString(string: displayOverride, attributes: attrs)
-        }
-
-        if let sc = sweaterColor {
-            dot.isHidden = false
-            dot.layer?.backgroundColor = sc.cgColor
-        } else {
-            dot.isHidden = true
-        }
-    }
 }

@@ -195,17 +195,9 @@ class MainLayout: NSView {
         showContent(for: focus)
     }
 
-    /// Switch this window's active tab to whichever focus corresponds to
-    /// `tag`, if any is known. Exposed (not `private`) so `DecisionPresenter`
-    /// can direct the operator's attention to the session asking a decision
-    /// — on the ONE window it actually presents on, not on every window the
-    /// way the pre-fix per-window presentation used to (that's also what
-    /// used to yank every display's tab to the asking session as a side
-    /// effect; this fixes that too).
-    func focusSession(tag: String) {
-        guard let focus = FocusStore.shared.focuses.first(where: { $0.sessionTag == tag }) else { return }
-        switchFocus(focus)
-    }
+    /// The `sessionTag` of the focus this window is showing right now. Read-only:
+    /// `DecisionPresenter` targets popups by it but never changes it.
+    var activeFocusTag: String { activeFocus.sessionTag }
 
     private func forceStart(_ focus: Focus) {
         AppStore.shared.session(

@@ -19,6 +19,8 @@
 		AA0000020000000000000104 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000004 /* AppStore.swift */; };
 		AA0000020000000000000105 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000005 /* Theme.swift */; };
 		AA0000020000000000000106 /* TabBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000006 /* TabBarView.swift */; };
+		NT0000000000000000000002 /* NavTabItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = NT0000000000000000000001 /* NavTabItem.swift */; };
+		NT0000000000000000000003 /* NavTabItem.swift in TestSources */ = {isa = PBXBuildFile; fileRef = NT0000000000000000000001 /* NavTabItem.swift */; };
 		AA0000020000000000000107 /* StatusBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000007 /* StatusBarView.swift */; };
 		AA0000020000000000000108 /* PaceBarsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000008 /* PaceBarsView.swift */; };
 		AA0000020000000000000109 /* MainLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000009 /* MainLayout.swift */; };
@@ -192,6 +194,16 @@
 		OO000000000000000000012 /* DecisionStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000010 /* DecisionStore.swift */; };
 		OO000000000000000000021 /* DecisionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000020 /* DecisionSheet.swift */; };
 		OO000000000000000000031 /* DecisionPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000030 /* DecisionPresenter.swift */; };
+		DP0000000000000000000002 /* DecisionTargeting.swift in Sources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000001 /* DecisionTargeting.swift */; };
+		DP0000000000000000000003 /* DecisionTargeting.swift in TestSources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000001 /* DecisionTargeting.swift */; };
+		DP0000000000000000000005 /* DecisionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000004 /* DecisionCoordinator.swift */; };
+		DP0000000000000000000006 /* DecisionCoordinator.swift in TestSources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000004 /* DecisionCoordinator.swift */; };
+		DP0000000000000000000008 /* AttentionRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000007 /* AttentionRegistry.swift */; };
+		DP0000000000000000000009 /* AttentionRegistry.swift in TestSources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000007 /* AttentionRegistry.swift */; };
+		DP0000000000000000000011 /* DecisionTargetingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000010 /* DecisionTargetingTests.swift */; };
+		DP0000000000000000000013 /* DecisionCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000012 /* DecisionCoordinatorTests.swift */; };
+		DP0000000000000000000015 /* AttentionRegistryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000014 /* AttentionRegistryTests.swift */; };
+		DP0000000000000000000017 /* SidenavAttentionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DP0000000000000000000016 /* SidenavAttentionTests.swift */; };
 		KK0000000000000000001A2 /* PostureScopedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000001A0 /* PostureScopedTests.swift */; };
 		KK0000000000000000001B2 /* ImagePasteboardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000001B0 /* ImagePasteboardTests.swift */; };
 		KK000000000000000000102 /* DecisionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000100 /* DecisionStoreTests.swift */; };
@@ -232,6 +244,7 @@
 		AA0000020000000000000004 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		AA0000020000000000000005 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		AA0000020000000000000006 /* TabBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabBarView.swift; sourceTree = "<group>"; };
+		NT0000000000000000000001 /* NavTabItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavTabItem.swift; sourceTree = "<group>"; };
 		AA0000020000000000000007 /* StatusBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000008 /* PaceBarsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaceBarsView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000009 /* MainLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainLayout.swift; sourceTree = "<group>"; };
@@ -355,6 +368,13 @@
 		OO000000000000000000010 /* DecisionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStore.swift; sourceTree = "<group>"; };
 		OO000000000000000000020 /* DecisionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheet.swift; sourceTree = "<group>"; };
 		OO000000000000000000030 /* DecisionPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionPresenter.swift; sourceTree = "<group>"; };
+		DP0000000000000000000001 /* DecisionTargeting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionTargeting.swift; sourceTree = "<group>"; };
+		DP0000000000000000000004 /* DecisionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionCoordinator.swift; sourceTree = "<group>"; };
+		DP0000000000000000000007 /* AttentionRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionRegistry.swift; sourceTree = "<group>"; };
+		DP0000000000000000000010 /* DecisionTargetingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionTargetingTests.swift; sourceTree = "<group>"; };
+		DP0000000000000000000012 /* DecisionCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionCoordinatorTests.swift; sourceTree = "<group>"; };
+		DP0000000000000000000014 /* AttentionRegistryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionRegistryTests.swift; sourceTree = "<group>"; };
+		DP0000000000000000000016 /* SidenavAttentionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidenavAttentionTests.swift; sourceTree = "<group>"; };
 		OO0000000000000000001A0 /* PostureScopedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostureScopedTests.swift; sourceTree = "<group>"; };
 		OO0000000000000000001B0 /* ImagePasteboardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePasteboardTests.swift; sourceTree = "<group>"; };
 		OO000000000000000000100 /* DecisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStoreTests.swift; sourceTree = "<group>"; };
@@ -479,6 +499,7 @@
 				II000000000000000000010 /* TurnInteractionStore.swift */,
 				AA0000020000000000000005 /* Theme.swift */,
 				AA0000020000000000000006 /* TabBarView.swift */,
+				NT0000000000000000000001 /* NavTabItem.swift */,
 				AA0000020000000000000007 /* StatusBarView.swift */,
 				AA0000020000000000000008 /* PaceBarsView.swift */,
 				AA0000020000000000000009 /* MainLayout.swift */,
@@ -489,6 +510,9 @@
 				OO000000000000000000010 /* DecisionStore.swift */,
 				OO000000000000000000020 /* DecisionSheet.swift */,
 				OO000000000000000000030 /* DecisionPresenter.swift */,
+				DP0000000000000000000001 /* DecisionTargeting.swift */,
+				DP0000000000000000000004 /* DecisionCoordinator.swift */,
+				DP0000000000000000000007 /* AttentionRegistry.swift */,
 				FF00000000000000000000A1 /* SidenavGrouping.swift */,
 				CC00000000000000000000B0 /* DiffColoring.swift */,
 				LL0000000000000000000001 /* CodeDocument.swift */,
@@ -583,6 +607,10 @@
 				VV0000000000000000000002 /* PaneFirstPaintAuditTests.swift */,
 				RA0000000000000000000002 /* RatioApplicationAuditTests.swift */,
 				OO000000000000000000100 /* DecisionStoreTests.swift */,
+				DP0000000000000000000010 /* DecisionTargetingTests.swift */,
+				DP0000000000000000000012 /* DecisionCoordinatorTests.swift */,
+				DP0000000000000000000014 /* AttentionRegistryTests.swift */,
+				DP0000000000000000000016 /* SidenavAttentionTests.swift */,
 				MD0000000000000000000B0 /* MotherDaemonStatusTests.swift */,
 				MG0000000000000000000B0 /* MotherJobGroupingTests.swift */,
 				OO0000000000000000001C0 /* OverlayHitTestTests.swift */,
@@ -724,6 +752,7 @@
 				AA0000020000000000000104 /* AppStore.swift in Sources */,
 				AA0000020000000000000105 /* Theme.swift in Sources */,
 				AA0000020000000000000106 /* TabBarView.swift in Sources */,
+				NT0000000000000000000002 /* NavTabItem.swift in Sources */,
 				AA0000020000000000000107 /* StatusBarView.swift in Sources */,
 				AA0000020000000000000108 /* PaceBarsView.swift in Sources */,
 				AA0000020000000000000109 /* MainLayout.swift in Sources */,
@@ -781,6 +810,9 @@
 				OO000000000000000000011 /* DecisionStore.swift in Sources */,
 				OO000000000000000000021 /* DecisionSheet.swift in Sources */,
 				OO000000000000000000031 /* DecisionPresenter.swift in Sources */,
+				DP0000000000000000000002 /* DecisionTargeting.swift in Sources */,
+				DP0000000000000000000005 /* DecisionCoordinator.swift in Sources */,
+				DP0000000000000000000008 /* AttentionRegistry.swift in Sources */,
 				PP000000000000000000002 /* ActivityStreamModel.swift in Sources */,
 				MD0000000000000000000A1 /* MotherDaemonStatus.swift in Sources */,
 				MG0000000000000000000A1 /* MotherJobGrouping.swift in Sources */,
@@ -886,6 +918,14 @@
 				RA0000000000000000000201 /* RatioApplicationAuditTests.swift in Sources */,
 				OO000000000000000000012 /* DecisionStore.swift in TestSources */,
 				KK000000000000000000102 /* DecisionStoreTests.swift in Sources */,
+				DP0000000000000000000003 /* DecisionTargeting.swift in TestSources */,
+				DP0000000000000000000006 /* DecisionCoordinator.swift in TestSources */,
+				DP0000000000000000000009 /* AttentionRegistry.swift in TestSources */,
+				DP0000000000000000000011 /* DecisionTargetingTests.swift in Sources */,
+				DP0000000000000000000013 /* DecisionCoordinatorTests.swift in Sources */,
+				DP0000000000000000000015 /* AttentionRegistryTests.swift in Sources */,
+				DP0000000000000000000017 /* SidenavAttentionTests.swift in Sources */,
+				NT0000000000000000000003 /* NavTabItem.swift in TestSources */,
 				MD0000000000000000000B1 /* MotherDaemonStatusTests.swift in Sources */,
 				MG0000000000000000000B1 /* MotherJobGroupingTests.swift in Sources */,
 				KK0000000000000000001B2 /* ImagePasteboardTests.swift in Sources */,
