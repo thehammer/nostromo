@@ -63,7 +63,8 @@ class ChatSession: ObservableObject {
 
     let tag: String            // local IPC address for this focus's session
     let agentName: String      // passed to the daemon → claude `--agent`
-    let displayName: String    // `-n` / `--remote-control` name (phone-facing label)
+    /// Updated on rename (see `AppStore.updateSessionLabel`); read at each spawn.
+    var displayName: String    // `-n` / `--remote-control` name (phone-facing label)
     let workingDirectory: String?
 
     /// The addressable transcript. Deliberately NOT `@Published`.

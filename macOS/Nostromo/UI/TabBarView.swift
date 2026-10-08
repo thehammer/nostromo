@@ -34,7 +34,9 @@ class TabBarView: NSView {
         didSet {
             updateStates()
             // Switching focus is a cheap moment to re-check that checkout's branch.
-            if let path = activeFocus?.projectPath { BranchProvider.shared.refresh([path]) }
+            if activeFocus?.projectPath != nil {
+                BranchProvider.shared.refresh(FocusStore.shared.focuses.compactMap { $0.projectPath })
+            }
         }
     }
 

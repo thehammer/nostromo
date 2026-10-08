@@ -269,11 +269,21 @@ class AppStore: ObservableObject {
     /// recreate — and re-spawn — the session eviction just removed.
     func session(for tag: String, agentName: String? = nil, displayName: String? = nil,
                  workingDirectory: String? = nil) -> ChatSession {
-        if let s = sessionRegistry[tag] { return s }
+        if let s = sessionRegistry[tag] {
+            // Re-attach after a rename: carry the current label so the next spawn uses it.
+            if let displayName, s.displayName != displayName { s.displayName = displayName }
+            return s
+        }
         let s = ChatSession(tag: tag, agentName: agentName, displayName: displayName,
                             workingDirectory: workingDirectory, client: client)
         sessionRegistry[tag] = s
         return s
+    }
+
+    /// A rename can't reach an already-running session (no protocol change), but
+    /// the next spawn/restart of it must use the new label.
+    func updateSessionLabel(tag: String, displayName: String) {
+        sessionRegistry[tag]?.displayName = displayName
     }
 
     // MARK: - Active focus

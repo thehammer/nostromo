@@ -211,7 +211,7 @@ final class BranchProviderTests: XCTestCase {
         XCTAssertNil(provider.branch(for: "/never-asked"))
     }
 
-    func testRefreshOnlyTouchesThePathsItWasGiven() {
+    func testRefreshOnlyLooksUpThePathsItWasGiven() {
         let fake = FakeGit(["/a": .resolved("main"), "/b": .resolved("dev")])
         let (provider, queue) = makeProvider(fake)
         refreshAndSettle(provider, queue, ["/a", "/b"])
@@ -221,7 +221,8 @@ final class BranchProviderTests: XCTestCase {
         refreshAndSettle(provider, queue, ["/a"])
 
         XCTAssertEqual(provider.branch(for: "/a"), "changed")
-        XCTAssertEqual(provider.branch(for: "/b"), "dev", "/b was not part of this refresh")
+        XCTAssertNil(provider.branch(for: "/b"), "/b is no longer in the path set, so it is pruned")
+        XCTAssertEqual(fake.calls.count("/b"), 1, "and is not looked up again")
     }
 
     // MARK: Threading
@@ -288,7 +289,7 @@ final class BranchProviderTests: XCTestCase {
         let (recorder, cancel) = record(provider)
         defer { cancel.cancel() }
         refreshAndSettle(provider, queue, ["/a", "/b"])
-        refreshAndSettle(provider, queue, ["/a"])
+        refreshAndSettle(provider, queue, ["/a", "/b"])
 
         XCTAssertGreaterThan(fake.calls.count("/a"), 1, "sanity: the provider really did re-check")
         XCTAssertTrue(recorder.values.isEmpty, "nothing changed, so nothing may be published: \(recorder.values)")
@@ -370,7 +371,7 @@ final class BranchProviderTests: XCTestCase {
         let (recorder, cancel) = record(provider)
         defer { cancel.cancel() }
         fake.set("/p", .resolved(nil))
-        refreshAndSettle(provider, queue, ["/p"])
+        refreshAndSettle(provider, queue, ["/p", "/q"])
 
         XCTAssertNil(provider.branch(for: "/p"))
         XCTAssertNil(provider.branches["/p"], "removed, not stored as an empty value")
@@ -386,6 +387,186 @@ final class BranchProviderTests: XCTestCase {
         refreshAndSettle(provider, queue, ["/p"])
         XCTAssertTrue(recorder.values.isEmpty)
         XCTAssertTrue(provider.branches.isEmpty)
+    }
+
+    // MARK: Pruning and repeated failures
+
+    func testPathsNoLongerRequestedArePrunedAndPublished() {
+        let fake = FakeGit(["/a": .resolved("main"), "/b": .resolved("dev")])
+        let (provider, queue) = makeProvider(fake)
+        refreshAndSettle(provider, queue, ["/a", "/b"])
+
+        refreshAndSettle(provider, queue, ["/b"])
+        XCTAssertEqual(provider.branches, ["/b": "dev"])
+
+        refreshAndSettle(provider, queue, [])
+        XCTAssertTrue(provider.branches.isEmpty, "an empty path set clears everything")
+    }
+
+    func testAFailingPathKeepsItsBranchForTwoFailuresAndDropsItOnTheThird() {
+        let fake = FakeGit(["/p": .resolved("main")])
+        let (provider, queue) = makeProvider(fake)
+        refreshAndSettle(provider, queue, ["/p"])
+
+        fake.set("/p", .failed)
+        refreshAndSettle(provider, queue, ["/p"])
+        refreshAndSettle(provider, queue, ["/p"])
+        XCTAssertEqual(provider.branch(for: "/p"), "main", "2 consecutive failures are still transient")
+        refreshAndSettle(provider, queue, ["/p"])
+        XCTAssertNil(provider.branch(for: "/p"), "3 consecutive failures drop the stale branch")
+    }
+
+    func testASuccessResetsTheConsecutiveFailureCount() {
+        let fake = FakeGit(["/p": .resolved("main")])
+        let (provider, queue) = makeProvider(fake)
+        refreshAndSettle(provider, queue, ["/p"])
+
+        fake.set("/p", .failed)
+        refreshAndSettle(provider, queue, ["/p"])
+        refreshAndSettle(provider, queue, ["/p"])
+        fake.set("/p", .resolved("main"))
+        refreshAndSettle(provider, queue, ["/p"])
+        fake.set("/p", .failed)
+        refreshAndSettle(provider, queue, ["/p"])
+        refreshAndSettle(provider, queue, ["/p"])
+        XCTAssertEqual(provider.branch(for: "/p"), "main", "failures were not consecutive across the success")
+    }
+
+    // MARK: Coalescing
+
+    /// Lookup that blocks on a gate and records overlap and batches.
+    private final class GatedGit {
+        private let lock = NSLock()
+        private var running = 0
+        private(set) var maxConcurrent = 0
+        private(set) var batches: [[String]] = []   // order paths were looked up, split by gate release
+        private(set) var lookedUp: [String] = []
+        let gate = DispatchSemaphore(value: 0)
+        let started = DispatchSemaphore(value: 0)
+        func lookup(_ path: String) -> GitBranch.Lookup {
+            lock.lock(); running += 1; maxConcurrent = max(maxConcurrent, running); lookedUp.append(path); lock.unlock()
+            started.signal()
+            _ = gate.wait(timeout: .now() + 15)
+            lock.lock(); running -= 1; lock.unlock()
+            return .resolved("b-\(path)")
+        }
+        var lookups: [String] { lock.lock(); defer { lock.unlock() }; return lookedUp }
+    }
+
+    func testRapidRefreshesWhileOneIsBlockedCoalesceIntoOneFollowUpWithTheLatestPaths() {
+        let git = GatedGit()
+        let queue = DispatchQueue(label: "bp-coalesce-\(UUID().uuidString)")
+        let provider = BranchProvider(queue: queue, lookup: git.lookup)
+
+        provider.refresh(["/first"])
+        XCTAssertEqual(git.started.wait(timeout: .now() + 5), .success)
+
+        for i in 0..<10 { provider.refresh(["/queued-\(i)"]) }
+        provider.refresh(["/latest-a", "/latest-b"])
+        git.gate.signal(); git.gate.signal(); git.gate.signal()   // release everything
+        queue.sync {}; pumpMain(); queue.sync {}; pumpMain()
+
+        XCTAssertEqual(git.lookups, ["/first", "/latest-a", "/latest-b"],
+                       "exactly one follow-up batch, with only the latest path set")
+        XCTAssertEqual(git.maxConcurrent, 1, "lookups never overlap")
+        XCTAssertEqual(provider.branches, ["/latest-a": "b-/latest-a", "/latest-b": "b-/latest-b"])
+    }
+
+    func testNoFollowUpBatchRunsWhenNothingWasRequestedDuringTheFirst() {
+        let git = GatedGit()
+        let queue = DispatchQueue(label: "bp-nofollow-\(UUID().uuidString)")
+        let provider = BranchProvider(queue: queue, lookup: git.lookup)
+        provider.refresh(["/only"])
+        XCTAssertEqual(git.started.wait(timeout: .now() + 5), .success)
+        git.gate.signal()
+        queue.sync {}; pumpMain(); queue.sync {}; pumpMain()
+        XCTAssertEqual(git.lookups, ["/only"])
+    }
+
+    // MARK: Polling lifecycle
+
+    private final class FakeTimers {
+        private(set) var created = 0
+        private(set) var cancelled = 0
+        private(set) var tick: (() -> Void)?
+        func make(_ interval: TimeInterval, _ tick: @escaping () -> Void) -> () -> Void {
+            created += 1
+            self.tick = tick
+            return { [self] in cancelled += 1 }
+        }
+    }
+
+    private func makePollingProvider(_ fake: FakeGit, timers: FakeTimers, active: @escaping () -> Bool,
+                                     center: NotificationCenter = NotificationCenter()) -> (BranchProvider, DispatchQueue) {
+        let queue = DispatchQueue(label: "bp-poll-\(UUID().uuidString)")
+        return (BranchProvider(queue: queue, lookup: fake.lookup, isAppActive: active,
+                               makeTimer: timers.make, notificationCenter: center), queue)
+    }
+
+    func testPollingTicksOnlyRefreshWhileTheAppIsActive() {
+        let fake = FakeGit(["/p": .resolved("main")])
+        let timers = FakeTimers()
+        var active = false
+        let (provider, queue) = makePollingProvider(fake, timers: timers, active: { active })
+        provider.startPolling { ["/p"] }
+        queue.sync {}; pumpMain()
+        let afterStart = fake.calls.count("/p")
+        XCTAssertEqual(afterStart, 1, "start does an immediate refresh")
+
+        timers.tick?(); queue.sync {}; pumpMain()
+        XCTAssertEqual(fake.calls.count("/p"), afterStart, "inactive app: tick is a no-op")
+
+        active = true
+        timers.tick?(); queue.sync {}; pumpMain()
+        XCTAssertEqual(fake.calls.count("/p"), afterStart + 1, "active app: tick refreshes")
+    }
+
+    func testSecondStartPollingDoesNotCreateASecondTimerButUpdatesPaths() {
+        let fake = FakeGit(["/a": .resolved("x"), "/b": .resolved("y")])
+        let timers = FakeTimers()
+        let (provider, queue) = makePollingProvider(fake, timers: timers, active: { true })
+        provider.startPolling { ["/a"] }
+        provider.startPolling { ["/b"] }
+        XCTAssertEqual(timers.created, 1)
+        XCTAssertTrue(provider.isPolling)
+
+        queue.sync {}; pumpMain()
+        timers.tick?(); queue.sync {}; pumpMain()
+        XCTAssertEqual(provider.branches, ["/b": "y"], "the latest paths provider is the one polled")
+    }
+
+    func testStopPollingCancelsTheTimerAndIgnoresActivation() {
+        let fake = FakeGit(["/p": .resolved("main")])
+        let timers = FakeTimers()
+        let center = NotificationCenter()
+        let (provider, queue) = makePollingProvider(fake, timers: timers, active: { true }, center: center)
+        provider.startPolling { ["/p"] }
+        queue.sync {}; pumpMain()
+        let calls = fake.calls.count("/p")
+
+        provider.stopPolling()
+        XCTAssertEqual(timers.cancelled, 1)
+        XCTAssertFalse(provider.isPolling)
+        center.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        queue.sync {}; pumpMain()
+        XCTAssertEqual(fake.calls.count("/p"), calls, "activation after stop does nothing")
+
+        provider.startPolling { ["/p"] }
+        XCTAssertEqual(timers.created, 2, "can be started again after stopping")
+    }
+
+    func testActivationNotificationTriggersARefreshWhilePolling() {
+        let fake = FakeGit(["/p": .resolved("main")])
+        let timers = FakeTimers()
+        let center = NotificationCenter()
+        let (provider, queue) = makePollingProvider(fake, timers: timers, active: { false }, center: center)
+        provider.startPolling { ["/p"] }
+        queue.sync {}; pumpMain()
+        let calls = fake.calls.count("/p")
+
+        center.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        queue.sync {}; pumpMain()
+        XCTAssertEqual(fake.calls.count("/p"), calls + 1)
     }
 
     // MARK: Dedup

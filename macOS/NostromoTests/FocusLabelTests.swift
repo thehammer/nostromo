@@ -206,6 +206,21 @@ final class FocusLabelTests: XCTestCase {
         XCTAssertEqual(focus.displayName, "Hotfix")
     }
 
+    // MARK: - FocusCreation.commit
+
+    func testCommittingASecondFocusForTheSameAgentAndRepoKeepsBothAndSwitchesToTheNewOne() throws {
+        let store = FocusStore(storageURL: try makeStorageURL())
+        let existing = makeFocus()
+        store.add(existing)
+        let created = makeFocus()   // same agent + repo, new id
+
+        var switchedTo: [Focus] = []
+        FocusCreation.commit(created, store: store) { switchedTo.append($0) }
+
+        XCTAssertEqual(dynamicFocuses(store).map(\.id), [existing.id, created.id])
+        XCTAssertEqual(switchedTo.map(\.id), [created.id], "switches to the NEW focus, not the existing match")
+    }
+
     // MARK: - FocusStore.rename
 
     func testRenameSetsTheLabelOnADynamicFocus() throws {

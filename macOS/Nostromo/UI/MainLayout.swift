@@ -263,7 +263,10 @@ class MainLayout: NSView {
     private func presentRenameSheet(for focus: Focus) {
         guard let window else { return }
         let sheet = RenameFocusSheet(currentLabel: focus.label) { label in
-            FocusStore.shared.rename(id: focus.id, label: label)
+            if FocusStore.shared.rename(id: focus.id, label: label),
+               let renamed = FocusStore.shared.focuses.first(where: { $0.id == focus.id }) {
+                AppStore.shared.updateSessionLabel(tag: renamed.sessionTag, displayName: renamed.displayName)
+            }
         }
         presentedRenameSheet = sheet  // retain for the sheet's lifetime
         window.beginSheet(sheet.window!) { [weak self] _ in
@@ -275,10 +278,7 @@ class MainLayout: NSView {
         guard let window else { return }
         let sheet = CreateFocusSheet { [weak self] focus in
             guard let self else { return }
-            // Always a new session: several per agent+repo are allowed, told
-            // apart by label / branch (see `buildNavRows`).
-            FocusStore.shared.add(focus)
-            self.switchFocus(focus)
+            FocusCreation.commit(focus, store: FocusStore.shared) { self.switchFocus($0) }
             self.presentedSheet = nil
         }
         presentedSheet = sheet  // retain for the sheet's lifetime

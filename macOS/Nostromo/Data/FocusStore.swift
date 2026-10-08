@@ -116,3 +116,13 @@ final class FocusStore {
         return decoded.filter { !$0.isBuiltIn }
     }
 }
+
+/// The create decision, shared by the UI and its tests.
+enum FocusCreation {
+    /// Always a new session: several per agent+repo are allowed, told apart by
+    /// label / branch (see `buildNavRows`). Never switches to an existing match.
+    static func commit(_ focus: Focus, store: FocusStore, switch switchTo: (Focus) -> Void) {
+        store.add(focus)
+        switchTo(focus)
+    }
+}
