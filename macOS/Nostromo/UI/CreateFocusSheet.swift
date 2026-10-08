@@ -9,6 +9,7 @@ final class CreateFocusSheet: NSWindowController {
     private let onCreate: (Focus) -> Void
     private let orgResolver: RepoOrgResolver
     private var isCreating = false
+    private var isCancelled = false
 
     // UI
     private let agentPopup   = NSPopUpButton()
@@ -20,7 +21,10 @@ final class CreateFocusSheet: NSWindowController {
     private var agents:   [String] = []
     private var projects: [String] = []
 
-    init(orgResolver: RepoOrgResolver = RepoOrgResolver(), onCreate: @escaping (Focus) -> Void) {
+    /// `agents` / `projects` override filesystem discovery (used by tests).
+    init(orgResolver: RepoOrgResolver = RepoOrgResolver(),
+         agents: [String]? = nil, projects: [String]? = nil,
+         onCreate: @escaping (Focus) -> Void) {
         self.onCreate = onCreate
         self.orgResolver = orgResolver
 
@@ -37,6 +41,13 @@ final class CreateFocusSheet: NSWindowController {
         super.init(window: win)
         buildContent()
         loadData()
+        if let agents { self.agents = agents; agentPopup.removeAllItems(); agentPopup.addItems(withTitles: agents) }
+        if let projects {
+            self.projects = projects
+            projectPopup.removeAllItems()
+            projectPopup.addItems(withTitles: projects.map { URL(fileURLWithPath: $0).lastPathComponent })
+        }
+        createBtn.isEnabled = !self.agents.isEmpty
         updatePreview()
     }
 
@@ -200,11 +211,12 @@ final class CreateFocusSheet: NSWindowController {
         let cached = orgResolver.cached(projectPath)
         showPreview(agentTag: agentTag, projectPath: projectPath, org: cached ?? nil)
         if cached == nil {
-            orgResolver.resolve(projectPath) { [weak self] _ in
-                guard let self, !self.projects.isEmpty,
+            orgResolver.resolve(projectPath) { [weak self] org in
+                guard let self, !self.agents.isEmpty, !self.projects.isEmpty,
                       self.projects[self.projectPopup.indexOfSelectedItem] == projectPath
                 else { return }   // selection moved on; drop the stale result
-                self.updatePreview()
+                self.showPreview(agentTag: self.agents[self.agentPopup.indexOfSelectedItem],
+                                 projectPath: projectPath, org: org)
             }
         }
     }
@@ -217,13 +229,16 @@ final class CreateFocusSheet: NSWindowController {
 
     // MARK: - Actions
 
-    @objc private func createTapped() {
-        guard !isCreating, !agents.isEmpty, !projects.isEmpty else { return }
+    @objc func createTapped() {
+        guard !isCreating, !isCancelled, !agents.isEmpty, !projects.isEmpty else { return }
         isCreating = true
+        createBtn.isEnabled = false
         let agentTag    = agents[agentPopup.indexOfSelectedItem]
         let projectPath = projects[projectPopup.indexOfSelectedItem]
-        orgResolver.resolve(projectPath) { [weak self] org in
+        orgResolver.resolve(projectPath) { [weak self] org in   // org is nil if the lookup failed
             guard let self else { return }
+            self.isCreating = false
+            guard !self.isCancelled else { return }
             let focus = Focus(id: UUID().uuidString,
                               agentTag: agentTag,
                               projectPath: projectPath,
@@ -235,7 +250,14 @@ final class CreateFocusSheet: NSWindowController {
         }
     }
 
-    @objc private func cancelTapped() {
-        window?.sheetParent?.endSheet(window!)
+    @objc func cancelTapped() {
+        isCancelled = true
+        if let window { window.sheetParent?.endSheet(window) }
     }
+
+    // MARK: - Test seams
+
+    var previewText: String { namePreview.stringValue }
+    var isCreateEnabled: Bool { createBtn.isEnabled }
+    func selectProject(at index: Int) { projectPopup.selectItem(at: index); updatePreview() }
 }

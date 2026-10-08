@@ -136,7 +136,7 @@ final class RepoOrgTests: XCTestCase {
         let resolver = RepoOrgResolver(lookup: { _ in
             lookupWasOnMain = Thread.isMainThread
             lookedUpOnMain.fulfill()
-            return "Carefeed"
+            return .resolved("Carefeed")
         })
         let done = expectation(description: "completion")
         var result: String?
@@ -157,7 +157,7 @@ final class RepoOrgTests: XCTestCase {
         let lock = NSLock()
         let resolver = RepoOrgResolver(lookup: { path in
             lock.lock(); calls += 1; lock.unlock()
-            return path == "/known" ? "Personal" : nil
+            return .resolved(path == "/known" ? "Personal" : nil)
         })
         XCTAssertNil(resolver.cached("/known"))
         for path in ["/known", "/unknown"] {
@@ -177,10 +177,156 @@ final class RepoOrgTests: XCTestCase {
         XCTAssertEqual(calls, 2)
     }
 
+    // MARK: Remote listing parsing
+
+    func testListingPrefersOriginEvenWhenUnknown() {
+        let listing = """
+        remote.a-first.url git@github.com:carefeed/x.git
+        remote.origin.url git@github.com:someoneelse/x.git
+        """
+        XCTAssertNil(RepoOrg.org(forRemoteListing: listing))
+    }
+
+    func testListingWithoutOriginUsesFirstSortedAndHandlesDottedNames() {
+        let listing = """
+        remote.zeta.url git@github.com:thehammer/x.git
+        remote.my.fork.url git@github.com:carefeed/x.git
+        """
+        XCTAssertEqual(RepoOrg.org(forRemoteListing: listing), "Carefeed")
+    }
+
+    func testLookupDistinguishesNoRemoteFromFailure() throws {
+        let dir = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertEqual(RepoOrg.lookup(forProjectPath: dir.path), .resolved(nil))
+        XCTAssertEqual(RepoOrg.lookup(forProjectPath: "/nonexistent/\(UUID().uuidString)"), .failed)
+    }
+
+    // MARK: Resolver failure semantics
+
+    func testFailedLookupIsNotCachedAndIsRetried() {
+        let lock = NSLock()
+        var calls = 0
+        let resolver = RepoOrgResolver(lookup: { _ in
+            lock.lock(); calls += 1; let n = calls; lock.unlock()
+            return n == 1 ? .failed : .resolved("Carefeed")
+        })
+        let first = expectation(description: "first")
+        var firstOrg: String? = "unset"
+        resolver.resolve("/p") { firstOrg = $0; first.fulfill() }
+        wait(for: [first], timeout: 5)
+        XCTAssertNil(firstOrg)
+        XCTAssertNil(resolver.cached("/p"))
+
+        let second = expectation(description: "second")
+        var secondOrg: String?
+        resolver.resolve("/p") { secondOrg = $0; second.fulfill() }
+        wait(for: [second], timeout: 5)
+        XCTAssertEqual(secondOrg, "Carefeed")
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(resolver.cached("/p"), .some("Carefeed"))
+    }
+
+    func testConcurrentResolvesShareOneLookup() {
+        let gate = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var calls = 0
+        let resolver = RepoOrgResolver(lookup: { _ in
+            lock.lock(); calls += 1; lock.unlock()
+            gate.wait()
+            return .resolved("Personal")
+        })
+        let both = expectation(description: "both")
+        both.expectedFulfillmentCount = 2
+        resolver.resolve("/p") { _ in both.fulfill() }
+        resolver.resolve("/p") { _ in both.fulfill() }
+        gate.signal()
+        wait(for: [both], timeout: 5)
+        XCTAssertEqual(calls, 1)
+    }
+
+    // MARK: Sheet async paths
+
+    /// A resolver whose lookups block until `release()` is called.
+    private final class GatedLookup {
+        let gate = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private(set) var calls = 0
+        var results: [String: RepoOrg.Lookup]
+        init(_ results: [String: RepoOrg.Lookup]) { self.results = results }
+        func lookup(_ path: String) -> RepoOrg.Lookup {
+            lock.lock(); calls += 1; lock.unlock()
+            gate.wait()
+            return results[path] ?? .resolved(nil)
+        }
+        func release(_ n: Int = 1) { for _ in 0..<n { gate.signal() } }
+    }
+
+    private func makeSheet(_ g: GatedLookup, onCreate: @escaping (Focus) -> Void) -> CreateFocusSheet {
+        CreateFocusSheet(orgResolver: RepoOrgResolver(lookup: g.lookup),
+                         agents: ["claudia"], projects: ["/tmp/alpha", "/tmp/beta"],
+                         onCreate: onCreate)
+    }
+
+    private func pumpMain(_ seconds: TimeInterval = 0.3) {
+        let e = expectation(description: "pump")
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { e.fulfill() }
+        wait(for: [e], timeout: 20)
+    }
+
+    func testStaleLookupDoesNotOverwriteNewerPreview() {
+        let g = GatedLookup(["/tmp/alpha": .resolved("Carefeed"), "/tmp/beta": .resolved("Personal")])
+        let sheet = makeSheet(g) { _ in }
+        sheet.selectProject(at: 1)   // moves on before alpha's lookup completes
+        g.release(2)
+        pumpMain()
+        XCTAssertTrue(sheet.previewText.contains("Beta"), sheet.previewText)
+        XCTAssertFalse(sheet.previewText.contains("Alpha"), sheet.previewText)
+    }
+
+    func testCreateBeforeLookupCompletesCreatesExactlyOneFocusWithOrg() {
+        let g = GatedLookup(["/tmp/alpha": .resolved("Carefeed")])
+        var created: [Focus] = []
+        let sheet = makeSheet(g) { created.append($0) }
+        sheet.createTapped()
+        XCTAssertFalse(sheet.isCreateEnabled)
+        sheet.createTapped()   // re-entrant tap while pending
+        g.release(2)
+        pumpMain()
+        XCTAssertEqual(created.count, 1)
+        XCTAssertEqual(created.first?.org, "Carefeed")
+        XCTAssertEqual(created.first?.projectPath, "/tmp/alpha")
+    }
+
+    func testCancelWhilePendingCreatesNothing() {
+        let g = GatedLookup(["/tmp/alpha": .resolved("Carefeed")])
+        var created: [Focus] = []
+        let sheet = makeSheet(g) { created.append($0) }
+        sheet.createTapped()
+        sheet.cancelTapped()
+        g.release(2)
+        pumpMain()
+        XCTAssertTrue(created.isEmpty)
+    }
+
+    func testFailedLookupStillCreatesFocusWithNilOrgAndRetriesLater() {
+        let g = GatedLookup(["/tmp/alpha": .failed])
+        var created: [Focus] = []
+        let resolver = RepoOrgResolver(lookup: g.lookup)
+        let sheet = CreateFocusSheet(orgResolver: resolver, agents: ["claudia"],
+                                     projects: ["/tmp/alpha"]) { created.append($0) }
+        sheet.createTapped()
+        g.release(2)
+        pumpMain()
+        XCTAssertEqual(created.count, 1)
+        XCTAssertNil(created.first?.org)
+        XCTAssertNil(resolver.cached("/tmp/alpha"))   // not cached; retried next time
+    }
+
     // MARK: Sheet view tree — no Org picker, preview under the Project row
 
     func testCreateFocusSheetHasNoOrgPickerAndPreviewSitsUnderProject() throws {
-        let sheet = CreateFocusSheet(orgResolver: RepoOrgResolver(lookup: { _ in nil }), onCreate: { _ in })
+        let sheet = CreateFocusSheet(orgResolver: RepoOrgResolver(lookup: { _ in .resolved(nil) }), onCreate: { _ in })
         let content = try XCTUnwrap(sheet.window?.contentView)
         content.layoutSubtreeIfNeeded()
 

@@ -20,28 +20,48 @@ enum RepoOrg {
 
     // MARK: Process-backed
 
-    /// Blocking: reads the repo's remote and maps it to an org. Never call on
-    /// the main thread — use `RepoOrgResolver`.
-    ///
-    /// - `origin` exists: its URL decides, even if it maps to nil (other
-    ///   remotes are never consulted).
-    /// - No `origin`: the alphabetically first remote (by name) decides.
-    static func org(forProjectPath path: String) -> String? {
-        if let url = git(path, ["config", "--get", "remote.origin.url"]) {
-            return org(forRemoteURL: url)
+    /// Outcome of a blocking lookup. `.failed` (timeout, spawn error, unexpected
+    /// exit) is distinct from `.resolved(nil)` (no remote / unknown owner) so
+    /// callers can retry failures but cache real answers.
+    enum Lookup: Equatable {
+        case resolved(String?)
+        case failed
+
+        var org: String? {
+            if case .resolved(let org) = self { return org }
+            return nil
         }
-        guard let listing = git(path, ["config", "--get-regexp", "^remote\\..+\\.url$"]) else { return nil }
-        var urls: [(name: String, url: String)] = []
+    }
+
+    /// Blocking: reads all remotes in one git call and maps the winner to an org.
+    /// Never call on the main thread — use `RepoOrgResolver`.
+    static func lookup(forProjectPath path: String) -> Lookup {
+        switch runGit(path, ["config", "--get-regexp", "^remote\\..*\\.url$"]) {
+        case .failed: return .failed
+        case .noMatch: return .resolved(nil)
+        case .output(let listing): return .resolved(org(forRemoteListing: listing))
+        }
+    }
+
+    static func org(forProjectPath path: String) -> String? {
+        lookup(forProjectPath: path).org
+    }
+
+    /// Parses `git config --get-regexp` output (`remote.<name>.url <url>` lines)
+    /// and picks the deciding remote: `origin` if present (final, even if its
+    /// owner is unknown); otherwise the first remote sorted by name.
+    static func org(forRemoteListing listing: String) -> String? {
+        var remotes: [(name: String, url: String)] = []
         for line in listing.split(whereSeparator: \.isNewline) {
             guard let space = line.firstIndex(of: " ") else { continue }
-            let key = line[..<space]                    // remote.<name>.url
+            let key = line[..<space]                    // remote.<name>.url (name may contain dots)
             guard key.hasPrefix("remote."), key.hasSuffix(".url"), key.count > "remote..url".count
             else { continue }
             let name = String(key.dropFirst("remote.".count).dropLast(".url".count))
-            urls.append((name, String(line[line.index(after: space)...])))
+            remotes.append((name, String(line[line.index(after: space)...])))
         }
-        guard let first = urls.min(by: { $0.name < $1.name }) else { return nil }
-        return org(forRemoteURL: first.url)
+        let chosen = remotes.first { $0.name == "origin" } ?? remotes.min { $0.name < $1.name }
+        return chosen.flatMap { org(forRemoteURL: $0.url) }
     }
 
     // MARK: Private
@@ -91,13 +111,19 @@ enum RepoOrg {
         return false
     }
 
+    private enum GitResult {
+        case output(String)   // exit 0 with output
+        case noMatch          // exit 1 (or exit 0, empty): ran fine, nothing matched
+        case failed           // spawn error, timeout, other exit code
+    }
+
     /// Runs git with a hard timeout. Output goes to a temp file rather than a
     /// pipe so a grandchild holding the descriptor can't block the read.
-    private static func git(_ path: String, _ args: [String]) -> String? {
+    private static func runGit(_ path: String, _ args: [String]) -> GitResult {
         let outURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("repoorg-\(UUID().uuidString).out")
         guard FileManager.default.createFile(atPath: outURL.path, contents: nil),
-              let outHandle = try? FileHandle(forWritingTo: outURL) else { return nil }
+              let outHandle = try? FileHandle(forWritingTo: outURL) else { return .failed }
         defer {
             try? outHandle.close()
             try? FileManager.default.removeItem(at: outURL)
@@ -110,35 +136,41 @@ enum RepoOrg {
         proc.standardError = FileHandle.nullDevice
         let done = DispatchSemaphore(value: 0)
         proc.terminationHandler = { _ in done.signal() }
-        do { try proc.run() } catch { return nil }
+        do { try proc.run() } catch { return .failed }
 
         if done.wait(timeout: .now() + 2) == .timedOut {
             if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
             _ = done.wait(timeout: .now() + 1)
-            return nil
+            return .failed
         }
 
-        guard proc.terminationStatus == 0,
-              let data = try? Data(contentsOf: outURL),
-              let out = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !out.isEmpty
-        else { return nil }
-        return out
+        switch proc.terminationStatus {
+        case 0:
+            guard let data = try? Data(contentsOf: outURL),
+                  let out = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            else { return .failed }
+            return out.isEmpty ? .noMatch : .output(out)
+        case 1: return .noMatch
+        default: return .failed   // e.g. 128: not a repo / git error
+        }
     }
 }
 
 /// Resolves a project's org off the main thread, with a per-path cache.
-/// `lookup` is injectable so tests can fake the (blocking) git work.
+/// Only resolved results are cached (including a legitimate nil); failed
+/// lookups are retried next time. Concurrent requests for one path share one
+/// lookup. `lookup` is injectable so tests can fake the (blocking) git work.
 final class RepoOrgResolver {
 
-    private let lookup: (String) -> String?
+    private let lookup: (String) -> RepoOrg.Lookup
     private let queue: DispatchQueue
     private let lock = NSLock()
     private var cache: [String: String?] = [:]
+    private var pending: [String: [(String?) -> Void]] = [:]
 
     init(queue: DispatchQueue = .global(qos: .userInitiated),
-         lookup: @escaping (String) -> String? = RepoOrg.org(forProjectPath:)) {
+         lookup: @escaping (String) -> RepoOrg.Lookup = RepoOrg.lookup(forProjectPath:)) {
         self.queue = queue
         self.lookup = lookup
     }
@@ -149,18 +181,32 @@ final class RepoOrgResolver {
         return cache[path]
     }
 
-    /// Calls `completion` on the main thread: immediately if cached, otherwise
-    /// after the lookup finishes on `queue`.
+    /// Calls `completion`: immediately (caller's thread) if cached, otherwise on
+    /// the main thread after the lookup finishes on `queue`. A failed lookup
+    /// completes with nil and is not cached.
     func resolve(_ path: String, completion: @escaping (String?) -> Void) {
-        if let hit = cached(path) {
+        lock.lock()
+        if let hit = cache[path] {
+            lock.unlock()
             completion(hit)
             return
         }
+        if pending[path] != nil {
+            pending[path]!.append(completion)
+            lock.unlock()
+            return
+        }
+        pending[path] = [completion]
+        lock.unlock()
+
         queue.async { [weak self] in
             guard let self else { return }
-            let org = self.lookup(path)
-            self.lock.lock(); self.cache[path] = .some(org); self.lock.unlock()
-            DispatchQueue.main.async { completion(org) }
+            let result = self.lookup(path)
+            self.lock.lock()
+            if case .resolved(let org) = result { self.cache[path] = .some(org) }
+            let waiters = self.pending.removeValue(forKey: path) ?? []
+            self.lock.unlock()
+            DispatchQueue.main.async { waiters.forEach { $0(result.org) } }
         }
     }
 }
