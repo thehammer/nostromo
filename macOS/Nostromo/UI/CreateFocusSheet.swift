@@ -7,14 +7,13 @@ import AppKit
 final class CreateFocusSheet: NSWindowController {
 
     private let onCreate: (Focus) -> Void
+    private let orgResolver: RepoOrgResolver
+    private var isCreating = false
+    private var isCancelled = false
 
     // UI
     private let agentPopup   = NSPopUpButton()
     private let projectPopup = NSPopUpButton()
-    private let orgControl   = NSSegmentedControl(labels: ["Carefeed", "Personal"],
-                                                  trackingMode: .selectOne,
-                                                  target: nil,
-                                                  action: nil)
     private let namePreview  = NSTextField(labelWithString: "")
     private let createBtn    = NSButton()
 
@@ -22,11 +21,15 @@ final class CreateFocusSheet: NSWindowController {
     private var agents:   [String] = []
     private var projects: [String] = []
 
-    init(onCreate: @escaping (Focus) -> Void) {
+    /// `agents` / `projects` override filesystem discovery (used by tests).
+    init(orgResolver: RepoOrgResolver = RepoOrgResolver(),
+         agents: [String]? = nil, projects: [String]? = nil,
+         onCreate: @escaping (Focus) -> Void) {
         self.onCreate = onCreate
+        self.orgResolver = orgResolver
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 260),
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 220),
             styleMask:   [.titled],
             backing:     .buffered,
             defer:       false
@@ -38,6 +41,13 @@ final class CreateFocusSheet: NSWindowController {
         super.init(window: win)
         buildContent()
         loadData()
+        if let agents { self.agents = agents; agentPopup.removeAllItems(); agentPopup.addItems(withTitles: agents) }
+        if let projects {
+            self.projects = projects
+            projectPopup.removeAllItems()
+            projectPopup.addItems(withTitles: projects.map { URL(fileURLWithPath: $0).lastPathComponent })
+        }
+        createBtn.isEnabled = !self.agents.isEmpty
         updatePreview()
     }
 
@@ -85,22 +95,6 @@ final class CreateFocusSheet: NSWindowController {
         projectPopup.action = #selector(pickerChanged)
         contentView.addSubview(projectPopup)
 
-        // Org row
-        let orgLabel = NSTextField(labelWithString: "Org:")
-        orgLabel.font         = .systemFont(ofSize: 12)
-        orgLabel.textColor    = .white
-        orgLabel.isEditable   = false
-        orgLabel.isBordered   = false
-        orgLabel.drawsBackground = false
-        orgLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(orgLabel)
-
-        orgControl.selectedSegment = 0   // default: Carefeed
-        orgControl.target = self
-        orgControl.action = #selector(pickerChanged)
-        orgControl.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(orgControl)
-
         // Name preview
         namePreview.font      = .systemFont(ofSize: 11)
         namePreview.textColor = .gray
@@ -145,14 +139,7 @@ final class CreateFocusSheet: NSWindowController {
             projectPopup.leadingAnchor.constraint(equalTo: projectLabel.trailingAnchor, constant: 8),
             projectPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
-            orgLabel.topAnchor.constraint(equalTo: projectLabel.bottomAnchor, constant: 14),
-            orgLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            orgLabel.widthAnchor.constraint(equalToConstant: 60),
-
-            orgControl.centerYAnchor.constraint(equalTo: orgLabel.centerYAnchor),
-            orgControl.leadingAnchor.constraint(equalTo: orgLabel.trailingAnchor, constant: 8),
-
-            namePreview.topAnchor.constraint(equalTo: orgLabel.bottomAnchor, constant: 14),
+            namePreview.topAnchor.constraint(equalTo: projectLabel.bottomAnchor, constant: 14),
             namePreview.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             namePreview.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
@@ -210,12 +197,6 @@ final class CreateFocusSheet: NSWindowController {
         createBtn.isEnabled = !agents.isEmpty
     }
 
-    // MARK: - Org picker helper
-
-    private var selectedOrg: String {
-        orgControl.selectedSegment == 1 ? "Personal" : "Carefeed"
-    }
-
     // MARK: - Preview
 
     @objc private func pickerChanged() { updatePreview() }
@@ -227,28 +208,56 @@ final class CreateFocusSheet: NSWindowController {
         }
         let agentTag    = agents[agentPopup.indexOfSelectedItem]
         let projectPath = projects[projectPopup.indexOfSelectedItem]
+        let cached = orgResolver.cached(projectPath)
+        showPreview(agentTag: agentTag, projectPath: projectPath, org: cached ?? nil)
+        if cached == nil {
+            orgResolver.resolve(projectPath) { [weak self] org in
+                guard let self, !self.agents.isEmpty, !self.projects.isEmpty,
+                      self.projects[self.projectPopup.indexOfSelectedItem] == projectPath
+                else { return }   // selection moved on; drop the stale result
+                self.showPreview(agentTag: self.agents[self.agentPopup.indexOfSelectedItem],
+                                 projectPath: projectPath, org: org)
+            }
+        }
+    }
+
+    private func showPreview(agentTag: String, projectPath: String, org: String?) {
         let preview = Focus(id: "preview", agentTag: agentTag, projectPath: projectPath,
-                            isBuiltIn: false, org: selectedOrg)
+                            isBuiltIn: false, org: org)
         namePreview.stringValue = "→ \(preview.displayName)"
     }
 
     // MARK: - Actions
 
-    @objc private func createTapped() {
-        guard !agents.isEmpty, !projects.isEmpty else { return }
+    @objc func createTapped() {
+        guard !isCreating, !isCancelled, !agents.isEmpty, !projects.isEmpty else { return }
+        isCreating = true
+        createBtn.isEnabled = false
         let agentTag    = agents[agentPopup.indexOfSelectedItem]
         let projectPath = projects[projectPopup.indexOfSelectedItem]
-        let focus = Focus(id: UUID().uuidString,
-                          agentTag: agentTag,
-                          projectPath: projectPath,
-                          isBuiltIn: false,
-                          org: selectedOrg,
-                          sessionSummary: nil)
-        window?.sheetParent?.endSheet(window!)
-        onCreate(focus)
+        orgResolver.resolve(projectPath) { [weak self] org in   // org is nil if the lookup failed
+            guard let self else { return }
+            self.isCreating = false
+            guard !self.isCancelled else { return }
+            let focus = Focus(id: UUID().uuidString,
+                              agentTag: agentTag,
+                              projectPath: projectPath,
+                              isBuiltIn: false,
+                              org: org,
+                              sessionSummary: nil)
+            if let window = self.window { window.sheetParent?.endSheet(window) }
+            self.onCreate(focus)
+        }
     }
 
-    @objc private func cancelTapped() {
-        window?.sheetParent?.endSheet(window!)
+    @objc func cancelTapped() {
+        isCancelled = true
+        if let window { window.sheetParent?.endSheet(window) }
     }
+
+    // MARK: - Test seams
+
+    var previewText: String { namePreview.stringValue }
+    var isCreateEnabled: Bool { createBtn.isEnabled }
+    func selectProject(at index: Int) { projectPopup.selectItem(at: index); updatePreview() }
 }
