@@ -436,6 +436,7 @@ class ChatTurnView: NSView, TurnIsland {
     /// reports it as a single line.
     static func measureIsland(_ view: NSView, width: CGFloat) -> CGFloat {
         let superview = view.superview
+        let selection = TranscriptSelection.capture(in: view)
         superview.map { _ in view.removeFromSuperview() }
 
         (view as? WidthPresettable)?.presetLayoutWidth(width)
@@ -445,6 +446,7 @@ class ChatTurnView: NSView, TurnIsland {
         view.setFrameSize(NSSize(width: width, height: height))
 
         superview?.addSubview(view)
+        selection?.restore()
         return height
     }
 
@@ -835,6 +837,56 @@ class TextBlockView: NSView, WidthPresettable {
     }
 }
 
+// MARK: - CopyMenuTextField
+
+/// A selectable label whose right-click menu is the owner's, both while idle and
+/// while it holds the field editor.
+///
+/// Once a selectable `NSTextField` is clicked, a field editor (a text view,
+/// installed as a subview of the label) becomes the hit view and answers the
+/// click with the standard text menu — `NSView.menu` on the label, and the
+/// `NSTextViewDelegate` menu hook, do not reach it. So the label brings its own
+/// editor (see `CopyMenuTextFieldCell`) and the editor asks the label.
+final class CopyMenuTextField: NSTextField {
+
+    override class var cellClass: AnyClass? {
+        get { CopyMenuTextFieldCell.self }
+        set { _ = newValue }
+    }
+
+    /// The menu to show; nil falls back to AppKit's own.
+    var menuProvider: (() -> NSMenu)?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        menuProvider?() ?? super.menu(for: event)
+    }
+}
+
+final class CopyMenuTextFieldCell: NSTextFieldCell {
+
+    private lazy var editor: CopyMenuFieldEditor = {
+        let editor = CopyMenuFieldEditor(frame: .zero)
+        editor.isFieldEditor = true
+        editor.isRichText = false
+        editor.importsGraphics = false
+        return editor
+    }()
+
+    override func fieldEditor(for controlView: NSView) -> NSTextView? { editor }
+}
+
+/// Field editor whose context menu is the owning label's, with a plain "Copy" of
+/// the selection ahead of the label's own items.
+final class CopyMenuFieldEditor: NSTextView {
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let custom = ((delegate as AnyObject?) as? CopyMenuTextField)?.menuProvider?() else { return super.menu(for: event) }
+        custom.insertItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: ""), at: 0)
+        custom.insertItem(.separator(), at: 1)
+        return custom
+    }
+}
+
 // MARK: - ToolCallView
 
 class ToolCallView: NSView {
@@ -874,18 +926,41 @@ class ToolCallView: NSView {
         dotLabel.textColor = Theme.borderInactive
         dotLabel.setContentHuggingPriority(.required, for: .horizontal)
 
-        let summaryLabel = NSTextField(labelWithString: data.inputSummary)
+        let summaryLabel = CopyMenuTextField(labelWithString: data.inputSummary)
         // Literal command text (flags like `--stat`, `->` in scripts, etc.) — disable
         // Fira Code's default ligatures so it renders verbatim. See ToolResultView's
         // buildLabelIfNeeded() for the full explanation of this default-on behavior.
+        //
+        // The wrapping is stated outright, in the string and on the cell. The row has
+        // always laid out word-wrapped (an attributed string with no paragraph style
+        // wraps, whatever `lineBreakMode` says), but a selectable label that takes
+        // the field editor rewrites its string from the cell's mode: with
+        // `.byTruncatingMiddle` here, selecting text re-laid the row out as one
+        // truncated line and the next measure shrank it. Saying "wrap" in both
+        // places keeps the selected and unselected row identical.
+        //
+        // Font and colour go on the cell as well as in the string, for the same
+        // reason: the field editor takes them from the cell, so a string-only font
+        // made the text jump to the system font (and the row re-measure shorter)
+        // the moment it was selected.
+        summaryLabel.font      = Theme.monoFont
+        summaryLabel.textColor = Theme.fg
+        let wrapping = NSMutableParagraphStyle()
+        wrapping.lineBreakMode = .byWordWrapping
         summaryLabel.attributedStringValue = NSAttributedString(string: data.inputSummary, attributes: [
             .font:            Theme.monoFont,
             .foregroundColor: Theme.fg,
             .ligature:        0,
+            .paragraphStyle:  wrapping,
         ])
         summaryLabel.isSelectable = true   // copyable transcript content
-        summaryLabel.lineBreakMode = .byTruncatingMiddle
+        summaryLabel.lineBreakMode = .byWordWrapping
+        (summaryLabel.cell as? NSTextFieldCell)?.wraps = true
         summaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // A selectable label that has been clicked owns the field editor, and a
+        // right-click lands on *that* (standard Copy / Look Up menu), never
+        // reaching `menu(for:)` below — so the label has to supply the menu itself.
+        summaryLabel.menuProvider = { [unowned self] in self.copyMenu() }
 
         let row = NSStackView(views: [iconLabel, nameLabel, dotLabel, summaryLabel])
         row.orientation = .horizontal
@@ -1025,12 +1100,67 @@ class ErrorBlockView: NSView {
 /// Whether a pane (re)attach may move focus to the input bar. Stealing focus
 /// from a field editor that holds a transcript selection would clear that
 /// selection, so a copy in progress survives the re-attach.
+///
+/// Only a selection inside *this* pane's transcript counts: a selection in a
+/// sibling pane (its transcript or its input draft) is none of this pane's
+/// business and must not stop it taking focus.
 enum TranscriptFocusPolicy {
-    static func shouldFocusInput(currentFirstResponder: NSResponder?, inputTextView: NSTextView?) -> Bool {
+
+    /// `transcript` is the pane's transcript scroll view.
+    static func shouldFocusInput(currentFirstResponder: NSResponder?, inputTextView: NSTextView?,
+                                 transcript: NSView) -> Bool {
         guard let text = currentFirstResponder as? NSTextView,
               text !== inputTextView,
               text.selectedRange().length > 0
         else { return true }
-        return false
+        // A field editor is a transient view the window hands to whichever label
+        // is being edited; the label is the thing that lives in the transcript.
+        let owner: NSView? = text.isFieldEditor ? text.delegate as? NSView : text
+        return !(owner?.isDescendant(of: transcript) ?? false)
+    }
+
+    /// Focus `inputTextView` unless that would clear a selection in `transcript`.
+    static func focusInputIfAppropriate(in window: NSWindow, inputTextView: NSTextView, transcript: NSView) {
+        guard shouldFocusInput(currentFirstResponder: window.firstResponder,
+                               inputTextView: inputTextView, transcript: transcript)
+        else { return }
+        window.makeFirstResponder(inputTextView)
+    }
+}
+
+// MARK: - TranscriptSelection
+
+/// A transcript selection held by a field editor inside some view, captured so it
+/// can be put back after that view is detached and re-attached.
+///
+/// Measuring a turn (or one block of it) detaches the view — see
+/// `ChatTurnView.measureIsland` — and AppKit drops the first responder, and with
+/// it the field editor, when a view holding it leaves the window. Without this a
+/// width change, or a block streaming into the turn being read, would silently
+/// clear the operator's selection.
+struct TranscriptSelection {
+    private let owner: NSTextField
+    private let range: NSRange
+
+    /// The selection currently held inside `view`, or nil when the first
+    /// responder is not a non-empty selection within it.
+    static func capture(in view: NSView) -> TranscriptSelection? {
+        guard let editor = view.window?.firstResponder as? NSTextView,
+              editor.isFieldEditor,
+              let owner = editor.delegate as? NSTextField,
+              owner.isDescendant(of: view),
+              editor.selectedRange.length > 0
+        else { return nil }
+        return TranscriptSelection(owner: owner, range: editor.selectedRange)
+    }
+
+    /// Call once the view is back in its window.
+    func restore() {
+        guard owner.window != nil else { return }
+        owner.selectText(nil)
+        guard let editor = owner.currentEditor() as? NSTextView else { return }
+        let length = (editor.string as NSString).length
+        guard range.upperBound <= length else { return }
+        editor.setSelectedRange(range)
     }
 }

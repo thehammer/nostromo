@@ -578,6 +578,8 @@ class ReplView: NSView {
         // Detached, the only constraints in play are the island's own internal
         // layout — which is exactly the question being asked.
         let superview = view.superview
+        // Detaching drops a live transcript selection; put it back after.
+        let selection = TranscriptSelection.capture(in: view)
         superview.map { _ in view.removeFromSuperview() }
 
         view.setIslandWidth(contentWidth)
@@ -586,6 +588,7 @@ class ReplView: NSView {
         virtualizer.recordMeasured(height, at: index, isComplete: turn.isComplete)
 
         superview?.addSubview(view)
+        selection?.restore()
     }
 
     /// Which of `materialize()`'s two step-3 call sites asked for a measurement.
@@ -767,10 +770,8 @@ class ReplView: NSView {
         super.viewDidMoveToWindow()
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
-            guard TranscriptFocusPolicy.shouldFocusInput(
-                currentFirstResponder: window.firstResponder, inputTextView: self.inputBar.textView)
-            else { return }
-            window.makeFirstResponder(self.inputBar.textView)
+            TranscriptFocusPolicy.focusInputIfAppropriate(
+                in: window, inputTextView: self.inputBar.textView, transcript: self.scrollView)
         }
         observeWindowVisibility()
         followTail.paneMayHaveBecomeUsable()
