@@ -75,12 +75,16 @@ class ReplView: NSView {
     private var laidOutWidth: CGFloat = 0
     private var cancellables = Set<AnyCancellable>()
 
-    /// True while the transcript should auto-scroll to the newest content.
-    /// Cleared when the user scrolls up to read history, so a background
-    /// stream of blocks (tool calls, Perri's own chatter, etc.) doesn't yank
-    /// the view back to the bottom out from under them. Set again once they
-    /// scroll back down, or when they send a message themselves.
-    private var isPinnedToBottom = true
+    /// "Jump to latest" pill, shown while the pane is not following the tail.
+    private let jumpOverlay = JumpToLatestOverlay()
+    /// Whether the transcript auto-scrolls to the newest content, and everything
+    /// that decides it (bounds observer, overlay, scroller, catch-up). Cleared
+    /// only by the operator scrolling away from the bottom, so a background
+    /// stream of blocks doesn't yank the view out from under someone reading
+    /// history; set again when they scroll back down or send a message. The rule
+    /// lives in `FollowTailPolicy`; the wiring in `FollowTailController`.
+    private var followTail: FollowTailController!
+    private var isPinnedToBottom: Bool { followTail.isPinned }
 
     init(tag: String, agentName: String? = nil, displayName: String? = nil,
          workingDirectory: String? = nil, quickActions: [QuickAction] = []) {
@@ -163,26 +167,20 @@ class ReplView: NSView {
         scrollView.drawsBackground      = false
         scrollView.hasVerticalScroller  = true
         scrollView.hasHorizontalScroller = false   // forces doc view to match scroll view width
-        scrollView.autohidesScrollers   = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
 
-        // Live-scroll notifications only fire for user-driven trackpad/wheel
-        // scrolling, not our own programmatic scrollToBottom() calls — exactly
-        // the signal needed to tell "user is reading history" apart from
-        // "we just auto-scrolled". Re-checked on every live-scroll tick so it
-        // tracks drags back down to the bottom too.
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(liveScrollDidChange),
-            name: NSScrollView.didLiveScrollNotification, object: scrollView)
-
-        // Programmatic scrolls (scroller drags, scrollToBottom, Home/End) do not
-        // post live-scroll notifications, so the materialization pass would miss
-        // them and the operator would drag into a blank region.
-        clip.postsBoundsChangedNotifications = true
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(clipBoundsDidChange),
-            name: NSView.boundsDidChangeNotification, object: clip)
+        // Follow-tail state: observes the clip view's bounds and live scrolls
+        // (scroller drags, scrollToBottom, Home/End post no live-scroll
+        // notification, so without the bounds observer the pass would miss them
+        // and the operator would drag into a blank region), and drives the
+        // overlay and scroller.
+        followTail = FollowTailController(scrollView: scrollView, overlay: jumpOverlay)
+        followTail.documentHeight  = { [weak self] in self?.virtualizer.documentHeight ?? 0 }
+        followTail.contentWidth    = { [weak self] in self?.contentWidth ?? 1 }
+        followTail.isMaterializing = { [weak self] in self?.isMaterializing ?? false }
+        followTail.requestPass     = { [weak self] in self?.schedulePass() }
+        followTail.onFlip          = { [weak self] flip in self?.logFollowTailFlip(flip) }
 
         // Scripted scroll for the acceptance run — see TranscriptLoadHarness.
         NotificationCenter.default.addObserver(
@@ -200,11 +198,17 @@ class ReplView: NSView {
         inputBar.translatesAutoresizingMaskIntoConstraints = false
         inputBar.onSend = { [weak self] text, images in
             guard let self else { return }
-            self.isPinnedToBottom = true
+            self.followTail.setPinned(true, cause: .send)
             self.session.send(text, images: images)
         }
         inputBar.onInterrupt = { [weak self] in self?.session.interrupt() }
         addSubview(inputBar)
+
+        // "Jump to latest" — covers exactly the transcript area (so it sits above
+        // the quick-action strip / context meter / input bar) and only its pill
+        // takes clicks.
+        jumpOverlay.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(jumpOverlay, positioned: .above, relativeTo: scrollView)
         // The whole pane (transcript included) accepts image drops.
         registerForDraggedTypes(ImagePasteboard.draggedTypes)
 
@@ -242,6 +246,11 @@ class ReplView: NSView {
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: scrollBottomTarget),
+
+            jumpOverlay.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            jumpOverlay.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            jumpOverlay.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            jumpOverlay.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
         ]
 
         if let strip = quickActionStrip {
@@ -384,7 +393,15 @@ class ReplView: NSView {
     /// must happen in this order.
     private func materialize() {
         let turns = session.turns
-        guard contentWidth > 1, !isMaterializing else { return }
+        guard !isMaterializing else { return }
+        guard contentWidth > 1 else {
+            // No usable width (collapsed split, not yet laid out): nothing to do
+            // now, but a pinned pane must still reach the bottom once it has
+            // width again — `FollowTailController.paneMayHaveBecomeUsable` pays this back.
+            followTail.notePassSkippedForWidth()
+            return
+        }
+        followTail.notePassRan()
         isMaterializing = true
         contentDirty = false
         defer {
@@ -473,7 +490,7 @@ class ReplView: NSView {
 
         // 5. Put the reading position back, or follow the newest content.
         if isPinnedToBottom {
-            scrollToBottom()
+            followTail.scrollToBottom()
         } else if let anchor {
             let top = virtualizer.restoredTop(for: anchor)
             if abs(top - viewport.minY) > 0.5 {
@@ -505,7 +522,7 @@ class ReplView: NSView {
                                 interaction: interactions.state(for: turn.id))
         view.onSend = { [weak self] text in
             guard let self else { return }
-            self.isPinnedToBottom = true
+            self.followTail.setPinned(true, cause: .send)
             self.session.send(text)
         }
         // An answered question card must come back answered. Rebuilt armed, it
@@ -654,52 +671,21 @@ class ReplView: NSView {
         }
     }
 
-    /// See `scrollToBottom()`: beyond any document height, below AppKit's 2^45 geometry limit.
-    static let scrollToBottomY: CGFloat = 1_000_000_000
-
-    private func scrollToBottom() {
-        // Scroll to an arbitrarily large Y — AppKit clamps to the actual maximum.
-        // Avoids accessing documentView.frame: reading `.frame` on a dirty NSView
-        // triggers a synchronous layout pass.
-        //
-        // "Arbitrarily large" must still be a VALID geometry value: this used to
-        // be `CGFloat.greatestFiniteMagnitude` (~1.8e308), and AppKit logged an
-        // `Invalid view geometry: value is greater than 35184372088832` Fault
-        // (2^45, its limit) on every call — a few per second while a transcript
-        // streams (found in live QA, 2026-10-06). `Self.scrollToBottomY` is far
-        // beyond any real document height (the longest transcript measured was
-        // ~1.1e7 points) yet far below that limit.
-        scrollView.contentView.scroll(NSPoint(x: 0, y: Self.scrollToBottomY))
-        scrollView.reflectScrolledClipView(scrollView.contentView)
-    }
-
-    /// Re-pin to the bottom — call whenever the user takes an action that
-    /// should bring the newest content into view (sending a message, an
-    /// answer, a quick action).
-    private func pinToBottomAndScroll() {
-        isPinnedToBottom = true
-        scrollToBottom()
-    }
-
-    @objc private func liveScrollDidChange() {
-        updatePinnedState()
-        schedulePass()
-    }
-
-    @objc private func clipBoundsDidChange() {
-        // Scroller drags, Home/End and `scrollToBottom()` move the clip view
-        // without posting a live-scroll notification — which is the entire reason
-        // this observer exists. Updating the pass but not the pinned state meant
-        // dragging up to read history left `isPinnedToBottom == true`, and the
-        // very pass the drag scheduled took the operator straight back to the
-        // bottom (`materialize()`, step 5).
-        //
-        // A bounds change observed while a pass is running was caused by that
-        // pass — the notification is delivered synchronously from inside its own
-        // scroll and frame calls — so it must not be read as operator intent.
-        guard !isMaterializing else { return }
-        updatePinnedState()
-        schedulePass()
+    /// Every flip of the pinned flag is logged with its cause and the pane's
+    /// visibility, so a pane that stops following in the field can be attributed
+    /// (`log stream --predicate 'category == "transcript"'`).
+    private func logFollowTailFlip(_ flip: FollowTailController.Flip) {
+        let win = window
+        let key = win?.isKeyWindow ?? false
+        let visible = win?.isVisible ?? false
+        let occluded = win.map { !$0.occlusionState.contains(.visible) } ?? true
+        let width = Double(contentWidth)
+        let docHeight = Double(virtualizer.documentHeight)
+        let visibleMaxY = Double(scrollView.contentView.bounds.maxY)
+        let originDelta = flip.originDeltaY.map { String(format: "%.1f", Double($0)) } ?? "n/a"
+        let sizeChanged = flip.sizeChanged.map { String($0) } ?? "n/a"
+        let tag = session.tag
+        log.info("follow-tail \(flip.pinned ? "pinned" : "unpinned", privacy: .public) tag=\(tag, privacy: .public) cause=\(flip.cause.rawValue, privacy: .public) originDelta=\(originDelta, privacy: .public) sizeChanged=\(sizeChanged, privacy: .public) width=\(width) docHeight=\(docHeight) visibleMaxY=\(visibleMaxY) windowKey=\(key) windowVisible=\(visible) occluded=\(occluded)")
     }
 
     /// Scroll bottom → top → bottom, one viewport at a time, so the acceptance
@@ -717,26 +703,17 @@ class ReplView: NSView {
             } else {
                 y += step
                 if y >= self.virtualizer.documentHeight {
-                    self.isPinnedToBottom = true
+                    self.followTail.setPinned(true, cause: .harness)
                     self.schedulePass()
                     timer.invalidate()
                     return
                 }
             }
-            self.isPinnedToBottom = false
+            self.followTail.setPinned(false, cause: .harness)
             self.scrollView.contentView.scroll(NSPoint(x: 0, y: y))
             self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
         }
         RunLoop.main.add(timer, forMode: .common)
-    }
-
-    private func updatePinnedState() {
-        let visibleMaxY = scrollView.contentView.bounds.maxY
-        // Within a small threshold of the true bottom counts as "pinned" —
-        // demanding an exact match would fight sub-pixel rounding. Compares
-        // against the virtualizer's cached height rather than the document
-        // view's frame, for the reason in `scrollToBottom`.
-        isPinnedToBottom = virtualizer.documentHeight - visibleMaxY < 40
     }
 
     override func layout() {
@@ -745,6 +722,7 @@ class ReplView: NSView {
         // both were taken at the old width. Re-estimating five thousand turns is
         // a few million float ops — which is what keeps a resize interactive.
         let width = contentWidth
+        followTail.paneMayHaveBecomeUsable()
         guard width > 1, abs(width - laidOutWidth) > 0.5 else { return }
         laidOutWidth = width
         if virtualizer.count == session.turns.count {
@@ -756,12 +734,43 @@ class ReplView: NSView {
         schedulePass()
     }
 
+    /// The window whose occlusion we are observing, so a move to another window
+    /// (a pane rebuild) swaps the observation rather than stacking a second.
+    private weak var observedWindow: NSWindow?
+
+    /// A window coming back from occluded/hidden is the moment a pane that
+    /// followed the tail while out of sight must prove it is at the bottom.
+    private func observeWindowVisibility() {
+        guard window !== observedWindow else { return }
+        if let old = observedWindow {
+            NotificationCenter.default.removeObserver(
+                self, name: NSWindow.didChangeOcclusionStateNotification, object: old)
+        }
+        observedWindow = window
+        guard let window else { return }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(windowOcclusionChanged),
+            name: NSWindow.didChangeOcclusionStateNotification, object: window)
+    }
+
+    @objc private func windowOcclusionChanged() {
+        guard window?.occlusionState.contains(.visible) == true else { return }
+        followTail.paneWasShown()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        followTail.paneWasShown()
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
             window.makeFirstResponder(self.inputBar.textView)
         }
+        observeWindowVisibility()
+        followTail.paneMayHaveBecomeUsable()
         // A pane rebuild reuses this instance (see DynamicFocusView), so scroll
         // position and pinned state survive it. A fresh instance re-syncs here.
         if window != nil, virtualizer.count != session.turns.count {
@@ -816,7 +825,7 @@ class ReplView: NSView {
         }
         let prompt = action.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !prompt.isEmpty {
-            isPinnedToBottom = true
+            followTail.setPinned(true, cause: .send)
             session.send(prompt)
         }
     }

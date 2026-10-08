@@ -27,6 +27,15 @@
 		AA0000020000000000000120 /* MotherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000020 /* MotherView.swift */; };
 		AA0000020000000000000122 /* PerriView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000022 /* PerriView.swift */; };
 		AA0000020000000000000123 /* ReplView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000023 /* ReplView.swift */; };
+		FT0000000000000000000011 /* FollowTailPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000001 /* FollowTailPolicy.swift */; };
+		FT0000000000000000000012 /* FollowTailPolicy.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000001 /* FollowTailPolicy.swift */; };
+		FT0000000000000000000013 /* JumpToLatestOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000002 /* JumpToLatestOverlay.swift */; };
+		FT0000000000000000000014 /* JumpToLatestOverlay.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000002 /* JumpToLatestOverlay.swift */; };
+		FT0000000000000000000015 /* FollowTailPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000003 /* FollowTailPolicyTests.swift */; };
+		FT0000000000000000000016 /* JumpToLatestOverlayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000004 /* JumpToLatestOverlayTests.swift */; };
+		FT0000000000000000000017 /* FollowTailControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000005 /* FollowTailControllerTests.swift */; };
+		FT0000000000000000000018 /* FollowTailController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000006 /* FollowTailController.swift */; };
+		FT0000000000000000000019 /* FollowTailController.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000006 /* FollowTailController.swift */; };
 		AA0000020000000000000125 /* FredView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000025 /* FredView.swift */; };
 		EE00000000000000000000A1 /* QuickActionStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000A0 /* QuickActionStripView.swift */; };
 		EE00000000000000000000C1 /* MarkdownCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000C0 /* MarkdownCardView.swift */; };
@@ -222,6 +231,12 @@
 		AA0000020000000000000020 /* MotherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000022 /* PerriView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000023 /* ReplView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplView.swift; sourceTree = "<group>"; };
+		FT0000000000000000000001 /* FollowTailPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailPolicy.swift; sourceTree = "<group>"; };
+		FT0000000000000000000002 /* JumpToLatestOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpToLatestOverlay.swift; sourceTree = "<group>"; };
+		FT0000000000000000000003 /* FollowTailPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailPolicyTests.swift; sourceTree = "<group>"; };
+		FT0000000000000000000004 /* JumpToLatestOverlayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpToLatestOverlayTests.swift; sourceTree = "<group>"; };
+		FT0000000000000000000005 /* FollowTailControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailControllerTests.swift; sourceTree = "<group>"; };
+		FT0000000000000000000006 /* FollowTailController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailController.swift; sourceTree = "<group>"; };
 		AA0000020000000000000025 /* FredView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredView.swift; sourceTree = "<group>"; };
 		EE00000000000000000000A0 /* QuickActionStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionStripView.swift; sourceTree = "<group>"; };
 		EE00000000000000000000C0 /* MarkdownCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownCardView.swift; sourceTree = "<group>"; };
@@ -406,6 +421,7 @@
 				HH000000000000000000020 /* TurnPayloadStore.swift */,
 				HH000000000000000000030 /* ThumbnailLoader.swift */,
 				HH0000000000000000000B0 /* OverlayHitTest.swift */,
+				FT0000000000000000000001 /* FollowTailPolicy.swift */,
 				HH0000000000000000000A0 /* ImagePasteboard.swift */,
 				HH000000000000000000040 /* MemoryWatchdog.swift */,
 				HH000000000000000000050 /* TranscriptDiagnostics.swift */,
@@ -489,6 +505,8 @@
 				AA0000020000000000000025 /* FredView.swift */,
 				EE00000000000000000000A0 /* QuickActionStripView.swift */,
 				AA0000020000000000000023 /* ReplView.swift */,
+				FT0000000000000000000002 /* JumpToLatestOverlay.swift */,
+				FT0000000000000000000006 /* FollowTailController.swift */,
 				II000000000000000000020 /* AskQuestionView.swift */,
 				II000000000000000000030 /* ToolResultView.swift */,
 				TT000000000000000000010 /* ChatTurnView.swift */,
@@ -547,6 +565,9 @@
 				MD0000000000000000000B0 /* MotherDaemonStatusTests.swift */,
 				MG0000000000000000000B0 /* MotherJobGroupingTests.swift */,
 				OO0000000000000000001C0 /* OverlayHitTestTests.swift */,
+				FT0000000000000000000003 /* FollowTailPolicyTests.swift */,
+				FT0000000000000000000004 /* JumpToLatestOverlayTests.swift */,
+				FT0000000000000000000005 /* FollowTailControllerTests.swift */,
 				AC0000000000000000000030 /* AppControlProtocolTests.swift */,
 				OO0000000000000000001B0 /* ImagePasteboardTests.swift */,
 				OO0000000000000000001A0 /* PostureScopedTests.swift */,
@@ -692,6 +713,9 @@
 				AA0000020000000000000125 /* FredView.swift in Sources */,
 				EE00000000000000000000A1 /* QuickActionStripView.swift in Sources */,
 				AA0000020000000000000123 /* ReplView.swift in Sources */,
+				FT0000000000000000000011 /* FollowTailPolicy.swift in Sources */,
+				FT0000000000000000000013 /* JumpToLatestOverlay.swift in Sources */,
+				FT0000000000000000000018 /* FollowTailController.swift in Sources */,
 				EE00000000000000000000C1 /* MarkdownCardView.swift in Sources */,
 				EE00000000000000000000D1 /* DynamicFocusView.swift in Sources */,
 				EE00000000000000000000E1 /* PaneContentView.swift in Sources */,
@@ -765,6 +789,9 @@
 				HH0000000000000000000A2 /* ImagePasteboard.swift in TestSources */,
 				HH0000000000000000000A3 /* ThumbnailLoader.swift in TestSources */,
 				HH0000000000000000000B2 /* OverlayHitTest.swift in TestSources */,
+				FT0000000000000000000012 /* FollowTailPolicy.swift in TestSources */,
+				FT0000000000000000000014 /* JumpToLatestOverlay.swift in TestSources */,
+				FT0000000000000000000019 /* FollowTailController.swift in TestSources */,
 				AC0000000000000000000012 /* AppControlProtocol.swift in TestSources */,
 				BB00000000000000000000B5 /* PhaseRibbonTests.swift in Sources */,
 				CC00000000000000000000A1 /* PerriModelTests.swift in Sources */,
@@ -833,6 +860,9 @@
 				MG0000000000000000000B1 /* MotherJobGroupingTests.swift in Sources */,
 				KK0000000000000000001B2 /* ImagePasteboardTests.swift in Sources */,
 				KK0000000000000000001C2 /* OverlayHitTestTests.swift in Sources */,
+				FT0000000000000000000015 /* FollowTailPolicyTests.swift in Sources */,
+				FT0000000000000000000016 /* JumpToLatestOverlayTests.swift in Sources */,
+				FT0000000000000000000017 /* FollowTailControllerTests.swift in Sources */,
 				AC0000000000000000000031 /* AppControlProtocolTests.swift in Sources */,
 				KK0000000000000000001A2 /* PostureScopedTests.swift in Sources */,
 				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,
