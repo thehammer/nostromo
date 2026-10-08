@@ -27,6 +27,13 @@ enum DecisionTargetTier: Int, Comparable {
     static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
+/// Whether an operator can actually see a window right now: on the active Space,
+/// not occluded (covers a hidden app), not miniaturized. The pure part of
+/// `NostromoWindow.isVisibleNow`, split out so it can be tested without AppKit windows.
+func decisionWindowIsVisible(onActiveSpace: Bool, occlusionVisible: Bool, isMiniaturized: Bool) -> Bool {
+    onActiveSpace && occlusionVisible && !isMiniaturized
+}
+
 /// What the targeting rule needs to know about one window.
 struct DecisionWindowInfo<ID: Hashable> {
     let id: ID

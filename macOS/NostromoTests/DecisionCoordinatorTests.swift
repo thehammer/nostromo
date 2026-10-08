@@ -517,6 +517,22 @@ final class DecisionCoordinatorTests: XCTestCase {
         XCTAssertTrue(sheet.closeReasons.isEmpty)
     }
 
+    func testReevaluateDoesNotCloseAndReattachWhenTheHoldingWindowItselfMovesUpATier() {
+        let holder = FakeWindow("holder", key: true, order: 0, focus: "teri")
+        h.windows = [holder]
+        h.coordinator.present(Harness.decision(tag: "perri"))   // tier 2 on the only window
+        let sheet = first(holder.liveSheets)
+
+        holder.activeFocusTag = "perri"   // the operator switched this same window to the asking focus
+        h.coordinator.reevaluate()
+
+        XCTAssertTrue(sheet.closeReasons.isEmpty, "no close while the sheet is already on the best window")
+        XCTAssertEqual(holder.shown.count, 1, "no re-attach (no beginSheet while the old sheet is ending)")
+        XCTAssertEqual(h.sheets.count, 1)
+        XCTAssertEqual(holder.liveSheets.count, 1)
+        XCTAssertTrue(h.isPresentationHeld())
+    }
+
     func testReevaluateDoesNotChurnWhenOnlyTheKeyWindowChangesAmongEqualTierWindows() {
         let w1 = FakeWindow("w1", key: true, order: 0, focus: "teri")
         let w2 = FakeWindow("w2", key: false, order: 1, focus: "fred")
@@ -627,6 +643,82 @@ final class DecisionCoordinatorTests: XCTestCase {
         XCTAssertNil(h.store.resolution(for: "r1"))
         XCTAssertEqual(h.attention.keyToTag[Harness.key("r1")], "perri")
         XCTAssertFalse(h.isPresentationHeld(), "claim released so the request can be shown again")
+    }
+
+    // The close fires window notifications (occlusion, screen, app-active) that
+    // call `reevaluate()` while the closing window is STILL listed in `windows()`.
+    // A closing window must be excluded from every later selection, not just from
+    // the `windowWillClose` call itself.
+
+    func testReevaluateWhileTheClosingWindowIsStillListedDoesNotMoveTheSheetBackOntoIt() {
+        let closing = FakeWindow("closing", key: true, order: 0, focus: "perri")
+        let survivor = FakeWindow("survivor", order: 1, focus: "teri")
+        h.windows = [closing, survivor]
+        h.coordinator.present(Harness.decision(tag: "perri"))
+        h.coordinator.windowWillClose(closing)
+        XCTAssertEqual(survivor.liveSheets.count, 1)
+        let survivorSheet = first(survivor.liveSheets)
+
+        h.coordinator.reevaluate()   // the closing window is tier 1 and still listed
+        h.coordinator.reevaluate()
+
+        XCTAssertEqual(closing.shown.count, 1, "never re-presented onto the closing window")
+        XCTAssertEqual(survivor.liveSheets.count, 1)
+        XCTAssertTrue(survivorSheet.closeReasons.isEmpty, "the survivor's sheet is not churned")
+        XCTAssertEqual(h.sheets.count, 2)
+        XCTAssertTrue(h.answers.isEmpty)
+        XCTAssertTrue(h.isPresentationHeld())
+        XCTAssertEqual(h.attention.tags, ["perri"])
+    }
+
+    func testReevaluateWhileTheLastWindowIsStillListedAndClosingPresentsNothingOntoIt() {
+        let only = FakeWindow("only", key: true, focus: "perri")
+        h.windows = [only]
+        h.coordinator.present(Harness.decision(tag: "perri"))
+        h.coordinator.windowWillClose(only)
+
+        h.coordinator.reevaluate()   // still listed: must not claim and attach to it
+
+        XCTAssertEqual(only.shown.count, 1, "nothing new is shown on the closing window")
+        XCTAssertEqual(h.sheets.count, 1)
+        XCTAssertTrue(h.liveSheets().isEmpty)
+        XCTAssertTrue(h.answers.isEmpty)
+        XCTAssertNil(h.store.resolution(for: "r1"))
+        XCTAssertEqual(h.attention.keyToTag[Harness.key("r1")], "perri", "still outstanding and flagged")
+        XCTAssertFalse(h.isPresentationHeld(), "claim released, not held by a dead sheet")
+    }
+
+    func testAWindowThatAppearsWhileTheLastOneIsStillClosingGetsTheRequest() {
+        let only = FakeWindow("only", key: true, focus: "perri")
+        h.windows = [only]
+        h.coordinator.present(Harness.decision(tag: "perri"))
+        h.coordinator.windowWillClose(only)
+        h.coordinator.reevaluate()
+
+        let fresh = FakeWindow("fresh", key: true, order: 1, focus: "teri")
+        h.windows = [only, fresh]   // the closing window is even a better tier than `fresh`
+        h.coordinator.reevaluate()
+
+        XCTAssertEqual(fresh.liveSheets.count, 1)
+        XCTAssertEqual(only.shown.count, 1)
+        XCTAssertTrue(h.isPresentationHeld())
+        XCTAssertTrue(h.answers.isEmpty)
+
+        first(fresh.liveSheets).answer("approve")
+        XCTAssertEqual(h.answers.count, 1)
+        XCTAssertTrue(h.attention.tags.isEmpty)
+    }
+
+    func testANewRequestIsNeverPresentedOnAWindowThatIsClosing() {
+        let closing = FakeWindow("closing", key: true, order: 0, focus: "perri")
+        let survivor = FakeWindow("survivor", order: 1, focus: "teri")
+        h.windows = [closing, survivor]
+        h.coordinator.windowWillClose(closing)
+
+        h.coordinator.present(Harness.decision("r2", tag: "perri"))
+
+        XCTAssertTrue(closing.shown.isEmpty)
+        XCTAssertEqual(survivor.liveSheets.count, 1)
     }
 
     func testARequestLeftWithoutAWindowIsPresentedWhenOneLaterAppears() {

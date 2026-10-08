@@ -130,7 +130,9 @@ extension DecisionSheet: DecisionSheetControlling {}
 extension NostromoWindow: DecisionHostWindow {
 
     var isVisibleNow: Bool {
-        isOnActiveSpace && occlusionState.contains(.visible) && !isMiniaturized
+        decisionWindowIsVisible(onActiveSpace: isOnActiveSpace,
+                                occlusionVisible: occlusionState.contains(.visible),
+                                isMiniaturized: isMiniaturized)
     }
 
     var isKeyNow: Bool { isKeyWindow }

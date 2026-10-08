@@ -86,6 +86,14 @@ final class DecisionCoordinator {
     /// Requests that are outstanding, whether or not a sheet is up right now.
     private var activeDecisions: [String: PendingDecision] = [:]
     private var presented: [String: Presented] = [:]
+    /// Windows that announced `windowWillClose` and have not yet left `windows()`.
+    /// The close itself posts window notifications (occlusion, screen, app-active)
+    /// that call `reevaluate()` while the window is still listed, so a closing
+    /// window must be excluded from EVERY selection, not just the closing call.
+    /// Held weakly so a released window's address can never be mistaken for a new one.
+    private var closingWindows: [WeakWindow] = []
+
+    private struct WeakWindow { weak var window: DecisionHostWindow? }
 
     init(store: DecisionStore,
          attention: AttentionSink,
@@ -114,7 +122,7 @@ final class DecisionCoordinator {
         }
         activeDecisions[requestId] = decision
         attention.raiseAttention(tag: decision.tag, key: Self.attentionKey(requestId))
-        attachToBestWindow(decision, excluding: nil)
+        attachToBestWindow(decision)
     }
 
     /// A `DecisionResolved` notice arrived — this request is done, however it
@@ -143,8 +151,10 @@ final class DecisionCoordinator {
     /// sheets are closed WITHOUT answering — a closing window must never answer
     /// Dismissed on the operator's behalf — and each request is re-presented on
     /// the best surviving window, or, with none, left outstanding for a later
-    /// `reevaluate()` (and the daemon's own timeout).
+    /// `reevaluate()` (and the daemon's own timeout). The window stays excluded
+    /// from every later selection until it leaves `windows()`.
     func windowWillClose(_ window: DecisionHostWindow) {
+        closingWindows.append(WeakWindow(window: window))
         for requestId in Array(presented.keys) {
             guard let entry = presented[requestId], entry.window === window else { continue }
             // The presentation claim stays held across the close: ending the
@@ -157,7 +167,7 @@ final class DecisionCoordinator {
                 store.releasePresentation(requestId: requestId)
                 continue
             }
-            attachToBestWindow(decision, excluding: window)
+            attachToBestWindow(decision)
         }
     }
 
@@ -173,20 +183,25 @@ final class DecisionCoordinator {
 
             guard let entry = presented[requestId] else {
                 if store.claimPresentation(requestId: requestId) {
-                    attachToBestWindow(decision, excluding: nil)
+                    attachToBestWindow(decision)
                 }
                 continue
             }
 
-            let infos = windowInfos(excluding: nil)
+            let candidates = candidateWindows()
+            let infos = windowInfos(of: candidates)
             guard let best = selectDecisionTargets(windows: infos, requestTag: decision.tag).first else { continue }
             let currentId = entry.window.map(ObjectIdentifier.init)
             // A holder that is gone from the list always moves; a live one
             // only for a strictly better tier.
-            if let currentId, let current = infos.first(where: { $0.id == currentId }) {
-                guard best.tier < decisionTier(of: current, requestTag: decision.tag) else { continue }
+            if let currentId {
+                // The sheet is already on the best window: nothing to move.
+                guard best.id != currentId else { continue }
+                if let current = infos.first(where: { $0.id == currentId }) {
+                    guard best.tier < decisionTier(of: current, requestTag: decision.tag) else { continue }
+                }
             }
-            guard let target = window(for: best.id) else { continue }
+            guard let target = candidates.first(where: { ObjectIdentifier($0) == best.id }) else { continue }
 
             // Drop the entry BEFORE closing: the old sheet's completion then
             // finds no matching token and does nothing.
@@ -206,24 +221,29 @@ final class DecisionCoordinator {
 
     private static func attentionKey(_ requestId: String) -> String { "decision:\(requestId)" }
 
-    private func windowInfos(excluding excluded: DecisionHostWindow?) -> [DecisionWindowInfo<ObjectIdentifier>] {
-        windows().filter { $0 !== excluded }.map {
+    /// The windows a sheet may be shown on: everything listed that is not closing.
+    /// Also forgets closing windows that have since left the list.
+    private func candidateWindows() -> [DecisionHostWindow] {
+        let listed = windows()
+        closingWindows.removeAll { closing in !listed.contains { $0 === closing.window } }
+        return listed.filter { window in !closingWindows.contains { $0.window === window } }
+    }
+
+    private func windowInfos(of windows: [DecisionHostWindow]) -> [DecisionWindowInfo<ObjectIdentifier>] {
+        windows.map {
             DecisionWindowInfo(id: ObjectIdentifier($0), isVisible: $0.isVisibleNow, isKey: $0.isKeyNow,
                                order: $0.frontOrder, activeFocusTag: $0.activeFocusTag)
         }
     }
 
-    private func window(for id: ObjectIdentifier) -> DecisionHostWindow? {
-        windows().first { ObjectIdentifier($0) == id }
-    }
-
     /// Show `decision` on the best window. The caller holds the presentation
     /// claim; with no window to show on it is released, leaving the request
     /// outstanding (attention stays raised) for a later `reevaluate()`.
-    private func attachToBestWindow(_ decision: PendingDecision, excluding excluded: DecisionHostWindow?) {
-        let infos = windowInfos(excluding: excluded)
+    private func attachToBestWindow(_ decision: PendingDecision) {
+        let candidates = candidateWindows()
+        let infos = windowInfos(of: candidates)
         guard let best = selectDecisionTargets(windows: infos, requestTag: decision.tag).first,
-              let target = windows().first(where: { ObjectIdentifier($0) == best.id && $0 !== excluded }) else {
+              let target = candidates.first(where: { ObjectIdentifier($0) == best.id }) else {
             store.releasePresentation(requestId: decision.requestId)
             log.info("decision \(decision.requestId, privacy: .public) has no window yet; left outstanding")
             return

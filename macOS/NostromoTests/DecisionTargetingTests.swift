@@ -22,6 +22,30 @@ final class DecisionTargetingTests: XCTestCase {
         selectDecisionTargets(windows: windows, requestTag: tag)
     }
 
+    // MARK: - Window visibility (the pure part of `NostromoWindow.isVisibleNow`)
+
+    func testWindowIsVisibleOnlyWhenOnActiveSpaceNotOccludedAndNotMiniaturized() {
+        XCTAssertTrue(decisionWindowIsVisible(onActiveSpace: true, occlusionVisible: true, isMiniaturized: false))
+    }
+
+    func testWindowOnAnotherSpaceIsNotVisible() {
+        XCTAssertFalse(decisionWindowIsVisible(onActiveSpace: false, occlusionVisible: true, isMiniaturized: false))
+    }
+
+    func testOccludedWindowIsNotVisible() {
+        XCTAssertFalse(decisionWindowIsVisible(onActiveSpace: true, occlusionVisible: false, isMiniaturized: false))
+    }
+
+    func testMiniaturizedWindowIsNotVisible() {
+        XCTAssertFalse(decisionWindowIsVisible(onActiveSpace: true, occlusionVisible: true, isMiniaturized: true))
+    }
+
+    func testHiddenAppWindowIsNotVisible() {
+        // App hidden: occlusion reports not-visible even on the active Space.
+        XCTAssertFalse(decisionWindowIsVisible(onActiveSpace: true, occlusionVisible: false, isMiniaturized: false))
+        XCTAssertFalse(decisionWindowIsVisible(onActiveSpace: false, occlusionVisible: false, isMiniaturized: true))
+    }
+
     // MARK: - Ladder
 
     func testEmptyWindowListYieldsNoTarget() {
