@@ -1,26 +1,5 @@
 import AppKit
 
-/// Why a `DecisionSheet` closed. Only the first two ever put anything on the
-/// wire; the other two exist precisely so a system-initiated close (this
-/// request was resolved elsewhere, or this sheet is being re-targeted to a
-/// surviving window) can NEVER be mistaken for an operator dismissal — a
-/// spurious `decision_answer` from a close nobody actually chose would read
-/// to the calling agent as an explicit Skip, and could cancel something the
-/// operator actually approved on another window.
-enum DecisionCloseReason {
-    /// The operator tapped a choice button.
-    case operatorChose(String)
-    /// The operator dismissed the modal (Dismiss button or titlebar close).
-    case operatorDismissed
-    /// This request was already resolved elsewhere (answered on another
-    /// window, or the daemon announced it's done) — close silently.
-    case supersededElsewhere
-    /// The presenting window is going away; the presenter is re-showing this
-    /// sheet's request on a surviving window (or, if none survives, leaving
-    /// it for the daemon's own timeout to resolve) — close silently either way.
-    case retargeting
-}
-
 /// A daemon-driven decision modal: an agent poses a question with a fixed set
 /// of choices, and this sheet returns the operator's pick (or an explicit
 /// dismissal) back to the caller.

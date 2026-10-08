@@ -189,3 +189,16 @@ private func sortedPathlessFocuses(_ focuses: [Focus]) -> [Focus] {
     rest.sort { $0.agentTag < $1.agentTag }
     return canonicals + rest
 }
+
+// MARK: - Attention
+
+extension NavRow {
+    /// True for a focus row whose focus has an outstanding attention request
+    /// (see `AttentionRegistry`). Headers never do. Deliberately not a
+    /// parameter of `buildNavRows`: attention changes far more often than the
+    /// row structure, and must never alter row content or height.
+    func needsAttention(in tags: Set<String>) -> Bool {
+        guard case .focus(let focus, _, _, _) = self else { return false }
+        return tags.contains(focus.sessionTag)
+    }
+}

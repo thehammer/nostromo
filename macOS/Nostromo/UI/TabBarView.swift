@@ -29,6 +29,9 @@ class TabBarView: NSView {
     /// reads identically in every window by construction.
     private var currentFocuses: [Focus] = []
 
+    /// The rows last built, so an attention change can re-flag them without a rebuild.
+    private var currentRows: [NavRow] = []
+
     /// Set by MainLayout when the active focus changes. Drives highlight state.
     var activeFocus: Focus? {
         didSet {
@@ -153,6 +156,13 @@ class TabBarView: NSView {
             FocusStore.shared.focuses.compactMap { $0.projectPath }
         }
 
+        // Focuses with an outstanding request for the operator (a pending
+        // decision, today). Flags rows in place: no rebuild, no height change.
+        AppStore.shared.$attentionTags
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateAttention() }
+            .store(in: &cancellables)
+
         // Per-focus PR under review (W8) — rebuild the rows with fresh
         // labels whenever any focus's pin loads or clears. `perriDetailByTag`
         // is app-wide (not per-window), so every window's sidebar reacts to
@@ -193,6 +203,7 @@ class TabBarView: NSView {
             },
             branchFor: { $0.projectPath.flatMap { branches[$0] } }
         )
+        currentRows = rows
         var prev: NSView? = nil
         var isFirstOrg = true
 
@@ -281,6 +292,7 @@ class TabBarView: NSView {
 
         updateStates()
         updateSweaters()
+        updateAttention()
     }
 
     @objc private func renameTapped(_ sender: NSMenuItem) {
@@ -325,6 +337,14 @@ class TabBarView: NSView {
     @objc private func addTapped() { onAdd?() }
 
     // MARK: - State updates
+
+    private func updateAttention() {
+        let tags = AppStore.shared.attentionTags
+        for row in currentRows {
+            guard case .focus(let focus, _, _, _) = row else { continue }
+            items[focus.id]?.needsAttention = row.needsAttention(in: tags)
+        }
+    }
 
     private func updateStates() {
         items.forEach { id, item in item.isActive = (id == activeFocus?.id) }
@@ -454,6 +474,11 @@ private class NavTabItem: NSView {
         didSet { updateAppearance() }
     }
 
+    /// An outstanding request (e.g. a pending decision) is waiting on this focus.
+    var needsAttention: Bool = false {
+        didSet { attentionDot.isHidden = !needsAttention }
+    }
+
     var sweaterColor: NSColor? = nil {
         didSet { updateAppearance() }
     }
@@ -461,6 +486,7 @@ private class NavTabItem: NSView {
     private let accentBar      = NSView()
     private let label          = NSTextField(labelWithString: "")
     private let dot            = NSView()
+    private let attentionDot   = NSView()
     private let displayOverride: String
     private let secondaryLabel: NSTextField?
 
@@ -516,6 +542,26 @@ private class NavTabItem: NSView {
             dot.heightAnchor.constraint(equalToConstant: 6),
             dot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             dot.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+
+        // Attention dot — 8px, in the same trailing column as the sweater dot but
+        // on the label's line, so it never shares a position with it. An overlay:
+        // it takes no space in the label constraints, so showing or hiding it can
+        // never move text or change the row's height.
+        attentionDot.wantsLayer = true
+        attentionDot.layer?.cornerRadius = 4
+        attentionDot.layer?.backgroundColor = Theme.attention.cgColor
+        attentionDot.isHidden = true
+        attentionDot.translatesAutoresizingMaskIntoConstraints = false
+        attentionDot.setAccessibilityElement(true)
+        attentionDot.setAccessibilityRole(.image)
+        attentionDot.setAccessibilityLabel("needs your attention")
+        addSubview(attentionDot)
+        NSLayoutConstraint.activate([
+            attentionDot.widthAnchor.constraint(equalToConstant: 8),
+            attentionDot.heightAnchor.constraint(equalToConstant: 8),
+            attentionDot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+            attentionDot.centerYAnchor.constraint(equalTo: topAnchor, constant: 13),
         ])
 
         // Label constraints — different depending on whether secondary is shown
