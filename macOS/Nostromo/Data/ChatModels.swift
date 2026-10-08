@@ -259,6 +259,18 @@ struct ToolCallData {
     let toolName:     String
     let inputSummary: String   // one-liner for the collapsed row
     let inputFull:    String   // pretty JSON for possible expansion
+
+    /// The complete command for a Bash call, decoded from `inputFull` (the daemon
+    /// truncates `inputSummary` to 80 chars). Anything that is not a Bash call, or
+    /// whose input does not decode, falls back to the visible summary.
+    var fullCommand: String {
+        guard toolName == "Bash",
+              let data = inputFull.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let command = obj["command"] as? String
+        else { return inputSummary }
+        return command
+    }
 }
 
 struct ToolResultData {
