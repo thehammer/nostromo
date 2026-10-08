@@ -7,6 +7,8 @@ import AppKit
 final class CreateFocusSheet: NSWindowController {
 
     private let onCreate: (Focus) -> Void
+    private let orgResolver: RepoOrgResolver
+    private var isCreating = false
 
     // UI
     private let agentPopup   = NSPopUpButton()
@@ -18,8 +20,9 @@ final class CreateFocusSheet: NSWindowController {
     private var agents:   [String] = []
     private var projects: [String] = []
 
-    init(onCreate: @escaping (Focus) -> Void) {
+    init(orgResolver: RepoOrgResolver = RepoOrgResolver(), onCreate: @escaping (Focus) -> Void) {
         self.onCreate = onCreate
+        self.orgResolver = orgResolver
 
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 220),
@@ -194,25 +197,42 @@ final class CreateFocusSheet: NSWindowController {
         }
         let agentTag    = agents[agentPopup.indexOfSelectedItem]
         let projectPath = projects[projectPopup.indexOfSelectedItem]
+        let cached = orgResolver.cached(projectPath)
+        showPreview(agentTag: agentTag, projectPath: projectPath, org: cached ?? nil)
+        if cached == nil {
+            orgResolver.resolve(projectPath) { [weak self] _ in
+                guard let self, !self.projects.isEmpty,
+                      self.projects[self.projectPopup.indexOfSelectedItem] == projectPath
+                else { return }   // selection moved on; drop the stale result
+                self.updatePreview()
+            }
+        }
+    }
+
+    private func showPreview(agentTag: String, projectPath: String, org: String?) {
         let preview = Focus(id: "preview", agentTag: agentTag, projectPath: projectPath,
-                            isBuiltIn: false, org: RepoOrg.org(forProjectPath: projectPath))
+                            isBuiltIn: false, org: org)
         namePreview.stringValue = "→ \(preview.displayName)"
     }
 
     // MARK: - Actions
 
     @objc private func createTapped() {
-        guard !agents.isEmpty, !projects.isEmpty else { return }
+        guard !isCreating, !agents.isEmpty, !projects.isEmpty else { return }
+        isCreating = true
         let agentTag    = agents[agentPopup.indexOfSelectedItem]
         let projectPath = projects[projectPopup.indexOfSelectedItem]
-        let focus = Focus(id: UUID().uuidString,
-                          agentTag: agentTag,
-                          projectPath: projectPath,
-                          isBuiltIn: false,
-                          org: RepoOrg.org(forProjectPath: projectPath),
-                          sessionSummary: nil)
-        window?.sheetParent?.endSheet(window!)
-        onCreate(focus)
+        orgResolver.resolve(projectPath) { [weak self] org in
+            guard let self else { return }
+            let focus = Focus(id: UUID().uuidString,
+                              agentTag: agentTag,
+                              projectPath: projectPath,
+                              isBuiltIn: false,
+                              org: org,
+                              sessionSummary: nil)
+            if let window = self.window { window.sheetParent?.endSheet(window) }
+            self.onCreate(focus)
+        }
     }
 
     @objc private func cancelTapped() {

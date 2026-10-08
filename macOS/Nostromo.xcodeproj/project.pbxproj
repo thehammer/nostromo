@@ -41,6 +41,7 @@
 		BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000A1 /* MotherBrokerClient.swift */; };
 		GG00000000000000000000A2 /* ProcessRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = GG00000000000000000000A1 /* ProcessRunner.swift */; };
 		RO00000000000000000000A2 /* RepoOrg.swift in Sources */ = {isa = PBXBuildFile; fileRef = RO00000000000000000000A1 /* RepoOrg.swift */; };
+		RO00000000000000000000A6 /* CreateFocusSheet.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000024 /* CreateFocusSheet.swift */; };
 		RO00000000000000000000A3 /* RepoOrg.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RO00000000000000000000A1 /* RepoOrg.swift */; };
 		RO00000000000000000000A5 /* RepoOrgTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RO00000000000000000000A4 /* RepoOrgTests.swift */; };
 		GG00000000000000000000A3 /* ProcessRunner.swift in TestSources */ = {isa = PBXBuildFile; fileRef = GG00000000000000000000A1 /* ProcessRunner.swift */; };
@@ -792,6 +793,7 @@
 				FF00000000000000000000B2 /* SidenavGroupingTests.swift in Sources */,
 				GG00000000000000000000A3 /* ProcessRunner.swift in TestSources */,
 				RO00000000000000000000A3 /* RepoOrg.swift in TestSources */,
+				RO00000000000000000000A6 /* CreateFocusSheet.swift in TestSources */,
 				RO00000000000000000000A5 /* RepoOrgTests.swift in Sources */,
 				GG00000000000000000000B2 /* ProcessRunnerTests.swift in Sources */,
 				HH00000000000000000000A1 /* PaneContentWireEqualityTests.swift in Sources */,
