@@ -267,14 +267,32 @@ Three things live here:
   following the newest message:
 
   ```
-  follow-tail unpinned tag=perri cause=userScroll width=812.0 docHeight=48211.0 visibleMaxY=31000.0 windowKey=false windowVisible=true occluded=true
+  follow-tail unpinned tag=perri cause=boundsChange originDelta=-212.0 sizeChanged=false width=812.0 docHeight=48211.0 visibleMaxY=31000.0 windowKey=false windowVisible=true occluded=true
   ```
 
-  `cause` is `userScroll`, `send`, `jumpToLatest` or `harness`. An *unpinned*
-  line with `cause=userScroll` while nobody touched that pane (note
-  `windowKey` / `occluded`) is the bug this exists to attribute: only the
-  operator scrolling away from the bottom may stop a pane following
-  (`FollowTailPolicy`).
+  `cause` is `userScroll`, `boundsChange`, `send`, `jumpToLatest` or `harness`:
+
+  - `userScroll` — the flip happened while a live scroll (trackpad / wheel,
+    including momentum) was in flight, or on a live-scroll tick. That is a real
+    operator gesture.
+  - `boundsChange` — the clip view's bounds moved with **no live scroll in
+    flight**: a scroller-knob drag, Home/End/Page keys, or something stray.
+    This is the cause to look at when a pane stops following and nobody admits
+    to scrolling it.
+  - `send` / `jumpToLatest` / `harness` — the operator sent something, clicked
+    "Jump to latest", or the load harness ran its scripted scroll.
+
+  `originDelta` is the clip view's new `bounds.origin.y` minus the previous one
+  (negative = toward the top of the transcript); `sizeChanged` says whether the
+  same bounds change also resized the clip view (pane resize, split
+  collapse/restore, input-bar growth). Both read `n/a` for flips that did not
+  come from a bounds change (`send`, `jumpToLatest`, `harness`). A genuine
+  scroll shows a clearly negative `originDelta` and `sizeChanged=false`
+  (`cause=userScroll`, or `boundsChange` for a knob drag or keys). An
+  *unpinned* line with `sizeChanged=true`, or a `boundsChange` line while nobody
+  touched that pane (note `windowKey` / `occluded`), is the bug this exists to
+  attribute. Only the operator scrolling away
+  from the bottom may stop a pane following (`FollowTailPolicy`).
 
 - An `os_signpost` interval named `measure` around **every**
   `ReplView.measure()` call, always on. Open the log in Instruments'

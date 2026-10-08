@@ -18,7 +18,7 @@ import CoreGraphics
 ///
 /// The rule here: **only the operator scrolling the viewport away from the
 /// bottom may un-pin.** A bounds change that resized the clip view is never a
-/// scroll. A bounds change caused by a materialization pass is never operator
+/// scroll (it can only *re*-pin, if it left the viewport at the bottom). A bounds change caused by a materialization pass is never operator
 /// intent either. What remains — origin moved, size did not, no pass running —
 /// is a wheel/trackpad tick, a scroller-knob drag, or Home/End/Page keys.
 enum FollowTailPolicy {
@@ -26,6 +26,10 @@ enum FollowTailPolicy {
     /// "Within this many points of the true bottom" counts as at the bottom.
     /// Demanding an exact match would fight sub-pixel rounding.
     static let pinThreshold: CGFloat = 40
+
+    /// An upward origin move smaller than this is jitter (sub-pixel rounding,
+    /// an AppKit clamp), not the operator scrolling, and must not un-pin.
+    static let unpinEpsilon: CGFloat = 0.5
 
     /// What changed `isPinnedToBottom`. Recorded with every flip so an
     /// occurrence in the field can be attributed (see `ReplView.setPinned`).
@@ -67,15 +71,20 @@ enum FollowTailPolicy {
                                         isMaterializing: Bool,
                                         documentHeight: CGFloat,
                                         visibleMaxY: CGFloat) -> Bool {
-        // Not scrolls: never touch the state.
-        guard !isMaterializing, !sizeChanged else { return current }
-        // Back at the bottom by any route re-arms following.
+        // Our own pass made this change: never operator intent.
+        guard !isMaterializing else { return current }
+        // Back at the bottom by any route re-arms following — including a
+        // resize that clamped an un-pinned viewport down onto the bottom, where
+        // a "Jump to latest" pill over the newest message would be absurd.
         if isNearBottom(documentHeight: documentHeight, visibleMaxY: visibleMaxY) { return true }
-        // Away from the bottom: only a move *up* un-pins. A zero or downward
-        // delta here means the document grew under a viewport the operator did
-        // not move (a stray tick, momentum tail, our own scroll racing the
-        // geometry) — keep following.
-        return originDeltaY < 0 ? false : current
+        // A resize that left the viewport away from the bottom is not a scroll:
+        // it never un-pins (the document may simply have grown under it).
+        guard !sizeChanged else { return current }
+        // Away from the bottom: only a clear move *up* un-pins. A zero, tiny or
+        // downward delta here means the document grew under a viewport the
+        // operator did not move (a stray tick, momentum tail, our own scroll
+        // racing the geometry) — keep the current state.
+        return originDeltaY < -unpinEpsilon ? false : current
     }
 
     /// Whether the clip view's bounds *size* changed between two notifications.

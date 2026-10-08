@@ -56,11 +56,41 @@ final class FollowTailPolicyTests: XCTestCase {
                               documentHeight: 5000, visibleMaxY: 5000))
     }
 
-    func testResizeNeverChangesPinnedStateEvenFarFromOrNearTheBottom() {
+    func testResizeFarFromTheBottomNeverChangesPinnedState() {
         XCTAssertTrue(pinned(after: true, originDeltaY: -50, sizeChanged: true,
                              documentHeight: 5000, visibleMaxY: 1000))
         XCTAssertFalse(pinned(after: false, originDeltaY: 50, sizeChanged: true,
-                              documentHeight: 5000, visibleMaxY: 5000))
+                              documentHeight: 5000, visibleMaxY: 1000))
+    }
+
+    func testResizeThatLeavesAnUnpinnedViewportNearTheBottomRepins() {
+        // E.g. a taller pane clamps the clip origin down to the bottom.
+        XCTAssertTrue(pinned(after: false, originDeltaY: -50, sizeChanged: true,
+                             documentHeight: 5000, visibleMaxY: 4980))
+        XCTAssertTrue(pinned(after: false, originDeltaY: 0, sizeChanged: true,
+                             documentHeight: 5000, visibleMaxY: 5000))
+    }
+
+    func testResizeNearTheBottomKeepsAPinnedPanePinned() {
+        XCTAssertTrue(pinned(after: true, originDeltaY: -50, sizeChanged: true,
+                             documentHeight: 5000, visibleMaxY: 4980))
+    }
+
+    // MARK: - Epsilon: un-pinning needs a real upward move
+
+    func testSubHalfPointUpwardMovementDoesNotUnpin() {
+        XCTAssertTrue(pinned(after: true, originDeltaY: -0.3,
+                             documentHeight: 5000, visibleMaxY: 2000))
+        XCTAssertTrue(pinned(after: true, originDeltaY: -0.5,
+                             documentHeight: 5000, visibleMaxY: 2000),
+                      "exactly half a point is not enough (strict)")
+    }
+
+    func testMoreThanHalfAPointUpwardMovementUnpins() {
+        XCTAssertFalse(pinned(after: true, originDeltaY: -0.6,
+                              documentHeight: 5000, visibleMaxY: 2000))
+        XCTAssertFalse(pinned(after: true, originDeltaY: -1,
+                              documentHeight: 5000, visibleMaxY: 2000))
     }
 
     // MARK: - The operator scrolling up un-pins

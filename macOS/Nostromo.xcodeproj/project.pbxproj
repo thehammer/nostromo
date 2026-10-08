@@ -33,7 +33,7 @@
 		FT0000000000000000000014 /* JumpToLatestOverlay.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000002 /* JumpToLatestOverlay.swift */; };
 		FT0000000000000000000015 /* FollowTailPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000003 /* FollowTailPolicyTests.swift */; };
 		FT0000000000000000000016 /* JumpToLatestOverlayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000004 /* JumpToLatestOverlayTests.swift */; };
-		FT0000000000000000000017 /* FollowTailClipViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000005 /* FollowTailClipViewTests.swift */; };
+		FT0000000000000000000017 /* FollowTailControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000005 /* FollowTailControllerTests.swift */; };
 		FT0000000000000000000018 /* FollowTailController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000006 /* FollowTailController.swift */; };
 		FT0000000000000000000019 /* FollowTailController.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000006 /* FollowTailController.swift */; };
 		AA0000020000000000000125 /* FredView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000025 /* FredView.swift */; };
@@ -231,7 +231,7 @@
 		FT0000000000000000000002 /* JumpToLatestOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpToLatestOverlay.swift; sourceTree = "<group>"; };
 		FT0000000000000000000003 /* FollowTailPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailPolicyTests.swift; sourceTree = "<group>"; };
 		FT0000000000000000000004 /* JumpToLatestOverlayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpToLatestOverlayTests.swift; sourceTree = "<group>"; };
-		FT0000000000000000000005 /* FollowTailClipViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailClipViewTests.swift; sourceTree = "<group>"; };
+		FT0000000000000000000005 /* FollowTailControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailControllerTests.swift; sourceTree = "<group>"; };
 		FT0000000000000000000006 /* FollowTailController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailController.swift; sourceTree = "<group>"; };
 		AA0000020000000000000025 /* FredView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredView.swift; sourceTree = "<group>"; };
 		EE00000000000000000000A0 /* QuickActionStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionStripView.swift; sourceTree = "<group>"; };
@@ -559,7 +559,7 @@
 				OO0000000000000000001C0 /* OverlayHitTestTests.swift */,
 				FT0000000000000000000003 /* FollowTailPolicyTests.swift */,
 				FT0000000000000000000004 /* JumpToLatestOverlayTests.swift */,
-				FT0000000000000000000005 /* FollowTailClipViewTests.swift */,
+				FT0000000000000000000005 /* FollowTailControllerTests.swift */,
 				AC0000000000000000000030 /* AppControlProtocolTests.swift */,
 				OO0000000000000000001B0 /* ImagePasteboardTests.swift */,
 				OO0000000000000000001A0 /* PostureScopedTests.swift */,
@@ -850,7 +850,7 @@
 				KK0000000000000000001C2 /* OverlayHitTestTests.swift in Sources */,
 				FT0000000000000000000015 /* FollowTailPolicyTests.swift in Sources */,
 				FT0000000000000000000016 /* JumpToLatestOverlayTests.swift in Sources */,
-				FT0000000000000000000017 /* FollowTailClipViewTests.swift in Sources */,
+				FT0000000000000000000017 /* FollowTailControllerTests.swift in Sources */,
 				AC0000000000000000000031 /* AppControlProtocolTests.swift in Sources */,
 				KK0000000000000000001A2 /* PostureScopedTests.swift in Sources */,
 				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,

@@ -51,13 +51,23 @@ final class FollowTailController {
 
     private var lastClipBounds: NSRect = .zero
     private var passSkippedForWidth = false
+    /// Between `willStartLiveScroll` and `didEndLiveScroll` (momentum included):
+    /// a bounds change now is a trackpad / wheel gesture, not something stray.
+    private var liveScrollInFlight = false
     private var observers: [NSObjectProtocol] = []
 
     init(scrollView: NSScrollView, overlay: JumpToLatestOverlay) {
         self.scrollView = scrollView
         self.overlay = overlay
 
-        // Light knob: the default dark knob is invisible on `Theme.bg`.
+        // The scroller must stay visible and usable for as long as the pane is
+        // scrolled back. An overlay scroller fades ~1 s after the last scroll,
+        // leaving a "Jump to latest" pill but no scrollbar; a legacy scroller
+        // keeps its track on screen whenever the document is taller than the
+        // viewport, which is always true while un-pinned. (It still hides when
+        // everything fits.) Light knob: the default dark knob is invisible on
+        // `Theme.bg`.
+        scrollView.scrollerStyle = .legacy
         scrollView.scrollerKnobStyle = .light
         scrollView.autohidesScrollers = true
 
@@ -80,6 +90,12 @@ final class FollowTailController {
         observers.append(center.addObserver(
             forName: NSScrollView.didLiveScrollNotification, object: scrollView, queue: nil
         ) { [weak self] _ in self?.liveScrollDidChange() })
+        observers.append(center.addObserver(
+            forName: NSScrollView.willStartLiveScrollNotification, object: scrollView, queue: nil
+        ) { [weak self] _ in self?.liveScrollInFlight = true })
+        observers.append(center.addObserver(
+            forName: NSScrollView.didEndLiveScrollNotification, object: scrollView, queue: nil
+        ) { [weak self] _ in self?.liveScrollInFlight = false })
     }
 
     deinit {
@@ -94,7 +110,6 @@ final class FollowTailController {
         guard pinned != isPinned else { return }
         isPinned = pinned
         overlay.setFollowingTail(pinned)
-        if !pinned { scrollView.flashScrollers() }
         onFlip?(Flip(pinned: pinned, cause: cause,
                      originDeltaY: originDeltaY, sizeChanged: sizeChanged))
     }
@@ -128,7 +143,7 @@ final class FollowTailController {
         // A bounds change observed while a pass is running was caused by that
         // pass — the notification is delivered synchronously from inside its own
         // scroll and frame calls — so it must not be read as operator intent.
-        classifyClipBoundsChange(cause: .userScroll)
+        classifyClipBoundsChange(cause: liveScrollInFlight ? .userScroll : .boundsChange)
         guard !isMaterializing() else { return }
         requestPass()
     }
