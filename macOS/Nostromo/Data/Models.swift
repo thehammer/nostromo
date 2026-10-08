@@ -45,6 +45,22 @@ struct Focus: Codable, Hashable, Identifiable {
     /// itself (`nostromo.create_focus`). Nil for every focus this app created,
     /// which is the overwhelming majority — see `sessionTag`.
     var daemonTag: String? = nil
+    /// Optional user-chosen name (create sheet / sidebar "Rename…"). Nil = default naming.
+    var label: String? = nil
+
+    /// Longest label the UI accepts.
+    static let maxLabelLength = 60
+
+    /// Trims whitespace/newlines, caps at `maxLabelLength` characters, and maps
+    /// blank to nil. Trim happens before the cap so leading spaces never eat
+    /// the budget; a cut can leave trailing whitespace, so trim again.
+    static func normalizedLabel(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let capped = String(trimmed.prefix(maxLabelLength))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return capped.isEmpty ? nil : capped
+    }
 
     /// Repo display name derived from the last path component of `projectPath`,
     /// converting kebab-case to Title Case (e.g. "admin-portal" → "Admin Portal").
@@ -55,6 +71,7 @@ struct Focus: Codable, Hashable, Identifiable {
     }
 
     var displayName: String {
+        if let label = Focus.normalizedLabel(label) { return label }
         guard let repo = repoName else { return agentTag.capitalized }
         return "\(agentTag.capitalized) in \(repo)"
     }
@@ -138,6 +155,9 @@ extension Focus {
         // Additive and optional: a `focuses.json` written before this field
         // existed decodes it as nil and keeps exactly the `sessionTag` it had.
         daemonTag      = try c.decodeIfPresent(String.self, forKey: .daemonTag)
+        // Additive and optional: a `focuses.json` written before labels existed
+        // decodes as nil (default naming).
+        label          = try c.decodeIfPresent(String.self, forKey: .label)
 
         // Self-heal a daemon-created focus persisted before `daemonTag` existed.
         //

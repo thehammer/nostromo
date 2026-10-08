@@ -37,41 +37,72 @@ enum NavRow: Equatable {
 /// - Repo groups follow, sorted alphabetically by `repoName`.
 /// - A repo with exactly one focus emits a single `.focus` row (no repo header);
 ///   a repo with ≥2 focuses emits `.repoHeader` + indented `.focus` rows.
+/// - Primary label: a focus's `label` (when set) wins over the default
+///   (`agentTag.capitalized` / "Agent in Repo" / repo name).
 /// - Secondary line: a Perri focus shows its PR under review (via `prFor`), or
 ///   "No PR" (`FocusPRLabel.noPR`) when it has none — the PR is the context of what
-///   Perri is doing. Every other agent's focus shows its `sessionSummary` when
-///   non-nil/empty, else the first 8 chars of `id` only when two focuses in the same
-///   repo share an `agentTag` (Phase 1 fallback), else "". Never `nil` (W8, D6: a
-///   row's height must not change when a summary or PR loads or clears, so every
-///   row always has a second line, empty or not).
+///   Perri is doing. Every other agent's focus shows `branch`, `branch · summary`,
+///   or the summary alone (`branchFor` / `sessionSummary`, collapsed to one line),
+///   followed — only when two same-agent focuses in the same repo are otherwise
+///   indistinguishable (same label, same branch, no summary) — by the first 8
+///   chars of `id` as a last resort. Never `nil` (W8, D6: a row's height must not
+///   change when a summary, branch or PR loads or clears, so every row always has a
+///   second line, empty or not).
 ///
 /// - Parameter prFor: Resolves a focus's `sessionTag` to its PR under review
 ///   (`repo`, `number`), both `nil` when it has none. Defaults to "no focus has a
 ///   PR" so every existing caller keeps compiling unchanged.
+/// - Parameter branchFor: Resolves a focus to its checkout's current git branch,
+///   `nil` when unknown. Defaults to "no branch known".
 func buildNavRows(
     _ focuses: [Focus],
-    prFor: (String) -> (repo: String?, number: Int?) = { _ in (nil, nil) }
+    prFor: (String) -> (repo: String?, number: Int?) = { _ in (nil, nil) },
+    branchFor: (Focus) -> String? = { _ in nil }
 ) -> [NavRow] {
     var rows: [NavRow] = []
 
+    /// One line, never wrapping: newlines in a summary become spaces.
+    func summaryOf(_ f: Focus) -> String? {
+        guard let summary = f.sessionSummary else { return nil }
+        let line = summary.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return line.isEmpty ? nil : line
+    }
+
+    func branchOf(_ f: Focus) -> String? {
+        guard f.projectPath != nil, let branch = branchFor(f), !branch.isEmpty else { return nil }
+        return branch
+    }
+
+    /// Same-agent focuses that look identical (label, branch, no summary) share a
+    /// key; the caller gives those the short id as a last-resort disambiguator.
+    func lookAlikeKey(_ f: Focus) -> String? {
+        guard summaryOf(f) == nil else { return nil }
+        return [f.agentTag, Focus.normalizedLabel(f.label) ?? "", branchOf(f) ?? ""]
+            .joined(separator: "\u{1F}")
+    }
+
     // Only a Perri focus shows its PR under review: that is the context of what
     // it is doing. Every other agent's focus is about some other activity, so
-    // a PR label would be noise there; it shows its session summary (or a
-    // disambiguator) instead. A Perri focus with nothing loaded says "No PR"
-    // (the PRD's "a focus with none says it has none") rather than a stale
-    // session summary. Never nil, so every row keeps the same two-line height
-    // (D6) — a row with nothing to say gets "" rather than no second line.
-    func secondaryLine(for f: Focus, fallback: String?) -> String {
+    // a PR label would be noise there; it shows `branch · summary` (plus the
+    // optional `idSuffix`) instead. A Perri focus with nothing loaded says
+    // "No PR" (the PRD's "a focus with none says it has none") rather than a
+    // stale session summary. Never nil, so every row keeps the same two-line
+    // height (D6) — a row with nothing to say gets "" rather than no second line.
+    func secondaryLine(for f: Focus, idSuffix: String?) -> String {
         if f.agentTag.lowercased() == "perri" {
             let (repo, number) = prFor(f.sessionTag)
             return FocusPRLabel.secondary(repo: repo, number: number, fallback: nil)
         }
-        return fallback ?? ""
+        return [branchOf(f), summaryOf(f), idSuffix].compactMap { $0 }.joined(separator: " · ")
     }
 
-    func summaryOf(_ f: Focus) -> String? {
-        guard let summary = f.sessionSummary, !summary.isEmpty else { return nil }
-        return summary
+    /// A focus row: the user's label when set, else `defaultLabel`.
+    func focusRow(_ f: Focus, defaultLabel: String, idSuffix: String? = nil, indented: Bool) -> NavRow {
+        .focus(f, label: Focus.normalizedLabel(f.label) ?? defaultLabel,
+               secondary: secondaryLine(for: f, idSuffix: idSuffix), indented: indented)
     }
 
     // 1. Bucket by effectiveOrg
@@ -92,8 +123,7 @@ func buildNavRows(
         // a. Org-level (pathless) focuses — canonical built-in order, then alpha
         let pathless = orgFocuses.filter { $0.projectPath == nil }
         for f in sortedPathlessFocuses(pathless) {
-            rows.append(.focus(f, label: f.agentTag.capitalized,
-                               secondary: secondaryLine(for: f, fallback: summaryOf(f)), indented: false))
+            rows.append(focusRow(f, defaultLabel: f.agentTag.capitalized, indented: false))
         }
 
         // b. Repo groups — alphabetical by repoName
@@ -108,29 +138,21 @@ func buildNavRows(
 
             if group.count == 1 {
                 let f = group[0]
-                let label = f.agentTag.lowercased() == "claudia"
+                let defaultLabel = f.agentTag.lowercased() == "claudia"
                     ? repoName
                     : "\(f.agentTag.capitalized) in \(repoName)"
-                rows.append(.focus(f, label: label,
-                                   secondary: secondaryLine(for: f, fallback: summaryOf(f)), indented: false))
+                rows.append(focusRow(f, defaultLabel: defaultLabel, indented: false))
             } else {
                 rows.append(.repoHeader(repoName))
 
-                // Count agentTag occurrences within the group for disambiguation
-                var tagCount: [String: Int] = [:]
-                for f in group { tagCount[f.agentTag, default: 0] += 1 }
+                var lookAlikes: [String: Int] = [:]
+                for f in group { if let key = lookAlikeKey(f) { lookAlikes[key, default: 0] += 1 } }
 
                 for f in group {
-                    let fallback: String?
-                    if let summary = f.sessionSummary, !summary.isEmpty {
-                        fallback = summary
-                    } else if (tagCount[f.agentTag] ?? 0) > 1 {
-                        fallback = String(f.id.prefix(8))
-                    } else {
-                        fallback = nil
-                    }
-                    rows.append(.focus(f, label: f.agentTag.capitalized,
-                                       secondary: secondaryLine(for: f, fallback: fallback), indented: true))
+                    let isLookAlike = lookAlikeKey(f).map { lookAlikes[$0, default: 0] > 1 } ?? false
+                    rows.append(focusRow(f, defaultLabel: f.agentTag.capitalized,
+                                         idSuffix: isLookAlike ? String(f.id.prefix(8)) : nil,
+                                         indented: true))
                 }
             }
         }
