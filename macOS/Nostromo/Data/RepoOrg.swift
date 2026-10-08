@@ -111,7 +111,7 @@ enum RepoOrg {
         return false
     }
 
-    private enum GitResult {
+    enum GitResult {
         case output(String)   // exit 0 with output
         case noMatch          // exit 1 (or exit 0, empty): ran fine, nothing matched
         case failed           // spawn error, timeout, other exit code
@@ -119,7 +119,7 @@ enum RepoOrg {
 
     /// Runs git with a hard timeout. Output goes to a temp file rather than a
     /// pipe so a grandchild holding the descriptor can't block the read.
-    private static func runGit(_ path: String, _ args: [String]) -> GitResult {
+    static func runGit(_ path: String, _ args: [String]) -> GitResult {
         let outURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("repoorg-\(UUID().uuidString).out")
         guard FileManager.default.createFile(atPath: outURL.path, contents: nil),

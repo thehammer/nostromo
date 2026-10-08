@@ -4,7 +4,7 @@ import AppKit
 ///
 /// Presented via `window.beginSheet(_:)`. Discovers available agents from
 /// `~/.claude/agents/*.md` and project directories from `~/Code/`.
-final class CreateFocusSheet: NSWindowController {
+final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
 
     private let onCreate: (Focus) -> Void
     private let orgResolver: RepoOrgResolver
@@ -14,6 +14,7 @@ final class CreateFocusSheet: NSWindowController {
     // UI
     private let agentPopup   = NSPopUpButton()
     private let projectPopup = NSPopUpButton()
+    private let labelField   = NSTextField()
     private let namePreview  = NSTextField(labelWithString: "")
     private let createBtn    = NSButton()
 
@@ -29,7 +30,7 @@ final class CreateFocusSheet: NSWindowController {
         self.orgResolver = orgResolver
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 220),
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 256),
             styleMask:   [.titled],
             backing:     .buffered,
             defer:       false
@@ -95,6 +96,23 @@ final class CreateFocusSheet: NSWindowController {
         projectPopup.action = #selector(pickerChanged)
         contentView.addSubview(projectPopup)
 
+        // Label row (optional)
+        let labelLabel = NSTextField(labelWithString: "Label:")
+        labelLabel.font      = .systemFont(ofSize: 12)
+        labelLabel.textColor = .white
+        labelLabel.isEditable = false
+        labelLabel.isBordered = false
+        labelLabel.drawsBackground = false
+        labelLabel.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(labelLabel)
+
+        labelField.font = .systemFont(ofSize: 12)
+        labelField.lineBreakMode = .byTruncatingTail
+        labelField.usesSingleLineMode = true
+        labelField.delegate = self
+        labelField.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(labelField)
+
         // Name preview
         namePreview.font      = .systemFont(ofSize: 11)
         namePreview.textColor = .gray
@@ -139,7 +157,15 @@ final class CreateFocusSheet: NSWindowController {
             projectPopup.leadingAnchor.constraint(equalTo: projectLabel.trailingAnchor, constant: 8),
             projectPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
-            namePreview.topAnchor.constraint(equalTo: projectLabel.bottomAnchor, constant: 14),
+            labelLabel.topAnchor.constraint(equalTo: projectLabel.bottomAnchor, constant: 14),
+            labelLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            labelLabel.widthAnchor.constraint(equalToConstant: 60),
+
+            labelField.centerYAnchor.constraint(equalTo: labelLabel.centerYAnchor),
+            labelField.leadingAnchor.constraint(equalTo: labelLabel.trailingAnchor, constant: 8),
+            labelField.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+
+            namePreview.topAnchor.constraint(equalTo: labelLabel.bottomAnchor, constant: 14),
             namePreview.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             namePreview.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
@@ -201,8 +227,11 @@ final class CreateFocusSheet: NSWindowController {
 
     @objc private func pickerChanged() { updatePreview() }
 
+    func controlTextDidChange(_ obj: Notification) { refreshPreviewText() }
+
     private func updatePreview() {
         guard !agents.isEmpty, !projects.isEmpty else {
+            labelField.placeholderString = nil
             namePreview.stringValue = agents.isEmpty ? "No agents found in ~/.claude/agents" : ""
             return
         }
@@ -224,7 +253,18 @@ final class CreateFocusSheet: NSWindowController {
     private func showPreview(agentTag: String, projectPath: String, org: String?) {
         let preview = Focus(id: "preview", agentTag: agentTag, projectPath: projectPath,
                             isBuiltIn: false, org: org)
-        namePreview.stringValue = "→ \(preview.displayName)"
+        // The placeholder is the default name, so a blank label field reads as
+        // "this is what you'll get".
+        labelField.placeholderString = preview.displayName
+        namePreview.stringValue = "→ \(Focus.normalizedLabel(labelField.stringValue) ?? preview.displayName)"
+    }
+
+    /// Re-render the preview after the label text changed (no org lookup needed:
+    /// the org never affects the name).
+    private func refreshPreviewText() {
+        guard !agents.isEmpty, !projects.isEmpty else { return }
+        showPreview(agentTag: agents[agentPopup.indexOfSelectedItem],
+                    projectPath: projects[projectPopup.indexOfSelectedItem], org: nil)
     }
 
     // MARK: - Actions
@@ -235,6 +275,7 @@ final class CreateFocusSheet: NSWindowController {
         createBtn.isEnabled = false
         let agentTag    = agents[agentPopup.indexOfSelectedItem]
         let projectPath = projects[projectPopup.indexOfSelectedItem]
+        let label       = Focus.normalizedLabel(labelField.stringValue)
         orgResolver.resolve(projectPath) { [weak self] org in   // org is nil if the lookup failed
             guard let self else { return }
             self.isCreating = false
@@ -244,7 +285,8 @@ final class CreateFocusSheet: NSWindowController {
                               projectPath: projectPath,
                               isBuiltIn: false,
                               org: org,
-                              sessionSummary: nil)
+                              sessionSummary: nil,
+                              label: label)
             if let window = self.window { window.sheetParent?.endSheet(window) }
             self.onCreate(focus)
         }
@@ -259,5 +301,10 @@ final class CreateFocusSheet: NSWindowController {
 
     var previewText: String { namePreview.stringValue }
     var isCreateEnabled: Bool { createBtn.isEnabled }
+    /// Type into the optional Label field.
+    func typeLabel(_ text: String) {
+        labelField.stringValue = text
+        refreshPreviewText()
+    }
     func selectProject(at index: Int) { projectPopup.selectItem(at: index); updatePreview() }
 }

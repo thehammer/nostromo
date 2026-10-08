@@ -34,6 +34,7 @@ class MainLayout: NSView {
 
     private var cancellables = Set<AnyCancellable>()
     private var presentedSheet: CreateFocusSheet?  // retained for sheet lifetime
+    private var presentedRenameSheet: RenameFocusSheet?
 
     // MARK: - Init
 
@@ -122,6 +123,7 @@ class MainLayout: NSView {
         // Wire TabBarView callbacks
         tabBar.onSwitch      = { [weak self] focus in self?.switchFocus(focus) }
         tabBar.onAdd         = { [weak self] in self?.presentCreateFocusSheet() }
+        tabBar.onRename      = { [weak self] focus in self?.presentRenameSheet(for: focus) }
         tabBar.onRemove      = { [weak self] focus in self?.removeFocus(focus) }
         tabBar.onForceStart  = { [weak self] focus in self?.forceStart(focus) }
 
@@ -258,17 +260,25 @@ class MainLayout: NSView {
 
     // MARK: - Sheet presentation
 
+    private func presentRenameSheet(for focus: Focus) {
+        guard let window else { return }
+        let sheet = RenameFocusSheet(currentLabel: focus.label) { label in
+            if FocusStore.shared.rename(id: focus.id, label: label),
+               let renamed = FocusStore.shared.focuses.first(where: { $0.id == focus.id }) {
+                AppStore.shared.updateSessionLabel(tag: renamed.sessionTag, displayName: renamed.displayName)
+            }
+        }
+        presentedRenameSheet = sheet  // retain for the sheet's lifetime
+        window.beginSheet(sheet.window!) { [weak self] _ in
+            self?.presentedRenameSheet = nil
+        }
+    }
+
     private func presentCreateFocusSheet() {
         guard let window else { return }
         let sheet = CreateFocusSheet { [weak self] focus in
             guard let self else { return }
-            if let existing = FocusStore.shared.existing(
-                projectPath: focus.projectPath, agentTag: focus.agentTag) {
-                self.switchFocus(existing)
-            } else {
-                FocusStore.shared.add(focus)
-                self.switchFocus(focus)
-            }
+            FocusCreation.commit(focus, store: FocusStore.shared) { self.switchFocus($0) }
             self.presentedSheet = nil
         }
         presentedSheet = sheet  // retain for the sheet's lifetime

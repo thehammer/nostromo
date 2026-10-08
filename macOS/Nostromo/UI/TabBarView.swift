@@ -30,7 +30,15 @@ class TabBarView: NSView {
     private var currentFocuses: [Focus] = []
 
     /// Set by MainLayout when the active focus changes. Drives highlight state.
-    var activeFocus: Focus? { didSet { updateStates() } }
+    var activeFocus: Focus? {
+        didSet {
+            updateStates()
+            // Switching focus is a cheap moment to re-check that checkout's branch.
+            if activeFocus?.projectPath != nil {
+                BranchProvider.shared.refresh(FocusStore.shared.focuses.compactMap { $0.projectPath })
+            }
+        }
+    }
 
     /// Called when the user taps a focus item.
     var onSwitch: ((Focus) -> Void)?
@@ -40,6 +48,9 @@ class TabBarView: NSView {
 
     /// Called when the user selects "Remove Focus" from a dynamic item's context menu.
     var onRemove: ((Focus) -> Void)?
+
+    /// Called when the user selects "Rename…" from a dynamic item's context menu.
+    var onRename: ((Focus) -> Void)?
 
     /// Called when the user selects "Force Start" from a dynamic item's context menu.
     var onForceStart: ((Focus) -> Void)?
@@ -127,6 +138,21 @@ class TabBarView: NSView {
             .sink { [weak self] _ in self?.updateSweaters() }
             .store(in: &cancellables)
 
+        // Live git branch per checkout (second line of a row). Published only on
+        // change, so this rebuilds the rows only when a branch actually moved.
+        // `dropFirst`: `setFocuses` renders the current branches itself.
+        BranchProvider.shared.$branches
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.setFocuses(self.currentFocuses)
+            }
+            .store(in: &cancellables)
+        BranchProvider.shared.startPolling {
+            FocusStore.shared.focuses.compactMap { $0.projectPath }
+        }
+
         // Per-focus PR under review (W8) — rebuild the rows with fresh
         // labels whenever any focus's pin loads or clears. `perriDetailByTag`
         // is app-wide (not per-window), so every window's sidebar reacts to
@@ -146,6 +172,11 @@ class TabBarView: NSView {
 
     /// Tears down and rebuilds the grouped item list from a new focuses array.
     func setFocuses(_ focuses: [Focus]) {
+        // A new/removed checkout needs its branch looked up now, not at the next tick.
+        let paths = Set(focuses.compactMap { $0.projectPath })
+        if paths != Set(currentFocuses.compactMap { $0.projectPath }) {
+            BranchProvider.shared.refresh(Array(paths))
+        }
         currentFocuses = focuses
 
         // Clear previous content
@@ -153,10 +184,15 @@ class TabBarView: NSView {
         items = [:]
 
         let perriDetailByTag = AppStore.shared.perriDetailByTag
-        let rows = buildNavRows(focuses) { tag in
-            let detail = perriDetailByTag[tag]
-            return (detail?.repo, detail?.prNumber)
-        }
+        let branches = BranchProvider.shared.branches
+        let rows = buildNavRows(
+            focuses,
+            prFor: { tag in
+                let detail = perriDetailByTag[tag]
+                return (detail?.repo, detail?.prNumber)
+            },
+            branchFor: { $0.projectPath.flatMap { branches[$0] } }
+        )
         var prev: NSView? = nil
         var isFirstOrg = true
 
@@ -177,6 +213,15 @@ class TabBarView: NSView {
 
                 if !focus.isBuiltIn {
                     let menu = NSMenu()
+
+                    let renameItem = NSMenuItem(
+                        title: "Rename…",
+                        action: #selector(renameTapped(_:)),
+                        keyEquivalent: ""
+                    )
+                    renameItem.target = self
+                    renameItem.representedObject = focus
+                    menu.addItem(renameItem)
 
                     let forceStartItem = NSMenuItem(
                         title: "Force Start",
@@ -236,6 +281,11 @@ class TabBarView: NSView {
 
         updateStates()
         updateSweaters()
+    }
+
+    @objc private func renameTapped(_ sender: NSMenuItem) {
+        guard let focus = sender.representedObject as? Focus else { return }
+        onRename?(focus)
     }
 
     @objc private func forceStartTapped(_ sender: NSMenuItem) {
@@ -423,6 +473,7 @@ private class NavTabItem: NSView {
             tf.textColor      = Theme.fgMuted
             tf.alignment      = .left
             tf.lineBreakMode  = .byTruncatingTail
+            tf.maximumNumberOfLines = 1
             tf.translatesAutoresizingMaskIntoConstraints = false
             return tf
         }

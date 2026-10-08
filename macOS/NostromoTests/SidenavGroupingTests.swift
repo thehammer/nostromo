@@ -609,4 +609,317 @@ final class SidenavGroupingTests: XCTestCase {
         }
         XCTAssertEqual(secondary, "Triaging the inbox")
     }
+
+    // MARK: - Multiple sessions per agent + repo: labels and branches
+    //
+    // Several sessions of the same agent can now live in the same repo, so a
+    // row has to say *which* one it is: the user's label is the name, the git
+    // branch is the context, and the 8-char id prefix is the last resort for
+    // two sessions that are otherwise indistinguishable.
+
+    private let portal = "/Users/hammer/Code/admin-portal"
+
+    private func makeLabeled(
+        id: String,
+        agent: String = "claudia",
+        path: String? = "/Users/hammer/Code/admin-portal",
+        label: String? = nil,
+        summary: String? = nil
+    ) -> Focus {
+        var f = makeFocus(id: id, agent: agent, path: path, org: "Carefeed", summary: summary)
+        f.label = label
+        return f
+    }
+
+    /// Build rows with a branch table keyed by focus id.
+    private func rows(_ focuses: [Focus], branches: [String: String] = [:]) -> [NavRow] {
+        buildNavRows(focuses, prFor: { _ in (nil, nil) }, branchFor: { branches[$0.id] })
+    }
+
+    private struct FocusRow { let label: String; let secondary: String?; let indented: Bool }
+
+    private func focusRow(_ id: String, in rows: [NavRow], file: StaticString = #filePath, line: UInt = #line) -> FocusRow? {
+        for row in rows {
+            if case let .focus(f, label: label, secondary: secondary, indented: indented) = row, f.id == id {
+                return FocusRow(label: label, secondary: secondary, indented: indented)
+            }
+        }
+        XCTFail("no .focus row for id \(id)", file: file, line: line)
+        return nil
+    }
+
+    // Ids are >= 8 chars so the id-prefix disambiguator is well-defined.
+    private let idA = "AAAAAAAA-0000-0000-0000-000000000001"
+    private let idB = "BBBBBBBB-0000-0000-0000-000000000002"
+    private let idC = "CCCCCCCC-0000-0000-0000-000000000003"
+    private var prefixA: String { String(idA.prefix(8)) }
+    private var prefixB: String { String(idB.prefix(8)) }
+
+    // MARK: Labels as row names
+
+    func testLoneLabeledFocusUsesItsLabelAsTheRowLabel() {
+        let claudia = makeLabeled(id: idA, agent: "claudia", label: "Hotfix")
+        let r = rows([claudia])
+        XCTAssertEqual(focusRow(idA, in: r)?.label, "Hotfix",
+                       "a lone Claudia would otherwise be named after the repo")
+        XCTAssertEqual(focusRow(idA, in: r)?.indented, false)
+    }
+
+    func testLoneLabeledNonClaudiaFocusUsesItsLabelInsteadOfAgentInRepo() {
+        let cody = makeLabeled(id: idA, agent: "cody", label: "Hotfix")
+        XCTAssertEqual(focusRow(idA, in: rows([cody]))?.label, "Hotfix")
+    }
+
+    func testLoneUnlabeledFocusKeepsItsDefaultRowLabel() {
+        let claudia = makeLabeled(id: idA, agent: "claudia")
+        let cody = makeLabeled(id: idB, agent: "cody", path: "/Users/hammer/Code/other-repo")
+        let r = rows([claudia, cody])
+        XCTAssertEqual(focusRow(idA, in: r)?.label, "Admin Portal")
+        XCTAssertEqual(focusRow(idB, in: r)?.label, "Cody in Other Repo")
+    }
+
+    func testTwoSameAgentSameRepoFocusesWithDifferentLabelsRenderBothLabels() {
+        let a = makeLabeled(id: idA, label: "Hotfix")
+        let b = makeLabeled(id: idB, label: "Refactor")
+        let r = rows([a, b])
+
+        XCTAssertEqual(r.count, 4, "org header + repo header + two rows")
+        XCTAssertEqual(r[0], .orgHeader("CAREFEED"))
+        XCTAssertEqual(r[1], .repoHeader("Admin Portal"))
+        XCTAssertEqual(focusRow(idA, in: r)?.label, "Hotfix")
+        XCTAssertEqual(focusRow(idB, in: r)?.label, "Refactor")
+        XCTAssertEqual(focusRow(idA, in: r)?.indented, true)
+        XCTAssertEqual(focusRow(idB, in: r)?.indented, true)
+    }
+
+    func testDifferentLabelsAreEnoughToTellRowsApartSoNoIdPrefixIsShown() {
+        let a = makeLabeled(id: idA, label: "Hotfix")
+        let b = makeLabeled(id: idB, label: "Refactor")
+        let r = rows([a, b])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "")
+    }
+
+    func testLabeledAndUnlabeledSameAgentFocusesAreDistinctSoNoIdPrefix() {
+        let a = makeLabeled(id: idA, label: "Hotfix")
+        let b = makeLabeled(id: idB, label: nil)
+        let r = rows([a, b])
+        XCTAssertEqual(focusRow(idA, in: r)?.label, "Hotfix")
+        XCTAssertEqual(focusRow(idB, in: r)?.label, "Claudia")
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "")
+    }
+
+    func testLabeledPerriFocusKeepsItsPrLineInsteadOfBranch() {
+        let perri = makeLabeled(id: idA, agent: "perri", label: "Review A")
+        let r = buildNavRows([perri], prFor: { _ in (nil, nil) }, branchFor: { _ in "main" })
+        XCTAssertEqual(focusRow(idA, in: r)?.label, "Review A")
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, NostromoKit.FocusPRLabel.noPR)
+    }
+
+    // MARK: Branch on the secondary line
+
+    func testBranchAloneIsTheSecondaryWhenThereIsNoSummary() {
+        let f = makeLabeled(id: idA, agent: "cody")
+        XCTAssertEqual(focusRow(idA, in: rows([f], branches: [idA: "feat/login"]))?.secondary, "feat/login")
+    }
+
+    func testBranchAndSummaryAreJoinedWithAMiddleDot() {
+        let f = makeLabeled(id: idA, agent: "cody", summary: "Fixing the login flow")
+        XCTAssertEqual(focusRow(idA, in: rows([f], branches: [idA: "feat/login"]))?.secondary,
+                       "feat/login · Fixing the login flow")
+    }
+
+    func testSummaryAloneIsTheSecondaryWhenThereIsNoBranch() {
+        let f = makeLabeled(id: idA, agent: "cody", summary: "Fixing the login flow")
+        XCTAssertEqual(focusRow(idA, in: rows([f]))?.secondary, "Fixing the login flow")
+    }
+
+    func testNoBranchAndNoSummaryGivesAnEmptySecondaryNotNil() {
+        let f = makeLabeled(id: idA, agent: "cody")
+        let secondary = focusRow(idA, in: rows([f]))?.secondary
+        XCTAssertNotNil(secondary)
+        XCTAssertEqual(secondary, "")
+    }
+
+    func testEmptySummaryIsTreatedAsAbsentWhenCombiningWithBranch() {
+        let f = makeLabeled(id: idA, agent: "cody", summary: "")
+        XCTAssertEqual(focusRow(idA, in: rows([f], branches: [idA: "main"]))?.secondary, "main")
+    }
+
+    func testBranchShowsOnRowsInsideARepoGroupToo() {
+        let a = makeLabeled(id: idA, agent: "cody", summary: "Fixing login")
+        let b = makeLabeled(id: idB, agent: "claudia")
+        let r = rows([a, b], branches: [idA: "feat/login", idB: "main"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "feat/login · Fixing login")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "main")
+    }
+
+    func testPerriRowShowsNoPrEvenWhenItsBranchIsKnown() {
+        let perri = makeLabeled(id: idA, agent: "perri")
+        let r = buildNavRows([perri], prFor: { _ in (nil, nil) }, branchFor: { _ in "main" })
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, NostromoKit.FocusPRLabel.noPR)
+    }
+
+    func testPerriRowShowsItsPrLabelRegardlessOfBranch() {
+        let perri = makeLabeled(id: idA, agent: "perri", summary: "Reviewing the queue")
+        let r = buildNavRows([perri],
+                             prFor: { _ in (repo: "Carefeed/admin-portal", number: 42) },
+                             branchFor: { _ in "feat/x" })
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary,
+                       NostromoKit.FocusPRLabel.label(repo: "Carefeed/admin-portal", number: 42))
+    }
+
+    func testPathlessAndBuiltInRowsAreUnchangedByBranch() {
+        var fred = Focus.builtIns.first { $0.id == "fred" }!
+        fred.sessionSummary = "Triaging the inbox"
+        let withBranch = buildNavRows(Focus.builtIns, prFor: { _ in (nil, nil) }, branchFor: { _ in "main" })
+        let without = buildNavRows(Focus.builtIns)
+        XCTAssertEqual(withBranch, without, "built-ins have no repo, so a branch lookup must change nothing")
+
+        let pathless = buildNavRows([fred], prFor: { _ in (nil, nil) }, branchFor: { _ in "main" })
+        XCTAssertEqual(focusRow("fred", in: pathless)?.secondary, "Triaging the inbox")
+    }
+
+    func testTwoSameAgentSameRepoFocusesWithNoLabelsButDifferentBranchesShowTheirBranches() {
+        let a = makeLabeled(id: idA)
+        let b = makeLabeled(id: idB)
+        let r = rows([a, b], branches: [idA: "main", idB: "feat/login"])
+        XCTAssertEqual(focusRow(idA, in: r)?.label, "Claudia")
+        XCTAssertEqual(focusRow(idB, in: r)?.label, "Claudia")
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "main")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "feat/login")
+    }
+
+    func testBranchLookupIsPerFocusSoTheClosureSeesTheFocusBeingRendered() {
+        // Two worktrees of one repo can't share a project path in practice, but
+        // the lookup contract is "ask about this focus" — verify it is asked
+        // about each path-bearing focus and answers are not mixed up.
+        let a = makeLabeled(id: idA, agent: "cody")
+        let b = makeLabeled(id: idB, agent: "claudia")
+        var asked: [String] = []
+        let r = buildNavRows([a, b], prFor: { _ in (nil, nil) }, branchFor: { f in
+            asked.append(f.id)
+            return f.id == self.idA ? "branch-a" : "branch-b"
+        })
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "branch-a")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "branch-b")
+        XCTAssertTrue(asked.contains(idA) && asked.contains(idB))
+    }
+
+    // MARK: Id-prefix disambiguator: only for otherwise-identical siblings
+
+    func testIdenticalUnlabeledSameAgentSiblingsWithNoBranchGetIdPrefixAsToday() {
+        let r = rows([makeLabeled(id: idA), makeLabeled(id: idB)])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, prefixA)
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, prefixB)
+    }
+
+    func testIdenticalSiblingsOnTheSameBranchGetBranchThenIdPrefix() {
+        let r = rows([makeLabeled(id: idA), makeLabeled(id: idB)], branches: [idA: "main", idB: "main"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "main · \(prefixA)")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "main · \(prefixB)")
+    }
+
+    func testSiblingsWithTheSameLabelAndNoBranchGetIdPrefixOnly() {
+        let r = rows([makeLabeled(id: idA, label: "Hotfix"), makeLabeled(id: idB, label: "Hotfix")])
+        XCTAssertEqual(focusRow(idA, in: r)?.label, "Hotfix")
+        XCTAssertEqual(focusRow(idB, in: r)?.label, "Hotfix")
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, prefixA)
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, prefixB)
+    }
+
+    func testSiblingsWithTheSameLabelAndSameBranchGetBranchThenIdPrefix() {
+        let r = rows([makeLabeled(id: idA, label: "Hotfix"), makeLabeled(id: idB, label: "Hotfix")],
+                     branches: [idA: "fix/x", idB: "fix/x"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "fix/x · \(prefixA)")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "fix/x · \(prefixB)")
+    }
+
+    func testSameLabelButDifferentBranchesNeedNoIdPrefix() {
+        let r = rows([makeLabeled(id: idA, label: "Hotfix"), makeLabeled(id: idB, label: "Hotfix")],
+                     branches: [idA: "fix/a", idB: "fix/b"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "fix/a")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "fix/b")
+    }
+
+    func testOneKnownBranchAndOneUnknownBranchAreDistinctSoNoIdPrefix() {
+        let r = rows([makeLabeled(id: idA), makeLabeled(id: idB)], branches: [idA: "main"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "main")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "")
+    }
+
+    func testDifferentLabelsOnTheSameBranchNeedNoIdPrefix() {
+        let r = rows([makeLabeled(id: idA, label: "Hotfix"), makeLabeled(id: idB, label: "Refactor")],
+                     branches: [idA: "main", idB: "main"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "main")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "main")
+    }
+
+    func testSiblingsThatEachHaveASummaryNeedNoIdPrefix() {
+        let r = rows([makeLabeled(id: idA, summary: "Doing A"), makeLabeled(id: idB, summary: "Doing B")],
+                     branches: [idA: "main", idB: "main"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "main · Doing A")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "main · Doing B")
+    }
+
+    func testOnlyTheIdenticalPairGetsIdPrefixWhenAThirdSiblingDiffers() {
+        let r = rows([makeLabeled(id: idA), makeLabeled(id: idB), makeLabeled(id: idC)],
+                     branches: [idA: "main", idB: "main", idC: "feat/other"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "main · \(prefixA)")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "main · \(prefixB)")
+        XCTAssertEqual(focusRow(idC, in: r)?.secondary, "feat/other")
+    }
+
+    func testDifferentAgentsInTheSameRepoNeverGetAnIdPrefix() {
+        let r = rows([makeLabeled(id: idA, agent: "claudia"), makeLabeled(id: idB, agent: "cody")],
+                     branches: [idA: "main", idB: "main"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "main")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "main")
+    }
+
+    func testIdenticalSiblingsInDifferentReposDoNotTriggerAnIdPrefix() {
+        let a = makeLabeled(id: idA, path: "/Users/hammer/Code/alpha")
+        let b = makeLabeled(id: idB, path: "/Users/hammer/Code/beta")
+        let r = rows([a, b], branches: [idA: "main", idB: "main"])
+        XCTAssertEqual(focusRow(idA, in: r)?.secondary, "main")
+        XCTAssertEqual(focusRow(idB, in: r)?.secondary, "main")
+    }
+
+    // MARK: Every focus row always has a second line, and it is one line
+
+    func testEveryFocusRowHasANonNilSecondaryWhateverItCarries() {
+        let focuses = Focus.builtIns + [
+            makeLabeled(id: idA, label: "Hotfix"),
+            makeLabeled(id: idB, agent: "cody", label: "Spike", summary: "Poking at it"),
+            makeLabeled(id: idC, agent: "cody", path: "/Users/hammer/Code/other"),
+        ]
+        let r = rows(focuses, branches: [idA: "main", idB: "feat/spike"])
+        var count = 0
+        for row in r {
+            guard case let .focus(f, label: _, secondary: secondary, indented: _) = row else { continue }
+            count += 1
+            XCTAssertNotNil(secondary, "\(f.id) must always render a second line (stable row height)")
+        }
+        XCTAssertEqual(count, focuses.count)
+    }
+
+    func testMultiLineSummaryIsCollapsedToOneLine() {
+        let f = makeLabeled(id: idA, agent: "cody", summary: "Line one\nLine two\nLine three")
+        let secondary = focusRow(idA, in: rows([f]))?.secondary
+        XCTAssertEqual(secondary, "Line one Line two Line three")
+        XCTAssertFalse(secondary?.contains("\n") ?? true)
+    }
+
+    func testMultiLineSummaryIsCollapsedWhenCombinedWithABranch() {
+        let f = makeLabeled(id: idA, agent: "cody", summary: "Line one\nLine two")
+        XCTAssertEqual(focusRow(idA, in: rows([f], branches: [idA: "main"]))?.secondary,
+                       "main · Line one Line two")
+    }
+
+    func testMultiLineSummaryIsCollapsedOnPathlessRowsToo() {
+        var fred = Focus.builtIns.first { $0.id == "fred" }!
+        fred.sessionSummary = "Triaging\ninbox"
+        XCTAssertEqual(focusRow("fred", in: rows([fred]))?.secondary, "Triaging inbox")
+    }
 }

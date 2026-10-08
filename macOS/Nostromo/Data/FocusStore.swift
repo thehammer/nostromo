@@ -16,26 +16,38 @@ final class FocusStore {
 
     private let storageURL: URL
 
-    private init() {
+    private convenience init() {
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".nostromo")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        storageURL = dir.appendingPathComponent("focuses.json")
-        let dynamic = Self.load(from: storageURL)
-        focuses = Focus.builtIns + dynamic
+        self.init(storageURL: dir.appendingPathComponent("focuses.json"))
+    }
+
+    /// Test seam: a store backed by an arbitrary file (never the real `~/.nostromo`).
+    init(storageURL: URL) {
+        self.storageURL = storageURL
+        focuses = Focus.builtIns + Self.load(from: storageURL)
+    }
+
+    /// Set (or, with nil/blank, clear) the label of a dynamic focus. Returns false
+    /// for built-ins and unknown ids. Only `label` changes: `id` and `sessionTag`
+    /// are the stable identity for panes, layouts and the daemon session.
+    @discardableResult
+    func rename(id: String, label: String?) -> Bool {
+        guard let idx = focuses.firstIndex(where: { $0.id == id }), !focuses[idx].isBuiltIn else {
+            return false
+        }
+        let normalized = Focus.normalizedLabel(label)
+        guard focuses[idx].label != normalized else { return true }
+        focuses[idx].label = normalized
+        save()
+        return true
     }
 
     func add(_ focus: Focus) {
         guard !focuses.contains(where: { $0.id == focus.id }) else { return }
         focuses.append(focus)
         save()
-    }
-
-    /// Returns an existing dynamic focus matching this project + agent, if any.
-    func existing(projectPath: String?, agentTag: String) -> Focus? {
-        focuses.first {
-            !$0.isBuiltIn && $0.projectPath == projectPath && $0.agentTag == agentTag
-        }
     }
 
     /// Apply an auto-generated session summary to the focus whose `sessionTag`
@@ -102,5 +114,15 @@ final class FocusStore {
               let decoded = try? JSONDecoder().decode([Focus].self, from: data)
         else { return [] }
         return decoded.filter { !$0.isBuiltIn }
+    }
+}
+
+/// The create decision, shared by the UI and its tests.
+enum FocusCreation {
+    /// Always a new session: several per agent+repo are allowed, told apart by
+    /// label / branch (see `buildNavRows`). Never switches to an existing match.
+    static func commit(_ focus: Focus, store: FocusStore, switch switchTo: (Focus) -> Void) {
+        store.add(focus)
+        switchTo(focus)
     }
 }
