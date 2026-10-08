@@ -261,7 +261,20 @@ log show --predicate 'subsystem == "com.hammer.nostromo" AND category == "transc
   --last 1h --info
 ```
 
-Two things live here:
+Three things live here:
+
+- One `.info` line per **follow-tail flip** — every time a pane starts or stops
+  following the newest message:
+
+  ```
+  follow-tail unpinned tag=perri cause=userScroll width=812.0 docHeight=48211.0 visibleMaxY=31000.0 windowKey=false windowVisible=true occluded=true
+  ```
+
+  `cause` is `userScroll`, `send`, `jumpToLatest` or `harness`. An *unpinned*
+  line with `cause=userScroll` while nobody touched that pane (note
+  `windowKey` / `occluded`) is the bug this exists to attribute: only the
+  operator scrolling away from the bottom may stop a pane following
+  (`FollowTailPolicy`).
 
 - An `os_signpost` interval named `measure` around **every**
   `ReplView.measure()` call, always on. Open the log in Instruments'
