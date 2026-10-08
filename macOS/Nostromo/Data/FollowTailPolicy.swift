@@ -13,13 +13,15 @@ import CoreGraphics
 /// saw "300 pt from the bottom", silently cleared `isPinnedToBottom`, and the
 /// pane stopped following for good: nothing re-armed it until the operator
 /// scrolled back within 40 pt of the bottom by hand. Intermittent, per pane,
-/// and worst for a pane that was hidden or occluded while content streamed —
-/// exactly the "one window keeps up, another lags" report.
+/// and plausibly worst for a pane that was hidden or occluded while content
+/// streamed (a hypothesis for the "one window keeps up, another lags" report,
+/// not an observed cause: occlusion alone posts no bounds change).
 ///
 /// The rule here: **only the operator scrolling the viewport away from the
 /// bottom may un-pin.** A bounds change that resized the clip view is never a
-/// scroll (it can only *re*-pin, if it left the viewport at the bottom). A bounds change caused by a materialization pass is never operator
-/// intent either. What remains — origin moved, size did not, no pass running —
+/// scroll (it can only *re*-pin, if it left the viewport at the bottom). A
+/// bounds change caused by a materialization pass is never operator intent
+/// either. What remains — origin moved, size did not, no pass running —
 /// is a wheel/trackpad tick, a scroller-knob drag, or Home/End/Page keys.
 enum FollowTailPolicy {
 

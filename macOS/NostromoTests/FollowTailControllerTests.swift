@@ -418,6 +418,19 @@ final class FollowTailControllerTests: XCTestCase {
         XCTAssertEqual(scroller?.isHidden, false)
     }
 
+    func testScrollerStyleSurvivesSystemPreferredStyleChange() {
+        let rig = Rig(scrollerStyleBeforeConfigure: .overlay)
+        rig.userScroll(to: 600)
+        // AppKit reverting the style, then announcing the system change
+        // (mouse attached/detached, "Show scroll bars" changed).
+        rig.scrollView.scrollerStyle = .overlay
+        NotificationCenter.default.post(name: NSScroller.preferredScrollerStyleDidChangeNotification,
+                                        object: nil)
+        XCTAssertEqual(rig.scrollView.scrollerStyle, .legacy)
+        XCTAssertEqual(rig.scrollView.scrollerKnobStyle, .light)
+        XCTAssertFalse(rig.controller.isPinned)
+    }
+
     func testScrollerStyleIsLegacyEvenBeforeAnyScrolling() {
         let rig = Rig(scrollerStyleBeforeConfigure: .overlay)
         XCTAssertEqual(rig.scrollView.scrollerStyle, .legacy)

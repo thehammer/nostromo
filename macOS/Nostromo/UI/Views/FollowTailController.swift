@@ -67,9 +67,7 @@ final class FollowTailController {
         // viewport, which is always true while un-pinned. (It still hides when
         // everything fits.) Light knob: the default dark knob is invisible on
         // `Theme.bg`.
-        scrollView.scrollerStyle = .legacy
-        scrollView.scrollerKnobStyle = .light
-        scrollView.autohidesScrollers = true
+        applyScrollerStyle()
 
         overlay.onJump = { [weak self] in self?.pinToBottomAndScroll(cause: .jumpToLatest) }
         overlay.setFollowingTail(isPinned)
@@ -96,6 +94,21 @@ final class FollowTailController {
         observers.append(center.addObserver(
             forName: NSScrollView.didEndLiveScrollNotification, object: scrollView, queue: nil
         ) { [weak self] _ in self?.liveScrollInFlight = false })
+        // AppKit re-applies the system's preferred scroller style to every
+        // scroll view when it changes (a mouse or trackpad is attached or
+        // detached, or "Show scroll bars" is changed). Without re-asserting
+        // ours, the scroller silently goes back to overlay and fades — the
+        // original "pill but no scrollbar" bug.
+        observers.append(center.addObserver(
+            forName: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil, queue: nil
+        ) { [weak self] _ in self?.applyScrollerStyle() })
+    }
+
+    /// Legacy style + light knob + autohide; see `init` for why. Idempotent.
+    func applyScrollerStyle() {
+        scrollView.scrollerStyle = .legacy
+        scrollView.scrollerKnobStyle = .light
+        scrollView.autohidesScrollers = true
     }
 
     deinit {
