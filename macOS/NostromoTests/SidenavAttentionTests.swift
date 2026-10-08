@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 
 // Behavioural spec for the sidebar attention flag.
 //
@@ -112,5 +113,104 @@ final class SidenavAttentionTests: XCTestCase {
             guard case let .focus(_, _, secondary, _) = row else { return XCTFail("not a focus row") }
             XCTAssertNotNil(secondary, "D6: every focus row carries a (possibly empty) second line")
         }
+    }
+
+    // MARK: - The attention dot on a real row (NavTabItem)
+
+    private static let longName = "A very long focus label that cannot possibly fit in a narrow sidebar row"
+
+    private func makeItem(label: String = "Cody in Nostromo", secondary: String? = "main",
+                          attention: Bool, sweater: NSColor? = nil, width: CGFloat = 180) -> NavTabItem {
+        let focus = dynamicFocus(id: "11111111-aaaa", agent: "cody")
+        let item = NavTabItem(focus: focus, label: label, secondary: secondary, indented: false)
+        item.sweaterColor = sweater
+        item.needsAttention = attention
+        // The same fixed row height `TabBarView` pins on every focus row.
+        let height = secondary != nil ? Theme.navItemSubtitleHeight : Theme.navItemHeight
+        item.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        item.layoutSubtreeIfNeeded()
+        return item
+    }
+
+    private func descendants<T>(of type: T.Type, in view: NSView) -> [T] {
+        view.subviews.flatMap { sub -> [T] in
+            (sub as? T).map { [$0] + descendants(of: type, in: sub) } ?? descendants(of: type, in: sub)
+        }
+    }
+
+    private func primaryLabel(in item: NavTabItem, text: String) -> NSTextField? {
+        descendants(of: NSTextField.self, in: item).first { $0.stringValue == text }
+    }
+
+    private func attentionDot(in item: NavTabItem) -> NSView? {
+        descendants(of: NSView.self, in: item).first { $0.accessibilityLabel() == "needs your attention" }
+    }
+
+    func testAttentionDotIsAnAccessibleImageLabelledNeedsYourAttention() throws {
+        let item = makeItem(attention: true)
+        let dot = try XCTUnwrap(attentionDot(in: item))
+        XCTAssertTrue(dot.isAccessibilityElement())
+        XCTAssertEqual(dot.accessibilityRole(), .image)
+        XCTAssertEqual(dot.accessibilityLabel(), "needs your attention")
+    }
+
+    func testAttentionDotIsShownOnlyWhileTheRowNeedsAttention() throws {
+        let item = makeItem(attention: false)
+        let dot = try XCTUnwrap(attentionDot(in: item))
+        XCTAssertTrue(dot.isHidden)
+        item.needsAttention = true
+        XCTAssertFalse(dot.isHidden)
+        item.needsAttention = false
+        XCTAssertTrue(dot.isHidden)
+    }
+
+    func testRowHeightIsIdenticalWithAndWithoutAttention() throws {
+        for secondary in [Optional("main"), nil] {
+            let plain = makeItem(secondary: secondary, attention: false)
+            let flagged = makeItem(secondary: secondary, attention: true)
+            XCTAssertEqual(flagged.frame.height, plain.frame.height, "D6: attention never changes row height")
+            XCTAssertEqual(flagged.fittingSize.height, plain.fittingSize.height)
+
+            let plainLabel = try XCTUnwrap(primaryLabel(in: plain, text: "Cody in Nostromo"))
+            let flaggedLabel = try XCTUnwrap(primaryLabel(in: flagged, text: "Cody in Nostromo"))
+            XCTAssertEqual(flaggedLabel.frame.origin.y, plainLabel.frame.origin.y)
+            XCTAssertEqual(flaggedLabel.frame.height, plainLabel.frame.height)
+        }
+    }
+
+    func testALongLabelDoesNotExtendUnderTheAttentionDot() throws {
+        for secondary in [Optional("main"), nil] {
+            for sweater in [nil, NSColor.systemOrange] {
+                let item = makeItem(label: Self.longName, secondary: secondary, attention: true, sweater: sweater)
+                let label = try XCTUnwrap(primaryLabel(in: item, text: Self.longName))
+                let dot = try XCTUnwrap(attentionDot(in: item))
+                XCTAssertFalse(dot.isHidden)
+                // Compare alignment rects: an NSTextField's frame extends ~2pt past its text.
+                let labelTextMaxX = label.alignmentRect(forFrame: label.frame).maxX
+                XCTAssertLessThanOrEqual(labelTextMaxX, dot.frame.minX - 4,
+                                         "label must leave a gap before the dot (secondary: \(String(describing: secondary)), sweater: \(sweater != nil))")
+            }
+        }
+    }
+
+    func testALongLabelKeepsItsWidthWhenThereIsNoAttention() throws {
+        let item = makeItem(label: Self.longName, attention: false)
+        let label = try XCTUnwrap(primaryLabel(in: item, text: Self.longName))
+        // Space is reserved only while the dot is shown.
+        let flagged = makeItem(label: Self.longName, attention: true)
+        let flaggedLabel = try XCTUnwrap(primaryLabel(in: flagged, text: Self.longName))
+        XCTAssertGreaterThanOrEqual(label.frame.width, flaggedLabel.frame.width)
+        XCTAssertEqual(label.lineBreakMode, .byTruncatingTail)
+        XCTAssertEqual(flaggedLabel.lineBreakMode, .byTruncatingTail)
+    }
+
+    func testTogglingAttentionOffRestoresTheLabelWidth() throws {
+        let item = makeItem(label: Self.longName, attention: false)
+        let before = try XCTUnwrap(primaryLabel(in: item, text: Self.longName)).frame.width
+        item.needsAttention = true
+        item.layoutSubtreeIfNeeded()
+        item.needsAttention = false
+        item.layoutSubtreeIfNeeded()
+        XCTAssertEqual(try XCTUnwrap(primaryLabel(in: item, text: Self.longName)).frame.width, before)
     }
 }

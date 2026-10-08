@@ -19,6 +19,8 @@
 		AA0000020000000000000104 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000004 /* AppStore.swift */; };
 		AA0000020000000000000105 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000005 /* Theme.swift */; };
 		AA0000020000000000000106 /* TabBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000006 /* TabBarView.swift */; };
+		NT0000000000000000000002 /* NavTabItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = NT0000000000000000000001 /* NavTabItem.swift */; };
+		NT0000000000000000000003 /* NavTabItem.swift in TestSources */ = {isa = PBXBuildFile; fileRef = NT0000000000000000000001 /* NavTabItem.swift */; };
 		AA0000020000000000000107 /* StatusBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000007 /* StatusBarView.swift */; };
 		AA0000020000000000000108 /* PaceBarsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000008 /* PaceBarsView.swift */; };
 		AA0000020000000000000109 /* MainLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000009 /* MainLayout.swift */; };
@@ -242,6 +244,7 @@
 		AA0000020000000000000004 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		AA0000020000000000000005 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		AA0000020000000000000006 /* TabBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabBarView.swift; sourceTree = "<group>"; };
+		NT0000000000000000000001 /* NavTabItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavTabItem.swift; sourceTree = "<group>"; };
 		AA0000020000000000000007 /* StatusBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000008 /* PaceBarsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaceBarsView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000009 /* MainLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainLayout.swift; sourceTree = "<group>"; };
@@ -496,6 +499,7 @@
 				II000000000000000000010 /* TurnInteractionStore.swift */,
 				AA0000020000000000000005 /* Theme.swift */,
 				AA0000020000000000000006 /* TabBarView.swift */,
+				NT0000000000000000000001 /* NavTabItem.swift */,
 				AA0000020000000000000007 /* StatusBarView.swift */,
 				AA0000020000000000000008 /* PaceBarsView.swift */,
 				AA0000020000000000000009 /* MainLayout.swift */,
@@ -748,6 +752,7 @@
 				AA0000020000000000000104 /* AppStore.swift in Sources */,
 				AA0000020000000000000105 /* Theme.swift in Sources */,
 				AA0000020000000000000106 /* TabBarView.swift in Sources */,
+				NT0000000000000000000002 /* NavTabItem.swift in Sources */,
 				AA0000020000000000000107 /* StatusBarView.swift in Sources */,
 				AA0000020000000000000108 /* PaceBarsView.swift in Sources */,
 				AA0000020000000000000109 /* MainLayout.swift in Sources */,
@@ -920,6 +925,7 @@
 				DP0000000000000000000013 /* DecisionCoordinatorTests.swift in Sources */,
 				DP0000000000000000000015 /* AttentionRegistryTests.swift in Sources */,
 				DP0000000000000000000017 /* SidenavAttentionTests.swift in Sources */,
+				NT0000000000000000000003 /* NavTabItem.swift in TestSources */,
 				MD0000000000000000000B1 /* MotherDaemonStatusTests.swift in Sources */,
 				MG0000000000000000000B1 /* MotherJobGroupingTests.swift in Sources */,
 				KK0000000000000000001B2 /* ImagePasteboardTests.swift in Sources */,
