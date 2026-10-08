@@ -248,18 +248,36 @@ final class RepoOrgTests: XCTestCase {
     // MARK: Sheet async paths
 
     /// A resolver whose lookups block until `release()` is called.
+    /// Lookup whose per-path completion the test controls. Each path has its own
+    /// gate so a test can finish lookups in a chosen order (a single shared gate
+    /// would leave the order to the scheduler).
     private final class GatedLookup {
-        let gate = DispatchSemaphore(value: 0)
         private let lock = NSLock()
+        private var gates: [String: DispatchSemaphore] = [:]
         private(set) var calls = 0
         var results: [String: RepoOrg.Lookup]
         init(_ results: [String: RepoOrg.Lookup]) { self.results = results }
+        private func gate(_ path: String) -> DispatchSemaphore {
+            lock.lock(); defer { lock.unlock() }
+            if let g = gates[path] { return g }
+            let g = DispatchSemaphore(value: 0)
+            gates[path] = g
+            return g
+        }
         func lookup(_ path: String) -> RepoOrg.Lookup {
             lock.lock(); calls += 1; lock.unlock()
-            gate.wait()
+            gate(path).wait()
             return results[path] ?? .resolved(nil)
         }
-        func release(_ n: Int = 1) { for _ in 0..<n { gate.signal() } }
+        /// Let the lookup for `path` complete (call before or after it starts).
+        func release(path: String, _ n: Int = 1) {
+            let g = gate(path)
+            for _ in 0..<n { g.signal() }
+        }
+        /// Let every lookup for the known paths complete.
+        func release(_ n: Int = 1) {
+            for path in ["/tmp/alpha", "/tmp/beta"] { release(path: path, n) }
+        }
     }
 
     private func makeSheet(_ g: GatedLookup, onCreate: @escaping (Focus) -> Void) -> CreateFocusSheet {
@@ -278,7 +296,15 @@ final class RepoOrgTests: XCTestCase {
         let g = GatedLookup(["/tmp/alpha": .resolved("Carefeed"), "/tmp/beta": .resolved("Personal")])
         let sheet = makeSheet(g) { _ in }
         sheet.selectProject(at: 1)   // moves on before alpha's lookup completes
-        g.release(2)
+        // Alpha (the stale selection) completes FIRST; without the staleness
+        // guard its result would now be applied to the preview.
+        g.release(path: "/tmp/alpha")
+        pumpMain()
+        XCTAssertTrue(sheet.previewText.contains("Beta"), sheet.previewText)
+        XCTAssertFalse(sheet.previewText.contains("Alpha"), sheet.previewText)
+        // Beta (the current selection) completes second; the preview stays on Beta
+        // (and its lookup thread is released so the test doesn't leak a blocked thread).
+        g.release(path: "/tmp/beta")
         pumpMain()
         XCTAssertTrue(sheet.previewText.contains("Beta"), sheet.previewText)
         XCTAssertFalse(sheet.previewText.contains("Alpha"), sheet.previewText)
