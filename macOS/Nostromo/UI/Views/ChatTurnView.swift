@@ -69,6 +69,7 @@ class MarkerTurnView: NSView, TurnIsland {
         }
 
         let label = NSTextField(labelWithString: text)
+        label.isSelectable         = true   // copyable transcript content
         label.font                 = .systemFont(ofSize: 11)
         label.textColor            = Theme.fgMuted
         label.lineBreakMode        = .byWordWrapping
@@ -297,6 +298,7 @@ class ChatTurnView: NSView, TurnIsland {
         let label = NSTextField(labelWithString:
             "⚠︎  Only the beginning of this turn is still held in this pane. "
             + "The full text remains in the Claude session transcript on disk.")
+        label.isSelectable         = true   // copyable transcript content
         label.font                 = .systemFont(ofSize: 10)
         label.textColor            = Theme.amber
         label.lineBreakMode        = .byWordWrapping
@@ -837,8 +839,22 @@ class TextBlockView: NSView, WidthPresettable {
 
 class ToolCallView: NSView {
 
+    /// Where the context-menu actions copy to. Injectable so tests never touch
+    /// the operator's real clipboard.
+    var pasteboard: NSPasteboard = .general
+
+    /// Longest command shown in the tooltip; the full text stays copyable.
+    static let tooltipLimit = 2000
+
+    private let data: ToolCallData
+
     init(data: ToolCallData) {
+        self.data = data
         super.init(frame: .zero)
+        let command = data.fullCommand
+        toolTip = command.count > Self.tooltipLimit
+            ? String(command.prefix(Self.tooltipLimit)) + "…"
+            : command
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
         layer?.cornerRadius    = 6
@@ -867,6 +883,7 @@ class ToolCallView: NSView {
             .foregroundColor: Theme.fg,
             .ligature:        0,
         ])
+        summaryLabel.isSelectable = true   // copyable transcript content
         summaryLabel.lineBreakMode = .byTruncatingMiddle
         summaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -886,6 +903,29 @@ class ToolCallView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    // MARK: Copy menu
+
+    override func menu(for event: NSEvent) -> NSMenu? { copyMenu() }
+
+    func copyMenu() -> NSMenu {
+        let menu = NSMenu()
+        if data.toolName == "Bash" {
+            menu.addItem(withTitle: "Copy command", action: #selector(copyCommand), keyEquivalent: "").target = self
+        }
+        menu.addItem(withTitle: "Copy full input", action: #selector(copyFullInput), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Copy summary", action: #selector(copySummary), keyEquivalent: "").target = self
+        return menu
+    }
+
+    @objc private func copyCommand()   { copy(data.fullCommand) }
+    @objc private func copyFullInput() { copy(data.inputFull) }
+    @objc private func copySummary()   { copy(data.inputSummary) }
+
+    private func copy(_ string: String) {
+        pasteboard.clearContents()
+        pasteboard.setString(string, forType: .string)
+    }
 
     private func icon(for name: String) -> String {
         switch name {
@@ -925,6 +965,7 @@ class ResultChipView: NSView {
             : "\(symbol)  \(durationStr)\(costStr)"
 
         let label = NSTextField(labelWithString: labelStr)
+        label.isSelectable = true   // copyable transcript content
         label.font      = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         label.textColor = color
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -953,6 +994,7 @@ class ErrorBlockView: NSView {
         layer?.borderColor     = Theme.redSweater.withAlphaComponent(0.4).cgColor
 
         let label = NSTextField(labelWithString: message)
+        label.isSelectable = true   // copyable transcript content
         // Literal error text — disable Fira Code's default ligatures so it renders
         // verbatim. See ToolResultView's buildLabelIfNeeded() for the full explanation.
         label.attributedStringValue = NSAttributedString(string: message, attributes: [
@@ -975,4 +1017,20 @@ class ErrorBlockView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+}
+
+
+// MARK: - TranscriptFocusPolicy
+
+/// Whether a pane (re)attach may move focus to the input bar. Stealing focus
+/// from a field editor that holds a transcript selection would clear that
+/// selection, so a copy in progress survives the re-attach.
+enum TranscriptFocusPolicy {
+    static func shouldFocusInput(currentFirstResponder: NSResponder?, inputTextView: NSTextView?) -> Bool {
+        guard let text = currentFirstResponder as? NSTextView,
+              text !== inputTextView,
+              text.selectedRange().length > 0
+        else { return true }
+        return false
+    }
 }

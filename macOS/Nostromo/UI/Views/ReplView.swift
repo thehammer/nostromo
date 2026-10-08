@@ -767,6 +767,9 @@ class ReplView: NSView {
         super.viewDidMoveToWindow()
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
+            guard TranscriptFocusPolicy.shouldFocusInput(
+                currentFirstResponder: window.firstResponder, inputTextView: self.inputBar.textView)
+            else { return }
             window.makeFirstResponder(self.inputBar.textView)
         }
         observeWindowVisibility()
