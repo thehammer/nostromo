@@ -34,6 +34,8 @@
 		FT0000000000000000000015 /* FollowTailPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000003 /* FollowTailPolicyTests.swift */; };
 		FT0000000000000000000016 /* JumpToLatestOverlayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000004 /* JumpToLatestOverlayTests.swift */; };
 		FT0000000000000000000017 /* FollowTailClipViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000005 /* FollowTailClipViewTests.swift */; };
+		FT0000000000000000000018 /* FollowTailController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000006 /* FollowTailController.swift */; };
+		FT0000000000000000000019 /* FollowTailController.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000006 /* FollowTailController.swift */; };
 		AA0000020000000000000125 /* FredView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000025 /* FredView.swift */; };
 		EE00000000000000000000A1 /* QuickActionStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000A0 /* QuickActionStripView.swift */; };
 		EE00000000000000000000C1 /* MarkdownCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000C0 /* MarkdownCardView.swift */; };
@@ -230,6 +232,7 @@
 		FT0000000000000000000003 /* FollowTailPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailPolicyTests.swift; sourceTree = "<group>"; };
 		FT0000000000000000000004 /* JumpToLatestOverlayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpToLatestOverlayTests.swift; sourceTree = "<group>"; };
 		FT0000000000000000000005 /* FollowTailClipViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailClipViewTests.swift; sourceTree = "<group>"; };
+		FT0000000000000000000006 /* FollowTailController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailController.swift; sourceTree = "<group>"; };
 		AA0000020000000000000025 /* FredView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredView.swift; sourceTree = "<group>"; };
 		EE00000000000000000000A0 /* QuickActionStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionStripView.swift; sourceTree = "<group>"; };
 		EE00000000000000000000C0 /* MarkdownCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownCardView.swift; sourceTree = "<group>"; };
@@ -496,6 +499,7 @@
 				EE00000000000000000000A0 /* QuickActionStripView.swift */,
 				AA0000020000000000000023 /* ReplView.swift */,
 				FT0000000000000000000002 /* JumpToLatestOverlay.swift */,
+				FT0000000000000000000006 /* FollowTailController.swift */,
 				II000000000000000000020 /* AskQuestionView.swift */,
 				II000000000000000000030 /* ToolResultView.swift */,
 				TT000000000000000000010 /* ChatTurnView.swift */,
@@ -703,6 +707,7 @@
 				AA0000020000000000000123 /* ReplView.swift in Sources */,
 				FT0000000000000000000011 /* FollowTailPolicy.swift in Sources */,
 				FT0000000000000000000013 /* JumpToLatestOverlay.swift in Sources */,
+				FT0000000000000000000018 /* FollowTailController.swift in Sources */,
 				EE00000000000000000000C1 /* MarkdownCardView.swift in Sources */,
 				EE00000000000000000000D1 /* DynamicFocusView.swift in Sources */,
 				EE00000000000000000000E1 /* PaneContentView.swift in Sources */,
@@ -777,6 +782,7 @@
 				HH0000000000000000000B2 /* OverlayHitTest.swift in TestSources */,
 				FT0000000000000000000012 /* FollowTailPolicy.swift in TestSources */,
 				FT0000000000000000000014 /* JumpToLatestOverlay.swift in TestSources */,
+				FT0000000000000000000019 /* FollowTailController.swift in TestSources */,
 				AC0000000000000000000012 /* AppControlProtocol.swift in TestSources */,
 				BB00000000000000000000B5 /* PhaseRibbonTests.swift in Sources */,
 				CC00000000000000000000A1 /* PerriModelTests.swift in Sources */,

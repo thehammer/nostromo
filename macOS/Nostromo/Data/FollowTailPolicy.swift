@@ -32,6 +32,10 @@ enum FollowTailPolicy {
     enum Cause: String {
         /// The operator scrolled (wheel, trackpad, scroller knob, keys).
         case userScroll
+        /// A bounds change moved the viewport away from the bottom with no
+        /// live scroll in flight (scroller-knob drag, keys, or something
+        /// stray). Not proof the operator scrolled.
+        case boundsChange
         /// The operator sent a message / answered / ran a quick action.
         case send
         /// The operator clicked "Jump to latest".
@@ -74,6 +78,11 @@ enum FollowTailPolicy {
         return originDeltaY < 0 ? false : current
     }
 
+    /// Whether the clip view's bounds *size* changed between two notifications.
+    static func sizeChanged(from previous: CGRect, to bounds: CGRect) -> Bool {
+        abs(bounds.width - previous.width) > 0.5 || abs(bounds.height - previous.height) > 0.5
+    }
+
     /// `pinnedAfterBoundsChange` fed straight from two successive clip-view
     /// bounds, so the scroll-vs-resize classification lives (and is tested) here
     /// rather than in the view.
@@ -82,12 +91,11 @@ enum FollowTailPolicy {
                                         bounds: CGRect,
                                         isMaterializing: Bool,
                                         documentHeight: CGFloat) -> Bool {
-        let sizeChanged = abs(bounds.width - previousBounds.width) > 0.5
-                       || abs(bounds.height - previousBounds.height) > 0.5
+        let resized = Self.sizeChanged(from: previousBounds, to: bounds)
         return pinnedAfterBoundsChange(
             current: current,
             originDeltaY: bounds.origin.y - previousBounds.origin.y,
-            sizeChanged: sizeChanged,
+            sizeChanged: resized,
             isMaterializing: isMaterializing,
             documentHeight: documentHeight,
             visibleMaxY: bounds.maxY)
