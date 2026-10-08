@@ -11,10 +11,6 @@ final class CreateFocusSheet: NSWindowController {
     // UI
     private let agentPopup   = NSPopUpButton()
     private let projectPopup = NSPopUpButton()
-    private let orgControl   = NSSegmentedControl(labels: ["Carefeed", "Personal"],
-                                                  trackingMode: .selectOne,
-                                                  target: nil,
-                                                  action: nil)
     private let namePreview  = NSTextField(labelWithString: "")
     private let createBtn    = NSButton()
 
@@ -26,7 +22,7 @@ final class CreateFocusSheet: NSWindowController {
         self.onCreate = onCreate
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 260),
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 220),
             styleMask:   [.titled],
             backing:     .buffered,
             defer:       false
@@ -85,22 +81,6 @@ final class CreateFocusSheet: NSWindowController {
         projectPopup.action = #selector(pickerChanged)
         contentView.addSubview(projectPopup)
 
-        // Org row
-        let orgLabel = NSTextField(labelWithString: "Org:")
-        orgLabel.font         = .systemFont(ofSize: 12)
-        orgLabel.textColor    = .white
-        orgLabel.isEditable   = false
-        orgLabel.isBordered   = false
-        orgLabel.drawsBackground = false
-        orgLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(orgLabel)
-
-        orgControl.selectedSegment = 0   // default: Carefeed
-        orgControl.target = self
-        orgControl.action = #selector(pickerChanged)
-        orgControl.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(orgControl)
-
         // Name preview
         namePreview.font      = .systemFont(ofSize: 11)
         namePreview.textColor = .gray
@@ -145,14 +125,7 @@ final class CreateFocusSheet: NSWindowController {
             projectPopup.leadingAnchor.constraint(equalTo: projectLabel.trailingAnchor, constant: 8),
             projectPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
-            orgLabel.topAnchor.constraint(equalTo: projectLabel.bottomAnchor, constant: 14),
-            orgLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            orgLabel.widthAnchor.constraint(equalToConstant: 60),
-
-            orgControl.centerYAnchor.constraint(equalTo: orgLabel.centerYAnchor),
-            orgControl.leadingAnchor.constraint(equalTo: orgLabel.trailingAnchor, constant: 8),
-
-            namePreview.topAnchor.constraint(equalTo: orgLabel.bottomAnchor, constant: 14),
+            namePreview.topAnchor.constraint(equalTo: projectLabel.bottomAnchor, constant: 14),
             namePreview.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             namePreview.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
@@ -210,12 +183,6 @@ final class CreateFocusSheet: NSWindowController {
         createBtn.isEnabled = !agents.isEmpty
     }
 
-    // MARK: - Org picker helper
-
-    private var selectedOrg: String {
-        orgControl.selectedSegment == 1 ? "Personal" : "Carefeed"
-    }
-
     // MARK: - Preview
 
     @objc private func pickerChanged() { updatePreview() }
@@ -228,7 +195,7 @@ final class CreateFocusSheet: NSWindowController {
         let agentTag    = agents[agentPopup.indexOfSelectedItem]
         let projectPath = projects[projectPopup.indexOfSelectedItem]
         let preview = Focus(id: "preview", agentTag: agentTag, projectPath: projectPath,
-                            isBuiltIn: false, org: selectedOrg)
+                            isBuiltIn: false, org: RepoOrg.org(forProjectPath: projectPath))
         namePreview.stringValue = "→ \(preview.displayName)"
     }
 
@@ -242,7 +209,7 @@ final class CreateFocusSheet: NSWindowController {
                           agentTag: agentTag,
                           projectPath: projectPath,
                           isBuiltIn: false,
-                          org: selectedOrg,
+                          org: RepoOrg.org(forProjectPath: projectPath),
                           sessionSummary: nil)
         window?.sheetParent?.endSheet(window!)
         onCreate(focus)
