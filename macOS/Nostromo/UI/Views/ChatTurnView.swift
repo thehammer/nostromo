@@ -68,7 +68,7 @@ class MarkerTurnView: NSView, TurnIsland {
             text = "⋯  Earlier history is no longer available in this pane. The full record remains on disk in the Claude session transcript."
         }
 
-        let label = NSTextField(labelWithString: text)
+        let label = CopyMenuTextField(labelWithString: text)
         label.isSelectable         = true   // copyable transcript content
         label.font                 = .systemFont(ofSize: 11)
         label.textColor            = Theme.fgMuted
@@ -295,7 +295,7 @@ class ChatTurnView: NSView, TurnIsland {
     required init?(coder: NSCoder) { fatalError() }
 
     private static func makeTruncationBanner() -> NSView {
-        let label = NSTextField(labelWithString:
+        let label = CopyMenuTextField(labelWithString:
             "⚠︎  Only the beginning of this turn is still held in this pane. "
             + "The full text remains in the Claude session transcript on disk.")
         label.isSelectable         = true   // copyable transcript content
@@ -568,7 +568,7 @@ class UserBubbleView: NSView {
 
     init(text: String, imageURLs: [URL] = []) {
         self.imageURLs = imageURLs
-        label = NSTextField(labelWithString: text)
+        label = CopyMenuTextField(labelWithString: text)
         label.isSelectable = true   // copyable: text in the transcript must be selectable
         label.font                 = .systemFont(ofSize: 13)
         label.textColor            = Theme.fg
@@ -691,7 +691,7 @@ class TextBlockView: NSView, WidthPresettable {
             let view: NSView
             switch segment {
             case .paragraph(let txt):
-                let label = NSTextField(labelWithString: Self.stripMarkdown(txt))
+                let label = CopyMenuTextField(labelWithString: Self.stripMarkdown(txt))
                 label.isSelectable = true   // copyable: text in the transcript must be selectable
                 label.font                 = .systemFont(ofSize: 13)
                 label.textColor            = Theme.fg
@@ -839,14 +839,19 @@ class TextBlockView: NSView, WidthPresettable {
 
 // MARK: - CopyMenuTextField
 
-/// A selectable label whose right-click menu is the owner's, both while idle and
-/// while it holds the field editor.
+/// A selectable transcript label: selection that stays legible on the dark theme,
+/// and a right-click menu that is the owner's, both while idle and while it holds
+/// the field editor.
 ///
 /// Once a selectable `NSTextField` is clicked, a field editor (a text view,
 /// installed as a subview of the label) becomes the hit view and answers the
 /// click with the standard text menu — `NSView.menu` on the label, and the
 /// `NSTextViewDelegate` menu hook, do not reach it. So the label brings its own
 /// editor (see `CopyMenuTextFieldCell`) and the editor asks the label.
+///
+/// Every selectable label in the transcript uses this class, menu or not, because
+/// the same editor swap is what blackens selected text: see
+/// `CopyMenuTextFieldCell.setUpFieldEditorAttributes`.
 final class CopyMenuTextField: NSTextField {
 
     override class var cellClass: AnyClass? {
@@ -873,6 +878,38 @@ final class CopyMenuTextFieldCell: NSTextFieldCell {
     }()
 
     override func fieldEditor(for controlView: NSView) -> NSTextView? { editor }
+
+    /// Make the field editor look like the label it replaces.
+    ///
+    /// These labels carry their colour and font in the attributed string, but the
+    /// field editor that takes over on selection reads them from the *cell* — and
+    /// finds the system default, which is black on a light Mac. Selected text then
+    /// turned black on the selection colour. So the label's own colour and font
+    /// (the first run's, else the cell's) are put on the editor, and the selection
+    /// uses the theme's highlight rather than the system one.
+    override func setUpFieldEditorAttributes(_ textObj: NSText) -> NSText {
+        let text = super.setUpFieldEditorAttributes(textObj)
+        let runs = attributedStringValue
+        let first = runs.length > 0 ? runs.attributes(at: 0, effectiveRange: nil) : [:]
+        // Kept on the cell too, so the next selection still knows them should the
+        // attributed string have been flattened by the editor handing it back.
+        let color = (first[.foregroundColor] as? NSColor) ?? textColor ?? Theme.fg
+        let font = (first[.font] as? NSFont) ?? self.font
+        textColor = color
+        self.font = font
+        text.textColor = color
+        text.font = font
+        (text as? NSTextView)?.applyTranscriptSelectionTheme()
+        return text
+    }
+}
+
+extension NSTextView {
+    /// Selection and caret colours for the dark transcript.
+    func applyTranscriptSelectionTheme() {
+        selectedTextAttributes = Theme.selectionAttributes
+        insertionPointColor = Theme.fg
+    }
 }
 
 /// Field editor whose context menu is the owning label's, with a plain "Copy" of
@@ -1039,7 +1076,7 @@ class ResultChipView: NSView {
             ? "\(symbol)  Interrupted · \(durationStr)\(costStr)"
             : "\(symbol)  \(durationStr)\(costStr)"
 
-        let label = NSTextField(labelWithString: labelStr)
+        let label = CopyMenuTextField(labelWithString: labelStr)
         label.isSelectable = true   // copyable transcript content
         label.font      = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         label.textColor = color
@@ -1068,7 +1105,7 @@ class ErrorBlockView: NSView {
         layer?.borderWidth     = 1
         layer?.borderColor     = Theme.redSweater.withAlphaComponent(0.4).cgColor
 
-        let label = NSTextField(labelWithString: message)
+        let label = CopyMenuTextField(labelWithString: message)
         label.isSelectable = true   // copyable transcript content
         // Literal error text — disable Fira Code's default ligatures so it renders
         // verbatim. See ToolResultView's buildLabelIfNeeded() for the full explanation.
@@ -1130,37 +1167,67 @@ enum TranscriptFocusPolicy {
 
 // MARK: - TranscriptSelection
 
-/// A transcript selection held by a field editor inside some view, captured so it
-/// can be put back after that view is detached and re-attached.
+/// A transcript selection captured so it can be put back after the view holding
+/// it is detached and re-attached.
 ///
 /// Measuring a turn (or one block of it) detaches the view — see
-/// `ChatTurnView.measureIsland` — and AppKit drops the first responder, and with
-/// it the field editor, when a view holding it leaves the window. Without this a
-/// width change, or a block streaming into the turn being read, would silently
-/// clear the operator's selection.
+/// `ChatTurnView.measureIsland` — and AppKit drops the first responder when a view
+/// holding it leaves the window. Without this a width change, or a block
+/// streaming into the turn being read, would silently clear the operator's
+/// selection.
+///
+/// Two kinds of holder: a selectable label's shared *field editor* (the editor is
+/// transient — the label is what lives in the transcript), and a plain
+/// `NSTextView`, which is how `MarkdownCardView` shows prose.
 struct TranscriptSelection {
-    private let owner: NSTextField
+
+    private enum Holder {
+        case label(NSTextField)
+        case textView(NSTextView)
+    }
+
+    private let holder: Holder
     private let range: NSRange
 
     /// The selection currently held inside `view`, or nil when the first
     /// responder is not a non-empty selection within it.
     static func capture(in view: NSView) -> TranscriptSelection? {
-        guard let editor = view.window?.firstResponder as? NSTextView,
-              editor.isFieldEditor,
-              let owner = editor.delegate as? NSTextField,
-              owner.isDescendant(of: view),
-              editor.selectedRange.length > 0
+        guard let text = view.window?.firstResponder as? NSTextView,
+              text.selectedRange.length > 0
         else { return nil }
-        return TranscriptSelection(owner: owner, range: editor.selectedRange)
+        if text.isFieldEditor {
+            guard let owner = text.delegate as? NSTextField, owner.isDescendant(of: view) else { return nil }
+            return TranscriptSelection(holder: .label(owner), range: text.selectedRange)
+        }
+        guard text.isDescendant(of: view) else { return nil }
+        return TranscriptSelection(holder: .textView(text), range: text.selectedRange)
     }
 
     /// Call once the view is back in its window.
     func restore() {
-        guard owner.window != nil else { return }
-        owner.selectText(nil)
-        guard let editor = owner.currentEditor() as? NSTextView else { return }
-        let length = (editor.string as NSString).length
+        switch holder {
+        case .label(let owner):
+            guard owner.window != nil else { return }
+            owner.selectText(nil)
+            guard let editor = owner.currentEditor() as? NSTextView else { return }
+            apply(range, to: editor)
+        case .textView(let text):
+            guard let window = text.window else { return }
+            // Taking first responder must not scroll the reader to the selection.
+            let clip = text.enclosingScrollView?.contentView
+            let origin = clip?.bounds.origin
+            window.makeFirstResponder(text)
+            apply(range, to: text)
+            if let clip, let origin, clip.bounds.origin != origin {
+                clip.scroll(to: origin)
+                clip.enclosingScrollView?.reflectScrolledClipView(clip)
+            }
+        }
+    }
+
+    private func apply(_ range: NSRange, to text: NSTextView) {
+        let length = (text.string as NSString).length
         guard range.upperBound <= length else { return }
-        editor.setSelectedRange(range)
+        text.setSelectedRange(range)
     }
 }

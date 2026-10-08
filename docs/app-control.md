@@ -34,10 +34,27 @@ screenshot or the `tree` dump can be passed straight to `click`.
 | `tree` | nested view dump: class, frame, text, tooltip, label |
 | `find TEXT` | views whose text/tooltip/label/class contains TEXT, with centre points |
 | `click` | by `X Y` or `--text`; the reply says which view class was hit |
+| `drag` | press at `X Y` (or `--text`), drag in steps to `--to X Y`, release — for selecting text |
 | `key` / `type` | key event through `NSApp.sendEvent` (menu shortcuts fire) / insert text at the first responder |
 | `paste` | put an image or text on the clipboard and send `paste:` |
 | `drop` | deliver a file drop to the registered drag destination under a point |
 | `screenshot` | PNG of a window's content view (no Screen Recording permission needed) |
+
+## Mouse events and the tracking loop
+
+`click` and `drag` queue the mouse-up (and the drag steps) in the app's event
+queue *before* sending the mouse-down. That order matters: on a control or on
+selectable text (a transcript label, an `NSTextView`), AppKit's `mouseDown`
+runs a nested loop that waits for the matching mouse-up, so a down sent alone
+parks the main thread there and the app freezes until a real mouse event
+arrives. If a `nostromo-app` call times out, that is the likely cause; one real
+click in the app window releases it. (`AppControlMouse` in
+`AppControlProtocol.swift` is the implementation and is unit-tested.)
+
+Select text with `drag`, e.g. across a paragraph, then `key c --mod cmd` to copy:
+
+    bin/nostromo-app drag 300 400 --to 700 420
+    bin/nostromo-app click --text "word" --count 2   # double-click selects a word
 
 ## Example: the image-attach path
 

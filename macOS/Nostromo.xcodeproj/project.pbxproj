@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		SC00000000000000000000F1 /* TranscriptSelectionColorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */; };
+		AM00000000000000000000F1 /* AppControlMouseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AM00000000000000000000F0 /* AppControlMouseTests.swift */; };
+		PS00000000000000000000F1 /* ProseSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PS00000000000000000000F0 /* ProseSelectionTests.swift */; };
 		AA0000000000000000000017 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000007 /* Assets.xcassets */; };
 		AA0000000000000000000011 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000001 /* main.swift */; };
 		AA0000000000000000000012 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000002 /* AppDelegate.swift */; };
@@ -233,6 +236,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptSelectionColorTests.swift; sourceTree = "<group>"; };
+		AM00000000000000000000F0 /* AppControlMouseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlMouseTests.swift; sourceTree = "<group>"; };
+		PS00000000000000000000F0 /* ProseSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProseSelectionTests.swift; sourceTree = "<group>"; };
 		AA0000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		AA0000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		AA0000000000000000000003 /* NostromoWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoWindow.swift; sourceTree = "<group>"; };
@@ -581,6 +587,9 @@
 				HH000000000000000000130 /* TurnHeightEstimatorTests.swift */,
 				TT000000000000000000040 /* ChatTurnViewLayoutTests.swift */,
 				TT000000000000000000050 /* TranscriptCopyTests.swift */,
+				SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */,
+				AM00000000000000000000F0 /* AppControlMouseTests.swift */,
+				PS00000000000000000000F0 /* ProseSelectionTests.swift */,
 				HH000000000000000000140 /* ImageDecodePolicyTests.swift */,
 				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
 				II000000000000000000100 /* TurnInteractionTests.swift */,
@@ -840,6 +849,9 @@
 				HH000000000000000000132 /* TurnHeightEstimatorTests.swift in Sources */,
 				TT000000000000000000042 /* ChatTurnViewLayoutTests.swift in Sources */,
 				TT000000000000000000052 /* TranscriptCopyTests.swift in Sources */,
+				SC00000000000000000000F1 /* TranscriptSelectionColorTests.swift in Sources */,
+				AM00000000000000000000F1 /* AppControlMouseTests.swift in Sources */,
+				PS00000000000000000000F1 /* ProseSelectionTests.swift in Sources */,
 				HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */,
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
 				BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */,

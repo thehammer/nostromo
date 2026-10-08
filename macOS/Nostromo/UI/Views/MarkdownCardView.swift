@@ -338,20 +338,17 @@ final class MarkdownCardView: NSView {
     private func setupTextView() {
         textView.isEditable                 = false
         textView.isSelectable               = true  // copyable
+        textView.applyTranscriptSelectionTheme()
         textView.drawsBackground            = false
         textView.isHorizontallyResizable    = false
-        textView.isVerticallyResizable      = true
+        // The card sizes the text view by frame (see `layout()`), so the text view
+        // must not resize itself to its text as well.
+        textView.isVerticallyResizable      = false
         textView.textContainerInset         = NSSize(width: 0, height: 0)
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.lineFragmentPadding = 0
-        textView.translatesAutoresizingMaskIntoConstraints = false
+        textView.translatesAutoresizingMaskIntoConstraints = true
         addSubview(textView)
-
-        NSLayoutConstraint.activate([
-            textView.topAnchor.constraint(equalTo: topAnchor, constant: padding),
-            textView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
-            textView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
-        ])
     }
 
     // MARK: - Layout
@@ -360,6 +357,13 @@ final class MarkdownCardView: NSView {
         super.layout()
 
         let textWidth = max(bounds.width - padding * 2, 1)
+        // Fill the card's interior. The text view used to be pinned only at its
+        // top and sides and left to find its own height, but an `NSTextView`
+        // reports no intrinsic height, so until AppKit happened to resize it
+        // it was a zero-height sliver: a mouse-down over the paragraph hit the
+        // card instead of the text view and nothing could be selected.
+        textView.frame = NSRect(x: padding, y: padding, width: textWidth,
+                                height: max(bounds.height - padding * 2, 0))
         textView.textContainer?.containerSize = NSSize(
             width: textWidth,
             height: CGFloat.greatestFiniteMagnitude

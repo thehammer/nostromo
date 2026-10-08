@@ -45,6 +45,18 @@ enum Theme {
     /// The dimmed caption's colour on the selected tab (see `bgBarActive`).
     static let tabCaptionOnActive = NSColor(white: 200/255, alpha: 1)
 
+    /// Selected transcript text: an opaque blue (not the system selection colour,
+    /// which follows the Mac's light/dark setting rather than this always-dark
+    /// theme) with white text on it. ~4:1 for white on the fill, and ~1.9:1
+    /// against the near-black card/row surfaces so the highlight is visible
+    /// (pinned in `TranscriptSelectionColorTests`).
+    static let selectionBackground = NSColor(red: 80/255, green: 125/255, blue: 215/255, alpha: 1)
+    static let selectionForeground = NSColor.white
+    static let selectionAttributes: [NSAttributedString.Key: Any] = [
+        .backgroundColor: selectionBackground,
+        .foregroundColor: selectionForeground,
+    ]
+
     // MARK: - Fonts
 
     static let tabFont       = NSFont.systemFont(ofSize: 12, weight: .regular)

@@ -17,6 +17,7 @@ window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
     nostromo-app tree   [-w N] [--depth D]
     nostromo-app find   TEXT [-w N]
     nostromo-app click  (--text TEXT [--index I] | X Y) [-w N] [--count C] [--mod cmd,shift]
+    nostromo-app drag   (--text TEXT [--index I] | X Y) --to X Y [--steps N] [--mod cmd,shift] [-w N]   press, drag, release (select text)
     nostromo-app key    CHARS [--mod cmd,shift] [-w N]
     nostromo-app type   TEXT [-w N]
     nostromo-app paste  (--image PATH | --text TEXT) [-w N]
@@ -41,11 +42,18 @@ def call(req):
                  "Is the app running with AppControlEnabled (see --help)?")
     s.sendall((json.dumps(req) + "\n").encode())
     buf = b""
-    while not buf.endswith(b"\n"):
-        chunk = s.recv(65536)
-        if not chunk:
-            break
-        buf += chunk
+    try:
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except socket.timeout:
+        sys.exit(f"timeout: no reply to {req.get('cmd')!r} within 20s.\n"
+                 "The app may be parked in an AppKit mouse-tracking loop (a mouseDown on selectable\n"
+                 "text or a control waiting for a mouseUp that never came), which freezes it. A REAL\n"
+                 "mouse click in the app window releases it. If this was a click or drag, report it:\n"
+                 "the control server is meant to queue the mouse-up itself.")
     resp = json.loads(buf)
     if not resp.get("ok"):
         sys.exit(f"error: {resp.get('error')}")
@@ -90,6 +98,10 @@ def main():
     c = sub.add_parser("click"); c.add_argument("xy", nargs="*", type=float)
     c.add_argument("--text"); c.add_argument("--index", type=int, default=0)
     c.add_argument("--count", type=int, default=1); c.add_argument("--mod", default="")
+    dr = sub.add_parser("drag"); dr.add_argument("xy", nargs="*", type=float)
+    dr.add_argument("--text"); dr.add_argument("--index", type=int, default=0)
+    dr.add_argument("--to", nargs=2, type=float, required=True, metavar=("X", "Y"))
+    dr.add_argument("--steps", type=int, default=8); dr.add_argument("--mod", default="")
     k = sub.add_parser("key"); k.add_argument("chars"); k.add_argument("--mod", default="")
     k.add_argument("--key-code", type=int, default=0)
     ty = sub.add_parser("type"); ty.add_argument("text")
@@ -128,6 +140,11 @@ def main():
         elif len(a.xy) == 2: r.update(x=a.xy[0], y=a.xy[1])
         else: p.error("click needs --text or X Y")
         r.update(count=a.count, modifiers=mods)
+    elif a.cmd == "drag":
+        if a.text: r.update(text=a.text, index=a.index)
+        elif len(a.xy) == 2: r.update(fromX=a.xy[0], fromY=a.xy[1])
+        else: p.error("drag needs --text or X Y")
+        r.update(toX=a.to[0], toY=a.to[1], steps=a.steps, modifiers=mods)
     elif a.cmd == "key": r.update(chars=a.chars, modifiers=mods, keyCode=a.key_code)
     elif a.cmd == "type": r["text"] = a.text
     elif a.cmd == "paste":

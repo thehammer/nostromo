@@ -27,6 +27,10 @@ final class ToolResultView: NSView {
     /// Guards against building the expensive full-content label more than once.
     private var labelBuilt  = false
 
+    /// Where "Copy" puts the output. Injectable so tests never touch the
+    /// operator's real clipboard.
+    var pasteboard: NSPasteboard = .general
+
     /// Fired on expand/collapse with the *new* state, so the turn's height can be
     /// re-measured and the operator's choice persisted outside this view.
     var onExpansionChange: ((Bool) -> Void)?
@@ -113,7 +117,7 @@ final class ToolResultView: NSView {
             ? content
             : "(The full content of this tool result is no longer retained in this pane. "
               + "It remains in the Claude session transcript on disk.)"
-        let label = NSTextField(labelWithString: body)
+        let label = CopyMenuTextField(labelWithString: body)
         label.isSelectable = true   // copyable: text in the transcript must be selectable
         label.lineBreakMode        = .byCharWrapping
         label.maximumNumberOfLines = 0
@@ -133,6 +137,7 @@ final class ToolResultView: NSView {
         // Biggest balloon driver: long single-line tool output (JSON, git status) had
         // an intrinsic width of ~8600pt. Yield horizontally so it wraps to the pane.
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.menuProvider = { [unowned self] in self.copyMenu(for: label) }
         label.translatesAutoresizingMaskIntoConstraints = false
         contentWrap.addSubview(label)
         NSLayoutConstraint.activate([
@@ -141,6 +146,27 @@ final class ToolResultView: NSView {
             label.trailingAnchor.constraint(equalTo: contentWrap.trailingAnchor),
             label.bottomAnchor.constraint(equalTo: contentWrap.bottomAnchor),
         ])
+    }
+
+    // MARK: Copy menu
+
+    /// Idle, "Copy" takes the whole output. Once the label holds a selection the
+    /// field editor puts its own "Copy" (the selection) first, so this one is
+    /// relabelled rather than duplicated.
+    private func copyMenu(for label: NSTextField) -> NSMenu {
+        let hasSelection = (label.currentEditor()?.selectedRange.length ?? 0) > 0
+        let menu = NSMenu()
+        let item = menu.addItem(withTitle: hasSelection ? "Copy all output" : "Copy",
+                                action: #selector(copyOutput(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = label
+        return menu
+    }
+
+    @objc private func copyOutput(_ sender: NSMenuItem) {
+        guard let text = (sender.representedObject as? NSTextField)?.stringValue else { return }
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     private func applyState() {
