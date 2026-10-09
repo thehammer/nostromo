@@ -18,6 +18,8 @@ window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
     nostromo-app find   TEXT [-w N]
     nostromo-app click  (--text TEXT [--index I] | X Y) [-w N] [--count C] [--mod cmd,shift]
     nostromo-app drag   (--text TEXT [--index I] | X Y) --to X Y [--steps N] [--mod cmd,shift] [-w N]   press, drag, release (select text)
+    nostromo-app hittest X Y [-w N]     READ-ONLY (sends no event): which view a click at X Y hits, the view chain up to the content view
+                                        (class, frame, hidden, alpha, first-responder/selectable/selection state) and key window / app active / first responder
     nostromo-app key    CHARS [--mod cmd,shift] [-w N]
     nostromo-app type   TEXT [-w N]
     nostromo-app paste  (--image PATH | --text TEXT) [-w N]
@@ -102,6 +104,7 @@ def main():
     dr.add_argument("--text"); dr.add_argument("--index", type=int, default=0)
     dr.add_argument("--to", nargs=2, type=float, required=True, metavar=("X", "Y"))
     dr.add_argument("--steps", type=int, default=8); dr.add_argument("--mod", default="")
+    ht = sub.add_parser("hittest"); ht.add_argument("xy", nargs=2, type=float, metavar=("X", "Y"))
     k = sub.add_parser("key"); k.add_argument("chars"); k.add_argument("--mod", default="")
     k.add_argument("--key-code", type=int, default=0)
     ty = sub.add_parser("type"); ty.add_argument("text")
@@ -144,7 +147,8 @@ def main():
         if a.text: r.update(text=a.text, index=a.index)
         elif len(a.xy) == 2: r.update(fromX=a.xy[0], fromY=a.xy[1])
         else: p.error("drag needs --text or X Y")
-        r.update(toX=a.to[0], toY=a.to[1], steps=a.steps, modifiers=mods)
+        r.update(toX=a.to[0], toY=a.to[1], steps=a.steps, modifiers=mods)   # the app clamps steps to 1...200
+    elif a.cmd == "hittest": r.update(x=a.xy[0], y=a.xy[1])
     elif a.cmd == "key": r.update(chars=a.chars, modifiers=mods, keyCode=a.key_code)
     elif a.cmd == "type": r["text"] = a.text
     elif a.cmd == "paste":

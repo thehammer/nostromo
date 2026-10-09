@@ -288,7 +288,9 @@ final class MarkdownCardView: NSView {
     static func measuredHeight(markdown: String, width: CGFloat) -> CGFloat {
         let padding: CGFloat = 12
         let textWidth = max(width - padding * 2, 1)
-        let key = "\(markdown.hashValue)|\(Int(textWidth.rounded()))" as NSString
+        // Exact width, not rounded: text wraps differently at 279.2 and 279.7, so a
+        // height cached for one must not answer for the other.
+        let key = "\(markdown.hashValue)|\(textWidth)" as NSString
         if let cached = heightCache.object(forKey: key) { return CGFloat(cached.doubleValue) }
 
         let m = measurer
@@ -339,6 +341,8 @@ final class MarkdownCardView: NSView {
         textView.isEditable                 = false
         textView.isSelectable               = true  // copyable
         textView.applyTranscriptSelectionTheme()
+        // Always-dark theme: keeps the unemphasised (inactive) selection grey dark too.
+        textView.appearance                 = NSAppearance(named: .darkAqua)
         textView.drawsBackground            = false
         textView.isHorizontallyResizable    = false
         // The card sizes the text view by frame (see `layout()`), so the text view
@@ -364,8 +368,15 @@ final class MarkdownCardView: NSView {
         // card instead of the text view and nothing could be selected.
         textView.frame = NSRect(x: padding, y: padding, width: textWidth,
                                 height: max(bounds.height - padding * 2, 0))
+        // Wrap at the width the card's height was measured at when the two agree
+        // to within the re-measure tolerance below. Wrapping at the exact bounds
+        // width instead let a half-point difference re-wrap onto one more line
+        // than the height allowed for, and the text view (not vertically
+        // resizable) clipped it.
+        let measuredAt = presetWidth ?? (measuredWidth > 0 ? measuredWidth : bounds.width)
+        let wrapWidth = abs(measuredAt - bounds.width) <= 0.5 ? measuredAt : bounds.width
         textView.textContainer?.containerSize = NSSize(
-            width: textWidth,
+            width: max(wrapWidth - padding * 2, 1),
             height: CGFloat.greatestFiniteMagnitude
         )
 

@@ -605,8 +605,14 @@ final class TranscriptTextViewSelectionSurvivalTests: XCTestCase {
         XCTAssertEqual(f.textView.selectedRange, selected)
     }
 
+    /// Taking focus is not enough to scroll a reader headlessly: in a never-activated
+    /// xctest process AppKit does not scroll when a text view becomes first responder
+    /// or its selection is set, so a plain rig cannot tell a guarded restore from an
+    /// unguarded one. This window does what AppKit does in an active window -- taking
+    /// first responder, and any selection change, scrolls the selection into view --
+    /// so that `TranscriptSelection.restore`'s own guard is what keeps the reader put.
     func testRestoringACardSelectionDoesNotScrollTheReader() {
-        let window = makeRigWindow(self, size: NSSize(width: 900, height: 300))
+        let window = makeScrollOnFocusWindow(self, size: NSSize(width: 900, height: 300))
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 900, height: 300))
         let doc = RigFlippedDoc(frame: NSRect(x: 0, y: 0, width: 900, height: 5000))
         scroll.documentView = doc
@@ -622,22 +628,44 @@ final class TranscriptTextViewSelectionSurvivalTests: XCTestCase {
         guard let tv = rigAllSubviews(of: turn).compactMap({ $0 as? NSTextView }).first(where: { !$0.isFieldEditor }) else {
             return XCTFail("no card text view")
         }
+        let follow = NotificationCenter.default.addObserver(forName: NSTextView.didChangeSelectionNotification,
+                                                            object: tv, queue: nil) { _ in
+            tv.scrollRangeToVisible(tv.selectedRange)
+        }
+        addTeardownBlock { NotificationCenter.default.removeObserver(follow) }
+        let clip = scroll.contentView
+        func readFromTheTop() {
+            clip.scroll(to: NSPoint(x: 0, y: 0))
+            scroll.reflectScrolledClipView(clip)
+        }
+
+        // Control: without the guard, taking focus in this window really does yank the reader.
+        readFromTheTop()
         XCTAssertTrue(window.makeFirstResponder(tv))
         tv.setSelectedRange(selected)
+        let yanked = clip.bounds.origin.y
+        print("SCROLLGUARD control: unguarded focus + selection moved the clip origin by \(yanked)")
+        XCTAssertGreaterThan(yanked, 1000, "precondition: the harness must scroll when nothing guards it, or this test proves nothing")
+        _ = window.makeFirstResponder(nil)
 
         // The reader is looking at the top of the transcript.
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: 0))
-        scroll.reflectScrolledClipView(scroll.contentView)
-        let before = scroll.contentView.bounds.origin
+        readFromTheTop()
+        let before = clip.bounds.origin
 
         let saved = TranscriptSelection.capture(in: turn)
-        XCTAssertNotNil(saved, "capture ignored a selection held by a plain text view")
+        XCTAssertNil(saved, "precondition: nothing is selected while focus is elsewhere")
+        XCTAssertTrue(window.makeFirstResponder(tv))
+        tv.setSelectedRange(selected)
+        readFromTheTop()   // the reader never moved: only the capture below matters
+        let held = TranscriptSelection.capture(in: turn)
+        XCTAssertNotNil(held, "capture ignored a selection held by a plain text view")
         turn.removeFromSuperview()
         doc.addSubview(turn)
-        saved?.restore()
+        held?.restore()
 
-        XCTAssertEqual(scroll.contentView.bounds.origin, before, "restoring a selection must not scroll the reader away")
+        XCTAssertEqual(clip.bounds.origin, before, "restoring a selection must not scroll the reader away")
         XCTAssertEqual(tv.selectedRange, selected, "the selection itself must still come back")
+        XCTAssertTrue(window.firstResponder === tv, "focus must come back too")
     }
 
     func testCaptureIsNilWhenTheCardTextViewHasNoSelection() {
@@ -678,3 +706,610 @@ final class TranscriptTextViewSelectionSurvivalTests: XCTestCase {
 
 
 
+
+// MARK: - A window whose focus changes scroll, like an active window's do
+
+/// Offscreen key window that, like AppKit in an active window, scrolls a text view's
+/// selection into view when the text view takes first responder. Headless AppKit
+/// does not do that, which would make every "must not scroll the reader" guard
+/// vacuous.
+final class RigScrollOnFocusWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var isKeyWindow: Bool { true }
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let ok = super.makeFirstResponder(responder)
+        if ok, let tv = responder as? NSTextView, !tv.isFieldEditor { tv.scrollRangeToVisible(tv.selectedRange) }
+        return ok
+    }
+}
+
+func makeScrollOnFocusWindow(_ testCase: XCTestCase, size: NSSize) -> RigScrollOnFocusWindow {
+    _ = NSApplication.shared
+    let window = RigScrollOnFocusWindow(contentRect: NSRect(origin: .zero, size: size),
+                                        styleMask: .borderless, backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.makeKey()
+    rigSettle()
+    testCase.addTeardownBlock { window.close() }
+    return window
+}
+
+// MARK: - A rig shaped like the real ReplView pane
+
+/// Mirrors `ReplClipView` (flipped clip). `ReplView.swift` is not compiled into this
+/// test bundle (it needs `AppStore` and half the app), so the real classes cannot be
+/// named here; both are plain flipped views, which is all they are.
+final class RigReplClipView: NSClipView { override var isFlipped: Bool { true } }
+/// Mirrors `TranscriptDocumentView`: flipped, not opaque, no constraints.
+final class RigTranscriptDocumentView: NSView {
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+}
+
+/// window content -> pane -> { NSScrollView(ReplClipView-shaped clip, TranscriptDocumentView-shaped
+/// document view -> ChatTurnView), JumpToLatestOverlay above it, an input-bar stand-in }, plus a
+/// window-level `ToastBannerView` above everything, as `MainLayout` stacks them. The pane's
+/// `FollowTailController` is the real one.
+///
+/// Not present: `ActivityTickerView` (its `setup()` subscribes to `AppStore.shared`, which
+/// cannot be built in a logic test). Its hit-test is the same `OverlayHitTest` pass-through
+/// `ToastBannerView` and `JumpToLatestOverlay` use.
+final class ReplRig {
+    static let windowWidth: CGFloat = 1500
+    static let paneHeight: CGFloat = 640
+    static let inputBarHeight: CGFloat = 60
+
+    let window: RigWindow
+    let pane = NSView()
+    let scroll = NSScrollView()
+    let clip = RigReplClipView()
+    let doc = RigTranscriptDocumentView()
+    let overlay: JumpToLatestOverlay
+    let toast = ToastBannerView()
+    let inputBar = NSView()
+    let followTail: FollowTailController
+    private(set) var turn: ChatTurnView
+    private(set) var blocks: [TurnBlock]
+    private(set) var paneWidth: CGFloat
+    /// The width turns are measured at. `ReplView` reads it from the clip view; a rig
+    /// may pin it so that two rigs measure at the same width.
+    var islandWidth: CGFloat?
+    var flips: [FollowTailController.Flip] = []
+    var content: NSView { window.contentView! }
+
+    var contentWidth: CGFloat { islandWidth ?? max(clip.bounds.width, 1) }
+
+    init(_ testCase: XCTestCase, blocks: [TurnBlock], paneWidth: CGFloat, islandWidth: CGFloat? = nil,
+         pinned: Bool = true) {
+        let window = makeRigWindow(testCase, size: NSSize(width: Self.windowWidth,
+                                                          height: Self.paneHeight + Self.inputBarHeight))
+        self.window = window
+        self.paneWidth = paneWidth
+        self.islandWidth = islandWidth
+        self.blocks = blocks
+        let overlay = JumpToLatestOverlay(frame: .zero)
+        self.overlay = overlay
+        let contentView = window.contentView!
+
+        pane.frame = contentView.bounds
+        contentView.addSubview(pane)
+        scroll.contentView = clip
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        pane.addSubview(scroll)
+        doc.frame = NSRect(x: 0, y: 0, width: 400, height: 1)
+        scroll.documentView = doc
+        pane.addSubview(inputBar)
+        pane.addSubview(overlay, positioned: .above, relativeTo: scroll)
+        contentView.addSubview(toast)   // last: on top of everything, like MainLayout's overlays
+        followTail = FollowTailController(scrollView: scroll, overlay: overlay)
+        turn = ReplRig.makeTurn(blocks)
+        followTail.documentHeight = { [unowned doc] in doc.frame.height }
+        followTail.contentWidth = { [unowned self] in self.contentWidth }
+        followTail.onFlip = { [unowned self] flip in self.flips.append(flip) }
+        if !pinned { overlay.setFollowingTail(false) }
+        resizeFrames(to: paneWidth)
+        materializeTurn()
+    }
+
+    private static func makeTurn(_ blocks: [TurnBlock]) -> ChatTurnView {
+        ChatTurnView(turn: ChatTurn(userInput: "hi", timestamp: Date(), blocks: blocks, isComplete: true),
+                     contentAvailable: true, interaction: TurnInteractionState())
+    }
+
+    private func resizeFrames(to width: CGFloat) {
+        paneWidth = width
+        let area = NSRect(x: 0, y: Self.inputBarHeight, width: width, height: Self.paneHeight)
+        scroll.frame = area
+        overlay.frame = area
+        inputBar.frame = NSRect(x: 0, y: 0, width: width, height: Self.inputBarHeight)
+        toast.frame = content.bounds
+    }
+
+    /// `ReplView.measure`: detached, width then height then frame; the held selection is
+    /// carried across the detach.
+    @discardableResult
+    func measure() -> CGFloat {
+        let superview = turn.superview
+        let selection = TranscriptSelection.capture(in: turn)
+        superview.map { _ in turn.removeFromSuperview() }
+        turn.setIslandWidth(contentWidth)
+        let height = max(turn.islandHeight(), TurnHeightEstimator.minimumTurnHeight)
+        turn.setFrameSize(NSSize(width: contentWidth, height: height))
+        superview?.addSubview(turn)
+        selection?.restore()
+        return height
+    }
+
+    /// `ReplView.materialize` steps 3 and 4 for a turn that is not there yet: measure
+    /// detached, add, position, size the document.
+    func materializeTurn() {
+        measure()
+        doc.addSubview(turn)
+        place()
+    }
+
+    func place() {
+        turn.setFrameOrigin(NSPoint(x: 0, y: 0))
+        doc.setFrameSize(NSSize(width: contentWidth, height: max(turn.frame.height, clip.bounds.height)))
+    }
+
+    /// A pane width change as `ReplView` sees it: frames first, then the pass that re-measures.
+    func changePane(to width: CGFloat, islandWidth: CGFloat? = nil) {
+        self.islandWidth = islandWidth
+        resizeFrames(to: width)
+        measure()
+        place()
+    }
+
+    /// A block streams into the turn, then the pass re-measures it.
+    func stream(_ block: TurnBlock) {
+        blocks.append(block)
+        turn.update(turn: ChatTurn(userInput: "hi", timestamp: Date(), blocks: blocks, isComplete: false))
+        measure()
+        place()
+    }
+
+    /// Lays the pane out until the clip view's width (which a scroller appearing changes) stops moving
+    /// the width turns are measured at.
+    func converge() {
+        for _ in 0..<5 {
+            content.layoutSubtreeIfNeeded()
+            let width = max(clip.bounds.width, 1)
+            if islandWidth == nil, abs(width - turn.frame.width) > 0.5 {
+                measure()
+                place()
+            } else { break }
+        }
+        content.layoutSubtreeIfNeeded()
+        content.displayIfNeeded()
+    }
+
+    var cardTextView: NSTextView? {
+        rigAllSubviews(of: turn).compactMap { $0 as? NSTextView }.first { !$0.isFieldEditor }
+    }
+
+    func hit(atWindowPoint p: NSPoint) -> NSView? { content.hitTest(content.convert(p, from: nil)) }
+
+    /// Points over the paragraph, in window coordinates: across the first, a middle and the
+    /// last line, from near the left edge to near the right.
+    func probePoints() -> [NSPoint] {
+        guard let tv = cardTextView, let lm = tv.layoutManager, let tc = tv.textContainer else { return [] }
+        lm.ensureLayout(for: tc)
+        let glyphs = lm.numberOfGlyphs
+        guard glyphs > 0 else { return [] }
+        let origin = tv.textContainerOrigin
+        var points: [NSPoint] = []
+        for glyph in [0, glyphs / 2, glyphs - 1] {
+            let rect = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            for fraction in [CGFloat(0.04), 0.3, 0.6, 0.96] {
+                let local = NSPoint(x: origin.x + rect.minX + rect.width * fraction, y: origin.y + rect.midY)
+                points.append(tv.convert(local, to: nil))
+            }
+        }
+        return points
+    }
+}
+
+// MARK: - Hit-testing in the real pane's shape
+
+/// A mouse-down over the paragraph must reach the card's text view, at any pane width,
+/// whatever phase of layout the pane is in, with the pane's overlays over it.
+final class ReplPaneHitTestFidelityTests: XCTestCase {
+
+    private let widths: [CGFloat] = [520, 640, 780, 900, 1415]
+    private let blocks: [TurnBlock] = [.text(ProseElement.markdown)]
+
+    /// Window-coordinate probe points and the converged island width for a pane width,
+    /// from a fully laid-out twin of the pane.
+    private func reference(width: CGFloat) -> (points: [NSPoint], islandWidth: CGFloat)? {
+        let twin = ReplRig(self, blocks: blocks, paneWidth: width)
+        twin.converge()
+        let points = twin.probePoints()
+        guard !points.isEmpty, twin.cardTextView != nil else { XCTFail("twin pane has no card text view at \(width)"); return nil }
+        return (points, twin.turn.frame.width)
+    }
+
+    private func misses(_ rig: ReplRig, _ points: [NSPoint]) -> [String] {
+        guard let tv = rig.cardTextView else { return ["no card text view"] }
+        return points.compactMap { p in
+            let hit = rig.hit(atWindowPoint: p)
+            return hit === tv ? nil : "(\(Int(p.x)),\(Int(p.y))) -> \(rigChain(hit))"
+        }
+    }
+
+    private enum Phase: String, CaseIterable {
+        case beforeAnyLayoutPass = "before any layout pass (frames set, nothing laid out)"
+        case afterARunLoopTurn = "after a run-loop turn without an explicit layout"
+        case afterALayoutPass = "after a layout pass"
+    }
+
+    private func advance(_ rig: ReplRig, to phase: Phase) {
+        switch phase {
+        case .beforeAnyLayoutPass: break
+        case .afterARunLoopTurn: rigSettle()
+        case .afterALayoutPass: rig.content.layoutSubtreeIfNeeded()
+        }
+    }
+
+    private func checkFreshPanes(_ phases: [Phase]) {
+        for pinned in [true, false] {
+            for width in widths {
+                guard let ref = reference(width: width) else { continue }
+                let rig = ReplRig(self, blocks: blocks, paneWidth: width, islandWidth: ref.islandWidth, pinned: pinned)
+                for phase in phases {
+                    advance(rig, to: phase)
+                    let failed = misses(rig, ref.points)
+                    XCTAssertTrue(failed.isEmpty,
+                                  "pane \(Int(width)), \(pinned ? "following the tail" : "scrolled back, pill shown"), \(phase.rawValue): \(failed.count) of \(ref.points.count) points miss the card text view: \(failed.prefix(3))")
+                }
+            }
+        }
+    }
+
+    /// A freshly materialized turn, the moment it is added: measured, sized and positioned by
+    /// `ReplView`, but `ChatTurnView.layout()` has not placed its blocks yet.
+    func testTheCardTextViewIsHitOverTheParagraphAtEveryWidthBeforeTheFirstLayoutPass() {
+        checkFreshPanes([.beforeAnyLayoutPass])
+    }
+
+    /// Fresh pane at each width, with the pill hidden and shown.
+    func testTheCardTextViewIsHitOverTheParagraphAtEveryWidthOnceLayoutHasRun() {
+        checkFreshPanes([.afterARunLoopTurn, .afterALayoutPass])
+    }
+
+    /// One pane, resized through the widths via the sequence `ReplView.measure` uses.
+    func testTheCardTextViewIsHitOverTheParagraphAfterEveryPaneWidthChange() {
+        guard let start = reference(width: 900) else { return }
+        let rig = ReplRig(self, blocks: blocks, paneWidth: 900, islandWidth: start.islandWidth)
+        rig.converge()
+        for width in [640, 520, 1415, 780, 900, 520, 1415 as CGFloat] {
+            guard let ref = reference(width: width) else { continue }
+            rig.changePane(to: width, islandWidth: ref.islandWidth)
+            for phase in Phase.allCases {
+                advance(rig, to: phase)
+                let failed = misses(rig, ref.points)
+                XCTAssertTrue(failed.isEmpty,
+                              "after resizing to \(Int(width)), \(phase.rawValue): \(failed.count) of \(ref.points.count) points miss the card text view: \(failed.prefix(3))")
+            }
+        }
+    }
+}
+
+// MARK: - A re-measure in the middle of a drag
+
+/// `ReplView.measure` detaches the turn (dropping first responder) and puts the held
+/// selection back. A streamed block, or a tool result expanding, can trigger that while
+/// the operator is still dragging. The drag must still end up selecting what was dragged.
+///
+/// The drag is driven through `RigWindow` as elsewhere: the mouse-down enters the text
+/// view's own nested tracking loop. The re-measure runs from a timer that fires *inside*
+/// that loop (event-tracking run-loop mode, as a main-queue pass would), after the first
+/// dragged events have been consumed; the timer then queues the rest of the drag and the
+/// mouse-up.
+final class ProseSelectionRemeasureMidDragTests: XCTestCase {
+
+    private struct Gesture {
+        let expected: NSRange
+        let expectedString: String
+        let points: [NSPoint]
+    }
+
+    /// A drag across the end of one wrapped line and the start of the next.
+    private func gesture(in tv: NSTextView, steps: Int = 8) -> Gesture? {
+        let text = tv.string as NSString
+        let start = text.range(of: "Second paragraph").location
+        guard start != NSNotFound else { return nil }
+        let lines = Target.lineRanges(tv).filter { $0.location >= start && $0.length >= 20 }
+        guard let first = lines.first, let second = lines.first(where: { $0.location == NSMaxRange(first) }) else { return nil }
+        let range = NSRange(location: NSMaxRange(first) - 8, length: 16)
+        _ = second
+        let a = Target.windowRect(tv, NSRange(location: range.location, length: 1))
+        let b = Target.windowRect(tv, NSRange(location: NSMaxRange(range) - 1, length: 1))
+        let from = NSPoint(x: a.minX + 1, y: a.midY), to = NSPoint(x: b.maxX - 1, y: b.midY)
+        let points = (1...steps).map { i -> NSPoint in
+            let f = CGFloat(i) / CGFloat(steps)
+            return NSPoint(x: from.x + (to.x - from.x) * f, y: from.y + (to.y - from.y) * f)
+        }
+        return Gesture(expected: range, expectedString: text.substring(with: range), points: [from] + points)
+    }
+
+    private func mouse(_ type: NSEvent.EventType, _ window: NSWindow, _ p: NSPoint, _ n: Int, _ t: TimeInterval) -> NSEvent {
+        NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: t, windowNumber: window.windowNumber,
+                           context: nil, eventNumber: n, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
+    }
+
+    /// Runs the drag, calling `interrupt` after the first dragged events have been consumed.
+    /// Returns whether the safety net (a background mouse-up) had to release a stuck loop.
+    private func dragInterrupted(_ rig: ReplRig, _ g: Gesture, interrupt: @escaping () -> Void) -> Bool {
+        let window = rig.window
+        let t0 = ProcessInfo.processInfo.systemUptime
+        let number = 777
+        let down = mouse(.leftMouseDown, window, g.points[0], number, t0)
+        let drags = Array(g.points.dropFirst())
+        let early = drags.prefix(3), late = drags.dropFirst(3)
+        for (i, p) in early.enumerated() { NSApp.postEvent(mouse(.leftMouseDragged, window, p, number, t0 + 0.001 * Double(i + 1)), atStart: false) }
+        let lateEvents = late.enumerated().map { mouse(.leftMouseDragged, window, $0.element, number, t0 + 0.001 * Double($0.offset + 4)) }
+        let up = mouse(.leftMouseUp, window, g.points.last!, number, t0 + 0.05)
+
+        let timer = Timer(timeInterval: 0.15, repeats: false) { _ in
+            interrupt()
+            for e in lateEvents { NSApp.postEvent(e, atStart: false) }
+            NSApp.postEvent(up, atStart: false)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        let rescue = mouse(.leftMouseUp, window, g.points.last!, number, t0 + 0.06)
+        let fired = Fired()
+        let net = DispatchSource.makeTimerSource(queue: .global())
+        net.schedule(deadline: .now() + 4)
+        net.setEventHandler { fired.set(); NSApp.postEvent(rescue, atStart: false) }
+        net.resume()
+        window.sendEvent(down)
+        net.cancel()
+        timer.invalidate()
+        return fired.value
+    }
+
+    private final class Fired {
+        private let lock = NSLock()
+        private var v = false
+        func set() { lock.lock(); v = true; lock.unlock() }
+        var value: Bool { lock.lock(); defer { lock.unlock() }; return v }
+    }
+
+    private func leftovers() -> Int {
+        var n = 0
+        while NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged], until: .distantPast,
+                              inMode: .default, dequeue: true) != nil { n += 1 }
+        return n
+    }
+
+    private func run(_ what: String, expectInterrupt: Bool = true, interrupt: (ReplRig) -> () -> Void) throws {
+        let rig = ReplRig(self, blocks: [.text(ProseElement.markdown)], paneWidth: 900)
+        rig.converge()
+        guard let tv = rig.cardTextView, let g = gesture(in: tv) else { return XCTFail("could not plan the drag") }
+        let action = interrupt(rig)
+        var ran = false
+        var midSelection = NSRange(location: NSNotFound, length: 0)
+        var heldWhenInterrupted = false
+        let rescued = dragInterrupted(rig, g) {
+            ran = true
+            midSelection = tv.selectedRange
+            heldWhenInterrupted = TranscriptSelection.capture(in: rig.turn) != nil
+            action()
+        }
+        if expectInterrupt {
+            XCTAssertTrue(ran, "\(what): the mid-drag interruption never ran, so nothing was tested")
+            XCTAssertGreaterThan(midSelection.length, 0, "\(what): no selection was in progress when the re-measure ran")
+            XCTAssertTrue(heldWhenInterrupted, "\(what): the card text view was not the first responder holding a selection when the re-measure ran")
+        }
+        let selection = tv.selectedRange
+        let selectedText = (selection.location != NSNotFound && NSMaxRange(selection) <= (tv.string as NSString).length)
+            ? (tv.string as NSString).substring(with: selection) : "?"
+        print("MIDDRAG \(what): selection \(selection) \"\(selectedText)\" expected \(g.expected) first responder \(String(describing: rig.window.firstResponder)) rescued \(rescued) card still attached \(tv.window != nil)")
+        _ = leftovers()
+        XCTAssertFalse(rescued, "\(what): the drag was still waiting for its mouse-up after 4 s; tracking was lost mid-drag")
+        XCTAssertEqual(selection, g.expected,
+                       "\(what): after a re-measure mid-drag the selection is \"\(selectedText)\" \(selection), not the dragged \"\(g.expectedString)\" \(g.expected)")
+        XCTAssertTrue(rig.window.firstResponder === tv, "\(what): the card text view lost focus: \(String(describing: rig.window.firstResponder))")
+    }
+
+    func testControlADragWithNoReMeasureSelectsExactlyTheDraggedText() throws {
+        try run("control (no re-measure)", expectInterrupt: false) { _ in {} }
+    }
+
+    func testADragStillSelectsTheDraggedTextWhenTheTurnIsReMeasuredMidDrag() throws {
+        try run("ReplView.measure sequence mid-drag") { rig in { rig.measure() } }
+    }
+
+    func testADragStillSelectsTheDraggedTextWhenTheBlockIsMeasuredMidDrag() throws {
+        try run("ChatTurnView.measureIsland mid-drag") { rig in {
+            if let island = rigAllSubviews(of: rig.turn).first(where: { $0 is TextBlockView }) {
+                _ = ChatTurnView.measureIsland(island, width: ChatTurnView.blockWidth(paneWidth: rig.contentWidth))
+            }
+        } }
+    }
+
+    func testADragStillSelectsTheDraggedTextWhenABlockStreamsInMidDrag() throws {
+        try run("a streamed block mid-drag") { rig in { rig.stream(.text("A block that streamed in while the operator was dragging.")) } }
+    }
+}
+
+// MARK: - Follow-tail while a selection is held
+
+final class PinnedPaneSelectionTests: XCTestCase {
+
+    private let card = TurnBlock.text(ProseElement.markdown)
+
+    /// `ReplView` pass step 5: a pinned pane ends the pass at the bottom.
+    private func finishPass(_ rig: ReplRig) {
+        if rig.followTail.isPinned { rig.followTail.scrollToBottom() }
+    }
+
+    private func maxOrigin(_ rig: ReplRig) -> CGFloat { rig.doc.frame.height - rig.clip.bounds.height }
+
+    private func run(scrollOnFocus: Bool) {
+        let rig = ReplRig(self, blocks: Array(repeating: card, count: 10), paneWidth: 520)
+        rig.converge()
+        XCTAssertGreaterThan(rig.doc.frame.height, rig.clip.bounds.height + 300, "precondition: the transcript is taller than the pane")
+        rig.followTail.scrollToBottom()
+        XCTAssertTrue(rig.followTail.isPinned, "precondition")
+        XCTAssertEqual(rig.clip.bounds.origin.y, maxOrigin(rig), accuracy: 1, "precondition: at the bottom")
+        // The held selection is in the first card, far above the viewport.
+        guard let tv = rig.cardTextView else { return XCTFail("no card text view") }
+        XCTAssertTrue(rig.window.makeFirstResponder(tv))
+        tv.setSelectedRange(NSRange(location: 7, length: 12))
+        rig.followTail.scrollToBottom()   // taking focus may have moved the reader; this is the pinned pane
+        rig.flips.removeAll()
+
+        var follower: NSObjectProtocol?
+        if scrollOnFocus {
+            follower = NotificationCenter.default.addObserver(forName: NSTextView.didChangeSelectionNotification, object: tv, queue: nil) { _ in
+                tv.scrollRangeToVisible(tv.selectedRange)
+            }
+        }
+        defer { follower.map(NotificationCenter.default.removeObserver) }
+
+        for i in 1...3 {
+            rig.stream(.text("streamed block \(i)"))   // measure(): detach, re-measure, re-attach, restore the selection
+            finishPass(rig)
+            XCTAssertTrue(rig.followTail.isPinned, "block \(i): the pane stopped following the tail")
+            XCTAssertEqual(rig.clip.bounds.origin.y, maxOrigin(rig), accuracy: 1,
+                           "block \(i): the pane is not at the bottom (origin \(rig.clip.bounds.origin.y), bottom \(maxOrigin(rig)))")
+        }
+        XCTAssertEqual(tv.selectedRange, NSRange(location: 7, length: 12), "the held selection was lost")
+        print("PINNEDSELECTION scrollOnFocus=\(scrollOnFocus): flips \(rig.flips.map { "\($0.pinned ? "pin" : "unpin")(\($0.cause.rawValue))" })")
+        if !scrollOnFocus {
+            XCTAssertTrue(rig.flips.isEmpty, "the pinned flag flipped while a block streamed in: \(rig.flips.map { "\($0.pinned) \($0.cause.rawValue)" })")
+        }
+    }
+
+    func testAPinnedPaneKeepsFollowingTheTailWhenABlockStreamsIntoATurnHoldingASelection() {
+        run(scrollOnFocus: false)
+    }
+
+    /// If taking focus does scroll (as in an active window), the restore guard must still
+    /// leave the pane pinned and at the bottom when the pass is over.
+    func testAPinnedPaneEndsAtTheBottomEvenIfTakingFocusScrollsToTheSelection() {
+        run(scrollOnFocus: true)
+    }
+}
+
+// MARK: - MarkdownCardView layout
+
+/// The card sizes its text view by frame in `layout()` (the text view is neither
+/// vertically resizable nor constraint-driven). So a resize of the card has to reach
+/// `layout()`, and the text view must always be tall enough for its laid-out text:
+/// with `isVerticallyResizable` off, anything below the frame is hard-clipped.
+final class MarkdownCardLayoutTests: XCTestCase {
+
+    private let md = "Filed `bugs/open/prose-selection.md` for this one.\n\n"
+        + "Second paragraph with some words to select across lines when the pane is narrow enough to wrap; "
+        + "this sentence keeps going so the paragraph is certain to wrap onto several lines at the width of the "
+        + "transcript pane, and then it goes on a little further for good measure.\n\n- item one\n- item two"
+
+    /// An offscreen window that IS on the window server's books (ordered front, parked far
+    /// outside every screen, never activated), so AppKit's own display-cycle layout runs.
+    private func makeParkedWindow() -> RigWindow {
+        _ = NSApplication.shared
+        let window = RigWindow(contentRect: NSRect(x: 0, y: 0, width: 1500, height: 700),
+                               styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+        window.orderFrontRegardless()
+        window.makeKey()
+        rigSettle(0.15)
+        addTeardownBlock { window.close() }
+        return window
+    }
+
+    private func textView(of card: MarkdownCardView) -> NSTextView? {
+        card.subviews.compactMap { $0 as? NSTextView }.first
+    }
+
+    private func place(_ card: MarkdownCardView, width: CGFloat, in window: NSWindow) {
+        card.presetWidth = width
+        card.frame = NSRect(x: 20, y: 20, width: width, height: MarkdownCardView.measuredHeight(markdown: md, width: width))
+        window.contentView!.addSubview(card)
+    }
+
+    private func assertFillsInterior(_ card: MarkdownCardView, _ tv: NSTextView, _ message: String,
+                                     file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(tv.frame.width, card.bounds.width - 24, accuracy: 0.5, "\(message): width. card \(card.frame), text view \(tv.frame)", file: file, line: line)
+        XCTAssertEqual(tv.frame.height, card.bounds.height - 24, accuracy: 0.5, "\(message): height. card \(card.frame), text view \(tv.frame)", file: file, line: line)
+        XCTAssertEqual(tv.frame.minX, 12, accuracy: 0.5, message, file: file, line: line)
+        XCTAssertEqual(tv.frame.minY, 12, accuracy: 0.5, message, file: file, line: line)
+    }
+
+    // (1) A pure frame resize of the card, nothing else.
+
+    func testResizingTheCardsFrameBringsItsTextViewWithIt() throws {
+        let window = makeParkedWindow()
+        let card = MarkdownCardView(markdown: md)
+        place(card, width: 500, in: window)
+        rigSettle()
+        let tv = try XCTUnwrap(textView(of: card))
+        assertFillsInterior(card, tv, "initial")
+
+        card.setFrameSize(NSSize(width: 360, height: MarkdownCardView.measuredHeight(markdown: md, width: 360)))
+        rigSettle()
+        assertFillsInterior(card, tv, "after card.setFrameSize(360 wide)")
+
+        card.frame = NSRect(x: 20, y: 20, width: 700, height: MarkdownCardView.measuredHeight(markdown: md, width: 700))
+        rigSettle()
+        assertFillsInterior(card, tv, "after card.frame = 700 wide")
+    }
+
+    func testAPaneWidthChangeInTheRealHierarchyBringsTheCardsTextViewWithIt() throws {
+        let rig = ReplRig(self, blocks: [.text(md)], paneWidth: 900)
+        rig.converge()
+        for width in [640 as CGFloat, 520, 1100, 780] {
+            rig.changePane(to: width)
+            rigSettle()   // no explicit layout: whatever AppKit does by itself
+            let tv = try XCTUnwrap(rig.cardTextView)
+            let card = try XCTUnwrap(tv.superview as? MarkdownCardView, "text view is not in a card: \(rigChain(tv))")
+            assertFillsInterior(card, tv, "pane \(Int(width)), no explicit layout pass")
+            XCTAssertEqual(card.bounds.width, ChatTurnView.blockWidth(paneWidth: rig.contentWidth), accuracy: 0.5,
+                           "pane \(Int(width)): the card is not as wide as its block column")
+        }
+    }
+
+    // (2) The last line is never hard-clipped.
+
+    /// Lays `card` out at `layoutWidth`, with the height `measuredHeight` gave for `presetWidth`
+    /// (which is what the real pane does), and returns how much taller the laid-out text is
+    /// than its view (positive = clipped).
+    private func shortfall(presetWidth: CGFloat, layoutWidth: CGFloat, in window: NSWindow) -> CGFloat? {
+        let card = MarkdownCardView(markdown: md)
+        card.presetWidth = presetWidth
+        card.frame = NSRect(x: 0, y: 0, width: layoutWidth,
+                            height: MarkdownCardView.measuredHeight(markdown: md, width: presetWidth))
+        window.contentView!.addSubview(card)
+        card.layoutSubtreeIfNeeded()
+        defer { card.removeFromSuperview() }
+        guard let tv = textView(of: card), let lm = tv.layoutManager, let tc = tv.textContainer else { return nil }
+        lm.ensureLayout(for: tc)
+        return lm.usedRect(for: tc).height - tv.frame.height
+    }
+
+    func testTheCardsTextViewIsNeverShorterThanItsLaidOutTextAcrossWidthsAndHalfPointOffsets() throws {
+        let window = makeRigWindow(self, size: NSSize(width: 1500, height: 900))
+        var worst: (shortfall: CGFloat, desc: String) = (-.infinity, "")
+        var failures: [String] = []
+        // ~10 coarse widths, then a fine sweep so a wrap boundary lands within half a point of some of them.
+        let widths = [300, 380, 460, 540, 620, 700, 820, 940, 1100, 1400].map { CGFloat($0) }
+            + stride(from: 300 as CGFloat, through: 1400, by: 3.7).map { $0 }
+        for w in widths {
+            for offset in [-0.5, 0, 0.5 as CGFloat] {
+                guard let miss = shortfall(presetWidth: w, layoutWidth: w + offset, in: window) else {
+                    return XCTFail("no text view in the card")
+                }
+                if miss > worst.shortfall { worst = (miss, "preset \(w), laid out at \(w + offset)") }
+                if miss > 0.5 { failures.append("preset \(w), laid out at \(w + offset): text is \(miss) pt taller than its view") }
+            }
+        }
+        print("CARDCLIP widths checked \(widths.count * 3), max shortfall \(worst.shortfall) pt at \(worst.desc)")
+        XCTAssertTrue(failures.isEmpty, "\(failures.count) layouts clip the last line (max shortfall \(worst.shortfall) pt at \(worst.desc)); first: \(failures.prefix(3))")
+    }
+}

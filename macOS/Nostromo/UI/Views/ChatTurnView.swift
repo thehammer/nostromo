@@ -509,6 +509,15 @@ class ChatTurnView: NSView, TurnIsland {
         return contentHeight
     }
 
+    /// Columns are positioned in `layout()`, so until the first layout pass they
+    /// sit at the origin and a click over a paragraph would land on the wrong
+    /// view. A turn attached and clicked before AppKit's layout pass ran (the
+    /// same run-loop turn) gets its pass now.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if needsLayout { layoutSubtreeIfNeeded() }
+        return super.hitTest(point)
+    }
+
     override func layout() {
         super.layout()
         remeasureIfNeeded()
@@ -888,6 +897,9 @@ final class CopyMenuTextFieldCell: NSTextFieldCell {
     /// (the first run's, else the cell's) are put on the editor, and the selection
     /// uses the theme's highlight rather than the system one.
     override func setUpFieldEditorAttributes(_ textObj: NSText) -> NSText {
+        // The editor otherwise takes the label's plain string and hands it back
+        // flattened, dropping attributes such as the tool output's `.ligature = 0`.
+        allowsEditingTextAttributes = true
         let text = super.setUpFieldEditorAttributes(textObj)
         let runs = attributedStringValue
         let first = runs.length > 0 ? runs.attributes(at: 0, effectiveRange: nil) : [:]
@@ -899,7 +911,13 @@ final class CopyMenuTextFieldCell: NSTextFieldCell {
         self.font = font
         text.textColor = color
         text.font = font
-        (text as? NSTextView)?.applyTranscriptSelectionTheme()
+        if let editor = text as? NSTextView {
+            editor.applyTranscriptSelectionTheme()
+            // The transcript is dark whatever the Mac's appearance. The unemphasised
+            // selection (window or app inactive) is drawn in a system grey that follows
+            // the appearance: near-white in aqua, where light text on it is unreadable.
+            editor.appearance = NSAppearance(named: .darkAqua)
+        }
         return text
     }
 }

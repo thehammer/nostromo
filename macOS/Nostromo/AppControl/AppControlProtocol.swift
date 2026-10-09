@@ -105,8 +105,16 @@ enum AppControlGeometry {
 /// rest in the queue; `deliverQueuedMouseEvents` then hands those on in order.
 enum AppControlMouse {
 
-    /// Monotonic across calls so successive gestures never reuse an event number.
-    private static var nextEventNumber = 1
+    /// Longest drag the socket will synthesise: every step is a queued event.
+    static let stepRange = 1...200
+
+    /// Event numbers are 16-bit signed once they pass through the event queue, so
+    /// gestures cycle through this range (above the small numbers the window
+    /// server hands real mouse events early in a session).
+    /// `deliverQueuedMouseEvents` tells this gesture's events from the operator's
+    /// by window number *and* this number.
+    private static let eventNumbers = 0x4000...0x7FFF
+    private static var nextEventNumber = eventNumbers.lowerBound
     /// Last timestamp handed out. Each gesture starts at `max(now, last + 1 ms)`,
     /// so the second click of a double-click never starts before the first one's
     /// mouse-up (which is stamped slightly after its down).
@@ -122,7 +130,7 @@ enum AppControlMouse {
             else { throw AppControlError.failed("could not synthesise mouse events") }
             NSApp.postEvent(up, atStart: false)
             window.sendEvent(down)
-            deliverQueuedMouseEvents(to: window)
+            deliverQueuedMouseEvents(to: window, eventNumber: number)
         }
     }
 
@@ -130,7 +138,7 @@ enum AppControlMouse {
     static func drag(in window: NSWindow, from: NSPoint, to: NSPoint, steps: Int = 8,
                      flags: NSEvent.ModifierFlags = []) throws {
         let number = takeEventNumber()
-        let n = max(steps, 1)
+        let n = min(max(steps, stepRange.lowerBound), stepRange.upperBound)
         let t = takeTimestamp(span: Double(n + 1) * 0.001)
         guard let down = event(.leftMouseDown, window, from, flags, number, 1, t) else {
             throw AppControlError.failed("could not synthesise mouse events")
@@ -150,16 +158,28 @@ enum AppControlMouse {
         queued.append(up)
         for e in queued { NSApp.postEvent(e, atStart: false) }
         window.sendEvent(down)
-        deliverQueuedMouseEvents(to: window)
+        deliverQueuedMouseEvents(to: window, eventNumber: number)
     }
 
     /// Whatever the down did not consume (it did not track) still goes to the
     /// window, in order, so the call returns with the gesture complete.
-    private static func deliverQueuedMouseEvents(to window: NSWindow) {
+    ///
+    /// The queue is app-wide, so it can also hold the operator's own mouse-up or
+    /// drag, or one meant for another window or a sheet. Only this gesture's
+    /// events (this window *and* this event number) are delivered; everything
+    /// else goes back at the front of the queue, unchanged and in its original
+    /// order, for whoever it was meant for.
+    private static func deliverQueuedMouseEvents(to window: NSWindow, eventNumber: Int) {
         let mask: NSEvent.EventTypeMask = [.leftMouseUp, .leftMouseDragged]
+        var foreign: [NSEvent] = []
         while let e = NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .default, dequeue: true) {
-            window.sendEvent(e)
+            if e.windowNumber == window.windowNumber && e.eventNumber == eventNumber {
+                window.sendEvent(e)
+            } else {
+                foreign.append(e)
+            }
         }
+        for e in foreign.reversed() { NSApp.postEvent(e, atStart: true) }
     }
 
     /// A start time later than every timestamp already handed out, reserving
@@ -171,7 +191,7 @@ enum AppControlMouse {
     }
 
     private static func takeEventNumber() -> Int {
-        defer { nextEventNumber += 1 }
+        defer { nextEventNumber = nextEventNumber == eventNumbers.upperBound ? eventNumbers.lowerBound : nextEventNumber + 1 }
         return nextEventNumber
     }
 
@@ -181,5 +201,65 @@ enum AppControlMouse {
         NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags, timestamp: timestamp,
                            windowNumber: window.windowNumber, context: nil, eventNumber: number,
                            clickCount: clickCount, pressure: type == .leftMouseUp ? 0 : 1)
+    }
+}
+
+
+/// Read-only hit-test report for the control socket's `hittest`: which view a
+/// mouse-down at a point would land on, and the state that decides whether the
+/// click can select text. Sends no event and changes nothing.
+///
+/// Built to diagnose "I can't select this" in the running app without clicking
+/// in it: the answer is the chain of views from the hit view up to the window's
+/// content view, plus whether the window and app are active and who holds focus.
+enum AppControlHitTest {
+
+    /// `windowPoint` is in AppKit window coordinates (bottom-left origin); the
+    /// reported frames are top-left-origin window-content rects, as in `tree`.
+    static func report(in window: NSWindow, at windowPoint: NSPoint) -> [String: Any] {
+        var chain: [[String: Any]] = []
+        if let content = window.contentView,
+           var view = content.hitTest(content.convert(windowPoint, from: nil)) {
+            let contentHeight = Double(content.bounds.height)
+            while true {
+                chain.append(describe(view, in: window, contentHeight: contentHeight))
+                if view === content { break }
+                guard let parent = view.superview else { break }
+                view = parent
+            }
+        }
+        return [
+            "hit": (chain.first?["class"] as? String) ?? "none",
+            "chain": chain,
+            "window": [
+                "isKeyWindow": window.isKeyWindow,
+                "appIsActive": NSApp.isActive,
+                "firstResponder": window.firstResponder.map { String(describing: type(of: $0)) } ?? "none",
+            ] as [String: Any],
+        ]
+    }
+
+    private static func describe(_ view: NSView, in window: NSWindow, contentHeight: Double) -> [String: Any] {
+        var d: [String: Any] = [
+            "class": String(describing: type(of: view)),
+            "frame": AppControlGeometry.topLeftRect(viewFrameInWindow: view.convert(view.bounds, to: nil),
+                                                     contentHeight: contentHeight),
+            "isHidden": view.isHidden,
+            "alphaValue": Double(view.alphaValue),
+            "acceptsFirstResponder": view.acceptsFirstResponder,
+            "needsLayout": view.needsLayout,
+        ]
+        if let text = view as? NSTextView {
+            d["isSelectable"] = text.isSelectable
+            d["isEditable"] = text.isEditable
+            d["isFieldEditor"] = text.isFieldEditor
+            d["selectedRange"] = ["location": text.selectedRange.location, "length": text.selectedRange.length]
+            d["isFirstResponder"] = window.firstResponder === text
+        } else if let field = view as? NSTextField {
+            d["isSelectable"] = field.isSelectable
+            d["isEditable"] = field.isEditable
+            d["isEditing"] = field.currentEditor() != nil
+        }
+        return d
     }
 }

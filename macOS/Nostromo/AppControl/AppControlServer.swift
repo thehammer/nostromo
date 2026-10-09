@@ -134,6 +134,7 @@ final class AppControlServer {
         case "restore":     return restoreFocus()
         case "click":       return try click(req)
         case "drag":        return try drag(req)
+        case "hittest":     return try hitTest(req)
         case "key":         return try key(req)
         case "type":        return try typeText(req)
         case "paste":       return try paste(req)
@@ -417,6 +418,16 @@ final class AppControlServer {
         // Let the run loop drain any resulting work.
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         return ["hit": hit.map { String(describing: type(of: $0)) } ?? "none"]
+    }
+
+    /// Which view a click at x/y would land on, and the focus state around it.
+    /// Read-only: no event is sent.
+    private func hitTest(_ req: AppControlRequest) throws -> Any {
+        let w = try window(req)
+        guard req.double("x") != nil, req.double("y") != nil else {
+            throw AppControlError.badRequest("hittest needs x and y")
+        }
+        return AppControlHitTest.report(in: w, at: try point(req, w))
     }
 
     /// Press at one point, drag to another, release — for selecting text.

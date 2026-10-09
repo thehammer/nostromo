@@ -47,8 +47,10 @@ enum Theme {
 
     /// Selected transcript text: an opaque blue (not the system selection colour,
     /// which follows the Mac's light/dark setting rather than this always-dark
-    /// theme) with white text on it. ~4:1 for white on the fill, and ~1.9:1
-    /// against the near-black card/row surfaces so the highlight is visible
+    /// theme) with white text on it. Contrast is the WCAG luminance ratio
+    /// (L1 + 0.05) / (L2 + 0.05): the fill's luminance is ~0.213, so white on it
+    /// is ~4.0:1, and against the near-black card/row surfaces (grey 0.085,
+    /// luminance ~0.008) the fill is ~4.5:1, so the highlight stands out
     /// (pinned in `TranscriptSelectionColorTests`).
     static let selectionBackground = NSColor(red: 80/255, green: 125/255, blue: 215/255, alpha: 1)
     static let selectionForeground = NSColor.white

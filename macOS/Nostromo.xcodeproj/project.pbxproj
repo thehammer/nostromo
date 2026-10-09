@@ -27,6 +27,7 @@
 		AA0000020000000000000107 /* StatusBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000007 /* StatusBarView.swift */; };
 		AA0000020000000000000108 /* PaceBarsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000008 /* PaceBarsView.swift */; };
 		AA0000020000000000000109 /* MainLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000009 /* MainLayout.swift */; };
+		RD00000000000000000000A2 /* ToastBannerView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000040 /* ToastBannerView.swift */; };
 		AA0000020000000000000110 /* ToastBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000040 /* ToastBannerView.swift */; };
 		AA0000020000000000000111 /* SessionHealthStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000041 /* SessionHealthStatusView.swift */; };
 		AA0000020000000000000120 /* MotherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000020 /* MotherView.swift */; };
@@ -907,6 +908,7 @@
 				II000000000000000000022 /* AskQuestionView.swift in TestSources */,
 				II000000000000000000032 /* ToolResultView.swift in TestSources */,
 				TT000000000000000000012 /* ChatTurnView.swift in TestSources */,
+				RD00000000000000000000A2 /* ToastBannerView.swift in TestSources */,
 				TT000000000000000000022 /* MarkdownTableView.swift in TestSources */,
 				TT000000000000000000032 /* MarkdownCardView.swift in TestSources */,
 				II000000000000000000042 /* LoadHarnessTargeting.swift in TestSources */,
