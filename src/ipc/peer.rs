@@ -315,7 +315,10 @@ mod tests {
         ] {
             let json = serde_json::to_string(&redact_for_network(msg)).unwrap();
             assert!(!json.contains("/Users/x/repo"), "path leaked: {json}");
-            assert!(json.contains("\"label\":\"L\""), "other fields kept: {json}");
+            // The label is withheld from network peers too (it can be a Jira
+            // key or doc title); an ordinary focus's identity is kept.
+            assert!(!json.contains("\"label\""), "label leaked: {json}");
+            assert!(json.contains("\"tag\":\"t\""), "other fields kept: {json}");
         }
     }
 }

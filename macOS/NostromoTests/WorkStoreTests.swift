@@ -71,4 +71,65 @@ final class WorkStoreTests: XCTestCase {
         store.resolve(requestId: "r1", with: .sendResult(.ok(outcome)))
         XCTAssertEqual(calls, 1)
     }
+
+    // MARK: - A request id is never silently taken over
+
+    private func isSuccess(_ response: WorkResponse) -> Bool {
+        switch response {
+        case .detail(.ok), .sendPreview(.ok), .sendResult(.ok): return true
+        default: return false
+        }
+    }
+
+    private func isTimeout(_ response: WorkResponse) -> Bool {
+        if case .timedOut = response { return true }
+        return false
+    }
+
+    /// Let any continuation the store scheduled on the main queue run.
+    private func pumpMainQueue(for seconds: TimeInterval = 0.05) {
+        RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    func testRegisteringARequestIdThatIsAlreadyPendingFailsTheFirstWaiterInsteadOfReplacingItSilently() {
+        let store = WorkStore()
+        var first: [WorkResponse] = []
+        var second: [WorkResponse] = []
+        store.expect(requestId: "r1") { first.append($0) }
+        store.expect(requestId: "r1") { second.append($0) }
+        pumpMainQueue()
+
+        XCTAssertEqual(first.count, 1, "the displaced waiter must be told, not left hanging until its timeout")
+        if let response = first.first {
+            XCTAssertFalse(isSuccess(response), "the displaced waiter must get an error, not a result")
+            XCTAssertFalse(isTimeout(response), "the displaced waiter must get a clear error, not a timeout")
+        }
+        XCTAssertTrue(second.isEmpty, "the new waiter is still waiting for the daemon's answer")
+        XCTAssertEqual(store.pendingRequestCount, 1)
+
+        // The daemon's answer goes to the new waiter, once, and never to the first again.
+        let outcome = try! JSONDecoder().decode(SendOutcome.self, from: #"{"kind":"seeded"}"#.data(using: .utf8)!)
+        store.resolve(requestId: "r1", with: .sendResult(.ok(outcome)))
+        XCTAssertEqual(second.count, 1)
+        XCTAssertTrue(second.first.map(isSuccess) ?? false)
+        XCTAssertEqual(first.count, 1)
+        XCTAssertEqual(store.pendingRequestCount, 0)
+    }
+
+    func testTheDisplacedWaitersTimeoutDoesNotCutTheNewWaitersWaitShort() {
+        let store = WorkStore(requestTimeout: 0.4)
+        var second: [WorkResponse] = []
+        store.expect(requestId: "r1") { _ in }
+        pumpMainQueue(for: 0.25)                       // t = 0.25 s
+        store.expect(requestId: "r1") { second.append($0) }
+        pumpMainQueue(for: 0.3)                        // t = 0.55 s: the first timer (0.4 s) has fired
+
+        XCTAssertTrue(second.isEmpty,
+                      "the first registration's timeout resolved the second waiter early: \(second)")
+        XCTAssertEqual(store.pendingRequestCount, 1)
+
+        let outcome = try! JSONDecoder().decode(SendOutcome.self, from: #"{"kind":"seeded"}"#.data(using: .utf8)!)
+        store.resolve(requestId: "r1", with: .sendResult(.ok(outcome)))
+        XCTAssertEqual(second.count, 1)
+    }
 }
