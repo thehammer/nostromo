@@ -1904,6 +1904,116 @@ async fn a_tcp_client_cannot_answer_a_decision_request_of_a_sensitive_focus_even
     );
 }
 
+// ── review round 2: per-focus Perri state, agent aliases, creators ────────────
+
+fn perri_state(tag: &str) -> ServerMsg {
+    ServerMsg::PerriState { tag: tag.into(), queue: vec![], current: None }
+}
+
+fn perri_tags(frames: &[ServerMsg]) -> Vec<String> {
+    frames
+        .iter()
+        .filter_map(|m| if let ServerMsg::PerriState { tag, .. } = m { Some(tag.clone()) } else { None })
+        .collect()
+}
+
+struct FixedPerriProvider(Vec<String>);
+
+impl nostromo::ipc::pane_registry::PerriStateProvider for FixedPerriProvider {
+    fn perri_states(&self, _focus_tags: &[String]) -> Vec<ServerMsg> {
+        self.0.iter().map(|t| perri_state(t)).collect()
+    }
+}
+
+#[tokio::test]
+async fn a_tcp_client_is_neither_broadcast_nor_replayed_the_perri_state_of_a_sensitive_focus() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![Topic::Focuses]).await;
+    derive_focus(&mut unix, W).await;
+    h.session_mgr
+        .lock()
+        .unwrap()
+        .configure_perri_state_provider(Arc::new(FixedPerriProvider(vec!["fred".into(), W.into(), "cody-x".into()])));
+
+    // Replay at connect.
+    let (mut tcp, replay) = h.tcp(vec![]).await;
+    assert_eq!(perri_tags(&replay), vec!["cody-x".to_string()], "replay: {replay:?}");
+    let (_unix2, unix_replay) = h.unix(vec![]).await;
+    assert_eq!(perri_tags(&unix_replay).len(), 3, "control: a Unix peer is replayed every focus");
+
+    // Live broadcast.
+    for tag in ["fred", "teri", W, "cody-x"] {
+        h.broadcast(perri_state(tag));
+    }
+    h.broadcast(ServerMsg::Pong);
+    let live = recv_until(&mut tcp, |m| matches!(m, ServerMsg::Pong)).await;
+    assert_eq!(perri_tags(&live), vec!["cody-x".to_string()], "broadcast: {live:?}");
+}
+
+#[tokio::test]
+async fn a_tcp_client_cannot_reach_a_fred_session_spawned_under_a_plugin_qualified_agent_name() {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    for agent in ["teri:teri", " Fred ", "FRED:fred"] {
+        let frames = attack(
+            &mut tcp,
+            ClientMsg::SessionSpawn {
+                tag: "t1".into(),
+                agent_name: agent.into(),
+                view_name: "v".into(),
+                cwd: None,
+                session_id: None,
+                remote_control: false,
+            },
+        )
+        .await;
+        assert_refused(&frames, &format!("session_spawn for agent {agent:?}"));
+    }
+}
+
+#[tokio::test]
+async fn a_focus_created_by_a_fred_session_is_sensitive_even_without_initial_context() {
+    let h = spawn_server().await;
+    let state = mcp_state(&h);
+    let created = create_focus(&state, &json!({"agent": "cody", "title": "Mail from SECRET-SENDER"}), Some("fred")).await;
+    let tag = created["focus_id"].as_str().expect("focus_id").to_string();
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    assert_refused(&attack(&mut tcp, ClientMsg::SessionAttach { tag: tag.clone() }).await, "attach to a Fred-created focus");
+    h.broadcast(ServerMsg::FocusCreated { meta: meta(&tag, "Mail from SECRET-SENDER", "cody", false) });
+    h.broadcast(ServerMsg::Pong);
+    let seen = recv_until(&mut tcp, |m| matches!(m, ServerMsg::Pong)).await;
+    assert!(!json_of(&seen).to_lowercase().contains("secret"), "{seen:?}");
+}
+
+#[tokio::test]
+async fn a_focus_pushed_with_the_fred_agent_under_a_custom_tag_is_sensitive_before_any_session_exists() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    send(&mut unix, &ClientMsg::FocusRegistryPush { focuses: vec![meta("my-mail", "My Mail", "fred", false)] }).await;
+    let _ = sync(&mut unix).await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    assert_refused(&attack(&mut tcp, ClientMsg::SessionAttach { tag: "my-mail".into() }).await, "attach to a custom-tag Fred focus");
+    h.broadcast(pane_content("my-mail"));
+    h.broadcast(ServerMsg::Pong);
+    let seen = recv_until(&mut tcp, |m| matches!(m, ServerMsg::Pong)).await;
+    assert!(!seen.iter().any(|m| matches!(m, ServerMsg::PaneContent { .. })), "{seen:?}");
+}
+
+#[tokio::test]
+async fn a_unix_client_that_subscribed_to_everything_is_not_replayed_retained_frames_again_by_a_second_subscribe() {
+    let h = spawn_server().await;
+    broadcast_retained_set(&h).await;
+    let (mut unix, first) = h.unix(vec![]).await;
+    assert!(count(&first, |m| matches!(m, ServerMsg::FredState { .. })) == 1, "{first:?}");
+
+    send(&mut unix, &ClientMsg::Subscribe { topics: vec![], renders_decisions: false }).await;
+    let second = sync(&mut unix).await;
+    assert!(second.is_empty(), "nothing was added, so nothing may be replayed again: {second:?}");
+}
+
 // ── H4: focus metadata a network peer may see ────────────────────────────────
 
 fn meta(tag: &str, display_name: &str, agent: &str, built_in: bool) -> FocusMeta {

@@ -18,7 +18,7 @@
 //! with no wildcard arm: adding a `ServerMsg` or `ClientMsg` variant breaks
 //! this module's build until the author decides how a network peer is treated.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -69,15 +69,20 @@ impl PeerTrust {
 // ── sensitive tags ────────────────────────────────────────────────────────────
 
 /// Is `name` one of the agents whose sessions hold mail/calendar/todo tools?
-/// Case-insensitive.
+/// Case-insensitive, ignores surrounding whitespace, and looks through a
+/// plugin qualifier (`teri:teri` is the same agent as `teri`).
 pub fn is_teri_or_fred_agent(name: &str) -> bool {
-    name.eq_ignore_ascii_case("fred") || name.eq_ignore_ascii_case("teri")
+    let bare = name.trim().rsplit(':').next().unwrap_or("").trim();
+    bare.eq_ignore_ascii_case("fred") || bare.eq_ignore_ascii_case("teri")
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct Registered {
+    /// Each registered tag with the random opaque id shown to network peers in
+    /// its place. Random rather than derived from the tag, so the id of a
+    /// short slug (a Jira key) cannot be recomputed from a guess.
     #[serde(default)]
-    tags: BTreeSet<String>,
+    tags: BTreeMap<String, String>,
     #[serde(default)]
     jobs: BTreeSet<String>,
     /// Set (in memory only) when the persisted registry exists but cannot be
@@ -104,9 +109,6 @@ struct Registered {
 pub struct SensitiveTags {
     inner: Arc<RwLock<Registered>>,
     path: Option<Arc<PathBuf>>,
-    /// Per-process salt for [`SensitiveTags::opaque_tag`]; keeps the opaque
-    /// tag of a short slug (a Jira key) from being brute-forced.
-    salt: Arc<String>,
 }
 
 impl Default for SensitiveTags {
@@ -121,7 +123,6 @@ impl SensitiveTags {
         Self {
             inner: Arc::new(RwLock::new(Registered::default())),
             path: None,
-            salt: Arc::new(uuid::Uuid::new_v4().to_string()),
         }
     }
 
@@ -141,14 +142,13 @@ impl SensitiveTags {
         Self {
             inner: Arc::new(RwLock::new(registered)),
             path: Some(Arc::new(path)),
-            salt: Arc::new(uuid::Uuid::new_v4().to_string()),
         }
     }
 
     /// Does the focus `tag` carry (or can it act on) Teri/Fred-derived data?
     pub fn tag_is_sensitive(&self, tag: &str) -> bool {
         let registered = self.inner.read().unwrap();
-        is_teri_or_fred_agent(tag) || registered.unreadable || registered.tags.contains(tag)
+        is_teri_or_fred_agent(tag) || registered.unreadable || registered.tags.contains_key(tag)
     }
 
     /// Was Mother job `job_id` created from a work item?
@@ -163,7 +163,9 @@ impl SensitiveTags {
             return;
         }
         let mut registered = self.inner.write().unwrap();
-        if registered.tags.insert(tag.to_string()) {
+        if !registered.tags.contains_key(tag) {
+            let opaque = format!("focus-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+            registered.tags.insert(tag.to_string(), opaque);
             self.persist(&registered);
         }
     }
@@ -176,15 +178,11 @@ impl SensitiveTags {
         }
     }
 
-    /// A stable stand-in for `tag` that reveals none of its text.
-    fn opaque_tag(&self, tag: &str) -> String {
-        // FNV-1a over salt + tag: no hashing dependency needed for a label.
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in self.salt.bytes().chain(tag.bytes()) {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-        format!("focus-{h:016x}")
+    /// The stand-in shown to network peers for a registered `tag`: stable for
+    /// the life of the registration and unrelated to the tag's text. `None` for
+    /// a tag that was never registered (a built-in, or an unreadable registry).
+    fn opaque_tag(&self, tag: &str) -> Option<String> {
+        self.inner.read().unwrap().tags.get(tag).cloned()
     }
 
     /// Write the registry out. Called with the registry's write lock held, so
@@ -249,7 +247,9 @@ pub enum ServerClass<'a> {
     /// list below). Content that can be, such as focus lists, is trimmed by
     /// [`redact_for_network`] instead.
     Open,
-    /// Content of one focus: delivered only if its tag is not sensitive.
+    /// Content of one focus (including a per-focus frame like `PerriState`,
+    /// whose tag alone names the focus): delivered only if its tag is not
+    /// sensitive.
     Focus(&'a str),
     /// Content of one Mother job: delivered only if the job is not work-derived.
     Job(&'a str),
@@ -273,10 +273,9 @@ pub enum ServerClass<'a> {
 //     `mother_resume`, `decision_answer`, `pty_spawn`/`pty_input`/`pty_kill`/…,
 //     `session_spawn` (for a non-Teri/Fred agent), `close_pane`,
 //     `rendered_shape`, and `session_*` verbs on non-sensitive tags.
-//   * daemon → client: PTY output (`pty_*`), Perri state (`perri_state`, also
-//     per-focus), `mother_statusline`, and the pane content / layout /
-//     notifications / decisions / activity / transcripts of every focus that is
-//     NOT a sensitive tag. Pane content of an ordinary dynamic focus can
+//   * daemon → client: PTY output (`pty_*`), `mother_statusline`, and the pane
+//     content / layout / notifications / decisions / activity / transcripts /
+//     Perri state of every focus that is NOT a sensitive tag. Pane content of an ordinary dynamic focus can
 //     therefore still show whatever its agent put there.
 //   * a Teri/Fred-derived focus is only recognised when it is a built-in, was
 //     created through `WorkSend` or `create_focus` with seeded context, or runs
@@ -316,7 +315,8 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::DecisionRequest { tag, .. }
         | ServerMsg::DecisionResolved { tag, .. }
         | ServerMsg::Notification { tag, .. }
-        | ServerMsg::ActivitySnapshot { tag, .. } => ServerClass::Focus(tag),
+        | ServerMsg::ActivitySnapshot { tag, .. }
+        | ServerMsg::PerriState { tag, .. } => ServerClass::Focus(tag),
 
         ServerMsg::Activity(event) => ServerClass::Activity(event.focus_tag.as_deref()),
 
@@ -337,7 +337,6 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // listed above.
         ServerMsg::Welcome { .. }
         | ServerMsg::MotherStatusline(_)
-        | ServerMsg::PerriState { .. }
         | ServerMsg::Pong
         | ServerMsg::Error { .. }
         | ServerMsg::PtySpawned { .. }
@@ -518,8 +517,8 @@ fn redact_meta(meta: &mut FocusMeta, tags: &SensitiveTags) {
     meta.session_summary = None;
     if tags.tag_is_sensitive(&meta.tag) || is_teri_or_fred_agent(&meta.agent_name) {
         meta.display_name = meta.agent_name.clone();
-        if !is_teri_or_fred_agent(&meta.tag) {
-            meta.tag = tags.opaque_tag(&meta.tag);
+        if let Some(opaque) = tags.opaque_tag(&meta.tag) {
+            meta.tag = opaque;
         }
     }
 }
@@ -817,8 +816,8 @@ mod tests {
         assert_eq!(derived.display_name, "cody");
         assert!(!derived.tag.contains("secret"), "{}", derived.tag);
         // The opaque tag is stable, so a client can still tell focuses apart.
-        assert_eq!(derived.tag, tags.opaque_tag("cody-secret-jira-title"));
-        assert_ne!(derived.tag, tags.opaque_tag("cody-other"));
+        assert_eq!(Some(derived.tag.clone()), tags.opaque_tag("cody-secret-jira-title"));
+        assert_eq!(tags.opaque_tag("cody-other"), None, "only registered tags have one");
 
         let ServerMsg::FocusCreated { meta: fred } =
             redact_for_network(ServerMsg::FocusCreated { meta: meta("fred", "fred") }, &tags)

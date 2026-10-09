@@ -462,12 +462,8 @@ where
             (mgr.perri_state_provider(), tags)
         };
         let frames = provider.map(|p| p.perri_states(&focus_tags)).unwrap_or_default();
-        for msg in frames {
-            let bytes = serde_json::to_vec(&msg).unwrap_or_default();
-            if !bytes.is_empty() {
-                let _ = write_frame(&mut writer, &bytes).await;
-            }
-        }
+        replay_messages(&mut writer, frames.into_iter().filter_map(|m| outbound(trust, m, &sensitive)))
+            .await;
     }
 
     // ── Retained replay — latest Teri/Fred/work frames, local clients only ────
@@ -476,7 +472,7 @@ where
     if trust.is_network() {
         replay_messages(&mut writer, [withheld_msg()]).await;
     } else {
-        replay_messages(&mut writer, retained_matching(&retained, &topics, &[])).await;
+        replay_messages(&mut writer, retained_matching(&retained, &topics, None)).await;
     }
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
@@ -553,7 +549,7 @@ where
                             let frames = if trust.is_network() {
                                 vec![]
                             } else {
-                                retained_matching(&retained, &new_topics, &topics)
+                                retained_matching(&retained, &new_topics, Some(&topics))
                             };
                             topics = new_topics;
                             replay_messages(&mut writer, frames).await;
@@ -1243,11 +1239,12 @@ fn retain_key(msg: &ServerMsg) -> Option<String> {
 }
 
 /// Retained frames a client subscribed to `topics` should be replayed, minus
-/// those it was already subscribed to under `already` (empty = none yet).
+/// those it was already subscribed to under `already` (`None` = a first
+/// subscribe, nothing was delivered yet).
 fn retained_matching(
     retained: &RetainedCache,
     topics: &[Topic],
-    already: &[Topic],
+    already: Option<&[Topic]>,
 ) -> Vec<ServerMsg> {
     retained
         .lock()
@@ -1255,7 +1252,7 @@ fn retained_matching(
         .values()
         .filter(|m| {
             message_matches_topics(m, topics)
-                && (already.is_empty() || !message_matches_topics(m, already))
+                && already.is_none_or(|old| !message_matches_topics(m, old))
         })
         .cloned()
         .collect()

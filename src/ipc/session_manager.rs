@@ -452,17 +452,19 @@ impl SessionManager {
     ) -> crate::activity::store::Attribution {
         use crate::activity::store::Attribution;
 
-        let tag = event
-            .focus_tag
+        let from_focus_tag = event.focus_tag.as_ref().filter(|tag| self.knows_focus(tag)).cloned();
+        let from_session_id = event
+            .session_id
             .as_ref()
-            .filter(|tag| self.knows_focus(tag))
-            .cloned()
-            .or_else(|| {
-                event
-                    .session_id
-                    .as_ref()
-                    .and_then(|sid| self.tag_for_session_id(sid))
-            });
+            .and_then(|sid| self.tag_for_session_id(sid));
+        // The two normally agree. When they do not, a sensitive owner wins:
+        // what a network peer may be shown is decided by this tag, and a
+        // hook-supplied `focus_tag` must not be able to move a Teri/Fred
+        // session's events onto an ordinary focus.
+        let tag = match from_session_id {
+            Some(sid_tag) if self.sensitive.tag_is_sensitive(&sid_tag) => Some(sid_tag),
+            sid_tag => from_focus_tag.or(sid_tag),
+        };
 
         match (tag, &event.agent_id) {
             (Some(tag), Some(agent_id)) => Attribution::Subagent {
@@ -1287,6 +1289,7 @@ impl SessionManager {
     /// and eviction is irreversible — see `pending_departures` and
     /// `daemon_created_tags`.
     pub fn set_focus_registry(&mut self, focuses: Vec<FocusMeta>) -> (Vec<FocusMeta>, Vec<String>) {
+        self.mark_teri_fred_focuses(&focuses);
         // An empty push carries no information about what still exists — it is
         // what a client sends before it has loaded anything. Take it as the
         // registry (unchanged from pre-W7 behaviour) but never as evidence that
@@ -1438,6 +1441,15 @@ impl SessionManager {
         Some(tags)
     }
 
+    /// A focus that runs the Fred/Teri agent is sensitive even when no session
+    /// of it is live yet (its persisted layout and panes are replayed to a
+    /// connecting client before the session respawns).
+    fn mark_teri_fred_focuses(&self, focuses: &[FocusMeta]) {
+        for focus in focuses.iter().filter(|f| is_teri_or_fred_agent(&f.agent_name)) {
+            self.sensitive.mark_tag(&focus.tag);
+        }
+    }
+
     /// Current focus registry snapshot.
     pub fn focus_registry(&self) -> Vec<FocusMeta> {
         self.focus_registry.clone()
@@ -1463,6 +1475,7 @@ impl SessionManager {
     /// `create_focus` MCP tool, which adds an agent-spawned focus to the
     /// daemon-owned registry.
     pub fn add_or_update_focus(&mut self, meta: FocusMeta) -> Vec<FocusMeta> {
+        self.mark_teri_fred_focuses(std::slice::from_ref(&meta));
         // This is the only way a focus enters the registry other than a Mac
         // push, so it is where a daemon-created tag earns its eviction
         // exemption (W7 — D8b).
