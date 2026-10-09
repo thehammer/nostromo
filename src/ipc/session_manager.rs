@@ -1289,7 +1289,6 @@ impl SessionManager {
     /// and eviction is irreversible — see `pending_departures` and
     /// `daemon_created_tags`.
     pub fn set_focus_registry(&mut self, focuses: Vec<FocusMeta>) -> (Vec<FocusMeta>, Vec<String>) {
-        self.mark_teri_fred_focuses(&focuses);
         // An empty push carries no information about what still exists — it is
         // what a client sends before it has loaded anything. Take it as the
         // registry (unchanged from pre-W7 behaviour) but never as evidence that
@@ -1444,7 +1443,10 @@ impl SessionManager {
     /// A focus that runs the Fred/Teri agent is sensitive even when no session
     /// of it is live yet (its persisted layout and panes are replayed to a
     /// connecting client before the session respawns).
-    fn mark_teri_fred_focuses(&self, focuses: &[FocusMeta]) {
+    ///
+    /// Called for registries pushed by a *local* peer only: the registration is
+    /// permanent and persisted, so a network peer must not be able to grow it.
+    pub fn mark_teri_fred_focuses(&self, focuses: &[FocusMeta]) {
         for focus in focuses.iter().filter(|f| is_teri_or_fred_agent(&f.agent_name)) {
             self.sensitive.mark_tag(&focus.tag);
         }

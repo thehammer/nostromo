@@ -848,6 +848,9 @@ fn handle_client_msg(
         ClientMsg::FocusRegistryPush { focuses } => {
             let (updated, departed, reconcilable, pane_registry) = {
                 let mut mgr = session_mgr.lock().unwrap();
+                if !trust.is_network() {
+                    mgr.mark_teri_fred_focuses(&focuses);
+                }
                 let (updated, departed) = mgr.set_focus_registry(focuses);
                 (
                     updated,

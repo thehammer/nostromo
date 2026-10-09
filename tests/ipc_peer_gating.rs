@@ -2003,6 +2003,16 @@ async fn a_focus_pushed_with_the_fred_agent_under_a_custom_tag_is_sensitive_befo
 }
 
 #[tokio::test]
+async fn a_tcp_client_cannot_grow_the_sensitive_registry_by_pushing_fred_focuses() {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    send(&mut tcp, &ClientMsg::FocusRegistryPush { focuses: vec![meta("tcp-pushed", "X", "fred", false)] }).await;
+    let _ = sync(&mut tcp).await;
+    let tags = h.session_mgr.lock().unwrap().sensitive_tags();
+    assert!(!tags.tag_is_sensitive("tcp-pushed"), "a network peer must not register permanent entries");
+}
+
+#[tokio::test]
 async fn a_unix_client_that_subscribed_to_everything_is_not_replayed_retained_frames_again_by_a_second_subscribe() {
     let h = spawn_server().await;
     broadcast_retained_set(&h).await;

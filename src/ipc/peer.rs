@@ -195,6 +195,12 @@ impl SensitiveTags {
             return opaque.clone();
         }
         let opaque = new_opaque_tag();
+        // Bounded: a network peer can push arbitrarily many tags through
+        // `focus_registry_push`. Past the cap the map restarts, which only
+        // changes the ids shown for these unregistered tags.
+        if registered.ephemeral.len() >= MAX_EPHEMERAL_OPAQUE_TAGS {
+            registered.ephemeral.clear();
+        }
         registered.ephemeral.insert(tag.to_string(), opaque.clone());
         opaque
     }
@@ -221,6 +227,8 @@ impl SensitiveTags {
         }
     }
 }
+
+const MAX_EPHEMERAL_OPAQUE_TAGS: usize = 4096;
 
 fn new_opaque_tag() -> String {
     format!("focus-{}", &uuid::Uuid::new_v4().simple().to_string()[..16])
