@@ -59,6 +59,15 @@ final class FocusStore {
         save()
     }
 
+    /// Set the org of a dynamic focus (from the repo-remote inference). Idempotent;
+    /// no-ops for unknown ids and built-ins.
+    func updateOrg(id: String, org: String?) {
+        guard let idx = focuses.firstIndex(where: { $0.id == id }), !focuses[idx].isBuiltIn,
+              focuses[idx].org != org else { return }
+        focuses[idx].org = org
+        save()
+    }
+
     func remove(_ focus: Focus) {
         guard !focus.isBuiltIn else { return }
         // Guard on membership so a double-remove (e.g. two windows racing a

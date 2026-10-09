@@ -121,6 +121,9 @@ pub async fn create_focus(state: &McpSharedState, args: &Value, _pty_id: Option<
         org: None,
         is_built_in: false,
         session_summary: None,
+        label: None,
+        project_path: cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        select_for_client: None,
     };
     {
         let mut mgr = daemon.session_mgr.lock().unwrap();

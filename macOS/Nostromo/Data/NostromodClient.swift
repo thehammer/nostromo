@@ -73,6 +73,25 @@ struct FocusCreatedMeta: Decodable {
     let org:            String?
     let isBuiltIn:      Bool
     let sessionSummary: String?
+    /// User-facing label (a Jira key, a doc title), when the creator supplied one.
+    let label:          String?
+    /// Absolute working directory the focus was created in. Present only on the
+    /// local (Unix-socket) connection — the daemon strips it for network peers.
+    let projectPath:    String?
+    /// `client_id` whose windows should select this focus when it appears.
+    let selectForClient: String?
+
+    // Explicit so the additive fields default to nil for callers (and tests)
+    // that predate them — the compiler-synthesized memberwise init has no defaults
+    // for `let` properties.
+    init(tag: String, displayName: String, agentName: String, projectName: String?,
+         org: String?, isBuiltIn: Bool, sessionSummary: String?,
+         label: String? = nil, projectPath: String? = nil, selectForClient: String? = nil) {
+        self.tag = tag; self.displayName = displayName; self.agentName = agentName
+        self.projectName = projectName; self.org = org; self.isBuiltIn = isBuiltIn
+        self.sessionSummary = sessionSummary; self.label = label
+        self.projectPath = projectPath; self.selectForClient = selectForClient
+    }
 
     enum CodingKeys: String, CodingKey {
         case tag
@@ -82,6 +101,9 @@ struct FocusCreatedMeta: Decodable {
         case org
         case isBuiltIn      = "is_built_in"
         case sessionSummary = "session_summary"
+        case label
+        case projectPath    = "project_path"
+        case selectForClient = "select_for_client"
     }
 
     /// Convert to a `Focus` model for insertion into `FocusStore`.
@@ -96,11 +118,12 @@ struct FocusCreatedMeta: Decodable {
         Focus(
             id:          tag,
             agentTag:    agentName,
-            projectPath: nil,   // daemon-spawned focuses carry no absolute path
+            projectPath: projectPath,   // nil for built-ins and older daemons
             isBuiltIn:   isBuiltIn,
             org:         org,
             sessionSummary: sessionSummary,
-            daemonTag:   tag
+            daemonTag:   tag,
+            label:       Focus.normalizedLabel(label)
         )
     }
 }
@@ -176,6 +199,19 @@ enum ServerMsg {
     case activitySnapshot(tag: String, streams: [ActivityStreamWire])
     /// Ingestion health verdict for the ambient activity feed.
     case activityHealth(ingesting: Bool, reason: String?, lastEventAt: Date?, hookInstalled: Bool)
+
+    // ── Teri/Fred work views (sensitive; never sent over TCP) ────────────────
+    /// Health of one work source.
+    case workSourceStatus(SourceStatus)
+    /// Full replacement of one group's items (`group == nil` for single-group sources).
+    case workSnapshot(source: WorkSource, group: String?, items: [WorkItem])
+    case teriPicks(PicksSnapshot)
+    /// Targeted answers, keyed by the `request_id` of the request.
+    case workDetail(requestId: String, result: WorkResult<WorkItemDetail>)
+    case workSendPreview(requestId: String, result: WorkResult<SendPreview>)
+    case workSendResult(requestId: String, result: WorkResult<SendOutcome>)
+    /// The daemon withheld these topics from this (network) connection. Informational.
+    case withheld(topics: [String], reason: String)
 
     case unknown
 }
@@ -544,15 +580,19 @@ class NostromodClient {
 
     // MARK: - Handshake
 
+    /// Stable for the life of the process: the id the daemon knows this app by,
+    /// and the one `select_for_client` on a `focus_created` frame names.
+    let clientId = UUID().uuidString
+
     private func sendHello() {
         // protocol v4 adds the focus registry push/pull family. The daemon holds
         // MIN_CLIENT_VERSION at 2, so the shipped GUI keeps working against older daemons.
-        send(ClientHello(clientId: UUID().uuidString, protocolVersion: 4), type: "hello")
+        send(ClientHello(clientId: clientId, protocolVersion: 4), type: "hello")
         // "layout" subscribes to FocusLayout / PaneContent / FocusCreated broadcasts.
         // "decision" subscribes to daemon-driven DecisionRequest broadcasts — being
         // subscribed is also what tells the daemon a client (an operator) exists at
         // all, so `nostromo.ask_decision` can fail fast with `no_operator` otherwise.
-        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]), type: "subscribe")
+        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "work", "layout", "decision"]), type: "subscribe")
     }
 
     /// Clean, unambiguous round-trip probe: no side effects, no fan-out
@@ -697,6 +737,13 @@ class NostromodClient {
             type: "rendered_shape",
             tag: tag
         )
+    }
+
+    /// Send one of the Teri/Fred work-view frames. The daemon refuses these over
+    /// TCP, so this is only meaningful on the Unix-socket connection (the only
+    /// one this client opens). Answers arrive as `ServerMsg.work*` keyed by `request_id`.
+    func send(_ msg: WorkClientMessage) {
+        send(msg, type: msg.wireType)
     }
 
     /// Encode and send `msg`. `type`/`tag` identify the frame for
@@ -957,12 +1004,74 @@ class NostromodClient {
                 )
             }
 
+        // ── Teri/Fred work views ─────────────────────────────────────────────
+        case "work_source_status":
+            if let m = try? decoder.decode(WorkSourceStatusResp.self, from: raw) {
+                return .workSourceStatus(m.status)
+            }
+
+        case "work_snapshot":
+            if let m = try? decoder.decode(WorkSnapshotResp.self, from: raw) {
+                return .workSnapshot(source: m.source, group: m.group, items: m.items)
+            }
+
+        case "teri_picks":
+            if let m = try? decoder.decode(TeriPicksResp.self, from: raw) {
+                return .teriPicks(m.picks)
+            }
+
+        case "work_detail":
+            if let m = try? decoder.decode(WorkDetailResp.self, from: raw) {
+                return .workDetail(requestId: m.request_id, result: m.result)
+            }
+
+        case "work_send_preview":
+            if let m = try? decoder.decode(WorkSendPreviewResp.self, from: raw) {
+                return .workSendPreview(requestId: m.request_id, result: m.result)
+            }
+
+        case "work_send_result":
+            if let m = try? decoder.decode(WorkSendResultResp.self, from: raw) {
+                return .workSendResult(requestId: m.request_id, result: m.result)
+            }
+
+        case "withheld":
+            if let m = try? decoder.decode(WithheldResp.self, from: raw) {
+                return .withheld(topics: m.topics, reason: m.reason)
+            }
+
         default:
             break
         }
 
         return .unknown
     }
+}
+
+// MARK: - Teri/Fred work view response wrappers
+
+private struct WorkSourceStatusResp: Decodable { let status: SourceStatus }
+private struct WorkSnapshotResp: Decodable {
+    let source: WorkSource
+    let group: String?
+    let items: [WorkItem]
+}
+private struct TeriPicksResp: Decodable { let picks: PicksSnapshot }
+private struct WorkDetailResp: Decodable {
+    let request_id: String
+    let result: WorkResult<WorkItemDetail>
+}
+private struct WorkSendPreviewResp: Decodable {
+    let request_id: String
+    let result: WorkResult<SendPreview>
+}
+private struct WorkSendResultResp: Decodable {
+    let request_id: String
+    let result: WorkResult<SendOutcome>
+}
+private struct WithheldResp: Decodable {
+    let topics: [String]
+    let reason: String
 }
 
 // MARK: - Ambient activity response wrappers (activity-path wedge)

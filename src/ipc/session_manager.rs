@@ -2260,6 +2260,9 @@ mod tests {
             org: None,
             is_built_in: false,
             session_summary: None,
+            label: None,
+            project_path: None,
+            select_for_client: None,
         }
     }
 
@@ -2545,6 +2548,9 @@ mod tests {
             org: None,
             is_built_in: true,
             session_summary: None,
+            label: None,
+            project_path: None,
+            select_for_client: None,
         }]);
 
         let finalized = mgr.ingest_activity_event(raw_activity_event(Some("fred"), None));

@@ -159,6 +159,16 @@ class MainLayout: NSView {
             }
             .store(in: &cancellables)
 
+        // A focus this client asked the daemon to create (`select_for_client`)
+        // is selected in the key window only, never in every window.
+        AppStore.shared.focusSelectionRequests
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] focus in
+                guard let self, self.window?.isKeyWindow == true else { return }
+                self.switchFocus(focus)
+            }
+            .store(in: &cancellables)
+
         // Threshold events → toast banners.
         FileWatchers.shared.thresholdEvents
             .receive(on: DispatchQueue.main)

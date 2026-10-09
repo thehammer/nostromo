@@ -112,6 +112,15 @@ async fn tcp_session_list_returns_empty_resp() {
 
     do_handshake(&mut stream).await;
 
+    // A network peer is told once, right after subscribing, which topics are
+    // withheld from it (see src/ipc/peer.rs); drain it before the request below.
+    let withheld = read_frame(&mut stream).await.unwrap();
+    let withheld: ServerMsg = serde_json::from_slice(&withheld).unwrap();
+    assert!(
+        matches!(withheld, ServerMsg::Withheld { .. }),
+        "expected the subscribe-time Withheld notice, got {withheld:?}"
+    );
+
     // → SessionList
     let list_req = ClientMsg::SessionList;
     write_frame(&mut stream, &serde_json::to_vec(&list_req).unwrap())
@@ -171,6 +180,14 @@ async fn tcp_and_unix_share_broadcast() {
     assert!(
         matches!(health, ServerMsg::ActivityHealth { .. }),
         "expected the subscribe-time ActivityHealth replay, got {health:?}"
+    );
+
+    // …followed by the one-time Withheld notice every network peer gets.
+    let withheld_bytes = read_frame(&mut stream).await.unwrap();
+    let withheld: ServerMsg = serde_json::from_slice(&withheld_bytes).unwrap();
+    assert!(
+        matches!(withheld, ServerMsg::Withheld { .. }),
+        "expected the subscribe-time Withheld notice, got {withheld:?}"
     );
 
     // Broadcast a Pong (matches any topic filter since it's not an Activity/Mother msg).

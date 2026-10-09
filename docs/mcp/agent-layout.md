@@ -149,3 +149,27 @@ review flow works until her prompt is rewritten to use `show` instead (see
 `docs/mcp/tools.md`'s "Per-caller tool withdrawal" section — the mechanism
 that will eventually narrow Perri specifically to the curated surface ships
 inert, and stays inert until that prompt change lands).
+
+## Transport trust
+
+`nostromd` serves the Mac app over a Unix socket and iOS/LAN clients over an
+unauthenticated TCP listener. Each connection is tagged with a `PeerTrust`
+(`src/ipc/peer.rs`) by the accept loop that received it: Unix → `LocalOther`,
+TCP → `Tcp`. A network (`Tcp`) peer is **never** sent Teri/Fred data, whatever
+topics it subscribed to (an empty topic list means "everything"):
+
+- `fred_state`, `teri_state`, `work_source_status`, `work_snapshot`,
+  `teri_picks`, `work_detail`, `work_send_preview` and `work_send_result` frames
+  are dropped before topic matching, and are never replayed from the retained
+  cache. After subscribing, a network peer gets one `withheld` frame naming
+  the topics (`fred`, `teri`, `work`).
+- `work_detail_request`, `work_refresh`, `picks_refresh`,
+  `work_send_preview_request`, `work_send` and `fred_seed` are refused with
+  `requires_secure_connection` (in the matching targeted result frame) and
+  change nothing.
+- `FocusMeta.project_path` (an absolute path) is stripped from focus frames.
+
+Every `ServerMsg` / `ClientMsg` variant is classified in `peer.rs` through an
+exhaustive `match`, so adding a variant does not compile until it is classified.
+Perri, Mother, Activity and layout data are not gated (residual risk, tracked
+with the TCP-exposure work).

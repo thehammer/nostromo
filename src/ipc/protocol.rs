@@ -73,6 +73,9 @@ pub enum Topic {
     Perri,
     Fred,
     Teri,
+    /// Teri work-item data: `WorkSourceStatus`, `WorkSnapshot`, `TeriPicks`.
+    /// Sensitive — never delivered to a network (TCP) peer.
+    Work,
     /// Agent-authored pane layout + content broadcasts (`FocusLayout`,
     /// `PaneContent`, `FocusCreated`).
     Layout,
@@ -227,6 +230,17 @@ pub struct FocusMeta {
     /// Auto-generated one-line session summary, when known.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub session_summary: Option<String>,
+    /// User-facing label for the focus (e.g. a Jira key or doc title), when the
+    /// creator supplied one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub label: Option<String>,
+    /// Absolute working directory the focus was created in, so clients can
+    /// group it under its repo.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub project_path: Option<String>,
+    /// `client_id` whose windows should select this focus when it appears.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub select_for_client: Option<String>,
 }
 
 // ── agent-authored pane layout (Phase 1: agent-driven-pane-layout) ───────────
@@ -1116,6 +1130,52 @@ pub enum ClientMsg {
         /// the daemon has no other way to know how stale a report is.
         rendered_at: chrono::DateTime<chrono::Utc>,
     },
+
+    // ── Teri/Fred work views (refused over TCP) ──────────────────────────────
+    /// Fetch the detail for one work item (`todo:`/`doc:`/`jira:`/`sentry:`) or
+    /// Fred mail/event (`mail:`/`event:`). Answered with `ServerMsg::WorkDetail`.
+    WorkDetailRequest {
+        request_id: String,
+        item_id: String,
+    },
+    /// Manual refresh (⌘R). `source: None` refreshes every source.
+    WorkRefresh {
+        #[serde(default)]
+        source: Option<crate::data::work::WorkSource>,
+        #[serde(default)]
+        fred: bool,
+    },
+    /// Ask the daemon to (re)generate Teri's picks. `reason`: `"first_open"` | `"manual"`.
+    PicksRefresh {
+        reason: String,
+    },
+    /// Preview the "send to agent" defaults for an item. Answered with
+    /// `ServerMsg::WorkSendPreview`.
+    WorkSendPreviewRequest {
+        request_id: String,
+        item_id: String,
+    },
+    /// Send a work item to an agent focus or a Mother job. Answered with
+    /// `ServerMsg::WorkSendResult`.
+    WorkSend {
+        request_id: String,
+        item_id: String,
+        /// `"focus"` or `"mother_job"`.
+        destination: String,
+        agent: String,
+        #[serde(default)]
+        working_directory: Option<String>,
+        label: String,
+        context: String,
+        #[serde(default)]
+        allow_duplicate: bool,
+    },
+    /// Send a confirmed prompt into Fred's own session (tag `fred`). Answered
+    /// with `ServerMsg::WorkSendResult`.
+    FredSeed {
+        request_id: String,
+        text: String,
+    },
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -1444,6 +1504,46 @@ pub enum ServerMsg {
         hook_installed: bool,
     },
 
+    // ── Teri/Fred work views (all sensitive: never sent to TCP peers) ────────
+    /// Health of one work source. Retained per source.
+    WorkSourceStatus {
+        status: crate::data::work::SourceStatus,
+    },
+    /// Full replacement of one group's items. `repo_docs` sends one frame per
+    /// repo (`group` = repo); other sources use `group: None`. A group that
+    /// disappears is sent once with `items: []`.
+    WorkSnapshot {
+        source: crate::data::work::WorkSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        items: Vec<crate::data::work::WorkItem>,
+    },
+    /// Teri's published picks. Retained.
+    TeriPicks {
+        picks: crate::data::work::PicksSnapshot,
+    },
+    /// Targeted answer to `WorkDetailRequest`.
+    WorkDetail {
+        request_id: String,
+        result: crate::data::work::WorkResult<crate::data::work::WorkDetail>,
+    },
+    /// Targeted answer to `WorkSendPreviewRequest`.
+    WorkSendPreview {
+        request_id: String,
+        result: crate::data::work::WorkResult<crate::data::work::SendPreview>,
+    },
+    /// Targeted answer to `WorkSend` / `FredSeed`.
+    WorkSendResult {
+        request_id: String,
+        result: crate::data::work::WorkResult<crate::data::work::SendOutcome>,
+    },
+    /// Sent once to a network (TCP) peer after it subscribes: these topics are
+    /// deliberately not delivered over this transport.
+    Withheld {
+        topics: Vec<Topic>,
+        reason: String,
+    },
+
     /// TUI-internal pseudo-event — **never produced by the daemon**.
     ///
     /// Injected locally by the [`DaemonClient`] supervisor immediately after a
@@ -1769,6 +1869,9 @@ mod tests {
             org:             Some("Carefeed".into()),
             is_built_in:     false,
             session_summary: Some("Build the auth flow".into()),
+            label: None,
+            project_path: None,
+            select_for_client: None,
         };
         let json = serde_json::to_string(&full).unwrap();
         let back: FocusMeta = serde_json::from_str(&json).unwrap();
@@ -1783,6 +1886,9 @@ mod tests {
             org:             None,
             is_built_in:     true,
             session_summary: None,
+            label: None,
+            project_path: None,
+            select_for_client: None,
         };
         let json = serde_json::to_string(&minimal).unwrap();
         let back: FocusMeta = serde_json::from_str(&json).unwrap();
@@ -1884,6 +1990,9 @@ mod tests {
             org:             Some("Carefeed".into()),
             is_built_in:     true,
             session_summary: None,
+            label: None,
+            project_path: None,
+            select_for_client: None,
         };
 
         round_trip_client(ClientMsg::FocusRegistryPush {
@@ -1955,6 +2064,9 @@ mod tests {
                 org: None,
                 is_built_in: false,
                 session_summary: None,
+                label: None,
+                project_path: None,
+                select_for_client: None,
             },
         });
     }
@@ -3708,4 +3820,209 @@ mod tests {
         assert!(!t.remove_tab("detail.0"));
         assert_eq!(t, before);
     }
+}
+
+#[cfg(test)]
+mod work_wire_tests {
+    use super::*;
+    use crate::data::work::{
+        GroupError, Link, PicksSnapshot, Pick, Priority, SendOutcome, SendPreview, SentMarker,
+        SourceState, SourceStatus, WorkDetail, WorkError, WorkItem, WorkResult, WorkSource,
+    };
+
+    fn ts() -> chrono::DateTime<chrono::Utc> {
+        "2026-10-09T14:30:00Z".parse().unwrap()
+    }
+
+    fn item() -> WorkItem {
+        WorkItem {
+            id: "jira:CORE-1".into(),
+            source: WorkSource::Jira,
+            kind: "story".into(),
+            title: "Fix the thing".into(),
+            repo: None,
+            project: Some("CORE".into()),
+            status: Some("In Progress".into()),
+            status_category: Some("in_progress".into()),
+            priority: Some(Priority { label: "High".into(), rank: 2 }),
+            severity: None,
+            environment: None,
+            created_at: Some(ts()),
+            updated_at: Some(ts()),
+            due: Some("2026-10-12".parse().unwrap()),
+            url: Some("https://example.invalid/CORE-1".into()),
+            path: None,
+            metrics: [("events".to_string(), 3)].into_iter().collect(),
+            linked: vec!["todo:abc".into()],
+            search_text: "fix the thing".into(),
+            sent: vec![SentMarker {
+                kind: "focus".into(),
+                target_id: "core-1".into(),
+                label: "CORE-1".into(),
+                created_at: ts(),
+            }],
+        }
+    }
+
+    fn status() -> SourceStatus {
+        SourceStatus {
+            source: WorkSource::Jira,
+            state: SourceState::RateLimited,
+            updated_at: Some(ts()),
+            reason: Some("slow down".into()),
+            retry_at: Some(ts()),
+            count: 4,
+            group_errors: vec![GroupError { group: "repo".into(), reason: "boom".into() }],
+        }
+    }
+
+    fn round_trip_server(msg: ServerMsg) -> String {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap(), "mismatch: {json}");
+        json
+    }
+
+    fn round_trip_client(msg: ClientMsg) -> String {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ClientMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap(), "mismatch: {json}");
+        json
+    }
+
+    #[test]
+    fn work_topic_serializes_to_work() {
+        assert_eq!(serde_json::to_string(&Topic::Work).unwrap(), "\"work\"");
+    }
+
+    #[test]
+    fn work_server_frames_round_trip() {
+        round_trip_server(ServerMsg::WorkSourceStatus { status: status() });
+        round_trip_server(ServerMsg::WorkSnapshot {
+            source: WorkSource::RepoDocs,
+            group: Some("nostromo".into()),
+            items: vec![item()],
+        });
+        round_trip_server(ServerMsg::WorkSnapshot {
+            source: WorkSource::Todos,
+            group: None,
+            items: vec![],
+        });
+        round_trip_server(ServerMsg::TeriPicks {
+            picks: PicksSnapshot {
+                generated_at: Some(ts()),
+                generating: false,
+                unavailable_sources: vec![WorkSource::Sentry],
+                items: vec![Pick {
+                    item_id: "jira:CORE-1".into(),
+                    source: WorkSource::Jira,
+                    title: "Fix the thing".into(),
+                    reason: "due soon".into(),
+                    done_since: false,
+                }],
+                error: None,
+            },
+        });
+        round_trip_server(ServerMsg::WorkDetail {
+            request_id: "r1".into(),
+            result: WorkResult::Ok(WorkDetail {
+                item_id: "jira:CORE-1".into(),
+                title: "Fix the thing".into(),
+                fields: vec![("Status".into(), "In Progress".into())],
+                markdown: "# hi".into(),
+                files: vec!["a.md".into()],
+                links: vec![Link { label: "Open".into(), url: "https://example.invalid".into() }],
+            }),
+        });
+        round_trip_server(ServerMsg::WorkDetail {
+            request_id: "r1".into(),
+            result: WorkResult::Err(WorkError::not_available()),
+        });
+        round_trip_server(ServerMsg::WorkSendPreview {
+            request_id: "r2".into(),
+            result: WorkResult::Ok(SendPreview {
+                item_id: "jira:CORE-1".into(),
+                agent: "claude".into(),
+                working_directory: Some("/tmp/repo".into()),
+                label: "CORE-1".into(),
+                context: "do it".into(),
+                existing: vec![],
+            }),
+        });
+        round_trip_server(ServerMsg::WorkSendResult {
+            request_id: "r3".into(),
+            result: WorkResult::Ok(SendOutcome {
+                kind: "seeded".into(),
+                focus_tag: Some("fred".into()),
+                job_id: None,
+            }),
+        });
+        round_trip_server(ServerMsg::WorkSendResult {
+            request_id: "r3".into(),
+            result: WorkResult::Err(WorkError::requires_secure_connection()),
+        });
+        round_trip_server(ServerMsg::Withheld {
+            topics: vec![Topic::Fred, Topic::Teri, Topic::Work],
+            reason: "requires_secure_connection".into(),
+        });
+    }
+
+    #[test]
+    fn work_client_frames_round_trip() {
+        round_trip_client(ClientMsg::WorkDetailRequest {
+            request_id: "r1".into(),
+            item_id: "mail:abc".into(),
+        });
+        round_trip_client(ClientMsg::WorkRefresh { source: Some(WorkSource::Jira), fred: false });
+        round_trip_client(ClientMsg::WorkRefresh { source: None, fred: true });
+        round_trip_client(ClientMsg::PicksRefresh { reason: "manual".into() });
+        round_trip_client(ClientMsg::WorkSendPreviewRequest {
+            request_id: "r2".into(),
+            item_id: "todo:1".into(),
+        });
+        round_trip_client(ClientMsg::WorkSend {
+            request_id: "r3".into(),
+            item_id: "todo:1".into(),
+            destination: "focus".into(),
+            agent: "claude".into(),
+            working_directory: Some("/tmp/repo".into()),
+            label: "a".into(),
+            context: "b".into(),
+            allow_duplicate: true,
+        });
+        round_trip_client(ClientMsg::FredSeed { request_id: "r4".into(), text: "hi".into() });
+    }
+
+    #[test]
+    fn work_client_frames_tolerate_missing_optional_fields() {
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"work_refresh"}"#).unwrap();
+        assert!(matches!(m, ClientMsg::WorkRefresh { source: None, fred: false }));
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"type":"work_send","request_id":"r","item_id":"i","destination":"focus","agent":"a","label":"l","context":"c"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            m,
+            ClientMsg::WorkSend { working_directory: None, allow_duplicate: false, .. }
+        ));
+    }
+
+    #[test]
+    fn focus_meta_new_fields_round_trip_and_old_json_decodes() {
+        let json = r#"{"tag":"t","display_name":"T","agent_name":"cody","is_built_in":false}"#;
+        let old: FocusMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(old.label, None);
+        assert_eq!(old.project_path, None);
+        assert_eq!(old.select_for_client, None);
+        let out = serde_json::to_string(&old).unwrap();
+        assert!(!out.contains("label") && !out.contains("project_path") && !out.contains("select_for_client"));
+
+        let mut full = old;
+        full.label = Some("CORE-1".into());
+        full.project_path = Some("/tmp/repo".into());
+        full.select_for_client = Some("client-1".into());
+        let back: FocusMeta = serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(back, full);
+    }
+
 }
