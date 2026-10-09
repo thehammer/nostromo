@@ -133,6 +133,8 @@ final class AppControlServer {
         case "activate":    return try activate(req)
         case "restore":     return restoreFocus()
         case "click":       return try click(req)
+        case "drag":        return try drag(req)
+        case "hittest":     return try hitTest(req)
         case "key":         return try key(req)
         case "type":        return try typeText(req)
         case "paste":       return try paste(req)
@@ -412,39 +414,42 @@ final class AppControlServer {
         let p = try point(req, w)
         let flags = AppControlGeometry.modifiers(req.strings("modifiers") ?? [])
         let hit = w.contentView?.hitTest(w.contentView!.convert(p, from: nil))
-        let n = req.int("count") ?? 1
-        for i in 1...n {
-            func ev(_ t: NSEvent.EventType) -> NSEvent? {
-                NSEvent.mouseEvent(with: t, location: p, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
-                                   windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: i, pressure: 1)
-            }
-            guard let down = ev(.leftMouseDown), let up = ev(.leftMouseUp) else {
-                throw AppControlError.failed("could not synthesise mouse events")
-            }
-            // NSControls run a tracking loop on mouseDown that waits for the
-            // matching mouseUp in the event queue, so for them queue the up
-            // first. Everything else (gesture recognizers, plain mouseDown
-            // handlers) wants down then up delivered in order.
-            if isInsideControl(hit) {
-                w.postEvent(up, atStart: false)
-                w.sendEvent(down)
-            } else {
-                w.sendEvent(down)
-                w.sendEvent(up)
-            }
-        }
-        // Let the run loop drain the queued mouseUp and any resulting work.
+        try AppControlMouse.click(in: w, at: p, flags: flags, count: req.int("count") ?? 1)
+        // Let the run loop drain any resulting work.
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         return ["hit": hit.map { String(describing: type(of: $0)) } ?? "none"]
     }
 
-    private func isInsideControl(_ v: NSView?) -> Bool {
-        var cur = v
-        while let c = cur {
-            if c is NSControl && !(c is NSTextField && !((c as! NSTextField).isEditable)) { return true }
-            cur = c.superview
+    /// Which view a click at x/y would land on, and the focus state around it.
+    /// Read-only: no event is sent.
+    private func hitTest(_ req: AppControlRequest) throws -> Any {
+        let w = try window(req)
+        guard req.double("x") != nil, req.double("y") != nil else {
+            throw AppControlError.badRequest("hittest needs x and y")
         }
-        return false
+        return AppControlHitTest.report(in: w, at: try point(req, w))
+    }
+
+    /// Press at one point, drag to another, release — for selecting text.
+    /// `fromX/fromY` and `toX/toY`, or `text` (+ `index`) for the start and
+    /// `toX/toY` for the end.
+    private func drag(_ req: AppControlRequest) throws -> Any {
+        let w = try window(req)
+        let from: NSPoint
+        if let fx = req.double("fromX"), let fy = req.double("fromY") {
+            from = AppControlGeometry.windowPoint(x: fx, y: fy, contentHeight: contentHeight(w))
+        } else {
+            from = try point(req, w)
+        }
+        guard let tx = req.double("toX"), let ty = req.double("toY") else {
+            throw AppControlError.badRequest("drag needs toX/toY")
+        }
+        let to = AppControlGeometry.windowPoint(x: tx, y: ty, contentHeight: contentHeight(w))
+        let flags = AppControlGeometry.modifiers(req.strings("modifiers") ?? [])
+        let hit = w.contentView?.hitTest(w.contentView!.convert(from, from: nil))
+        try AppControlMouse.drag(in: w, from: from, to: to, steps: req.int("steps") ?? 8, flags: flags)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        return ["hit": hit.map { String(describing: type(of: $0)) } ?? "none"]
     }
 
     // MARK: - Keyboard

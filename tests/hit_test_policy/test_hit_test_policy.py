@@ -35,6 +35,14 @@ def hit_test_bodies():
                 yield path, src[m.end():i]
 
 
+def passes_point_straight_to_super(body):
+    """An override that never interprets the point itself — it only forwards it
+    to `super.hitTest(point)`, which expects the same superview coordinates —
+    cannot have the #185 bug (e.g. ChatTurnView completes a pending layout, then
+    defers to super)."""
+    return "super.hitTest(" in body and "point" not in body.replace("super.hitTest(point)", "")
+
+
 class HitTestPolicy(unittest.TestCase):
     def test_every_override_is_found(self):
         # Guards the scanner itself: the two known overlays must be seen, or the
@@ -45,9 +53,14 @@ class HitTestPolicy(unittest.TestCase):
     def test_overrides_convert_from_the_superview(self):
         for path, body in hit_test_bodies():
             with self.subTest(file=os.path.basename(path)):
-                self.assertTrue(any(s in body for s in SAFE),
+                self.assertTrue(any(s in body for s in SAFE) or passes_point_straight_to_super(body),
                                 f"{path}: hitTest must use OverlayHitTest.hit or convert the point "
                                 "from the superview — AppKit passes superview coordinates.")
+
+    def test_pass_through_exemption_is_narrow(self):
+        self.assertTrue(passes_point_straight_to_super("\n  layout()\n  return super.hitTest(point)\n}"))
+        self.assertFalse(passes_point_straight_to_super("\n  return bounds.contains(point) ? self : nil\n}"))
+        self.assertFalse(passes_point_straight_to_super("\n  let p = convert(point, from: self)\n  return super.hitTest(p)\n}"))
 
     def test_no_override_converts_the_point_from_self(self):
         for path, body in hit_test_bodies():

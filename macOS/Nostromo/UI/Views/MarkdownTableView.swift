@@ -85,7 +85,7 @@ class MarkdownTableView: NSView {
             cells.reserveCapacity(colCount)
             for colIdx in 0..<colCount {
                 let text  = colIdx < rowData.count ? rowData[colIdx] : ""
-                let label = NSTextField(labelWithString: text)
+                let label = CopyMenuTextField(labelWithString: text)
                 label.isSelectable = true   // copyable: text in the transcript must be selectable
                 label.font = isHeader
                     ? .systemFont(ofSize: 11, weight: .semibold)
