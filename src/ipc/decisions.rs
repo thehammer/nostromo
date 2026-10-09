@@ -317,6 +317,11 @@ impl DecisionRegistry {
 
     // ── test/diagnostic visibility ────────────────────────────────────────────
 
+    /// The focus tag an active request belongs to, if `request_id` is active.
+    pub fn tag_of_active(&self, request_id: &str) -> Option<String> {
+        self.active.get(request_id).map(|e| e.tag.clone())
+    }
+
     /// The active request id for `tag`, if any.
     pub fn active_request_id(&self, tag: &str) -> Option<String> {
         self.active_by_tag.get(tag).cloned()

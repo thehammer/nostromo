@@ -439,6 +439,21 @@ class AppStore: ObservableObject {
             .sink { [weak self] _ in self?.pushFocusRegistry() }
             .store(in: &cancellables)
 
+        // The work store holds what one connection pushed. When it drops, requests
+        // still waiting for an answer can never get one; when a connection comes
+        // up, whatever the previous one left behind is stale (the daemon re-sends
+        // its retained work frames, and an older daemon sends none).
+        client.connected
+            .receive(on: DispatchQueue.main)
+            .sink { connected in
+                if connected {
+                    WorkStore.shared.reset()
+                } else {
+                    WorkStore.shared.failPendingRequests(reason: "The daemon connection was lost")
+                }
+            }
+            .store(in: &cancellables)
+
         FocusStore.shared.$focuses
             .receive(on: DispatchQueue.main)
             .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)

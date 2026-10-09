@@ -635,7 +635,9 @@ fn handle_client_msg(
 ) {
     // Deny-by-default for network peers: a sensitive request, or any request
     // that reads or drives a Teri/Fred-derived session, changes nothing.
-    if trust.is_network() && refuse_for_network(&msg, sensitive) {
+    if trust.is_network()
+        && (refuse_for_network(&msg, sensitive) || answers_sensitive_decision(&msg, sensitive, decisions))
+    {
         refuse_over_network(&msg, targeted_tx);
         return;
     }
@@ -1174,6 +1176,24 @@ fn seed_fred(
             WorkResult::err("fred_seed_failed", format!("could not send to Fred: {e}"))
         }
     }
+}
+
+/// Is `msg` an answer to a decision request of a sensitive focus? The request
+/// id is unguessable and its request is never sent to a network peer, so this
+/// is defence in depth for a leaked id.
+fn answers_sensitive_decision(
+    msg: &ClientMsg,
+    sensitive: &SensitiveTags,
+    decisions: &Arc<Mutex<DecisionRegistry>>,
+) -> bool {
+    let ClientMsg::DecisionAnswer { request_id, .. } = msg else {
+        return false;
+    };
+    decisions
+        .lock()
+        .unwrap()
+        .tag_of_active(request_id)
+        .is_some_and(|tag| sensitive.tag_is_sensitive(&tag))
 }
 
 /// Answer a sensitive request from a network peer with

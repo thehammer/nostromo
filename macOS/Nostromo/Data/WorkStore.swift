@@ -8,6 +8,10 @@ enum WorkResponse {
     case sendResult(WorkResult<SendOutcome>)
     /// No answer arrived within `requestTimeout`.
     case timedOut
+    /// The request ended without an answer for a reason other than a timeout:
+    /// its id was reused by a newer request (`superseded`) or the daemon
+    /// connection went away (`connection_lost`).
+    case failed(WorkError)
 }
 
 /// In-memory home of the Teri work data pushed by the daemon: per-source
@@ -33,7 +37,14 @@ final class WorkStore: ObservableObject {
 
     /// Items of each `(source, group)`; a snapshot fully replaces its group.
     private var groups: [GroupKey: [WorkItem]] = [:]
-    private var pendingRequests: [String: (WorkResponse) -> Void] = [:]
+    private var pendingRequests: [String: PendingRequest] = [:]
+
+    /// A waiting continuation. `token` tells a registration apart from a later
+    /// one that reuses its id, so a stale timeout never resolves the newer waiter.
+    private struct PendingRequest {
+        let token = UUID()
+        let completion: (WorkResponse) -> Void
+    }
 
     private struct GroupKey: Hashable {
         let source: WorkSource
@@ -84,21 +95,51 @@ final class WorkStore: ObservableObject {
         self.picks = picks
     }
 
+    /// Forget everything pushed over a connection that is gone: items, source
+    /// statuses and picks. The next connection's daemon re-sends what it has,
+    /// and an older daemon with no work data must not leave this one's behind.
+    func reset() {
+        groups.removeAll()
+        statuses.removeAll()
+        picks = nil
+        revision += 1
+    }
+
     // MARK: - Request continuations
 
     /// Register `completion` for `requestId`; it runs once, with the daemon's
-    /// answer or `.timedOut`. Call on the main thread.
+    /// answer, `.timedOut`, or `.failed`. Call on the main thread.
+    ///
+    /// Reusing the id of a request still in flight fails the earlier waiter
+    /// (`superseded`) rather than silently replacing it, and the new request
+    /// gets its own full timeout.
     func expect(requestId: String, completion: @escaping (WorkResponse) -> Void) {
-        pendingRequests[requestId] = completion
+        let pending = PendingRequest(completion: completion)
+        if let displaced = pendingRequests.updateValue(pending, forKey: requestId) {
+            displaced.completion(.failed(WorkError(
+                code: "superseded",
+                message: "A newer request reused request id \(requestId)")))
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) { [weak self] in
-            self?.resolve(requestId: requestId, with: .timedOut)
+            guard let self, self.pendingRequests[requestId]?.token == pending.token else { return }
+            self.resolve(requestId: requestId, with: .timedOut)
+        }
+    }
+
+    /// Fail every request still waiting (the daemon connection went away, so
+    /// no answer will come). Late answers are then ignored by `resolve`.
+    func failPendingRequests(reason: String) {
+        let pending = pendingRequests
+        pendingRequests.removeAll()
+        for (_, request) in pending {
+            request.completion(.failed(WorkError(code: "connection_lost", message: reason)))
         }
     }
 
     /// Complete the request `requestId`. A late or duplicate answer (already
     /// resolved or timed out) is ignored.
     func resolve(requestId: String, with response: WorkResponse) {
-        guard let completion = pendingRequests.removeValue(forKey: requestId) else { return }
-        completion(response)
+        guard let pending = pendingRequests.removeValue(forKey: requestId) else { return }
+        pending.completion(response)
     }
 }

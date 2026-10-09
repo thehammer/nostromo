@@ -22,9 +22,18 @@ final class TeriFredWiringTests: XCTestCase {
         }
     }
 
-    func testClientSubscribesToTheWorkTopic() throws {
+    func testClientAddsTheWorkTopicOnlyForADaemonThatAdvertisesIt() throws {
         let source = try Self.source("Data/NostromodClient.swift")
-        XCTAssertTrue(source.contains(#""teri", "work""#), "the subscribe list must include the work topic")
+        XCTAssertTrue(source.contains(#"featureTopics: [String: String] = ["work": "work"]"#),
+                      "the work topic must be tied to the `work` Welcome feature")
+        XCTAssertFalse(source.contains(#""teri", "work""#),
+                       "the first subscribe must not name `work`: an older daemon drops the connection")
+    }
+
+    func testAppStoreFailsPendingWorkRequestsOnDisconnectAndResetsTheStoreOnConnect() throws {
+        let source = try Self.source("Data/AppStore.swift")
+        XCTAssertTrue(source.contains("WorkStore.shared.failPendingRequests(reason:"))
+        XCTAssertTrue(source.contains("WorkStore.shared.reset()"))
     }
 
     func testFocusCreatedSelectionIsGatedOnThisClientsId() throws {

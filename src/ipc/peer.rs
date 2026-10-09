@@ -80,6 +80,11 @@ struct Registered {
     tags: BTreeSet<String>,
     #[serde(default)]
     jobs: BTreeSet<String>,
+    /// Set (in memory only) when the persisted registry exists but cannot be
+    /// read: the daemon can no longer tell which tags are work-derived, so it
+    /// fails closed and treats every tag and job as sensitive.
+    #[serde(skip)]
+    unreadable: bool,
 }
 
 /// Which focus tags and Mother jobs carry Teri/Fred-derived content.
@@ -122,10 +127,17 @@ impl SensitiveTags {
 
     /// A registry persisted at `path`, seeded from it when it exists.
     pub fn persisted(path: PathBuf) -> Self {
-        let registered = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Registered>(&bytes).ok())
-            .unwrap_or_default();
+        let registered = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<Registered>(&bytes).unwrap_or_else(|e| {
+                warn!(path = %path.display(), "sensitive-tag registry unreadable ({e}); treating every tag as sensitive");
+                Registered { unreadable: true, ..Registered::default() }
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registered::default(),
+            Err(e) => {
+                warn!(path = %path.display(), "sensitive-tag registry unreadable ({e}); treating every tag as sensitive");
+                Registered { unreadable: true, ..Registered::default() }
+            }
+        };
         Self {
             inner: Arc::new(RwLock::new(registered)),
             path: Some(Arc::new(path)),
@@ -135,12 +147,14 @@ impl SensitiveTags {
 
     /// Does the focus `tag` carry (or can it act on) Teri/Fred-derived data?
     pub fn tag_is_sensitive(&self, tag: &str) -> bool {
-        is_teri_or_fred_agent(tag) || self.inner.read().unwrap().tags.contains(tag)
+        let registered = self.inner.read().unwrap();
+        is_teri_or_fred_agent(tag) || registered.unreadable || registered.tags.contains(tag)
     }
 
     /// Was Mother job `job_id` created from a work item?
     pub fn job_is_sensitive(&self, job_id: &str) -> bool {
-        self.inner.read().unwrap().jobs.contains(job_id)
+        let registered = self.inner.read().unwrap();
+        registered.unreadable || registered.jobs.contains(job_id)
     }
 
     /// Register `tag` as sensitive. Idempotent.
@@ -148,17 +162,17 @@ impl SensitiveTags {
         if is_teri_or_fred_agent(tag) {
             return;
         }
-        let added = self.inner.write().unwrap().tags.insert(tag.to_string());
-        if added {
-            self.persist();
+        let mut registered = self.inner.write().unwrap();
+        if registered.tags.insert(tag.to_string()) {
+            self.persist(&registered);
         }
     }
 
     /// Register Mother job `job_id` as sensitive. Idempotent.
     pub fn mark_job(&self, job_id: &str) {
-        let added = self.inner.write().unwrap().jobs.insert(job_id.to_string());
-        if added {
-            self.persist();
+        let mut registered = self.inner.write().unwrap();
+        if registered.jobs.insert(job_id.to_string()) {
+            self.persist(&registered);
         }
     }
 
@@ -173,9 +187,17 @@ impl SensitiveTags {
         format!("focus-{h:016x}")
     }
 
-    fn persist(&self) {
+    /// Write the registry out. Called with the registry's write lock held, so
+    /// concurrent registrations are serialised and the last write on disk is
+    /// the latest state.
+    fn persist(&self, registered: &Registered) {
         let Some(path) = &self.path else { return };
-        let json = match serde_json::to_vec(&*self.inner.read().unwrap()) {
+        if registered.unreadable {
+            // Leave the unreadable file for the operator rather than replace
+            // it with a registry that forgot everything before this run.
+            return;
+        }
+        let json = match serde_json::to_vec(registered) {
             Ok(j) => j,
             Err(e) => {
                 warn!("sensitive-tag registry: serialise failed: {e}");
@@ -429,16 +451,20 @@ pub fn is_sensitive_client_msg(msg: &ClientMsg) -> bool {
     }
 }
 
-/// Does `msg` read, drive or create a session/focus that carries Teri/Fred
-/// data? A network peer's such request is refused with
+/// Does `msg` read, drive or create a session/focus (or Mother job) that
+/// carries Teri/Fred data? A network peer's such request is refused with
 /// `requires_secure_connection` before any side effect. Spawning is refused
 /// for a sensitive tag *and* for the `fred`/`teri` agent under any tag (that
 /// session would have mail/calendar/todo tools). `SessionDetach` is allowed:
-/// it only releases the peer's own attachment.
+/// it only releases the peer's own attachment. `DecisionAnswer` names only a
+/// request id; the server resolves it to its tag (see `handle_client_msg`).
 pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool {
     match msg {
         ClientMsg::SessionSpawn { tag, agent_name, .. } => {
             tags.tag_is_sensitive(tag) || is_teri_or_fred_agent(agent_name)
+        }
+        ClientMsg::MotherAction { job_id, .. } | ClientMsg::MotherResume { job_id, .. } => {
+            tags.job_is_sensitive(job_id)
         }
         ClientMsg::SessionAttach { tag }
         | ClientMsg::SessionSend { tag, .. }
@@ -463,8 +489,6 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::SessionList
         | ClientMsg::FocusRegistryPush { .. }
         | ClientMsg::FocusList
-        | ClientMsg::MotherAction { .. }
-        | ClientMsg::MotherResume { .. }
         | ClientMsg::PerriAction { .. }
         | ClientMsg::DecisionAnswer { .. }
         | ClientMsg::WorkDetailRequest { .. }
@@ -834,5 +858,33 @@ mod tests {
             panic!("expected SessionListResp");
         };
         assert_eq!(sessions.iter().map(|s| s.tag.as_str()).collect::<Vec<_>>(), vec!["cody-ok"]);
+    }
+
+    #[test]
+    fn an_unreadable_registry_fails_closed_and_is_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_path_beside(&dir.path().join("daemon-sessions.json"));
+        std::fs::write(&path, b"{not json").unwrap();
+
+        let tags = SensitiveTags::persisted(path.clone());
+        assert!(tags.tag_is_sensitive("cody-anything"));
+        assert!(tags.job_is_sensitive("any-job"));
+        tags.mark_tag("cody-x");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{not json", "must not overwrite the evidence");
+    }
+
+    #[test]
+    fn mother_verbs_on_a_work_derived_job_are_refused_for_network_peers() {
+        let tags = SensitiveTags::in_memory();
+        tags.mark_job("job-work");
+        let action = |id: &str| ClientMsg::MotherAction {
+            job_id: id.into(),
+            action: crate::ipc::protocol::MotherActionKind::Cancel,
+        };
+        let resume = |id: &str| ClientMsg::MotherResume { job_id: id.into(), answer: "a".into() };
+        assert!(refuse_for_network(&action("job-work"), &tags));
+        assert!(refuse_for_network(&resume("job-work"), &tags));
+        assert!(!refuse_for_network(&action("job-plain"), &tags));
+        assert!(!refuse_for_network(&resume("job-plain"), &tags));
     }
 }

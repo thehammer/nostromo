@@ -592,7 +592,31 @@ class NostromodClient {
         // "decision" subscribes to daemon-driven DecisionRequest broadcasts — being
         // subscribed is also what tells the daemon a client (an operator) exists at
         // all, so `nostromo.ask_decision` can fail fast with `no_operator` otherwise.
-        send(ClientSubscribe(topics: ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "work", "layout", "decision"]), type: "subscribe")
+        //
+        // Only topics EVERY daemon knows go out here. A daemon that predates a topic
+        // cannot decode a `subscribe` naming it and drops the connection, so a
+        // rebuilt app would loop connect/fail against a not-yet-reinstalled daemon.
+        // Optional topics are added by a second `subscribe` once this connection's
+        // `welcome` advertises them (see `subscribeToAdvertisedFeatures`).
+        send(ClientSubscribe(topics: NostromodClient.baseTopics), type: "subscribe")
+    }
+
+    /// Topics every daemon this app can talk to understands.
+    static let baseTopics = ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]
+
+    /// `welcome.features` that add a topic, in the order they are subscribed.
+    /// "work" carries the Teri work-item frames (`work_source_status`,
+    /// `work_snapshot`, `teri_picks`).
+    static let featureTopics: [String: String] = ["work": "work"]
+
+    /// Re-subscribe with the base topics plus the topic of every feature this
+    /// connection's daemon advertised. Evaluated per connection (a daemon that is
+    /// replaced by an older or newer build between reconnects is re-detected from
+    /// its own `welcome`); a daemon with no `features` gets nothing extra.
+    private func subscribeToAdvertisedFeatures(_ features: [String]) {
+        let extra = features.compactMap { NostromodClient.featureTopics[$0] }
+        guard !extra.isEmpty else { return }
+        send(ClientSubscribe(topics: NostromodClient.baseTopics + extra), type: "subscribe")
     }
 
     /// Clean, unambiguous round-trip probe: no side effects, no fan-out
@@ -789,7 +813,7 @@ class NostromodClient {
             let length = header.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
             guard length > 0, length <= 4 * 1024 * 1024 else { break }
             guard let body = readN(sock, Int(length)) else { break }
-            dispatch(body)   // hops to main internally
+            dispatch(body, from: sock)   // hops to main internally
         }
         log.info("read loop ended (fd=\(sock, privacy: .public)) — reconnecting")
         Darwin.close(sock)
@@ -817,10 +841,16 @@ class NostromodClient {
 
     // MARK: - Decoding
 
-    private func dispatch(_ data: Data) {
+    private func dispatch(_ data: Data, from sock: Int32) {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type_ = json["type"] as? String
         else { return }
+
+        // The daemon says which optional capabilities it serves; ask for their
+        // topics now, but only on the connection that said so.
+        if type_ == "welcome", fd == sock {
+            subscribeToAdvertisedFeatures(json["features"] as? [String] ?? [])
+        }
 
         let t0 = Date()
         let msg = decode(type_: type_, json: json, raw: data)

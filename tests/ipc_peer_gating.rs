@@ -1862,6 +1862,48 @@ async fn a_tcp_client_is_not_told_about_a_mother_job_that_a_work_item_started() 
     );
 }
 
+#[tokio::test]
+async fn a_tcp_client_cannot_cancel_or_answer_a_mother_job_that_a_work_item_started() {
+    use nostromo::ipc::protocol::MotherActionKind;
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    let outcome = SendOutcome { kind: "mother_job".into(), focus_tag: None, job_id: Some("job-work".into()) };
+    work_send_via(&mut unix, ScriptedWorkService { outcome, spawn: None }, "mother_job").await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    let cancel = attack(&mut tcp, ClientMsg::MotherAction { job_id: "job-work".into(), action: MotherActionKind::Cancel }).await;
+    assert_refused(&cancel, "mother_action on a work-derived job");
+    let resume = attack(&mut tcp, ClientMsg::MotherResume { job_id: "job-work".into(), answer: "do it".into() }).await;
+    assert_refused(&resume, "mother_resume on a work-derived job");
+}
+
+#[tokio::test]
+async fn a_tcp_client_cannot_answer_a_decision_request_of_a_sensitive_focus_even_with_its_id() {
+    use nostromo::ipc::protocol::DecisionChoice;
+    let h = spawn_server().await;
+    let (request_id, _rx, _msg) = h.decisions.lock().unwrap().submit(
+        "fred".into(),
+        "Forward the 20 newest mails?".into(),
+        None,
+        vec![DecisionChoice { id: "yes".into(), label: "Yes".into(), detail: None }],
+        None,
+    );
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    let frames = attack(
+        &mut tcp,
+        ClientMsg::DecisionAnswer { request_id: request_id.clone(), choice_id: Some("yes".into()) },
+    )
+    .await;
+    assert_refused(&frames, "decision_answer for a sensitive focus");
+    assert_eq!(
+        h.decisions.lock().unwrap().active_request_id("fred"),
+        Some(request_id),
+        "the request must still be waiting for its real operator"
+    );
+}
+
 // ── H4: focus metadata a network peer may see ────────────────────────────────
 
 fn meta(tag: &str, display_name: &str, agent: &str, built_in: bool) -> FocusMeta {
