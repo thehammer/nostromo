@@ -362,13 +362,20 @@ pub fn tool_descriptors() -> Vec<Value> {
         // ── Phase 3: Mother mutations ──────────────────────────────────────
         json!({
             "name": "mother.enqueue_job",
-            "description": "Enqueue a plan file as a new Mother job. Returns { id, title, status }.",
+            "description": "Enqueue a plan file as a new Mother job via `mother add`. Returns { id } (plus title/status in the TUI). `repo` and `branch` are required.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "plan_path": { "type": "string", "description": "Absolute path to the plan Markdown file" }
+                    "plan_path": { "type": "string", "description": "Absolute path to the plan Markdown file" },
+                    "repo": { "type": "string", "description": "Repository slug (required)" },
+                    "branch": { "type": "string", "description": "Branch the job works on (required)" },
+                    "repo_path": { "type": "string", "description": "Local path of the repository" },
+                    "base": { "type": "string", "description": "Base branch" },
+                    "max_cost": { "type": "number", "description": "Maximum cost in dollars" },
+                    "label": { "type": "string", "description": "Job label" },
+                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Job ids this job depends on" }
                 },
-                "required": ["plan_path"]
+                "required": ["plan_path", "repo", "branch"]
             }
         }),
         json!({

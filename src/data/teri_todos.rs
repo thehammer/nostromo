@@ -2,8 +2,8 @@
 //! active todos every 5 s and pushes snapshots to a watch channel.
 //!
 //! The database is owned by Teri's external Claude plugin; nostromo reads it
-//! strictly read-only. A missing DB file is treated as "no todos yet" rather
-//! than an error.
+//! strictly read-only. A missing DB file is reported as an error (not an empty
+//! list) so consumers never mistake "Teri isn't set up" for "no todos".
 
 use std::path::PathBuf;
 
@@ -68,7 +68,7 @@ fn fetch_once(path: PathBuf) -> TeriTodosSnapshot {
             generated_at: Some(Utc::now()),
             items: vec![],
             stale: false,
-            error: None,
+            error: Some(format!("Teri database not found at {}", path.display())),
         };
     }
     match query_todos(&path) {

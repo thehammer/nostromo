@@ -464,7 +464,7 @@ async fn fred_list_unread_emails_filters_read() {
     );
 
     let result = fred::list_unread_emails(&state);
-    let items = result.as_array().expect("should return array");
+    let items = result["items"].as_array().expect("should return array");
     assert_eq!(items.len(), 2, "should return only the 2 unread items");
 
     // Verify each returned item is unread.
@@ -514,7 +514,7 @@ async fn fred_list_calendar_events_no_date_returns_all() {
 
     let input = fred::CalendarEventsInput { date: None };
     let result = fred::list_calendar_events(&state, &input);
-    let events = result.as_array().expect("should return array");
+    let events = result["events"].as_array().expect("should return array");
     assert_eq!(events.len(), 2, "no date filter should return all 2 events");
 }
 
@@ -559,7 +559,7 @@ async fn fred_list_calendar_events_with_date_filters() {
         date: Some("2026-05-14".to_string()),
     };
     let result = fred::list_calendar_events(&state, &input);
-    let events = result.as_array().expect("should return array");
+    let events = result["events"].as_array().expect("should return array");
     assert_eq!(
         events.len(),
         1,

@@ -10,7 +10,7 @@
 pub mod broker_client;
 pub mod protocol;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -246,15 +246,8 @@ pub async fn tail_log(id: &str, n: usize) -> Result<String> {
 /// Archive a single terminal-state job by id.
 /// Mother CLI silently skips jobs that are not in a terminal state.
 pub async fn archive(id: &str) -> Result<()> {
-    let out = Command::new(mother_bin())
-        .args(["archive", id])
-        .output()
-        .await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother archive {id} failed: {stderr}");
-    }
-    Ok(())
+    validate_job_id(id)?;
+    run_mother(&["archive", id]).await
 }
 
 /// Cancel a running or queued job by id.
@@ -304,13 +297,21 @@ fn validate_job_id(id: &str) -> Result<()> {
 }
 
 /// Shell out to the `mother` binary with the given arguments.
+///
+/// A non-zero exit is an `Err` carrying the CLI's (trimmed) stderr.
 async fn run_mother(args: &[&str]) -> Result<()> {
     let out = Command::new(mother_bin()).args(args).output().await?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother {} failed: {stderr}", args.join(" "));
+        let detail = trimmed_stderr(&out.stderr);
+        warn!("mother {} failed: {detail}", args.join(" "));
+        anyhow::bail!("mother {} failed: {detail}", args.first().copied().unwrap_or(""));
     }
     Ok(())
+}
+
+/// Stderr as text, trimmed and capped at 500 chars.
+fn trimmed_stderr(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr).trim().chars().take(500).collect()
 }
 
 /// Archive every terminal-state job, regardless of age
@@ -327,20 +328,53 @@ pub async fn archive_all() -> Result<()> {
     Ok(())
 }
 
-/// Re-enqueue a plan file (used for new-plan enqueue via `mother add --plan`).
+/// Parameters for `mother add`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AddJobRequest {
+    pub plan_file: PathBuf,
+    pub repo: String,
+    pub repo_path: Option<String>,
+    pub branch: String,
+    pub base: Option<String>,
+    pub max_cost: Option<f64>,
+    pub label: Option<String>,
+    pub depends_on: Vec<String>,
+}
+
+/// Enqueue a plan via `mother add --plan-file .. --repo .. --branch .. --format text`
+/// and return the printed job id.
 ///
-/// This is the MCP `MotherEnqueue` path only. Cancel/answer/retry operations
-/// use the broker client (`BrokerClient::send_command`).
-pub async fn add_plan(plan_path: &Path) -> Result<()> {
-    let out = Command::new(mother_bin())
-        .args(["add", "--plan", plan_path.to_str().unwrap_or_default()])
-        .output()
-        .await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother add --plan {} failed: {stderr}", plan_path.display());
+/// A non-zero exit or empty stdout is an `Err` carrying the CLI's stderr.
+pub async fn add_job(req: AddJobRequest) -> Result<String> {
+    let mut cmd = Command::new(mother_bin());
+    cmd.arg("add")
+        .arg("--plan-file")
+        .arg(&req.plan_file)
+        .args(["--repo", &req.repo])
+        .args(["--branch", &req.branch]);
+    if let Some(v) = &req.repo_path {
+        cmd.args(["--repo-path", v]);
     }
-    Ok(())
+    if let Some(v) = &req.base {
+        cmd.args(["--base", v]);
+    }
+    if let Some(v) = req.max_cost {
+        cmd.args(["--max-cost", &v.to_string()]);
+    }
+    if let Some(v) = &req.label {
+        cmd.args(["--label", v]);
+    }
+    if !req.depends_on.is_empty() {
+        cmd.args(["--depends-on", &req.depends_on.join(",")]);
+    }
+    let out = cmd.args(["--format", "text"]).output().await?;
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || id.is_empty() {
+        let detail = trimmed_stderr(&out.stderr);
+        warn!("mother add {} failed: {detail}", req.plan_file.display());
+        anyhow::bail!("mother add failed: {detail}");
+    }
+    Ok(id)
 }
 
 // ── peek types ────────────────────────────────────────────────────────────────

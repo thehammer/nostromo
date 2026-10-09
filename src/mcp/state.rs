@@ -369,24 +369,36 @@ impl McpSharedState {
     }
 
     /// Variant of [`for_daemon`] that accepts the real watch receivers from the
-    /// daemon's background sources, so `perri.list_pr_queue`, `perri.get_current_pr`,
-    /// `mother.list_jobs`, etc. return live data instead of the empty stubs from
-    /// `for_test`.
-    pub fn for_daemon_with_sources(
-        daemon: DaemonMcpBackend,
-        perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
-        perri_pr_rx: watch::Receiver<PrSnapshots>,
-        mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
-    ) -> Self {
+    /// daemon's background sources, so `perri.list_pr_queue`, `teri.list_todos`,
+    /// `fred.get_state`, `mother.list_jobs`, etc. return live data instead of
+    /// the empty stubs from `for_test`.
+    pub fn for_daemon_with_sources(daemon: DaemonMcpBackend, sources: DaemonSources) -> Self {
         let (event_tx, _dropped_rx) = mpsc::unbounded_channel();
         let mut state = Self::for_test(event_tx);
         state.daemon = Some(daemon);
-        state.perri_queue_rx = perri_queue_rx;
-        state.perri_pr_rx = perri_pr_rx;
+        state.perri_queue_rx = sources.perri_queue_rx;
+        state.perri_pr_rx = sources.perri_pr_rx;
         // The PR source owns the real sender; drop the test one so nothing in
         // the daemon can publish a snapshot behind the source's back.
         state.perri_pr_tx = None;
-        state.mother_jobs_rx = mother_jobs_rx;
+        state.mother_jobs_rx = sources.mother_jobs_rx;
+        state.fred_mailbox_rx = sources.fred_mailbox_rx;
+        state.fred_calendar_rx = sources.fred_calendar_rx;
+        state.teri_todos_rx = sources.teri_todos_rx;
         state
     }
+}
+
+/// The live watch receivers a daemon-hosted MCP server reads from.
+///
+/// A struct rather than positional arguments so a new source doesn't grow
+/// `for_daemon_with_sources`' argument list. Mother status and rate limits
+/// have no daemon source: `mother.get_status` derives from `mother_jobs_rx`.
+pub struct DaemonSources {
+    pub perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
+    pub perri_pr_rx: watch::Receiver<PrSnapshots>,
+    pub mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
+    pub fred_mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
+    pub fred_calendar_rx: watch::Receiver<Option<CalendarSnapshot>>,
+    pub teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
 }

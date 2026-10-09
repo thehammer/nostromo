@@ -219,6 +219,12 @@ async fn main() -> Result<()> {
     let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
     let jobs_rx_for_mcp = jobs_rx.clone();
 
+    // Fred / Teri sources are spawned here, before the MCP state is built, so
+    // the MCP tools and the broadcasters read the same channels.
+    let fred_mailbox_rx  = FredMailboxNativeSource::spawn(config.clone());
+    let fred_calendar_rx = FredCalendarNativeSource::spawn(config.clone());
+    let teri_todos_rx    = TeriTodosNativeSource::spawn();
+
     // Hosts the layout/introspection/focus tool surface inside nostromd so that
     // daemon-hosted agent sessions can assemble their own pane workspaces. Pane
     // mutations are applied to `pane_registry` and broadcast as `FocusLayout` /
@@ -266,9 +272,14 @@ async fn main() -> Result<()> {
             };
             let state = McpSharedState::for_daemon_with_sources(
                 backend,
-                perri_queue_rx_for_mcp,
-                perri_pr_rx_for_mcp,
-                jobs_rx_for_mcp,
+                nostromo::mcp::DaemonSources {
+                    perri_queue_rx: perri_queue_rx_for_mcp,
+                    perri_pr_rx: perri_pr_rx_for_mcp,
+                    mother_jobs_rx: jobs_rx_for_mcp,
+                    fred_mailbox_rx: fred_mailbox_rx.clone(),
+                    fred_calendar_rx: fred_calendar_rx.clone(),
+                    teri_todos_rx: teri_todos_rx.clone(),
+                },
             );
 
             // ── Pane-source liveness (live-pane-sources) ────────────────────────
@@ -366,12 +377,8 @@ async fn main() -> Result<()> {
         perri_pr_rx,
     ));
 
-    // ── Fred background sources ───────────────────────────────────────────────
-    let fred_mailbox_rx  = FredMailboxNativeSource::spawn(config.clone());
-    let fred_calendar_rx = FredCalendarNativeSource::spawn(config.clone());
-
-    // ── Teri todos source + broadcaster ───────────────────────────────────────
-    let teri_todos_rx = TeriTodosNativeSource::spawn();
+    // ── Teri todos broadcaster ────────────────────────────────────────────────
+    // (Fred and Teri sources were spawned earlier so the MCP state could get live receivers.)
     let btx_teri = broadcast_tx.clone();
     tokio::spawn(run_teri_broadcaster(teri_todos_rx, btx_teri));
 

@@ -11,7 +11,6 @@
 //!
 //! Phase 4 additions: `Notify`, `RegisterStatusSegment`, `ClearStatusSegment`.
 
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -130,7 +129,7 @@ pub enum McpCommand {
     // ── Mother job control ────────────────────────────────────────────────────
     /// Enqueue a plan file; returns a minimal job record.
     MotherEnqueue {
-        plan_path: PathBuf,
+        req: crate::mother::AddJobRequest,
         reply: oneshot::Sender<McpReply<MotherJobLite>>,
     },
 

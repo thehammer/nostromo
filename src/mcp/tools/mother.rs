@@ -98,7 +98,16 @@ pub async fn peek(_state: &McpSharedState, input: &PeekInput) -> Value {
 }
 
 /// Handle `mother.get_status()`.
+///
+/// In the daemon there is no separate status source, so counts are derived
+/// from the live job list (consistent with `mother.list_jobs`).
 pub fn get_status(state: &McpSharedState) -> Value {
+    if state.daemon.is_some() {
+        let status = mother::MotherStatus::from_jobs(&state.mother_jobs_rx.borrow());
+        return serde_json::to_value(status).unwrap_or_else(
+            |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
+        );
+    }
     match state.mother_status_rx.borrow().as_ref() {
         Some(status) => serde_json::to_value(status).unwrap_or_else(
             |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
