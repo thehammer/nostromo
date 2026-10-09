@@ -77,6 +77,14 @@ pub async fn create_focus(state: &McpSharedState, args: &Value, _pty_id: Option<
 
     let tag = derive_tag(&agent, &title);
 
+    // Seeded context is, in practice, text from a work item (a Jira
+    // description, a mail body, a todo): the focus's transcript, panes and
+    // metadata must never reach a network (TCP) peer. Registered before the
+    // session exists so nothing it says can be sent first.
+    if initial_context.is_some() {
+        daemon.session_mgr.lock().unwrap().sensitive_tags().mark_tag(&tag);
+    }
+
     // Idempotent: a live focus with this tag returns its id rather than erroring.
     {
         let mgr = daemon.session_mgr.lock().unwrap();

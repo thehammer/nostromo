@@ -31,9 +31,8 @@ use super::{
     codec::{read_frame, write_frame},
     decisions::{AnswerOutcome, DecisionRegistry},
     peer::{
-        is_sensitive_client_msg, is_sensitive_server_msg, may_receive_broadcast, redact_for_network,
-        withheld_msg,
-        PeerTrust, Transport,
+        outbound, refuse_for_network, withheld_msg, PeerTrust, SensitiveTags,
+        Transport,
     },
     protocol::{
         ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
@@ -43,8 +42,12 @@ use super::{
     session_manager::SessionManager,
 };
 use crate::data::work::{
-    fred_detail_service, work_service, SendOutcome, SendRequest, WorkError, WorkResult,
+    fred_detail_service, work_service, SendOutcome, SendRequest, SourceState, WorkError, WorkResult,
 };
+
+/// The optional capability advertised in `Welcome.features`: this daemon serves
+/// the `work` topic and its frames.
+const FEATURE_WORK: &str = "work";
 
 /// Latest broadcast frame per retain key (see [`retain_key`]), replayed to a
 /// local client that subscribes after the frame was sent.
@@ -291,6 +294,7 @@ where
     let welcome = ServerMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
         daemon_pid: std::process::id(),
+        features: vec![FEATURE_WORK.to_string()],
     };
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
     debug!(claimed_id, conn_key, "client welcomed");
@@ -300,7 +304,7 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let (topics, renders_decisions): (Vec<Topic>, bool) = match sub {
+    let (mut topics, renders_decisions): (Vec<Topic>, bool) = match sub {
         ClientMsg::Subscribe { topics, renders_decisions } => (topics, renders_decisions),
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
@@ -323,7 +327,7 @@ where
     // operator iff it named `Topic::Decision` explicitly, or set
     // `renders_decisions: true` — the only way to make that claim without a
     // full topic enumeration when subscribing to everything.
-    let is_operator = topics.contains(&Topic::Decision) || renders_decisions;
+    let mut is_operator = topics.contains(&Topic::Decision) || renders_decisions;
     if is_operator {
         decisions.lock().unwrap().add_operator(&conn_key);
     }
@@ -332,6 +336,10 @@ where
     // Use `conn_key` (server-minted UUID) as the registry key — not the
     // client-supplied `claimed_id` — so no remote peer can impersonate an
     // existing connection by guessing or replaying another client's id.
+
+    // Which tags/jobs carry Teri/Fred-derived content. Held as a handle so the
+    // write path never takes the session manager's lock.
+    let sensitive = session_mgr.lock().unwrap().sensitive_tags();
 
     let (targeted_tx, mut targeted_rx) = mpsc::unbounded_channel::<ServerMsg>();
     {
@@ -390,7 +398,16 @@ where
                 snapshots.extend(provider.bound_pane_contents());
             }
         }
-        replay_messages(&mut writer, snapshots).await;
+        // A network peer is replayed only what it could also be sent live: the
+        // layout and pane content of a sensitive focus never leave this box.
+        // (Pane content of an ordinary dynamic focus is still replayed — the
+        // exposure of the rest of the daemon is tracked separately, see
+        // `peer.rs`.)
+        replay_messages(
+            &mut writer,
+            snapshots.into_iter().filter_map(|m| outbound(trust, m, &sensitive)),
+        )
+        .await;
     }
 
     // ── Activity replay — snapshot + health on (re)connect ────────────────────
@@ -417,7 +434,14 @@ where
             let health_msg = activity_health_msg(&mgr, hook_installed);
             (snapshots, health_msg)
         };
-        replay_messages(&mut writer, snapshots.into_iter().chain(std::iter::once(health_msg))).await;
+        replay_messages(
+            &mut writer,
+            snapshots
+                .into_iter()
+                .chain(std::iter::once(health_msg))
+                .filter_map(|m| outbound(trust, m, &sensitive)),
+        )
+        .await;
     }
 
     // ── Perri replay — push the current queue/current-PR to a new client ──
@@ -452,14 +476,7 @@ where
     if trust.is_network() {
         replay_messages(&mut writer, [withheld_msg()]).await;
     } else {
-        let frames: Vec<ServerMsg> = retained
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|m| may_receive_broadcast(trust, m) && message_matches_topics(m, &topics))
-            .cloned()
-            .collect();
-        replay_messages(&mut writer, frames).await;
+        replay_messages(&mut writer, retained_matching(&retained, &topics, &[])).await;
     }
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
@@ -472,13 +489,12 @@ where
                     Ok(msg) => {
                         // Trust gate first: a network peer never gets a
                         // sensitive frame, whatever its topic list says.
-                        if !may_receive_broadcast(trust, &msg) {
-                            continue;
-                        }
                         if !message_matches_topics(&msg, &topics) {
                             continue;
                         }
-                        let msg = if trust.is_network() { redact_for_network(msg) } else { msg };
+                        let Some(msg) = outbound(trust, msg, &sensitive) else {
+                            continue;
+                        };
                         let bytes = match serde_json::to_vec(&msg) {
                             Ok(b) => b,
                             Err(e) => { warn!("serialise error: {e}"); continue; }
@@ -498,15 +514,12 @@ where
 
             // Targeted messages (PTY output, PtySpawned, PtyAttached, etc.)
             Some(msg) = targeted_rx.recv() => {
-                // Targeted frames are responses to this peer's own requests;
-                // the only sensitive ones a network peer may get are refusals.
-                if trust.is_network()
-                    && is_sensitive_server_msg(&msg).is_sensitive()
-                    && !is_refusal(&msg)
-                {
+                // Targeted frames (session transcripts, replies, summaries)
+                // go through the same gate as broadcasts; the only
+                // sensitive frames a network peer gets are refusals.
+                let Some(msg) = outbound(trust, msg, &sensitive) else {
                     continue;
-                }
-                let msg = if trust.is_network() { redact_for_network(msg) } else { msg };
+                };
                 let bytes = match serde_json::to_vec(&msg) {
                     Ok(b) => b,
                     Err(e) => { warn!("serialise targeted msg: {e}"); continue; }
@@ -527,7 +540,26 @@ where
                                 continue;
                             }
                         };
-                        handle_client_msg(msg, trust, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
+                        // A later `Subscribe` replaces the topic list: a client
+                        // that learned from `Welcome.features` that the daemon
+                        // serves `work` adds it this way.
+                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions } = msg {
+                            if !is_operator && (new_topics.contains(&Topic::Decision) || renders_decisions) {
+                                decisions.lock().unwrap().add_operator(&conn_key);
+                                is_operator = true;
+                            }
+                            // Replay retained frames only for the topics this
+                            // subscribe adds; a network peer gets none.
+                            let frames = if trust.is_network() {
+                                vec![]
+                            } else {
+                                retained_matching(&retained, &new_topics, &topics)
+                            };
+                            topics = new_topics;
+                            replay_messages(&mut writer, frames).await;
+                            continue;
+                        }
+                        handle_client_msg(msg, trust, &sensitive, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -592,6 +624,7 @@ where
 fn handle_client_msg(
     msg: ClientMsg,
     trust: PeerTrust,
+    sensitive: &SensitiveTags,
     conn_key: &str,
     pty_mgr: &Arc<Mutex<PtyManager>>,
     session_mgr: &Arc<Mutex<SessionManager>>,
@@ -600,8 +633,9 @@ fn handle_client_msg(
     perri_state_dir: &Path,
     decisions: &Arc<Mutex<DecisionRegistry>>,
 ) {
-    // Deny-by-default for network peers: a sensitive request changes nothing.
-    if trust.is_network() && is_sensitive_client_msg(&msg) {
+    // Deny-by-default for network peers: a sensitive request, or any request
+    // that reads or drives a Teri/Fred-derived session, changes nothing.
+    if trust.is_network() && refuse_for_network(&msg, sensitive) {
         refuse_over_network(&msg, targeted_tx);
         return;
     }
@@ -1087,8 +1121,22 @@ fn handle_client_msg(
                 context,
                 allow_duplicate,
             };
+            let sensitive = sensitive.clone();
             tokio::spawn(async move {
                 let result = work_service().send(request).await;
+                // Whatever the send created now holds work-item content: its
+                // focus transcript, panes and metadata, or its Mother job, are
+                // withheld from network peers from here on. (A service that
+                // broadcasts the new focus before returning should register it
+                // itself first; see `WorkService::send`.)
+                if let Ok(outcome) = &result {
+                    if let Some(tag) = &outcome.focus_tag {
+                        sensitive.mark_tag(tag);
+                    }
+                    if let Some(job_id) = &outcome.job_id {
+                        sensitive.mark_job(job_id);
+                    }
+                }
                 let _ = tx.send(ServerMsg::WorkSendResult { request_id, result: result.into() });
             });
         }
@@ -1155,19 +1203,6 @@ fn refuse_over_network(msg: &ClientMsg, targeted_tx: &mpsc::UnboundedSender<Serv
     let _ = targeted_tx.send(reply);
 }
 
-/// True for the targeted refusal frames [`refuse_over_network`] produces.
-fn is_refusal(msg: &ServerMsg) -> bool {
-    let is_secure_refusal = |code: &str| code == "requires_secure_connection";
-    match msg {
-        ServerMsg::WorkDetail { result: WorkResult::Err(e), .. }
-        | ServerMsg::WorkSendPreview { result: WorkResult::Err(e), .. }
-        | ServerMsg::WorkSendResult { result: WorkResult::Err(e), .. } => {
-            is_secure_refusal(&e.code)
-        }
-        _ => false,
-    }
-}
-
 // ── retained-message cache ────────────────────────────────────────────────────
 
 /// Key under which a broadcast frame is remembered, or `None` if it is not
@@ -1187,17 +1222,60 @@ fn retain_key(msg: &ServerMsg) -> Option<String> {
     }
 }
 
+/// Retained frames a client subscribed to `topics` should be replayed, minus
+/// those it was already subscribed to under `already` (empty = none yet).
+fn retained_matching(
+    retained: &RetainedCache,
+    topics: &[Topic],
+    already: &[Topic],
+) -> Vec<ServerMsg> {
+    retained
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|m| {
+            message_matches_topics(m, topics)
+                && (already.is_empty() || !message_matches_topics(m, already))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Update the retained cache for one broadcast frame: remember the latest
+/// frame per key, and forget what the source says is gone — a group that
+/// reports no items, and every group of a source that is no longer configured.
+fn apply_retention(cache: &mut BTreeMap<String, ServerMsg>, msg: ServerMsg) {
+    match &msg {
+        ServerMsg::WorkSnapshot { items, .. } if items.is_empty() => {
+            if let Some(key) = retain_key(&msg) {
+                cache.remove(&key);
+            }
+            return;
+        }
+        ServerMsg::WorkSourceStatus { status } if status.state == SourceState::NotConfigured => {
+            let prefix = format!("work:{}:", status.source.as_str());
+            cache.retain(|key, _| !key.starts_with(&prefix));
+        }
+        _ => {}
+    }
+    if let Some(key) = retain_key(&msg) {
+        cache.insert(key, msg);
+    }
+}
+
 /// Remember the latest retained frame per key until the broadcast channel closes.
+///
+/// If this task falls behind the channel it cannot know which retained frames
+/// it missed (including a removal), so it clears the cache rather than serve
+/// state it can no longer vouch for; the sources re-broadcast on their next
+/// change or refresh.
 async fn retain_broadcasts(mut rx: broadcast::Receiver<ServerMsg>, cache: RetainedCache) {
     loop {
         match rx.recv().await {
-            Ok(msg) => {
-                if let Some(key) = retain_key(&msg) {
-                    cache.lock().unwrap().insert(key, msg);
-                }
-            }
+            Ok(msg) => apply_retention(&mut cache.lock().unwrap(), msg),
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!("retained-message cache lagged {n} broadcast messages");
+                warn!("retained-message cache lagged {n} broadcast messages; clearing it");
+                cache.lock().unwrap().clear();
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }

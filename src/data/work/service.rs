@@ -27,6 +27,14 @@ pub trait WorkService: Send + Sync {
 
     async fn send_preview(&self, item_id: &str) -> Result<SendPreview, WorkError>;
 
+    /// Send a work item to a focus or a Mother job.
+    ///
+    /// The focus/job this creates holds work-item content, so a network (TCP)
+    /// peer must never see it. The server registers the returned
+    /// `focus_tag`/`job_id` as sensitive (`ipc::peer::SensitiveTags`) once this
+    /// returns, but an implementation that broadcasts `FocusCreated` (or
+    /// otherwise announces the new focus) **before** returning must register
+    /// the tag first via `SessionManager::sensitive_tags().mark_tag(..)`.
     async fn send(&self, request: SendRequest) -> Result<SendOutcome, WorkError>;
 }
 

@@ -90,6 +90,26 @@ pub enum Topic {
     /// though it still receives `DecisionRequest` broadcasts like any other
     /// message.
     Decision,
+    /// A topic this build does not know (a newer client's). Decoded rather
+    /// than rejected so a future topic never makes an older daemon drop the
+    /// whole `Subscribe`; it matches no message, and, because it keeps the
+    /// list non-empty, it never degrades into the empty-list wildcard.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Decode a `Subscribe` topic list leniently: an element that is not a topic
+/// this build knows (an unknown name, or not a string at all) becomes
+/// [`Topic::Unknown`] instead of failing the whole frame.
+fn lenient_topics<'de, D>(deserializer: D) -> Result<Vec<Topic>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .map(|v| serde_json::from_value(v).unwrap_or(Topic::Unknown))
+        .collect())
 }
 
 /// Metadata about a daemon-owned PTY.
@@ -895,6 +915,7 @@ pub enum ClientMsg {
         protocol_version: u32,
     },
     Subscribe {
+        #[serde(deserialize_with = "lenient_topics")]
         topics: Vec<Topic>,
         /// Declares that this client can actually present a decision-modal
         /// request to a human and answer it — the fact `nostromo.ask_decision`
@@ -1187,6 +1208,15 @@ pub enum ServerMsg {
     Welcome {
         protocol_version: u32,
         daemon_pid: u32,
+        /// Optional capabilities this daemon serves beyond the base
+        /// protocol (currently `"work"`: the `work` topic and its frames).
+        /// A client sends a topic only the daemon advertises, because an
+        /// older daemon rejects a topic it has never heard of. Additive:
+        /// absent on the wire when empty, so a daemon that predates the field
+        /// (and a client that ignores it) is unaffected; `PROTOCOL_VERSION`
+        /// does not change.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     Activity(ActivityEvent),
     MotherJobs {

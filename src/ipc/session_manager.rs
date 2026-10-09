@@ -49,6 +49,7 @@ use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
 use super::decisions::DecisionRegistry;
+use super::peer::{is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
 use super::pane_registry::{PaneContentProvider, PaneRegistry, PerriStateProvider};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
 use super::stream_json::{
@@ -314,6 +315,10 @@ pub struct SessionManager {
     /// — because attribution needs exactly the state this type already owns
     /// (the live `sessions` map and the `session_reverse` index).
     activity_store: crate::activity::store::ActivityStore,
+    /// Focus tags / Mother jobs that carry Teri/Fred-derived content, which a
+    /// network (TCP) peer must neither read nor drive. See
+    /// [`SensitiveTags`]; persisted beside the session id store.
+    sensitive: SensitiveTags,
 }
 
 impl SessionManager {
@@ -322,6 +327,7 @@ impl SessionManager {
     }
 
     pub fn with_store_path(store_path: PathBuf) -> Self {
+        let sensitive = SensitiveTags::persisted(registry_path_beside(&store_path));
         Self {
             sessions: HashMap::new(),
             client_senders: Arc::new(Mutex::new(HashMap::new())),
@@ -338,7 +344,14 @@ impl SessionManager {
             decisions: None,
             session_reverse: HashMap::new(),
             activity_store: crate::activity::store::ActivityStore::new(),
+            sensitive,
         }
+    }
+
+    /// The registry of sensitive tags/jobs (a shared handle: clones see the
+    /// same registrations).
+    pub fn sensitive_tags(&self) -> SensitiveTags {
+        self.sensitive.clone()
     }
 
     /// Wire the daemon-hosted MCP bridge: the shared pane registry plus the
@@ -470,7 +483,19 @@ impl SessionManager {
         event: crate::agent_bus::ActivityEvent,
     ) -> crate::agent_bus::ActivityEvent {
         let attribution = self.resolve_attribution(&event);
-        self.activity_store.ingest(event, attribution)
+        let attributed_tag = match &attribution {
+            crate::activity::store::Attribution::Focus { tag }
+            | crate::activity::store::Attribution::Subagent { tag, .. } => Some(tag.clone()),
+            crate::activity::store::Attribution::Unattributed => None,
+        };
+        let mut finalized = self.activity_store.ingest(event, attribution);
+        // The attributed focus is authoritative: a hook-supplied `focus_tag`
+        // may be absent or wrong (attribution can come from the session id),
+        // and what a network peer may see is decided by this tag.
+        if attributed_tag.is_some() {
+            finalized.focus_tag = attributed_tag;
+        }
+        finalized
     }
 
     /// [`Self::ingest_activity_event`], additionally reporting whether this
@@ -529,6 +554,13 @@ impl SessionManager {
         session_id: Option<String>,
         remote_control: bool,
     ) -> Result<Option<String>> {
+        // A Fred/Teri session has mail/calendar/todo tools and reads their
+        // data: whatever tag it runs under is sensitive. Registered before the
+        // child exists, so nothing it produces can precede the registration.
+        if is_teri_or_fred_agent(&agent_name) {
+            self.sensitive.mark_tag(&tag);
+        }
+
         if let Some(existing) = self.sessions.get(&tag) {
             if existing.alive() {
                 return Ok(existing.session_id.clone());

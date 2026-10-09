@@ -91,6 +91,7 @@ async fn codec_server_msg_welcome_round_trip() {
     let msg = ServerMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
         daemon_pid: 12345,
+        features: vec![],
     };
     let bytes = serde_json::to_vec(&msg).unwrap();
     let (mut reader, mut writer) = tokio::io::duplex(256);

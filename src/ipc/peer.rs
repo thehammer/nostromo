@@ -2,15 +2,31 @@
 //!
 //! `nostromd` serves the Mac app over a Unix socket and iOS/LAN clients over an
 //! **unauthenticated** TCP listener. The server tags every connection with its
-//! [`Transport`] and derives a [`PeerTrust`]; Teri/Fred data (mail subjects and
-//! senders, todos, work items) is *sensitive* and is withheld from network
-//! peers, and sensitive requests from network peers are refused.
+//! [`Transport`] and derives a [`PeerTrust`]. Teri/Fred data (mail subjects and
+//! senders, todos, work items) is *sensitive*: a network peer must not be able
+//! to read it, nor to make the daemon act on it.
+//!
+//! The model is **allow-list shaped for anything that can carry or act on
+//! Teri/Fred-derived data**: it is not enough to block the dedicated frames,
+//! because the same text also travels in session transcripts, pane content,
+//! notifications, decisions, activity, focus metadata and Mother jobs. Those
+//! frames are scoped by a focus tag (or Mother job id), and a network peer only
+//! receives/drives them for tags that are not *sensitive* — see
+//! [`SensitiveTags`].
 //!
 //! The classification functions below are deliberately exhaustive `match`es
 //! with no wildcard arm: adding a `ServerMsg` or `ClientMsg` variant breaks
-//! this module's build until the author decides whether it is sensitive.
+//! this module's build until the author decides how a network peer is treated.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use super::protocol::{ClientMsg, FocusMeta, ServerMsg, Topic};
+use crate::data::work::WorkResult;
 
 /// Wire transport a connection arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +66,144 @@ impl PeerTrust {
     }
 }
 
+// ── sensitive tags ────────────────────────────────────────────────────────────
+
+/// Is `name` one of the agents whose sessions hold mail/calendar/todo tools?
+/// Case-insensitive.
+pub fn is_teri_or_fred_agent(name: &str) -> bool {
+    name.eq_ignore_ascii_case("fred") || name.eq_ignore_ascii_case("teri")
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Registered {
+    #[serde(default)]
+    tags: BTreeSet<String>,
+    #[serde(default)]
+    jobs: BTreeSet<String>,
+}
+
+/// Which focus tags and Mother jobs carry Teri/Fred-derived content.
+///
+/// A tag is sensitive when it is a built-in (`fred`, `teri`), when a session
+/// of the `fred`/`teri` agent runs under it, or when it was **registered**
+/// because the focus was created from work items (`WorkSend`) or seeded with
+/// context by an agent (`nostromo.create_focus` with `initial_context`) — the
+/// seeded text can be a mail body or a Jira description. Registration is
+/// permanent (a tag is never un-marked) and is persisted next to the session
+/// id store so a daemon restart that resumes the session does not forget it.
+///
+/// Cheap to clone: every clone shares one registry. The session manager owns
+/// it; connections hold a clone so the write path never takes the session
+/// manager's lock.
+#[derive(Clone)]
+pub struct SensitiveTags {
+    inner: Arc<RwLock<Registered>>,
+    path: Option<Arc<PathBuf>>,
+    /// Per-process salt for [`SensitiveTags::opaque_tag`]; keeps the opaque
+    /// tag of a short slug (a Jira key) from being brute-forced.
+    salt: Arc<String>,
+}
+
+impl Default for SensitiveTags {
+    fn default() -> Self {
+        Self::in_memory()
+    }
+}
+
+impl SensitiveTags {
+    /// A registry that is not persisted (tests, non-daemon use).
+    pub fn in_memory() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Registered::default())),
+            path: None,
+            salt: Arc::new(uuid::Uuid::new_v4().to_string()),
+        }
+    }
+
+    /// A registry persisted at `path`, seeded from it when it exists.
+    pub fn persisted(path: PathBuf) -> Self {
+        let registered = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Registered>(&bytes).ok())
+            .unwrap_or_default();
+        Self {
+            inner: Arc::new(RwLock::new(registered)),
+            path: Some(Arc::new(path)),
+            salt: Arc::new(uuid::Uuid::new_v4().to_string()),
+        }
+    }
+
+    /// Does the focus `tag` carry (or can it act on) Teri/Fred-derived data?
+    pub fn tag_is_sensitive(&self, tag: &str) -> bool {
+        is_teri_or_fred_agent(tag) || self.inner.read().unwrap().tags.contains(tag)
+    }
+
+    /// Was Mother job `job_id` created from a work item?
+    pub fn job_is_sensitive(&self, job_id: &str) -> bool {
+        self.inner.read().unwrap().jobs.contains(job_id)
+    }
+
+    /// Register `tag` as sensitive. Idempotent.
+    pub fn mark_tag(&self, tag: &str) {
+        if is_teri_or_fred_agent(tag) {
+            return;
+        }
+        let added = self.inner.write().unwrap().tags.insert(tag.to_string());
+        if added {
+            self.persist();
+        }
+    }
+
+    /// Register Mother job `job_id` as sensitive. Idempotent.
+    pub fn mark_job(&self, job_id: &str) {
+        let added = self.inner.write().unwrap().jobs.insert(job_id.to_string());
+        if added {
+            self.persist();
+        }
+    }
+
+    /// A stable stand-in for `tag` that reveals none of its text.
+    fn opaque_tag(&self, tag: &str) -> String {
+        // FNV-1a over salt + tag: no hashing dependency needed for a label.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in self.salt.bytes().chain(tag.bytes()) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        format!("focus-{h:016x}")
+    }
+
+    fn persist(&self) {
+        let Some(path) = &self.path else { return };
+        let json = match serde_json::to_vec(&*self.inner.read().unwrap()) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!("sensitive-tag registry: serialise failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = write_atomic(path, &json) {
+            warn!(path = %path.display(), "sensitive-tag registry: persist failed: {e}");
+        }
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// The path of the sensitive-tag registry that sits beside a session id store.
+pub fn registry_path_beside(store_path: &Path) -> PathBuf {
+    store_path.with_file_name("sensitive-tags.json")
+}
+
+// ── server → client classification ───────────────────────────────────────────
+
 /// Whether a message carries Teri/Fred data (or requests it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SensitiveClass {
@@ -63,10 +217,58 @@ impl SensitiveClass {
     }
 }
 
-/// Classify a daemon-to-client message.
-pub fn is_sensitive_server_msg(msg: &ServerMsg) -> SensitiveClass {
-    use SensitiveClass::{NotSensitive, Sensitive};
+/// How a daemon-to-client frame is scoped, i.e. what decides whether a network
+/// peer may receive it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerClass<'a> {
+    /// Teri/Fred/work data itself: never delivered to a network peer.
+    Sensitive,
+    /// Not Teri/Fred-derived (or knowingly left open, see the module-level
+    /// list below). Content that can be, such as focus lists, is trimmed by
+    /// [`redact_for_network`] instead.
+    Open,
+    /// Content of one focus: delivered only if its tag is not sensitive.
+    Focus(&'a str),
+    /// Content of one Mother job: delivered only if the job is not work-derived.
+    Job(&'a str),
+    /// An activity event: its focus tag, or `None` when unattributed.
+    /// Unattributed events are withheld: they may belong to a Teri/Fred
+    /// session whose session id the daemon could not resolve.
+    Activity(Option<&'a str>),
+}
+
+// ── What is NOT gated (read this before trusting the exhaustive matches) ─────
+//
+// The `match`es below force every `ServerMsg`/`ClientMsg` variant to be
+// *classified*, which is NOT a security audit of the daemon. The TCP listener
+// is unauthenticated and LAN-bound as a whole; fixing that (authentication,
+// rebinding the port) is tracked separately in
+// `.claude/wip/nostromd-tcp-47100-exposure/index.md`. Until then these families
+// are knowingly reachable by any network peer, because gating them one by one
+// would be theatre while `pty_spawn` runs arbitrary commands:
+//
+//   * client → daemon: `focus_registry_push`, `perri_action`, `mother_action`,
+//     `mother_resume`, `decision_answer`, `pty_spawn`/`pty_input`/`pty_kill`/…,
+//     `session_spawn` (for a non-Teri/Fred agent), `close_pane`,
+//     `rendered_shape`, and `session_*` verbs on non-sensitive tags.
+//   * daemon → client: PTY output (`pty_*`), Perri state (`perri_state`, also
+//     per-focus), `mother_statusline`, and the pane content / layout /
+//     notifications / decisions / activity / transcripts of every focus that is
+//     NOT a sensitive tag. Pane content of an ordinary dynamic focus can
+//     therefore still show whatever its agent put there.
+//   * a Teri/Fred-derived focus is only recognised when it is a built-in, was
+//     created through `WorkSend` or `create_focus` with seeded context, or runs
+//     the `fred`/`teri` agent. Text an agent pastes into some other focus, or
+//     a Mother job started from a shell, is not tracked.
+//
+// What this module DOES guarantee for network peers: nothing Teri/Fred-derived
+// that the daemon can identify (the four cases above) is delivered or driven
+// through any frame family, on the replay, broadcast and targeted paths.
+
+/// Classify a daemon-to-client message. Every variant is listed on purpose.
+pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
     match msg {
+        // Teri/Fred/work data itself.
         ServerMsg::TeriState { .. }
         | ServerMsg::FredState { .. }
         | ServerMsg::WorkSourceStatus { .. }
@@ -74,13 +276,45 @@ pub fn is_sensitive_server_msg(msg: &ServerMsg) -> SensitiveClass {
         | ServerMsg::TeriPicks { .. }
         | ServerMsg::WorkDetail { .. }
         | ServerMsg::WorkSendPreview { .. }
-        | ServerMsg::WorkSendResult { .. } => Sensitive,
+        | ServerMsg::WorkSendResult { .. } => ServerClass::Sensitive,
 
+        // Scoped to one focus: the transcript, pane content, notifications,
+        // decision prompts/details and activity of a focus can all quote
+        // mail, todos or Jira text.
+        ServerMsg::SessionSpawned { tag, .. }
+        | ServerMsg::SessionTurns { tag, .. }
+        | ServerMsg::SessionTurnDelta { tag, .. }
+        | ServerMsg::SessionState { tag, .. }
+        | ServerMsg::SessionPermissionRequest { tag, .. }
+        | ServerMsg::SessionExited { tag, .. }
+        | ServerMsg::SessionDown { tag, .. }
+        | ServerMsg::SessionSummaryUpdate { tag, .. }
+        | ServerMsg::FocusLayout { tag, .. }
+        | ServerMsg::PaneContent { tag, .. }
+        | ServerMsg::DecisionRequest { tag, .. }
+        | ServerMsg::DecisionResolved { tag, .. }
+        | ServerMsg::Notification { tag, .. }
+        | ServerMsg::ActivitySnapshot { tag, .. } => ServerClass::Focus(tag),
+
+        ServerMsg::Activity(event) => ServerClass::Activity(event.focus_tag.as_deref()),
+
+        // Scoped to one Mother job. A job started from a work item carries
+        // its plan/title/transcript; classified by job id (no focus tag).
+        ServerMsg::MotherPeek { job_id, .. } => ServerClass::Job(job_id),
+        ServerMsg::MotherAwaitDetected(job) => ServerClass::Job(&job.id),
+
+        // Lists whose entries are filtered/trimmed by `redact_for_network`.
+        ServerMsg::FocusListResp { .. }
+        | ServerMsg::FocusRegistryUpdated { .. }
+        | ServerMsg::FocusCreated { .. }
+        | ServerMsg::SessionListResp { .. }
+        | ServerMsg::MotherJobs { .. } => ServerClass::Open,
+
+        // No Teri/Fred-derived content: handshake, liveness, counters, health
+        // booleans, the withheld notice, and the knowingly-open families
+        // listed above.
         ServerMsg::Welcome { .. }
-        | ServerMsg::Activity(_)
-        | ServerMsg::MotherJobs { .. }
         | ServerMsg::MotherStatusline(_)
-        | ServerMsg::MotherAwaitDetected(_)
         | ServerMsg::PerriState { .. }
         | ServerMsg::Pong
         | ServerMsg::Error { .. }
@@ -92,33 +326,70 @@ pub fn is_sensitive_server_msg(msg: &ServerMsg) -> SensitiveClass {
         | ServerMsg::PtyDetach { .. }
         | ServerMsg::PtyListResp { .. }
         | ServerMsg::PtyIdentity { .. }
-        | ServerMsg::SessionSpawned { .. }
-        | ServerMsg::SessionTurns { .. }
-        | ServerMsg::SessionTurnDelta { .. }
-        | ServerMsg::SessionState { .. }
-        | ServerMsg::SessionPermissionRequest { .. }
-        | ServerMsg::SessionExited { .. }
-        | ServerMsg::SessionDown { .. }
-        | ServerMsg::SessionListResp { .. }
-        | ServerMsg::SessionSummaryUpdate { .. }
-        | ServerMsg::FocusListResp { .. }
-        | ServerMsg::FocusRegistryUpdated { .. }
-        | ServerMsg::MotherPeek { .. }
-        | ServerMsg::FocusLayout { .. }
-        | ServerMsg::PaneContent { .. }
-        | ServerMsg::FocusCreated { .. }
-        | ServerMsg::DecisionRequest { .. }
-        | ServerMsg::DecisionResolved { .. }
-        | ServerMsg::Notification { .. }
-        | ServerMsg::ActivitySnapshot { .. }
         | ServerMsg::ActivityHealth { .. }
         | ServerMsg::Withheld { .. }
-        | ServerMsg::DaemonReconnected => NotSensitive,
+        | ServerMsg::DaemonReconnected => ServerClass::Open,
     }
 }
 
+/// Is `msg` Teri/Fred/work data *itself* (as opposed to focus-scoped content)?
+pub fn is_sensitive_server_msg(msg: &ServerMsg) -> SensitiveClass {
+    match classify_server_msg(msg) {
+        ServerClass::Sensitive => SensitiveClass::Sensitive,
+        ServerClass::Open
+        | ServerClass::Focus(_)
+        | ServerClass::Job(_)
+        | ServerClass::Activity(_) => SensitiveClass::NotSensitive,
+    }
+}
+
+/// True for the targeted refusal frames a network peer is answered with.
+pub fn is_refusal(msg: &ServerMsg) -> bool {
+    let is_secure_refusal = |code: &str| code == "requires_secure_connection";
+    match msg {
+        ServerMsg::WorkDetail { result: WorkResult::Err(e), .. }
+        | ServerMsg::WorkSendPreview { result: WorkResult::Err(e), .. }
+        | ServerMsg::WorkSendResult { result: WorkResult::Err(e), .. } => {
+            is_secure_refusal(&e.code)
+        }
+        ServerMsg::Error { message } => message.starts_with("requires_secure_connection"),
+        _ => false,
+    }
+}
+
+/// May `msg` be written to a peer of this trust, on **any** path (broadcast,
+/// targeted, replay)? A local peer may receive everything. A network peer
+/// never receives Teri/Fred/work data, nor content scoped to a sensitive focus
+/// or work-derived job, whatever topics it subscribed to (an empty list means
+/// "everything", which must not include these). Runs before topic matching.
+pub fn may_receive(trust: PeerTrust, msg: &ServerMsg, tags: &SensitiveTags) -> bool {
+    if !trust.is_network() || is_refusal(msg) {
+        return true;
+    }
+    match classify_server_msg(msg) {
+        ServerClass::Sensitive => false,
+        ServerClass::Open => true,
+        ServerClass::Focus(tag) => !tags.tag_is_sensitive(tag),
+        ServerClass::Job(job_id) => !tags.job_is_sensitive(job_id),
+        ServerClass::Activity(Some(tag)) => !tags.tag_is_sensitive(tag),
+        ServerClass::Activity(None) => false,
+    }
+}
+
+/// What a peer of this trust is actually sent for `msg`: `None` when it is
+/// withheld, otherwise the frame (trimmed for a network peer).
+pub fn outbound(trust: PeerTrust, msg: ServerMsg, tags: &SensitiveTags) -> Option<ServerMsg> {
+    if !may_receive(trust, &msg, tags) {
+        return None;
+    }
+    Some(if trust.is_network() { redact_for_network(msg, tags) } else { msg })
+}
+
+// ── client → server classification ───────────────────────────────────────────
+
 /// Classify a client-to-daemon message. `true` means a network peer must be
-/// refused with `requires_secure_connection`.
+/// refused with `requires_secure_connection`, whatever tag it names. (Requests
+/// that name a sensitive *tag* are caught by [`targets_sensitive_session`].)
 pub fn is_sensitive_client_msg(msg: &ClientMsg) -> bool {
     match msg {
         ClientMsg::WorkDetailRequest { .. }
@@ -158,36 +429,107 @@ pub fn is_sensitive_client_msg(msg: &ClientMsg) -> bool {
     }
 }
 
-/// May `msg` be written to a peer of this trust on the **broadcast** path?
-///
-/// A network peer never receives a sensitive broadcast, whatever topics it
-/// subscribed to (an empty list means "everything", which must not include
-/// Teri/Fred data). This runs before topic matching.
-pub fn may_receive_broadcast(trust: PeerTrust, msg: &ServerMsg) -> bool {
-    !(trust.is_network() && is_sensitive_server_msg(msg).is_sensitive())
+/// Does `msg` read, drive or create a session/focus that carries Teri/Fred
+/// data? A network peer's such request is refused with
+/// `requires_secure_connection` before any side effect. Spawning is refused
+/// for a sensitive tag *and* for the `fred`/`teri` agent under any tag (that
+/// session would have mail/calendar/todo tools). `SessionDetach` is allowed:
+/// it only releases the peer's own attachment.
+pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool {
+    match msg {
+        ClientMsg::SessionSpawn { tag, agent_name, .. } => {
+            tags.tag_is_sensitive(tag) || is_teri_or_fred_agent(agent_name)
+        }
+        ClientMsg::SessionAttach { tag }
+        | ClientMsg::SessionSend { tag, .. }
+        | ClientMsg::SessionInterrupt { tag }
+        | ClientMsg::SessionControl { tag, .. }
+        | ClientMsg::SessionAnswerPermission { tag, .. }
+        | ClientMsg::ClosePane { tag, .. }
+        | ClientMsg::ActivitySnapshotRequest { tag }
+        | ClientMsg::RenderedShape { tag, .. } => tags.tag_is_sensitive(tag),
+
+        ClientMsg::Hello { .. }
+        | ClientMsg::Subscribe { .. }
+        | ClientMsg::Ping
+        | ClientMsg::PtySpawn { .. }
+        | ClientMsg::PtyAttach { .. }
+        | ClientMsg::PtyDetach { .. }
+        | ClientMsg::PtyInput { .. }
+        | ClientMsg::PtyResize { .. }
+        | ClientMsg::PtyKill { .. }
+        | ClientMsg::PtyList
+        | ClientMsg::SessionDetach { .. }
+        | ClientMsg::SessionList
+        | ClientMsg::FocusRegistryPush { .. }
+        | ClientMsg::FocusList
+        | ClientMsg::MotherAction { .. }
+        | ClientMsg::MotherResume { .. }
+        | ClientMsg::PerriAction { .. }
+        | ClientMsg::DecisionAnswer { .. }
+        | ClientMsg::WorkDetailRequest { .. }
+        | ClientMsg::WorkRefresh { .. }
+        | ClientMsg::PicksRefresh { .. }
+        | ClientMsg::WorkSendPreviewRequest { .. }
+        | ClientMsg::WorkSend { .. }
+        | ClientMsg::FredSeed { .. } => false,
+    }
 }
 
-/// Strip fields a network peer must not see from an otherwise-deliverable
-/// frame. `FocusMeta::project_path` is an absolute filesystem path; the
-/// `FocusMeta` contract promises none reach mobile, so it is dropped here.
-pub fn redact_for_network(msg: ServerMsg) -> ServerMsg {
-    fn strip(metas: &mut [FocusMeta]) {
-        for m in metas {
-            m.project_path = None;
+/// Must a network peer's `msg` be refused? (Either family above.)
+pub fn refuse_for_network(msg: &ClientMsg, tags: &SensitiveTags) -> bool {
+    is_sensitive_client_msg(msg) || targets_sensitive_session(msg, tags)
+}
+
+// ── trimming for network peers ───────────────────────────────────────────────
+
+/// Strip from a focus's metadata what a network peer must not see: the
+/// absolute project path, the work-item label (a Jira key or doc title), the
+/// first-user-message summary (seeded context), and, for a sensitive focus,
+/// the agent-supplied title and the tag (the tag of a work-derived focus is a
+/// slug of that title). A built-in `fred`/`teri` tag is public.
+fn redact_meta(meta: &mut FocusMeta, tags: &SensitiveTags) {
+    meta.project_path = None;
+    meta.label = None;
+    meta.session_summary = None;
+    if tags.tag_is_sensitive(&meta.tag) || is_teri_or_fred_agent(&meta.agent_name) {
+        meta.display_name = meta.agent_name.clone();
+        if !is_teri_or_fred_agent(&meta.tag) {
+            meta.tag = tags.opaque_tag(&meta.tag);
         }
     }
-    match msg {
-        ServerMsg::FocusListResp { mut focuses } => {
-            strip(&mut focuses);
-            ServerMsg::FocusListResp { focuses }
+}
+
+/// Trim an otherwise-deliverable frame for a network peer; see
+/// [`redact_meta`], plus: session and Mother-job lists drop their sensitive
+/// entries.
+pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
+    fn redact_all(mut metas: Vec<FocusMeta>, tags: &SensitiveTags) -> Vec<FocusMeta> {
+        for m in &mut metas {
+            redact_meta(m, tags);
         }
-        ServerMsg::FocusRegistryUpdated { mut focuses } => {
-            strip(&mut focuses);
-            ServerMsg::FocusRegistryUpdated { focuses }
+        metas
+    }
+    match msg {
+        ServerMsg::FocusListResp { focuses } => {
+            ServerMsg::FocusListResp { focuses: redact_all(focuses, tags) }
+        }
+        ServerMsg::FocusRegistryUpdated { focuses } => {
+            ServerMsg::FocusRegistryUpdated { focuses: redact_all(focuses, tags) }
         }
         ServerMsg::FocusCreated { mut meta } => {
-            meta.project_path = None;
+            redact_meta(&mut meta, tags);
             ServerMsg::FocusCreated { meta }
+        }
+        ServerMsg::SessionListResp { mut sessions } => {
+            sessions.retain(|s| {
+                !tags.tag_is_sensitive(&s.tag) && !is_teri_or_fred_agent(&s.agent_name)
+            });
+            ServerMsg::SessionListResp { sessions }
+        }
+        ServerMsg::MotherJobs { mut jobs } => {
+            jobs.retain(|j| !tags.job_is_sensitive(&j.id));
+            ServerMsg::MotherJobs { jobs }
         }
         other => other,
     }
@@ -245,8 +587,9 @@ mod tests {
         ];
         for msg in &sensitive {
             assert!(is_sensitive_server_msg(msg).is_sensitive(), "{msg:?}");
-            assert!(!may_receive_broadcast(PeerTrust::Tcp, msg), "{msg:?}");
-            assert!(may_receive_broadcast(PeerTrust::LocalOther, msg), "{msg:?}");
+            let tags = SensitiveTags::in_memory();
+            assert!(!may_receive(PeerTrust::Tcp, msg, &tags), "{msg:?}");
+            assert!(may_receive(PeerTrust::LocalOther, msg, &tags), "{msg:?}");
         }
     }
 
@@ -254,8 +597,9 @@ mod tests {
     fn non_sensitive_broadcasts_still_reach_network_peers() {
         let msg = ServerMsg::FocusRegistryUpdated { focuses: vec![] };
         assert!(!is_sensitive_server_msg(&msg).is_sensitive());
-        assert!(may_receive_broadcast(PeerTrust::Tcp, &msg));
-        assert!(may_receive_broadcast(PeerTrust::Tcp, &withheld_msg()));
+        let tags = SensitiveTags::in_memory();
+        assert!(may_receive(PeerTrust::Tcp, &msg, &tags));
+        assert!(may_receive(PeerTrust::Tcp, &withheld_msg(), &tags));
     }
 
     #[test]
@@ -313,12 +657,182 @@ mod tests {
             ServerMsg::FocusRegistryUpdated { focuses: vec![meta.clone()] },
             ServerMsg::FocusListResp { focuses: vec![meta.clone()] },
         ] {
-            let json = serde_json::to_string(&redact_for_network(msg)).unwrap();
+            let json =
+                serde_json::to_string(&redact_for_network(msg, &SensitiveTags::in_memory())).unwrap();
             assert!(!json.contains("/Users/x/repo"), "path leaked: {json}");
             // The label is withheld from network peers too (it can be a Jira
             // key or doc title); an ordinary focus's identity is kept.
             assert!(!json.contains("\"label\""), "label leaked: {json}");
             assert!(json.contains("\"tag\":\"t\""), "other fields kept: {json}");
         }
+    }
+
+    fn tags_with(tag: &str) -> SensitiveTags {
+        let tags = SensitiveTags::in_memory();
+        tags.mark_tag(tag);
+        tags
+    }
+
+    #[test]
+    fn fred_and_teri_are_sensitive_whatever_their_case_and_others_only_once_registered() {
+        let tags = SensitiveTags::in_memory();
+        for tag in ["fred", "teri", "Fred", "TERI"] {
+            assert!(tags.tag_is_sensitive(tag), "{tag}");
+        }
+        assert!(!tags.tag_is_sensitive("cody-core-1"));
+        tags.mark_tag("cody-core-1");
+        assert!(tags.tag_is_sensitive("cody-core-1"));
+        // A clone shares the registry.
+        let clone = tags.clone();
+        clone.mark_tag("cody-core-2");
+        assert!(tags.tag_is_sensitive("cody-core-2"));
+    }
+
+    #[test]
+    fn registered_tags_and_jobs_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_path_beside(&dir.path().join("daemon-sessions.json"));
+        let first = SensitiveTags::persisted(path.clone());
+        first.mark_tag("cody-core-1");
+        first.mark_job("job-9");
+
+        let second = SensitiveTags::persisted(path);
+        assert!(second.tag_is_sensitive("cody-core-1"));
+        assert!(second.job_is_sensitive("job-9"));
+        assert!(!second.tag_is_sensitive("cody-other"));
+    }
+
+    #[test]
+    fn session_verbs_on_a_sensitive_tag_or_for_a_fred_teri_agent_are_refused_for_network_peers() {
+        let tags = tags_with("cody-core-1");
+        let attach = |tag: &str| ClientMsg::SessionAttach { tag: tag.into() };
+        assert!(refuse_for_network(&attach("fred"), &tags));
+        assert!(refuse_for_network(&attach("cody-core-1"), &tags));
+        assert!(!refuse_for_network(&attach("cody-other"), &tags));
+        let spawn = |tag: &str, agent: &str| ClientMsg::SessionSpawn {
+            tag: tag.into(),
+            agent_name: agent.into(),
+            view_name: "v".into(),
+            cwd: None,
+            session_id: None,
+            remote_control: false,
+        };
+        assert!(refuse_for_network(&spawn("anything", "fred"), &tags));
+        assert!(refuse_for_network(&spawn("anything", "Teri"), &tags));
+        assert!(!refuse_for_network(&spawn("anything", "cody"), &tags));
+        // Detaching only releases the peer's own attachment.
+        assert!(!refuse_for_network(&ClientMsg::SessionDetach { tag: "fred".into() }, &tags));
+    }
+
+    #[test]
+    fn focus_scoped_frames_follow_their_tag_and_unattributed_activity_is_withheld() {
+        let tags = tags_with("cody-core-1");
+        let notification = |tag: &str| ServerMsg::Notification {
+            tag: tag.into(),
+            level: crate::ipc::protocol::NotificationLevel::Info,
+            message: "m".into(),
+        };
+        assert!(!may_receive(PeerTrust::Tcp, &notification("fred"), &tags));
+        assert!(!may_receive(PeerTrust::Tcp, &notification("cody-core-1"), &tags));
+        assert!(may_receive(PeerTrust::Tcp, &notification("cody-other"), &tags));
+        assert!(may_receive(PeerTrust::LocalOther, &notification("fred"), &tags));
+
+        let event = |focus_tag: Option<&str>| {
+            ServerMsg::Activity(crate::agent_bus::ActivityEvent {
+                ts: chrono::Utc::now(),
+                agent: "a".into(),
+                kind: "tool_use".into(),
+                summary: "s".into(),
+                focus_tag: focus_tag.map(str::to_string),
+                session_id: None,
+                agent_id: None,
+                agent_type: None,
+                parent_agent_id: None,
+                tool_name: None,
+                tool_use_id: None,
+                cwd: None,
+                seq: None,
+            })
+        };
+        assert!(may_receive(PeerTrust::Tcp, &event(Some("cody-other")), &tags));
+        assert!(!may_receive(PeerTrust::Tcp, &event(Some("teri")), &tags));
+        assert!(!may_receive(PeerTrust::Tcp, &event(None), &tags));
+        assert!(may_receive(PeerTrust::LocalOther, &event(None), &tags));
+    }
+
+    #[test]
+    fn refusals_are_always_deliverable() {
+        let refusal = ServerMsg::WorkSendResult {
+            request_id: "r".into(),
+            result: WorkResult::Err(crate::data::work::WorkError::requires_secure_connection()),
+        };
+        assert!(may_receive(PeerTrust::Tcp, &refusal, &SensitiveTags::in_memory()));
+    }
+
+    #[test]
+    fn a_sensitive_focus_shows_a_network_peer_only_its_agent_and_an_opaque_tag() {
+        let tags = tags_with("cody-secret-jira-title");
+        let meta = |tag: &str, agent: &str| FocusMeta {
+            tag: tag.into(),
+            display_name: "Cody on SECRET".into(),
+            agent_name: agent.into(),
+            project_name: None,
+            org: None,
+            is_built_in: false,
+            session_summary: Some("SUMMARY".into()),
+            label: Some("LABEL".into()),
+            project_path: Some("/Users/x".into()),
+            select_for_client: None,
+        };
+        let ServerMsg::FocusCreated { meta: derived } = redact_for_network(
+            ServerMsg::FocusCreated { meta: meta("cody-secret-jira-title", "cody") },
+            &tags,
+        ) else {
+            panic!("expected FocusCreated");
+        };
+        assert_eq!(derived.display_name, "cody");
+        assert!(!derived.tag.contains("secret"), "{}", derived.tag);
+        // The opaque tag is stable, so a client can still tell focuses apart.
+        assert_eq!(derived.tag, tags.opaque_tag("cody-secret-jira-title"));
+        assert_ne!(derived.tag, tags.opaque_tag("cody-other"));
+
+        let ServerMsg::FocusCreated { meta: fred } =
+            redact_for_network(ServerMsg::FocusCreated { meta: meta("fred", "fred") }, &tags)
+        else {
+            panic!("expected FocusCreated");
+        };
+        assert_eq!((fred.tag.as_str(), fred.display_name.as_str()), ("fred", "fred"));
+        assert!(fred.label.is_none() && fred.session_summary.is_none() && fred.project_path.is_none());
+    }
+
+    #[test]
+    fn session_lists_for_network_peers_omit_sensitive_sessions() {
+        use crate::ipc::protocol::SessionInfo;
+        use crate::ipc::stream_json::SessionState;
+        let info = |tag: &str, agent: &str| SessionInfo {
+            tag: tag.into(),
+            agent_name: agent.into(),
+            view_name: "v".into(),
+            session_id: None,
+            alive: true,
+            remote_control: false,
+            state: SessionState::Idle,
+            stop_reason: None,
+        };
+        let tags = tags_with("cody-core-1");
+        let ServerMsg::SessionListResp { sessions } = redact_for_network(
+            ServerMsg::SessionListResp {
+                sessions: vec![
+                    info("fred", "fred"),
+                    info("cody-core-1", "cody"),
+                    info("renamed", "teri"),
+                    info("cody-ok", "cody"),
+                ],
+            },
+            &tags,
+        ) else {
+            panic!("expected SessionListResp");
+        };
+        assert_eq!(sessions.iter().map(|s| s.tag.as_str()).collect::<Vec<_>>(), vec!["cody-ok"]);
     }
 }
