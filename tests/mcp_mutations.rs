@@ -466,8 +466,10 @@ async fn mother_enqueue_job_dispatches_command() {
     let plan_path_clone = plan_path.clone();
     let fake_loop = tokio::spawn(async move {
         if let Some(AppEvent::McpCommand(cmd)) = rx.recv().await {
-            if let nostromo::mcp::McpCommand::MotherEnqueue { plan_path, reply } = *cmd {
-                assert_eq!(plan_path, plan_path_clone);
+            if let nostromo::mcp::McpCommand::MotherEnqueue { req, reply } = *cmd {
+                assert_eq!(req.plan_file, plan_path_clone);
+                assert_eq!(req.repo, "acme/web");
+                assert_eq!(req.branch, "feat/x");
                 let _ = reply.send(Ok(nostromo::mcp::command::MotherJobLite {
                     id: "test-job-id".into(),
                     title: "Test plan".into(),
@@ -485,7 +487,7 @@ async fn mother_enqueue_job_dispatches_command() {
         &mut writer,
         2,
         "mother.enqueue_job",
-        json!({ "plan_path": plan_path.to_str().unwrap() }),
+        json!({ "plan_path": plan_path.to_str().unwrap(), "repo": "acme/web", "branch": "feat/x" }),
     )
     .await;
 

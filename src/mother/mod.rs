@@ -6,11 +6,17 @@
 //! - `MOTHER_ROOT`            — state root (default: `$HOME/.mother`)
 //! - `MOTHER_BROKER_SOCK`     — broker socket (default: `$MOTHER_ROOT/broker.sock`)
 //! - `MOTHER_STATUSLINE_CACHE`— statusline cache file (default: `/tmp/.mother-statusline`)
+//! - `NOSTROMO_MOTHER_CLI_TIMEOUT_MS` — bound on every `mother` CLI call (default: 30000)
 
 pub mod broker_client;
+pub mod feed;
 pub mod protocol;
 
+pub use feed::{JobsFeed, MotherSourceState};
+
 use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
+use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -220,14 +226,15 @@ impl MotherJob {
 // ── async helpers ─────────────────────────────────────────────────────────────
 
 /// List all Mother jobs by shelling out to `mother list --format json`.
+///
+/// A non-zero exit is an `Err` carrying the CLI's stderr — a failed list must
+/// never read as "no jobs".
 pub async fn list_jobs() -> Result<Vec<MotherJob>> {
-    let out = Command::new(mother_bin())
-        .args(["list", "--format", "json"])
-        .output()
-        .await?;
+    let out = run_output(&["list", "--format", "json"]).await?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother list failed: {stderr}");
+        let detail = trimmed_stderr(&out.stderr);
+        warn!("mother list failed: {detail}");
+        return Err(cli_failure("list", detail).into());
     }
     let jobs: Vec<MotherJob> = serde_json::from_slice(&out.stdout)?;
     Ok(jobs)
@@ -246,46 +253,52 @@ pub async fn tail_log(id: &str, n: usize) -> Result<String> {
 /// Archive a single terminal-state job by id.
 /// Mother CLI silently skips jobs that are not in a terminal state.
 pub async fn archive(id: &str) -> Result<()> {
-    let out = Command::new(mother_bin())
-        .args(["archive", id])
-        .output()
-        .await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother archive {id} failed: {stderr}");
-    }
-    Ok(())
+    validate_job_id(id)?;
+    run_mother(&["archive", id]).await
 }
 
 /// Cancel a running or queued job by id.
 pub async fn cancel(id: &str) -> Result<()> {
     validate_job_id(id)?;
-    run_mother(&["cancel", "--", id]).await
+    run_mother(&["cancel", id]).await
 }
 
 /// Retry a failed or cancelled job by id.
+///
+/// Deliberately NOT `--yes`: `mother retry` has no confirmation prompt, and in
+/// the real CLI `--yes` exists only to override the "this job's branch already
+/// has an open pull request" guard. Passing it would silently turn that guard
+/// off for every MCP/IPC retry. Without it the CLI refuses (stderr names the
+/// open PR and points at `mother reconcile`), which `cli_failure` maps to
+/// `MotherCliError::OpenPr`.
 pub async fn retry(id: &str) -> Result<()> {
     validate_job_id(id)?;
-    run_mother(&["retry", "--", id]).await
+    run_mother(&["retry", id]).await
 }
 
 /// Force-start a queued job by id, skipping the quota-cap confirmation.
+///
+/// `--yes` is required when non-interactive (the CLI refuses without it), and
+/// in the real CLI it also overrides the open-pull-request guard. Only the IPC
+/// `MotherAction::ForceStart` path reaches this (an explicit operator action in
+/// the app), never an MCP tool.
 pub async fn force_start(id: &str) -> Result<()> {
     validate_job_id(id)?;
-    run_mother(&["force-start", "--yes", "--", id]).await
+    run_mother(&["force-start", "--yes", id]).await
 }
 
 /// Resume an awaiting job by id, supplying the operator's answer.
-/// Shells out to `mother resume -- <id> <answer>`.
 ///
-/// The `--` end-of-options separator ensures neither `id` nor `answer`
-/// can be misinterpreted as CLI flags by the `mother` binary, regardless
-/// of their content.  `id` is additionally validated by `validate_job_id`
-/// to reject leading-dash strings; `answer` is passed literally after `--`
-/// so arbitrary text is safe without further sanitization.
+/// The answer is operator text: it can start with a dash or span lines, so it
+/// never goes on the command line. It is written to a private temp file and
+/// handed over as `mother resume <id> --from-file <path>`. The `mother` CLI
+/// has no `--` end-of-options separator, so `id` is kept flag-safe by
+/// `validate_job_id` instead.
 pub async fn resume(id: &str, answer: &str) -> Result<()> {
     validate_job_id(id)?;
-    run_mother(&["resume", "--", id, answer]).await
+    let file = AnswerFile::write(answer)?;
+    let path = file.path().to_string_lossy().into_owned();
+    run_mother(&["resume", id, "--from-file", &path]).await
 }
 
 /// Reject job ids that look like CLI flags or contain unexpected characters.
@@ -303,23 +316,134 @@ fn validate_job_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// A `mother` CLI failure, split by what the caller can do about it.
+#[derive(Debug, thiserror::Error)]
+pub enum MotherCliError {
+    /// The call did not finish within the CLI timeout; the process was killed.
+    #[error("mother {cmd} timed out after {millis} ms")]
+    Timeout { cmd: String, millis: u128 },
+    /// The CLI refused because the job's branch already has an open PR.
+    #[error("mother {cmd} failed: {detail}")]
+    OpenPr { cmd: String, detail: String },
+    /// Any other non-zero exit.
+    #[error("mother {cmd} failed: {detail}")]
+    Failed { cmd: String, detail: String },
+}
+
+fn cli_failure(cmd: &str, detail: String) -> MotherCliError {
+    let cmd = cmd.to_owned();
+    // The real CLI says "... already has an open pull request: URL ... use
+    // 'mother reconcile ...'" (note: "pull request", not "PR"). Match both.
+    let lower = detail.to_lowercase();
+    if lower.contains("open pull request") || lower.contains("open pr") {
+        MotherCliError::OpenPr { cmd, detail }
+    } else {
+        MotherCliError::Failed { cmd, detail }
+    }
+}
+
+/// How long a single `mother` CLI call may run.
+fn cli_timeout() -> Duration {
+    let ms = std::env::var("NOSTROMO_MOTHER_CLI_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30_000);
+    Duration::from_millis(ms)
+}
+
+/// A `mother` command that can never block on the terminal (stdin is closed,
+/// so a confirmation prompt sees EOF) and dies with its future.
+fn mother_command() -> tokio::process::Command {
+    let mut cmd = Command::new(mother_bin());
+    cmd.stdin(Stdio::null()).kill_on_drop(true);
+    cmd
+}
+
+/// Run `cmd` to completion within [`cli_timeout`]. On timeout the child is
+/// killed (the future owning it is dropped) and the call is an
+/// [`MotherCliError::Timeout`].
+async fn output_bounded(mut cmd: tokio::process::Command, label: &str) -> Result<Output> {
+    let limit = cli_timeout();
+    match tokio::time::timeout(limit, cmd.output()).await {
+        Ok(out) => Ok(out?),
+        Err(_) => {
+            warn!("mother {label} timed out after {} ms", limit.as_millis());
+            Err(MotherCliError::Timeout {
+                cmd: label.to_owned(),
+                millis: limit.as_millis(),
+            }
+            .into())
+        }
+    }
+}
+
+async fn run_output(args: &[&str]) -> Result<Output> {
+    let mut cmd = mother_command();
+    cmd.args(args);
+    output_bounded(cmd, args.first().copied().unwrap_or("")).await
+}
+
 /// Shell out to the `mother` binary with the given arguments.
+///
+/// A non-zero exit is an `Err` carrying the CLI's (trimmed) stderr.
 async fn run_mother(args: &[&str]) -> Result<()> {
-    let out = Command::new(mother_bin()).args(args).output().await?;
+    let label = args.first().copied().unwrap_or("");
+    let out = run_output(args).await?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother {} failed: {stderr}", args.join(" "));
+        let detail = trimmed_stderr(&out.stderr);
+        warn!("mother {label} failed: {detail}");
+        return Err(cli_failure(label, detail).into());
     }
     Ok(())
+}
+
+/// A private (0600) temp file holding a resume answer; removed on drop.
+struct AnswerFile(PathBuf);
+
+impl AnswerFile {
+    fn write(answer: &str) -> Result<Self> {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            "nostromo-mother-answer-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(name);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&path)?;
+        let file = Self(path);
+        f.write_all(answer.as_bytes())?;
+        Ok(file)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for AnswerFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Stderr as text, trimmed and capped at 500 chars.
+fn trimmed_stderr(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr).trim().chars().take(500).collect()
 }
 
 /// Archive every terminal-state job, regardless of age
 /// (`mother archive --older-than 0`).
 pub async fn archive_all() -> Result<()> {
-    let out = Command::new(mother_bin())
-        .args(["archive", "--older-than", "0"])
-        .output()
-        .await?;
+    let out = run_output(&["archive", "--older-than", "0"]).await?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         warn!("mother archive --older-than 0 failed: {stderr}");
@@ -327,20 +451,85 @@ pub async fn archive_all() -> Result<()> {
     Ok(())
 }
 
-/// Re-enqueue a plan file (used for new-plan enqueue via `mother add --plan`).
-///
-/// This is the MCP `MotherEnqueue` path only. Cancel/answer/retry operations
-/// use the broker client (`BrokerClient::send_command`).
-pub async fn add_plan(plan_path: &Path) -> Result<()> {
-    let out = Command::new(mother_bin())
-        .args(["add", "--plan", plan_path.to_str().unwrap_or_default()])
-        .output()
-        .await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("mother add --plan {} failed: {stderr}", plan_path.display());
+/// Parameters for `mother add`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AddJobRequest {
+    pub plan_file: PathBuf,
+    pub repo: String,
+    pub repo_path: Option<String>,
+    pub branch: String,
+    pub base: Option<String>,
+    pub max_cost: Option<f64>,
+    pub label: Option<String>,
+    pub depends_on: Vec<String>,
+}
+
+impl AddJobRequest {
+    /// Reject values the CLI could mistake for flags, and a relative plan
+    /// path (the daemon's cwd is not the caller's).
+    ///
+    /// `mother add` takes `--flag VALUE` pairs, so a value that starts with
+    /// `-` could be parsed as another option.
+    pub fn validate(&self) -> Result<()> {
+        if !self.plan_file.is_absolute() {
+            anyhow::bail!("plan_path must be an absolute path: {}", self.plan_file.display());
+        }
+        let singles = [
+            ("repo", Some(self.repo.as_str())),
+            ("branch", Some(self.branch.as_str())),
+            ("repo_path", self.repo_path.as_deref()),
+            ("base", self.base.as_deref()),
+            ("label", self.label.as_deref()),
+        ];
+        for (name, value) in singles {
+            if value.is_some_and(|v| v.starts_with('-')) {
+                anyhow::bail!("{name} must not start with '-'");
+            }
+        }
+        if self.depends_on.iter().any(|d| d.starts_with('-')) {
+            anyhow::bail!("depends_on entries must not start with '-'");
+        }
+        Ok(())
     }
-    Ok(())
+}
+
+/// Enqueue a plan via `mother add --plan-file .. --repo .. --branch .. --format text`
+/// and return the printed job id.
+///
+/// An invalid request, a non-zero exit or empty stdout is an `Err`; a CLI
+/// failure carries the CLI's stderr.
+pub async fn add_job(req: AddJobRequest) -> Result<String> {
+    req.validate()?;
+    let mut cmd = mother_command();
+    cmd.arg("add")
+        .arg("--plan-file")
+        .arg(&req.plan_file)
+        .args(["--repo", &req.repo])
+        .args(["--branch", &req.branch]);
+    if let Some(v) = &req.repo_path {
+        cmd.args(["--repo-path", v]);
+    }
+    if let Some(v) = &req.base {
+        cmd.args(["--base", v]);
+    }
+    if let Some(v) = req.max_cost {
+        cmd.args(["--max-cost", &v.to_string()]);
+    }
+    if let Some(v) = &req.label {
+        cmd.args(["--label", v]);
+    }
+    if !req.depends_on.is_empty() {
+        cmd.args(["--depends-on", &req.depends_on.join(",")]);
+    }
+    cmd.args(["--format", "text"]);
+    let out = output_bounded(cmd, "add").await?;
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || id.is_empty() {
+        let detail = trimmed_stderr(&out.stderr);
+        warn!("mother add {} failed: {detail}", req.plan_file.display());
+        return Err(cli_failure("add", detail).into());
+    }
+    Ok(id)
 }
 
 // ── peek types ────────────────────────────────────────────────────────────────
@@ -370,10 +559,7 @@ pub struct PeekSnapshot {
 
 /// Fetch a live snapshot of a running job via `mother peek <id> --format json`.
 pub async fn peek(id: &str) -> Result<PeekSnapshot> {
-    let out = Command::new(mother_bin())
-        .args(["peek", id, "--format", "json", "--tail", "5"])
-        .output()
-        .await?;
+    let out = run_output(&["peek", id, "--format", "json", "--tail", "5"]).await?;
     if out.stdout.is_empty() {
         return Ok(PeekSnapshot::default());
     }

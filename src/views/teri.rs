@@ -147,7 +147,8 @@ impl TeriView {
         let snap = snap.as_ref();
 
         let stale = snap.map(|s| s.stale).unwrap_or(false);
-        let error = snap.and_then(|s| s.error.as_deref());
+        // A user with no Teri database is in an empty state, not an error.
+        let error = snap.filter(|s| !s.not_configured).and_then(|s| s.error.as_deref());
         let items_ref = snap.map(|s| s.items.as_slice()).unwrap_or(&[]);
 
         let focused = self.pane_focus == Pane::Todos;
