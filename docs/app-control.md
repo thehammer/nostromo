@@ -35,7 +35,7 @@ screenshot or the `tree` dump can be passed straight to `click`.
 | `find TEXT` | views whose text/tooltip/label/class contains TEXT, with centre points |
 | `click` | by `X Y` or `--text`; the reply says which view class was hit |
 | `drag` | press at `X Y` (or `--text`), drag in steps to `--to X Y`, release — for selecting text |
-| `hittest X Y` | **read-only, sends no event**: which view a click at X Y would hit, plus the chain of views from it up to the content view and the focus state (see below) |
+| `hittest X Y` | **read-only, sends no event** (may complete a layout pass AppKit already had pending): which view a click at X Y would hit, plus the chain of views from it up to the content view and the focus state (see below) |
 | `key` / `type` | key event through `NSApp.sendEvent` (menu shortcuts fire) / insert text at the first responder |
 | `paste` | put an image or text on the clipboard and send `paste:` |
 | `drop` | deliver a file drop to the registered drag destination under a point |
@@ -61,7 +61,7 @@ Select text with `drag`, e.g. across a paragraph, then `key c --mod cmd` to copy
 
     bin/nostromo-app hittest 600 400          # a point inside an agent paragraph
 
-Sends no event and changes nothing, so it is safe against the app you are using.
+Sends no event and changes no state, so it is safe against the app you are using. (A chat turn that has a layout pass pending completes it when hit-tested — the same pass AppKit would run before the next draw; `needsLayout` in the reply shows whether one was pending.)
 The reply has `hit` (the hit view's class), `chain` (the hit view first, then each
 superview up to the window's content view) and `window`:
 

@@ -207,7 +207,8 @@ enum AppControlMouse {
 
 /// Read-only hit-test report for the control socket's `hittest`: which view a
 /// mouse-down at a point would land on, and the state that decides whether the
-/// click can select text. Sends no event and changes nothing.
+/// click can select text. Sends no event and changes no state; hit-testing a chat turn with a
+/// pending layout pass completes that pass (see `ChatTurnView.hitTest`).
 ///
 /// Built to diagnose "I can't select this" in the running app without clicking
 /// in it: the answer is the chain of views from the hit view up to the window's

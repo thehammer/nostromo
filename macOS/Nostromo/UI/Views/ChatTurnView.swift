@@ -513,6 +513,8 @@ class ChatTurnView: NSView, TurnIsland {
     /// sit at the origin and a click over a paragraph would land on the wrong
     /// view. A turn attached and clicked before AppKit's layout pass ran (the
     /// same run-loop turn) gets its pass now.
+    /// The point goes to `super` untouched (still superview coordinates). Note the
+    /// app-control `hittest` reaches this, so it can complete a pending layout pass.
     override func hitTest(_ point: NSPoint) -> NSView? {
         if needsLayout { layoutSubtreeIfNeeded() }
         return super.hitTest(point)

@@ -18,7 +18,7 @@ window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
     nostromo-app find   TEXT [-w N]
     nostromo-app click  (--text TEXT [--index I] | X Y) [-w N] [--count C] [--mod cmd,shift]
     nostromo-app drag   (--text TEXT [--index I] | X Y) --to X Y [--steps N] [--mod cmd,shift] [-w N]   press, drag, release (select text)
-    nostromo-app hittest X Y [-w N]     READ-ONLY (sends no event): which view a click at X Y hits, the view chain up to the content view
+    nostromo-app hittest X Y [-w N]     READ-ONLY (sends no event; may finish a pending layout pass): which view a click at X Y hits, the view chain up to the content view
                                         (class, frame, hidden, alpha, first-responder/selectable/selection state) and key window / app active / first responder
     nostromo-app key    CHARS [--mod cmd,shift] [-w N]
     nostromo-app type   TEXT [-w N]
