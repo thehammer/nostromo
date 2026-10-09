@@ -167,9 +167,40 @@ topics it subscribed to (an empty topic list means "everything"):
   `work_send_preview_request`, `work_send` and `fred_seed` are refused with
   `requires_secure_connection` (in the matching targeted result frame) and
   change nothing.
-- `FocusMeta.project_path` (an absolute path) is stripped from focus frames.
+- Anything that can carry the same text through an *older* frame is scoped by
+  focus tag (or Mother job id) and withheld for a **sensitive** tag: session
+  transcripts (`session_turns`, `session_turn_delta`, `session_state`,
+  `session_summary_update`, ...), `pane_content`, `focus_layout`,
+  `notification`, `decision_request` / `decision_resolved`, `activity` /
+  `activity_snapshot`, per-focus `perri_state`, and the Mother job frames of a
+  work-derived job. This applies on replay, broadcast and targeted paths.
+  Unattributed `activity` events are withheld.
+- A tag is sensitive when it is `fred` / `teri`, runs the `fred`/`teri` agent
+  (any tag), or was created from work items (`work_send`) or through
+  `nostromo.create_focus` with `initial_context` or from a Fred/Teri session
+  (`SensitiveTags`, persisted beside `daemon-sessions.json`). A network peer's
+  `session_attach` / `session_send` / `session_control` / `session_interrupt` /
+  `session_spawn`, `close_pane`, `mother_action` / `mother_resume` for a
+  sensitive tag or job are refused with `requires_secure_connection`.
+- `session_list_resp` and `mother_jobs` omit sensitive entries. In focus frames
+  a network peer sees no `project_path`, `label` or `session_summary`, and a
+  sensitive focus shows only its agent name (a work-derived tag is replaced
+  by an opaque id).
 
 Every `ServerMsg` / `ClientMsg` variant is classified in `peer.rs` through an
 exhaustive `match`, so adding a variant does not compile until it is classified.
-Perri, Mother, Activity and layout data are not gated (residual risk, tracked
-with the TCP-exposure work).
+That is **not** a security audit: the whole unauthenticated listener is tracked
+separately (`.claude/wip/nostromd-tcp-47100-exposure`). `pty_spawn`,
+`focus_registry_push`, `perri_action`, `decision_answer` for ordinary focuses and
+the content of non-sensitive focuses are knowingly still reachable by a network
+peer; `peer.rs` lists them in a block comment.
+
+### Version skew (`Welcome.features`)
+
+An older daemon drops a connection whose `subscribe` names a topic it does not
+know. `Topic` now decodes unknown names as `unknown` (ignored), and the daemon's
+`welcome` carries an additive `features` list (`"work"`). The Mac client
+subscribes to the base topics immediately and sends a second `subscribe`
+adding `work` only when that connection's `welcome` lists it; a later
+`subscribe` on a live connection replaces the topic list and replays retained
+frames for the topics it adds (never to a network peer).

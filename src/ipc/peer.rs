@@ -90,6 +90,11 @@ struct Registered {
     /// fails closed and treats every tag and job as sensitive.
     #[serde(skip)]
     unreadable: bool,
+    /// Opaque ids minted in memory for sensitive tags that are not registered
+    /// (a tag that merely *looks* like a Fred/Teri agent, or any tag while the
+    /// registry is unreadable). Never persisted.
+    #[serde(skip)]
+    ephemeral: BTreeMap<String, String>,
 }
 
 /// Which focus tags and Mother jobs carry Teri/Fred-derived content.
@@ -128,16 +133,14 @@ impl SensitiveTags {
 
     /// A registry persisted at `path`, seeded from it when it exists.
     pub fn persisted(path: PathBuf) -> Self {
+        let unreadable = |why: &dyn std::fmt::Display| {
+            warn!(path = %path.display(), "sensitive-tag registry unreadable ({why}); treating every tag as sensitive");
+            Registered { unreadable: true, ..Registered::default() }
+        };
         let registered = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<Registered>(&bytes).unwrap_or_else(|e| {
-                warn!(path = %path.display(), "sensitive-tag registry unreadable ({e}); treating every tag as sensitive");
-                Registered { unreadable: true, ..Registered::default() }
-            }),
+            Ok(bytes) => serde_json::from_slice::<Registered>(&bytes).unwrap_or_else(|e| unreadable(&e)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registered::default(),
-            Err(e) => {
-                warn!(path = %path.display(), "sensitive-tag registry unreadable ({e}); treating every tag as sensitive");
-                Registered { unreadable: true, ..Registered::default() }
-            }
+            Err(e) => unreadable(&e),
         };
         Self {
             inner: Arc::new(RwLock::new(registered)),
@@ -149,6 +152,12 @@ impl SensitiveTags {
     pub fn tag_is_sensitive(&self, tag: &str) -> bool {
         let registered = self.inner.read().unwrap();
         is_teri_or_fred_agent(tag) || registered.unreadable || registered.tags.contains_key(tag)
+    }
+
+    /// Is a focus with this `tag` running `agent_name` sensitive? A session of
+    /// the Fred/Teri agent is, whatever tag it runs under.
+    pub fn focus_is_sensitive(&self, tag: &str, agent_name: &str) -> bool {
+        self.tag_is_sensitive(tag) || is_teri_or_fred_agent(agent_name)
     }
 
     /// Was Mother job `job_id` created from a work item?
@@ -164,8 +173,7 @@ impl SensitiveTags {
         }
         let mut registered = self.inner.write().unwrap();
         if !registered.tags.contains_key(tag) {
-            let opaque = format!("focus-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
-            registered.tags.insert(tag.to_string(), opaque);
+            registered.tags.insert(tag.to_string(), new_opaque_tag());
             self.persist(&registered);
         }
     }
@@ -178,11 +186,17 @@ impl SensitiveTags {
         }
     }
 
-    /// The stand-in shown to network peers for a registered `tag`: stable for
-    /// the life of the registration and unrelated to the tag's text. `None` for
-    /// a tag that was never registered (a built-in, or an unreadable registry).
-    fn opaque_tag(&self, tag: &str) -> Option<String> {
-        self.inner.read().unwrap().tags.get(tag).cloned()
+    /// The stand-in shown to network peers for a sensitive `tag`: stable for
+    /// the life of the registration (or, for a tag that is sensitive without
+    /// being registered, of this process) and unrelated to the tag's text.
+    fn opaque_tag(&self, tag: &str) -> String {
+        let mut registered = self.inner.write().unwrap();
+        if let Some(opaque) = registered.tags.get(tag).or_else(|| registered.ephemeral.get(tag)) {
+            return opaque.clone();
+        }
+        let opaque = new_opaque_tag();
+        registered.ephemeral.insert(tag.to_string(), opaque.clone());
+        opaque
     }
 
     /// Write the registry out. Called with the registry's write lock held, so
@@ -206,6 +220,10 @@ impl SensitiveTags {
             warn!(path = %path.display(), "sensitive-tag registry: persist failed: {e}");
         }
     }
+}
+
+fn new_opaque_tag() -> String {
+    format!("focus-{}", &uuid::Uuid::new_v4().simple().to_string()[..16])
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -460,7 +478,7 @@ pub fn is_sensitive_client_msg(msg: &ClientMsg) -> bool {
 pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool {
     match msg {
         ClientMsg::SessionSpawn { tag, agent_name, .. } => {
-            tags.tag_is_sensitive(tag) || is_teri_or_fred_agent(agent_name)
+            tags.focus_is_sensitive(tag, agent_name)
         }
         ClientMsg::MotherAction { job_id, .. } | ClientMsg::MotherResume { job_id, .. } => {
             tags.job_is_sensitive(job_id)
@@ -515,10 +533,13 @@ fn redact_meta(meta: &mut FocusMeta, tags: &SensitiveTags) {
     meta.project_path = None;
     meta.label = None;
     meta.session_summary = None;
-    if tags.tag_is_sensitive(&meta.tag) || is_teri_or_fred_agent(&meta.agent_name) {
+    if tags.focus_is_sensitive(&meta.tag, &meta.agent_name) {
         meta.display_name = meta.agent_name.clone();
-        if let Some(opaque) = tags.opaque_tag(&meta.tag) {
-            meta.tag = opaque;
+        // Only the exact built-in names are public. Every other sensitive tag
+        // (registered, alias-looking, or sensitive because the registry is
+        // unreadable) is replaced, never passed through.
+        if meta.tag != "fred" && meta.tag != "teri" {
+            meta.tag = tags.opaque_tag(&meta.tag);
         }
     }
 }
@@ -545,9 +566,7 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
             ServerMsg::FocusCreated { meta }
         }
         ServerMsg::SessionListResp { mut sessions } => {
-            sessions.retain(|s| {
-                !tags.tag_is_sensitive(&s.tag) && !is_teri_or_fred_agent(&s.agent_name)
-            });
+            sessions.retain(|s| !tags.focus_is_sensitive(&s.tag, &s.agent_name));
             ServerMsg::SessionListResp { sessions }
         }
         ServerMsg::MotherJobs { mut jobs } => {
@@ -816,8 +835,8 @@ mod tests {
         assert_eq!(derived.display_name, "cody");
         assert!(!derived.tag.contains("secret"), "{}", derived.tag);
         // The opaque tag is stable, so a client can still tell focuses apart.
-        assert_eq!(Some(derived.tag.clone()), tags.opaque_tag("cody-secret-jira-title"));
-        assert_eq!(tags.opaque_tag("cody-other"), None, "only registered tags have one");
+        assert_eq!(derived.tag, tags.opaque_tag("cody-secret-jira-title"));
+        assert_ne!(derived.tag, tags.opaque_tag("cody-other"));
 
         let ServerMsg::FocusCreated { meta: fred } =
             redact_for_network(ServerMsg::FocusCreated { meta: meta("fred", "fred") }, &tags)
@@ -870,6 +889,42 @@ mod tests {
         assert!(tags.job_is_sensitive("any-job"));
         tags.mark_tag("cody-x");
         assert_eq!(std::fs::read(&path).unwrap(), b"{not json", "must not overwrite the evidence");
+    }
+
+    #[test]
+    fn a_sensitive_tag_is_never_passed_through_to_a_network_peer_even_when_unregistered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_path_beside(&dir.path().join("daemon-sessions.json"));
+        std::fs::write(&path, b"{not json").unwrap(); // unreadable: every tag is sensitive
+        for tags in [SensitiveTags::persisted(path), SensitiveTags::in_memory()] {
+            for (tag, agent) in [("cody-secret-title", "cody"), ("x:fred", "cody"), ("anything", "teri:teri")] {
+                let meta = FocusMeta {
+                    tag: tag.into(),
+                    display_name: "SECRET".into(),
+                    agent_name: agent.into(),
+                    project_name: None,
+                    org: None,
+                    is_built_in: false,
+                    session_summary: None,
+                    label: None,
+                    project_path: None,
+                    select_for_client: None,
+                };
+                let ServerMsg::FocusCreated { meta } =
+                    redact_for_network(ServerMsg::FocusCreated { meta }, &tags)
+                else {
+                    panic!("expected FocusCreated");
+                };
+                let sensitive = tags.tag_is_sensitive(tag) || is_teri_or_fred_agent(agent);
+                if sensitive {
+                    assert_ne!(meta.tag, tag, "{tag} passed through");
+                    assert!(!meta.tag.contains("secret") && !meta.tag.contains("fred"), "{}", meta.tag);
+                    assert_eq!(meta.display_name, agent);
+                } else {
+                    assert_eq!(meta.tag, tag);
+                }
+            }
+        }
     }
 
     #[test]
