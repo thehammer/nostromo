@@ -490,6 +490,9 @@ async fn run_job_poller(
     loop {
         interval.tick().await;
 
+        // Ticket taken BEFORE the list starts: a mutator's refresh that starts
+        // later and finishes first wins, and this (older) result is dropped.
+        let ticket = jobs_feed.begin();
         match mother::list_jobs().await {
             Ok(jobs) => {
                 tracing::debug!(count = jobs.len(), "mother poll ok");
@@ -514,8 +517,13 @@ async fn run_job_poller(
                     last_states.insert(job.id.clone(), job.state.clone());
                 }
 
-                // Publish live job list to the peek poller.
-                jobs_feed.publish_jobs(jobs.clone());
+                // Publish live job list to the peek poller and MCP readers, unless a
+                // newer list (e.g. a mutator's refresh) already landed; then do not
+                // re-broadcast the older state either.
+                if !jobs_feed.publish_jobs_at(ticket, jobs.clone()) {
+                    tracing::debug!("mother poll result superseded by a newer list; skipping publish");
+                    continue;
+                }
 
                 match tx.send(ServerMsg::MotherJobs { jobs }) {
                     Ok(n) => tracing::debug!(receivers = n, "MotherJobs broadcast sent"),
@@ -528,7 +536,7 @@ async fn run_job_poller(
             }
             Err(e) => {
                 tracing::warn!("mother list_jobs error: {e:#}");
-                jobs_feed.publish_failure(format!("{e:#}"));
+                jobs_feed.publish_failure_at(ticket, format!("{e:#}"));
             }
         }
     }

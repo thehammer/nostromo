@@ -950,11 +950,12 @@ if [ -e "$here/sleep_on" ] && [ "$(cat "$here/sleep_on")" = "$sub" ]; then
   echo $$ > "$here/pid.$sub"
   exec sleep 30
 fi
-if [ -e "$here/openpr" ] && [ "$sub" = retry ]; then
-  printf 'mother: retry: job %s has an open PR; use `mother reconcile`\n' "$id" >&2
+# Real CLI: the open-PR guard is skipped by --yes (retry has no prompt at all).
+if [ -e "$here/openpr" ] && { [ "$sub" = retry ] || [ "$sub" = force-start ]; } && [ -z "$yes" ]; then
+  printf "mother: refusing - job %s's branch 'b' already has an open pull request: https://example.invalid/pr/1 ... use 'mother reconcile %s ...'\n" "$id" "$id" >&2
   exit 1
 fi
-if [ -e "$here/prompt" ] && { [ "$sub" = retry ] || [ "$sub" = force-start ]; } && [ -z "$yes" ]; then
+if [ -e "$here/prompt" ] && [ "$sub" = force-start ] && [ -z "$yes" ]; then
   if read -r _ans; then
     echo "aborted: not confirmed" >&2
   else
@@ -1399,8 +1400,8 @@ async fn cancel_retry_and_archive_use_the_real_cli_argv() {
         assert_eq!(res["ok"], true, "{tool}: {res}");
     }
     assert_eq!(fake.call_of("cancel"), "cancel j");
-    // Without --yes the real `retry` prompts on stdin.
-    assert_eq!(fake.call_of("retry"), "retry --yes j");
+    // `retry` takes NO --yes: in the real CLI that flag only overrides the open-PR guard.
+    assert_eq!(fake.call_of("retry"), "retry j");
     assert_eq!(fake.call_of("archive"), "archive j");
 }
 
@@ -1588,7 +1589,7 @@ async fn retry_of_a_job_whose_branch_has_an_open_pr_is_a_distinct_error_with_a_r
     let res = c.call("mother.retry_job", json!({ "id": "j1" })).await;
     assert_eq!(res["error"], "mother_job_has_open_pr", "{res}");
     assert!(
-        res["detail"].as_str().unwrap_or("").contains("has an open PR"),
+        res["detail"].as_str().unwrap_or("").contains("open pull request"),
         "detail must carry the CLI's stderr: {res}"
     );
     assert!(
@@ -1598,16 +1599,17 @@ async fn retry_of_a_job_whose_branch_has_an_open_pr_is_a_distinct_error_with_a_r
 }
 
 #[tokio::test]
-async fn retry_never_waits_on_a_confirmation_prompt() {
+async fn retry_does_not_pass_yes_so_the_open_pr_guard_stays_on() {
     let fake = FakeMother::install().await;
-    // Without --yes this fake reads stdin, hits EOF and aborts with exit 1.
-    fake.mode("prompt");
+    // The real `retry` has no prompt; `--yes` would only disable the open-PR guard.
+    // With a job whose branch has an open PR the call must be refused, not forced.
+    fake.mode("openpr");
     let h = harness().await;
     let mut c = Client::connect(&h).await;
 
     let res = c.call("mother.retry_job", json!({ "id": "j1" })).await;
-    assert_eq!(res["ok"], true, "retry must pass --yes: {res}");
-    assert_eq!(fake.call_of("retry"), "retry --yes j1");
+    assert_eq!(res["error"], "mother_job_has_open_pr", "{res}");
+    assert_eq!(fake.call_of("retry"), "retry j1", "retry must not pass --yes");
 }
 
 #[tokio::test]

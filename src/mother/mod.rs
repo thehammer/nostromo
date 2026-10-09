@@ -263,14 +263,25 @@ pub async fn cancel(id: &str) -> Result<()> {
     run_mother(&["cancel", id]).await
 }
 
-/// Retry a failed or cancelled job by id (`--yes`: the CLI prompts otherwise,
-/// and there is nobody to answer).
+/// Retry a failed or cancelled job by id.
+///
+/// Deliberately NOT `--yes`: `mother retry` has no confirmation prompt, and in
+/// the real CLI `--yes` exists only to override the "this job's branch already
+/// has an open pull request" guard. Passing it would silently turn that guard
+/// off for every MCP/IPC retry. Without it the CLI refuses (stderr names the
+/// open PR and points at `mother reconcile`), which `cli_failure` maps to
+/// `MotherCliError::OpenPr`.
 pub async fn retry(id: &str) -> Result<()> {
     validate_job_id(id)?;
-    run_mother(&["retry", "--yes", id]).await
+    run_mother(&["retry", id]).await
 }
 
 /// Force-start a queued job by id, skipping the quota-cap confirmation.
+///
+/// `--yes` is required when non-interactive (the CLI refuses without it), and
+/// in the real CLI it also overrides the open-pull-request guard. Only the IPC
+/// `MotherAction::ForceStart` path reaches this (an explicit operator action in
+/// the app), never an MCP tool.
 pub async fn force_start(id: &str) -> Result<()> {
     validate_job_id(id)?;
     run_mother(&["force-start", "--yes", id]).await
@@ -321,7 +332,10 @@ pub enum MotherCliError {
 
 fn cli_failure(cmd: &str, detail: String) -> MotherCliError {
     let cmd = cmd.to_owned();
-    if detail.to_lowercase().contains("open pr") {
+    // The real CLI says "... already has an open pull request: URL ... use
+    // 'mother reconcile ...'" (note: "pull request", not "PR"). Match both.
+    let lower = detail.to_lowercase();
+    if lower.contains("open pull request") || lower.contains("open pr") {
         MotherCliError::OpenPr { cmd, detail }
     } else {
         MotherCliError::Failed { cmd, detail }
