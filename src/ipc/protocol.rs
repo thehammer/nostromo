@@ -1746,6 +1746,7 @@ mod tests {
             }],
             stale: false,
             error: None,
+            not_configured: false,
         };
         round_trip_server(ServerMsg::TeriState { todos: snap });
     }
@@ -2496,6 +2497,7 @@ mod tests {
             sweater: "amber".into(),
             stale:   false,
             error:   None,
+            generated_at: Some(chrono::Utc::now()),
         };
         round_trip_server(ServerMsg::FredState { mailbox, calendar });
     }

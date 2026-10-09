@@ -66,6 +66,10 @@ Returns the full live state snapshot for a named view.
 `render_state` section on every response — see "Render-state visibility
 (W1)" below.
 
+For `view_id: "fred"` the blob is the `fred.get_state` response and for
+`view_id: "teri"` it is the `teri.list_todos` response, including the
+`state` / `updated_at` / `reason` / `auth` fields (see "Source-state fields").
+
 Source: `src/mcp/tools/get_view_state.rs`
 
 ---
@@ -106,6 +110,10 @@ Returns the latest Claude rate-limit snapshot.
 }
 ```
 
+**In `nostromd` (daemon-hosted MCP)** nothing publishes rate limits yet, so the
+answer is explicit rather than a bare `null`:
+`{ "state": "not_available", "reason": "the daemon has no rate-limits source yet" }`.
+
 Source: `src/mcp/tools/nostromo_meta.rs`
 
 ---
@@ -117,6 +125,9 @@ Returns the current global budget posture.
 **Input**: *(none)*
 
 **Output**: `{ "posture": "normal" }` — values: `flush`, `normal`, `elevated`, `conservative`, `critical`.
+
+**In `nostromd`** (no posture source yet):
+`{ "state": "not_available", "reason": "the daemon has no budget-posture source yet" }`.
 
 Source: `src/mcp/tools/nostromo_meta.rs`
 
@@ -185,13 +196,30 @@ Source: `src/mcp/tools/perri.rs`
 
 ---
 
+### Source-state fields (Teri, Fred, Mother)
+
+The live-data tools below never answer "nothing yet" and "it failed" with the
+same empty list. Each response carries:
+
+| Field | Meaning |
+|-------|---------|
+| `state` | `loading` (no snapshot yet), `fresh`, `empty` (loaded, nothing there), `stale` (serving old data after a failed refresh), `error` (failed, no data), `unauthenticated` (Fred needs Microsoft sign-in), `not_configured` (Teri has no database yet — an empty state, not a failure) |
+| `updated_at` | When the data was produced (ISO-8601 UTC), or `null` while `loading` |
+| `reason` | Why, for `stale` / `error` / `not_configured` / `unauthenticated` (never a filesystem path or token) |
+| `auth` | Only when `state` is `unauthenticated`: `{ verification_uri, user_code, expires_at }` — the device-code prompt, never a token |
+
+---
+
 ### `fred.list_unread_emails`
 
 Returns unread emails from Fred's mailbox.
 
+> **Breaking change (FND-2).** This used to return `{ "emails": [...] }`. It now
+> returns the state-carrying shape below; the list is `items`.
+
 **Input**: *(none)*
 
-**Output**: `{ "emails": [ { "id", "from", "subject", "received_at", "unread" }, ... ] }`
+**Output**: `{ "state", "updated_at", "reason"?, "auth"?, "unread_count", "items": [ { "from", "subject", "received_at", "vip", "is_invite", "is_read" }, ... ] }`
 
 Source: `src/mcp/tools/fred.rs`
 
@@ -201,12 +229,17 @@ Source: `src/mcp/tools/fred.rs`
 
 Returns today's calendar events (or events on a specific date).
 
+> **Breaking change (FND-2).** This used to return `{ "date", "events" }`. It now
+> returns `{ "state", "updated_at", "reason"?, "events": [...] }`.
+
 **Input**:
 ```json
 { "date": "2026-05-14" }  // optional; omit for today
 ```
 
-**Output**: `{ "date", "events": [ { "title", "start", "end", "in_minutes" }, ... ] }`
+**Output**: `{ "state", "updated_at", "reason"?, "events": [ { "start", "end", "title", "status", "is_now" }, ... ] }`.
+A malformed `date` returns `{ "error": "bad_date", "provided": ... }`.
+`updated_at` is the calendar snapshot's `generated_at`.
 
 Source: `src/mcp/tools/fred.rs`
 
@@ -214,7 +247,11 @@ Source: `src/mcp/tools/fred.rs`
 
 ### `fred.get_state`
 
-Returns Fred's composite state: `{ unread_count, today_event_count, mailbox, calendar }`.
+Returns Fred's composite state:
+`{ state, updated_at, reason?, auth?, unread_count, today_event_count, mailbox, calendar, mailbox_state, calendar_state }`.
+`state` is the worse of `mailbox_state` and `calendar_state`
+(`unauthenticated` > `error` > `stale` > `loading` > `fresh`/`empty`);
+`updated_at`/`reason`/`auth` come from that worse source.
 
 **Input**: *(none)*
 
@@ -283,6 +320,14 @@ Returns the current Mother status summary.
 
 **Output**: `{ "running": 1, "queued": 2, "failed": 0, "awaiting": 1 }`
 
+In `nostromd` the counts are derived from the live job list and carry the
+list's state: `{ ..., "state", "updated_at"?, "reason"? }` where `state` is
+`loading` (no `mother list` has completed — the zero counts mean nothing),
+`fresh`, `stale` (the latest `mother list` failed; counts are from the last
+success) or `error` (it has never succeeded). Mutations
+(`mother.cancel_job`, `mother.enqueue_job`, ...) re-list and publish
+immediately, so the next read reflects them without waiting for the 2 s poll.
+
 Source: `src/mcp/tools/mother.rs`
 
 ---
@@ -293,7 +338,11 @@ Returns Teri's active todo list (open, in_progress, blocked items).
 
 **Input**: *(none)*
 
-**Output**: `{ "todos": [ { "id", "text", "status", "created_at" }, ... ] }`
+**Output**: `{ "state", "updated_at", "reason"?, "generated_at", "items": [ { "id", "title", "status", "priority", "due_date", "jira_key" }, ... ], "stale", "error" }`
+
+A user who never set Teri up (no `~/.teri/teri.db`) gets
+`{ "state": "not_configured", "reason": "Teri has no database yet", "items": [] }`
+— not an error, and the reason never contains the path.
 
 Source: `src/mcp/tools/teri.rs`
 
@@ -683,11 +732,40 @@ Source: `src/mcp/tools/perri_mutators.rs`
 
 ### `mother.enqueue_job`
 
-Enqueue a plan file as a new Mother job.
+Enqueue a plan file as a new Mother job (`mother add`).
 
-**Input**: `{ "plan_path": "/absolute/path/to/plan.md" }`
+> **Breaking change (FND-2).** `repo` and `branch` are now **required**
+> (`mother add` needs both); a call with only `plan_path` is `invalid_args`.
 
-**Output**: `{ "id": "job-id", "title": "Plan title", "status": "queued" }`
+**Input**:
+```json
+{
+  "plan_path": "/absolute/path/to/plan.md",
+  "repo": "nostromo",
+  "branch": "feature/my-change",
+  "repo_path": "/Users/me/Code/nostromo",
+  "base": "origin/main",
+  "max_cost": 10,
+  "label": "my-label",
+  "depends_on": ["ab12cd34"]
+}
+```
+
+- `plan_path` must be an **absolute** path (the daemon's cwd is not yours) to a
+  file that exists and contains a `suggested_config` block.
+- `repo` is a bare repo **name** as `mother add --repo NAME` takes it (e.g.
+  `nostromo`), not an `owner/slug`. Unless `repo_path` is given, the checkout is
+  `~/Code/<repo>`.
+- `repo`, `branch`, `repo_path`, `base`, `label` and every `depends_on` entry
+  are rejected (`invalid_args`) if they start with `-`.
+
+**Output**: `{ "id": "job-id" }` (the TUI additionally returns `title` / `status`).
+Errors: `invalid_args`, `plan_not_found`, `mother_cli_error` (carries the CLI's
+stderr; includes CLI timeouts — every daemon-side `mother` call is bounded at
+30 s, stdin closed, process killed on timeout; override with
+`NOSTROMO_MOTHER_CLI_TIMEOUT_MS`), and `mother_job_has_open_pr` (with a `hint`
+pointing at `mother reconcile`) for retries the CLI refuses because the job's
+branch already has an open PR.
 
 Source: `src/mcp/tools/mother_mutators.rs`
 

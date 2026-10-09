@@ -1,7 +1,7 @@
 //! MCP tool handlers for Mother job-control mutations.
 //!
 //! ## Tools
-//! - `mother.enqueue_job({ plan_path })`
+//! - `mother.enqueue_job({ plan_path, repo, branch, ... })`
 //! - `mother.cancel_job({ id })`
 //! - `mother.archive_job({ id })`
 //! - `mother.resume_job({ id, answer })`
@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 use crate::event::AppEvent;
 use crate::ipc::protocol::ServerMsg;
 use crate::mcp::{command::McpCommand, state::McpSharedState};
-use crate::mother::{self, AddJobRequest};
+use crate::mother::{self, AddJobRequest, MotherCliError};
 
 const COMMAND_TIMEOUT_SECS: u64 = 5;
 
@@ -38,7 +38,7 @@ pub async fn enqueue_job(state: &McpSharedState, args: &Value) -> Value {
                 rebroadcast_jobs(state).await;
                 json!({ "id": id })
             }
-            Err(e) => json!({ "error": format!("mother_cli_error: {e}"), "detail": e.to_string() }),
+            Err(e) => cli_error_value(&e),
         };
     }
 
@@ -70,7 +70,7 @@ fn parse_add_request(args: &Value) -> Result<AddJobRequest, String> {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
-    Ok(AddJobRequest {
+    let req = AddJobRequest {
         plan_file: PathBuf::from(plan_file),
         repo,
         repo_path: str_arg("repo_path"),
@@ -79,18 +79,37 @@ fn parse_add_request(args: &Value) -> Result<AddJobRequest, String> {
         max_cost: args.get("max_cost").and_then(|v| v.as_f64()),
         label: str_arg("label"),
         depends_on,
-    })
+    };
+    req.validate().map_err(|e| e.to_string())?;
+    Ok(req)
 }
 
-/// Run a daemon-side job mutation, then re-list jobs and broadcast them so
-/// every client (and `mother.list_jobs`) sees the result.
+/// The tool error for a failed `mother` CLI call.
+///
+/// An "open PR" refusal gets its own error code and a pointer at
+/// `mother reconcile` (the CLI's own remedy) so an agent can act on it
+/// instead of retrying blindly.
+fn cli_error_value(e: &anyhow::Error) -> Value {
+    if let Some(MotherCliError::OpenPr { detail, .. }) = e.downcast_ref::<MotherCliError>() {
+        return json!({
+            "error": "mother_job_has_open_pr",
+            "detail": detail,
+            "hint": "the job's branch already has an open PR; adopt it with `mother reconcile <id>` instead",
+        });
+    }
+    json!({ "error": format!("mother_cli_error: {e}"), "detail": e.to_string() })
+}
+
+/// Run a daemon-side job mutation, then re-list jobs, publish them to the
+/// daemon's feed (so `mother.list_jobs` / `get_status` / `list_views` see the
+/// result immediately) and broadcast them to every client.
 async fn daemon_mutation(
     state: &McpSharedState,
     op: impl Future<Output = anyhow::Result<()>>,
 ) -> Value {
     let result = match op.await {
         Ok(()) => json!({ "ok": true }),
-        Err(e) => json!({ "error": format!("mother_cli_error: {e}"), "detail": e.to_string() }),
+        Err(e) => cli_error_value(&e),
     };
     rebroadcast_jobs(state).await;
     result
@@ -98,7 +117,11 @@ async fn daemon_mutation(
 
 async fn rebroadcast_jobs(state: &McpSharedState) {
     let Some(daemon) = state.daemon.as_ref() else { return };
-    match mother::list_jobs().await {
+    let listed = match state.mother_feed.as_ref() {
+        Some(feed) => feed.refresh().await,
+        None => mother::list_jobs().await,
+    };
+    match listed {
         Ok(jobs) => {
             let _ = daemon.broadcast_tx.send(ServerMsg::MotherJobs { jobs });
         }

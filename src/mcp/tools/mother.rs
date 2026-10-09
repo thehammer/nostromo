@@ -100,13 +100,21 @@ pub async fn peek(_state: &McpSharedState, input: &PeekInput) -> Value {
 /// Handle `mother.get_status()`.
 ///
 /// In the daemon there is no separate status source, so counts are derived
-/// from the live job list (consistent with `mother.list_jobs`).
+/// from the live job list (consistent with `mother.list_jobs`) and carry the
+/// list's `state` (`loading|fresh|stale|error`), plus `reason` / `updated_at`
+/// when known — a failed `mother list` must not read as zero counts.
 pub fn get_status(state: &McpSharedState) -> Value {
     if state.daemon.is_some() {
         let status = mother::MotherStatus::from_jobs(&state.mother_jobs_rx.borrow());
-        return serde_json::to_value(status).unwrap_or_else(
+        let mut out = serde_json::to_value(status).unwrap_or_else(
             |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
         );
+        if let Some(obj) = out.as_object_mut() {
+            for (k, v) in source_fields(state) {
+                obj.insert(k.into(), v);
+            }
+        }
+        return out;
     }
     match state.mother_status_rx.borrow().as_ref() {
         Some(status) => serde_json::to_value(status).unwrap_or_else(
@@ -114,4 +122,17 @@ pub fn get_status(state: &McpSharedState) -> Value {
         ),
         None => Value::Null,
     }
+}
+
+/// `state` plus, when known, `reason` and `updated_at` for the Mother job list.
+pub(crate) fn source_fields(state: &McpSharedState) -> Vec<(&'static str, Value)> {
+    let source = state.mother_source_rx.borrow();
+    let mut fields = vec![("state", json!(source.name()))];
+    if let Some(reason) = source.reason() {
+        fields.push(("reason", json!(reason)));
+    }
+    if let Some(updated_at) = source.updated_at() {
+        fields.push(("updated_at", json!(updated_at)));
+    }
+    fields
 }

@@ -80,6 +80,7 @@ impl FredCalendarNativeSource {
                     error: Some(format!("Graph client init failed: {e:#}")),
                     stale: true,
                     sweater: "sage".to_owned(),
+                    generated_at: Some(chrono::Utc::now()),
                     ..Default::default()
                 }));
                 return;
@@ -280,6 +281,7 @@ fn build_snapshot(raw_events: Vec<GraphEvent>) -> CalendarSnapshot {
         sweater,
         stale: false,
         error: None,
+        generated_at: Some(chrono::Utc::now()),
     }
 }
 

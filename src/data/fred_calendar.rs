@@ -55,6 +55,10 @@ pub struct CalendarSnapshot {
     pub sweater: String,
     pub stale: bool,
     pub error: Option<String>,
+    /// When this snapshot was produced (UTC). `None` for snapshots from older
+    /// sources / persisted frames that predate the field.
+    #[serde(default)]
+    pub generated_at: Option<DateTime<Utc>>,
 }
 
 // ── Source ──────────────────────────────────────────────────────────────────

@@ -216,8 +216,7 @@ async fn main() -> Result<()> {
     }
 
     // ── Mother jobs channel (spawned early so MCP state gets live receiver) ─────
-    let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
-    let jobs_rx_for_mcp = jobs_rx.clone();
+    let jobs_feed = nostromo::mother::JobsFeed::new();
 
     // Fred / Teri sources are spawned here, before the MCP state is built, so
     // the MCP tools and the broadcasters read the same channels.
@@ -275,7 +274,7 @@ async fn main() -> Result<()> {
                 nostromo::mcp::DaemonSources {
                     perri_queue_rx: perri_queue_rx_for_mcp,
                     perri_pr_rx: perri_pr_rx_for_mcp,
-                    mother_jobs_rx: jobs_rx_for_mcp,
+                    mother: jobs_feed.clone(),
                     fred_mailbox_rx: fred_mailbox_rx.clone(),
                     fred_calendar_rx: fred_calendar_rx.clone(),
                     teri_todos_rx: teri_todos_rx.clone(),
@@ -383,13 +382,13 @@ async fn main() -> Result<()> {
     tokio::spawn(run_teri_broadcaster(teri_todos_rx, btx_teri));
 
     // ── Mother pollers ────────────────────────────────────────────────────────
-    // (jobs_tx/jobs_rx were created earlier so the MCP state could get a live receiver.)
+    // (`jobs_feed` was created earlier so the MCP state shares the poller's channel.)
     let btx_mother = broadcast_tx.clone();
-    tokio::spawn(run_mother_pollers(btx_mother, jobs_tx));
+    tokio::spawn(run_mother_pollers(btx_mother, jobs_feed.clone()));
 
     // ── Mother peek poller ────────────────────────────────────────────────────
     let btx_peek = broadcast_tx.clone();
-    tokio::spawn(run_peek_poller(btx_peek, jobs_rx));
+    tokio::spawn(run_peek_poller(btx_peek, jobs_feed.jobs_rx()));
 
     // ── Fred broadcaster ──────────────────────────────────────────────────────
     let btx_fred = broadcast_tx.clone();
@@ -425,10 +424,10 @@ async fn main() -> Result<()> {
 
 async fn run_mother_pollers(
     tx: broadcast::Sender<ServerMsg>,
-    jobs_tx: tokio::sync::watch::Sender<Vec<nostromo::mother::MotherJob>>,
+    jobs_feed: nostromo::mother::JobsFeed,
 ) {
     let tx2 = tx.clone();
-    tokio::join!(run_statusline_watcher(tx), run_job_poller(tx2, jobs_tx),);
+    tokio::join!(run_statusline_watcher(tx), run_job_poller(tx2, jobs_feed),);
 }
 
 async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
@@ -480,7 +479,7 @@ async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
 
 async fn run_job_poller(
     tx: broadcast::Sender<ServerMsg>,
-    jobs_tx: tokio::sync::watch::Sender<Vec<nostromo::mother::MotherJob>>,
+    jobs_feed: nostromo::mother::JobsFeed,
 ) {
     let mut seen_awaiting: HashSet<String> = HashSet::new();
     let mut last_states: HashMap<String, String> = HashMap::new();
@@ -516,7 +515,7 @@ async fn run_job_poller(
                 }
 
                 // Publish live job list to the peek poller.
-                let _ = jobs_tx.send(jobs.clone());
+                jobs_feed.publish_jobs(jobs.clone());
 
                 match tx.send(ServerMsg::MotherJobs { jobs }) {
                     Ok(n) => tracing::debug!(receivers = n, "MotherJobs broadcast sent"),
@@ -529,6 +528,7 @@ async fn run_job_poller(
             }
             Err(e) => {
                 tracing::warn!("mother list_jobs error: {e:#}");
+                jobs_feed.publish_failure(format!("{e:#}"));
             }
         }
     }

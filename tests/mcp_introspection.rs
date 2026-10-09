@@ -499,6 +499,7 @@ async fn fred_list_calendar_events_no_date_returns_all() {
         sweater: "sage".to_string(),
         stale: false,
         error: None,
+        generated_at: None,
     };
     let state = seeded_state(
         None,
@@ -541,6 +542,7 @@ async fn fred_list_calendar_events_with_date_filters() {
         sweater: "amber".to_string(),
         stale: false,
         error: None,
+        generated_at: None,
     };
     let state = seeded_state(
         None,
@@ -583,6 +585,7 @@ async fn fred_get_state_fields() {
         sweater: "sage".to_string(),
         stale: false,
         error: None,
+        generated_at: None,
     };
     let state = seeded_state(
         None,
@@ -732,6 +735,7 @@ async fn teri_list_todos_returns_items() {
         ],
         stale: false,
         error: None,
+        not_configured: false,
     };
     let state = seeded_state(
         None,
@@ -798,6 +802,15 @@ async fn nostromo_get_budget_posture_returns_posture() {
     let result = nostromo_meta::get_budget_posture(&state);
     // BudgetPosture serialises with #[serde(rename_all="lowercase")].
     assert_eq!(result, "elevated");
+}
+
+#[tokio::test]
+async fn nostromo_rate_limits_and_posture_stay_null_outside_the_daemon_when_unset() {
+    // The TUI path is unchanged: "not available" is only spelled out for the
+    // daemon-hosted server.
+    let state = seeded_state(None, None, None, None, None, vec![], None, None, None);
+    assert!(nostromo_meta::get_rate_limits(&state).is_null());
+    assert!(nostromo_meta::get_budget_posture(&state).is_null());
 }
 
 #[tokio::test]

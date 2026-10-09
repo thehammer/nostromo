@@ -71,22 +71,38 @@ pub async fn get_worktree_info(cwd: Option<&str>) -> Value {
     })
 }
 
+/// What the daemon answers for a source it does not have (yet): explicit, so
+/// an agent never mistakes "nothing wired" for "no data".
+fn not_available(what: &str) -> Value {
+    json!({
+        "state": "not_available",
+        "reason": format!("the daemon has no {what} source yet"),
+    })
+}
+
 /// Handle `nostromo.get_rate_limits()`.
+///
+/// In the daemon nothing publishes rate limits, so the answer is
+/// `{ state: "not_available", reason }` rather than a bare `null`.
 pub fn get_rate_limits(state: &McpSharedState) -> Value {
     match state.rate_limits_rx.borrow().as_ref() {
         Some(rl) => serde_json::to_value(rl).unwrap_or_else(
             |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
         ),
+        None if state.daemon.is_some() => not_available("rate-limits"),
         None => Value::Null,
     }
 }
 
 /// Handle `nostromo.get_budget_posture()`.
+///
+/// Same contract as [`get_rate_limits`].
 pub fn get_budget_posture(state: &McpSharedState) -> Value {
     match state.budget_posture_rx.borrow().as_ref() {
         Some(p) => serde_json::to_value(p).unwrap_or_else(
             |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
         ),
+        None if state.daemon.is_some() => not_available("budget-posture"),
         None => Value::Null,
     }
 }

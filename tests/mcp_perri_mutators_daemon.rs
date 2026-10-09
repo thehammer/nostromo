@@ -42,14 +42,13 @@ struct Harness {
     /// The PR-snapshot channel's only sender, when this harness owns one.
     /// `None` in [`PrSource::Dead`] — that drop *is* the condition under test.
     _pr_tx: Option<tokio::sync::watch::Sender<nostromo::data::perri_pr::PrSnapshots>>,
-    /// The queue and Mother-jobs senders, held alive for the harness's whole
+    /// The queue sender, held alive for the harness's whole
     /// life. Load-bearing: the daemon reports "the PR source is gone" from a
     /// dropped `watch::Sender`, so an unrelated sender the harness itself let
     /// fall out of scope could manufacture that verdict. These stay alive so a
     /// source-gone answer can only have come from the PR channel.
     _queue_tx:
         Option<tokio::sync::watch::Sender<Option<nostromo::data::perri_queue::PrQueueSnapshot>>>,
-    _jobs_tx: Option<tokio::sync::watch::Sender<Vec<nostromo::mother::MotherJob>>>,
 }
 
 /// Where a harness's `perri.load_pr` refetch can possibly get its snapshot
@@ -108,8 +107,8 @@ fn make_daemon_state_with_pr_source(pr_source: PrSource) -> Harness {
         decisions: decisions.clone(),
         tickets: Default::default(),
     };
-    let (state, pr_tx, queue_tx, jobs_tx) = match pr_source {
-        PrSource::StateOwned => (McpSharedState::for_daemon(backend), None, None, None),
+    let (state, pr_tx, queue_tx) = match pr_source {
+        PrSource::StateOwned => (McpSharedState::for_daemon(backend), None, None),
         PrSource::LiveButSilent | PrSource::Dead => {
             // `for_daemon_with_sources` explicitly clears the state's own
             // `perri_pr_tx`, so the sender created here is the channel's only
@@ -117,14 +116,12 @@ fn make_daemon_state_with_pr_source(pr_source: PrSource) -> Harness {
             let (pr_tx, pr_rx) = tokio::sync::watch::channel(nostromo::data::perri_pr::no_prs());
             let (queue_tx, queue_rx) =
                 tokio::sync::watch::channel(None::<nostromo::data::perri_queue::PrQueueSnapshot>);
-            let (jobs_tx, jobs_rx) =
-                tokio::sync::watch::channel(Vec::<nostromo::mother::MotherJob>::new());
             let state = McpSharedState::for_daemon_with_sources(
                 backend,
                 nostromo::mcp::DaemonSources {
                     perri_queue_rx: queue_rx,
                     perri_pr_rx: pr_rx,
-                    mother_jobs_rx: jobs_rx,
+                    mother: nostromo::mother::JobsFeed::new(),
                     fred_mailbox_rx: tokio::sync::watch::channel(None).1,
                     fred_calendar_rx: tokio::sync::watch::channel(None).1,
                     teri_todos_rx: tokio::sync::watch::channel(None).1,
@@ -136,7 +133,7 @@ fn make_daemon_state_with_pr_source(pr_source: PrSource) -> Harness {
             } else {
                 Some(pr_tx)
             };
-            (state, pr_tx, Some(queue_tx), Some(jobs_tx))
+            (state, pr_tx, Some(queue_tx))
         }
     };
     Harness {
@@ -147,7 +144,6 @@ fn make_daemon_state_with_pr_source(pr_source: PrSource) -> Harness {
         decisions,
         _pr_tx: pr_tx,
         _queue_tx: queue_tx,
-        _jobs_tx: jobs_tx,
     }
 }
 

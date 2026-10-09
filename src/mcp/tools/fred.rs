@@ -45,7 +45,7 @@ fn mailbox_view(snap: Option<&MailboxSnapshot>) -> SourceView {
         };
     }
     SourceView {
-        state: source_state::derive(snap.stale, snap.error.as_deref(), snap.items.is_empty()),
+        state: source_state::derive(false, snap.stale, snap.error.as_deref(), snap.items.is_empty()),
         updated_at: snap.generated_at,
         reason: snap.error.clone(),
         auth: None,
@@ -57,8 +57,8 @@ fn calendar_view(snap: Option<&CalendarSnapshot>) -> SourceView {
         return SourceView { state: source_state::LOADING, updated_at: None, reason: None, auth: None };
     };
     SourceView {
-        state: source_state::derive(snap.stale, snap.error.as_deref(), snap.events.is_empty()),
-        updated_at: None,
+        state: source_state::derive(false, snap.stale, snap.error.as_deref(), snap.events.is_empty()),
+        updated_at: snap.generated_at,
         reason: snap.error.clone(),
         auth: None,
     }
@@ -73,6 +73,30 @@ fn severity(state: &str) -> u8 {
         source_state::LOADING => 1,
         _ => 0,
     }
+}
+
+/// The overall state of Fred: the worse of the two sources. When both are
+/// healthy but differ (fresh + empty), something is there: `fresh`.
+fn composite_state(mailbox: &SourceView, calendar: &SourceView) -> &'static str {
+    let worst = if severity(calendar.state) > severity(mailbox.state) { calendar } else { mailbox };
+    if severity(worst.state) == 0 && mailbox.state != calendar.state {
+        source_state::FRESH
+    } else {
+        worst.state
+    }
+}
+
+/// `(overall state, unread count, today's event count)` read straight from the
+/// snapshots — for summaries that must not serialise the whole mailbox.
+pub(crate) fn summary(state: &McpSharedState) -> (&'static str, usize, usize) {
+    let mailbox = state.fred_mailbox_rx.borrow();
+    let calendar = state.fred_calendar_rx.borrow();
+    let overall = composite_state(&mailbox_view(mailbox.as_ref()), &calendar_view(calendar.as_ref()));
+    (
+        overall,
+        mailbox.as_ref().map_or(0, |s| s.unread_count),
+        calendar.as_ref().map_or(0, |s| s.events.len()),
+    )
 }
 
 fn ser<T: serde::Serialize>(v: &T) -> Value {
@@ -164,13 +188,8 @@ pub fn get_state(state: &McpSharedState) -> Value {
     drop(calendar_borrow);
 
     let (mailbox_state, calendar_state) = (mailbox.state, calendar.state);
+    let composite = composite_state(&mailbox, &calendar);
     let worst = if severity(calendar_state) > severity(mailbox_state) { calendar } else { mailbox };
-    let composite = if severity(worst.state) == 0 && mailbox_state != calendar_state {
-        // fresh + empty: something is there.
-        source_state::FRESH
-    } else {
-        worst.state
-    };
     let mut out = json!({
         "state": composite,
         "updated_at": worst.updated_at,

@@ -1160,10 +1160,10 @@ Two things a client must do to stay correct under recycling:
 
 | Tool | Effect |
 |------|--------|
-| `mother.enqueue_job({ plan_path })` | `mother add --plan <path>` — returns `{ id, title, status }` |
+| `mother.enqueue_job({ plan_path, repo, branch, ... })` | `mother add --plan-file <abs path> --repo <name> --branch <branch> --format text` — returns `{ id }`; `repo` is a bare repo name (e.g. `nostromo`), the plan needs a `suggested_config` block |
 | `mother.cancel_job({ id })` | `mother cancel <id>` |
 | `mother.archive_job({ id })` | `mother archive <id>` |
-| `mother.resume_job({ id, answer })` | `mother resume <id> <answer>` |
+| `mother.resume_job({ id, answer })` | `mother resume <id> --from-file <tmp>` (the answer goes through a private temp file, never argv) |
 
 ---
 
