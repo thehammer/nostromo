@@ -13,6 +13,7 @@ use super::model::{SendOutcome, SendPreview, WorkDetail, WorkError, WorkSource};
 /// Contract for Teri's work sources. Every method is only ever called for a
 /// trusted (local) peer.
 #[async_trait]
+#[allow(clippy::double_must_use)]
 pub trait WorkService: Send + Sync {
     /// Detail for a non-Fred item id (`todo:`, `doc:`, `jira:`, `sentry:`).
     async fn detail(&self, item_id: &str) -> Result<WorkDetail, WorkError>;
@@ -26,7 +27,6 @@ pub trait WorkService: Send + Sync {
 
     async fn send_preview(&self, item_id: &str) -> Result<SendPreview, WorkError>;
 
-    #[allow(clippy::too_many_arguments)]
     async fn send(&self, request: SendRequest) -> Result<SendOutcome, WorkError>;
 }
 
@@ -45,6 +45,7 @@ pub struct SendRequest {
 
 /// Detail provider for Fred mail (`mail:`) and calendar (`event:`) items.
 #[async_trait]
+#[allow(clippy::double_must_use)]
 pub trait FredDetailService: Send + Sync {
     async fn detail(&self, item_id: &str) -> Result<WorkDetail, WorkError>;
 }
