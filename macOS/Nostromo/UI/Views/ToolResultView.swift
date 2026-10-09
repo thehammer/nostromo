@@ -137,7 +137,7 @@ final class ToolResultView: NSView {
         // Biggest balloon driver: long single-line tool output (JSON, git status) had
         // an intrinsic width of ~8600pt. Yield horizontally so it wraps to the pane.
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label.menuProvider = { [weak self] in self?.copyMenu(for: label) ?? NSMenu() }
+        label.menuProvider = { [weak self, weak label] in label.flatMap { self?.copyMenu(for: $0) } ?? NSMenu() }
         label.translatesAutoresizingMaskIntoConstraints = false
         contentWrap.addSubview(label)
         NSLayoutConstraint.activate([

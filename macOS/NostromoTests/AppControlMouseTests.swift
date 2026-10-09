@@ -434,8 +434,11 @@ final class AppControlMouseForeignEventTests: XCTestCase {
         XCTAssertEqual(event.type, type, message, file: file, line: line)
         XCTAssertEqual(event.windowNumber, windowNumber, "\(message): window number changed", file: file, line: line)
         XCTAssertEqual(event.eventNumber, eventNumber, "\(message): event number changed", file: file, line: line)
-        XCTAssertEqual(event.locationInWindow.x, location.x, accuracy: 0.5, "\(message): location changed", file: file, line: line)
-        XCTAssertEqual(event.locationInWindow.y, location.y, accuracy: 0.5, "\(message): location changed", file: file, line: line)
+        // Location is a sanity check only: AppKit can displace the location of an event posted for a
+        // just-ordered window by a fraction of a point (seen: 0.7 pt), which made this flaky at 0.5.
+        // Window number, event number, type and order are the real assertions.
+        XCTAssertEqual(event.locationInWindow.x, location.x, accuracy: 2.0, "\(message): location changed", file: file, line: line)
+        XCTAssertEqual(event.locationInWindow.y, location.y, accuracy: 2.0, "\(message): location changed", file: file, line: line)
     }
 
     // MARK: a mouse-up for another window
