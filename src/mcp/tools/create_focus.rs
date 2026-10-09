@@ -91,6 +91,11 @@ pub async fn create_focus(state: &McpSharedState, args: &Value, pty_id: Option<&
         if initial_context.is_some() || from_sensitive_caller {
             sensitive.mark_tag(&tag);
         }
+        // A focus spawned by a session a network peer is steering is steered
+        // by that peer too: it must not be a way back to the withheld tools.
+        if pty_id.is_some_and(|caller| sensitive.is_network_driven(caller)) {
+            sensitive.mark_network_driven(&tag);
+        }
     }
 
     // Idempotent: a live focus with this tag returns its id rather than erroring.

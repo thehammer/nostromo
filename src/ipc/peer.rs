@@ -95,6 +95,23 @@ struct Registered {
     /// registry is unreadable). Never persisted.
     #[serde(skip)]
     ephemeral: BTreeMap<String, String>,
+    /// Bytes held by `ephemeral` (keys plus values), kept so the cap is on
+    /// memory, not on entry count.
+    #[serde(skip)]
+    ephemeral_bytes: usize,
+    /// The last write of the registry failed, so what is on disk may lack
+    /// recent registrations. Cleared by the next successful write.
+    #[serde(skip)]
+    degraded: bool,
+    /// The registry on disk is known to have lost registrations (a previous
+    /// run could not write it, or the disk cannot be written now): which tags
+    /// are missing is unknowable, so every resumed session is treated as
+    /// sensitive until [`SensitiveTags::settle_lost_history`].
+    #[serde(skip)]
+    lost_history: bool,
+    /// Tags whose session a network peer has written to. In memory only.
+    #[serde(skip)]
+    network_driven: BTreeSet<String>,
 }
 
 /// Which focus tags and Mother jobs carry Teri/Fred-derived content.
@@ -114,6 +131,7 @@ struct Registered {
 pub struct SensitiveTags {
     inner: Arc<RwLock<Registered>>,
     path: Option<Arc<PathBuf>>,
+    writer: RegistryWriter,
 }
 
 impl Default for SensitiveTags {
@@ -128,24 +146,48 @@ impl SensitiveTags {
         Self {
             inner: Arc::new(RwLock::new(Registered::default())),
             path: None,
+            writer: Arc::new(write_atomic),
         }
     }
 
     /// A registry persisted at `path`, seeded from it when it exists.
     pub fn persisted(path: PathBuf) -> Self {
+        Self::persisted_with_writer(path, Arc::new(write_atomic))
+    }
+
+    /// As [`SensitiveTags::persisted`], writing through `writer` (tests inject
+    /// a failing disk).
+    ///
+    /// Startup is **degraded** when a `sensitive-tags.dirty` sentinel is
+    /// present (a previous run failed to persist a registration) or when the
+    /// registry cannot be written now. See [`SensitiveTags::note_resumed`].
+    pub fn persisted_with_writer(path: PathBuf, writer: RegistryWriter) -> Self {
         let unreadable = |why: &dyn std::fmt::Display| {
             warn!(path = %path.display(), "sensitive-tag registry unreadable ({why}); treating every tag as sensitive");
             Registered { unreadable: true, ..Registered::default() }
         };
-        let registered = match std::fs::read(&path) {
+        let mut registered = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice::<Registered>(&bytes).unwrap_or_else(|e| unreadable(&e)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registered::default(),
             Err(e) => unreadable(&e),
         };
-        Self {
-            inner: Arc::new(RwLock::new(registered)),
+        let tags = Self {
+            inner: Arc::new(RwLock::new(Registered::default())),
             path: Some(Arc::new(path)),
+            writer,
+        };
+        if !registered.unreadable {
+            // A sentinel, or a registry that cannot be written right now,
+            // means registrations may have been lost across this restart.
+            let sentinel_present = tags.sentinel_path().is_some_and(|p| p.exists());
+            if sentinel_present || !tags.write_registry(&registered) {
+                warn!("sensitive-tag registry may have lost registrations; resumed sessions are treated as sensitive");
+                registered.degraded = true;
+                registered.lost_history = true;
+            }
         }
+        *tags.inner.write().unwrap() = registered;
+        tags
     }
 
     /// Does the focus `tag` carry (or can it act on) Teri/Fred-derived data?
@@ -172,9 +214,15 @@ impl SensitiveTags {
             return;
         }
         let mut registered = self.inner.write().unwrap();
+        self.register_tag(&mut registered, tag);
+    }
+
+    /// Register `tag` (with a fresh opaque id) and persist, unless it is
+    /// already registered. Caller holds the write lock.
+    fn register_tag(&self, registered: &mut Registered, tag: &str) {
         if !registered.tags.contains_key(tag) {
             registered.tags.insert(tag.to_string(), new_opaque_tag());
-            self.persist(&registered);
+            self.persist(registered);
         }
     }
 
@@ -182,8 +230,57 @@ impl SensitiveTags {
     pub fn mark_job(&self, job_id: &str) {
         let mut registered = self.inner.write().unwrap();
         if registered.jobs.insert(job_id.to_string()) {
-            self.persist(&registered);
+            self.persist(&mut registered);
         }
+    }
+
+    /// A stored session id for `tag` is being resumed. While the registry is
+    /// known to have lost registrations (see [`SensitiveTags::persisted_with_writer`])
+    /// an unregistered resumed session may have been work-derived, so it is
+    /// registered as sensitive. A healthy registry leaves it alone.
+    pub fn note_resumed(&self, tag: &str) {
+        let mut registered = self.inner.write().unwrap();
+        if registered.lost_history && !is_teri_or_fred_agent(tag) {
+            self.register_tag(&mut registered, tag);
+        }
+    }
+
+    /// The session manager has now registered every stored session as sensitive
+    /// ([`SensitiveTags::note_resumed`]), so the registry no longer lacks
+    /// anything that can resume. If it can be written, it is current again:
+    /// the degraded state and the sentinel go.
+    pub fn settle_lost_history(&self) {
+        let mut registered = self.inner.write().unwrap();
+        if registered.lost_history {
+            // Persist as a healthy registry; `persist` leaves `degraded` set
+            // only if the write failed, and then history is still lost for
+            // the next restart too.
+            registered.lost_history = false;
+            self.persist(&mut registered);
+            registered.lost_history = registered.degraded;
+        }
+    }
+
+    /// Did the last attempt to write the registry fail, or did this run start
+    /// from a registry that may have lost registrations?
+    pub fn is_degraded(&self) -> bool {
+        self.inner.read().unwrap().degraded
+    }
+
+    /// A network peer wrote to `tag`'s session. That session can now be steered
+    /// by an unauthenticated peer, so it is denied the Teri/Fred/Mother MCP
+    /// tools (see `mcp::tools`). Not persisted: it ends with the daemon.
+    pub fn mark_network_driven(&self, tag: &str) {
+        self.inner.write().unwrap().network_driven.insert(tag.to_string());
+    }
+
+    pub fn is_network_driven(&self, tag: &str) -> bool {
+        self.inner.read().unwrap().network_driven.contains(tag)
+    }
+
+    /// Total bytes held by the ephemeral opaque-tag map (keys and values).
+    pub fn ephemeral_footprint_bytes(&self) -> usize {
+        self.inner.read().unwrap().ephemeral_bytes
     }
 
     /// The stand-in shown to network peers for a sensitive `tag`: stable for
@@ -191,44 +288,143 @@ impl SensitiveTags {
     /// being registered, of this process) and unrelated to the tag's text.
     fn opaque_tag(&self, tag: &str) -> String {
         let mut registered = self.inner.write().unwrap();
-        if let Some(opaque) = registered.tags.get(tag).or_else(|| registered.ephemeral.get(tag)) {
+        if let Some(opaque) = registered.tags.get(tag) {
+            return opaque.clone();
+        }
+        // The key is attacker-controlled (a network peer pushes whatever tag it
+        // likes), so an oversized tag is remembered by a fixed-size digest.
+        let key = ephemeral_key(tag);
+        if let Some(opaque) = registered.ephemeral.get(key.as_ref()) {
             return opaque.clone();
         }
         let opaque = new_opaque_tag();
-        // Bounded: a network peer can push arbitrarily many tags through
-        // `focus_registry_push`. Past the cap the map restarts, which only
-        // changes the ids shown for these unregistered tags.
-        if registered.ephemeral.len() >= MAX_EPHEMERAL_OPAQUE_TAGS {
+        // Bounded in entries and in bytes: past either cap the map restarts,
+        // which only changes the ids shown for these unregistered tags.
+        let entry_bytes = key.len() + opaque.len();
+        if registered.ephemeral.len() >= MAX_EPHEMERAL_OPAQUE_TAGS
+            || registered.ephemeral_bytes + entry_bytes > MAX_EPHEMERAL_OPAQUE_BYTES
+        {
             registered.ephemeral.clear();
+            registered.ephemeral_bytes = 0;
         }
-        registered.ephemeral.insert(tag.to_string(), opaque.clone());
+        registered.ephemeral_bytes += entry_bytes;
+        registered.ephemeral.insert(key.into_owned(), opaque.clone());
         opaque
     }
 
     /// Write the registry out. Called with the registry's write lock held, so
     /// concurrent registrations are serialised and the last write on disk is
     /// the latest state.
-    fn persist(&self, registered: &Registered) {
-        let Some(path) = &self.path else { return };
+    ///
+    /// A failed write is retried (bounded). If it still fails the registry is
+    /// **degraded**: the registration stays in memory, and a sentinel file is
+    /// left beside the registry so the next start knows registrations may be
+    /// missing from it. A later successful write clears both.
+    fn persist(&self, registered: &mut Registered) {
+        if self.path.is_none() {
+            return;
+        }
         if registered.unreadable {
             // Leave the unreadable file for the operator rather than replace
             // it with a registry that forgot everything before this run.
             return;
         }
+        if self.write_registry(registered) {
+            // Still degraded while the file is known to lack past registrations.
+            registered.degraded = registered.lost_history;
+            if !registered.lost_history {
+                self.clear_sentinel();
+            }
+        } else {
+            registered.degraded = true;
+            self.write_sentinel();
+        }
+    }
+
+    fn write_sentinel(&self) {
+        if let Some(sentinel) = self.sentinel_path() {
+            if let Err(e) = std::fs::write(&sentinel, b"registrations may be missing from sensitive-tags.json\n") {
+                warn!(path = %sentinel.display(), "sensitive-tag registry: could not write the degraded sentinel: {e}");
+            }
+        }
+    }
+
+    fn clear_sentinel(&self) {
+        if let Some(sentinel) = self.sentinel_path() {
+            let _ = std::fs::remove_file(sentinel);
+        }
+    }
+
+    /// One bounded write attempt sequence; `true` when the registry reached the disk.
+    fn write_registry(&self, registered: &Registered) -> bool {
+        let Some(path) = &self.path else { return true };
         let json = match serde_json::to_vec(registered) {
             Ok(j) => j,
             Err(e) => {
                 warn!("sensitive-tag registry: serialise failed: {e}");
-                return;
+                return false;
             }
         };
-        if let Err(e) = write_atomic(path, &json) {
-            warn!(path = %path.display(), "sensitive-tag registry: persist failed: {e}");
+        for attempt in 0..PERSIST_ATTEMPTS {
+            match (self.writer)(path, &json) {
+                Ok(()) => return true,
+                Err(e) => {
+                    warn!(path = %path.display(), attempt, "sensitive-tag registry: persist failed: {e}");
+                    if attempt + 1 < PERSIST_ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_millis(5 << attempt));
+                    }
+                }
+            }
         }
+        false
+    }
+
+    fn sentinel_path(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|p| p.with_file_name("sensitive-tags.dirty"))
     }
 }
 
+/// How the registry is written to disk; tests inject a failing writer.
+pub type RegistryWriter = Arc<dyn Fn(&Path, &[u8]) -> std::io::Result<()> + Send + Sync>;
+
+tokio::task_local! {
+    static WORK_SEND: ();
+}
+
+/// Run `fut` as part of a work-item send (`WorkSend`). While it runs,
+/// `SessionManager::spawn_session`, `add_or_update_focus` and
+/// `send_user_message` register their tag as sensitive **before** anything is
+/// spawned, seeded or broadcast, so a network peer can never see the focus a
+/// work item is being sent to in the window before `WorkService::send` returns.
+///
+/// The scope follows the task, not the thread: a [`WorkService`](crate::data::work::WorkService)
+/// that hands the work to another task must wrap that task's future in this too.
+pub async fn within_work_send<F: std::future::Future>(fut: F) -> F::Output {
+    WORK_SEND.scope((), fut).await
+}
+
+/// Is the current task inside [`within_work_send`]?
+pub fn in_work_send() -> bool {
+    WORK_SEND.try_with(|_| ()).is_ok()
+}
+
 const MAX_EPHEMERAL_OPAQUE_TAGS: usize = 4096;
+/// Total bytes (keys plus ids) the ephemeral map may hold.
+const MAX_EPHEMERAL_OPAQUE_BYTES: usize = 256 * 1024;
+/// Longest tag kept verbatim as a map key; longer ones are keyed by digest.
+const MAX_EPHEMERAL_KEY_LEN: usize = 256;
+/// Attempts to write the registry before it is declared degraded.
+const PERSIST_ATTEMPTS: u32 = 3;
+
+fn ephemeral_key(tag: &str) -> std::borrow::Cow<'_, str> {
+    use std::hash::{Hash, Hasher};
+    if tag.len() <= MAX_EPHEMERAL_KEY_LEN {
+        return std::borrow::Cow::Borrowed(tag);
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tag.hash(&mut hasher);
+    std::borrow::Cow::Owned(format!("\u{0}h{}:{:016x}", tag.len(), hasher.finish()))
+}
 
 fn new_opaque_tag() -> String {
     format!("focus-{}", &uuid::Uuid::new_v4().simple().to_string()[..16])
@@ -296,21 +492,31 @@ pub enum ServerClass<'a> {
 // would be theatre while `pty_spawn` runs arbitrary commands:
 //
 //   * client → daemon: `focus_registry_push`, `perri_action`, `mother_action`,
-//     `mother_resume`, `decision_answer`, `pty_spawn`/`pty_input`/`pty_kill`/…,
-//     `session_spawn` (for a non-Teri/Fred agent), `close_pane`,
-//     `rendered_shape`, and `session_*` verbs on non-sensitive tags.
+//     `mother_resume`, `decision_answer`, `pty_kill`/`pty_attach`/`pty_resize`,
+//     `close_pane`, `rendered_shape`, and `session_*` verbs (attach, send,
+//     interrupt, control) on non-sensitive tags. `session_send` writes to an
+//     existing session's process: that session is then marked network-driven
+//     and loses its `fred.*`/`teri.*`/`mother.*` MCP tools, but it keeps its
+//     other tools (`nostromo.*`, `perri.*`) and whatever it already read.
 //   * daemon → client: PTY output (`pty_*`), `mother_statusline`, and the pane
 //     content / layout / notifications / decisions / activity / transcripts /
-//     Perri state of every focus that is NOT a sensitive tag. Pane content of an ordinary dynamic focus can
-//     therefore still show whatever its agent put there.
+//     Perri state of every focus that is NOT a sensitive tag. Pane content of an
+//     ordinary dynamic focus can therefore still show whatever its agent put there.
 //   * a Teri/Fred-derived focus is only recognised when it is a built-in, was
 //     created through `WorkSend` or `create_focus` with seeded context, or runs
 //     the `fred`/`teri` agent. Text an agent pastes into some other focus, or
-//     a Mother job started from a shell, is not tracked.
+//     a Mother job started from a shell, is not tracked. A Mother job a work
+//     item starts is registered when `WorkService::send` returns (its id is not
+//     known sooner), so it can appear in a `mother_jobs` list in that window.
 //
 // What this module DOES guarantee for network peers: nothing Teri/Fred-derived
-// that the daemon can identify (the four cases above) is delivered or driven
-// through any frame family, on the replay, broadcast and targeted paths.
+// that the daemon can identify (the cases above) is delivered or driven through
+// any frame family, on the replay, broadcast and targeted paths, AND a network
+// peer cannot start a process (`session_spawn` for any agent, `pty_spawn`) or
+// type into a PTY (`pty_input`), so it cannot use an ordinary agent session as
+// a proxy to the `fred.*`/`teri.*` tools. The guarantee is bounded by the
+// unauthenticated listener: it is not a substitute for authentication or for
+// binding the port to loopback (tracked in the wip doc above).
 
 /// Classify a daemon-to-client message. Every variant is listed on purpose.
 pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
@@ -525,9 +731,59 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
     }
 }
 
-/// Must a network peer's `msg` be refused? (Either family above.)
+/// Does `msg` start a process, or write to one the peer did not start itself?
+/// Refused for a network peer whatever it names: a session of **any** agent
+/// is hosted with the MCP bridge, whose `fred.*`/`teri.*`/`mother.*` tools
+/// would make the daemon fetch Teri/Fred data and stream it back as an
+/// ordinary transcript, and `pty_spawn`/`pty_input` run commands as the user.
+///
+/// Until the listener is authenticated an iOS client on the LAN therefore
+/// cannot start sessions or PTYs. It can still attach to, and send to,
+/// non-sensitive sessions the Mac started (such a session loses those tools
+/// once a network peer has written to it, see
+/// [`SensitiveTags::mark_network_driven`]).
+pub fn starts_or_feeds_process(msg: &ClientMsg) -> bool {
+    match msg {
+        ClientMsg::SessionSpawn { .. } | ClientMsg::PtySpawn { .. } | ClientMsg::PtyInput { .. } => {
+            true
+        }
+
+        ClientMsg::Hello { .. }
+        | ClientMsg::Subscribe { .. }
+        | ClientMsg::Ping
+        | ClientMsg::PtyAttach { .. }
+        | ClientMsg::PtyDetach { .. }
+        | ClientMsg::PtyResize { .. }
+        | ClientMsg::PtyKill { .. }
+        | ClientMsg::PtyList
+        | ClientMsg::SessionAttach { .. }
+        | ClientMsg::SessionDetach { .. }
+        | ClientMsg::SessionSend { .. }
+        | ClientMsg::ClosePane { .. }
+        | ClientMsg::SessionInterrupt { .. }
+        | ClientMsg::SessionControl { .. }
+        | ClientMsg::SessionAnswerPermission { .. }
+        | ClientMsg::SessionList
+        | ClientMsg::FocusRegistryPush { .. }
+        | ClientMsg::FocusList
+        | ClientMsg::MotherAction { .. }
+        | ClientMsg::MotherResume { .. }
+        | ClientMsg::PerriAction { .. }
+        | ClientMsg::DecisionAnswer { .. }
+        | ClientMsg::ActivitySnapshotRequest { .. }
+        | ClientMsg::RenderedShape { .. }
+        | ClientMsg::WorkDetailRequest { .. }
+        | ClientMsg::WorkRefresh { .. }
+        | ClientMsg::PicksRefresh { .. }
+        | ClientMsg::WorkSendPreviewRequest { .. }
+        | ClientMsg::WorkSend { .. }
+        | ClientMsg::FredSeed { .. } => false,
+    }
+}
+
+/// Must a network peer's `msg` be refused? (Any family above.)
 pub fn refuse_for_network(msg: &ClientMsg, tags: &SensitiveTags) -> bool {
-    is_sensitive_client_msg(msg) || targets_sensitive_session(msg, tags)
+    is_sensitive_client_msg(msg) || targets_sensitive_session(msg, tags) || starts_or_feeds_process(msg)
 }
 
 // ── trimming for network peers ───────────────────────────────────────────────
@@ -769,7 +1025,9 @@ mod tests {
         };
         assert!(refuse_for_network(&spawn("anything", "fred"), &tags));
         assert!(refuse_for_network(&spawn("anything", "Teri"), &tags));
-        assert!(!refuse_for_network(&spawn("anything", "cody"), &tags));
+        // A spawn for any agent is refused: an ordinary agent's session is a
+        // proxy to the Teri/Fred tools (see `starts_or_feeds_process`).
+        assert!(refuse_for_network(&spawn("anything", "cody"), &tags));
         // Detaching only releases the peer's own attachment.
         assert!(!refuse_for_network(&ClientMsg::SessionDetach { tag: "fred".into() }, &tags));
     }
@@ -948,5 +1206,460 @@ mod tests {
         assert!(refuse_for_network(&resume("job-work"), &tags));
         assert!(!refuse_for_network(&action("job-plain"), &tags));
         assert!(!refuse_for_network(&resume("job-plain"), &tags));
+    }
+
+    // ── round 3 ───────────────────────────────────────────────────────────────
+
+    use crate::ipc::protocol::{MotherActionKind, PermissionDecision, SessionAction};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// One of every `ClientMsg` variant, for exhaustive classification checks.
+    fn every_client_msg() -> Vec<ClientMsg> {
+        vec![
+            ClientMsg::Hello { client_id: "c".into(), protocol_version: 4 },
+            ClientMsg::Subscribe { topics: vec![], renders_decisions: false },
+            ClientMsg::Ping,
+            ClientMsg::PtySpawn {
+                pty_id: "p".into(),
+                cmd: "/bin/sh".into(),
+                args: vec![],
+                cols: 80,
+                rows: 24,
+                cwd: None,
+                client_tag: "t".into(),
+            },
+            ClientMsg::PtyAttach { pty_id: "p".into() },
+            ClientMsg::PtyDetach { pty_id: "p".into() },
+            ClientMsg::PtyInput { pty_id: "p".into(), bytes: b"ls\n".to_vec() },
+            ClientMsg::PtyResize { pty_id: "p".into(), cols: 80, rows: 24 },
+            ClientMsg::PtyKill { pty_id: "p".into() },
+            ClientMsg::PtyList,
+            ClientMsg::SessionSpawn {
+                tag: "x1".into(),
+                agent_name: "claude".into(),
+                view_name: "v".into(),
+                cwd: Some("/tmp".into()),
+                session_id: None,
+                remote_control: false,
+            },
+            ClientMsg::SessionAttach { tag: "x1".into() },
+            ClientMsg::SessionDetach { tag: "x1".into() },
+            ClientMsg::SessionSend { tag: "x1".into(), text: "t".into(), images: vec![] },
+            ClientMsg::ClosePane { tag: "x1".into(), pane_id: "p".into() },
+            ClientMsg::SessionInterrupt { tag: "x1".into() },
+            ClientMsg::SessionControl { tag: "x1".into(), action: SessionAction::Stop },
+            ClientMsg::SessionAnswerPermission {
+                tag: "x1".into(),
+                request_id: "r".into(),
+                decision: PermissionDecision::Allow,
+            },
+            ClientMsg::SessionList,
+            ClientMsg::FocusRegistryPush { focuses: vec![] },
+            ClientMsg::FocusList,
+            ClientMsg::MotherAction { job_id: "j".into(), action: MotherActionKind::Cancel },
+            ClientMsg::MotherResume { job_id: "j".into(), answer: "a".into() },
+            ClientMsg::PerriAction { action: "clear".into(), pr_number: None, repo: None, tag: None },
+            ClientMsg::DecisionAnswer { request_id: "r".into(), choice_id: None },
+            ClientMsg::ActivitySnapshotRequest { tag: "x1".into() },
+            ClientMsg::RenderedShape {
+                tag: "x1".into(),
+                window_id: "w".into(),
+                pane_ids: vec![],
+                rendered_at: chrono::Utc::now(),
+            },
+            ClientMsg::WorkDetailRequest { request_id: "r".into(), item_id: "i".into() },
+            ClientMsg::WorkRefresh { source: None, fred: false },
+            ClientMsg::PicksRefresh { reason: "manual".into() },
+            ClientMsg::WorkSendPreviewRequest { request_id: "r".into(), item_id: "i".into() },
+            ClientMsg::WorkSend {
+                request_id: "r".into(),
+                item_id: "i".into(),
+                destination: "focus".into(),
+                agent: "cody".into(),
+                working_directory: None,
+                label: "l".into(),
+                context: "c".into(),
+                allow_duplicate: false,
+            },
+            ClientMsg::FredSeed { request_id: "r".into(), text: "t".into() },
+        ]
+    }
+
+    /// The independent oracle: which requests start a process or write to one.
+    /// Deliberately a wildcard-free `match`: adding a `ClientMsg` variant breaks
+    /// this test's build until someone decides which side it falls on.
+    fn oracle_starts_or_feeds_process(msg: &ClientMsg) -> bool {
+        match msg {
+            ClientMsg::SessionSpawn { .. } | ClientMsg::PtySpawn { .. } | ClientMsg::PtyInput { .. } => true,
+            ClientMsg::Hello { .. }
+            | ClientMsg::Subscribe { .. }
+            | ClientMsg::Ping
+            | ClientMsg::PtyAttach { .. }
+            | ClientMsg::PtyDetach { .. }
+            | ClientMsg::PtyResize { .. }
+            | ClientMsg::PtyKill { .. }
+            | ClientMsg::PtyList
+            | ClientMsg::SessionAttach { .. }
+            | ClientMsg::SessionDetach { .. }
+            | ClientMsg::SessionSend { .. }
+            | ClientMsg::ClosePane { .. }
+            | ClientMsg::SessionInterrupt { .. }
+            | ClientMsg::SessionControl { .. }
+            | ClientMsg::SessionAnswerPermission { .. }
+            | ClientMsg::SessionList
+            | ClientMsg::FocusRegistryPush { .. }
+            | ClientMsg::FocusList
+            | ClientMsg::MotherAction { .. }
+            | ClientMsg::MotherResume { .. }
+            | ClientMsg::PerriAction { .. }
+            | ClientMsg::DecisionAnswer { .. }
+            | ClientMsg::ActivitySnapshotRequest { .. }
+            | ClientMsg::RenderedShape { .. }
+            | ClientMsg::WorkDetailRequest { .. }
+            | ClientMsg::WorkRefresh { .. }
+            | ClientMsg::PicksRefresh { .. }
+            | ClientMsg::WorkSendPreviewRequest { .. }
+            | ClientMsg::WorkSend { .. }
+            | ClientMsg::FredSeed { .. } => false,
+        }
+    }
+
+    #[test]
+    fn starts_or_feeds_process_is_true_for_session_spawn_pty_spawn_and_pty_input_and_for_nothing_else() {
+        for msg in every_client_msg() {
+            assert_eq!(starts_or_feeds_process(&msg), oracle_starts_or_feeds_process(&msg), "{msg:?}");
+        }
+    }
+
+    #[test]
+    fn starts_or_feeds_process_does_not_depend_on_the_agent_or_the_tag() {
+        for (tag, agent) in [("x1", "claude"), ("cody-1", "cody"), ("fred", "fred"), ("", ""), ("x:fred", "teri:teri")] {
+            let spawn = ClientMsg::SessionSpawn {
+                tag: tag.into(),
+                agent_name: agent.into(),
+                view_name: "v".into(),
+                cwd: None,
+                session_id: None,
+                remote_control: false,
+            };
+            assert!(starts_or_feeds_process(&spawn), "{tag:?}/{agent:?}");
+        }
+    }
+
+    #[test]
+    fn a_network_peer_is_refused_every_process_starting_or_feeding_request_whatever_the_tag_or_agent() {
+        let tags = SensitiveTags::in_memory();
+        for msg in every_client_msg().iter().filter(|m| oracle_starts_or_feeds_process(m)) {
+            assert!(refuse_for_network(msg, &tags), "{msg:?} must be refused for a network peer");
+        }
+        // Still refused for an agent and tag nobody would call sensitive.
+        let spawn = ClientMsg::SessionSpawn {
+            tag: "x1".into(),
+            agent_name: "claude".into(),
+            view_name: "v".into(),
+            cwd: Some("/tmp".into()),
+            session_id: None,
+            remote_control: false,
+        };
+        assert!(refuse_for_network(&spawn, &tags));
+    }
+
+    #[test]
+    fn a_network_peer_may_still_attach_send_detach_and_list_for_an_ordinary_session() {
+        let tags = SensitiveTags::in_memory();
+        for msg in [
+            ClientMsg::SessionAttach { tag: "cody-x".into() },
+            ClientMsg::SessionSend { tag: "cody-x".into(), text: "hi".into(), images: vec![] },
+            ClientMsg::SessionDetach { tag: "cody-x".into() },
+            ClientMsg::SessionList,
+            ClientMsg::Ping,
+        ] {
+            assert!(!refuse_for_network(&msg, &tags), "{msg:?}");
+        }
+    }
+
+    // ── work-send scope ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn the_work_send_scope_is_visible_inside_it_across_awaits_and_only_inside_it() {
+        assert!(!in_work_send());
+        within_work_send(async {
+            assert!(in_work_send());
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            assert!(in_work_send(), "the scope must survive await points");
+        })
+        .await;
+        assert!(!in_work_send(), "the scope ends with the future");
+    }
+
+    #[tokio::test]
+    async fn within_work_send_returns_the_value_of_the_future_it_wraps() {
+        assert_eq!(within_work_send(async { 41 + 1 }).await, 42);
+    }
+
+    // ── network-driven sessions ───────────────────────────────────────────────
+
+    #[test]
+    fn a_tag_a_network_peer_wrote_to_is_network_driven_but_not_thereby_sensitive() {
+        let tags = SensitiveTags::in_memory();
+        assert!(!tags.is_network_driven("cody-a"));
+        tags.mark_network_driven("cody-a");
+        assert!(tags.is_network_driven("cody-a"));
+        assert!(!tags.is_network_driven("cody-b"));
+        assert!(
+            !tags.tag_is_sensitive("cody-a"),
+            "a network peer may keep conversing with a session it drove"
+        );
+        // A clone shares the registry.
+        let clone = tags.clone();
+        clone.mark_network_driven("cody-c");
+        assert!(tags.is_network_driven("cody-c"));
+    }
+
+    // ── bounded opaque-tag memory ─────────────────────────────────────────────
+
+    #[test]
+    fn an_oversized_tag_never_ends_up_as_a_key_and_its_stand_in_is_short_and_unrelated() {
+        let tags = SensitiveTags::in_memory();
+        for i in 0..100 {
+            let junk = format!("{i:04}{}:fred", "j".repeat(1000));
+            assert!(tags.tag_is_sensitive(&junk));
+            let opaque = tags.opaque_tag(&junk);
+            assert!(opaque.len() <= 64, "stand-in is {} bytes", opaque.len());
+            assert!(!opaque.contains("jjjj"), "{opaque}");
+        }
+        assert!(
+            tags.ephemeral_footprint_bytes() < 100 * 256,
+            "oversized tags were retained: {} bytes held",
+            tags.ephemeral_footprint_bytes()
+        );
+    }
+
+    #[test]
+    fn ordinary_short_tags_keep_a_stable_stand_in() {
+        let tags = SensitiveTags::in_memory();
+        let first = tags.opaque_tag("x:fred");
+        assert_eq!(first, tags.opaque_tag("x:fred"));
+        assert_ne!(first, tags.opaque_tag("y:fred"));
+    }
+
+    #[test]
+    fn the_total_bytes_held_for_stand_ins_stay_capped_even_with_thousands_of_mid_sized_tags() {
+        let tags = SensitiveTags::in_memory();
+        for i in 0..4096 {
+            let mid = format!("{i:05}{}:fred", "m".repeat(190));
+            let _ = tags.opaque_tag(&mid);
+        }
+        assert!(
+            tags.ephemeral_footprint_bytes() <= 512 * 1024,
+            "4096 x ~200-byte tags hold {} bytes; the total must be capped (512 KiB)",
+            tags.ephemeral_footprint_bytes()
+        );
+    }
+
+    // ── persistence that fails open ───────────────────────────────────────────
+
+    fn registry_in(dir: &Path) -> PathBuf {
+        registry_path_beside(&dir.join("daemon-sessions.json"))
+    }
+
+    fn sentinel_beside(registry: &Path) -> PathBuf {
+        registry.with_file_name("sensitive-tags.dirty")
+    }
+
+    /// A writer that really writes while `fail_next` is 0 and fails (and counts
+    /// the attempt) while it is positive; `fail_always` overrides.
+    struct ScriptedDisk {
+        fail_always: Arc<AtomicBool>,
+        fail_next: Arc<AtomicUsize>,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedDisk {
+        fn new() -> (Self, RegistryWriter) {
+            let disk = Self {
+                fail_always: Arc::new(AtomicBool::new(false)),
+                fail_next: Arc::new(AtomicUsize::new(0)),
+                attempts: Arc::new(AtomicUsize::new(0)),
+            };
+            let (always, next, attempts) =
+                (Arc::clone(&disk.fail_always), Arc::clone(&disk.fail_next), Arc::clone(&disk.attempts));
+            let writer: RegistryWriter = Arc::new(move |path: &Path, bytes: &[u8]| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                if always.load(Ordering::SeqCst) {
+                    return Err(std::io::Error::other("disk full"));
+                }
+                if next
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    return Err(std::io::Error::other("transient"));
+                }
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                std::fs::write(path, bytes)
+            });
+            (disk, writer)
+        }
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn a_registry_that_cannot_be_written_still_protects_the_tag_retries_a_bounded_number_of_times_and_goes_degraded_with_a_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        let (disk, writer) = ScriptedDisk::new();
+        let tags = SensitiveTags::persisted_with_writer(path.clone(), writer);
+        assert!(!tags.is_degraded(), "a registry on a healthy disk starts healthy");
+        assert!(!sentinel_beside(&path).exists());
+
+        disk.fail_always.store(true, Ordering::SeqCst);
+        let before = disk.attempts();
+        tags.mark_tag("cody-x");
+
+        assert!(tags.tag_is_sensitive("cody-x"), "a failed write must not un-protect the tag in memory");
+        let used = disk.attempts() - before;
+        assert!((2..=5).contains(&used), "a failing write is retried a bounded number of times, used {used}");
+        assert!(tags.is_degraded());
+        assert!(sentinel_beside(&path).exists(), "the sentinel must record that the registry is incomplete");
+    }
+
+    #[test]
+    fn a_job_registration_that_cannot_be_persisted_is_kept_in_memory_and_degrades_the_registry_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        let (disk, writer) = ScriptedDisk::new();
+        let tags = SensitiveTags::persisted_with_writer(path.clone(), writer);
+
+        disk.fail_always.store(true, Ordering::SeqCst);
+        tags.mark_job("job-9");
+
+        assert!(tags.job_is_sensitive("job-9"));
+        assert!(tags.is_degraded());
+        assert!(sentinel_beside(&path).exists());
+    }
+
+    #[test]
+    fn a_transient_write_failure_is_retried_and_leaves_the_registry_healthy_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        let (disk, writer) = ScriptedDisk::new();
+        let tags = SensitiveTags::persisted_with_writer(path.clone(), writer);
+
+        disk.fail_next.store(1, Ordering::SeqCst);
+        let before = disk.attempts();
+        tags.mark_tag("cody-x");
+
+        assert!(disk.attempts() - before >= 2, "the failed write must have been retried");
+        assert!(!tags.is_degraded());
+        assert!(!sentinel_beside(&path).exists());
+        assert!(
+            SensitiveTags::persisted(path).tag_is_sensitive("cody-x"),
+            "the retried write must have reached the disk"
+        );
+    }
+
+    #[test]
+    fn a_later_successful_write_clears_the_degraded_state_and_removes_the_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        let (disk, writer) = ScriptedDisk::new();
+        let tags = SensitiveTags::persisted_with_writer(path.clone(), writer);
+
+        disk.fail_always.store(true, Ordering::SeqCst);
+        tags.mark_tag("cody-x");
+        assert!(tags.is_degraded());
+        assert!(sentinel_beside(&path).exists());
+
+        disk.fail_always.store(false, Ordering::SeqCst);
+        tags.mark_tag("cody-y");
+
+        assert!(!tags.is_degraded());
+        assert!(!sentinel_beside(&path).exists(), "a healthy write must remove the sentinel");
+        assert!(tags.tag_is_sensitive("cody-x") && tags.tag_is_sensitive("cody-y"));
+    }
+
+    #[test]
+    fn after_a_failed_write_and_a_restart_a_resumed_session_is_sensitive_and_a_fresh_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        {
+            let (disk, writer) = ScriptedDisk::new();
+            let tags = SensitiveTags::persisted_with_writer(path.clone(), writer);
+            disk.fail_always.store(true, Ordering::SeqCst);
+            tags.mark_tag("cody-x");
+            assert!(tags.is_degraded());
+        }
+        // The registry never reached the disk; only the sentinel did.
+        let _ = std::fs::remove_file(&path);
+        assert!(sentinel_beside(&path).exists());
+
+        let restarted = SensitiveTags::persisted(path.clone());
+        assert!(restarted.is_degraded(), "a present sentinel means the registry may be missing entries");
+
+        restarted.note_resumed("cody-x");
+        assert!(restarted.tag_is_sensitive("cody-x"), "a resumed session of a degraded registry fails closed");
+        assert!(!restarted.tag_is_sensitive("cody-fresh"), "a session that was not resumed is unaffected");
+    }
+
+    #[test]
+    fn every_session_resumed_after_a_degraded_restart_is_protected_not_only_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        std::fs::write(sentinel_beside(&path), b"dirty").unwrap();
+
+        // The disk is healthy again, so registering the first resumed tag
+        // writes fine; the registry is nevertheless still missing whatever was
+        // lost before, so the next resumed session must be protected as well.
+        let restarted = SensitiveTags::persisted(path);
+        restarted.note_resumed("cody-a");
+        restarted.note_resumed("cody-b");
+        restarted.note_resumed("cody-c");
+        for tag in ["cody-a", "cody-b", "cody-c"] {
+            assert!(restarted.tag_is_sensitive(tag), "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_registry_whose_probe_write_fails_at_startup_is_degraded_and_protects_resumed_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        let (disk, writer) = ScriptedDisk::new();
+        disk.fail_always.store(true, Ordering::SeqCst);
+
+        let tags = SensitiveTags::persisted_with_writer(path, writer);
+
+        assert!(tags.is_degraded(), "a registry that cannot be written at startup cannot be trusted");
+        tags.note_resumed("cody-x");
+        assert!(tags.tag_is_sensitive("cody-x"));
+        assert!(!tags.tag_is_sensitive("cody-fresh"));
+    }
+
+    #[test]
+    fn a_healthy_registry_restart_does_not_make_an_ordinary_resumed_session_sensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        SensitiveTags::persisted(path.clone()).mark_tag("cody-x");
+
+        let restarted = SensitiveTags::persisted(path.clone());
+        assert!(!restarted.is_degraded());
+        restarted.note_resumed("cody-ordinary");
+
+        assert!(!restarted.tag_is_sensitive("cody-ordinary"));
+        assert!(restarted.tag_is_sensitive("cody-x"), "registered tags survive the restart");
+        assert!(!sentinel_beside(&path).exists());
+    }
+
+    #[test]
+    fn note_resumed_on_an_already_registered_tag_changes_nothing() {
+        let tags = SensitiveTags::in_memory();
+        tags.mark_tag("cody-x");
+        tags.note_resumed("cody-x");
+        assert!(tags.tag_is_sensitive("cody-x"));
+        assert!(!tags.is_degraded(), "an in-memory registry is never degraded");
     }
 }

@@ -31,8 +31,8 @@ use super::{
     codec::{read_frame, write_frame},
     decisions::{AnswerOutcome, DecisionRegistry},
     peer::{
-        outbound, refuse_for_network, withheld_msg, PeerTrust, SensitiveTags,
-        Transport,
+        outbound, refuse_for_network, withheld_msg, within_work_send, PeerTrust,
+        SensitiveTags, Transport,
     },
     protocol::{
         ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
@@ -251,7 +251,7 @@ async fn handle_client<S>(
     retained: RetainedCache,
 ) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite,
+    S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -329,7 +329,7 @@ where
     // full topic enumeration when subscribing to everything.
     let mut is_operator = topics.contains(&Topic::Decision) || renders_decisions;
     if is_operator {
-        decisions.lock().unwrap().add_operator(&conn_key);
+        add_operator(&decisions, &conn_key, trust);
     }
 
     // ── Register per-client targeted channel ──────────────────────────────────
@@ -477,6 +477,21 @@ where
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
 
+    // `read_frame` is not cancel-safe (a frame is a header read then a body
+    // read), and the `select!` below drops whichever branch loses. Reading in
+    // a task of its own and receiving whole frames here means a broadcast
+    // arriving mid-frame cannot drop half a frame and desync the stream.
+    let (frame_tx, mut frames) = mpsc::channel::<Result<Vec<u8>>>(16);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            let frame = read_frame(&mut reader).await;
+            let failed = frame.is_err();
+            if frame_tx.send(frame).await.is_err() || failed {
+                break;
+            }
+        }
+    });
+
     let result: Result<()> = loop {
         tokio::select! {
             // Broadcast events (activity, Mother, etc.)
@@ -526,8 +541,8 @@ where
             }
 
             // Commands from client
-            frame = read_frame(&mut reader) => {
-                match frame {
+            frame = frames.recv() => {
+                match frame.unwrap_or_else(|| Err(anyhow::anyhow!("reader task ended"))) {
                     Ok(bytes) => {
                         let msg: ClientMsg = match serde_json::from_slice(&bytes) {
                             Ok(m) => m,
@@ -541,7 +556,7 @@ where
                         // serves `work` adds it this way.
                         if let ClientMsg::Subscribe { topics: new_topics, renders_decisions } = msg {
                             if !is_operator && (new_topics.contains(&Topic::Decision) || renders_decisions) {
-                                decisions.lock().unwrap().add_operator(&conn_key);
+                                add_operator(&decisions, &conn_key, trust);
                                 is_operator = true;
                             }
                             // Replay retained frames only for the topics this
@@ -568,6 +583,7 @@ where
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
+    reader_task.abort();
     debug!(
         claimed_id,
         conn_key,
@@ -586,6 +602,19 @@ where
     }
 
     result
+}
+
+/// Record `conn_key` as a client that renders decisions. A network peer is
+/// tracked apart from a local one: it is never sent a decision for a sensitive
+/// focus, so it must not keep `nostromo.ask_decision` from failing fast with
+/// `no_operator` when the Mac is closed (see `DecisionRegistry::has_operator_for`).
+fn add_operator(decisions: &Arc<Mutex<DecisionRegistry>>, conn_key: &str, trust: PeerTrust) {
+    let mut registry = decisions.lock().unwrap();
+    if trust.is_network() {
+        registry.add_network_operator(conn_key);
+    } else {
+        registry.add_operator(conn_key);
+    }
 }
 
 /// Serialize and write each message in order, best-effort: a message that
@@ -771,6 +800,13 @@ fn handle_client_msg(
 
         ClientMsg::SessionSend { tag, text, images } => {
             let mut mgr = session_mgr.lock().unwrap();
+            // An unauthenticated peer is about to steer this session: withdraw
+            // its Teri/Fred/Mother tools first, so nothing it is told to do
+            // can reach them. (Only a live session can be written to, which
+            // also bounds how many tags this records.)
+            if trust.is_network() && mgr.has_live_session(&tag) {
+                sensitive.mark_network_driven(&tag);
+            }
             if let Err(e) = mgr.send_user_message(&tag, &text, &images) {
                 warn!(conn_key, %tag, "SessionSend error: {e}");
                 let _ = targeted_tx.send(ServerMsg::Error {
@@ -1124,12 +1160,14 @@ fn handle_client_msg(
             };
             let sensitive = sensitive.clone();
             tokio::spawn(async move {
-                let result = work_service().send(request).await;
-                // Whatever the send created now holds work-item content: its
-                // focus transcript, panes and metadata, or its Mother job, are
-                // withheld from network peers from here on. (A service that
-                // broadcasts the new focus before returning should register it
-                // itself first; see `WorkService::send`.)
+                // Inside the scope, the session manager registers every tag
+                // the send spawns, seeds or announces *before* doing so, so
+                // nothing it creates can reach a network peer before this
+                // returns.
+                let result = within_work_send(work_service().send(request)).await;
+                // The send's outcome names what it created; registering it here
+                // as well covers a service that did not go through the session
+                // manager, and the Mother job (whose id is not known sooner).
                 if let Ok(outcome) = &result {
                     if let Some(tag) = &outcome.focus_tag {
                         sensitive.mark_tag(tag);
@@ -1287,15 +1325,25 @@ fn apply_retention(cache: &mut BTreeMap<String, ServerMsg>, msg: ServerMsg) {
 ///
 /// If this task falls behind the channel it cannot know which retained frames
 /// it missed (including a removal), so it clears the cache rather than serve
-/// state it can no longer vouch for; the sources re-broadcast on their next
-/// change or refresh.
+/// state it can no longer vouch for, and asks every source to refresh so the
+/// cache is repopulated: a Mac that reconnects after a lag must not wait for
+/// a source to change on its own before it is replayed anything.
 async fn retain_broadcasts(mut rx: broadcast::Receiver<ServerMsg>, cache: RetainedCache) {
     loop {
         match rx.recv().await {
             Ok(msg) => apply_retention(&mut cache.lock().unwrap(), msg),
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!("retained-message cache lagged {n} broadcast messages; clearing it");
+                warn!("retained-message cache lagged {n} broadcast messages; clearing it and refreshing the sources");
                 cache.lock().unwrap().clear();
+                tokio::spawn(async {
+                    let service = work_service();
+                    if let Err(e) = service.refresh(None, true).await {
+                        debug!(code = %e.code, "retention resync: refresh not performed");
+                    }
+                    if let Err(e) = service.refresh_picks("retention_lag").await {
+                        debug!(code = %e.code, "retention resync: picks refresh not performed");
+                    }
+                });
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }

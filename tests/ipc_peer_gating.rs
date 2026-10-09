@@ -25,6 +25,7 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -44,6 +45,7 @@ use nostromo::ipc::{
     codec::{read_frame, write_frame},
     decisions::DecisionRegistry,
     pane_registry::{PaneContentProvider, PaneRegistry},
+    peer::{registry_path_beside, within_work_send},
     protocol::{
         ClientMsg, DecisionResolution, FocusMeta, NotificationLevel, PaneContentWire, PaneTree,
         ServerMsg, SessionAction, Topic, PROTOCOL_VERSION,
@@ -54,11 +56,13 @@ use nostromo::ipc::{
     PtyManager, SessionManager,
 };
 use nostromo::mcp::tools::create_focus::create_focus;
+use nostromo::mcp::tools::{ask_decision, dispatch, tool_descriptors_for, ToolResult};
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
+use tokio::sync::{broadcast, Notify};
 
 // ── server harness ────────────────────────────────────────────────────────────
 
@@ -2506,4 +2510,854 @@ async fn a_source_that_stops_being_configured_has_its_retained_snapshots_evicted
         vec![("repo_docs".to_string(), "repo-a".to_string())],
         "the unconfigured source's stale items must not be replayed; other sources are unaffected: {replay:?}"
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Round 3 of the security fix-ups.
+//
+// * a network peer must not be able to start or feed a process (the proxy
+//   bypass: a spawned session or PTY is a way to run Fred/Teri tools);
+// * a session a network peer has written to loses the fred./teri./mother. tools;
+// * a work send registers what it creates BEFORE it announces it;
+// * the opaque-tag map is bounded; a registry that cannot be written fails
+//   closed; a network peer is not a decision operator for sensitive focuses;
+// * a lagged retained-frame cache is refreshed; odd spellings of fred/teri tags
+//   stay protected on the wire.
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn spawn_msg(tag: &str, agent: &str, view: &str, session_id: Option<&str>) -> ClientMsg {
+    ClientMsg::SessionSpawn {
+        tag: tag.into(),
+        agent_name: agent.into(),
+        view_name: view.into(),
+        cwd: Some("/tmp".into()),
+        session_id: session_id.map(str::to_string),
+        remote_control: false,
+    }
+}
+
+/// Like `spawn_fake_session`, but the caller decides the session id (`None`
+/// lets the daemon resume from its store, or start fresh).
+async fn spawn_fake_session_with_id(
+    unix: &mut UnixStream,
+    tag: &str,
+    agent: &str,
+    view: &str,
+    session_id: Option<&str>,
+) {
+    send(unix, &spawn_msg(tag, agent, view, session_id)).await;
+    let frames =
+        recv_until(unix, |m| matches!(m, ServerMsg::SessionSpawned { .. } | ServerMsg::Error { .. }))
+            .await;
+    assert!(
+        matches!(frames.last(), Some(ServerMsg::SessionSpawned { .. })),
+        "a Unix peer must be able to spawn `{tag}`: {frames:?}"
+    );
+    wait_for_log(view, "START", |l| l.contains("START")).await;
+}
+
+async fn unix_session_tags(unix: &mut UnixStream) -> Vec<String> {
+    attack(unix, ClientMsg::SessionList)
+        .await
+        .into_iter()
+        .find_map(|m| match m {
+            ServerMsg::SessionListResp { sessions } => {
+                Some(sessions.into_iter().map(|s| s.tag).collect())
+            }
+            _ => None,
+        })
+        .expect("session_list_resp")
+}
+
+async fn unix_pty_ids(unix: &mut UnixStream) -> Vec<String> {
+    attack(unix, ClientMsg::PtyList)
+        .await
+        .into_iter()
+        .find_map(|m| match m {
+            ServerMsg::PtyListResp { ptys } => Some(ptys.into_iter().map(|p| p.pty_id).collect()),
+            _ => None,
+        })
+        .expect("pty_list_resp")
+}
+
+async fn wait_for_file(path: &std::path::Path) -> bool {
+    for _ in 0..200 {
+        if path.exists() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+fn pty_spawn_msg(pty_id: &str, args: Vec<String>) -> ClientMsg {
+    ClientMsg::PtySpawn {
+        pty_id: pty_id.into(),
+        cmd: "/bin/sh".into(),
+        args,
+        cols: 80,
+        rows: 24,
+        cwd: None,
+        client_tag: "r3".into(),
+    }
+}
+
+// ── 1. a network peer cannot start or feed a process ─────────────────────────
+
+#[tokio::test]
+async fn a_tcp_client_cannot_spawn_a_session_even_for_an_ordinary_agent_and_tag_and_nothing_is_started() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    let view = "v-r3-spawn-x1";
+
+    let frames = attack(&mut tcp, spawn_msg("x1", "claude", view, None)).await;
+    assert_refused(&frames, "session_spawn x1 claude /tmp");
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::SessionSpawned { .. })),
+        "the spawn must not be acknowledged: {frames:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake_starts(view), 0, "the refused spawn started a child");
+    assert!(!h.session_mgr.lock().unwrap().has_live_session("x1"));
+    assert!(unix_session_tags(&mut unix).await.is_empty(), "a session exists");
+
+    // Follow-ups for the session the peer wanted deliver nothing.
+    let attach = attack(&mut tcp, ClientMsg::SessionAttach { tag: "x1".into() }).await;
+    assert_no_transcript(&attach);
+    let sent = attack(
+        &mut tcp,
+        ClientMsg::SessionSend { tag: "x1".into(), text: "ATTACKER-TEXT".into(), images: vec![] },
+    )
+    .await;
+    assert_no_transcript(&sent);
+    assert_eq!(fake_starts(view), 0);
+    assert!(!fake_log(view).contains("ATTACKER-TEXT"));
+}
+
+#[tokio::test]
+async fn a_unix_client_can_still_spawn_a_session_for_an_ordinary_agent_and_tag() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    let view = "v-r3-unix-spawn";
+
+    spawn_fake_session_with_id(&mut unix, "x1", "claude", view, None).await;
+
+    assert_eq!(fake_starts(view), 1);
+    assert!(h.session_mgr.lock().unwrap().has_live_session("x1"));
+}
+
+#[tokio::test]
+async fn a_tcp_client_cannot_spawn_a_pty_and_nothing_is_run() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    let marker = h._tmp.path().join("tcp-pty-spawn-marker");
+
+    let frames = attack(
+        &mut tcp,
+        pty_spawn_msg("tcp-pty-1", vec!["-c".into(), format!("touch {}", marker.display())]),
+    )
+    .await;
+    assert_refused(&frames, "pty_spawn");
+    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::PtySpawned { .. })), "{frames:?}");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!marker.exists(), "the refused pty_spawn ran its command");
+    assert!(unix_pty_ids(&mut unix).await.is_empty(), "a PTY was created");
+}
+
+#[tokio::test]
+async fn a_tcp_client_cannot_type_into_a_pty_but_a_unix_client_can() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    let dir = h._tmp.path();
+    let (unix_marker, tcp_marker, later_marker) =
+        (dir.join("unix-input"), dir.join("tcp-input"), dir.join("later-input"));
+
+    send(&mut unix, &pty_spawn_msg("unix-pty-1", vec![])).await;
+    let spawned =
+        recv_until(&mut unix, |m| matches!(m, ServerMsg::PtySpawned { .. } | ServerMsg::Error { .. })).await;
+    assert!(matches!(spawned.last(), Some(ServerMsg::PtySpawned { .. })), "{spawned:?}");
+
+    // Control: a Unix peer's input reaches the shell.
+    send(
+        &mut unix,
+        &ClientMsg::PtyInput {
+            pty_id: "unix-pty-1".into(),
+            bytes: format!("touch {}\n", unix_marker.display()).into_bytes(),
+        },
+    )
+    .await;
+    assert!(wait_for_file(&unix_marker).await, "a Unix peer's pty_input must reach the shell");
+
+    let frames = attack(
+        &mut tcp,
+        ClientMsg::PtyInput {
+            pty_id: "unix-pty-1".into(),
+            bytes: format!("touch {}\n", tcp_marker.display()).into_bytes(),
+        },
+    )
+    .await;
+    assert_refused(&frames, "pty_input");
+
+    // The shell is still alive and processing input, so the absence of the
+    // TCP peer's marker is down to the refusal.
+    send(
+        &mut unix,
+        &ClientMsg::PtyInput {
+            pty_id: "unix-pty-1".into(),
+            bytes: format!("touch {}\n", later_marker.display()).into_bytes(),
+        },
+    )
+    .await;
+    assert!(wait_for_file(&later_marker).await);
+    assert!(!tcp_marker.exists(), "a network peer's input was executed");
+
+    send(&mut unix, &ClientMsg::PtyKill { pty_id: "unix-pty-1".into() }).await;
+}
+
+#[tokio::test]
+async fn a_unix_client_can_still_spawn_a_pty() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    let marker = h._tmp.path().join("unix-pty-spawn-marker");
+
+    send(
+        &mut unix,
+        &pty_spawn_msg("unix-pty-2", vec!["-c".into(), format!("touch {}", marker.display())]),
+    )
+    .await;
+    let spawned =
+        recv_until(&mut unix, |m| matches!(m, ServerMsg::PtySpawned { .. } | ServerMsg::Error { .. })).await;
+    assert!(matches!(spawned.last(), Some(ServerMsg::PtySpawned { .. })), "{spawned:?}");
+    assert!(wait_for_file(&marker).await, "a Unix peer's pty_spawn must run its command");
+}
+
+const SENSITIVE_TOOLS: [&str; 3] = ["fred.list_unread_emails", "teri.list_todos", "mother.list_jobs"];
+
+fn tool_is_forbidden(r: &ToolResult) -> bool {
+    matches!(r, ToolResult::Forbidden(_))
+}
+
+fn tool_is_ok(r: &ToolResult) -> bool {
+    matches!(r, ToolResult::Ok(_))
+}
+
+fn gated_tool_names(descriptors: &[Value]) -> Vec<String> {
+    descriptors
+        .iter()
+        .filter_map(|d| d["name"].as_str())
+        .filter(|n| n.starts_with("fred.") || n.starts_with("teri.") || n.starts_with("mother."))
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_session_a_network_peer_has_written_to_is_denied_the_fred_teri_and_mother_tools_while_other_sessions_keep_them() {
+    let h = spawn_server().await;
+    let state = mcp_state(&h);
+    let (mut unix, _) = h.unix(vec![]).await;
+    spawn_fake_session(&mut unix, "cody-a", "cody", "v-r3-nd-a").await;
+    spawn_fake_session(&mut unix, "cody-b", "cody", "v-r3-nd-b").await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    let tags = h.session_mgr.lock().unwrap().sensitive_tags();
+
+    // Before anyone writes to them, both sessions have the tools.
+    for tag in ["cody-a", "cody-b"] {
+        for tool in SENSITIVE_TOOLS {
+            assert!(tool_is_ok(&dispatch(tool, None, &state, Some(tag)).await), "{tool} for {tag}");
+        }
+    }
+
+    // A Unix peer's own send does not taint.
+    send(&mut unix, &ClientMsg::SessionSend { tag: "cody-b".into(), text: "UNIX-B".into(), images: vec![] })
+        .await;
+    wait_for_log("v-r3-nd-b", "the Unix peer's message", |l| l.contains("UNIX-B")).await;
+
+    // A TCP peer's send to a live ordinary session is delivered, and taints it.
+    send(&mut tcp, &ClientMsg::SessionSend { tag: "cody-a".into(), text: "TCP-HELLO".into(), images: vec![] })
+        .await;
+    wait_for_log("v-r3-nd-a", "the TCP peer's message", |l| l.contains("TCP-HELLO")).await;
+    // A send that reaches no live session taints nothing.
+    let _ = attack(
+        &mut tcp,
+        ClientMsg::SessionSend { tag: "ghost".into(), text: "TCP-GHOST".into(), images: vec![] },
+    )
+    .await;
+
+    assert!(tags.is_network_driven("cody-a"));
+    assert!(!tags.is_network_driven("cody-b"));
+    assert!(!tags.is_network_driven("ghost"));
+
+    for tool in SENSITIVE_TOOLS {
+        assert!(
+            tool_is_forbidden(&dispatch(tool, None, &state, Some("cody-a")).await),
+            "{tool} must be denied to a session a network peer drove"
+        );
+        assert!(
+            tool_is_ok(&dispatch(tool, None, &state, Some("cody-b")).await),
+            "{tool} must stay available to an untouched session"
+        );
+    }
+    assert_eq!(
+        gated_tool_names(&tool_descriptors_for(&state, Some("cody-a")).await),
+        Vec::<String>::new(),
+        "tools/list for a network-driven session must omit fred./teri./mother. tools"
+    );
+    assert!(
+        !gated_tool_names(&tool_descriptors_for(&state, Some("cody-b")).await).is_empty(),
+        "tools/list for an untouched session still lists them"
+    );
+    // The tools the session had that are not Teri/Fred/Mother's stay.
+    assert!(tool_descriptors_for(&state, Some("cody-a"))
+        .await
+        .iter()
+        .any(|d| d["name"] == "nostromo.get_self"));
+}
+
+#[tokio::test]
+async fn a_tcp_client_keeps_its_ordinary_conversation_after_it_has_driven_a_session() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    let view = "v-r3-nd-chat";
+    spawn_fake_session(&mut unix, "cody-chat", "cody", view).await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    send(&mut tcp, &ClientMsg::SessionSend { tag: "cody-chat".into(), text: "TCP-ONE".into(), images: vec![] })
+        .await;
+    wait_for_log(view, "the first message", |l| l.contains("TCP-ONE")).await;
+    let frames = attack(&mut tcp, ClientMsg::SessionAttach { tag: "cody-chat".into() }).await;
+    assert!(
+        frames.iter().any(|m| matches!(m, ServerMsg::SessionTurns { tag, .. } if tag == "cody-chat")),
+        "driving a session must not stop a TCP peer from attaching to it: {frames:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_session_spawned_inside_a_work_send_scope_is_sensitive_but_one_spawned_outside_it_is_not() {
+    let h = spawn_server().await;
+    let tags = h.session_mgr.lock().unwrap().sensitive_tags();
+
+    within_work_send(async {
+        h.session_mgr
+            .lock()
+            .unwrap()
+            .spawn_session("cody-in-scope".into(), "cody".into(), "v-r3-scope-in".into(), None, None, false)
+            .expect("spawn inside the scope");
+    })
+    .await;
+    assert!(tags.tag_is_sensitive("cody-in-scope"));
+
+    h.session_mgr
+        .lock()
+        .unwrap()
+        .spawn_session("cody-out-of-scope".into(), "cody".into(), "v-r3-scope-out".into(), None, None, false)
+        .expect("spawn outside the scope");
+    assert!(!tags.tag_is_sensitive("cody-out-of-scope"));
+}
+
+// ── 2. a work send registers what it creates before it announces it ──────────
+
+/// A `WorkService` that behaves the way a real one may: it creates the focus's
+/// session, announces the focus and streams its content, and only afterwards
+/// returns the outcome the server would register the tag from.
+struct AnnouncingWorkService {
+    mgr: Arc<Mutex<SessionManager>>,
+    tx: broadcast::Sender<ServerMsg>,
+    tag: String,
+    view: String,
+    /// Signalled once the session exists.
+    spawned: Arc<Notify>,
+    /// Signalled by the test once the TCP client is attacking.
+    go: Arc<Notify>,
+}
+
+#[async_trait]
+impl WorkService for AnnouncingWorkService {
+    async fn detail(&self, _item_id: &str) -> Result<WorkDetail, WorkError> {
+        Err(WorkError::not_available())
+    }
+    async fn refresh(&self, _source: Option<WorkSource>, _fred: bool) -> Result<(), WorkError> {
+        Ok(())
+    }
+    async fn refresh_picks(&self, _reason: &str) -> Result<(), WorkError> {
+        Ok(())
+    }
+    async fn send_preview(&self, item_id: &str) -> Result<SendPreview, WorkError> {
+        Ok(send_preview(item_id))
+    }
+    async fn send(&self, _request: SendRequest) -> Result<SendOutcome, WorkError> {
+        let tag = self.tag.clone();
+        self.mgr
+            .lock()
+            .unwrap()
+            .spawn_session(tag.clone(), "cody".into(), self.view.clone(), None, Some(format!("sid-{}", self.view)), false)
+            .map_err(|e| WorkError::new("spawn_failed", e.to_string()))?;
+        self.spawned.notify_one();
+        self.go.notified().await;
+
+        let secret_meta = FocusMeta {
+            tag: tag.clone(),
+            display_name: "Cody on SECRET-DISPLAY".into(),
+            agent_name: "cody".into(),
+            project_name: None,
+            org: None,
+            is_built_in: false,
+            session_summary: Some("SECRET-SUMMARY".into()),
+            label: Some("SECRET-LABEL".into()),
+            project_path: None,
+            select_for_client: None,
+        };
+        let updated = {
+            let mut mgr = self.mgr.lock().unwrap();
+            mgr.send_user_message(&tag, "SECRET-WORK-CONTEXT: the confidential ticket", &[])
+                .map_err(|e| WorkError::new("seed_failed", e.to_string()))?;
+            mgr.add_or_update_focus(secret_meta.clone())
+        };
+        let _ = self.tx.send(ServerMsg::FocusCreated { meta: secret_meta });
+        let _ = self.tx.send(ServerMsg::FocusRegistryUpdated { focuses: updated });
+        let _ = self.tx.send(ServerMsg::Notification {
+            tag: tag.clone(),
+            level: NotificationLevel::Info,
+            message: "SECRET-NOTIFICATION".into(),
+        });
+        let _ = self.tx.send(ServerMsg::SessionSummaryUpdate {
+            tag: tag.clone(),
+            summary: "SECRET-SUMMARY-UPDATE".into(),
+        });
+        let _ = self.tx.send(pane_content(&tag));
+        // Long enough for a TCP client to read all of it.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        Ok(SendOutcome { kind: "created".into(), focus_tag: Some(tag), job_id: None })
+    }
+}
+
+#[tokio::test]
+async fn nothing_a_work_send_creates_reaches_a_tcp_client_even_before_the_send_has_returned() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let tag = "cody-late-secret-focus";
+    let (spawned, go) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    install_work_service(Arc::new(AnnouncingWorkService {
+        mgr: Arc::clone(&h.session_mgr),
+        tx: h.server.tx.clone(),
+        tag: tag.into(),
+        view: "v-r3-late".into(),
+        spawned: Arc::clone(&spawned),
+        go: Arc::clone(&go),
+    }));
+    let (mut unix, _) = h.unix(vec![]).await;
+    let (mut tcp, mut seen) = h.tcp(vec![]).await;
+    let finished = AtomicBool::new(false);
+
+    let unix_side = async {
+        send(
+            &mut unix,
+            &ClientMsg::WorkSend {
+                request_id: "r-late".into(),
+                item_id: "jira:SECRET-1".into(),
+                destination: "focus".into(),
+                agent: "cody".into(),
+                working_directory: None,
+                label: "SECRET-JIRA-TITLE".into(),
+                context: "WORK-CONTEXT".into(),
+                allow_duplicate: false,
+            },
+        )
+        .await;
+        let frames = recv_until(&mut unix, |m| matches!(m, ServerMsg::WorkSendResult { .. })).await;
+        finished.store(true, Ordering::SeqCst);
+        frames
+    };
+    let attacker = async {
+        // From the moment the session exists, keep trying to attach, as an
+        // attacker would, while the service announces and streams the focus.
+        spawned.notified().await;
+        let mut attempts = Vec::new();
+        for i in 0.. {
+            attempts.push(attack(&mut tcp, ClientMsg::SessionAttach { tag: tag.into() }).await);
+            if i == 4 {
+                go.notify_one();
+            }
+            if finished.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        attempts
+    };
+    let (unix_frames, attempts) = tokio::join!(unix_side, attacker);
+    assert!(
+        matches!(unix_frames.last(), Some(ServerMsg::WorkSendResult { result: WorkResult::Ok(_), .. })),
+        "the local work send must succeed: {unix_frames:?}"
+    );
+
+    assert!(attempts.len() >= 5, "the attacker must have kept trying: {}", attempts.len());
+    for (i, frames) in attempts.iter().enumerate() {
+        assert_refused(frames, &format!("attach attempt {i} to the work-derived focus"));
+    }
+    for frames in &attempts {
+        seen.extend(frames.iter().cloned());
+    }
+    seen.extend(sync(&mut tcp).await);
+
+    assert_no_transcript(&seen);
+    let lowered = json_of(&seen).to_lowercase();
+    assert!(!lowered.contains("secret"), "work-derived content reached the TCP peer: {lowered}");
+
+    // Control: the Unix peer did receive the announcement.
+    let mut useen = unix_frames;
+    useen.extend(sync(&mut unix).await);
+    assert!(
+        useen.iter().any(|m| matches!(m, ServerMsg::FocusCreated { meta } if meta.tag == tag)),
+        "control: a Unix peer sees the focus: {useen:?}"
+    );
+}
+
+// ── 3. the opaque-tag map is bounded ─────────────────────────────────────────
+
+fn junk_focus(i: usize) -> FocusMeta {
+    FocusMeta {
+        tag: format!("{i:03}{}:fred", "j".repeat(3_999_000)),
+        display_name: "x".into(),
+        agent_name: "cody".into(),
+        project_name: None,
+        org: None,
+        is_built_in: false,
+        session_summary: None,
+        label: None,
+        project_path: None,
+        select_for_client: None,
+    }
+}
+
+#[tokio::test]
+async fn a_tcp_client_pushing_many_huge_fred_looking_tags_cannot_make_the_daemon_hold_them() {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    // One push at a time, each awaited until its fan-out reaches this client:
+    // a 4 MB frame that is still being read when another frame becomes ready
+    // on the connection is a (separate) hazard of the server's read loop, and
+    // not what this test is about.
+    let mut seen = vec![];
+    for i in 0..10 {
+        send(&mut tcp, &ClientMsg::FocusRegistryPush { focuses: vec![junk_focus(i)] }).await;
+        seen.extend(
+            recv_until(&mut tcp, |m| matches!(m, ServerMsg::FocusRegistryUpdated { .. })).await,
+        );
+    }
+    seen.extend(sync(&mut tcp).await);
+
+    let footprint = h.session_mgr.lock().unwrap().sensitive_tags().ephemeral_footprint_bytes();
+    assert!(footprint < 1024 * 1024, "the daemon holds {footprint} bytes of peer-supplied tags");
+
+    let updates: Vec<Vec<FocusMeta>> = seen
+        .iter()
+        .filter_map(|m| match m {
+            ServerMsg::FocusRegistryUpdated { focuses } => Some(focuses.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!updates.is_empty(), "the TCP client must still receive focus_registry_updated: {}", seen.len());
+    for focus in updates.iter().flatten() {
+        assert!(focus.tag.len() <= 256, "a {}-byte tag reached the peer", focus.tag.len());
+        assert!(!focus.tag.contains("jjjj"), "the junk tag was passed through");
+    }
+}
+
+// ── 4. a registry that cannot be written fails closed on resume ──────────────
+
+#[tokio::test]
+async fn a_session_resumed_while_the_registry_is_degraded_is_sensitive_and_a_fresh_one_is_not() {
+    let h = spawn_server().await;
+    let dir = h._tmp.path().join("degraded");
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("sessions.json");
+    std::fs::write(&store, json!({"cody-resumed": "sid-r3-resumed"}).to_string()).unwrap();
+    // A previous run could not persist its registry and left the sentinel.
+    std::fs::write(registry_path_beside(&store).with_file_name("sensitive-tags.dirty"), b"1").unwrap();
+    *h.session_mgr.lock().unwrap() = SessionManager::with_store_path(store);
+
+    let (mut unix, _) = h.unix(vec![]).await;
+    spawn_fake_session_with_id(&mut unix, "cody-resumed", "cody", "v-r3-resumed", None).await;
+    spawn_fake_session_with_id(&mut unix, "cody-fresh", "cody", "v-r3-fresh", None).await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    let refused = attack(&mut tcp, ClientMsg::SessionAttach { tag: "cody-resumed".into() }).await;
+    assert_refused(&refused, "session_attach to a session resumed under a degraded registry");
+    assert_no_transcript(&refused);
+    let sent = attack(
+        &mut tcp,
+        ClientMsg::SessionSend { tag: "cody-resumed".into(), text: "ATTACKER-TEXT".into(), images: vec![] },
+    )
+    .await;
+    assert_refused(&sent, "session_send to a resumed session");
+    assert!(!fake_log("v-r3-resumed").contains("ATTACKER-TEXT"));
+
+    let fresh = attack(&mut tcp, ClientMsg::SessionAttach { tag: "cody-fresh".into() }).await;
+    assert!(
+        fresh.iter().any(|m| matches!(m, ServerMsg::SessionTurns { tag, .. } if tag == "cody-fresh")),
+        "a session that was not resumed is unaffected: {fresh:?}"
+    );
+}
+
+// ── 5. a network peer is not an operator for sensitive decisions ─────────────
+
+fn ask_args(tag: &str) -> Value {
+    json!({
+        "prompt": "Proceed?",
+        "choices": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}],
+        "view_id": tag,
+        "timeout_secs": 1,
+    })
+}
+
+async fn ask(state: &McpSharedState, tag: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), ask_decision::handle(state, &ask_args(tag), None))
+        .await
+        .expect("ask_decision must return within its own timeout")
+}
+
+#[tokio::test]
+async fn a_tcp_client_that_renders_decisions_is_no_operator_for_a_sensitive_focus_but_is_for_an_ordinary_one() {
+    let h = spawn_server().await;
+    let state = mcp_state(&h);
+    h.session_mgr.lock().unwrap().sensitive_tags().mark_tag("cody-derived");
+    let mut tcp = raw_tcp(&h).await;
+    raw_handshake(&mut tcp, json!({"type": "subscribe", "topics": [], "renders_decisions": true}))
+        .await
+        .expect("handshake");
+
+    for tag in ["fred", "cody-derived"] {
+        assert_eq!(
+            ask(&state, tag).await,
+            json!({"error": "no_operator"}),
+            "a network peer cannot answer a decision on sensitive focus `{tag}`"
+        );
+    }
+    assert_eq!(
+        ask(&state, "cody-x").await,
+        json!({"error": "timeout"}),
+        "for an ordinary focus the network peer is a valid operator (the request is posed, nobody answers)"
+    );
+}
+
+#[tokio::test]
+async fn a_tcp_client_naming_the_decision_topic_is_not_an_operator_for_a_sensitive_focus_either() {
+    let h = spawn_server().await;
+    let state = mcp_state(&h);
+    let (_tcp, _) = h.tcp(vec![Topic::Decision]).await;
+
+    assert_eq!(ask(&state, "fred").await, json!({"error": "no_operator"}));
+    assert_eq!(ask(&state, "cody-x").await, json!({"error": "timeout"}));
+}
+
+#[tokio::test]
+async fn a_sensitive_decision_is_posed_and_answered_when_a_local_operator_is_connected_alongside_a_network_one() {
+    let h = spawn_server().await;
+    let state = mcp_state(&h);
+    let mut tcp = raw_tcp(&h).await;
+    raw_handshake(&mut tcp, json!({"type": "subscribe", "topics": [], "renders_decisions": true}))
+        .await
+        .expect("handshake");
+    let (mut unix, _) = h.unix(vec![Topic::Decision]).await;
+
+    let operator = async {
+        let frames = recv_until(&mut unix, |m| matches!(m, ServerMsg::DecisionRequest { .. })).await;
+        let Some(ServerMsg::DecisionRequest { request_id, tag, .. }) = frames.last().cloned() else {
+            panic!("expected a DecisionRequest, got {frames:?}");
+        };
+        assert_eq!(tag, "fred");
+        send(&mut unix, &ClientMsg::DecisionAnswer { request_id, choice_id: Some("yes".into()) }).await;
+    };
+    let (answer, ()) = tokio::join!(ask(&state, "fred"), operator);
+
+    assert_eq!(answer, json!({"ok": true, "choice_id": "yes"}));
+}
+
+// ── 6. a lagged retained cache is refreshed ──────────────────────────────────
+
+/// Records calls like `FakeWorkService` and, like a real source, re-broadcasts
+/// its current state when asked to refresh.
+struct RebroadcastingWorkService {
+    calls: Calls,
+    tx: broadcast::Sender<ServerMsg>,
+}
+
+#[async_trait]
+impl WorkService for RebroadcastingWorkService {
+    async fn detail(&self, item_id: &str) -> Result<WorkDetail, WorkError> {
+        Ok(work_detail(item_id, "rebroadcasting"))
+    }
+    async fn refresh(&self, source: Option<WorkSource>, fred: bool) -> Result<(), WorkError> {
+        self.calls.lock().unwrap().push(format!("work.refresh:{source:?}:{fred}"));
+        let _ = self.tx.send(work_snapshot(WorkSource::RepoDocs, Some("repo-a"), &["doc:repo-a:a.md"]));
+        let _ = self.tx.send(fred_state(7));
+        Ok(())
+    }
+    async fn refresh_picks(&self, reason: &str) -> Result<(), WorkError> {
+        self.calls.lock().unwrap().push(format!("work.refresh_picks:{reason}"));
+        let _ = self.tx.send(teri_picks());
+        Ok(())
+    }
+    async fn send_preview(&self, item_id: &str) -> Result<SendPreview, WorkError> {
+        Ok(send_preview(item_id))
+    }
+    async fn send(&self, _request: SendRequest) -> Result<SendOutcome, WorkError> {
+        Err(WorkError::not_available())
+    }
+}
+
+/// Wait (bounded) until some call satisfies `pred`; returns all calls.
+async fn wait_for_call(calls: &Calls, what: &str, pred: impl Fn(&str) -> bool) -> Vec<String> {
+    for _ in 0..200 {
+        {
+            let c = calls.lock().unwrap();
+            if c.iter().any(|x| pred(x)) {
+                return c.clone();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the work service never saw {what}; calls: {:?}", calls.lock().unwrap());
+}
+
+/// More broadcasts than the channel holds, sent without yielding, so the
+/// retained-frame cache task cannot keep up and lags.
+fn flood(h: &Harness) {
+    for _ in 0..1500 {
+        h.broadcast(ServerMsg::Pong);
+    }
+}
+
+#[tokio::test]
+async fn when_the_retained_cache_falls_behind_the_broadcast_channel_the_sources_are_asked_to_refresh() {
+    let _guard = RegistryGuard::acquire().await;
+    let calls = install_fakes();
+    let h = spawn_server().await;
+
+    flood(&h);
+
+    let seen = wait_for_call(&calls, "a full refresh", |c| c == "work.refresh:None:true").await;
+    let seen_picks = wait_for_call(&calls, "a picks refresh", |c| c.starts_with("work.refresh_picks:")).await;
+    assert!(seen.contains(&"work.refresh:None:true".to_string()), "{seen:?}");
+    assert!(seen_picks.iter().any(|c| c.starts_with("work.refresh_picks:")), "{seen_picks:?}");
+}
+
+#[tokio::test]
+async fn a_cache_that_is_not_lagging_does_not_cause_refreshes() {
+    let _guard = RegistryGuard::acquire().await;
+    let calls = install_fakes();
+    let h = spawn_server().await;
+
+    for _ in 0..10 {
+        h.broadcast(ServerMsg::Pong);
+        tokio::task::yield_now().await;
+    }
+    h.broadcast(fred_state(1));
+    let_retention_settle().await;
+
+    assert!(calls.lock().unwrap().is_empty(), "unexpected calls: {:?}", calls.lock().unwrap());
+}
+
+#[tokio::test]
+async fn after_the_retained_cache_lags_a_late_local_subscriber_is_replayed_the_sources_fresh_state() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+    install_work_service(Arc::new(RebroadcastingWorkService {
+        calls: Arc::clone(&calls),
+        tx: h.server.tx.clone(),
+    }));
+    h.broadcast(work_snapshot(WorkSource::RepoDocs, Some("repo-a"), &["doc:repo-a:stale.md"]));
+    let_retention_settle().await;
+
+    flood(&h);
+    wait_for_call(&calls, "a full refresh", |c| c == "work.refresh:None:true").await;
+    wait_for_call(&calls, "a picks refresh", |c| c.starts_with("work.refresh_picks:")).await;
+    let_retention_settle().await;
+
+    let (_unix, replay) = h.unix(vec![]).await;
+    let snapshot_items: Vec<Vec<String>> = replay
+        .iter()
+        .filter_map(|m| match m {
+            ServerMsg::WorkSnapshot { items, .. } => Some(items.iter().map(|i| i.id.clone()).collect()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(snapshot_items, vec![vec!["doc:repo-a:a.md".to_string()]], "{replay:?}");
+    assert_eq!(fred_unread_counts(&replay), vec![7], "{replay:?}");
+    assert_eq!(count(&replay, |m| matches!(m, ServerMsg::TeriPicks { .. })), 1, "{replay:?}");
+}
+
+// ── 7. odd spellings of fred/teri tags stay protected on the wire ────────────
+
+#[tokio::test]
+async fn sessions_under_whitespace_case_and_qualified_fred_and_teri_tags_are_unreachable_for_a_tcp_client() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    // (tag, agent): `fred:x` is protected because it runs the fred agent.
+    let cases = [
+        (" fred", "cody"),
+        ("Fred ", "cody"),
+        ("TERI", "cody"),
+        ("x:fred", "cody"),
+        ("fred:x", "fred"),
+        ("x:teri", "teri"),
+    ];
+    for (i, (tag, agent)) in cases.iter().enumerate() {
+        spawn_fake_session_with_id(&mut unix, tag, agent, &format!("v-r3-ws-{i}"), Some(&format!("sid-ws-{i}")))
+            .await;
+    }
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    let mut seen = vec![];
+    for (i, (tag, _)) in cases.iter().enumerate() {
+        let tag = tag.to_string();
+        for (what, msg) in [
+            ("session_attach", ClientMsg::SessionAttach { tag: tag.clone() }),
+            (
+                "session_send",
+                ClientMsg::SessionSend { tag: tag.clone(), text: format!("ATTACKER-{i}"), images: vec![] },
+            ),
+            ("session_interrupt", ClientMsg::SessionInterrupt { tag: tag.clone() }),
+            ("session_control stop", ClientMsg::SessionControl { tag: tag.clone(), action: SessionAction::Stop }),
+            (
+                "session_control restart",
+                ClientMsg::SessionControl { tag: tag.clone(), action: SessionAction::Restart },
+            ),
+            (
+                "session_control new_session",
+                ClientMsg::SessionControl { tag: tag.clone(), action: SessionAction::NewSession },
+            ),
+        ] {
+            let frames = attack(&mut tcp, msg).await;
+            assert_refused(&frames, &format!("{what} on tag {tag:?}"));
+            seen.extend(frames);
+        }
+    }
+    assert_no_transcript(&seen);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for (i, (tag, _)) in cases.iter().enumerate() {
+        let view = format!("v-r3-ws-{i}");
+        let log = fake_log(&view);
+        assert!(!log.contains("ATTACKER"), "text from the TCP peer reached {tag:?}: {log:?}");
+        assert_eq!(fake_starts(&view), 1, "{tag:?} was restarted: {log:?}");
+        assert!(h.session_mgr.lock().unwrap().has_live_session(tag), "{tag:?} was stopped");
+    }
+
+    let listed = attack(&mut tcp, ClientMsg::SessionList).await;
+    let tcp_tags: Vec<String> = listed
+        .into_iter()
+        .find_map(|m| match m {
+            ServerMsg::SessionListResp { sessions } => Some(sessions.into_iter().map(|s| s.tag).collect()),
+            _ => None,
+        })
+        .expect("session_list_resp");
+    assert!(tcp_tags.is_empty(), "a TCP peer's session list shows {tcp_tags:?}");
 }

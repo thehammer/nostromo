@@ -49,7 +49,7 @@ use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
 use super::decisions::DecisionRegistry;
-use super::peer::{is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
+use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
 use super::pane_registry::{PaneContentProvider, PaneRegistry, PerriStateProvider};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
 use super::stream_json::{
@@ -328,6 +328,15 @@ impl SessionManager {
 
     pub fn with_store_path(store_path: PathBuf) -> Self {
         let sensitive = SensitiveTags::persisted(registry_path_beside(&store_path));
+        if sensitive.is_degraded() {
+            // The registry may have lost registrations (a failed write before
+            // this start), so every stored session is treated as sensitive:
+            // each is registered now, before any client can connect.
+            for tag in load_id_store(&store_path).keys() {
+                sensitive.note_resumed(tag);
+            }
+            sensitive.settle_lost_history();
+        }
         Self {
             sessions: HashMap::new(),
             client_senders: Arc::new(Mutex::new(HashMap::new())),
@@ -559,7 +568,9 @@ impl SessionManager {
         // A Fred/Teri session has mail/calendar/todo tools and reads their
         // data: whatever tag it runs under is sensitive. Registered before the
         // child exists, so nothing it produces can precede the registration.
-        if is_teri_or_fred_agent(&agent_name) {
+        // A session spawned while a work item is being sent holds that item's
+        // content likewise (see `peer::within_work_send`).
+        if is_teri_or_fred_agent(&agent_name) || in_work_send() {
             self.sensitive.mark_tag(&tag);
         }
 
@@ -576,6 +587,9 @@ impl SessionManager {
             Some(id) => (id, true),
             None => (Uuid::new_v4().to_string(), false),
         };
+        if resume {
+            self.sensitive.note_resumed(&tag);
+        }
         self.session_reverse.insert(effective_id.clone(), tag.clone());
 
         let program = resolve_claude()?;
@@ -775,6 +789,11 @@ impl SessionManager {
         text: &str,
         images: &[String],
     ) -> Result<()> {
+        // Text sent during a work-item send is that item's content: the
+        // session it lands in is sensitive before the text is written.
+        if in_work_send() {
+            self.sensitive.mark_tag(tag);
+        }
         let session = self
             .sessions
             .get(tag)
@@ -1478,6 +1497,9 @@ impl SessionManager {
     /// daemon-owned registry.
     pub fn add_or_update_focus(&mut self, meta: FocusMeta) -> Vec<FocusMeta> {
         self.mark_teri_fred_focuses(std::slice::from_ref(&meta));
+        if in_work_send() {
+            self.sensitive.mark_tag(&meta.tag);
+        }
         // This is the only way a focus enters the registry other than a Mac
         // push, so it is where a daemon-created tag earns its eviction
         // exemption (W7 — D8b).
@@ -3259,5 +3281,140 @@ mod image_encoding_tests {
         assert_eq!(ok.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(ok[0].media_type, "image/png");
+    }
+}
+
+/// A session or focus a work send creates or feeds holds work-item content from
+/// its first instant, so the manager registers it as sensitive while the
+/// server's work-send scope is open, before doing anything else (a service may
+/// broadcast about the new focus long before `send` returns).
+#[cfg(test)]
+mod work_send_scope_tests {
+    use super::*;
+    use crate::ipc::peer::within_work_send;
+
+    fn focus(tag: &str) -> FocusMeta {
+        FocusMeta {
+            tag: tag.into(),
+            display_name: "Cody on SECRET".into(),
+            agent_name: "cody".into(),
+            project_name: None,
+            org: None,
+            is_built_in: false,
+            session_summary: Some("SECRET".into()),
+            label: Some("SECRET".into()),
+            project_path: None,
+            select_for_client: None,
+        }
+    }
+
+    /// Kills any stub children on drop, even when an assertion fails first:
+    /// the test runtime waits for the blocking reader threads, which only end
+    /// when their child does.
+    struct Reaped(SessionManager);
+
+    impl std::ops::Deref for Reaped {
+        type Target = SessionManager;
+        fn deref(&self) -> &SessionManager {
+            &self.0
+        }
+    }
+
+    impl std::ops::DerefMut for Reaped {
+        fn deref_mut(&mut self) -> &mut SessionManager {
+            &mut self.0
+        }
+    }
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            self.0.kill_all_on_shutdown();
+        }
+    }
+
+    fn manager(dir: &tempfile::TempDir) -> Reaped {
+        Reaped(SessionManager::with_store_path(dir.path().join("sessions.json")))
+    }
+
+    /// A session that stays alive and swallows its stdin.
+    fn spawn_idle(mgr: &mut SessionManager, tag: &str) {
+        let program = PathBuf::from("/bin/sh");
+        let args = vec!["-c".to_string(), "cat > /dev/null".to_string()];
+        let managed = mgr
+            .spawn_managed(
+                tag.into(),
+                "cody".into(),
+                "View".into(),
+                None,
+                false,
+                format!("sid-{tag}"),
+                false,
+                program.clone(),
+                args.clone(),
+                Some((program, args)),
+            )
+            .expect("spawn idle stub");
+        mgr.sessions.insert(tag.to_string(), managed);
+    }
+
+    #[tokio::test]
+    async fn a_focus_added_inside_a_work_send_is_sensitive_at_once_and_one_added_outside_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let tags = mgr.sensitive_tags();
+
+        mgr.add_or_update_focus(focus("cody-ordinary"));
+        assert!(!tags.tag_is_sensitive("cody-ordinary"));
+
+        within_work_send(async {
+            mgr.add_or_update_focus(focus("cody-derived"));
+            assert!(
+                tags.tag_is_sensitive("cody-derived"),
+                "the tag must be registered by the time add_or_update_focus returns"
+            );
+        })
+        .await;
+
+        assert!(tags.tag_is_sensitive("cody-derived"), "registration is permanent");
+        assert!(!tags.tag_is_sensitive("cody-ordinary"));
+        mgr.add_or_update_focus(focus("cody-after"));
+        assert!(!tags.tag_is_sensitive("cody-after"), "the scope ended with the work send");
+    }
+
+    #[tokio::test]
+    async fn a_message_sent_inside_a_work_send_marks_the_session_sensitive_but_one_sent_outside_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let tags = mgr.sensitive_tags();
+        spawn_idle(&mut mgr, "cody-plain");
+        spawn_idle(&mut mgr, "cody-seeded");
+
+        mgr.send_user_message("cody-plain", "hello", &[]).expect("send outside the scope");
+        assert!(!tags.tag_is_sensitive("cody-plain"));
+
+        within_work_send(async {
+            mgr.send_user_message("cody-seeded", "WORK-CONTEXT", &[]).expect("send inside the scope");
+        })
+        .await;
+        assert!(tags.tag_is_sensitive("cody-seeded"));
+        assert!(!tags.tag_is_sensitive("cody-plain"));
+    }
+
+    #[tokio::test]
+    async fn a_send_inside_a_work_send_registers_the_tag_even_when_the_send_itself_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let tags = mgr.sensitive_tags();
+
+        within_work_send(async {
+            let outcome = mgr.send_user_message("cody-not-running", "WORK-CONTEXT", &[]);
+            assert!(outcome.is_err(), "there is no such session");
+        })
+        .await;
+
+        assert!(
+            tags.tag_is_sensitive("cody-not-running"),
+            "registration comes before anything that can fail, so no frame can slip out first"
+        );
     }
 }

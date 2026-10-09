@@ -114,6 +114,10 @@ pub struct DecisionRegistry {
     /// setting `renders_decisions: true` on that frame. See
     /// [`Self::has_operator`].
     operators: HashSet<String>,
+    /// Network (TCP) connections that declared the same. Kept apart: a network
+    /// peer is never sent a decision for a sensitive focus. See
+    /// [`Self::has_operator_for`].
+    network_operators: HashSet<String>,
     /// Wired by [`DecisionRegistry::configure_broadcast`] so every resolution
     /// path can announce a [`ServerMsg::DecisionResolved`] notice — the fix
     /// for the multi-window decision-sheet bug: every presenting window (not
@@ -304,7 +308,19 @@ impl DecisionRegistry {
     /// this before submitting anything — an agent blocking on a closed GUI is
     /// a worse failure than an immediate refusal.
     pub fn has_operator(&self) -> bool {
-        !self.operators.is_empty()
+        !self.operators.is_empty() || !self.network_operators.is_empty()
+    }
+
+    /// Is there a client that can receive a decision request on a focus that is
+    /// `sensitive` (or not)? A network peer renders only ordinary focuses (a
+    /// sensitive request is never sent to it), so it counts only for those.
+    pub fn has_operator_for(&self, sensitive: bool) -> bool {
+        !self.operators.is_empty() || (!sensitive && !self.network_operators.is_empty())
+    }
+
+    /// A network (TCP) client that renders decisions; see [`Self::has_operator_for`].
+    pub fn add_network_operator(&mut self, conn_key: &str) {
+        self.network_operators.insert(conn_key.to_string());
     }
 
     pub fn add_operator(&mut self, conn_key: &str) {
@@ -313,6 +329,7 @@ impl DecisionRegistry {
 
     pub fn remove_operator(&mut self, conn_key: &str) {
         self.operators.remove(conn_key);
+        self.network_operators.remove(conn_key);
     }
 
     // ── test/diagnostic visibility ────────────────────────────────────────────
@@ -1048,5 +1065,58 @@ mod tests {
         let (_c_id, mut rx_c, _bcast_c) = submit_simple(&mut registry, "teri", "C?");
         registry.cancel_tag("teri");
         assert_eq!(rx_c.try_recv(), Ok(DecisionOutcome::Cancelled));
+    }
+
+    // ── network operators (round 3) ───────────────────────────────────────────
+    //
+    // An unauthenticated network peer may render decisions for ordinary
+    // focuses, but a request on a sensitive (Teri/Fred-derived) focus is never
+    // sent to it, so it must not count as someone who can answer one.
+
+    #[test]
+    fn with_no_operator_nobody_can_receive_a_request_on_any_kind_of_focus() {
+        let registry = DecisionRegistry::new();
+        assert!(!registry.has_operator());
+        assert!(!registry.has_operator_for(false));
+        assert!(!registry.has_operator_for(true));
+    }
+
+    #[test]
+    fn a_local_operator_counts_for_requests_on_sensitive_and_ordinary_focuses_alike() {
+        let mut registry = DecisionRegistry::new();
+        registry.add_operator("local-1");
+        assert!(registry.has_operator());
+        assert!(registry.has_operator_for(false));
+        assert!(registry.has_operator_for(true));
+    }
+
+    #[test]
+    fn a_network_operator_counts_only_for_requests_on_ordinary_focuses() {
+        let mut registry = DecisionRegistry::new();
+        registry.add_network_operator("tcp-1");
+        assert!(registry.has_operator(), "has_operator() still means any operator");
+        assert!(registry.has_operator_for(false));
+        assert!(!registry.has_operator_for(true), "a network peer never receives a sensitive request");
+    }
+
+    #[test]
+    fn a_local_operator_alongside_a_network_one_makes_sensitive_requests_deliverable() {
+        let mut registry = DecisionRegistry::new();
+        registry.add_network_operator("tcp-1");
+        registry.add_operator("local-1");
+        assert!(registry.has_operator_for(true));
+
+        registry.remove_operator("local-1");
+        assert!(!registry.has_operator_for(true), "only the network operator is left");
+        assert!(registry.has_operator_for(false));
+    }
+
+    #[test]
+    fn removing_a_network_operator_withdraws_it() {
+        let mut registry = DecisionRegistry::new();
+        registry.add_network_operator("tcp-1");
+        registry.remove_operator("tcp-1");
+        assert!(!registry.has_operator());
+        assert!(!registry.has_operator_for(false));
     }
 }

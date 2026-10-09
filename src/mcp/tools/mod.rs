@@ -523,12 +523,34 @@ pub fn tool_descriptors() -> Vec<Value> {
 /// default — the two are the same list, byte for byte, which is what keeps
 /// every agent's surface unchanged until an operator says otherwise.
 pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) -> Vec<Value> {
+    let mut descriptors = tool_descriptors();
+    if is_network_driven(state, pty_id) {
+        descriptors.retain(|d| {
+            !d.get("name").and_then(Value::as_str).is_some_and(is_network_withheld_tool)
+        });
+    }
     let policy = crate::mcp::tool_policy::load();
     if policy.is_empty() {
-        return tool_descriptors();
+        return descriptors;
     }
     let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id).await;
-    crate::mcp::tool_policy::filter_descriptors(tool_descriptors(), policy.denied_for(agent.as_deref()))
+    crate::mcp::tool_policy::filter_descriptors(descriptors, policy.denied_for(agent.as_deref()))
+}
+
+/// The tools that reach Teri/Fred-derived data or Mother jobs: withheld from a
+/// session an unauthenticated network peer is steering (see
+/// `SensitiveTags::mark_network_driven`).
+fn is_network_withheld_tool(name: &str) -> bool {
+    ["fred.", "teri.", "mother."].iter().any(|prefix| name.starts_with(prefix))
+}
+
+/// Has a network peer written to the session `pty_id` (the focus tag, for a
+/// daemon-hosted session)?
+fn is_network_driven(state: &McpSharedState, pty_id: Option<&str>) -> bool {
+    let (Some(daemon), Some(tag)) = (&state.daemon, pty_id) else {
+        return false;
+    };
+    daemon.session_mgr.lock().unwrap().sensitive_tags().is_network_driven(tag)
 }
 
 // ── tool dispatch ─────────────────────────────────────────────────────────────
@@ -577,6 +599,12 @@ async fn dispatch_inner(
     state: &McpSharedState,
     pty_id: Option<&str>,
 ) -> ToolResult {
+    // A session a network peer is steering gets no tool that reaches Teri/Fred
+    // data or Mother jobs, whatever the operator's policy says.
+    if is_network_withheld_tool(name) && is_network_driven(state, pty_id) {
+        return ToolResult::Forbidden(name.to_string());
+    }
+
     // ── per-caller withdrawal (W5 — curated-agent-views, B8/D7) ─────────────
     //
     // Checked here rather than only in `tools/list`, because filtering the
