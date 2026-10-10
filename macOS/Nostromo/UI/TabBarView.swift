@@ -31,6 +31,7 @@ class TabBarView: NSView {
 
     /// The rows last built, so an attention change can re-flag them without a rebuild.
     private var currentRows: [NavRow] = []
+    private var badges = FocusBadgeRegistry()
 
     /// Set by MainLayout when the active focus changes. Drives highlight state.
     var activeFocus: Focus? {
@@ -163,6 +164,22 @@ class TabBarView: NSView {
             .sink { [weak self] _ in self?.updateAttention() }
             .store(in: &cancellables)
 
+        // Live counts / "needs you" signals on the built-in rows, computed from data the
+        // app already holds. Debounced; applied in place (no rebuild, no height change).
+        // The 30 s tick refreshes time-based text (meeting countdown, overdue).
+        let store = AppStore.shared
+        Publishers.MergeMany([
+            store.$fredMailbox.map { _ in () }.eraseToAnyPublisher(),
+            store.$fredCalendar.map { _ in () }.eraseToAnyPublisher(),
+            store.$teriTodos.map { _ in () }.eraseToAnyPublisher(),
+            store.$perriQueue.map { _ in () }.eraseToAnyPublisher(),
+            store.$motherStatus.map { _ in () }.eraseToAnyPublisher(),
+            Timer.publish(every: 30, on: .main, in: .common).autoconnect().map { _ in () }.eraseToAnyPublisher(),
+        ])
+        .debounce(for: .milliseconds(250), scheduler: DispatchQueue.main)
+        .sink { [weak self] in self?.updateBadges() }
+        .store(in: &cancellables)
+
         // Per-focus PR under review (W8) — rebuild the rows with fresh
         // labels whenever any focus's pin loads or clears. `perriDetailByTag`
         // is app-wide (not per-window), so every window's sidebar reacts to
@@ -221,6 +238,14 @@ class TabBarView: NSView {
             case .focus(let focus, let label, let secondary, let indented):
                 let item = NavTabItem(focus: focus, label: label, secondary: secondary, indented: indented)
                 item.onTap = { [weak self] in self?.onSwitch?(focus) }
+                item.onBadgeTap = { [weak self] in
+                    self?.onSwitch?(focus)
+                    switch focus.agentTag.lowercased() {
+                    case "teri" where focus.isBuiltIn: FocusDeepLink.post(.teriTab("todos"))
+                    case "fred" where focus.isBuiltIn: FocusDeepLink.post(.fredInbox)
+                    default: break
+                    }
+                }
 
                 if !focus.isBuiltIn {
                     let menu = NSMenu()
@@ -292,7 +317,7 @@ class TabBarView: NSView {
 
         updateStates()
         updateSweaters()
-        updateAttention()
+        updateBadges()
     }
 
     @objc private func renameTapped(_ sender: NSMenuItem) {
@@ -338,8 +363,27 @@ class TabBarView: NSView {
 
     // MARK: - State updates
 
+    /// Recompute the built-in rows' badges and apply them in place.
+    private func updateBadges() {
+        let store = AppStore.shared
+        let now = Date()
+        for (source, tag, badge) in [
+            ("fred",   "fred",   BadgeProviders.fred(mailbox: store.fredMailbox, calendar: store.fredCalendar, now: now)),
+            ("mother", "mother", BadgeProviders.mother(store.motherStatus)),
+            ("perri",  "perri",  BadgeProviders.perri(queueCount: store.perriQueue.count)),
+            ("teri",   "teri",   BadgeProviders.teri(todos: store.teriTodos, now: now, calendar: BadgeProviders.chicago)),
+        ] {
+            badges.publish(tag: tag, sourceKey: source, badge: badge)
+        }
+        for row in currentRows {
+            guard case .focus(let focus, _, _, _) = row else { continue }
+            items[focus.id]?.setBadge(badges.badge(for: focus.sessionTag))
+        }
+        updateAttention()
+    }
+
     private func updateAttention() {
-        let tags = AppStore.shared.attentionTags
+        let tags = AppStore.shared.attentionTags.union(badges.attentionTags)
         for row in currentRows {
             guard case .focus(let focus, _, _, _) = row else { continue }
             items[focus.id]?.needsAttention = row.needsAttention(in: tags)

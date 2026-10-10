@@ -54,10 +54,14 @@ enum NavRow: Equatable {
 ///   PR" so every existing caller keeps compiling unchanged.
 /// - Parameter branchFor: Resolves a focus to its checkout's current git branch,
 ///   `nil` when unknown. Defaults to "no branch known".
+/// - Parameter badgeDetailFor: Resolves a focus's `sessionTag` to its badge detail
+///   line. Used as the second line of the built-in Fred, Mother and Teri rows when
+///   non-nil; defaults to "no badge". Still never produces a `nil` second line.
 func buildNavRows(
     _ focuses: [Focus],
     prFor: (String) -> (repo: String?, number: Int?) = { _ in (nil, nil) },
-    branchFor: (Focus) -> String? = { _ in nil }
+    branchFor: (Focus) -> String? = { _ in nil },
+    badgeDetailFor: (String) -> String? = { _ in nil }
 ) -> [NavRow] {
     var rows: [NavRow] = []
 
@@ -95,6 +99,10 @@ func buildNavRows(
         if f.agentTag.lowercased() == "perri" {
             let (repo, number) = prFor(f.sessionTag)
             return FocusPRLabel.secondary(repo: repo, number: number, fallback: nil)
+        }
+        if f.isBuiltIn, ["fred", "mother", "teri"].contains(f.agentTag.lowercased()),
+           let detail = badgeDetailFor(f.sessionTag) {
+            return detail
         }
         return [branchOf(f), summaryOf(f), idSuffix].compactMap { $0 }.joined(separator: " · ")
     }
