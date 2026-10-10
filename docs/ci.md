@@ -12,7 +12,7 @@ skipped reports as "skipped", which a required check treats as passing.
 |---|---|---|---|---|
 | `Build & Lint` | ubuntu-latest | `cargo build`, `cargo clippy -D warnings`, `cargo test` | `cargo test` | ~4.5 min |
 | `Python tooling tests` | macos-latest | `make python-test` (fails on any skip) | `make python-test` | ~25 s |
-| `Swift tests (Mac app)` | macos-26 | `make mac-test` — the `NostromoTests` scheme, ~1,230 tests | `make mac-test` | ~3.5 min |
+| `Swift tests (Mac app)` | macos-26 | `make mac-test` — the `NostromoTests` scheme, ~1,230 tests | `make mac-test` | ~3–4.5 min |
 | `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~1.5 min |
 | `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.5 min |
 | `Launch smoke (advisory)` | macos-26 | see below (path-filtered, advisory) | `make mac-smoke` | ~5 min |
