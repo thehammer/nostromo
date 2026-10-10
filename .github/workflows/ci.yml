@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: every job here only checks out code, builds, tests and uploads artifacts.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
