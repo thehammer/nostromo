@@ -66,13 +66,15 @@ final class FredSurfaceViewTests: XCTestCase {
     private func makeView(mailbox: MailboxSnapshot? = nil,
                           calendar: CalendarSnapshot? = nil,
                           isConnected: Bool = true,
-                          timeZone: TimeZone = FredSurfaceViewTests.chicago) -> FredSurfaceView {
+                          timeZone: TimeZone = FredSurfaceViewTests.chicago,
+                          detail: FredDetailActions? = nil) -> FredSurfaceView {
         let clock = self.clock
         let view = FredSurfaceView(
             model: FredSurfaceModel(mailbox: mailbox, calendar: calendar, isConnected: isConnected),
             clock: { clock.now },
             pasteboard: pasteboard,
-            timeZone: timeZone)
+            timeZone: timeZone,
+            detail: detail)
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 420),
                          styleMask: [.titled], backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
@@ -1149,5 +1151,205 @@ final class FredSurfaceViewTests: XCTestCase {
         XCTAssertFalse(try text("fred.today.header").contains("No meetings"))
         XCTAssertNotNil(try bannerMessage("fred.today.banner"))
         XCTAssertEqual(try rowCount(todayTable), 0)
+    }
+
+    // MARK: - F1: detail and Ask Fred
+
+    /// Records what the view asked of its injected collaborators. Closures answer synchronously.
+    private final class DetailFake {
+        var requested: [String] = []
+        var seeds: [String] = []
+        var opened: [URL] = []
+        var detailResult: (String) -> Result<WorkItemDetail, WorkError> = { id in
+            .failure(WorkError(code: "not_found", message: "no detail for \(id)"))
+        }
+        var seedError: WorkError?
+
+        var actions: FredDetailActions {
+            FredDetailActions(
+                requestDetail: { id, done in self.requested.append(id); done(self.detailResult(id)) },
+                seedFred: { text, done in self.seeds.append(text); done(self.seedError) },
+                open: { self.opened.append($0) })
+        }
+    }
+
+    private func mailDetail(id: String = "mail:m-0") throws -> WorkItemDetail {
+        try decode(WorkItemDetail.self, [
+            "item_id": id,
+            "title": "Quarterly numbers",
+            "fields": [["From", "Alice Smith <alice@example.com>"],
+                       ["To", "Bob Jones <bob@example.com>"],
+                       ["Received", "Sat 10 Oct 2026, 09:10"]],
+            "markdown": "Hello Bob,\nNumbers attached.",
+            "files": [String](),
+            "links": [["label": "Open in Outlook", "url": "https://outlook.example/detail/mail"]],
+        ])
+    }
+
+    private func eventDetail(id: String = "event:e-0") throws -> WorkItemDetail {
+        try decode(WorkItemDetail.self, [
+            "item_id": id,
+            "title": "Eng sync",
+            "fields": [["Organiser", "Olive <olive@example.com>"],
+                       ["When", "Sat 10 Oct 2026, 09:30\u{2013}10:00"],
+                       ["Attendees", "Ann (accepted), Ben (no response)"]],
+            "markdown": "Agenda: roadmap",
+            "files": [String](),
+            "links": [["label": "Open in Outlook", "url": "https://outlook.example/detail/event"]],
+        ])
+    }
+
+    private func oneMailView(_ fake: DetailFake) throws {
+        makeView(mailbox: try mailbox(items: [Mail(from: "Alice", subject: "Quarterly numbers")]),
+                 detail: fake.actions)
+    }
+
+    private func oneEventView(_ fake: DetailFake) throws {
+        makeView(calendar: try calendar(events: [Ev(title: "Eng sync", start: at("09:30"), end: at("10:00"))]),
+                 detail: fake.actions)
+    }
+
+    func testNothingIsSelectedSoNoDetailIsShownUntilARowIsSelected() throws {
+        let fake = DetailFake()
+        try oneMailView(fake)
+        XCTAssertNil(sut.detailView)
+        XCTAssertTrue(fake.requested.isEmpty)
+    }
+
+    func testSelectingAnInboxRowRequestsThatMessageAndShowsItsFieldsAndBody() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] _ in .success(try! mailDetail()) }
+        try oneMailView(fake)
+        sut.selectInboxRow(0)
+        XCTAssertEqual(fake.requested, ["mail:m-0"])
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.displayedFields.map(\.label), ["From", "To", "Received"])
+        XCTAssertEqual(d.displayedFields.first?.value, "Alice Smith <alice@example.com>")
+        XCTAssertEqual(d.displayedBody, "Hello Bob,\nNumbers attached.")
+        XCTAssertNil(d.errorText)
+    }
+
+    func testSelectingATodayEventRequestsThatEventAndShowsItsFieldsAndAgenda() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] _ in .success(try! eventDetail()) }
+        try oneEventView(fake)
+        sut.selectTodayRow(0)
+        XCTAssertEqual(fake.requested, ["event:e-0"])
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.displayedFields.map(\.label), ["Organiser", "When", "Attendees"])
+        XCTAssertEqual(d.displayedBody, "Agenda: roadmap")
+    }
+
+    func testADetailErrorIsShownInTheDetailAndNeverAsAnEmptyMessage() throws {
+        let fake = DetailFake()
+        fake.detailResult = { _ in .failure(WorkError(code: "not_found", message: "That item no longer exists in Outlook")) }
+        try oneMailView(fake)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.errorText, "That item no longer exists in Outlook")
+        XCTAssertTrue(d.displayedFields.isEmpty)
+        XCTAssertEqual(d.displayedBody, "")
+    }
+
+    // MARK: Ask Fred / Prep with Fred
+
+    private func loadedMailDetailView(_ fake: DetailFake) throws -> FredDetailView {
+        fake.detailResult = { [self] _ in .success(try! mailDetail()) }
+        try oneMailView(fake)
+        sut.selectInboxRow(0)
+        return try XCTUnwrap(sut.detailView)
+    }
+
+    func testAskFredOpensAConfirmationWithTheDefaultPromptAndSendsNothingYet() throws {
+        let fake = DetailFake()
+        let d = try loadedMailDetailView(fake)
+        XCTAssertFalse(d.isConfirming)
+        d.beginSeed()
+        XCTAssertTrue(d.isConfirming)
+        XCTAssertEqual(d.promptText, FredDetailPrompts.ask(try mailDetail()))
+        XCTAssertTrue(fake.seeds.isEmpty, "nothing is sent until the user confirms")
+    }
+
+    func testConfirmingSendsExactlyOneSeedWithTheEditedPromptAndCloses() throws {
+        let fake = DetailFake()
+        let d = try loadedMailDetailView(fake)
+        d.beginSeed()
+        d.promptText = "Just tell me if this needs a reply."
+        d.confirmSeed()
+        XCTAssertEqual(fake.seeds, ["Just tell me if this needs a reply."])
+        XCTAssertFalse(d.isConfirming)
+        XCTAssertNil(d.errorText)
+        d.confirmSeed()
+        XCTAssertEqual(fake.seeds.count, 1, "a second confirm with nothing open sends nothing")
+    }
+
+    func testCancellingSendsNothingAndCloses() throws {
+        let fake = DetailFake()
+        let d = try loadedMailDetailView(fake)
+        d.beginSeed()
+        d.cancelSeed()
+        XCTAssertTrue(fake.seeds.isEmpty)
+        XCTAssertFalse(d.isConfirming)
+    }
+
+    func testWhenFredIsNotRunningTheUserIsToldHowToRecoverAndSuccessIsNotClaimed() throws {
+        let fake = DetailFake()
+        fake.seedError = WorkError(code: "fred_not_running", message: "raw daemon text")
+        let d = try loadedMailDetailView(fake)
+        d.beginSeed()
+        d.confirmSeed()
+        XCTAssertEqual(d.errorText, "Fred's session isn't running; open Fred's chat once and retry.")
+        XCTAssertEqual(fake.seeds.count, 1)
+        XCTAssertFalse(d.isConfirming && d.errorText == nil, "no success state is shown")
+    }
+
+    func testPrepWithFredOnAnEventSeedsTheMeetingPrompt() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] _ in .success(try! eventDetail()) }
+        try oneEventView(fake)
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        d.beginSeed()
+        XCTAssertEqual(d.promptText, FredDetailPrompts.prep(try eventDetail()))
+        d.confirmSeed()
+        XCTAssertEqual(fake.seeds, [FredDetailPrompts.prep(try eventDetail())])
+    }
+
+    // MARK: Open in Outlook
+
+    func testOpenInOutlookHandsTheDetailsLinkToTheOpener() throws {
+        let fake = DetailFake()
+        let d = try loadedMailDetailView(fake)
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: "https://outlook.example/detail/mail")!])
+    }
+
+    func testOpenInOutlookFallsBackToTheListItemsLinkWhenTheDetailFailed() throws {
+        let fake = DetailFake()
+        try oneMailView(fake)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertNotNil(d.errorText)
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: "https://outlook.example/m/0")!])
+    }
+
+    // MARK: Default prompts
+
+    func testTheAskPromptOpensWithTheInstructionsAndCarriesTheMessage() throws {
+        let p = FredDetailPrompts.ask(try mailDetail())
+        XCTAssertTrue(p.hasPrefix("Here is an email from my inbox. Summarise it and tell me if it needs a reply; if so, draft one for me to review. Do not send anything."), p)
+        for piece in ["Alice Smith <alice@example.com>", "Bob Jones <bob@example.com>",
+                      "Sat 10 Oct 2026, 09:10", "Quarterly numbers", "Hello Bob,\nNumbers attached."] {
+            XCTAssertTrue(p.contains(piece), "missing \(piece) in \(p)")
+        }
+    }
+
+    func testThePrepPromptOpensWithTheInstructionsAndCarriesTheMeeting() throws {
+        let p = FredDetailPrompts.prep(try eventDetail())
+        XCTAssertTrue(p.hasPrefix("Brief me for this meeting: related email threads, related Jira issues, and open questions. Do not RSVP or change the calendar."), p)
+        for piece in ["Eng sync", "Olive <olive@example.com>", "Ann (accepted), Ben (no response)", "Agenda: roadmap"] {
+            XCTAssertTrue(p.contains(piece), "missing \(piece) in \(p)")
+        }
     }
 }

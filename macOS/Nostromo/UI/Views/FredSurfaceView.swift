@@ -211,9 +211,17 @@ final class FredSurfaceView: NSView {
     /// as the view (set by `FredBindings`).
     var subscriptions = Set<AnyCancellable>()
 
+    /// Detail of the selected message or event, shown below the two lists
+    /// (full width, so Inbox and Today both stay visible). Nil until a row is
+    /// selected.
+    private(set) var detailView: FredDetailView?
+
     private let clock: () -> Date
     private let pasteboard: NSPasteboard
     private let timeZone: TimeZone
+    private let detailActions: FredDetailActions?
+    private var selectedItemId: String?
+    private var isReloading = false
 
     private let disconnectedBanner = SourceStateBanner()
     private let inboxPane: FredPane
@@ -227,8 +235,10 @@ final class FredSurfaceView: NSView {
     init(model: FredSurfaceModel,
          clock: @escaping () -> Date = { Date() },
          pasteboard: NSPasteboard = .general,
-         timeZone: TimeZone = .current) {
+         timeZone: TimeZone = .current,
+         detail: FredDetailActions? = nil) {
         self.model = model
+        self.detailActions = detail
         self.clock = clock
         self.pasteboard = pasteboard
         self.timeZone = timeZone
@@ -275,9 +285,68 @@ final class FredSurfaceView: NSView {
         disconnectedBanner.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bannerHeight)
         let top = bannerHeight
         let half = (bounds.width / 2).rounded(.down)
-        inboxPane.frame = NSRect(x: 0, y: top, width: half, height: max(0, bounds.height - top))
+        let available = max(0, bounds.height - top)
+        // With a selection the lists keep the top ~40% and the detail takes the rest.
+        let listsHeight = detailView == nil ? available : max(Self.minListsHeight, (available * 0.4).rounded(.down))
+        inboxPane.frame = NSRect(x: 0, y: top, width: half, height: min(available, listsHeight))
         todayPane.frame = NSRect(x: half + 1, y: top, width: max(0, bounds.width - half - 1),
-                                 height: max(0, bounds.height - top))
+                                 height: min(available, listsHeight))
+        if let detailView {
+            let y = top + min(available, listsHeight) + 1
+            detailView.frame = NSRect(x: 0, y: y, width: bounds.width, height: max(0, bounds.height - y))
+        }
+    }
+
+    private static let minListsHeight: CGFloat = 140
+
+    // MARK: - Selection
+
+    /// Select Inbox row `row` as the user would (shows its detail).
+    func selectInboxRow(_ row: Int) {
+        select(row: row, in: inboxPane.table)
+    }
+
+    /// Select Today row `row` as the user would (shows its detail).
+    func selectTodayRow(_ row: Int) {
+        select(row: row, in: todayPane.table)
+    }
+
+    private func select(row: Int, in table: NSTableView) {
+        guard row >= 0, row < table.numberOfRows else { return }
+        isReloading = true   // the delegate callback would show the detail a second time
+        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        isReloading = false
+        showDetail(for: table)
+    }
+
+    private func showDetail(for table: NSTableView) {
+        let row = table.selectedRow
+        let other = table === inboxPane.table ? todayPane.table : inboxPane.table
+        let subject: FredDetailSubject?
+        if table === inboxPane.table {
+            subject = inboxRows.items.indices.contains(row) ? .mail(inboxRows.items[row]) : nil
+        } else {
+            subject = todayRows.events.indices.contains(row) ? .event(todayRows.events[row]) : nil
+        }
+        guard let subject, let actions = detailActions else { return }
+        other.deselectAll(nil)
+        detailView?.removeFromSuperview()
+        let view = FredDetailView(subject: subject, actions: actions)
+        addSubview(view)
+        detailView = view
+        selectedItemId = subject.itemId
+        needsLayout = true
+    }
+
+    private func restoreSelection() {
+        guard let id = selectedItemId else { return }
+        isReloading = true
+        defer { isReloading = false }
+        if let row = inboxRows.items.firstIndex(where: { "mail:\($0.id)" == id }) {
+            inboxPane.table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        } else if let row = todayRows.events.firstIndex(where: { "event:\($0.id)" == id }) {
+            todayPane.table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
     }
 
     static let bannerHeight: CGFloat = 26
@@ -296,6 +365,12 @@ final class FredSurfaceView: NSView {
         inboxPane.table.delegate = inboxRows
         todayPane.table.dataSource = todayRows
         todayPane.table.delegate = todayRows
+        for pane in [inboxPane, todayPane] {
+            pane.table.onSelectionChange = { [weak self] table in
+                guard let self, !self.isReloading else { return }
+                self.showDetail(for: table)
+            }
+        }
         inboxPane.onCopy = { [weak self] code in self?.copy(code) }
         todayPane.onCopy = { [weak self] code in self?.copy(code) }
     }
@@ -352,6 +427,22 @@ final class FredSurfaceView: NSView {
             hasRows: !events.isEmpty,
             showsEmptyMessage: calendar.map { FredPresentation.showsData($0) && events.isEmpty } ?? false,
             now: now, zone: timeZone)
+        restoreSelection()
+    }
+}
+
+// MARK: - Selectable table
+
+/// Reports selection changes and treats Return as "open this row's detail".
+final class FredTable: NSTableView {
+    var onSelectionChange: ((FredTable) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76, selectedRow >= 0 {
+            onSelectionChange?(self)
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }
 
@@ -359,7 +450,7 @@ final class FredSurfaceView: NSView {
 
 private final class FredPane: NSView {
 
-    let table = NSTableView()
+    let table = FredTable()
     var onCopy: ((String) -> Void)?
 
     private let sourceName: String
@@ -420,7 +511,9 @@ private final class FredPane: NSView {
         table.headerView = nil
         table.rowHeight = 44
         table.intercellSpacing = .zero
-        table.selectionHighlightStyle = .none
+        table.selectionHighlightStyle = .regular
+        table.allowsEmptySelection = true
+        table.allowsMultipleSelection = false
         table.backgroundColor = .clear
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.setAccessibilityIdentifier("\(idPrefix).table")
@@ -587,7 +680,7 @@ private final class FredSignInView: NSView {
 // MARK: - Inbox rows
 
 private final class FredInboxRows: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    private var items: [MailboxItem] = []
+    private(set) var items: [MailboxItem] = []
     private var now = Date()
 
     func set(_ items: [MailboxItem], now: Date) {
@@ -596,6 +689,10 @@ private final class FredInboxRows: NSObject, NSTableViewDataSource, NSTableViewD
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        if let table = notification.object as? FredTable { table.onSelectionChange?(table) }
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard items.indices.contains(row) else { return nil }
@@ -692,7 +789,7 @@ private final class FredInboxCell: NSTableCellView {
 // MARK: - Today rows
 
 private final class FredTodayRows: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    private var events: [CalendarEvent] = []
+    private(set) var events: [CalendarEvent] = []
     private var now = Date()
     private var zone = TimeZone.current
 
@@ -703,6 +800,10 @@ private final class FredTodayRows: NSObject, NSTableViewDataSource, NSTableViewD
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { events.count }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        if let table = notification.object as? FredTable { table.onSelectionChange?(table) }
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard events.indices.contains(row) else { return nil }

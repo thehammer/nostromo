@@ -10,6 +10,7 @@ pub mod dirty_file;
 pub mod file_source;
 pub mod fred_calendar;
 pub mod fred_calendar_native;
+pub mod fred_detail;
 pub mod fred_mailbox;
 pub mod fred_mailbox_native;
 pub mod github_client;
