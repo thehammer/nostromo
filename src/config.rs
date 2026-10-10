@@ -216,7 +216,8 @@ impl Config {
     /// Resolved TCP listen address.
     ///
     /// Resolution order: `NOSTROMD_TCP_ADDR` env var → `config.toml tcp_addr`
-    /// → `DEFAULT_TCP_ADDR` (`0.0.0.0:47100`).
+    /// → `DEFAULT_TCP_ADDR` (`127.0.0.1:47100`, loopback only; the TCP listener has no
+    /// authentication, so only set `NOSTROMD_TCP_ADDR` to a LAN address on a network you trust).
     pub fn tcp_listen_addr(&self) -> SocketAddr {
         if let Ok(v) = std::env::var(TCP_ADDR_ENV) {
             if let Ok(addr) = v.parse() {
