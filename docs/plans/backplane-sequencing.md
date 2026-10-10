@@ -145,13 +145,16 @@ W13 should **not** be enqueued until Q2 is answered (its PRD is a stub).
 
 ## Risks
 
-- **Kobe cannot run WireGuard** (MDM forbids VPN payloads, or the office
-  network drops UDP 51820 — try moving the UDM listener to UDP/443 first).
-  Then the satellite needs a public `wss://` endpoint: a UDM port-forward to
-  the primary with a DDNS name and an ACME certificate, or a payload-blind
-  hub (one Fargate task). B8 keeps either a satellite config change. Test on
-  Kobe before W10 is dispatched: install the WireGuard app, import the UDM
-  profile, `ping` the primary's WireGuard address.
+- **Kobe cannot run WireGuard** — **retired 2026-10-10.** The WireGuard
+  client is installed on Kobe alongside Twingate (Carefeed's ZTNA) and
+  reaches the home network from the office. Two operational notes carried
+  into W10: (1) keep Kobe's WireGuard profile **split-tunnel** —
+  `AllowedIPs` = the home subnet (and the primary's address) only — so
+  Carefeed traffic continues to route via Twingate and never transits the
+  operator's home network; (2) the satellite's uplink URL must use the
+  primary's WireGuard/LAN address, not a public name, so a Twingate DNS
+  policy cannot capture it. The public-endpoint / hub fallback is no longer
+  planned; B8 still keeps it a config change if that ever reverses.
 - **Sensitive data on the primary.** Teri/Fred mail subjects and todos would
   be retained on Tokyo. Default in W10 is to publish them
   (`uplink.publish_sensitive = true`) because the host is the operator's own

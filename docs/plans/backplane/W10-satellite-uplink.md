@@ -97,7 +97,10 @@ VPN down. Mother and Bishop are not modified.
   own tempdirs and `mode = satellite`). Drive the satellite's broadcast
   channel directly (no real Mother).
 - `README.md` §Daemon — primary vs satellite, `config.toml` example for
-  Kobe, the "VPN down" behaviour.
+  Kobe, the "VPN down" behaviour, and the operator note that a satellite on
+  a managed laptop should use a **split-tunnel** WireGuard profile
+  (`AllowedIPs` = home subnet) with `uplink.url` pointing at the primary's
+  WireGuard/LAN address, so corporate traffic stays on its own VPN.
 
 ## Approach
 
