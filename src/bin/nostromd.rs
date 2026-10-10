@@ -373,7 +373,7 @@ async fn main() -> Result<()> {
     // ── Teri todos source + broadcaster ───────────────────────────────────────
     let teri_todos_rx = TeriTodosNativeSource::spawn();
     let btx_teri = broadcast_tx.clone();
-    tokio::spawn(run_teri_broadcaster(teri_todos_rx, btx_teri));
+    tokio::spawn(run_teri_broadcaster(teri_todos_rx, btx_teri, server.subscribe_republish()));
 
     // ── Mother pollers ────────────────────────────────────────────────────────
     // (jobs_tx/jobs_rx were created earlier so the MCP state could get a live receiver.)
@@ -386,7 +386,12 @@ async fn main() -> Result<()> {
 
     // ── Fred broadcaster ──────────────────────────────────────────────────────
     let btx_fred = broadcast_tx.clone();
-    tokio::spawn(run_fred_broadcaster(btx_fred, fred_mailbox_rx, fred_calendar_rx));
+    tokio::spawn(run_fred_broadcaster(
+        btx_fred,
+        fred_mailbox_rx,
+        fred_calendar_rx,
+        server.subscribe_republish(),
+    ));
 
     // ── SIGTERM / SIGINT ──────────────────────────────────────────────────────
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -675,11 +680,14 @@ async fn run_perri_broadcaster(
 
 // ── Fred broadcaster ─────────────────────────────────────────────────────────
 
-/// Broadcast `FredState` on startup and whenever either Fred source changes.
+/// Broadcast `FredState` on startup, whenever either Fred source changes, and
+/// whenever `republish_rx` changes (the retained-frame cache lagged and lost
+/// the last `FredState`, so it is sent again now rather than at the next poll).
 async fn run_fred_broadcaster(
     tx: broadcast::Sender<ServerMsg>,
     mut mailbox_rx: tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
     mut calendar_rx: tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
+    mut republish_rx: tokio::sync::watch::Receiver<u64>,
 ) {
     // Send an initial frame so a client that connects after the first fetch
     // still gets state. Clone the watch contents while borrowed, drop the
@@ -689,6 +697,8 @@ async fn run_fred_broadcaster(
         tokio::select! {
             r = mailbox_rx.changed() => { if r.is_err() { break; } }
             r = calendar_rx.changed() => { if r.is_err() { break; } }
+            // The server (the sender) going away means the daemon is shutting down.
+            r = republish_rx.changed() => { if r.is_err() { break; } }
         }
         // No-receiver send error is non-fatal (Nostromo may be closed).
         let _ = tx.send(build_fred_state(&mailbox_rx, &calendar_rx));
@@ -710,9 +720,13 @@ fn build_fred_state(
 
 /// Watch the `TeriTodosNativeSource` channel and broadcast a `TeriState` frame
 /// whenever the snapshot changes.  The first emission covers the initial poll.
+///
+/// A change of `republish_rx` (the retained-frame cache lagged) re-emits the
+/// current value at once.
 async fn run_teri_broadcaster(
     mut rx: tokio::sync::watch::Receiver<Option<nostromo::data::teri_todos::TeriTodosSnapshot>>,
     tx: broadcast::Sender<ServerMsg>,
+    mut republish_rx: tokio::sync::watch::Receiver<u64>,
 ) {
     loop {
         // Emit the current value first (covers the initial snapshot), then wait
@@ -720,8 +734,13 @@ async fn run_teri_broadcaster(
         if let Some(snap) = rx.borrow_and_update().clone() {
             let _ = tx.send(ServerMsg::TeriState { todos: snap });
         }
-        if rx.changed().await.is_err() {
-            break; // sender dropped — daemon shutting down
+        tokio::select! {
+            r = rx.changed() => {
+                if r.is_err() {
+                    break; // sender dropped — daemon shutting down
+                }
+            }
+            r = republish_rx.changed() => { if r.is_err() { break; } }
         }
     }
 }
@@ -755,4 +774,63 @@ fn daemon_log_dir() -> PathBuf {
         .join(".cache")
         .join("nostromd")
         .join("log")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::watch;
+
+    async fn next_frame(rx: &mut broadcast::Receiver<ServerMsg>) -> ServerMsg {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("a frame within 2s")
+            .expect("channel open")
+    }
+
+    async fn nothing_for_a_moment(rx: &mut broadcast::Receiver<ServerMsg>) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), rx.recv()).await.is_err(),
+            "no frame was expected"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_fred_broadcaster_publishes_its_current_state_again_when_asked_to_republish() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let (_mailbox_tx, mailbox_rx) =
+            watch::channel(Some(MailboxSnapshot { unread_count: 3, ..Default::default() }));
+        let (_calendar_tx, calendar_rx) = watch::channel(None::<CalendarSnapshot>);
+        let (republish_tx, republish_rx) = watch::channel(0u64);
+        tokio::spawn(run_fred_broadcaster(tx, mailbox_rx, calendar_rx, republish_rx));
+
+        assert!(matches!(next_frame(&mut rx).await, ServerMsg::FredState { mailbox, .. } if mailbox.unread_count == 3));
+        nothing_for_a_moment(&mut rx).await;
+
+        republish_tx.send_modify(|g| *g += 1);
+        assert!(
+            matches!(next_frame(&mut rx).await, ServerMsg::FredState { mailbox, .. } if mailbox.unread_count == 3),
+            "a republish request must re-send FredState without waiting for the source"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_teri_broadcaster_publishes_its_current_state_again_when_asked_to_republish() {
+        use nostromo::data::teri_todos::TeriTodosSnapshot;
+        let (tx, mut rx) = broadcast::channel(16);
+        let (_todos_tx, todos_rx) =
+            watch::channel(Some(TeriTodosSnapshot { stale: true, ..Default::default() }));
+        let (republish_tx, republish_rx) = watch::channel(0u64);
+        tokio::spawn(run_teri_broadcaster(todos_rx, tx, republish_rx));
+
+        assert!(matches!(next_frame(&mut rx).await, ServerMsg::TeriState { todos } if todos.stale));
+        nothing_for_a_moment(&mut rx).await;
+
+        republish_tx.send_modify(|g| *g += 1);
+        assert!(
+            matches!(next_frame(&mut rx).await, ServerMsg::TeriState { todos } if todos.stale),
+            "a republish request must re-send TeriState without waiting for the source"
+        );
+    }
 }

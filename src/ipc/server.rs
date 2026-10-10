@@ -58,6 +58,9 @@ pub struct Server {
     socket_path: PathBuf,
     pub tx: broadcast::Sender<ServerMsg>,
     retained: RetainedCache,
+    /// Bumped when the retained cache lagged and must be repopulated; the
+    /// pollers that own retained frames (`fred`, `teri`) re-publish on it.
+    republish: tokio::sync::watch::Sender<u64>,
 }
 
 impl Server {
@@ -102,7 +105,8 @@ impl Server {
 
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
         let retained: RetainedCache = Arc::new(Mutex::new(BTreeMap::new()));
-        tokio::spawn(retain_broadcasts(tx.subscribe(), Arc::clone(&retained)));
+        let (republish, _) = tokio::sync::watch::channel(0u64);
+        tokio::spawn(retain_broadcasts(tx.subscribe(), Arc::clone(&retained), republish.clone()));
 
         let retained_for_loop = Arc::clone(&retained);
         tokio::spawn(async move {
@@ -117,7 +121,15 @@ impl Server {
             socket_path: path,
             tx,
             retained,
+            republish,
         })
+    }
+
+    /// A receiver that changes whenever the retained-frame cache lagged and
+    /// every source that owns a retained frame should publish its current
+    /// state again. Pollers `select!` on `changed()` next to their own source.
+    pub fn subscribe_republish(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.republish.subscribe()
     }
 
     /// Broadcast a message to all connected, subscribed clients.
@@ -800,10 +812,11 @@ fn handle_client_msg(
 
         ClientMsg::SessionSend { tag, text, images } => {
             let mut mgr = session_mgr.lock().unwrap();
-            // An unauthenticated peer is about to steer this session: withdraw
-            // its Teri/Fred/Mother tools first, so nothing it is told to do
-            // can reach them. (Only a live session can be written to, which
-            // also bounds how many tags this records.)
+            // A network peer never reaches here (`session_send` is refused for
+            // it, see `peer::starts_or_feeds_process`). Kept as defense in
+            // depth: if a network peer ever can write, withdraw the session's
+            // Teri/Fred/Mother tools first. (Only a live session can be
+            // written to, which also bounds how many tags this records.)
             if trust.is_network() && mgr.has_live_session(&tag) {
                 sensitive.mark_network_driven(&tag);
             }
@@ -1325,29 +1338,76 @@ fn apply_retention(cache: &mut BTreeMap<String, ServerMsg>, msg: ServerMsg) {
 ///
 /// If this task falls behind the channel it cannot know which retained frames
 /// it missed (including a removal), so it clears the cache rather than serve
-/// state it can no longer vouch for, and asks every source to refresh so the
-/// cache is repopulated: a Mac that reconnects after a lag must not wait for
-/// a source to change on its own before it is replayed anything.
-async fn retain_broadcasts(mut rx: broadcast::Receiver<ServerMsg>, cache: RetainedCache) {
+/// state it can no longer vouch for, and asks every source to publish again so
+/// the cache is repopulated: a Mac that reconnects after a lag must not wait
+/// for a source to change on its own before it is replayed anything.
+///
+/// Two kinds of source: the work service (refreshed here) and the pollers that
+/// own the retained `fred`/`teri` frames (poked through `republish`).
+/// Lag-triggered refreshes are coalesced: at most one runs at a time, and a
+/// burst of lags during it costs one more run, not one per lag.
+async fn retain_broadcasts(
+    mut rx: broadcast::Receiver<ServerMsg>,
+    cache: RetainedCache,
+    republish: tokio::sync::watch::Sender<u64>,
+) {
+    let resync = Arc::new(Mutex::new(Resync::Idle));
     loop {
         match rx.recv().await {
             Ok(msg) => apply_retention(&mut cache.lock().unwrap(), msg),
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!("retained-message cache lagged {n} broadcast messages; clearing it and refreshing the sources");
                 cache.lock().unwrap().clear();
-                tokio::spawn(async {
-                    let service = work_service();
-                    if let Err(e) = service.refresh(None, true).await {
-                        debug!(code = %e.code, "retention resync: refresh not performed");
-                    }
-                    if let Err(e) = service.refresh_picks("retention_lag").await {
-                        debug!(code = %e.code, "retention resync: picks refresh not performed");
-                    }
-                });
+                republish.send_modify(|generation| *generation = generation.wrapping_add(1));
+                request_work_resync(&resync);
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+/// State of the lag-triggered work refresh.
+#[derive(Debug, PartialEq, Eq)]
+enum Resync {
+    Idle,
+    /// A refresh is in flight.
+    Running,
+    /// A refresh is in flight and another lag arrived meanwhile: run once more.
+    RunAgain,
+}
+
+/// Refresh the work sources, unless a refresh is already in flight, in which
+/// case ask it to run once more when it finishes.
+fn request_work_resync(state: &Arc<Mutex<Resync>>) {
+    {
+        let mut st = state.lock().unwrap();
+        match *st {
+            Resync::Idle => *st = Resync::Running,
+            Resync::Running | Resync::RunAgain => {
+                *st = Resync::RunAgain;
+                return;
+            }
+        }
+    }
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        loop {
+            let service = work_service();
+            if let Err(e) = service.refresh(None, true).await {
+                debug!(code = %e.code, "retention resync: refresh not performed");
+            }
+            if let Err(e) = service.refresh_picks("retention_lag").await {
+                debug!(code = %e.code, "retention resync: picks refresh not performed");
+            }
+            let mut st = state.lock().unwrap();
+            if *st == Resync::RunAgain {
+                *st = Resync::Running;
+                continue;
+            }
+            *st = Resync::Idle;
+            break;
+        }
+    });
 }
 
 /// Snapshot one focus's activity streams into their wire form.

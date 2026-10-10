@@ -152,23 +152,62 @@ impl SensitiveTags {
 
     /// A registry persisted at `path`, seeded from it when it exists.
     pub fn persisted(path: PathBuf) -> Self {
-        Self::persisted_with_writer(path, Arc::new(write_atomic))
+        Self::open(path, Arc::new(write_atomic), false)
+    }
+
+    /// As [`SensitiveTags::persisted`], told whether the session id store lists
+    /// sessions that can be resumed. A registry that is *missing* while
+    /// sessions exist has lost whatever it knew about them (see below), so the
+    /// start is degraded.
+    pub fn persisted_for_sessions(path: PathBuf, has_stored_sessions: bool) -> Self {
+        Self::open(path, Arc::new(write_atomic), has_stored_sessions)
     }
 
     /// As [`SensitiveTags::persisted`], writing through `writer` (tests inject
     /// a failing disk).
-    ///
-    /// Startup is **degraded** when a `sensitive-tags.dirty` sentinel is
-    /// present (a previous run failed to persist a registration) or when the
-    /// registry cannot be written now. See [`SensitiveTags::note_resumed`].
     pub fn persisted_with_writer(path: PathBuf, writer: RegistryWriter) -> Self {
+        Self::open(path, writer, false)
+    }
+
+    /// Startup is **degraded** (see [`SensitiveTags::note_resumed`]) when
+    ///
+    /// * a `sensitive-tags.dirty` sentinel or a `sensitive-tags.json.stale`
+    ///   file is present (a previous run failed to persist a registration;
+    ///   the stale file is the registry it moved aside because it could not
+    ///   even write the sentinel, and is loaded in place of a missing one);
+    /// * the registry is missing while the session store lists sessions (an
+    ///   upgrade, or a registry lost with the disk): which of them were
+    ///   work-derived is unknowable; or
+    /// * the registry cannot be written now.
+    ///
+    /// The one gap left: a failed registration write on a disk where the
+    /// sentinel write fails **and** the registry cannot be renamed aside either
+    /// (a read-only file system), followed by a restart on a recovered disk,
+    /// looks healthy. The failure is logged loudly at the time.
+    fn open(path: PathBuf, writer: RegistryWriter, has_stored_sessions: bool) -> Self {
         let unreadable = |why: &dyn std::fmt::Display| {
             warn!(path = %path.display(), "sensitive-tag registry unreadable ({why}); treating every tag as sensitive");
             Registered { unreadable: true, ..Registered::default() }
         };
-        let mut registered = match std::fs::read(&path) {
+        let stale_path = stale_path_beside(&path);
+        let mut from_stale = false;
+        let read = match std::fs::read(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match std::fs::read(&stale_path) {
+                Ok(bytes) => {
+                    from_stale = true;
+                    Ok(bytes)
+                }
+                Err(_) => Err(e),
+            },
+            other => other,
+        };
+        let mut registry_missing = false;
+        let mut registered = match read {
             Ok(bytes) => serde_json::from_slice::<Registered>(&bytes).unwrap_or_else(|e| unreadable(&e)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registered::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                registry_missing = true;
+                Registered::default()
+            }
             Err(e) => unreadable(&e),
         };
         let tags = Self {
@@ -177,13 +216,24 @@ impl SensitiveTags {
             writer,
         };
         if !registered.unreadable {
-            // A sentinel, or a registry that cannot be written right now,
-            // means registrations may have been lost across this restart.
+            // Evaluated in order, the cheap signals first; the probe write
+            // (which would create an empty registry) only when none applies.
             let sentinel_present = tags.sentinel_path().is_some_and(|p| p.exists());
-            if sentinel_present || !tags.write_registry(&registered) {
+            let lost = sentinel_present
+                || from_stale
+                || stale_path.exists()
+                || (registry_missing && has_stored_sessions)
+                || !tags.write_registry(&registered);
+            if lost {
                 warn!("sensitive-tag registry may have lost registrations; resumed sessions are treated as sensitive");
                 registered.degraded = true;
                 registered.lost_history = true;
+                // Registering the resumed sessions writes the registry one tag
+                // at a time: leave the sentinel so a crash part-way through
+                // is still seen as degraded by the next start.
+                if !sentinel_present {
+                    tags.write_sentinel();
+                }
             }
         }
         *tags.inner.write().unwrap() = registered;
@@ -267,9 +317,15 @@ impl SensitiveTags {
         self.inner.read().unwrap().degraded
     }
 
-    /// A network peer wrote to `tag`'s session. That session can now be steered
-    /// by an unauthenticated peer, so it is denied the Teri/Fred/Mother MCP
-    /// tools (see `mcp::tools`). Not persisted: it ends with the daemon.
+    /// `tag`'s session is (or may be) steered by an unauthenticated peer, so it
+    /// is denied the Teri/Fred/Mother MCP tools and every read tool that can
+    /// return their data (see `mcp::tools`). Not persisted: it ends with the
+    /// daemon.
+    ///
+    /// Defense in depth: since `session_send` is refused for network peers
+    /// ([`starts_or_feeds_process`]) the server no longer marks on that path;
+    /// the marking still propagates (a focus a driven session creates is driven
+    /// too) and covers any future path that lets a network peer write.
     pub fn mark_network_driven(&self, tag: &str) {
         self.inner.write().unwrap().network_driven.insert(tag.to_string());
     }
@@ -314,7 +370,10 @@ impl SensitiveTags {
 
     /// Write the registry out. Called with the registry's write lock held, so
     /// concurrent registrations are serialised and the last write on disk is
-    /// the latest state.
+    /// the latest state. (A *failing* write therefore sleeps up to ~15 ms in
+    /// [`SensitiveTags::write_registry`] under that lock. That is deliberate:
+    /// releasing the lock between attempts would let a later registration
+    /// overtake this one on disk, and a failing disk is already an incident.)
     ///
     /// A failed write is retried (bounded). If it still fails the registry is
     /// **degraded**: the registration stays in memory, and a sentinel file is
@@ -337,21 +396,46 @@ impl SensitiveTags {
             }
         } else {
             registered.degraded = true;
-            self.write_sentinel();
+            if !self.write_sentinel() {
+                // A full disk fails both writes. Renaming needs no new blocks,
+                // so move the registry aside instead: a restart then finds it
+                // missing (or finds the `.stale` copy) and starts degraded.
+                self.move_registry_aside();
+            }
         }
     }
 
-    fn write_sentinel(&self) {
-        if let Some(sentinel) = self.sentinel_path() {
-            if let Err(e) = std::fs::write(&sentinel, b"registrations may be missing from sensitive-tags.json\n") {
+    /// Leave the degraded sentinel; `false` when it could not be written.
+    fn write_sentinel(&self) -> bool {
+        let Some(sentinel) = self.sentinel_path() else { return true };
+        match std::fs::write(&sentinel, b"registrations may be missing from sensitive-tags.json\n") {
+            Ok(()) => true,
+            Err(e) => {
                 warn!(path = %sentinel.display(), "sensitive-tag registry: could not write the degraded sentinel: {e}");
+                false
             }
+        }
+    }
+
+    fn move_registry_aside(&self) {
+        let Some(path) = &self.path else { return };
+        let stale = stale_path_beside(path);
+        match std::fs::rename(path.as_path(), &stale) {
+            Ok(()) => warn!(stale = %stale.display(), "sensitive-tag registry moved aside so the next start is degraded"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // already missing: that is the signal
+            Err(e) => warn!(
+                "sensitive-tag registry: could not write the registry or the degraded sentinel or move the registry aside ({e}); \
+                 a restart on a recovered disk will NOT know registrations are missing"
+            ),
         }
     }
 
     fn clear_sentinel(&self) {
         if let Some(sentinel) = self.sentinel_path() {
             let _ = std::fs::remove_file(sentinel);
+        }
+        if let Some(path) = &self.path {
+            let _ = std::fs::remove_file(stale_path_beside(path));
         }
     }
 
@@ -439,6 +523,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Where a registry that could not be re-written is moved aside to.
+fn stale_path_beside(registry: &Path) -> PathBuf {
+    registry.with_file_name("sensitive-tags.json.stale")
+}
+
 /// The path of the sensitive-tag registry that sits beside a session id store.
 pub fn registry_path_beside(store_path: &Path) -> PathBuf {
     store_path.with_file_name("sensitive-tags.json")
@@ -493,11 +582,9 @@ pub enum ServerClass<'a> {
 //
 //   * client → daemon: `focus_registry_push`, `perri_action`, `mother_action`,
 //     `mother_resume`, `decision_answer`, `pty_kill`/`pty_attach`/`pty_resize`,
-//     `close_pane`, `rendered_shape`, and `session_*` verbs (attach, send,
-//     interrupt, control) on non-sensitive tags. `session_send` writes to an
-//     existing session's process: that session is then marked network-driven
-//     and loses its `fred.*`/`teri.*`/`mother.*` MCP tools, but it keeps its
-//     other tools (`nostromo.*`, `perri.*`) and whatever it already read.
+//     `close_pane`, `rendered_shape`, and the read/stop-only `session_*` verbs
+//     (attach, detach, interrupt, control) on non-sensitive tags. None of
+//     these writes to a session or starts a process.
 //   * daemon → client: PTY output (`pty_*`), `mother_statusline`, and the pane
 //     content / layout / notifications / decisions / activity / transcripts /
 //     Perri state of every focus that is NOT a sensitive tag. Pane content of an
@@ -512,9 +599,13 @@ pub enum ServerClass<'a> {
 // What this module DOES guarantee for network peers: nothing Teri/Fred-derived
 // that the daemon can identify (the cases above) is delivered or driven through
 // any frame family, on the replay, broadcast and targeted paths, AND a network
-// peer cannot start a process (`session_spawn` for any agent, `pty_spawn`) or
-// type into a PTY (`pty_input`), so it cannot use an ordinary agent session as
-// a proxy to the `fred.*`/`teri.*` tools. The guarantee is bounded by the
+// peer cannot spawn, feed or drive ANY session or process: `session_spawn` (any
+// agent), `session_send` and `session_answer_permission` (any tag, including
+// ordinary sessions the Mac started), `pty_spawn` and `pty_input` are all
+// refused with no side effect. An unauthenticated peer therefore cannot use an
+// agent session (which has Bash/Read and the MCP bridge) as a proxy to the
+// `fred.*`/`teri.*` tools or to the daemon's local sockets. The guarantee is
+// bounded by the
 // unauthenticated listener: it is not a substitute for authentication or for
 // binding the port to loopback (tracked in the wip doc above).
 
@@ -731,22 +822,31 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
     }
 }
 
-/// Does `msg` start a process, or write to one the peer did not start itself?
-/// Refused for a network peer whatever it names: a session of **any** agent
-/// is hosted with the MCP bridge, whose `fred.*`/`teri.*`/`mother.*` tools
-/// would make the daemon fetch Teri/Fred data and stream it back as an
-/// ordinary transcript, and `pty_spawn`/`pty_input` run commands as the user.
+/// Does `msg` start a process, or write to / drive one that is already running?
+/// Refused for a network peer whatever it names:
+///
+/// * a session of **any** agent is hosted with the MCP bridge, whose
+///   `fred.*`/`teri.*`/`mother.*` tools would make the daemon fetch Teri/Fred
+///   data and stream it back as an ordinary transcript;
+/// * `pty_spawn`/`pty_input` run commands as the user;
+/// * `session_send` to an *existing* ordinary session is the same thing by
+///   another route: the agent has Bash and Read, so "run this script" makes an
+///   unauthenticated LAN peer a local client of the daemon's sockets (a
+///   `LocalOther` view of everything). Withholding the MCP tools from such a
+///   session does not close that, so the write itself is refused;
+/// * `session_answer_permission` approves a tool action in a session.
 ///
 /// Until the listener is authenticated an iOS client on the LAN therefore
-/// cannot start sessions or PTYs. It can still attach to, and send to,
-/// non-sensitive sessions the Mac started (such a session loses those tools
-/// once a network peer has written to it, see
-/// [`SensitiveTags::mark_network_driven`]).
+/// cannot start sessions or PTYs, chat with a session, or answer its prompts.
+/// It can still list and attach to (read) non-sensitive sessions, detach, and
+/// interrupt (which only stops a turn).
 pub fn starts_or_feeds_process(msg: &ClientMsg) -> bool {
     match msg {
-        ClientMsg::SessionSpawn { .. } | ClientMsg::PtySpawn { .. } | ClientMsg::PtyInput { .. } => {
-            true
-        }
+        ClientMsg::SessionSpawn { .. }
+        | ClientMsg::PtySpawn { .. }
+        | ClientMsg::PtyInput { .. }
+        | ClientMsg::SessionSend { .. }
+        | ClientMsg::SessionAnswerPermission { .. } => true,
 
         ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
@@ -758,11 +858,9 @@ pub fn starts_or_feeds_process(msg: &ClientMsg) -> bool {
         | ClientMsg::PtyList
         | ClientMsg::SessionAttach { .. }
         | ClientMsg::SessionDetach { .. }
-        | ClientMsg::SessionSend { .. }
         | ClientMsg::ClosePane { .. }
         | ClientMsg::SessionInterrupt { .. }
         | ClientMsg::SessionControl { .. }
-        | ClientMsg::SessionAnswerPermission { .. }
         | ClientMsg::SessionList
         | ClientMsg::FocusRegistryPush { .. }
         | ClientMsg::FocusList
@@ -1290,7 +1388,11 @@ mod tests {
     /// this test's build until someone decides which side it falls on.
     fn oracle_starts_or_feeds_process(msg: &ClientMsg) -> bool {
         match msg {
-            ClientMsg::SessionSpawn { .. } | ClientMsg::PtySpawn { .. } | ClientMsg::PtyInput { .. } => true,
+            ClientMsg::SessionSpawn { .. }
+            | ClientMsg::PtySpawn { .. }
+            | ClientMsg::PtyInput { .. }
+            | ClientMsg::SessionSend { .. }
+            | ClientMsg::SessionAnswerPermission { .. } => true,
             ClientMsg::Hello { .. }
             | ClientMsg::Subscribe { .. }
             | ClientMsg::Ping
@@ -1301,11 +1403,9 @@ mod tests {
             | ClientMsg::PtyList
             | ClientMsg::SessionAttach { .. }
             | ClientMsg::SessionDetach { .. }
-            | ClientMsg::SessionSend { .. }
             | ClientMsg::ClosePane { .. }
             | ClientMsg::SessionInterrupt { .. }
             | ClientMsg::SessionControl { .. }
-            | ClientMsg::SessionAnswerPermission { .. }
             | ClientMsg::SessionList
             | ClientMsg::FocusRegistryPush { .. }
             | ClientMsg::FocusList
@@ -1325,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn starts_or_feeds_process_is_true_for_session_spawn_pty_spawn_and_pty_input_and_for_nothing_else() {
+    fn starts_or_feeds_process_is_true_for_spawns_pty_input_session_send_and_permission_answers_and_for_nothing_else() {
         for msg in every_client_msg() {
             assert_eq!(starts_or_feeds_process(&msg), oracle_starts_or_feeds_process(&msg), "{msg:?}");
         }
@@ -1365,16 +1465,34 @@ mod tests {
     }
 
     #[test]
-    fn a_network_peer_may_still_attach_send_detach_and_list_for_an_ordinary_session() {
+    fn a_network_peer_may_still_attach_detach_interrupt_and_list_for_an_ordinary_session() {
         let tags = SensitiveTags::in_memory();
         for msg in [
             ClientMsg::SessionAttach { tag: "cody-x".into() },
-            ClientMsg::SessionSend { tag: "cody-x".into(), text: "hi".into(), images: vec![] },
             ClientMsg::SessionDetach { tag: "cody-x".into() },
+            ClientMsg::SessionInterrupt { tag: "cody-x".into() },
             ClientMsg::SessionList,
             ClientMsg::Ping,
         ] {
             assert!(!refuse_for_network(&msg, &tags), "{msg:?}");
+        }
+    }
+
+    #[test]
+    fn a_network_peer_cannot_write_to_or_answer_a_permission_for_any_session_whatever_its_tag() {
+        let tags = SensitiveTags::in_memory();
+        for tag in ["cody-x", "x1", "", "ghost", "claudia"] {
+            for msg in [
+                ClientMsg::SessionSend { tag: tag.into(), text: "hi".into(), images: vec![] },
+                ClientMsg::SessionAnswerPermission {
+                    tag: tag.into(),
+                    request_id: "r".into(),
+                    decision: PermissionDecision::Allow,
+                },
+            ] {
+                assert!(refuse_for_network(&msg, &tags), "{msg:?}");
+                assert!(starts_or_feeds_process(&msg), "{msg:?}");
+            }
         }
     }
 
@@ -1661,6 +1779,104 @@ mod tests {
         assert!(!restarted.tag_is_sensitive("cody-ordinary"));
         assert!(restarted.tag_is_sensitive("cody-x"), "registered tags survive the restart");
         assert!(!sentinel_beside(&path).exists());
+    }
+
+    // ── a registry that is missing, or moved aside, while sessions exist ──────
+
+    fn stale_beside(registry: &Path) -> PathBuf {
+        registry.with_file_name("sensitive-tags.json.stale")
+    }
+
+    #[test]
+    fn a_missing_registry_while_the_session_store_lists_sessions_starts_degraded_until_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        assert!(!path.exists());
+
+        let tags = SensitiveTags::persisted_for_sessions(path.clone(), true);
+        assert!(tags.is_degraded(), "sessions exist but the registry that classified them is gone");
+        tags.note_resumed("cody-old");
+        assert!(tags.tag_is_sensitive("cody-old"), "an unregistered resumed session fails closed");
+        assert!(!tags.tag_is_sensitive("cody-fresh"));
+        assert!(
+            sentinel_beside(&path).exists(),
+            "registering resumed sessions writes the registry piecemeal: a crash part-way must be seen again"
+        );
+
+        tags.settle_lost_history();
+        assert!(!tags.is_degraded(), "once every stored session is registered the registry is current");
+        assert!(!sentinel_beside(&path).exists());
+        assert!(SensitiveTags::persisted(path).tag_is_sensitive("cody-old"));
+    }
+
+    #[test]
+    fn a_missing_registry_with_no_stored_sessions_is_a_fresh_install_and_starts_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+
+        let tags = SensitiveTags::persisted_for_sessions(path.clone(), false);
+
+        assert!(!tags.is_degraded());
+        assert!(path.exists(), "the probe write creates the registry");
+        assert!(!tags.tag_is_sensitive("cody-fresh"));
+    }
+
+    #[test]
+    fn a_present_registry_with_stored_sessions_is_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        SensitiveTags::persisted(path.clone()).mark_tag("cody-x");
+
+        let tags = SensitiveTags::persisted_for_sessions(path, true);
+
+        assert!(!tags.is_degraded());
+        tags.note_resumed("cody-ordinary");
+        assert!(!tags.tag_is_sensitive("cody-ordinary"));
+    }
+
+    #[test]
+    fn when_neither_the_registry_nor_the_sentinel_can_be_written_the_registry_is_moved_aside_so_a_restart_is_degraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        let (disk, writer) = ScriptedDisk::new();
+        let tags = SensitiveTags::persisted_with_writer(path.clone(), writer);
+        tags.mark_tag("cody-a");
+        tags.mark_job("job-a");
+        // The double fault: a directory squats on the sentinel's name, so
+        // writing the sentinel fails exactly as it would on a full disk.
+        std::fs::create_dir(sentinel_beside(&path)).unwrap();
+        disk.fail_always.store(true, Ordering::SeqCst);
+
+        tags.mark_tag("cody-b");
+
+        assert!(tags.is_degraded());
+        assert!(tags.tag_is_sensitive("cody-b"), "still protected in memory");
+        assert!(!path.exists() && stale_beside(&path).exists(), "the registry was moved aside");
+        drop(tags);
+        std::fs::remove_dir(sentinel_beside(&path)).unwrap();
+
+        // The disk has recovered; no sentinel exists; the probe write works.
+        let restarted = SensitiveTags::persisted_for_sessions(path.clone(), false);
+        assert!(restarted.is_degraded(), "a moved-aside registry must not look healthy");
+        assert!(restarted.tag_is_sensitive("cody-a"), "what the stale registry knew is kept");
+        assert!(restarted.job_is_sensitive("job-a"));
+        restarted.note_resumed("cody-b");
+        assert!(restarted.tag_is_sensitive("cody-b"), "the registration that was lost is covered by the resume rule");
+
+        restarted.settle_lost_history();
+        assert!(!restarted.is_degraded());
+        assert!(!stale_beside(&path).exists(), "a healthy write removes the stale copy");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_leftover_stale_registry_beside_a_present_one_still_degrades_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_in(dir.path());
+        SensitiveTags::persisted(path.clone()).mark_tag("cody-x");
+        std::fs::write(stale_beside(&path), b"{}").unwrap();
+
+        assert!(SensitiveTags::persisted(path).is_degraded());
     }
 
     #[test]

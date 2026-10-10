@@ -22,11 +22,22 @@ use crate::mcp::state::McpSharedState;
 /// ]
 /// ```
 pub async fn handle(state: &McpSharedState) -> Value {
+    handle_for(state, false).await
+}
+
+/// As [`handle`]; `network_driven` redacts the Fred/Teri/Mother summaries.
+pub async fn handle_for(state: &McpSharedState, network_driven: bool) -> Value {
     let views = state.views_meta.read().await.clone();
 
     let mut result = Vec::with_capacity(views.len());
     for view in &views {
-        let summary = summary_for(view.id, state);
+        // The Fred/Teri/Mother summaries are unread, todo and job counts: for a
+        // session a network peer is steering they are withheld.
+        let summary = if network_driven && matches!(view.id, "fred" | "teri" | "mother") {
+            json!({})
+        } else {
+            summary_for(view.id, state)
+        };
         result.push(json!({
             "id": view.id,
             "title": view.title,

@@ -247,6 +247,19 @@ pub(crate) fn target_tag<'a>(args: &'a Value, pty_id: Option<&'a str>) -> Option
         .filter(|s| !s.is_empty())
 }
 
+/// Does the layout an `apply_layout` call names (`name`) or carries (inline
+/// `panes`) bind any pane to `source`? Used to refuse a source to a caller that
+/// may not read it, before the layout is applied.
+pub(crate) fn layout_binds_source(args: &Value, source: &str) -> bool {
+    if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+        return layout_schema::load(name)
+            .is_ok_and(|schema| schema.panes.values().any(|p| p.source.as_deref() == Some(source)));
+    }
+    args.get("panes").and_then(Value::as_object).is_some_and(|panes| {
+        panes.values().any(|p| p.get("source").and_then(Value::as_str) == Some(source))
+    })
+}
+
 /// Build a [`LayoutSchema`] from an inline `{ tree, panes }` payload.
 fn schema_from_inline(args: &Value) -> Result<LayoutSchema, ApplyLayoutError> {
     let tree = args

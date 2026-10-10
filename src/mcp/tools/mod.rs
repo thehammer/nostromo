@@ -31,6 +31,7 @@ pub mod teri;
 
 use serde_json::{json, Value};
 
+use crate::ipc::peer::SensitiveTags;
 use crate::mcp::state::McpSharedState;
 
 // ── tool descriptors ─────────────────────────────────────────────────────────
@@ -544,13 +545,97 @@ fn is_network_withheld_tool(name: &str) -> bool {
     ["fred.", "teri.", "mother."].iter().any(|prefix| name.starts_with(prefix))
 }
 
-/// Has a network peer written to the session `pty_id` (the focus tag, for a
-/// daemon-hosted session)?
-fn is_network_driven(state: &McpSharedState, pty_id: Option<&str>) -> bool {
-    let (Some(daemon), Some(tag)) = (&state.daemon, pty_id) else {
+/// The built-in views whose state is Teri/Fred/Mother data.
+const SENSITIVE_VIEW_IDS: [&str; 3] = ["fred", "teri", "mother"];
+
+/// Tools whose target is a focus/view (`view_id`, else the caller's own
+/// focus): what they read, repaint or echo belongs to that focus.
+const FOCUS_SCOPED_TOOLS: [&str; 17] = [
+    "nostromo.get_render_state",
+    "nostromo.set_pane_content",
+    "nostromo.set_pane_focus",
+    "nostromo.set_pane_layout",
+    "nostromo.switch_active_view",
+    "nostromo.create_pane",
+    "nostromo.reset_panes",
+    "nostromo.apply_layout",
+    "nostromo.refresh_pane_content",
+    "nostromo.show",
+    "nostromo.ask_decision",
+    "perri.get_state",
+    "perri.get_current_pr",
+    "perri.load_pr",
+    "perri.clear_current_pr",
+    "perri.set_selected_index",
+    "perri.get_selected_index",
+];
+
+/// Is `target` (a view id or focus tag) Teri/Fred/Mother data?
+fn is_sensitive_target(tags: &SensitiveTags, target: &str) -> bool {
+    let bare = target.trim();
+    SENSITIVE_VIEW_IDS.iter().any(|v| bare.eq_ignore_ascii_case(v)) || tags.tag_is_sensitive(bare)
+}
+
+/// Must `name(arguments)` be refused to a session a network peer is steering?
+///
+/// Beyond the `fred.`/`teri.`/`mother.` tools themselves this covers every
+/// other tool whose *result* can carry their data:
+///
+/// * `nostromo.get_view_state` for `fred`/`teri`/`mother` (the same mailbox,
+///   calendar, todo and job data) or a sensitive focus tag;
+/// * any focus-scoped tool whose target (`view_id`, else the caller's own
+///   focus) is such a view or tag: it would read or echo that focus's panes;
+/// * ticket-backed content (`show` of a ticket, a `nostromo.get_ticket` pane
+///   source): a Jira ticket fetched with the daemon's credentials is work data.
+///
+/// (`nostromo.list_views` is redacted rather than refused, see
+/// [`list_views::handle_for`].)
+fn is_denied_to_network_driven(
+    name: &str,
+    arguments: Option<&Value>,
+    tags: &SensitiveTags,
+    pty_id: Option<&str>,
+) -> bool {
+    if is_network_withheld_tool(name) {
+        return true;
+    }
+    let null = Value::Null;
+    let args = arguments.unwrap_or(&null);
+    let view_id = args.get("view_id").and_then(Value::as_str);
+
+    if name == "nostromo.get_view_state" {
+        return view_id.is_some_and(|v| is_sensitive_target(tags, v));
+    }
+    if !FOCUS_SCOPED_TOOLS.contains(&name) {
         return false;
+    }
+    let target = view_id.or(pty_id).filter(|t| !t.is_empty());
+    if target.is_some_and(|t| is_sensitive_target(tags, t)) {
+        return true;
+    }
+    match name {
+        "nostromo.show" => args.get("type").and_then(Value::as_str) == Some("ticket"),
+        "nostromo.refresh_pane_content" => {
+            args.get("source").and_then(Value::as_str) == Some(apply_layout::SOURCE_TICKET)
+        }
+        "nostromo.apply_layout" => apply_layout::layout_binds_source(args, apply_layout::SOURCE_TICKET),
+        _ => false,
+    }
+}
+
+/// The sensitive-tag registry, when the session `pty_id` (the focus tag, for a
+/// daemon-hosted session) is network-driven; `None` for every other caller.
+fn network_driven_tags(state: &McpSharedState, pty_id: Option<&str>) -> Option<SensitiveTags> {
+    let (Some(daemon), Some(tag)) = (&state.daemon, pty_id) else {
+        return None;
     };
-    daemon.session_mgr.lock().unwrap().sensitive_tags().is_network_driven(tag)
+    let tags = daemon.session_mgr.lock().unwrap().sensitive_tags();
+    tags.is_network_driven(tag).then_some(tags)
+}
+
+/// Has a network peer written to the session `pty_id`?
+fn is_network_driven(state: &McpSharedState, pty_id: Option<&str>) -> bool {
+    network_driven_tags(state, pty_id).is_some()
 }
 
 // ── tool dispatch ─────────────────────────────────────────────────────────────
@@ -601,7 +686,11 @@ async fn dispatch_inner(
 ) -> ToolResult {
     // A session a network peer is steering gets no tool that reaches Teri/Fred
     // data or Mother jobs, whatever the operator's policy says.
-    if is_network_withheld_tool(name) && is_network_driven(state, pty_id) {
+    let network_tags = network_driven_tags(state, pty_id);
+    if network_tags
+        .as_ref()
+        .is_some_and(|tags| is_denied_to_network_driven(name, arguments, tags, pty_id))
+    {
         return ToolResult::Forbidden(name.to_string());
     }
 
@@ -628,7 +717,7 @@ async fn dispatch_inner(
         "nostromo.get_self" => get_self::handle(state, pty_id).await,
 
         // ── Phase 2: global ────────────────────────────────────────────────
-        "nostromo.list_views" => list_views::handle(state).await,
+        "nostromo.list_views" => list_views::handle_for(state, network_tags.is_some()).await,
         "nostromo.get_view_state" => {
             let input = parse_args::<get_view_state::GetViewStateInput>(arguments);
             match input {

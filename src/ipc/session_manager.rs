@@ -327,12 +327,15 @@ impl SessionManager {
     }
 
     pub fn with_store_path(store_path: PathBuf) -> Self {
-        let sensitive = SensitiveTags::persisted(registry_path_beside(&store_path));
+        let stored = load_id_store(&store_path);
+        let sensitive =
+            SensitiveTags::persisted_for_sessions(registry_path_beside(&store_path), !stored.is_empty());
         if sensitive.is_degraded() {
             // The registry may have lost registrations (a failed write before
-            // this start), so every stored session is treated as sensitive:
-            // each is registered now, before any client can connect.
-            for tag in load_id_store(&store_path).keys() {
+            // this start, or it is missing while sessions exist), so every
+            // stored session is treated as sensitive: each is registered now,
+            // before any client can connect.
+            for tag in stored.keys() {
                 sensitive.note_resumed(tag);
             }
             sensitive.settle_lost_history();
