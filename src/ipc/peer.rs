@@ -1490,11 +1490,20 @@ mod tests {
                 if always.load(Ordering::SeqCst) {
                     return Err(std::io::Error::other("disk full"));
                 }
-                if next
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                    .is_ok()
-                {
-                    return Err(std::io::Error::other("transient"));
+                // Hand-rolled decrement-if-positive: `fetch_update` is renamed
+                // `try_update` on newer toolchains (deprecated under -D warnings),
+                // and older ones lack `try_update`, so avoid both.
+                loop {
+                    let n = next.load(Ordering::SeqCst);
+                    if n == 0 {
+                        break;
+                    }
+                    if next
+                        .compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        return Err(std::io::Error::other("transient"));
+                    }
                 }
                 if let Some(dir) = path.parent() {
                     std::fs::create_dir_all(dir)?;
