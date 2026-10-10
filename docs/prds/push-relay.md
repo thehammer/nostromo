@@ -425,3 +425,193 @@ Visibility and retention:
    would let it appear on the phone. If employer policy says no, enrichment
    and lock-screen choice labels for work hosts come out of scope, not into a
    setting.
+
+---
+
+## Design-loop notes for Ada
+
+**Author:** Archie (Phase 3, 2026-10-10). Ada's sections above are unchanged.
+Plans: `docs/plans/backplane/W13-push-relay.md` (daemon engine, relay, app
+basics) and `docs/plans/backplane/W16-ios-push-enrichment.md` (Notification
+Service Extension, enrichment, lock-screen decision actions, withdrawal on the
+phone). Items marked **Sign-off** change or qualify an acceptance criterion and
+wait for Ada. Items marked **Clarification** are how the plan reads the PRD;
+Ada only needs to object if the reading is wrong.
+
+### Operator answers to the open questions (2026-10-10, via the coordinator)
+
+1. **Rhythm.** Quiet hours 22:00–07:00 with the 07:00 summary fit the commute.
+   The operator also wants an **evening summary**, default **17:30** phone-local
+   time, configurable per device, with the same fixed-vocabulary rules as the
+   morning one (count by host, oldest age, never a repository name). It is sent
+   only if at least one enabled item is waiting, and is skipped if 17:30 falls
+   inside the device's quiet hours. Planned in W13.
+2. **Carefeed content on the personal phone's screen is allowed.** Enrichment
+   and lock-screen decision actions stay in scope for work hosts. Host-class
+   gating stays as specified: repository names only for hosts marked personal;
+   an unmarked host is work; enrichment is on by default for personal hosts and
+   **opt-in per host, per device** for work hosts. Planned in W13 (classification)
+   and W16 (enrichment and actions).
+
+Ada: please move these into the Open questions section as answered.
+
+### Flagged criteria: what the plan does
+
+| AC | Decision | Where |
+|---|---|---|
+| Withdrawal within 2 min without opening the app | Planned, with one dependency on Apple (**Sign-off S1**) | W13 sends the withdrawal; W16 removes it on the phone |
+| Enrichment within 5 s over the VPN | Planned as written | W16 (Notification Service Extension, 4 s internal budget) |
+| Lock-screen decision actions in v1 | Planned as written, with one edge case (**Sign-off S4**) | W16 |
+| Grace delay 2:00–2:10 with skip-if-resolved | Planned as written | W13 hold queue on the primary |
+| PR size bucket | Planned. The data exists at no extra cost; one edge case (**Sign-off S3**) | W13 |
+| Relay records with no host name | Planned, and stricter: the relay stores no device registry at all | W13 `infra/push-relay/` |
+| Vocabulary allow-list test | Planned as written: a grammar check over the whole outbound request, not only title and body | W13 `src/push/vocab.rs` |
+
+Evidence behind the table:
+
+- **Withdrawal.** The badge can always be corrected without the app: a
+  badge-only APNs alert push (`aps.badge`, no alert or sound) is applied by iOS
+  itself. *Removing* a delivered notification needs code on the phone. There
+  are two ways. (a) A background push (`content-available`, `apns-push-type:
+  background`, priority 5) wakes the app to call
+  `removeDeliveredNotifications`. iOS rations these pushes under its
+  background-push budget and never delivers them to an app the user has
+  force-quit, so this cannot carry a 2-minute promise. (b) A `mutable-content`
+  alert push runs the Notification Service Extension. The extension runs even
+  when the app has been force-quit and is not subject to that budget. It
+  removes the stale notification and then hides itself. Hiding itself needs the
+  `com.apple.developer.usernotifications.filtering` entitlement, which Apple
+  grants on request. W16 builds (b) and the app tells the daemon per device
+  whether it has the entitlement. W13 uses (a) plus the badge-only push until
+  then.
+- **Enrichment.** A Notification Service Extension gets about 30 s of wall
+  time to modify a `mutable-content` push before display, and its network
+  traffic uses the WireGuard tunnel when the tunnel is up. W16 caps its own
+  fetch at 4 s, so the 5 s criterion holds. When the VPN is down, the contract
+  text is shown after at most 4 s. Nothing intermediate is ever shown. The
+  extension cannot bring the tunnel up itself; that depends on WireGuard
+  on-demand rules.
+- **Decision actions.** The extension fetches the choices and registers a
+  per-notification `UNNotificationCategory` whose `UNNotificationAction`s carry
+  the real labels and `.authenticationRequired` (Face ID or passcode before
+  anything runs). It then sets the notification's `categoryIdentifier`. The
+  action runs the app in the background, which sends `DecisionAnswer` over the
+  WebSocket. W16 starts with a spike on device for the known race between
+  registering a category and displaying the notification. The fallback is a
+  Notification Content Extension that draws the buttons in the expanded view.
+- **Grace delay.** The primary (Tokyo) is always on, polls Mother every 2 s
+  (`src/bin/nostromd.rs:492`) and receives satellite frames over the uplink.
+  A hold queue keyed on the item's start time plus 120 s, checked every
+  second, dispatches between 2:00 and about 2:02. An item resolved during the
+  delay is dropped and logged as *skipped: resolved during grace delay*.
+- **PR size.** `PrQueueItem` (`src/data/perri_queue.rs:105-131`) and
+  `PrListItem` (`src/ipc/protocol.rs:453-476`) have no line counts. However,
+  every bucket-1/2 candidate already gets a `GET /repos/{r}/pulls/{n}` on each
+  poll (`get_pr_head_sha`, `src/data/perri_queue_native.rs:1911-1929`), and
+  GitHub's response carries `additions` and `deletions`. Deserialising those
+  two fields (`PrDetail`, `:228-235`) costs no extra request. The targeted
+  GraphQL probe (`src/data/perri_queue_targeted.rs:840-880`) can add the same
+  two fields.
+- **Allow-list.** Every phrase is a constant in one module. A grammar checker
+  tokenises title and body on ` · ` and accepts only the PRD's productions
+  (fixed phrases, `#<n>`, 8-hex refs, counts, durations, configured host
+  names, and repository names for personal hosts). Tests drive marker strings
+  through every kind, host class and reason, then check the entire JSON body
+  sent to the relay, custom keys included.
+
+### Sign-off needed
+
+**S1. Withdrawal within 2 minutes depends on an Apple entitlement.**
+> Withdrawal within 2 minutes without opening the app is met on any device
+> running the W16 build with Apple's notification-filtering entitlement
+> granted. Until that entitlement is granted (or if Apple declines): the badge
+> is corrected within 2 minutes (badge-only push, reliable); removing the
+> notification itself is best-effort via a background push (iOS rations these
+> and does not deliver them to a force-quit app); and every stale notification
+> is removed the moment the app opens and connects (the PRD's floor). If Apple
+> declines the entitlement, the proposed fallback is to **replace** the stale
+> notification in place (same APNs collapse id, passive interruption level, no
+> sound) with `<Kind> · <host>` / `<ref> no longer needs you`. That adds one
+> phrase to the vocabulary, *no longer needs you*.
+
+**S2. Decisions are never coalesced into a Summary.**
+> "Four or more notifications becoming due within 2 minutes produce exactly one
+> Summary" applies to Mother and review items. Because both wait 2 minutes, an
+> item's due time is known 2 minutes in advance, so the primary can count
+> exactly. When the first item comes due, every other item due within the next
+> 2 minutes is already known. Decision requests are always sent individually
+> within 10 seconds and are not counted. They cannot be predicted, a Summary
+> cannot carry their timeout or lock-screen choices, and the 10-second
+> criterion would otherwise conflict with waiting to see whether three more
+> arrive.
+
+**S3. A review whose size is unknown omits the size phrase.**
+> If GitHub has not returned the PR's line counts by the time the grace delay
+> ends (both reads failed for the whole 2 minutes), the body is
+> `PR #<n> · <k> waiting`, with the size phrase omitted rather than guessed.
+
+**S4. A decision with more choices than iOS will show offers Open only.**
+> iOS shows a limited number of notification actions. The legacy documented
+> limit is four, and W16's spike measures it on the current iOS. A decision
+> with more choices than can be shown offers only **Open**, never a partial
+> set of buttons, because a partial set would silently bias the answer.
+
+**S5. Repository names for reviews are also gated on the repository owner.**
+> A review notification shows the repository name only if the host is
+> personal **and** the repository's owner is not listed in the primary's
+> `[push] work_owners` (default `["Carefeed"]`). The Perri queue searches only
+> `org:Carefeed` on every host (`src/data/perri_queue_native.rs:989-990`), so
+> a personal host running Perri would otherwise send Carefeed repository names
+> through the relay. As a result, the PRD's example `Review · sendai · bishop`
+> cannot occur until the queue covers personal orgs.
+
+**S6. One new phrase for decisions about to time out.**
+> When less than a minute remains, the body says `times out in under 1 min`
+> instead of `times out in 0 min`.
+
+### Clarifications (object only if the reading is wrong)
+
+- **C1. "Starts waiting".** For a Mother job, this is Mother's own `paused_at`
+  (falling back to when Nostromo first saw it awaiting). For a review, it is
+  when Nostromo's queue first shows the PR in the *review requested* bucket:
+  seconds after GitHub with the relay, or up to one poll interval (60 s
+  default) without it.
+- **C2. Which PRs count as "review requested".** Only the `requested` bucket
+  (`review-requested:@me`). The queue's other buckets (`needs_review`, which is
+  org-wide `review:required`, and `changes_req`) do not notify; they would
+  break the handful-a-day budget. "N waiting" is the count of `requested` PRs
+  on that host.
+- **C3. "No operator client is presenting it".** A decision is pushed when,
+  at the moment it is raised, no client that renders decisions is connected:
+  no local Mac app on the originating host and no app connected to the
+  primary. There is also a consequence for agents. Today `nostromo.ask_decision`
+  fails immediately with `no_operator` when no client is connected
+  (`src/mcp/tools/ask_decision.rs:84-89`). After W13, a paired device that can
+  receive a decision push right now also counts as an operator for
+  non-sensitive sessions (decision kind on, outside quiet hours). So the agent
+  blocks until its timeout instead of failing at once. Without this there
+  would be nothing to notify about.
+- **C4. Quiet hours and withdrawals.** A withdrawal and a badge-only update
+  make no sound and show nothing, so they still go out during quiet hours.
+  "Nothing is pushed" is read as "nothing alerts".
+- **C5. Opening the app removes stale notifications once the app reaches the
+  primary.** With the VPN down the phone cannot know what was resolved, so
+  nothing is removed until it connects. This matches the PRD's prose ("the
+  moment the app opens and connects").
+- **C6. Host names.** The name in a notification is the host's configured
+  `host_name` (W10). Only names matching `^[a-z][a-z0-9-]{0,15}$` are sent;
+  a host whose name does not match is labelled `host` in its notifications
+  until renamed. W13's README tells the operator to set `host_name`
+  explicitly, because the default comes from the OS hostname, which an MDM may
+  have set to an asset tag or a person's name.
+- **C7. Lock-screen labels on work hosts.** Per the PRD, decision buttons
+  carry real labels on every host whose choices can be fetched. The per-host
+  enrichment opt-in governs the notification *text* only. If Ada wants
+  work-host button labels to follow the enrichment toggle too (Open only until
+  opted in), that is a one-line change in W16.
+- **C8. The relay holds no device registry.** The APNs token travels from the
+  operator's machine with each push and is not stored. The relay keeps only
+  the delivery record the privacy note describes, keyed by a random per-device
+  push id, plus AWS Lambda's own platform log lines (request id and duration,
+  no payload) with 7-day log retention. The privacy note is accurate as
+  written.
