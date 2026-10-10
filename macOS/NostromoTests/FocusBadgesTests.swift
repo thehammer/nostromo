@@ -38,13 +38,14 @@ final class FocusBadgesTests: XCTestCase {
         var startOffset: TimeInterval
         var duration: TimeInterval = 1800
         var status: String = "accepted"
+        var allDay: Bool = false
     }
 
     private func calendar(_ events: [Ev], stale: Bool = false, error: String? = nil) throws -> CalendarSnapshot {
         let evs = events.map { e -> String in
             let s = iso.string(from: now.addingTimeInterval(e.startOffset))
             let en = iso.string(from: now.addingTimeInterval(e.startOffset + e.duration))
-            return "{\"start\": \"\(s)\", \"end\": \"\(en)\", \"title\": \"\(e.title)\", \"status\": \"\(e.status)\", \"is_now\": false}"
+            return "{\"start\": \"\(s)\", \"end\": \"\(en)\", \"title\": \"\(e.title)\", \"status\": \"\(e.status)\", \"is_now\": false\(e.allDay ? ", \"is_all_day\": true" : "")}"
         }
         var parts = ["\"events\": [\(evs.joined(separator: ","))]", "\"sweater\": \"\"", "\"stale\": \(stale)"]
         if let error { parts.append("\"error\": \"\(error)\"") }
@@ -142,6 +143,41 @@ final class FocusBadgesTests: XCTestCase {
     func testFredWithOnlyDeclinedEventsSaysNoMoreMeetings() throws {
         let cal = try calendar([Ev(title: "Skipped", startOffset: -60, status: "declined")])
         XCTAssertEqual(try XCTUnwrap(fred(nil, cal)).detail, "No more meetings")
+    }
+
+    // All-day events (holidays, OOO, birthdays) are never "now" and never "next": the badge
+    // must agree with the Fred Today pane (FredPresentation), which ignores them.
+
+    /// A holiday spanning the whole day around `now` (started 10 h ago, ends in 14 h).
+    private var holiday: Ev { Ev(title: "Columbus Day", startOffset: -10 * 3600, duration: 24 * 3600, allDay: true) }
+
+    func testFredIgnoresAnAllDayEventAndShowsTheNextRealMeeting() throws {
+        let cal = try calendar([holiday, Ev(title: "Eng sync", startOffset: 30 * 60)])
+        let badge = try XCTUnwrap(fred(nil, cal))
+        XCTAssertEqual(badge.detail, "Next: Eng sync in 30 min")
+        XCTAssertEqual(badge.level, .info)
+    }
+
+    func testFredNeverShowsAnAllDayEventAsNowDuringARealMeeting() throws {
+        let cal = try calendar([holiday, Ev(title: "Standup", startOffset: -5 * 60, duration: 1800)])
+        let badge = try XCTUnwrap(fred(nil, cal))
+        XCTAssertEqual(badge.detail, "Now: Standup")
+        XCTAssertEqual(badge.level, .attention)
+        XCTAssertFalse(badge.accessibilityLabel.contains("Columbus Day"))
+    }
+
+    func testFredWithOnlyAnAllDayEventTodaySaysNoMoreMeetings() throws {
+        let badge = try XCTUnwrap(fred(nil, try calendar([holiday])))
+        XCTAssertEqual(badge.detail, "No more meetings")
+        XCTAssertEqual(badge.level, .info)
+        XCTAssertEqual(badge.accessibilityLabel, "Fred, no more meetings")
+    }
+
+    func testFredNeverCountsAnAllDayEventThatStartsLaterAsTheNextMeeting() throws {
+        let laterAllDay = Ev(title: "Offsite", startOffset: 3 * 3600, duration: 24 * 3600, allDay: true)
+        let badge = try XCTUnwrap(fred(nil, try calendar([laterAllDay])))
+        XCTAssertEqual(badge.detail, "No more meetings")
+        XCTAssertEqual(badge.level, .info)
     }
 
     func testFredMailTroubleTakesTheSecondLineOverTheMeeting() throws {

@@ -20,7 +20,6 @@ const MAX_LIMIT: usize = 500;
 /// Source states shared by the Teri and Fred tools.
 pub(crate) mod source_state {
     pub const LOADING: &str = "loading";
-    pub const UNAUTHENTICATED: &str = "unauthenticated";
     pub const ERROR: &str = "error";
     pub const STALE: &str = "stale";
     pub const EMPTY: &str = "empty";

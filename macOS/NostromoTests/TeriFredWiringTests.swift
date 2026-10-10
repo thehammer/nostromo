@@ -56,7 +56,7 @@ final class TeriFredWiringTests: XCTestCase {
         XCTAssertTrue(teri.contains("WorkStore.shared.setConnected"), "the store must follow the connection")
         XCTAssertFalse(teri.contains("TeriTodosPanel"), "the old SwiftUI todo panel is gone")
         let fred = try Self.source("UI/Views/FredBindings.swift")
-        XCTAssertTrue(fred.contains("FredHUD()"))
+        XCTAssertTrue(fred.contains("FredSurfaceView("))
     }
 
     // MARK: - Helpers

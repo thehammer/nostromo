@@ -28,6 +28,8 @@ use tracing::{debug, info, warn};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 const LOGIN_BASE: &str = "https://login.microsoftonline.com";
+/// Graph's minimum device-code polling interval.
+const MIN_DEVICE_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 const SCOPES: &str = "Mail.Read Calendars.Read offline_access";
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -38,6 +40,143 @@ pub struct DeviceFlowPrompt {
     pub verification_uri: String,
     pub user_code: String,
     pub expires_at: DateTime<Utc>,
+}
+
+/// Where the client talks to and how it signs in. `Default` is production;
+/// tests point the bases at a mock server and switch the `m365` CLI off.
+#[derive(Debug, Clone)]
+pub struct GraphOptions {
+    /// Base for Graph API paths (replaces `https://graph.microsoft.com/v1.0`).
+    pub graph_base: String,
+    /// Base for the OAuth endpoints (replaces `https://login.microsoftonline.com`).
+    pub login_base: String,
+    /// Borrow a token from the `m365` CLI before starting the device flow.
+    pub use_m365_cli: bool,
+    /// Floor for the device-code polling interval.
+    pub min_device_poll: std::time::Duration,
+}
+
+impl Default for GraphOptions {
+    fn default() -> Self {
+        Self {
+            graph_base: GRAPH_BASE.to_owned(),
+            login_base: LOGIN_BASE.to_owned(),
+            use_m365_cli: true,
+            min_device_poll: MIN_DEVICE_POLL,
+        }
+    }
+}
+
+/// A non-success HTTP answer from Graph. Typed so callers can turn it into a
+/// plain-English reason (`downcast_ref` works through `anyhow` context).
+#[derive(Debug)]
+pub struct GraphHttpError {
+    pub status: reqwest::StatusCode,
+    pub url: String,
+    pub body: String,
+    /// The server's `Retry-After` (already capped), when it sent a usable one.
+    pub retry_after: Option<std::time::Duration>,
+}
+
+impl GraphHttpError {
+    /// Graph is throttling us: a 429, or a 503 that says when to come back.
+    pub fn is_throttle(&self) -> bool {
+        self.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || (self.status == reqwest::StatusCode::SERVICE_UNAVAILABLE && self.retry_after.is_some())
+    }
+}
+
+impl std::fmt::Display for GraphHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Graph GET {} -> {}: {}", self.url, self.status, self.body)
+    }
+}
+
+impl std::error::Error for GraphHttpError {}
+
+/// Longest we will ever stay quiet because of a `Retry-After` (contract §9
+/// caps backoff at 15 minutes).
+pub const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Parse an HTTP `Retry-After` value: whole seconds or an HTTP-date, measured
+/// from `now`, capped at [`MAX_RETRY_AFTER`]. A date in the past is zero.
+/// `None` when the value is neither.
+pub fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<std::time::Duration> {
+    let value = value.trim();
+    let wait = if let Ok(secs) = value.parse::<u64>() {
+        std::time::Duration::from_secs(secs)
+    } else {
+        let when = DateTime::parse_from_rfc2822(value).ok()?.with_timezone(&Utc);
+        (when - now).to_std().unwrap_or(std::time::Duration::ZERO)
+    };
+    Some(wait.min(MAX_RETRY_AFTER))
+}
+
+/// `Some(retry_after)` when `e` is Graph throttling us (429, or 503 with a
+/// `Retry-After`); `None` for any other failure.
+pub fn throttle_of(e: &anyhow::Error) -> Option<Option<std::time::Duration>> {
+    let http = e.downcast_ref::<GraphHttpError>()?;
+    http.is_throttle().then_some(http.retry_after)
+}
+
+/// Consecutive-throttle counter for one polling loop. Success resets it.
+/// The wait after a throttle is the server's `Retry-After` when there is one,
+/// otherwise exponential backoff: 2 s, 4 s, 8 s … capped at 15 min, plus up
+/// to 25 % jitter.
+#[derive(Debug, Default)]
+pub struct ThrottleBackoff {
+    consecutive: u32,
+}
+
+const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl ThrottleBackoff {
+    /// A fetch succeeded: the next throttle starts again at the first step.
+    pub fn succeeded(&mut self) {
+        self.consecutive = 0;
+    }
+
+    /// `e` is how a fetch failed. When it is a throttle, how long to stay
+    /// quiet; otherwise `None` (and the backoff is left alone).
+    pub fn throttled(&mut self, e: &anyhow::Error) -> Option<std::time::Duration> {
+        let retry_after = throttle_of(e)?;
+        let step = BACKOFF_BASE
+            .saturating_mul(1u32.checked_shl(self.consecutive).unwrap_or(u32::MAX))
+            .min(MAX_RETRY_AFTER);
+        self.consecutive = self.consecutive.saturating_add(1);
+        Some(match retry_after {
+            Some(wait) => wait,
+            None => (step + step.mul_f64(jitter() * 0.25)).min(MAX_RETRY_AFTER),
+        })
+    }
+}
+
+/// A cheap value in `[0, 1)`; spreads out retries, not security sensitive.
+fn jitter() -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    f64::from(nanos % 1000) / 1000.0
+}
+
+/// A short plain-English reason for a failed Graph fetch, safe to show in the
+/// UI and MCP results: no URLs, response bodies or tokens.
+pub fn failure_reason(what: &str, e: &anyhow::Error) -> String {
+    if let Some(http) = e.downcast_ref::<GraphHttpError>() {
+        let code = http.status.as_u16();
+        return match code {
+            401 => format!("{what}: Microsoft rejected the sign-in (401); sign-in will be retried"),
+            403 => format!("{what}: Microsoft denied access (403)"),
+            429 => format!("{what}: Microsoft is rate limiting requests (429)"),
+            500..=599 => format!("{what}: Microsoft Graph is unavailable ({code})"),
+            _ => format!("{what}: Microsoft Graph returned {code}"),
+        };
+    }
+    if e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_connect() || r.is_timeout())) {
+        return format!("{what}: could not reach Microsoft Graph");
+    }
+    format!("{what}: unexpected response from Microsoft Graph")
 }
 
 // ── Internal types ────────────────────────────────────────────────────────────
@@ -86,11 +225,46 @@ pub struct GraphClient {
     /// multiple concurrent poll tasks (each with its own device code) when
     /// `ensure_authed` is called repeatedly while sign-in is pending.
     device_flow_active: Arc<Mutex<bool>>,
+    /// The prompt of the device flow in flight (cleared when it ends), so every
+    /// caller sharing this client shows the same code instead of starting its own.
+    pending_prompt: Arc<Mutex<Option<DeviceFlowPrompt>>>,
+    opts: GraphOptions,
 }
 
 impl GraphClient {
     /// Create a new client, loading any cached token from `cache_path`.
     pub async fn new(client_id: String, tenant: String, cache_path: PathBuf) -> Result<Self> {
+        Self::with_options(client_id, tenant, cache_path, GraphOptions::default()).await
+    }
+
+    /// The process-wide client for `(client_id, tenant, cache_path)`. The Fred
+    /// mailbox and calendar sources both call this so they share one token and
+    /// one device flow (two clients would issue two sign-in codes).
+    pub async fn shared(client_id: String, tenant: String, cache_path: PathBuf) -> Result<Self> {
+        type Key = (String, String, PathBuf);
+        static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Key, GraphClient>>> =
+            std::sync::OnceLock::new();
+        let registry = REGISTRY.get_or_init(Default::default);
+        let key = (client_id.clone(), tenant.clone(), cache_path.clone());
+        if let Some(existing) = registry.lock().expect("graph registry").get(&key) {
+            return Ok(existing.clone());
+        }
+        let client = Self::new(client_id, tenant, cache_path).await?;
+        Ok(registry
+            .lock()
+            .expect("graph registry")
+            .entry(key)
+            .or_insert(client)
+            .clone())
+    }
+
+    /// Create a client with explicit endpoints/sign-in options.
+    pub async fn with_options(
+        client_id: String,
+        tenant: String,
+        cache_path: PathBuf,
+        opts: GraphOptions,
+    ) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("nostromo/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -105,7 +279,14 @@ impl GraphClient {
             client_id,
             tenant,
             device_flow_active: Arc::new(Mutex::new(false)),
+            pending_prompt: Arc::new(Mutex::new(None)),
+            opts,
         })
+    }
+
+    /// The sign-in prompt of the device flow in flight, if any.
+    pub async fn pending_prompt(&self) -> Option<DeviceFlowPrompt> {
+        self.pending_prompt.lock().await.clone()
     }
 
     /// Ensure the client is authenticated.
@@ -139,44 +320,56 @@ impl GraphClient {
         // No valid token — try m365 CLI first, fall back to device flow.
         drop(guard); // release lock before async I/O
 
-        if let Some(tok) = try_m365_token().await {
-            info!("graph token acquired via m365 CLI");
-            persist_token(&self.cache_path, &tok)?;
-            *self.token.lock().await = Some(tok);
-            return Ok(None);
-        }
-
-        {
-            let active = self.device_flow_active.lock().await;
-            if *active {
+        if self.opts.use_m365_cli {
+            if let Some(tok) = try_m365_token().await {
+                info!("graph token acquired via m365 CLI");
+                persist_token(&self.cache_path, &tok)?;
+                *self.token.lock().await = Some(tok);
                 return Ok(None);
             }
         }
+
+        // Held across the start so two sources sharing this client cannot
+        // both begin a device flow (two sign-in codes).
+        let mut active = self.device_flow_active.lock().await;
+        if *active {
+            drop(active);
+            // Sign-in still pending: keep showing its prompt (the token is
+            // stored before the prompt is cleared, so `None` here means the
+            // flow just completed).
+            return Ok(self.pending_prompt().await);
+        }
         let prompt = self.start_device_flow().await?;
+        *active = true;
         Ok(Some(prompt))
     }
 
     /// Fetch a JSON resource from Graph (full URL or path under GRAPH_BASE).
+    ///
+    /// A 401 gets one refresh-and-retry. The first answer and the retried one
+    /// go through the same status check, so a failed retry can never be read
+    /// as data.
     pub async fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
-        let url = absolute_url(url);
-        let resp = self.authenticated_get(&url).await?;
+        let url = self.absolute_url(url);
+        let mut resp = self.authenticated_get(&url).await?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            // Attempt a single refresh-and-retry.
-            self.refresh_once().await?;
-            let resp2 = self.authenticated_get(&url).await?;
-            return resp2
-                .json::<T>()
-                .await
-                .context("deserialising Graph JSON after refresh");
+            // If the token cannot be refreshed it is no good any more: forget
+            // it so the next `ensure_authed` borrows a new one or starts the
+            // device flow.
+            if let Err(e) = self.refresh_once().await {
+                *self.token.lock().await = None;
+                return Err(e.context(GraphHttpError {
+                    status: reqwest::StatusCode::UNAUTHORIZED,
+                    url,
+                    body: String::new(),
+                    retry_after: None,
+                }));
+            }
+            resp = self.authenticated_get(&url).await?;
         }
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            bail!("Graph GET {url} -> {status}: {body}");
-        }
-
+        let resp = ensure_success(resp, &url).await?;
         resp.json::<T>().await.context("deserialising Graph JSON")
     }
 
@@ -193,11 +386,11 @@ impl GraphClient {
         let start_url = if delta_link_file.exists() {
             tokio::fs::read_to_string(delta_link_file)
                 .await
-                .unwrap_or_else(|_| absolute_url(initial_path))
+                .unwrap_or_else(|_| self.absolute_url(initial_path))
                 .trim()
                 .to_owned()
         } else {
-            absolute_url(initial_path)
+            self.absolute_url(initial_path)
         };
 
         let mut items: Vec<T> = Vec::new();
@@ -210,12 +403,10 @@ impl GraphClient {
                 .await
                 .with_context(|| format!("delta fetch {url}"))?;
 
-            if let Some(arr) = page.get("value").and_then(|v| v.as_array()) {
-                for item in arr {
-                    match serde_json::from_value::<T>(item.clone()) {
-                        Ok(t) => items.push(t),
-                        Err(e) => warn!("skipping delta item, deserialise error: {e}"),
-                    }
+            for item in page_values(&page, &url)? {
+                match serde_json::from_value::<T>(item.clone()) {
+                    Ok(t) => items.push(t),
+                    Err(e) => warn!("skipping delta item, deserialise error: {e}"),
                 }
             }
 
@@ -245,7 +436,7 @@ impl GraphClient {
     /// call rather than incremental changes (e.g. `calendarView`).
     pub async fn get_paged<T: DeserializeOwned>(&self, initial_path: &str) -> Result<Vec<T>> {
         let mut items: Vec<T> = Vec::new();
-        let mut next_url: Option<String> = Some(absolute_url(initial_path));
+        let mut next_url: Option<String> = Some(self.absolute_url(initial_path));
 
         while let Some(url) = next_url.take() {
             let page: serde_json::Value = self
@@ -253,12 +444,10 @@ impl GraphClient {
                 .await
                 .with_context(|| format!("paged fetch {url}"))?;
 
-            if let Some(arr) = page.get("value").and_then(|v| v.as_array()) {
-                for item in arr {
-                    match serde_json::from_value::<T>(item.clone()) {
-                        Ok(t) => items.push(t),
-                        Err(e) => warn!("skipping paged item, deserialise error: {e}"),
-                    }
+            for item in page_values(&page, &url)? {
+                match serde_json::from_value::<T>(item.clone()) {
+                    Ok(t) => items.push(t),
+                    Err(e) => warn!("skipping paged item, deserialise error: {e}"),
                 }
             }
 
@@ -306,7 +495,7 @@ impl GraphClient {
     }
 
     async fn do_refresh(&self, refresh_token: &str) -> Result<TokenState> {
-        let url = format!("{LOGIN_BASE}/{}/oauth2/v2.0/token", self.tenant);
+        let url = format!("{}/{}/oauth2/v2.0/token", self.opts.login_base, self.tenant);
         let params = [
             ("client_id", self.client_id.as_str()),
             ("grant_type", "refresh_token"),
@@ -343,7 +532,7 @@ impl GraphClient {
     }
 
     async fn start_device_flow(&self) -> Result<DeviceFlowPrompt> {
-        let url = format!("{LOGIN_BASE}/{}/oauth2/v2.0/devicecode", self.tenant);
+        let url = format!("{}/{}/oauth2/v2.0/devicecode", self.opts.login_base, self.tenant);
         let params = [("client_id", self.client_id.as_str()), ("scope", SCOPES)];
 
         let dc: DeviceCodeResponse = self
@@ -364,21 +553,26 @@ impl GraphClient {
             expires_at,
         };
 
-        *self.device_flow_active.lock().await = true;
+        *self.pending_prompt.lock().await = Some(prompt.clone());
 
         // Spawn background poll task.
         let client = self.clone();
         let device_code = dc.device_code.clone();
-        let poll_interval = dc.interval.max(5);
+        let poll_interval = std::time::Duration::from_secs(dc.interval).max(self.opts.min_device_poll);
         tokio::spawn(async move {
-            client.poll_device_code(&device_code, poll_interval).await;
+            client.poll_device_code(&device_code, poll_interval, expires_at).await;
         });
 
         Ok(prompt)
     }
 
-    async fn poll_device_code(&self, device_code: &str, interval_secs: u64) {
-        let url = format!("{LOGIN_BASE}/{}/oauth2/v2.0/token", self.tenant);
+    async fn poll_device_code(
+        &self,
+        device_code: &str,
+        interval: std::time::Duration,
+        deadline: DateTime<Utc>,
+    ) {
+        let url = format!("{}/{}/oauth2/v2.0/token", self.opts.login_base, self.tenant);
         let params = [
             ("client_id", self.client_id.as_str()),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -386,7 +580,11 @@ impl GraphClient {
         ];
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+            tokio::time::sleep(interval).await;
+            if Utc::now() > deadline {
+                warn!("device flow expired before sign-in completed");
+                break;
+            }
 
             let resp: TokenResponse = match self
                 .http
@@ -394,8 +592,9 @@ impl GraphClient {
                 .form(&params)
                 .send()
                 .await
-                .and_then(|r| r.error_for_status())
             {
+                // Azure answers "still pending" / "expired" with HTTP 400 and a
+                // JSON `error` body, so the body (not the status) decides.
                 Ok(r) => match r.json().await {
                     Ok(v) => v,
                     Err(e) => {
@@ -438,6 +637,8 @@ impl GraphClient {
                 break;
             }
         }
+        // The token (on success) is already stored: clear the prompt only now.
+        *self.pending_prompt.lock().await = None;
         *self.device_flow_active.lock().await = false;
     }
 }
@@ -534,10 +735,67 @@ fn persist_token(path: &Path, tok: &TokenState) -> Result<()> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn absolute_url(path_or_url: &str) -> String {
-    if path_or_url.starts_with("http") {
-        path_or_url.to_owned()
-    } else {
-        format!("{GRAPH_BASE}{path_or_url}")
+/// Pass a successful response through; turn anything else into a typed
+/// `GraphHttpError` carrying the server's `Retry-After`.
+async fn ensure_success(resp: reqwest::Response, url: &str) -> Result<reqwest::Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| parse_retry_after(v, Utc::now()));
+    let body = resp.text().await.unwrap_or_default();
+    Err(GraphHttpError { status, url: url.to_owned(), body, retry_after }.into())
+}
+
+/// The `value` array of a collection page. A page without one (including a
+/// 200 whose body is an error object) is an error, never an empty page.
+fn page_values<'a>(page: &'a serde_json::Value, url: &str) -> Result<&'a Vec<serde_json::Value>> {
+    page.get("value")
+        .and_then(|v| v.as_array())
+        .with_context(|| format!("Graph page has no `value` array: {url}"))
+}
+
+impl GraphClient {
+    fn absolute_url(&self, path_or_url: &str) -> String {
+        if path_or_url.starts_with("http") {
+            path_or_url.to_owned()
+        } else {
+            format!("{}{path_or_url}", self.opts.graph_base)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Contract §9 (least privilege): the daemon only ever reads from Graph.
+    /// The only non-GET requests in this file are the OAuth token / device-code
+    /// POSTs; nothing here may PUT, PATCH or DELETE, and every `.post(` must be
+    /// aimed at an `oauth2/v2.0` endpoint.
+    #[test]
+    fn graph_client_only_issues_get_requests_to_graph_and_posts_only_to_oauth() {
+        let src = include_str!("graph_client.rs");
+        let code = src.split("#[cfg(test)]").next().expect("source before tests");
+        for verb in [".put(", ".patch(", ".delete(", ".request("] {
+            assert!(!code.contains(verb), "graph_client.rs must not use {verb}");
+        }
+        let lines: Vec<&str> = code.lines().collect();
+        let mut posts = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains(".post(") {
+                posts += 1;
+                let context = lines[i.saturating_sub(20)..i].join("\n");
+                assert!(
+                    context.contains("oauth2/v2.0"),
+                    "POST at line {} is not aimed at an OAuth endpoint",
+                    i + 1
+                );
+            }
+        }
+        assert!(posts >= 1, "expected the OAuth POSTs to be found");
+        assert!(code.contains(".get(url)"), "Graph reads must use GET");
     }
 }

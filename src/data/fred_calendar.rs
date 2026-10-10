@@ -28,17 +28,42 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
-use crate::{config::Config, data::dirty_file};
+use crate::{
+    config::Config,
+    data::{dirty_file, graph_client::DeviceFlowPrompt, work::model::SourceState},
+};
 
 // ── Snapshot types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CalendarEvent {
+    /// Graph event id. Empty for the legacy bash source.
+    #[serde(default)]
+    pub id: String,
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
     pub title: String,
     pub status: String,
     pub is_now: bool,
+    /// Link that opens the event in Outlook on the web.
+    #[serde(default)]
+    pub web_link: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    /// Teams (or other) join link.
+    #[serde(default)]
+    pub online_meeting_url: Option<String>,
+    /// Organizer's display name.
+    #[serde(default)]
+    pub organizer: Option<String>,
+    #[serde(default)]
+    pub is_cancelled: bool,
+    /// Raw Graph `responseStatus.response` ("accepted", "tentativelyAccepted", ...).
+    #[serde(default)]
+    pub response_status: String,
+    /// All-day events are never "now" and never the next meeting.
+    #[serde(default)]
+    pub is_all_day: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -59,6 +84,86 @@ pub struct CalendarSnapshot {
     /// sources / persisted frames that predate the field.
     #[serde(default)]
     pub generated_at: Option<DateTime<Utc>>,
+    /// What the user should see: never `fresh`/`empty` when the fetch failed.
+    #[serde(default)]
+    pub state: SourceState,
+    /// Last *successful* fetch (kept across stale snapshots).
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// The sign-in prompt when Graph auth is pending (same prompt as the mailbox's).
+    #[serde(default)]
+    pub auth_prompt: Option<DeviceFlowPrompt>,
+    /// When `state` is `rate_limited`: the earliest time the daemon will ask
+    /// Graph again.
+    #[serde(default)]
+    pub retry_at: Option<DateTime<Utc>>,
+}
+
+impl CalendarSnapshot {
+    /// The snapshot to publish when a fetch failed: the previous good data
+    /// (when there is any) marked `stale`, otherwise an `error` snapshot with
+    /// no events. Never `fresh`/`empty`.
+    pub fn failed(previous: Option<&CalendarSnapshot>, reason: String) -> CalendarSnapshot {
+        let has_data = previous.is_some_and(|p| p.updated_at.is_some());
+        match previous {
+            Some(prev) if has_data => CalendarSnapshot {
+                state: SourceState::Stale,
+                stale: true,
+                error: Some(reason),
+                auth_prompt: None,
+                retry_at: None,
+                ..prev.clone()
+            },
+            _ => CalendarSnapshot {
+                generated_at: Some(Utc::now()),
+                sweater: "sage".to_owned(),
+                state: SourceState::Error,
+                error: Some(reason),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// The snapshot to publish when Graph is throttling us: like `failed`
+    /// (previous good data kept, marked `stale`; never `fresh`/`empty`) but in
+    /// the `rate_limited` state with the time we will ask again.
+    pub fn rate_limited(previous: Option<&CalendarSnapshot>, reason: String, retry_at: DateTime<Utc>) -> CalendarSnapshot {
+        CalendarSnapshot {
+            state: SourceState::RateLimited,
+            retry_at: Some(retry_at),
+            ..Self::failed(previous, reason)
+        }
+    }
+
+    /// The snapshot to publish while the user must sign in: no data, the
+    /// device-flow prompt, and a plain-English reason. Carries no token.
+    pub fn unauthenticated(prompt: DeviceFlowPrompt) -> CalendarSnapshot {
+        CalendarSnapshot {
+            generated_at: Some(Utc::now()),
+            sweater: "sage".to_owned(),
+            state: SourceState::Unauthenticated,
+            error: Some("Sign in to Microsoft 365 to see your calendar".to_owned()),
+            auth_prompt: Some(prompt),
+            ..Default::default()
+        }
+    }
+
+    /// Fill `state`/`updated_at` on a snapshot from the legacy bash source.
+    fn with_legacy_state(mut self) -> CalendarSnapshot {
+        self.state = if self.stale {
+            SourceState::Stale
+        } else if self.error.is_some() {
+            SourceState::Error
+        } else if self.events.is_empty() {
+            SourceState::Empty
+        } else {
+            SourceState::Fresh
+        };
+        if !matches!(self.state, SourceState::Error) {
+            self.updated_at = self.updated_at.or(self.generated_at);
+        }
+        self
+    }
 }
 
 // ── Source ──────────────────────────────────────────────────────────────────
@@ -83,14 +188,15 @@ impl FredCalendarSource {
                 match source.fetch().await {
                     Ok(snap) => {
                         debug!(sweater = %snap.sweater, events = snap.events.len(), "calendar refreshed");
-                        let _ = tx.send(Some(snap));
+                        let _ = tx.send(Some(snap.with_legacy_state()));
                     }
                     Err(e) => {
                         warn!("calendar fetch failed: {e:#}");
-                        let mut snap = tx.borrow().clone().unwrap_or_default();
-                        snap.stale = true;
-                        snap.error = Some(e.to_string());
-                        let _ = tx.send(Some(snap));
+                        let previous = tx.borrow().clone();
+                        let _ = tx.send(Some(CalendarSnapshot::failed(
+                            previous.as_ref(),
+                            e.to_string(),
+                        )));
                     }
                 }
 

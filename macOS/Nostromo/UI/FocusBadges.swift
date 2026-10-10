@@ -101,7 +101,9 @@ enum BadgeProviders {
         if calendar.error != nil || calendar.stale {
             return ("Calendar unavailable", "calendar unavailable", false)
         }
-        let live = calendar.events.filter { !["declined", "cancelled"].contains($0.status.lowercased()) }
+        // Same rule as the Today pane: cancelled, declined and all-day events
+        // are never "now" and never the next meeting.
+        let live = calendar.events.filter { !["declined", "cancelled"].contains($0.status.lowercased()) && !$0.isAllDay }
         if let current = live.first(where: { e in
             guard let s = e.start, let end = e.end else { return false }
             return s <= now && now < end
