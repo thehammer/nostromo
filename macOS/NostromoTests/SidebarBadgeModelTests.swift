@@ -192,3 +192,49 @@ final class SidebarBadgeModelTests: XCTestCase {
         wait(for: [settle], timeout: 5)
     }
 }
+
+// MARK: - PerriQueueHealth: the signals that keep a stale/loading queue from showing as a fresh count
+
+final class PerriQueueHealthTests: XCTestCase {
+
+    func testAFreshStartIsLoadingNotStale() {
+        let health = PerriQueueHealth()
+        XCTAssertTrue(health.loading)
+        XCTAssertFalse(health.stale)
+    }
+
+    func testAFrameClearsLoadingAndStale() {
+        var health = PerriQueueHealth()
+        health.frameArrived()
+        XCTAssertFalse(health.loading)
+        XCTAssertFalse(health.stale)
+    }
+
+    func testADroppedConnectionMakesTheHeldQueueStale() {
+        var health = PerriQueueHealth()
+        health.frameArrived()
+        health.connectionChanged(false)
+        XCTAssertTrue(health.stale, "the queue from a dropped connection must not look fresh")
+        XCTAssertFalse(health.loading)
+    }
+
+    func testAReconnectIsLoadingUntilAFrameArrives() {
+        var health = PerriQueueHealth()
+        health.frameArrived()
+        health.connectionChanged(false)
+        health.connectionChanged(true)
+        XCTAssertTrue(health.loading, "a new connection has not delivered a queue yet")
+        XCTAssertFalse(health.stale)
+        health.frameArrived()
+        XCTAssertFalse(health.loading)
+    }
+
+    /// End to end through the provider: the exact inputs AppStore now publishes.
+    func testAStaleOrLoadingQueueNeverProducesACountOnTheBadge() {
+        var health = PerriQueueHealth()
+        health.frameArrived()
+        health.connectionChanged(false)
+        let badge = BadgeProviders.perri(queueCount: 7, stale: health.stale, error: nil, loading: health.loading)
+        XCTAssertFalse(String(describing: badge).contains("7"), "a stale queue must not show its old count: \(badge)")
+    }
+}

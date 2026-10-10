@@ -59,3 +59,29 @@ struct SidebarBadgeModel {
         Publishers.MergeMany(sources).debounce(for: interval, scheduler: scheduler).eraseToAnyPublisher()
     }
 }
+
+/// Whether the Perri queue the Mac holds can be trusted for the sidebar badge.
+///
+/// The daemon's `perri_state` frame carries no stale/error flag, so the honest signals are the
+/// connection itself and whether a frame has arrived since it came up: a dropped connection
+/// leaves the old queue in memory (stale: never show its count as if fresh), and a fresh
+/// connection has not delivered a queue yet (loading). A `perri_state` frame clears both.
+struct PerriQueueHealth: Equatable {
+    private(set) var stale = false
+    private(set) var loading = true
+
+    mutating func connectionChanged(_ connected: Bool) {
+        if connected {
+            stale = false
+            loading = true
+        } else {
+            stale = true
+            loading = false
+        }
+    }
+
+    mutating func frameArrived() {
+        stale = false
+        loading = false
+    }
+}
