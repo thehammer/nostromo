@@ -430,3 +430,120 @@ tap. An unreachable attempt does not use up the code.
    everything, because the lost-phone moment may happen at work. If you'd
    rather keep device administration off the employer's machine, Kobe gets
    a read-only list and pairing moves to Sendai or the terminal.
+
+---
+
+## Design-loop notes for Ada
+
+**From:** Archie, design loop turn 1 (2026-10-10).
+**Plans:** `docs/plans/backplane/W9-ws-transport.md` (daemon and terminal),
+`W10-satellite-uplink.md` (relay from a satellite Mac),
+`W11-ios-ws-client.md` (iPhone/iPad), `W15-mac-device-admin.md` (new: Mac
+app). The sequencing memo marks Q1 answered.
+
+Every one of the six ambitious bets is planned as written. Nothing below
+plans less than an acceptance criterion without asking you first. Items
+D1–D6 need your sign-off or your copy before W11 and W15 are dispatched.
+The rest is for information.
+
+### The flagged criteria
+
+| AC | Decision | Where |
+|---|---|---|
+| AC12, AC24 (pair and manage from Kobe) | **Planned as written.** The Mac app sends pair/list/revoke/scope to its local daemon. On a satellite, that daemon relays them up the uplink it already dials out on, and answers come back the same way. Nothing connects toward Kobe. The primary, not Kobe, holds how much each Mac may do (`full`, `read-only` or `off`), so your open question 2 becomes a setting, not a redesign. | W9 (admin verbs), W10 (relay and enforcement), W15 (UI) |
+| AC13 (Mac window updates on its own) | **Planned.** The pairing is owned by the window's connection, and the outcome is pushed to it. | W9, W10, W15 |
+| AC14 (`device pair` stays running) | **Planned as written,** including exit codes and Ctrl-C invalidating the code. | W9 |
+| AC35 (live mail-and-todos change) | **Planned as written.** A connected device's permission is re-checked the moment it changes. Off removes content already on screen; on refills it without a reconnect. The daemon side completes in under 1 s. | W9, W11, W15 |
+| AC17 (lockout after five wrong attempts) | **Planned,** with the clarification in D5. | W9, W15 |
+| AC27 (wipe on revoke) | **Planned.** Note the coupling: AC22 needs last-known content to survive a relaunch, so the phone now keeps an encrypted on-disk copy (readable only while the phone is unlocked). A revoke deletes the credential, then that copy, then shows the screen. | W11 |
+| AC6 (system Camera opens the app) | **Planned.** The QR holds a `nostromo://pair?…` link the app registers. iOS's Camera already hands such links to the app that owns them (authenticator apps work this way with `otpauth://`). It needs no web domain. W11 lists an on-device check because the simulator cannot prove it. | W11 |
+| AC9 (name dedup) | **Planned as written** ("iPad", "iPad 2", …). Revoked names don't block reuse. | W9 |
+| AC31 (un-pair from the device) | **Planned as written.** If the server doesn't answer within 5 s, the phone forgets locally and shows your message. | W9, W11 |
+
+### Needs your sign-off or copy
+
+**D1. Local Network permission (AC2, and "no permission prompts other
+than the camera").** *Evidence:* Apple TN3179, "Understanding local network
+privacy". It says: "A local network is an IP network associated with a
+broadcast-capable network interface. Such interfaces include Wi-Fi and
+Ethernet, but not cellular (WWAN) or VPN." It also says an outgoing TCP
+connection to a local network address "requires local network access", in
+checks that "apply to all networking APIs … `URLSession`". So, when the
+phone is on home Wi-Fi and the server's address is on that **same Wi-Fi
+subnet**, iOS will show its Local Network alert at the first connection.
+If the operator denies it, the connection fails. Nothing in the app can
+avoid that. Over WireGuard, on cellular, or when the server sits on a
+different routed subnet (a separate VLAN on the UDM Pro), no alert appears
+and AC2 holds.
+*Proposal:* (a) AC2 reads "…with Local Network permission denied, when the
+server is reached over the VPN or from another subnet." (b) The "no
+permission prompts other than the camera" line gains "and, on the home
+Wi-Fi only, iOS's own Local Network question when the server shares that
+network". (c) A fifth failure state, distinct from "unreachable", for
+"Local Network access is off and the server is on this Wi-Fi". It needs
+your sentence; mine for reference: "Nostromo needs Local Network access to
+reach 10.0.0.5 on this Wi-Fi. Turn it on in Settings > Privacy & Security >
+Local Network." (d) An operator note: putting Tokyo on its own VLAN removes
+the alert entirely. That is the operator's choice, not a product
+requirement.
+
+**D2. AC3's three actions on the very first in-app scan.** The first time
+**Scan Code** is used, iOS shows its camera-permission alert, a tap the app
+cannot suppress (`AVCaptureDevice` requires the grant before capture).
+*Proposal:* AC3 counts operator actions in the app, excluding iOS's
+one-time permission alert. The system-Camera path in AC6 already has
+camera permission and never shows it.
+
+**D3. A pairing lives only as long as the window or command that shows its
+code.** Closing the Pair window counts as Cancel. If that Mac loses its
+connection to the server while the window is up (VPN drops, laptop lid
+closes), the code stops working at once rather than staying redeemable with
+nobody watching. That is safer, and it keeps AC13's promise that the
+result appears where pairing started. It needs one more message in the
+window and the terminal, with **New Code**; mine for reference: "Lost the
+connection to your Nostromo server, so this code no longer works."
+
+**D4. The confirmation step comes after a check with the server.** AC7
+pre-fills a name given on the server side, and the confirmation step
+states the device's scope. Both are known only to the server. So after a
+scan or typed code, the device asks the server about the code first, and
+then shows the confirmation. As a result, "expired", "wrong" and "can't
+reach" appear *before* the confirmation screen rather than after **Pair**.
+A wrong code at that check counts toward the AC17 lockout. Behaviour is
+otherwise unchanged. Please confirm the order.
+
+**D5. AC17 when two codes are open at once.** A wrong code can't be pinned
+on one pairing, so a wrong attempt counts against every pairing open at
+that moment. With one pairing open (the normal case) this is exactly
+AC17. With two open (Sendai's window and a terminal at the same time),
+five wrong attempts lock out both. Information only, unless you object.
+
+**D6. A pairing link opened on a phone that is already paired.** AC6 lets
+any pairing QR open the app at the confirmation step. On an already-paired
+phone, I propose the confirmation adds one line: "This replaces this
+iPhone's current pairing." **Pair** then re-pairs. The old entry stays in
+the list until revoked or un-paired; the alternative is to revoke it
+automatically. Your call and your copy.
+
+### For information
+
+- **Open question 2 (Kobe).** Both answers are buildable without changing
+  the plans. The primary stores each Mac's device-admin level, set with
+  `nostromo device admin kobe full|read-only|off` on the server. If the
+  operator chooses "read-only", W15 needs one line of copy for the disabled
+  controls on Kobe, and one for **Pair a Device…** when it is not allowed
+  there. The technical consequence for the operator to weigh: with `full`,
+  anything that controls Kobe can pair a device that reads mail and todos.
+- **Open question 1 (default on).** Both answers are a one-line default in
+  W9/W15. Nothing else changes, as you said.
+- **AC37.** To keep it, the terminal no longer has a command that prints a
+  credential. Satellite Macs also enrol with a code (`nostromo device pair
+  --satellite kobe` on the server, `nostromo uplink pair` on the Mac).
+- **AC22 regression guard.** Only an explicit "you are not paired" answer
+  from the server moves a device to the pairing screen. W11 tests every
+  other failure (timeout, refused, network down, server error) against
+  that rule.
+- **Technical criteria added:** unauthenticated connection attempts are
+  rate-limited per address. Codes live only in the server's memory and are
+  never written to disk. The credential is stored as a hash on the server
+  and only in the device's Keychain on the device.
