@@ -24,7 +24,6 @@
 //! not redacted) — it is resolved here and held only on [`JiraProvider`],
 //! behind a `Debug` impl that redacts it.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -32,6 +31,7 @@ use serde_json::Value;
 
 use super::{Ticket, TicketComment, TicketProvider};
 use crate::config::Config;
+use crate::data::work::credentials::read_env_file;
 use crate::ipc::protocol::{MdBlock, MdSpan};
 
 /// Jira Cloud REST v3's issue-fetch base path. Production base URL is
@@ -135,82 +135,6 @@ fn unconfigured_message(credentials_path: &Path) -> String {
          that file, or set jira_site/jira_email in ~/.config/nostromo/config.toml.",
         credentials_path.display()
     )
-}
-
-/// Expand `${NAME}` references in `value`, the way the shell that normally
-/// sources this file would: from variables defined earlier in the same file
-/// (`seen`), then from the process environment, else empty.
-///
-/// Only the braced form is expanded — a bare `$` (an API token may legitimately
-/// contain one) is left alone. The shared `~/.claude/credentials/.env` writes
-/// `ATLASSIAN_USER_EMAIL=${ATLASSIAN_EMAIL}`; taking that literally made the
-/// daemon log in to Jira as the string `${ATLASSIAN_EMAIL}`, which Jira answers
-/// as an anonymous request (404), surfaced as `unknown_ticket` for every real
-/// key. An unresolvable reference expands to empty, so `resolve_credentials`
-/// reports the provider as unconfigured instead of sending a bogus login.
-fn expand_braced_refs(value: &str, seen: &HashMap<String, String>) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        match after.find('}') {
-            Some(end) => {
-                let name = &after[..end];
-                let resolved = seen
-                    .get(name)
-                    .cloned()
-                    .or_else(|| std::env::var(name).ok())
-                    .unwrap_or_default();
-                out.push_str(&resolved);
-                rest = &after[end + 1..];
-            }
-            None => {
-                // Unterminated `${` — not a reference; keep it verbatim.
-                out.push_str(&rest[start..]);
-                rest = "";
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Parse `KEY=VALUE` lines from a `.env`-style file. Missing/unreadable file
-/// returns an empty map rather than an error — the caller (`resolve_credentials`)
-/// treats "no file" and "file present but incomplete" identically.
-fn read_env_file(path: &Path) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return map;
-    };
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let k = k.trim().to_string();
-        let mut v = v.trim().to_string();
-        // Shell semantics: single quotes are literal; double quotes and bare
-        // values expand `${NAME}` references.
-        let mut expand = true;
-        if v.len() >= 2 {
-            if v.starts_with('\'') && v.ends_with('\'') {
-                v = v[1..v.len() - 1].to_string();
-                expand = false;
-            } else if v.starts_with('"') && v.ends_with('"') {
-                v = v[1..v.len() - 1].to_string();
-            }
-        }
-        if expand {
-            v = expand_braced_refs(&v, &map);
-        }
-        map.insert(k, v);
-    }
-    map
 }
 
 // ── provider ─────────────────────────────────────────────────────────────────

@@ -1,5 +1,11 @@
-import AppKit
+import Foundation
 
-// Scaffold placeholder (FND-1). Filled by T4 (teri-fred-t4-picks); it compiles today so the
-// Xcode project never needs another edit (design contract §10.1).
-final class TeriPicksTab: NSView {}
+/// The Picks tab. Picks are Teri's own selection rather than a work source, so
+/// there is no list yet: the surface shows "Coming soon" until picks exist.
+enum TeriPicksTab {
+    static let config = TeriTabConfig(
+        tab: .picks,
+        sourceName: "Picks",
+        list: nil,
+        emptyMessage: "Teri has not picked anything yet.")
+}

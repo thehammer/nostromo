@@ -731,6 +731,7 @@ async fn teri_list_todos_returns_items() {
                 priority: 1,
                 due_date: Some("2026-05-14".to_string()),
                 jira_key: Some("CORE-123".to_string()),
+                body: None,
             },
             TeriTodo {
                 id: 2,
@@ -739,6 +740,7 @@ async fn teri_list_todos_returns_items() {
                 priority: 2,
                 due_date: None,
                 jira_key: None,
+                body: None,
             },
         ],
         stale: false,

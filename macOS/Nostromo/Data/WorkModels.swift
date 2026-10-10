@@ -121,6 +121,10 @@ struct WorkItem: Decodable, Hashable, Identifiable {
     let linked: [String]
     let searchText: String
     let sent: [SentMarker]
+    /// Case- and diacritic-folded `title` + `searchText`, built once at decode
+    /// time (off the main thread) so a keystroke filter is a cheap byte search.
+    /// Not on the wire.
+    let searchIndex: String
 
     enum CodingKeys: String, CodingKey {
         case id, source, kind, title, repo, project, status, priority, severity, environment
@@ -153,6 +157,7 @@ struct WorkItem: Decodable, Hashable, Identifiable {
         linked         = try c.decodeIfPresent([String].self, forKey: .linked) ?? []
         searchText     = try c.decodeIfPresent(String.self, forKey: .searchText) ?? ""
         sent           = try c.decodeIfPresent([SentMarker].self, forKey: .sent) ?? []
+        searchIndex    = WorkQuery.searchIndex(title: title, searchText: searchText)
     }
 }
 

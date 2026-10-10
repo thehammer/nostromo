@@ -1,5 +1,11 @@
-import AppKit
+import Foundation
 
-// Scaffold placeholder (FND-1). Filled by T3 (teri-fred-t3-sentry); it compiles today so the
-// Xcode project never needs another edit (design contract §10.1).
-final class TeriSentryTab: NSView {}
+/// The Sentry tab. Until its slice lands the source reports "Coming soon" and the
+/// surface shows that state; this minimal config lists whatever arrives.
+enum TeriSentryTab {
+    static let config = TeriTabConfig(
+        tab: .sentry,
+        sourceName: "Sentry",
+        list: .generic(sourceLabel: "Sentry"),
+        emptyMessage: "No unresolved Sentry issues.")
+}
