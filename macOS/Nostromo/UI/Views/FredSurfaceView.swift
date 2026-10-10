@@ -25,11 +25,22 @@ struct FredSurfaceModel {
 /// takes the clock and zone it needs, so the rules are testable without a view.
 enum FredPresentation {
 
-    /// States whose data (and counts) the user can trust enough to show.
-    /// `stale` and `rateLimited` keep the last good data under a banner.
-    static func showsData(_ state: SourceState?) -> Bool {
+    /// Whether the snapshot's data (and counts) can be trusted enough to show.
+    /// `stale` and `rateLimited` keep the last good data under a banner, but
+    /// only when there is some: a throttled fetch that never read anything has
+    /// no zero to show ("0 unread", "No meetings today").
+    static func showsData(_ mailbox: MailboxSnapshot) -> Bool {
+        showsData(mailbox.state, hasData: mailbox.updatedAt != nil || mailbox.unreadCount > 0 || !mailbox.items.isEmpty)
+    }
+
+    static func showsData(_ calendar: CalendarSnapshot) -> Bool {
+        showsData(calendar.state, hasData: calendar.updatedAt != nil || !calendar.events.isEmpty)
+    }
+
+    private static func showsData(_ state: SourceState, hasData: Bool) -> Bool {
         switch state {
-        case .fresh?, .empty?, .stale?, .rateLimited?: return true
+        case .fresh, .empty: return true
+        case .stale, .rateLimited: return hasData
         default: return false
         }
     }
@@ -39,7 +50,7 @@ enum FredPresentation {
     /// Unread first, then newest first. The daemon already sorts this way; the
     /// view does not rely on it.
     static func inboxItems(_ mailbox: MailboxSnapshot?) -> [MailboxItem] {
-        guard let mailbox, showsData(mailbox.state) else { return [] }
+        guard let mailbox, showsData(mailbox) else { return [] }
         return mailbox.items.sorted { a, b in
             if a.isRead != b.isRead { return !a.isRead }
             return (a.receivedAt ?? .distantPast) > (b.receivedAt ?? .distantPast)
@@ -47,7 +58,7 @@ enum FredPresentation {
     }
 
     static func inboxHeader(_ mailbox: MailboxSnapshot?) -> String {
-        guard let mailbox, showsData(mailbox.state) else { return "Inbox" }
+        guard let mailbox, showsData(mailbox) else { return "Inbox" }
         return "Inbox · \(mailbox.unreadCount) unread"
     }
 
@@ -94,7 +105,7 @@ enum FredPresentation {
 
     /// Today's events in time order (cancelled and declined ones included).
     static func todayEvents(_ calendar: CalendarSnapshot?) -> [CalendarEvent] {
-        guard let calendar, showsData(calendar.state) else { return [] }
+        guard let calendar, showsData(calendar) else { return [] }
         return calendar.events.sorted {
             ($0.start ?? .distantPast, $0.end ?? .distantPast) < ($1.start ?? .distantPast, $1.end ?? .distantPast)
         }
@@ -120,7 +131,7 @@ enum FredPresentation {
     /// "Next: Eng sync in 12 min" / "No more meetings today" / "No meetings
     /// today"; `nil` when there is no trustworthy data to count down from.
     static func countdown(_ calendar: CalendarSnapshot?, now: Date) -> String? {
-        guard let calendar, showsData(calendar.state) else { return nil }
+        guard let calendar, showsData(calendar) else { return nil }
         let events = todayEvents(calendar)
         if events.isEmpty { return "No meetings today" }
         let upcoming = events.filter { isLive($0) && ($0.start ?? .distantPast) > now }
@@ -320,9 +331,10 @@ final class FredSurfaceView: NSView {
             state: mailbox?.state,
             updatedAt: mailbox?.updatedAt,
             reason: mailbox?.error,
+            retryAt: mailbox?.retryAt,
             prompt: mailbox?.state == .unauthenticated ? mailbox?.authPrompt : nil,
             hasRows: !items.isEmpty,
-            showsEmptyMessage: mailbox.map { FredPresentation.showsData($0.state) && items.isEmpty } ?? false,
+            showsEmptyMessage: mailbox.map { FredPresentation.showsData($0) && items.isEmpty } ?? false,
             now: now, zone: timeZone)
 
         // Today
@@ -335,9 +347,10 @@ final class FredSurfaceView: NSView {
             state: calendar?.state,
             updatedAt: calendar?.updatedAt,
             reason: calendar?.error,
+            retryAt: calendar?.retryAt,
             prompt: todayPrompt,
             hasRows: !events.isEmpty,
-            showsEmptyMessage: calendar.map { FredPresentation.showsData($0.state) && events.isEmpty } ?? false,
+            showsEmptyMessage: calendar.map { FredPresentation.showsData($0) && events.isEmpty } ?? false,
             now: now, zone: timeZone)
     }
 }
@@ -447,7 +460,7 @@ private final class FredPane: NSView {
     }
 
     // swiftlint:disable:next function_parameter_count
-    func render(header: String, trailing: String?, state: SourceState?, updatedAt: Date?, reason: String?,
+    func render(header: String, trailing: String?, state: SourceState?, updatedAt: Date?, reason: String?, retryAt: Date?,
                 prompt: DeviceFlowPrompt?, hasRows: Bool, showsEmptyMessage: Bool, now: Date, zone: TimeZone) {
         headerLabel.stringValue = header
         trailingLabel.stringValue = trailing ?? ""
@@ -460,7 +473,8 @@ private final class FredPane: NSView {
             signIn.isHidden = false
         } else {
             signIn.isHidden = true
-            banner.show(state: state, updatedAt: updatedAt, reason: reason, sourceName: sourceName, now: now)
+            banner.show(state: state, updatedAt: updatedAt, reason: reason, retryAt: retryAt,
+                        sourceName: sourceName, now: now)
         }
 
         emptyLabel.isHidden = !showsEmptyMessage

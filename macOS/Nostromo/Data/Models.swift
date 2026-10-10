@@ -962,6 +962,8 @@ struct MailboxSnapshot: Decodable {
     let state:        SourceState
     /// Last successful fetch.
     let updatedAt:    Date?
+    /// When `state` is `.rateLimited`: when the daemon will ask Microsoft again.
+    let retryAt:      Date?
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
@@ -972,6 +974,7 @@ struct MailboxSnapshot: Decodable {
         case authPrompt  = "auth_prompt"
         case state
         case updatedAt   = "updated_at"
+        case retryAt     = "retry_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -983,6 +986,7 @@ struct MailboxSnapshot: Decodable {
         error       = try c.decodeIfPresent(String.self,            forKey: .error)
         authPrompt  = try c.decodeIfPresent(DeviceFlowPrompt.self,  forKey: .authPrompt)
         updatedAt   = try c.decodeIfPresent(Date.self,              forKey: .updatedAt)
+        retryAt     = try c.decodeIfPresent(Date.self,              forKey: .retryAt)
         if let wire = try c.decodeIfPresent(SourceState.self, forKey: .state) {
             state = wire
         } else if authPrompt != nil {
@@ -1075,6 +1079,8 @@ struct CalendarSnapshot: Decodable {
     let updatedAt:  Date?
     /// The sign-in prompt while Microsoft sign-in is pending.
     let authPrompt: DeviceFlowPrompt?
+    /// When `state` is `.rateLimited`: when the daemon will ask Microsoft again.
+    let retryAt:    Date?
 
     enum CodingKeys: String, CodingKey {
         case events
@@ -1085,6 +1091,7 @@ struct CalendarSnapshot: Decodable {
         case state
         case updatedAt  = "updated_at"
         case authPrompt = "auth_prompt"
+        case retryAt    = "retry_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -1096,6 +1103,7 @@ struct CalendarSnapshot: Decodable {
         error   = try c.decodeIfPresent(String.self,          forKey: .error)
         updatedAt  = try c.decodeIfPresent(Date.self,             forKey: .updatedAt)
         authPrompt = try c.decodeIfPresent(DeviceFlowPrompt.self, forKey: .authPrompt)
+        retryAt    = try c.decodeIfPresent(Date.self,             forKey: .retryAt)
         if let wire = try c.decodeIfPresent(SourceState.self, forKey: .state) {
             state = wire
         } else if authPrompt != nil {

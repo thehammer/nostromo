@@ -93,6 +93,10 @@ pub struct CalendarSnapshot {
     /// The sign-in prompt when Graph auth is pending (same prompt as the mailbox's).
     #[serde(default)]
     pub auth_prompt: Option<DeviceFlowPrompt>,
+    /// When `state` is `rate_limited`: the earliest time the daemon will ask
+    /// Graph again.
+    #[serde(default)]
+    pub retry_at: Option<DateTime<Utc>>,
 }
 
 impl CalendarSnapshot {
@@ -107,6 +111,7 @@ impl CalendarSnapshot {
                 stale: true,
                 error: Some(reason),
                 auth_prompt: None,
+                retry_at: None,
                 ..prev.clone()
             },
             _ => CalendarSnapshot {
@@ -116,6 +121,17 @@ impl CalendarSnapshot {
                 error: Some(reason),
                 ..Default::default()
             },
+        }
+    }
+
+    /// The snapshot to publish when Graph is throttling us: like `failed`
+    /// (previous good data kept, marked `stale`; never `fresh`/`empty`) but in
+    /// the `rate_limited` state with the time we will ask again.
+    pub fn rate_limited(previous: Option<&CalendarSnapshot>, reason: String, retry_at: DateTime<Utc>) -> CalendarSnapshot {
+        CalendarSnapshot {
+            state: SourceState::RateLimited,
+            retry_at: Some(retry_at),
+            ..Self::failed(previous, reason)
         }
     }
 

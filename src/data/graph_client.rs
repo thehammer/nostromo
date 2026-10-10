@@ -74,6 +74,16 @@ pub struct GraphHttpError {
     pub status: reqwest::StatusCode,
     pub url: String,
     pub body: String,
+    /// The server's `Retry-After` (already capped), when it sent a usable one.
+    pub retry_after: Option<std::time::Duration>,
+}
+
+impl GraphHttpError {
+    /// Graph is throttling us: a 429, or a 503 that says when to come back.
+    pub fn is_throttle(&self) -> bool {
+        self.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || (self.status == reqwest::StatusCode::SERVICE_UNAVAILABLE && self.retry_after.is_some())
+    }
 }
 
 impl std::fmt::Display for GraphHttpError {
@@ -83,6 +93,72 @@ impl std::fmt::Display for GraphHttpError {
 }
 
 impl std::error::Error for GraphHttpError {}
+
+/// Longest we will ever stay quiet because of a `Retry-After` (contract §9
+/// caps backoff at 15 minutes).
+pub const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Parse an HTTP `Retry-After` value: whole seconds or an HTTP-date, measured
+/// from `now`, capped at [`MAX_RETRY_AFTER`]. A date in the past is zero.
+/// `None` when the value is neither.
+pub fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<std::time::Duration> {
+    let value = value.trim();
+    let wait = if let Ok(secs) = value.parse::<u64>() {
+        std::time::Duration::from_secs(secs)
+    } else {
+        let when = DateTime::parse_from_rfc2822(value).ok()?.with_timezone(&Utc);
+        (when - now).to_std().unwrap_or(std::time::Duration::ZERO)
+    };
+    Some(wait.min(MAX_RETRY_AFTER))
+}
+
+/// `Some(retry_after)` when `e` is Graph throttling us (429, or 503 with a
+/// `Retry-After`); `None` for any other failure.
+pub fn throttle_of(e: &anyhow::Error) -> Option<Option<std::time::Duration>> {
+    let http = e.downcast_ref::<GraphHttpError>()?;
+    http.is_throttle().then_some(http.retry_after)
+}
+
+/// Consecutive-throttle counter for one polling loop. Success resets it.
+/// The wait after a throttle is the server's `Retry-After` when there is one,
+/// otherwise exponential backoff: 2 s, 4 s, 8 s … capped at 15 min, plus up
+/// to 25 % jitter.
+#[derive(Debug, Default)]
+pub struct ThrottleBackoff {
+    consecutive: u32,
+}
+
+const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl ThrottleBackoff {
+    /// A fetch succeeded: the next throttle starts again at the first step.
+    pub fn succeeded(&mut self) {
+        self.consecutive = 0;
+    }
+
+    /// `e` is how a fetch failed. When it is a throttle, how long to stay
+    /// quiet; otherwise `None` (and the backoff is left alone).
+    pub fn throttled(&mut self, e: &anyhow::Error) -> Option<std::time::Duration> {
+        let retry_after = throttle_of(e)?;
+        let step = BACKOFF_BASE
+            .saturating_mul(1u32.checked_shl(self.consecutive).unwrap_or(u32::MAX))
+            .min(MAX_RETRY_AFTER);
+        self.consecutive = self.consecutive.saturating_add(1);
+        Some(match retry_after {
+            Some(wait) => wait,
+            None => (step + step.mul_f64(jitter() * 0.25)).min(MAX_RETRY_AFTER),
+        })
+    }
+}
+
+/// A cheap value in `[0, 1)`; spreads out retries, not security sensitive.
+fn jitter() -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    f64::from(nanos % 1000) / 1000.0
+}
 
 /// A short plain-English reason for a failed Graph fetch, safe to show in the
 /// UI and MCP results: no URLs, response bodies or tokens.
@@ -269,35 +345,31 @@ impl GraphClient {
     }
 
     /// Fetch a JSON resource from Graph (full URL or path under GRAPH_BASE).
+    ///
+    /// A 401 gets one refresh-and-retry. The first answer and the retried one
+    /// go through the same status check, so a failed retry can never be read
+    /// as data.
     pub async fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
         let url = self.absolute_url(url);
-        let resp = self.authenticated_get(&url).await?;
+        let mut resp = self.authenticated_get(&url).await?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            // Attempt a single refresh-and-retry. If the token cannot be
-            // refreshed it is no good any more: forget it so the next
-            // `ensure_authed` borrows a new one or starts the device flow.
+            // If the token cannot be refreshed it is no good any more: forget
+            // it so the next `ensure_authed` borrows a new one or starts the
+            // device flow.
             if let Err(e) = self.refresh_once().await {
                 *self.token.lock().await = None;
                 return Err(e.context(GraphHttpError {
                     status: reqwest::StatusCode::UNAUTHORIZED,
                     url,
                     body: String::new(),
+                    retry_after: None,
                 }));
             }
-            let resp2 = self.authenticated_get(&url).await?;
-            return resp2
-                .json::<T>()
-                .await
-                .context("deserialising Graph JSON after refresh");
+            resp = self.authenticated_get(&url).await?;
         }
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GraphHttpError { status, url, body }.into());
-        }
-
+        let resp = ensure_success(resp, &url).await?;
         resp.json::<T>().await.context("deserialising Graph JSON")
     }
 
@@ -331,12 +403,10 @@ impl GraphClient {
                 .await
                 .with_context(|| format!("delta fetch {url}"))?;
 
-            if let Some(arr) = page.get("value").and_then(|v| v.as_array()) {
-                for item in arr {
-                    match serde_json::from_value::<T>(item.clone()) {
-                        Ok(t) => items.push(t),
-                        Err(e) => warn!("skipping delta item, deserialise error: {e}"),
-                    }
+            for item in page_values(&page, &url)? {
+                match serde_json::from_value::<T>(item.clone()) {
+                    Ok(t) => items.push(t),
+                    Err(e) => warn!("skipping delta item, deserialise error: {e}"),
                 }
             }
 
@@ -374,12 +444,10 @@ impl GraphClient {
                 .await
                 .with_context(|| format!("paged fetch {url}"))?;
 
-            if let Some(arr) = page.get("value").and_then(|v| v.as_array()) {
-                for item in arr {
-                    match serde_json::from_value::<T>(item.clone()) {
-                        Ok(t) => items.push(t),
-                        Err(e) => warn!("skipping paged item, deserialise error: {e}"),
-                    }
+            for item in page_values(&page, &url)? {
+                match serde_json::from_value::<T>(item.clone()) {
+                    Ok(t) => items.push(t),
+                    Err(e) => warn!("skipping paged item, deserialise error: {e}"),
                 }
             }
 
@@ -666,6 +734,30 @@ fn persist_token(path: &Path, tok: &TokenState) -> Result<()> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Pass a successful response through; turn anything else into a typed
+/// `GraphHttpError` carrying the server's `Retry-After`.
+async fn ensure_success(resp: reqwest::Response, url: &str) -> Result<reqwest::Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| parse_retry_after(v, Utc::now()));
+    let body = resp.text().await.unwrap_or_default();
+    Err(GraphHttpError { status, url: url.to_owned(), body, retry_after }.into())
+}
+
+/// The `value` array of a collection page. A page without one (including a
+/// 200 whose body is an error object) is an error, never an empty page.
+fn page_values<'a>(page: &'a serde_json::Value, url: &str) -> Result<&'a Vec<serde_json::Value>> {
+    page.get("value")
+        .and_then(|v| v.as_array())
+        .with_context(|| format!("Graph page has no `value` array: {url}"))
+}
 
 impl GraphClient {
     fn absolute_url(&self, path_or_url: &str) -> String {

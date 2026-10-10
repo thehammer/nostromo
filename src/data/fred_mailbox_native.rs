@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
@@ -29,7 +30,7 @@ use crate::{
         dirty_file,
         fred_calendar::CalendarSnapshot,
         fred_mailbox::{MailboxItem, MailboxSnapshot},
-        graph_client::{failure_reason, GraphClient},
+        graph_client::{failure_reason, GraphClient, ThrottleBackoff},
         work::model::SourceState,
     },
 };
@@ -192,13 +193,22 @@ impl FredMailboxNativeSource {
         // In-memory message store: id -> item.
         let mut store: HashMap<String, GraphMessage> = HashMap::new();
         let mut unread = UnreadCount::default();
+        let mut backoff = ThrottleBackoff::default();
 
         loop {
             let previous = tx.borrow().clone();
-            let next = self
-                .refresh(&graph, &delta_file, &mut store, &mut unread, previous.as_ref())
+            let (next, throttled_for) = self
+                .refresh(&graph, &delta_file, &mut store, &mut unread, &mut backoff, previous.as_ref())
                 .await;
             let _ = tx.send(Some(next));
+
+            if let Some(quiet) = throttled_for {
+                // Graph is throttling us: stay silent for the whole wait, dirty
+                // signals included, and forget the ones that piled up meanwhile.
+                tokio::time::sleep(quiet).await;
+                while dirty_rx.try_recv().is_ok() {}
+                continue;
+            }
 
             // Poll every few seconds, or immediately on dirty signal.
             tokio::select! {
@@ -211,21 +221,37 @@ impl FredMailboxNativeSource {
     }
 
     /// One poll cycle. Always yields the snapshot to publish: fresh data, the
-    /// sign-in prompt, or the previous data marked stale / an error.
+    /// sign-in prompt, or the previous data marked stale / an error / rate
+    /// limited. The second value is how long to stay silent when Graph
+    /// throttled us (never shorter than the normal poll interval).
     async fn refresh(
         &self,
         graph: &GraphClient,
         delta_file: &std::path::Path,
         store: &mut HashMap<String, GraphMessage>,
         unread: &mut UnreadCount,
+        backoff: &mut ThrottleBackoff,
         previous: Option<&MailboxSnapshot>,
-    ) -> MailboxSnapshot {
+    ) -> (MailboxSnapshot, Option<Duration>) {
+        let poll = self.timing.mailbox_poll;
+        let failure = |backoff: &mut ThrottleBackoff, what: &str, e: &anyhow::Error| {
+            let reason = failure_reason(what, e);
+            match backoff.throttled(e) {
+                Some(wait) => {
+                    let wait = wait.max(poll);
+                    let retry_at = Utc::now() + chrono::Duration::from_std(wait).unwrap_or_default();
+                    (MailboxSnapshot::rate_limited(previous, reason, retry_at), Some(wait))
+                }
+                None => (MailboxSnapshot::failed(previous, reason), None),
+            }
+        };
+
         match graph.ensure_authed().await {
-            Ok(Some(prompt)) => return MailboxSnapshot::unauthenticated(prompt),
+            Ok(Some(prompt)) => return (MailboxSnapshot::unauthenticated(prompt), None),
             Ok(None) => {}
             Err(e) => {
                 warn!("graph ensure_authed error: {e:#}");
-                return MailboxSnapshot::failed(previous, failure_reason("Mail sign-in failed", &e));
+                return failure(backoff, "Mail sign-in failed", &e);
             }
         }
 
@@ -241,28 +267,34 @@ impl FredMailboxNativeSource {
             }
             Err(e) => {
                 warn!("mailbox delta failed: {e:#}");
-                return MailboxSnapshot::failed(previous, failure_reason("Mail fetch failed", &e));
+                return failure(backoff, "Mail fetch failed", &e);
             }
         }
 
         if unread.needs_fetch(self.timing.unread_count_ttl) {
-            match graph.get_json::<GraphMailFolder>(INBOX_FOLDER_PATH).await {
-                Ok(folder) => {
-                    unread.value = Some(folder.unread_item_count.unwrap_or(0).max(0) as usize);
+            // A folder answer without `unreadItemCount` is a failure, never zero.
+            let count = graph
+                .get_json::<GraphMailFolder>(INBOX_FOLDER_PATH)
+                .await
+                .and_then(|f| {
+                    f.unread_item_count
+                        .context("inbox folder response has no unreadItemCount")
+                });
+            match count {
+                Ok(n) => {
+                    unread.value = Some(n.max(0) as usize);
                     unread.fetched_at = Some(Instant::now());
                     unread.dirty = false;
                 }
                 Err(e) => {
                     warn!("inbox unread count failed: {e:#}");
-                    return MailboxSnapshot::failed(
-                        previous,
-                        failure_reason("Mail unread count failed", &e),
-                    );
+                    return failure(backoff, "Mail unread count failed", &e);
                 }
             }
         }
 
-        build_snapshot(store, unread.value.unwrap_or(0), &self.config)
+        backoff.succeeded();
+        (build_snapshot(store, unread.value.unwrap_or(0), &self.config), None)
     }
 
     fn delta_cache_dir(&self) -> PathBuf {
@@ -429,6 +461,7 @@ fn build_snapshot(
         auth_prompt: None,
         state,
         updated_at: Some(now),
+        retry_at: None,
     }
 }
 

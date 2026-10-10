@@ -71,6 +71,10 @@ pub struct MailboxSnapshot {
     /// Last *successful* fetch (kept across stale snapshots).
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+    /// When `state` is `rate_limited`: the earliest time the daemon will ask
+    /// Graph again.
+    #[serde(default)]
+    pub retry_at: Option<DateTime<Utc>>,
 }
 
 impl MailboxSnapshot {
@@ -85,6 +89,7 @@ impl MailboxSnapshot {
                 stale: true,
                 error: Some(reason),
                 auth_prompt: None,
+                retry_at: None,
                 ..prev.clone()
             },
             _ => MailboxSnapshot {
@@ -94,6 +99,17 @@ impl MailboxSnapshot {
                 error: Some(reason),
                 ..Default::default()
             },
+        }
+    }
+
+    /// The snapshot to publish when Graph is throttling us: like `failed`
+    /// (previous good data kept, marked `stale`; never `fresh`/`empty`) but in
+    /// the `rate_limited` state with the time we will ask again.
+    pub fn rate_limited(previous: Option<&MailboxSnapshot>, reason: String, retry_at: DateTime<Utc>) -> MailboxSnapshot {
+        MailboxSnapshot {
+            state: SourceState::RateLimited,
+            retry_at: Some(retry_at),
+            ..Self::failed(previous, reason)
         }
     }
 

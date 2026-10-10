@@ -1054,4 +1054,100 @@ final class FredSurfaceViewTests: XCTestCase {
         let withPrompt = try decode(CalendarSnapshot.self, json: "{\(prompt)}")
         XCTAssertEqual(withPrompt.authPrompt?.userCode, "C", "calendar snapshots now carry their own auth prompt")
     }
+
+    // MARK: - Rate limiting: `retry_at` on the wire and in the banner
+
+    /// The app's decoder (`NostromodClient`): ISO8601 with or without fractional seconds.
+    private func appDecode<T: Decodable>(_ type: T.Type, json: String) throws -> T {
+        let frac = ISO8601DateFormatter()
+        frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let basic = ISO8601DateFormatter()
+        basic.formatOptions = [.withInternetDateTime]
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .custom { decoder in
+            let c = try decoder.singleValueContainer()
+            let str = try c.decode(String.self)
+            if let date = frac.date(from: str) ?? basic.date(from: str) { return date }
+            throw DecodingError.dataCorruptedError(in: c, debugDescription: "Cannot parse date: \(str)")
+        }
+        return try d.decode(T.self, from: Data(json.utf8))
+    }
+
+    /// `retryAt` read by name so this file compiles before the model gains the field:
+    /// a missing property reads as `nil` and the assertion (not the build) fails.
+    private func retryAt(_ snapshot: Any) -> Date? {
+        Mirror(reflecting: snapshot).children.first { $0.label == "retryAt" }?.value as? Date
+    }
+
+    private let retryInstant = Date(timeIntervalSince1970: 1_791_642_840) // 2026-10-10T14:34:00Z
+
+    func testMailboxSnapshotDecodesRetryAtWithAndWithoutFractionalSeconds() throws {
+        let basic = try appDecode(MailboxSnapshot.self, json: #"{"state": "rate_limited", "stale": true, "unread_count": 4, "retry_at": "2026-10-10T14:34:00Z"}"#)
+        XCTAssertEqual(retryAt(basic), retryInstant)
+        let frac = try appDecode(MailboxSnapshot.self, json: #"{"state": "rate_limited", "stale": true, "unread_count": 4, "retry_at": "2026-10-10T14:34:00.250Z"}"#)
+        XCTAssertEqual(try XCTUnwrap(retryAt(frac)).timeIntervalSince(retryInstant), 0.25, accuracy: 0.001)
+        let absent = try appDecode(MailboxSnapshot.self, json: #"{"state": "fresh", "unread_count": 4}"#)
+        XCTAssertNil(retryAt(absent))
+        XCTAssertEqual(basic.state, .rateLimited)
+    }
+
+    func testCalendarSnapshotDecodesRetryAtWithAndWithoutFractionalSeconds() throws {
+        let basic = try appDecode(CalendarSnapshot.self, json: #"{"state": "rate_limited", "stale": true, "events": [], "retry_at": "2026-10-10T14:34:00Z"}"#)
+        XCTAssertEqual(retryAt(basic), retryInstant)
+        let frac = try appDecode(CalendarSnapshot.self, json: #"{"state": "rate_limited", "stale": true, "events": [], "retry_at": "2026-10-10T14:34:00.250Z"}"#)
+        XCTAssertEqual(try XCTUnwrap(retryAt(frac)).timeIntervalSince(retryInstant), 0.25, accuracy: 0.001)
+        let absent = try appDecode(CalendarSnapshot.self, json: #"{"state": "fresh", "events": []}"#)
+        XCTAssertNil(retryAt(absent))
+        XCTAssertEqual(basic.state, .rateLimited)
+    }
+
+    func testRateLimitedBannerContentSaysWhenItWillRetryOnlyWhenItKnows() throws {
+        let known = SourceStateBanner.content(state: .rateLimited, updatedAt: nil, reason: nil,
+                                              retryAt: retryInstant, sourceName: "Mail", now: now)
+        XCTAssertTrue(try XCTUnwrap(known).message.contains("retrying at"), known?.message ?? "nil")
+        let unknown = SourceStateBanner.content(state: .rateLimited, updatedAt: nil, reason: nil,
+                                                retryAt: nil, sourceName: "Mail", now: now)
+        XCTAssertFalse(try XCTUnwrap(unknown).message.contains("retrying at"))
+    }
+
+    func testRateLimitedFredPanesTellTheUserWhenTheDaemonWillAskMicrosoftAgain() throws {
+        let mail = try appDecode(MailboxSnapshot.self, json: """
+            {"state": "rate_limited", "stale": true, "unread_count": 12, "items": [],
+             "error": "Mail fetch failed: Microsoft is rate limiting requests (429)",
+             "retry_at": "2026-10-10T14:34:00Z"}
+            """)
+        let cal = try appDecode(CalendarSnapshot.self, json: """
+            {"state": "rate_limited", "stale": true, "events": [], "sweater": "sage",
+             "error": "Calendar fetch failed: Microsoft is rate limiting requests (429)",
+             "retry_at": "2026-10-10T14:34:00Z"}
+            """)
+        makeView(mailbox: mail, calendar: cal)
+        for id in ["fred.inbox.banner", "fred.today.banner"] {
+            let message = try XCTUnwrap(try bannerMessage(id), "\(id) is showing")
+            XCTAssertTrue(message.contains("Rate-limited"), message)
+            XCTAssertTrue(message.contains("retrying at"), "\(id): \(message)")
+        }
+    }
+
+    /// Throttled before anything was ever fetched: the snapshot carries no data and
+    /// no `updated_at`, so the panes must not turn its zeros into "0 unread" / "No
+    /// meetings today" (the invariant: a throttled fetch is never a confident zero).
+    func testRateLimitedMailWithNothingEverFetchedNeverReadsAsZeroUnreadOrAnEmptyInbox() throws {
+        makeView(mailbox: try mailbox(state: "rate_limited", unread: 0, items: [], stale: true,
+                                      error: "Mail fetch failed: Microsoft is rate limiting requests (429)"))
+        XCTAssertEqual(try text("fred.inbox.header"), "Inbox", "no count was ever read")
+        XCTAssertFalse(isShown("fred.inbox.empty"), "a throttled inbox is not an empty inbox")
+        XCTAssertNotNil(try bannerMessage("fred.inbox.banner"), "the user is told why")
+        XCTAssertEqual(try rowCount(inboxTable), 0)
+    }
+
+    func testRateLimitedCalendarWithNothingEverFetchedNeverReadsAsNoMeetingsToday() throws {
+        makeView(calendar: try calendar(state: "rate_limited", events: [], stale: true,
+                                        error: "Calendar fetch failed: Microsoft is rate limiting requests (429)"))
+        XCTAssertFalse(isShown("fred.today.empty"), "a throttled calendar is not an empty day")
+        XCTAssertFalse(try text("fred.today.countdown").contains("No meetings"))
+        XCTAssertFalse(try text("fred.today.header").contains("No meetings"))
+        XCTAssertNotNil(try bannerMessage("fred.today.banner"))
+        XCTAssertEqual(try rowCount(todayTable), 0)
+    }
 }

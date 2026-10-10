@@ -41,8 +41,9 @@ final class SourceStateBanner: NSView {
 
     /// Present a source's state when it is not a `SourceStatus` (Fred's
     /// snapshots carry their own `state`). `nil` state means "no snapshot yet".
-    func show(state: SourceState?, updatedAt: Date?, reason: String?, sourceName: String, now: Date = Date()) {
-        apply(Self.content(state: state, updatedAt: updatedAt, reason: reason, retryAt: nil,
+    func show(state: SourceState?, updatedAt: Date?, reason: String?, retryAt: Date? = nil,
+              sourceName: String, now: Date = Date()) {
+        apply(Self.content(state: state, updatedAt: updatedAt, reason: reason, retryAt: retryAt,
                            sourceName: sourceName, now: now))
     }
 

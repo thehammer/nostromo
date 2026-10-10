@@ -20,7 +20,7 @@ use crate::{
         dirty_file,
         fred_calendar::{CalendarEvent, CalendarSnapshot, NextEvent},
         fred_mailbox_native::{shared_graph_client, FredTiming},
-        graph_client::{failure_reason, GraphClient},
+        graph_client::{failure_reason, GraphClient, ThrottleBackoff},
         work::model::SourceState,
     },
 };
@@ -140,14 +140,23 @@ impl FredCalendarNativeSource {
         tx: watch::Sender<Option<CalendarSnapshot>>,
         dirty_rx: &mut mpsc::UnboundedReceiver<()>,
     ) {
+        let mut backoff = ThrottleBackoff::default();
         loop {
             let previous = tx.borrow().clone();
-            let next = self.refresh(&graph, previous.as_ref()).await;
+            let (next, throttled_for) = self.refresh(&graph, &mut backoff, previous.as_ref()).await;
             let nothing_to_show = matches!(
                 next.state,
                 SourceState::Unauthenticated | SourceState::Error | SourceState::Loading
             );
             let _ = tx.send(Some(next));
+
+            if let Some(quiet) = throttled_for {
+                // Graph is throttling us: stay silent for the whole wait, dirty
+                // signals included, and forget the ones that piled up meanwhile.
+                tokio::time::sleep(quiet).await;
+                while dirty_rx.try_recv().is_ok() {}
+                continue;
+            }
 
             let wait = if nothing_to_show {
                 self.timing.calendar_poll.min(RETRY_WHILE_EMPTY)
@@ -164,23 +173,36 @@ impl FredCalendarNativeSource {
     }
 
     /// One poll cycle. Always yields the snapshot to publish: fresh events,
-    /// the sign-in prompt, or the previous events marked stale / an error.
+    /// the sign-in prompt, or the previous events marked stale / an error /
+    /// rate limited. The second value is how long to stay silent when Graph
+    /// throttled us (never shorter than the normal poll interval).
     async fn refresh(
         &self,
         graph: &GraphClient,
+        backoff: &mut ThrottleBackoff,
         previous: Option<&CalendarSnapshot>,
-    ) -> CalendarSnapshot {
+    ) -> (CalendarSnapshot, Option<Duration>) {
+        let poll = self.timing.calendar_poll;
+        let failure = |backoff: &mut ThrottleBackoff, what: &str, e: &anyhow::Error| {
+            let reason = failure_reason(what, e);
+            match backoff.throttled(e) {
+                Some(wait) => {
+                    let wait = wait.max(poll);
+                    let retry_at = Utc::now() + ChronoDuration::from_std(wait).unwrap_or_default();
+                    (CalendarSnapshot::rate_limited(previous, reason, retry_at), Some(wait))
+                }
+                None => (CalendarSnapshot::failed(previous, reason), None),
+            }
+        };
+
         // The mailbox and calendar share one client, so a pending sign-in is
         // the same prompt for both.
         match graph.ensure_authed().await {
-            Ok(Some(prompt)) => return CalendarSnapshot::unauthenticated(prompt),
+            Ok(Some(prompt)) => return (CalendarSnapshot::unauthenticated(prompt), None),
             Ok(None) => {}
             Err(e) => {
                 warn!("graph ensure_authed error: {e:#}");
-                return CalendarSnapshot::failed(
-                    previous,
-                    failure_reason("Calendar sign-in failed", &e),
-                );
+                return failure(backoff, "Calendar sign-in failed", &e);
             }
         }
 
@@ -189,11 +211,12 @@ impl FredCalendarNativeSource {
         match graph.get_paged::<GraphEvent>(&path).await {
             Ok(events) => {
                 debug!(count = events.len(), "calendar fetch received");
-                build_snapshot(events, Utc::now(), (window_start, window_end))
+                backoff.succeeded();
+                (build_snapshot(events, Utc::now(), (window_start, window_end)), None)
             }
             Err(e) => {
                 warn!("calendar fetch failed: {e:#}");
-                CalendarSnapshot::failed(previous, failure_reason("Calendar fetch failed", &e))
+                failure(backoff, "Calendar fetch failed", &e)
             }
         }
     }
@@ -374,6 +397,7 @@ fn build_snapshot(
         state,
         updated_at: Some(now),
         auth_prompt: None,
+        retry_at: None,
     }
 }
 
