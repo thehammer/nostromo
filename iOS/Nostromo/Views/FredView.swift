@@ -15,6 +15,8 @@ struct FredView: View {
         Group {
             if !store.connected {
                 disconnectedView
+            } else if store.withheldTopics.contains("fred") {
+                WithheldPlaceholderView()
             } else {
                 contentList
             }

@@ -7,6 +7,29 @@
 import SwiftUI
 import NostromoKit
 
+/// Shown in the Teri/Fred tabs when the daemon withholds their data from
+/// this (network) connection.
+struct WithheldPlaceholderView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text("Requires a secure connection to your Mac")
+                .font(.title3.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Text("Teri and Fred data stays on your Mac until the connection to it is authenticated.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding()
+        // One VoiceOver element: the heading and the explanation read together.
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct TeriView: View {
     @EnvironmentObject var store: DaemonStore
 
@@ -14,6 +37,8 @@ struct TeriView: View {
         Group {
             if !store.connected {
                 disconnectedView
+            } else if store.withheldTopics.contains("teri") {
+                WithheldPlaceholderView()
             } else if items.isEmpty {
                 emptyView
             } else {

@@ -1101,3 +1101,55 @@ final class DaemonStorePerFocusPRTests: XCTestCase {
         XCTAssertNil(after, "a tag dropped from the live focus list must be pruned from perriCurrentPr, same lifetime as focusLayouts/sessionHealth")
     }
 }
+
+// MARK: - withheld topics (X0: iOS placeholder for data the daemon withholds from network clients)
+
+final class DaemonStoreWithheldTests: XCTestCase {
+
+    private func deliver(_ msg: ServerMsg, via client: NetworkClient) async {
+        await client.messages.send(msg)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+    }
+
+    func testAWithheldFramePopulatesWithheldTopics() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        await deliver(.withheld(topics: ["fred", "teri", "work"], reason: "requires_secure_connection"), via: client)
+        let topics = await store.withheldTopics
+        XCTAssertEqual(topics, ["fred", "teri", "work"])
+    }
+
+    func testAWorkOnlyWithheldFrameDoesNotMarkTeriOrFredAsWithheld() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        await deliver(.withheld(topics: ["work"], reason: "requires_secure_connection"), via: client)
+        let topics = await store.withheldTopics
+        XCTAssertTrue(topics.contains("work"))
+        XCTAssertFalse(topics.contains("teri"))
+        XCTAssertFalse(topics.contains("fred"))
+    }
+
+    func testStoppingTheClientClearsWithheldTopics() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        await deliver(.withheld(topics: ["fred", "teri"], reason: "requires_secure_connection"), via: client)
+        let before = await store.withheldTopics
+        XCTAssertFalse(before.isEmpty, "sanity check: populated before the disconnect")
+
+        await client.stop()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        let after = await store.withheldTopics
+        XCTAssertTrue(after.isEmpty, "a reconnect must start without a stale placeholder")
+    }
+
+    func testRealTeriDataClearsOnlyTheTeriPlaceholder() async {
+        let client = await NetworkClient()
+        let store  = await DaemonStore(client: client)
+        await deliver(.withheld(topics: ["fred", "teri"], reason: "requires_secure_connection"), via: client)
+        await deliver(.teriState(TeriTodosSnapshot(items: [])), via: client)
+        let topics = await store.withheldTopics
+        XCTAssertFalse(topics.contains("teri"), "a daemon that stops withholding Teri must remove its placeholder")
+        XCTAssertTrue(topics.contains("fred"), "Fred is still withheld")
+    }
+}
