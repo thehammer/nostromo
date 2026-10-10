@@ -59,6 +59,7 @@
 		WK0000000000000000000078 /* FredSurfaceViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000077 /* FredSurfaceViewTests.swift */; };
 		WK0000000000000000000080 /* FocusBadgesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000079 /* FocusBadgesTests.swift */; };
 		WK0000000000000000000082 /* TeriFredWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000081 /* TeriFredWiringTests.swift */; };
+		WK0000000000000000000084 /* TeriTodosPanelStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000083 /* TeriTodosPanelStateTests.swift */; };
 		SC00000000000000000000F1 /* TranscriptSelectionColorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */; };
 		AM00000000000000000000F1 /* AppControlMouseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AM00000000000000000000F0 /* AppControlMouseTests.swift */; };
 		PS00000000000000000000F1 /* ProseSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PS00000000000000000000F0 /* ProseSelectionTests.swift */; };
@@ -323,6 +324,7 @@
 		WK0000000000000000000077 /* FredSurfaceViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredSurfaceViewTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000079 /* FocusBadgesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusBadgesTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000081 /* TeriFredWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriFredWiringTests.swift; sourceTree = "<group>"; };
+		WK0000000000000000000083 /* TeriTodosPanelStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriTodosPanelStateTests.swift; sourceTree = "<group>"; };
 		SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptSelectionColorTests.swift; sourceTree = "<group>"; };
 		AM00000000000000000000F0 /* AppControlMouseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlMouseTests.swift; sourceTree = "<group>"; };
 		PS00000000000000000000F0 /* ProseSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProseSelectionTests.swift; sourceTree = "<group>"; };
@@ -696,6 +698,7 @@
 				WK0000000000000000000077 /* FredSurfaceViewTests.swift */,
 				WK0000000000000000000079 /* FocusBadgesTests.swift */,
 				WK0000000000000000000081 /* TeriFredWiringTests.swift */,
+				WK0000000000000000000083 /* TeriTodosPanelStateTests.swift */,
 				LL0000000000000000000006 /* CodeDocumentTests.swift */,
 				LL0000000000000000000007 /* DiffDocumentTests.swift */,
 				LL0000000000000000000008 /* ScrollDecisionTests.swift */,
@@ -1011,6 +1014,7 @@
 				WK0000000000000000000078 /* FredSurfaceViewTests.swift in Sources */,
 				WK0000000000000000000080 /* FocusBadgesTests.swift in Sources */,
 				WK0000000000000000000082 /* TeriFredWiringTests.swift in Sources */,
+				WK0000000000000000000084 /* TeriTodosPanelStateTests.swift in Sources */,
 				HH000000000000000000012 /* TurnReconciler.swift in TestSources */,
 				HH000000000000000000022 /* TurnPayloadStore.swift in TestSources */,
 				HH000000000000000000042 /* MemoryWatchdog.swift in TestSources */,

@@ -279,6 +279,29 @@ pub fn native_pane_for(tag: &str) -> Option<&'static str> {
     }
 }
 
+/// A focus's seeded default layout when it owns a native pane (`mother`,
+/// `teri`, `fred`); `None` for every other tag. The single place that decides
+/// which focuses start from a native tree rather than a bare REPL.
+pub fn default_native_tree(tag: &str) -> Option<PaneTree> {
+    match tag {
+        "mother" => Some(default_mother_tree()),
+        "teri" => Some(default_teri_tree()),
+        "fred" => Some(default_fred_tree()),
+        _ => None,
+    }
+}
+
+/// True when `pane_id` is a leaf reachable from the root through `Split` nodes
+/// only, i.e. NOT inside a `Tabs` node, so it is on screen by default rather
+/// than behind another tab.
+pub fn is_top_level_leaf(tree: &PaneTree, pane_id: &str) -> bool {
+    match tree {
+        PaneTree::Leaf { pane_id: id } => id == pane_id,
+        PaneTree::Split { children, .. } => children.iter().any(|c| is_top_level_leaf(c, pane_id)),
+        PaneTree::Tabs { .. } => false,
+    }
+}
+
 /// True when `tree` holds a pane named `queue` that is NOT a tab — the old
 /// arrangement, where the queue was a region of its own beside the detail tabs.
 pub fn has_bare_queue(tree: &PaneTree) -> bool {

@@ -29,6 +29,7 @@ struct TeriTodosPanel: View {
                     Image(systemName: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
                         .font(.caption)
+                        .help("Stale: showing the last good todo list")
                 }
             }
             .padding(.horizontal, 12)
@@ -37,30 +38,27 @@ struct TeriTodosPanel: View {
 
             Divider()
 
-            if let err = store.teriTodos?.error {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                    Text(err)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            switch TeriTodosPanelState.resolve(store.teriTodos) {
+            case .loading:
+                placeholder(icon: "hourglass", text: "Loading...")
+            case .error(let message):
+                placeholder(icon: "exclamationmark.triangle", text: message, tint: .orange)
+            case .notConfigured:
+                placeholder(icon: "gearshape", text: "Teri is not set up yet: no todo database found.")
+            case .empty:
+                placeholder(icon: "tray", text: "No Todos")
+            case .list(_, let error):
+                if let error {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-            }
-
-            if items.isEmpty {
-                Spacer()
-                VStack(spacing: 8) {
-                    Image(systemName: "tray")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.secondary)
-                    Text("No Todos")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            } else {
                 List {
                     ForEach(items) { todo in
                         NostromoKit.TeriTodoRow(model: rowModel(for: todo))
@@ -70,6 +68,22 @@ struct TeriTodosPanel: View {
             }
         }
         .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    private func placeholder(icon: String, text: String, tint: Color = .secondary) -> some View {
+        VStack(spacing: 8) {
+            Spacer()
+            Image(systemName: icon)
+                .font(.system(size: 32))
+                .foregroundStyle(tint)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
     }
 
     /// Active todos sorted by priority ASC, then nulls-last on due_date, then due_date ASC.

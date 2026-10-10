@@ -16,7 +16,7 @@ use std::time::Duration;
 use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::pane_registry::PaneRegistry;
 use nostromo::ipc::protocol::{
-    ClientMsg, FocusMeta, PaneTree, ServerMsg, Topic, PROTOCOL_VERSION,
+    ClientMsg, FocusMeta, PaneTree, ServerMsg, SessionAction, Topic, PROTOCOL_VERSION,
 };
 use nostromo::ipc::{PtyManager, Server, SessionManager};
 use nostromo::mcp::tools::apply_layout::apply_layout;
@@ -27,6 +27,7 @@ use tokio::net::UnixStream;
 
 struct Daemon {
     socket_path: std::path::PathBuf,
+    tcp_port: u16,
     registry: Arc<Mutex<PaneRegistry>>,
     state: McpSharedState,
     _server: Server,
@@ -34,8 +35,18 @@ struct Daemon {
 }
 
 fn spawn() -> Daemon {
+    spawn_with_store(None)
+}
+
+/// A daemon whose pane store was written by an older daemon: `store` is the
+/// V3 envelope's `trees` object, as JSON.
+fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
     let tmp = TempDir::new().unwrap();
     let socket_path = tmp.path().join("nostromd.sock");
+    if let Some(trees) = store {
+        let envelope = json!({ "version": 3, "trees": trees, "bindings": {} });
+        std::fs::write(tmp.path().join("panes.json"), envelope.to_string()).unwrap();
+    }
     let registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(tmp.path().join("panes.json"))));
     let session_mgr =
         Arc::new(Mutex::new(SessionManager::with_store_path(tmp.path().join("sessions.json"))));
@@ -54,6 +65,17 @@ fn spawn() -> Daemon {
         Arc::clone(&decisions),
     )
     .unwrap();
+    // A network listener beside the Unix socket, for the leak test.
+    let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    tcp_listener.set_nonblocking(true).unwrap();
+    let tcp_port = tcp_listener.local_addr().unwrap().port();
+    server.bind_tcp(
+        tokio::net::TcpListener::from_std(tcp_listener).unwrap(),
+        pty_mgr,
+        Arc::clone(&session_mgr),
+        tmp.path().join("perri-state"),
+        Arc::clone(&decisions),
+    );
     let state = McpSharedState::for_daemon(DaemonMcpBackend {
         pane_registry: Arc::clone(&registry),
         session_mgr,
@@ -62,7 +84,7 @@ fn spawn() -> Daemon {
         decisions,
         tickets: Default::default(),
     });
-    Daemon { socket_path, registry, state, _server: server, _tmp: tmp }
+    Daemon { socket_path, tcp_port, registry, state, _server: server, _tmp: tmp }
 }
 
 async fn send(s: &mut UnixStream, msg: &ClientMsg) {
@@ -241,14 +263,15 @@ async fn an_agent_can_apply_a_layout_that_keeps_the_native_pane() {
 
 #[tokio::test]
 async fn an_agent_built_layout_is_wrapped_when_the_focus_registry_is_pushed() {
-    let d = spawn();
+    // An agent built the layout (persisted by an older daemon) before the Mac
+    // app announced the focus.
+    let d = spawn_with_store(Some(json!({
+        "teri": { "kind": "split", "direction": "horizontal",
+                  "children": [ {"kind": "leaf", "pane_id": "repl"},
+                                {"kind": "leaf", "pane_id": "notes"} ],
+                  "ratios": [0.5, 0.5] }
+    })));
     let mut client = connect(&d).await;
-    // An agent built the layout before the Mac app announced the focus.
-    {
-        let mut reg = d.registry.lock().unwrap();
-        reg.get_or_init("teri");
-        reg.create_pane("teri", "notes", nostromo::ipc::pane_registry::SplitPosition::Right, "repl").unwrap();
-    }
     let before = registry_ids(&d, "teri");
 
     let frames = push_and_settle(&mut client, vec![meta("teri", "teri")]).await;
@@ -271,4 +294,211 @@ async fn other_focuses_are_not_given_native_panes() {
 
     assert!(layouts_for(&frames, "cody-x").is_empty(), "{frames:?}");
     assert!(layouts_for(&frames, "my-mail").is_empty(), "{frames:?}");
+}
+
+#[tokio::test]
+async fn an_agent_cannot_apply_a_layout_that_buries_the_native_pane_in_tabs() {
+    let d = spawn();
+    let mut client = connect(&d).await;
+    push_and_settle(&mut client, vec![meta("teri", "teri"), meta("fred", "fred")]).await;
+
+    for (tag, native) in [("teri", "teri_surface"), ("fred", "fred_hud")] {
+        let before = d.registry.lock().unwrap().get(tag).cloned();
+        let result = apply_layout(
+            &d.state,
+            &json!({ "tree": {
+                "direction": "vertical",
+                "children": [
+                    {"tabs": [
+                        {"pane": native, "label": "Native"},
+                        {"pane": "scratch", "label": "Scratch"}
+                    ], "active": "scratch"},
+                    {"pane": "repl"}
+                ],
+                "ratios": [0.6, 0.4]
+            }}),
+            Some(tag),
+        )
+        .await;
+        assert_eq!(result["error"], "native_pane_required", "{tag}: {result}");
+        assert_eq!(d.registry.lock().unwrap().get(tag).cloned(), before, "{tag}: layout unchanged");
+    }
+}
+
+// ── a fresh spawn keeps the native pane ──────────────────────────────────────
+//
+// `SessionSpawn` (id nil) used to reset the focus to a bare REPL, silently
+// discarding `teri_surface` / `fred_hud` the Mac app was about to host.
+
+/// Spawns run `/bin/sh` in place of `claude` (the child's behaviour is
+/// irrelevant; only the layout matters). Set once and never removed, so
+/// concurrent tests in this binary cannot race on it.
+fn use_stub_claude() {
+    std::env::set_var(nostromo::ipc::session_manager::CLAUDE_BIN_ENV, "/bin/sh");
+}
+
+async fn spawn_fresh(s: &mut UnixStream, tag: &str) {
+    send(
+        s,
+        &ClientMsg::SessionSpawn {
+            tag: tag.into(),
+            agent_name: tag.into(),
+            view_name: tag.into(),
+            cwd: None,
+            session_id: None,
+            remote_control: false,
+        },
+    )
+    .await;
+}
+
+/// Everything the daemon says up to and including `SessionSpawned` for `tag`,
+/// plus whatever broadcast frames land by the time two control round trips
+/// complete (the broadcast and the targeted reply travel on different channels).
+async fn spawn_and_collect(s: &mut UnixStream, tag: &str) -> Vec<ServerMsg> {
+    spawn_fresh(s, tag).await;
+    let mut frames = Vec::new();
+    loop {
+        let m = recv(s).await;
+        let done = matches!(&m, ServerMsg::SessionSpawned { tag: t, .. } if t == tag);
+        let failed = matches!(&m, ServerMsg::Error { .. });
+        frames.push(m);
+        assert!(!failed, "spawn failed: {frames:?}");
+        if done {
+            break;
+        }
+    }
+    frames.extend(sync(s).await);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    frames.extend(sync(s).await);
+    frames
+}
+
+/// What a client connecting right now is told about `tag`'s layout.
+async fn replayed_layout(d: &Daemon, tag: &str) -> Option<PaneTree> {
+    let mut s = UnixStream::connect(&d.socket_path).await.unwrap();
+    send(&mut s, &ClientMsg::Hello { client_id: "replay-probe".into(), protocol_version: PROTOCOL_VERSION }).await;
+    assert!(matches!(recv(&mut s).await, ServerMsg::Welcome { .. }));
+    send(&mut s, &ClientMsg::Subscribe { topics: vec![Topic::Layout], renders_decisions: false }).await;
+    let frames = sync(&mut s).await;
+    layouts_for(&frames, tag).last().map(|t| (*t).clone())
+}
+
+const NATIVE: [(&str, &str); 2] = [("teri", "teri_surface"), ("fred", "fred_hud")];
+
+#[tokio::test]
+async fn a_fresh_spawn_keeps_the_native_pane_for_a_client_that_connects_afterwards() {
+    use_stub_claude();
+    for (tag, native) in NATIVE {
+        let d = spawn();
+        let mut client = connect(&d).await;
+
+        spawn_and_collect(&mut client, tag).await;
+
+        let replayed = replayed_layout(&d, tag).await.unwrap_or_else(|| panic!("{tag}: no layout replayed"));
+        assert_eq!(ids(&replayed), vec![native, "repl"], "{tag}: replay shows the native pane");
+        assert_eq!(registry_ids(&d, tag), vec![native, "repl"], "{tag}: registry agrees");
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_spawn_announces_the_native_layout_to_connected_clients() {
+    use_stub_claude();
+    for (tag, native) in NATIVE {
+        let d = spawn();
+        let mut client = connect(&d).await;
+
+        let frames = spawn_and_collect(&mut client, tag).await;
+
+        let layouts = layouts_for(&frames, tag);
+        assert!(!layouts.is_empty(), "{tag}: spawn broadcasts a FocusLayout: {frames:?}");
+        assert_eq!(ids(layouts.last().unwrap()), vec![native, "repl"], "{tag}");
+    }
+}
+
+#[tokio::test]
+async fn spawning_after_new_session_keeps_the_native_pane_and_announces_it_again() {
+    use_stub_claude();
+    for (tag, native) in NATIVE {
+        let d = spawn();
+        let mut client = connect(&d).await;
+        spawn_and_collect(&mut client, tag).await;
+
+        // "New session": drop the session id and stop the child, then spawn
+        // fresh (id nil), as the Mac app does.
+        send(&mut client, &ClientMsg::SessionControl { tag: tag.into(), action: SessionAction::NewSession }).await;
+        sync(&mut client).await;
+        let frames = spawn_and_collect(&mut client, tag).await;
+
+        let layouts = layouts_for(&frames, tag);
+        assert!(!layouts.is_empty(), "{tag}: the second fresh spawn is announced too: {frames:?}");
+        assert_eq!(ids(layouts.last().unwrap()), vec![native, "repl"], "{tag}");
+        let replayed = replayed_layout(&d, tag).await.unwrap_or_else(|| panic!("{tag}: no layout replayed"));
+        assert_eq!(ids(&replayed), vec![native, "repl"], "{tag}: replay after new_session + spawn");
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_spawn_of_an_ordinary_focus_is_a_bare_repl_and_gets_no_native_pane() {
+    use_stub_claude();
+    let d = spawn();
+    let mut client = connect(&d).await;
+
+    for tag in ["teri-x", "cody-x"] {
+        spawn_and_collect(&mut client, tag).await;
+        assert_eq!(registry_ids(&d, tag), vec!["repl"], "{tag}");
+    }
+}
+
+// ── a network peer never sees the native layout ──────────────────────────────
+
+#[tokio::test]
+async fn a_fresh_spawn_of_teri_or_fred_does_not_announce_its_layout_to_a_network_peer() {
+    use_stub_claude();
+    let d = spawn();
+    let mut client = connect(&d).await;
+
+    // A TCP peer subscribed to layouts.
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", d.tcp_port)).await.unwrap();
+    write_frame(
+        &mut tcp,
+        &serde_json::to_vec(&ClientMsg::Hello {
+            client_id: "native-surfaces-tcp".into(),
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(recv_any(&mut tcp).await, ServerMsg::Welcome { .. }));
+    write_frame(
+        &mut tcp,
+        &serde_json::to_vec(&ClientMsg::Subscribe { topics: vec![Topic::Layout, Topic::Focuses], renders_decisions: false })
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    for (tag, _) in NATIVE {
+        let frames = spawn_and_collect(&mut client, tag).await;
+        assert!(!layouts_for(&frames, tag).is_empty(), "control: the local client is told: {frames:?}");
+    }
+
+    // Ping, then read to the Pong: everything the peer was going to be sent is before it.
+    write_frame(&mut tcp, &serde_json::to_vec(&ClientMsg::Ping).unwrap()).await.unwrap();
+    loop {
+        match recv_any(&mut tcp).await {
+            ServerMsg::Pong => break,
+            ServerMsg::FocusLayout { tag, .. } => panic!("the {tag} layout reached a network peer"),
+            _ => {}
+        }
+    }
+}
+
+async fn recv_any<S: tokio::io::AsyncRead + Unpin>(s: &mut S) -> ServerMsg {
+    let bytes = tokio::time::timeout(Duration::from_secs(5), read_frame(s))
+        .await
+        .expect("timed out waiting for a server frame")
+        .expect("read frame");
+    serde_json::from_slice(&bytes).unwrap()
 }

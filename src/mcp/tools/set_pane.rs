@@ -156,7 +156,10 @@ pub async fn set_pane_layout(state: &McpSharedState, args: &Value) -> Value {
                 });
                 json!({ "ok": true })
             }
-            Err(e) => json!({ "error": e.code() }),
+            Err(e) => match e.detail() {
+                Some(detail) => json!({ "error": e.code(), "detail": detail }),
+                None => json!({ "error": e.code() }),
+            },
         };
     }
 

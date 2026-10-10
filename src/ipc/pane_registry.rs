@@ -110,6 +110,20 @@ impl PaneError {
     }
 }
 
+impl PaneError {
+    /// A human-readable explanation for the errors whose code alone doesn't say
+    /// what to change; `None` for the self-explanatory ones.
+    pub fn detail(self) -> Option<&'static str> {
+        match self {
+            PaneError::NativePaneRequired => Some(
+                "the focus's native pane (teri_surface / fred_hud) must stay in the layout \
+                 as a non-tab leaf: keep it as a split child, not inside a tabs node",
+            ),
+            _ => None,
+        }
+    }
+}
+
 // ── split position ──────────────────────────────────────────────────────────
 
 /// Where a new pane lands relative to the leaf it splits.
@@ -413,7 +427,12 @@ impl PaneRegistry {
         if !Self::is_mother_focus(tag) {
             return None;
         }
+        let created = !self.trees.contains_key(tag);
         let current = self.get_or_init(tag);
+        if created {
+            // `init_focus` just seeded the native tree: report it as new.
+            return Some(current);
+        }
         if !matches!(&current, PaneTree::Leaf { pane_id } if pane_id == "repl") {
             return None;
         }
@@ -464,10 +483,12 @@ impl PaneRegistry {
         )
     }
 
-    /// Seed `native` into `tag`'s layout. A bare REPL becomes `default`; a layout
-    /// that already holds the native pane is left alone; any other layout (e.g.
-    /// one an agent built) is wrapped — native pane first, the old tree second —
-    /// so no previous pane is lost. Returns the tree when anything changed.
+    /// Seed `native` into `tag`'s layout. A tag with no tree yet starts from its
+    /// native default; a bare REPL becomes `default`; a layout that already holds
+    /// the native pane as a non-tab leaf is left alone; any other layout (e.g.
+    /// one an agent built, or a persisted one that buried the native pane in a
+    /// tabs node) is wrapped — native pane first, the old tree second — so no
+    /// previous pane is lost. Returns the tree when anything changed.
     fn ensure_native_layout(
         &mut self,
         tag: &str,
@@ -477,12 +498,21 @@ impl PaneRegistry {
         direction: SplitDirection,
         default: PaneTree,
     ) -> Option<PaneTree> {
-        let current = self.get_or_init(tag);
+        let created = !self.trees.contains_key(tag);
+        let mut current = self.get_or_init(tag);
+        if created {
+            // `init_focus` just seeded the native tree: report it as new.
+            return Some(current);
+        }
         let new_tree = if matches!(&current, PaneTree::Leaf { pane_id } if pane_id == REPL_PANE_ID) {
             default
-        } else if current.pane_ids().iter().any(|p| p == native) {
+        } else if crate::mcp::views::tree::is_top_level_leaf(&current, native) {
             return None;
         } else {
+            // Buried in a tabs node: lift it out first (its id must stay unique).
+            if current.pane_ids().iter().any(|p| p == native) && !current.remove_tab(native) {
+                return None;
+            }
             PaneTree::Split {
                 direction,
                 children: vec![
@@ -624,10 +654,11 @@ impl PaneRegistry {
 
     // ── mutations ──────────────────────────────────────────────────────────────
 
-    /// Initialise (or re-initialise) `tag` to a single REPL leaf and persist.
-    /// Called on a fresh, non-resume session spawn.
+    /// Initialise (or re-initialise) `tag` and persist: to its native default
+    /// (`mother`, `teri`, `fred`; see `default_native_tree`) or else a single
+    /// REPL leaf. Called on a fresh, non-resume session spawn.
     pub fn init_focus(&mut self, tag: &str) -> PaneTree {
-        let tree = PaneTree::repl_leaf();
+        let tree = crate::mcp::views::tree::default_native_tree(tag).unwrap_or_else(PaneTree::repl_leaf);
         self.trees.insert(tag.to_string(), tree.clone());
         self.prune_to_tree(tag);
         self.persist();
@@ -680,19 +711,13 @@ impl PaneRegistry {
         Ok(result)
     }
 
-    /// `reset_panes`: collapse `tag` back to a single REPL leaf. Returns the
-    /// new tree. Errors with [`PaneError::UnknownView`] when the tag is absent.
+    /// `reset_panes`: collapse `tag` back to its default layout (a single REPL
+    /// leaf, or the native tree for `mother`/`teri`/`fred`). Returns the new tree. Errors with [`PaneError::UnknownView`] when the tag is absent.
     pub fn reset(&mut self, tag: &str) -> Result<PaneTree, PaneError> {
         if !self.trees.contains_key(tag) {
             return Err(PaneError::UnknownView);
         }
-        let tree = if Self::is_teri_focus(tag) {
-            crate::mcp::views::tree::default_teri_tree()
-        } else if Self::is_fred_focus(tag) {
-            crate::mcp::views::tree::default_fred_tree()
-        } else {
-            PaneTree::repl_leaf()
-        };
+        let tree = crate::mcp::views::tree::default_native_tree(tag).unwrap_or_else(PaneTree::repl_leaf);
         self.trees.insert(tag.to_string(), tree.clone());
         self.prune_to_tree(tag);
         self.persist();
@@ -744,7 +769,7 @@ impl PaneRegistry {
             if let Some(native) = crate::mcp::views::tree::native_pane_for(tag)
                 .filter(|_| Self::is_teri_focus(tag) || Self::is_fred_focus(tag))
             {
-                if !new_tree.pane_ids().iter().any(|p| p == native) {
+                if !crate::mcp::views::tree::is_top_level_leaf(&new_tree, native) {
                     return Err(PaneError::NativePaneRequired);
                 }
             }
@@ -1145,8 +1170,8 @@ mod tests {
     #[test]
     fn fresh_focus_has_exactly_repl_pane() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        assert_eq!(reg.pane_ids("mother"), vec!["repl".to_string()]);
+        reg.init_focus("agent");
+        assert_eq!(reg.pane_ids("agent"), vec!["repl".to_string()]);
     }
 
     // ── W7 — D8/D10: removing a focus ────────────────────────────────────────
@@ -1239,12 +1264,12 @@ mod tests {
     #[test]
     fn create_pane_right_appends_new_pane_after_existing() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
         let tree = reg
-            .create_pane("mother", "jobs", SplitPosition::Right, "repl")
+            .create_pane("agent", "jobs", SplitPosition::Right, "repl")
             .unwrap();
 
-        assert_eq!(reg.pane_ids("mother"), vec!["repl", "jobs"]);
+        assert_eq!(reg.pane_ids("agent"), vec!["repl", "jobs"]);
 
         match tree {
             PaneTree::Split {
@@ -1267,12 +1292,12 @@ mod tests {
     #[test]
     fn create_pane_left_inserts_new_pane_before_existing() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
         let tree = reg
-            .create_pane("mother", "nav", SplitPosition::Left, "repl")
+            .create_pane("agent", "nav", SplitPosition::Left, "repl")
             .unwrap();
 
-        assert_eq!(reg.pane_ids("mother"), vec!["nav", "repl"]);
+        assert_eq!(reg.pane_ids("agent"), vec!["nav", "repl"]);
 
         match tree {
             PaneTree::Split {
@@ -1294,12 +1319,12 @@ mod tests {
     #[test]
     fn create_pane_below_produces_vertical_split_with_new_pane_after() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
         let tree = reg
-            .create_pane("mother", "log", SplitPosition::Below, "repl")
+            .create_pane("agent", "log", SplitPosition::Below, "repl")
             .unwrap();
 
-        assert_eq!(reg.pane_ids("mother"), vec!["repl", "log"]);
+        assert_eq!(reg.pane_ids("agent"), vec!["repl", "log"]);
 
         match tree {
             PaneTree::Split { direction, ratios, .. } => {
@@ -1313,12 +1338,12 @@ mod tests {
     #[test]
     fn create_pane_above_produces_vertical_split_with_new_pane_before() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
         let tree = reg
-            .create_pane("mother", "header", SplitPosition::Above, "repl")
+            .create_pane("agent", "header", SplitPosition::Above, "repl")
             .unwrap();
 
-        assert_eq!(reg.pane_ids("mother"), vec!["header", "repl"]);
+        assert_eq!(reg.pane_ids("agent"), vec!["header", "repl"]);
 
         match tree {
             PaneTree::Split { direction, ratios, children } => {
@@ -1336,19 +1361,19 @@ mod tests {
     #[test]
     fn create_pane_on_non_root_leaf_splits_that_leaf() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
             .unwrap();
         // Now split "jobs" vertically by adding "diff" below it.
-        reg.create_pane("mother", "diff", SplitPosition::Below, "jobs")
+        reg.create_pane("agent", "diff", SplitPosition::Below, "jobs")
             .unwrap();
 
         // Tree order: repl, jobs, diff (repl is first leaf; jobs split with diff below).
-        let ids = reg.pane_ids("mother");
+        let ids = reg.pane_ids("agent");
         assert_eq!(ids, vec!["repl", "jobs", "diff"]);
 
         // Inspect structure: root is Horizontal [repl, Split(Vertical [jobs, diff])].
-        let tree = reg.get("mother").unwrap();
+        let tree = reg.get("agent").unwrap();
         match tree {
             PaneTree::Split { direction, children, .. } => {
                 assert_eq!(*direction, SplitDirection::Horizontal);
@@ -1373,15 +1398,15 @@ mod tests {
     #[test]
     fn create_pane_unknown_relative_to_returns_error_and_leaves_tree_unchanged() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        let before = reg.pane_ids("mother").clone();
+        reg.init_focus("agent");
+        let before = reg.pane_ids("agent").clone();
 
         let err = reg
-            .create_pane("mother", "jobs", SplitPosition::Right, "nonexistent")
+            .create_pane("agent", "jobs", SplitPosition::Right, "nonexistent")
             .unwrap_err();
 
         assert_eq!(err, PaneError::UnknownPane);
-        assert_eq!(reg.pane_ids("mother"), before);
+        assert_eq!(reg.pane_ids("agent"), before);
     }
 
     // ── 5. create_pane with duplicate pane_id → DuplicatePane, tree unchanged ─
@@ -1389,17 +1414,17 @@ mod tests {
     #[test]
     fn create_pane_duplicate_id_returns_error_and_leaves_tree_unchanged() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
             .unwrap();
-        let before = reg.pane_ids("mother").clone();
+        let before = reg.pane_ids("agent").clone();
 
         let err = reg
-            .create_pane("mother", "jobs", SplitPosition::Left, "repl")
+            .create_pane("agent", "jobs", SplitPosition::Left, "repl")
             .unwrap_err();
 
         assert_eq!(err, PaneError::DuplicatePane);
-        assert_eq!(reg.pane_ids("mother"), before);
+        assert_eq!(reg.pane_ids("agent"), before);
     }
 
     // ── 5b. Duplicate of "repl" is also rejected ─────────────────────────────
@@ -1407,14 +1432,14 @@ mod tests {
     #[test]
     fn create_pane_duplicate_repl_returns_error() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         let err = reg
-            .create_pane("mother", "repl", SplitPosition::Right, "repl")
+            .create_pane("agent", "repl", SplitPosition::Right, "repl")
             .unwrap_err();
 
         assert_eq!(err, PaneError::DuplicatePane);
-        assert_eq!(reg.pane_ids("mother"), vec!["repl"]);
+        assert_eq!(reg.pane_ids("agent"), vec!["repl"]);
     }
 
     // ── 6. Operations on unregistered tag → UnknownView ──────────────────────
@@ -1449,19 +1474,19 @@ mod tests {
     #[test]
     fn reset_collapses_multi_pane_layout_to_single_repl() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
             .unwrap();
-        reg.create_pane("mother", "diff", SplitPosition::Below, "jobs")
+        reg.create_pane("agent", "diff", SplitPosition::Below, "jobs")
             .unwrap();
-        reg.create_pane("mother", "log", SplitPosition::Right, "jobs")
+        reg.create_pane("agent", "log", SplitPosition::Right, "jobs")
             .unwrap();
 
         // Confirm we have more than one pane before reset.
-        assert!(reg.pane_ids("mother").len() > 1);
+        assert!(reg.pane_ids("agent").len() > 1);
 
-        let tree = reg.reset("mother").unwrap();
-        assert_eq!(reg.pane_ids("mother"), vec!["repl"]);
+        let tree = reg.reset("agent").unwrap();
+        assert_eq!(reg.pane_ids("agent"), vec!["repl"]);
         assert!(matches!(tree, PaneTree::Leaf { pane_id } if pane_id == "repl"));
     }
 
@@ -1470,28 +1495,28 @@ mod tests {
     #[test]
     fn exactly_one_repl_leaf_always_present() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         // After init.
-        let ids = reg.pane_ids("mother");
+        let ids = reg.pane_ids("agent");
         assert_eq!(ids.iter().filter(|id| id.as_str() == "repl").count(), 1);
 
         // After several creates.
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl").unwrap();
-        reg.create_pane("mother", "diff", SplitPosition::Below, "jobs").unwrap();
-        reg.create_pane("mother", "log", SplitPosition::Right, "diff").unwrap();
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl").unwrap();
+        reg.create_pane("agent", "diff", SplitPosition::Below, "jobs").unwrap();
+        reg.create_pane("agent", "log", SplitPosition::Right, "diff").unwrap();
 
-        let ids = reg.pane_ids("mother");
+        let ids = reg.pane_ids("agent");
         assert_eq!(ids.iter().filter(|id| id.as_str() == "repl").count(), 1);
 
         // After reset.
-        reg.reset("mother").unwrap();
-        let ids = reg.pane_ids("mother");
+        reg.reset("agent").unwrap();
+        let ids = reg.pane_ids("agent");
         assert_eq!(ids.iter().filter(|id| id.as_str() == "repl").count(), 1);
 
         // And again after re-building.
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl").unwrap();
-        let ids = reg.pane_ids("mother");
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl").unwrap();
+        let ids = reg.pane_ids("agent");
         assert_eq!(ids.iter().filter(|id| id.as_str() == "repl").count(), 1);
     }
 
@@ -1500,19 +1525,19 @@ mod tests {
     #[test]
     fn identical_create_sequence_after_reset_produces_byte_identical_tree() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         let build = |reg: &mut PaneRegistry| {
-            reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+            reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
                 .unwrap();
-            reg.create_pane("mother", "log", SplitPosition::Below, "jobs")
+            reg.create_pane("agent", "log", SplitPosition::Below, "jobs")
                 .unwrap();
-            reg.get("mother").unwrap().clone()
+            reg.get("agent").unwrap().clone()
         };
 
         let tree_a = build(&mut reg);
 
-        reg.reset("mother").unwrap();
+        reg.reset("agent").unwrap();
         let tree_b = build(&mut reg);
 
         // Structural equality via PartialEq.
@@ -1529,22 +1554,22 @@ mod tests {
     #[test]
     fn set_layout_ratio_map_updates_ratios_and_preserves_structure() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
             .unwrap();
 
-        let panes_before = reg.pane_ids("mother");
+        let panes_before = reg.pane_ids("agent");
         reg.set_layout(
-            "mother",
+            "agent",
             &serde_json::json!({"repl": 0.3, "jobs": 0.7}),
         )
         .unwrap();
 
         // Structure unchanged.
-        assert_eq!(reg.pane_ids("mother"), panes_before);
+        assert_eq!(reg.pane_ids("agent"), panes_before);
 
         // Ratios updated: 0.3/1.0 and 0.7/1.0 (sum is 1.0, already normalised).
-        let tree = reg.get("mother").unwrap();
+        let tree = reg.get("agent").unwrap();
         match tree {
             PaneTree::Split { ratios, .. } => {
                 let tolerance = 1e-5_f32;
@@ -1560,18 +1585,18 @@ mod tests {
     #[test]
     fn set_layout_ratio_map_normalises_non_unit_sum() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
             .unwrap();
 
         // Supply un-normalised raw values (sum = 4.0).
         reg.set_layout(
-            "mother",
+            "agent",
             &serde_json::json!({"repl": 1.0, "jobs": 3.0}),
         )
         .unwrap();
 
-        let tree = reg.get("mother").unwrap();
+        let tree = reg.get("agent").unwrap();
         match tree {
             PaneTree::Split { ratios, .. } => {
                 let tolerance = 1e-5_f32;
@@ -1588,8 +1613,8 @@ mod tests {
     #[test]
     fn set_layout_full_tree_payload_replaces_tree_wholesale() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
             .unwrap();
 
         // A valid replacement tree: repl on the left, new_pane on the right.
@@ -1603,10 +1628,10 @@ mod tests {
         };
         let payload = serde_json::to_value(&replacement).unwrap();
 
-        reg.set_layout("mother", &payload).unwrap();
+        reg.set_layout("agent", &payload).unwrap();
 
-        assert_eq!(reg.pane_ids("mother"), vec!["repl", "dashboard"]);
-        assert_eq!(reg.get("mother").unwrap(), &replacement);
+        assert_eq!(reg.pane_ids("agent"), vec!["repl", "dashboard"]);
+        assert_eq!(reg.get("agent").unwrap(), &replacement);
     }
 
     // ── 12. set_layout with invalid full tree → InvalidLayout ─────────────────
@@ -1614,7 +1639,7 @@ mod tests {
     #[test]
     fn set_layout_full_tree_without_repl_returns_invalid_layout() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         // A tree with zero repl leaves.
         let bad_tree = PaneTree::Split {
@@ -1626,17 +1651,17 @@ mod tests {
             ratios: vec![0.5, 0.5],
         };
         let payload = serde_json::to_value(&bad_tree).unwrap();
-        let err = reg.set_layout("mother", &payload).unwrap_err();
+        let err = reg.set_layout("agent", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
 
         // Tree should be unchanged.
-        assert_eq!(reg.pane_ids("mother"), vec!["repl"]);
+        assert_eq!(reg.pane_ids("agent"), vec!["repl"]);
     }
 
     #[test]
     fn set_layout_full_tree_with_duplicate_repl_returns_invalid_layout() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         // A tree with two repl leaves.
         let bad_tree = PaneTree::Split {
@@ -1648,15 +1673,15 @@ mod tests {
             ratios: vec![0.5, 0.5],
         };
         let payload = serde_json::to_value(&bad_tree).unwrap();
-        let err = reg.set_layout("mother", &payload).unwrap_err();
+        let err = reg.set_layout("agent", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
     }
 
     #[test]
     fn set_layout_full_tree_with_duplicate_non_repl_ids_returns_invalid_layout() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
             .unwrap();
 
         // Tree has repl once but "jobs" twice — duplicate ids.
@@ -1676,7 +1701,7 @@ mod tests {
             ratios: vec![0.5, 0.5],
         };
         let payload = serde_json::to_value(&bad_tree).unwrap();
-        let err = reg.set_layout("mother", &payload).unwrap_err();
+        let err = reg.set_layout("agent", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
     }
 
@@ -1705,7 +1730,7 @@ mod tests {
     #[test]
     fn set_layout_with_well_formed_tabs_node_is_accepted() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         let tree = tree_with_tabs_region(
             vec![
@@ -1716,16 +1741,16 @@ mod tests {
             0,
         );
         let payload = serde_json::to_value(&tree).unwrap();
-        let result = reg.set_layout("mother", &payload).unwrap();
+        let result = reg.set_layout("agent", &payload).unwrap();
 
-        assert_eq!(reg.pane_ids("mother"), vec!["repl", "ticket", "activity"]);
+        assert_eq!(reg.pane_ids("agent"), vec!["repl", "ticket", "activity"]);
         assert_eq!(result, tree);
     }
 
     #[test]
     fn set_layout_tabs_node_with_mismatched_labels_length_is_rejected() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         let tree = tree_with_tabs_region(
             vec![
@@ -1736,15 +1761,15 @@ mod tests {
             0,
         );
         let payload = serde_json::to_value(&tree).unwrap();
-        let err = reg.set_layout("mother", &payload).unwrap_err();
+        let err = reg.set_layout("agent", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
-        assert_eq!(reg.pane_ids("mother"), vec!["repl"], "tree must be left unchanged");
+        assert_eq!(reg.pane_ids("agent"), vec!["repl"], "tree must be left unchanged");
     }
 
     #[test]
     fn set_layout_tabs_node_with_active_out_of_range_is_rejected() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         let tree = tree_with_tabs_region(
             vec![
@@ -1755,25 +1780,25 @@ mod tests {
             2,
         );
         let payload = serde_json::to_value(&tree).unwrap();
-        let err = reg.set_layout("mother", &payload).unwrap_err();
+        let err = reg.set_layout("agent", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
     }
 
     #[test]
     fn set_layout_tabs_node_with_zero_children_is_rejected() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         let tree = tree_with_tabs_region(vec![], vec![], 0);
         let payload = serde_json::to_value(&tree).unwrap();
-        let err = reg.set_layout("mother", &payload).unwrap_err();
+        let err = reg.set_layout("agent", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
     }
 
     #[test]
     fn set_layout_tabs_node_containing_repl_leaf_is_rejected() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         // The tabs region itself hosts "repl" — hiding the REPL behind a tab
         // is never valid, regardless of whether a repl leaf exists elsewhere.
@@ -1787,14 +1812,14 @@ mod tests {
             region: None,
         };
         let payload = serde_json::to_value(&tree).unwrap();
-        let err = reg.set_layout("mother", &payload).unwrap_err();
+        let err = reg.set_layout("agent", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
     }
 
     #[test]
     fn set_layout_tabs_node_nested_inside_a_split_still_rejects_a_nested_repl() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         // "repl" appears nested two levels deep inside the tabs region's own
         // inner split — the repl-inside-tabs check must walk the tabs
@@ -1827,14 +1852,14 @@ mod tests {
         };
 
         let payload = serde_json::to_value(&tree).unwrap();
-        let err = reg.set_layout("mother", &payload).unwrap_err();
+        let err = reg.set_layout("agent", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
     }
 
     #[test]
     fn set_layout_tabs_node_with_nested_split_recurses_ratio_validation() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
 
         // A tabs child that is itself a malformed split (mismatched ratio
         // count) must still be caught — validation recurses into tab children.
@@ -1851,7 +1876,7 @@ mod tests {
             0,
         );
         let payload = serde_json::to_value(&tree).unwrap();
-        let err = reg.set_layout("mother", &payload).unwrap_err();
+        let err = reg.set_layout("agent", &payload).unwrap_err();
         assert_eq!(err, PaneError::InvalidLayout);
     }
 
@@ -1861,17 +1886,17 @@ mod tests {
         // targeted by create_pane (splitting it further) and bound to a source
         // exactly like any other leaf.
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
+        reg.init_focus("agent");
         let tree = tree_with_tabs_region(
             vec![PaneTree::Leaf { pane_id: "ticket".into() }],
             vec!["Ticket"],
             0,
         );
-        reg.set_layout("mother", &serde_json::to_value(&tree).unwrap())
+        reg.set_layout("agent", &serde_json::to_value(&tree).unwrap())
             .unwrap();
 
-        reg.bind_source("mother", "ticket", "perri.list_pr_queue");
-        assert_eq!(reg.source_for("mother", "ticket"), Some("perri.list_pr_queue"));
+        reg.bind_source("agent", "ticket", "perri.list_pr_queue");
+        assert_eq!(reg.source_for("agent", "ticket"), Some("perri.list_pr_queue"));
     }
 
     // ── 13. PaneError::code() returns stable snake_case strings ──────────────
@@ -1917,18 +1942,18 @@ mod tests {
 
         {
             let mut reg = PaneRegistry::with_store_path(tmp.clone());
-            reg.init_focus("mother");
-            reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+            reg.init_focus("agent");
+            reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
                 .unwrap();
-            reg.create_pane("mother", "log", SplitPosition::Below, "jobs")
+            reg.create_pane("agent", "log", SplitPosition::Below, "jobs")
                 .unwrap();
             // reg drops here, flushing to disk.
         }
 
         // Load a fresh registry from the same path.
         let reg2 = PaneRegistry::with_store_path(tmp.clone());
-        assert!(reg2.contains("mother"), "focus 'mother' should survive reload");
-        assert_eq!(reg2.pane_ids("mother"), vec!["repl", "jobs", "log"]);
+        assert!(reg2.contains("agent"), "focus 'mother' should survive reload");
+        assert_eq!(reg2.pane_ids("agent"), vec!["repl", "jobs", "log"]);
 
         // Clean up.
         let _ = std::fs::remove_file(&tmp);
@@ -1939,12 +1964,12 @@ mod tests {
     #[test]
     fn get_or_init_returns_existing_tree_without_reinitialising() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "jobs", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "jobs", SplitPosition::Right, "repl")
             .unwrap();
 
         // get_or_init should return the existing 2-pane tree, not a fresh repl.
-        let tree = reg.get_or_init("mother");
+        let tree = reg.get_or_init("agent");
         let ids: Vec<String> = tree.pane_ids();
         assert_eq!(ids, vec!["repl", "jobs"]);
     }
@@ -1982,18 +2007,18 @@ mod tests {
     #[test]
     fn bind_source_on_repl_pane_is_silently_refused() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.bind_source("mother", REPL_PANE_ID, "perri.list_pr_queue");
-        assert_eq!(reg.source_for("mother", REPL_PANE_ID), None);
+        reg.init_focus("agent");
+        reg.bind_source("agent", REPL_PANE_ID, "perri.list_pr_queue");
+        assert_eq!(reg.source_for("agent", REPL_PANE_ID), None);
         assert!(reg.all_bindings().is_empty());
     }
 
     #[test]
     fn bind_source_on_pane_not_in_tag_tree_is_silently_refused() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.bind_source("mother", "does_not_exist", "perri.list_pr_queue");
-        assert_eq!(reg.source_for("mother", "does_not_exist"), None);
+        reg.init_focus("agent");
+        reg.bind_source("agent", "does_not_exist", "perri.list_pr_queue");
+        assert_eq!(reg.source_for("agent", "does_not_exist"), None);
         assert!(reg.all_bindings().is_empty());
     }
 
@@ -2019,20 +2044,20 @@ mod tests {
     #[test]
     fn bind_source_rebinding_the_same_pane_replaces_the_old_source_with_one_entry() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "queue", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "queue", SplitPosition::Right, "repl")
             .unwrap();
-        reg.bind_source("mother", "queue", "perri.list_pr_queue");
-        reg.bind_source("mother", "queue", "perri.get_current_pr");
+        reg.bind_source("agent", "queue", "perri.list_pr_queue");
+        reg.bind_source("agent", "queue", "perri.get_current_pr");
 
         assert_eq!(
-            reg.source_for("mother", "queue"),
+            reg.source_for("agent", "queue"),
             Some("perri.get_current_pr")
         );
         let matching: Vec<_> = reg
             .all_bindings()
             .into_iter()
-            .filter(|(tag, pane_id, _)| tag == "mother" && pane_id == "queue")
+            .filter(|(tag, pane_id, _)| tag == "agent" && pane_id == "queue")
             .collect();
         assert_eq!(
             matching.len(),
@@ -2044,20 +2069,20 @@ mod tests {
     #[test]
     fn unbind_source_removes_the_binding() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "queue", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "queue", SplitPosition::Right, "repl")
             .unwrap();
-        reg.bind_source("mother", "queue", "perri.list_pr_queue");
-        reg.unbind_source("mother", "queue");
-        assert_eq!(reg.source_for("mother", "queue"), None);
+        reg.bind_source("agent", "queue", "perri.list_pr_queue");
+        reg.unbind_source("agent", "queue");
+        assert_eq!(reg.source_for("agent", "queue"), None);
     }
 
     #[test]
     fn unbind_source_on_pane_with_no_binding_is_a_noop() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.unbind_source("mother", "repl"); // must not panic
-        assert_eq!(reg.source_for("mother", "repl"), None);
+        reg.init_focus("agent");
+        reg.unbind_source("agent", "repl"); // must not panic
+        assert_eq!(reg.source_for("agent", "repl"), None);
     }
 
     #[test]
@@ -2112,52 +2137,52 @@ mod tests {
     #[test]
     fn reset_drops_all_bindings_for_that_tag() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "queue", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "queue", SplitPosition::Right, "repl")
             .unwrap();
-        reg.create_pane("mother", "diff", SplitPosition::Below, "queue")
+        reg.create_pane("agent", "diff", SplitPosition::Below, "queue")
             .unwrap();
-        reg.bind_source("mother", "queue", "perri.list_pr_queue");
-        reg.bind_source("mother", "diff", "perri.get_current_pr");
+        reg.bind_source("agent", "queue", "perri.list_pr_queue");
+        reg.bind_source("agent", "diff", "perri.get_current_pr");
 
-        reg.reset("mother").unwrap();
+        reg.reset("agent").unwrap();
 
-        assert_eq!(reg.source_for("mother", "queue"), None);
-        assert_eq!(reg.source_for("mother", "diff"), None);
+        assert_eq!(reg.source_for("agent", "queue"), None);
+        assert_eq!(reg.source_for("agent", "diff"), None);
         assert!(reg.all_bindings().is_empty());
     }
 
     #[test]
     fn set_layout_full_tree_that_omits_a_bound_pane_drops_its_binding() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "queue", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "queue", SplitPosition::Right, "repl")
             .unwrap();
-        reg.bind_source("mother", "queue", "perri.list_pr_queue");
+        reg.bind_source("agent", "queue", "perri.list_pr_queue");
 
         // Replace the tree wholesale with one that no longer has "queue".
         let replacement = PaneTree::repl_leaf();
         let payload = serde_json::to_value(&replacement).unwrap();
-        reg.set_layout("mother", &payload).unwrap();
+        reg.set_layout("agent", &payload).unwrap();
 
-        assert_eq!(reg.source_for("mother", "queue"), None);
+        assert_eq!(reg.source_for("agent", "queue"), None);
         assert!(reg.all_bindings().is_empty());
     }
 
     #[test]
     fn set_layout_ratio_map_that_keeps_a_bound_pane_preserves_its_binding() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        reg.create_pane("mother", "queue", SplitPosition::Right, "repl")
+        reg.init_focus("agent");
+        reg.create_pane("agent", "queue", SplitPosition::Right, "repl")
             .unwrap();
-        reg.bind_source("mother", "queue", "perri.list_pr_queue");
+        reg.bind_source("agent", "queue", "perri.list_pr_queue");
 
         // A ratio-map payload never touches structure, so "queue" survives.
-        reg.set_layout("mother", &serde_json::json!({"repl": 0.3, "queue": 0.7}))
+        reg.set_layout("agent", &serde_json::json!({"repl": 0.3, "queue": 0.7}))
             .unwrap();
 
         assert_eq!(
-            reg.source_for("mother", "queue"),
+            reg.source_for("agent", "queue"),
             Some("perri.list_pr_queue")
         );
     }
@@ -2201,13 +2226,13 @@ mod tests {
         // before this feature existed — a bare `HashMap<String, PaneTree>`,
         // no version envelope, no bindings field at all.
         let mut trees: HashMap<String, PaneTree> = HashMap::new();
-        trees.insert("mother".to_string(), PaneTree::repl_leaf());
+        trees.insert("agent".to_string(), PaneTree::repl_leaf());
         let bytes = serde_json::to_vec_pretty(&trees).unwrap();
         std::fs::write(&tmp, bytes).unwrap();
 
         let reg = PaneRegistry::with_store_path(tmp.clone());
-        assert!(reg.contains("mother"));
-        assert_eq!(reg.pane_ids("mother"), vec!["repl".to_string()]);
+        assert!(reg.contains("agent"));
+        assert_eq!(reg.pane_ids("agent"), vec!["repl".to_string()]);
         assert!(
             reg.all_bindings().is_empty(),
             "an old-format store has no bindings to recover, not a load failure"
@@ -2235,18 +2260,18 @@ mod tests {
         let json = serde_json::json!({
             "version": 2,
             "trees": {
-                "mother": { "kind": "leaf", "pane_id": "repl" }
+                "agent": { "kind": "leaf", "pane_id": "repl" }
             },
             "bindings": {
-                "mother": { "repl": "some.source" }
+                "agent": { "repl": "some.source" }
             }
         });
         let bytes = serde_json::to_vec(&json).unwrap();
 
         let (trees, bindings) = parse_store(&bytes).expect("a valid V2 envelope must parse");
-        assert_eq!(trees.get("mother"), Some(&PaneTree::repl_leaf()));
+        assert_eq!(trees.get("agent"), Some(&PaneTree::repl_leaf()));
         assert_eq!(
-            bindings.get("mother").and_then(|panes| panes.get("repl")),
+            bindings.get("agent").and_then(|panes| panes.get("repl")),
             Some(&SourceBinding::new("some.source")),
             "a V2 binding (bare source string) must upgrade into a SourceBinding with params: None"
         );
@@ -2257,18 +2282,18 @@ mod tests {
         let json = serde_json::json!({
             "version": 3,
             "trees": {
-                "mother": { "kind": "leaf", "pane_id": "repl" }
+                "agent": { "kind": "leaf", "pane_id": "repl" }
             },
             "bindings": {
-                "mother": { "repl": { "source": "some.source", "params": { "path": "a.rs" } } }
+                "agent": { "repl": { "source": "some.source", "params": { "path": "a.rs" } } }
             }
         });
         let bytes = serde_json::to_vec(&json).unwrap();
 
         let (trees, bindings) = parse_store(&bytes).expect("a valid V3 envelope must parse");
-        assert_eq!(trees.get("mother"), Some(&PaneTree::repl_leaf()));
+        assert_eq!(trees.get("agent"), Some(&PaneTree::repl_leaf()));
         assert_eq!(
-            bindings.get("mother").and_then(|panes| panes.get("repl")),
+            bindings.get("agent").and_then(|panes| panes.get("repl")),
             Some(&SourceBinding {
                 source: "some.source".to_string(),
                 params: Some(serde_json::json!({ "path": "a.rs" })),
@@ -2282,12 +2307,12 @@ mod tests {
         // The pre-binding on-disk shape: a bare `HashMap<String, PaneTree>`,
         // no version envelope, no bindings field at all.
         let json = serde_json::json!({
-            "mother": { "kind": "leaf", "pane_id": "repl" }
+            "agent": { "kind": "leaf", "pane_id": "repl" }
         });
         let bytes = serde_json::to_vec(&json).unwrap();
 
         let (trees, bindings) = parse_store(&bytes).expect("a valid bare V1 map must parse");
-        assert_eq!(trees.get("mother"), Some(&PaneTree::repl_leaf()));
+        assert_eq!(trees.get("agent"), Some(&PaneTree::repl_leaf()));
         assert!(
             bindings.is_empty(),
             "the V1 shape carries no bindings — parse_store must default to empty, not error"
@@ -2349,10 +2374,10 @@ mod tests {
     #[test]
     fn mark_painted_sets_has_been_painted_true() {
         let mut reg = PaneRegistry::in_memory();
-        reg.init_focus("mother");
-        assert!(!reg.has_been_painted("mother", "repl"));
-        reg.mark_painted("mother", "repl");
-        assert!(reg.has_been_painted("mother", "repl"));
+        reg.init_focus("agent");
+        assert!(!reg.has_been_painted("agent", "repl"));
+        reg.mark_painted("agent", "repl");
+        assert!(reg.has_been_painted("agent", "repl"));
     }
 
     #[test]
@@ -2514,13 +2539,13 @@ mod tests {
         // The pre-binding wire shape: a bare `{ "<tag>": <PaneTree> }` map —
         // no version envelope, no "trees"/"bindings" keys at all.
         let raw = r#"{
-            "mother": { "kind": "leaf", "pane_id": "repl" }
+            "agent": { "kind": "leaf", "pane_id": "repl" }
         }"#;
         std::fs::write(&tmp, raw).unwrap();
 
         let reg = PaneRegistry::with_store_path(tmp.clone());
-        assert!(reg.contains("mother"));
-        assert_eq!(reg.pane_ids("mother"), vec!["repl".to_string()]);
+        assert!(reg.contains("agent"));
+        assert_eq!(reg.pane_ids("agent"), vec!["repl".to_string()]);
         assert!(
             reg.all_bindings().is_empty(),
             "a V1 store has no bindings to recover, not a load failure"
@@ -2632,7 +2657,7 @@ mod tests {
     #[test]
     fn rendered_shapes_for_tag_ignores_other_tags() {
         let mut reg = PaneRegistry::in_memory();
-        reg.record_rendered_shape("conn-a", "0", "mother", vec!["repl".into()], chrono::Utc::now());
+        reg.record_rendered_shape("conn-a", "0", "agent", vec!["repl".into()], chrono::Utc::now());
         assert!(reg.rendered_shapes_for_tag("perri").is_empty());
     }
 
@@ -2797,10 +2822,16 @@ mod tests {
     #[test]
     fn other_agents_focuses_are_left_exactly_as_they_are() {
         let mut reg = PaneRegistry::in_memory();
-        for tag in ["fred", "mother", "teri", "claudia-2D177DF1", "perriwinkle"] {
+        for tag in ["agent", "claudia-2D177DF1", "perriwinkle"] {
             reg.init_focus(tag);
             assert_eq!(reg.ensure_review_layout(tag), None, "{tag} must not get a review queue");
             assert_eq!(reg.get(tag).cloned(), Some(PaneTree::repl_leaf()), "{tag}");
+        }
+        // The native-pane focuses keep their native tree, queue-free.
+        for tag in ["mother", "teri", "fred"] {
+            let seeded = reg.init_focus(tag);
+            assert_eq!(reg.ensure_review_layout(tag), None, "{tag} must not get a review queue");
+            assert_eq!(reg.get(tag).cloned(), Some(seeded), "{tag}");
         }
     }
 
@@ -2861,7 +2892,7 @@ mod mother_layout_tests {
         reg2.init_focus("mother");
         reg2.create_pane("mother", "notes", SplitPosition::Right, "repl").unwrap();
         assert_eq!(reg2.ensure_mother_layout("mother"), None);
-        assert_eq!(reg2.pane_ids("mother"), vec!["repl", "notes"]);
+        assert_eq!(reg2.pane_ids("mother"), vec!["mother_queue", "repl", "notes"]);
     }
 
     #[test]
@@ -2899,7 +2930,8 @@ mod native_surface_tests {
 
     /// An agent-built layout: `notes` | `scratch` above the REPL.
     fn agent_built(reg: &mut PaneRegistry, tag: &str) -> Vec<String> {
-        reg.get_or_init(tag);
+        // Start from a bare REPL, not the native seed: this is a layout that lacks it.
+        reg.trees.insert(tag.to_string(), PaneTree::repl_leaf());
         reg.create_pane(tag, "notes", SplitPosition::Right, REPL_PANE_ID).unwrap();
         reg.create_pane(tag, "scratch", SplitPosition::Below, "notes").unwrap();
         reg.pane_ids(tag)
@@ -3056,6 +3088,275 @@ mod native_surface_tests {
 
         assert_eq!(reg.pane_ids("teri"), vec!["teri_surface", "repl"]);
         assert_eq!(reg.pane_ids("fred"), vec!["fred_hud", "repl"]);
+    }
+
+    // ── fresh spawn seeds the native tree (init_focus) ───────────────────────
+    //
+    // `SessionManager::spawn_session` calls `init_focus` on every non-resume
+    // spawn. For the focuses that own a native surface that must produce the
+    // native layout, not a bare REPL the Mac app then has nothing to host in.
+
+    #[test]
+    fn a_fresh_spawn_of_each_native_focus_starts_from_its_native_tree() {
+        use crate::mcp::views::tree::{default_fred_tree, default_mother_tree, default_teri_tree};
+        for (tag, expected) in [
+            ("teri", default_teri_tree()),
+            ("fred", default_fred_tree()),
+            ("mother", default_mother_tree()),
+        ] {
+            let mut reg = fresh();
+            let returned = reg.init_focus(tag);
+            assert_eq!(returned, expected, "{tag}: init_focus returns the native tree");
+            assert_eq!(reg.get(tag), Some(&expected), "{tag}: the registry holds it");
+            assert_eq!(reg.get_or_init(tag), expected, "{tag}: get_or_init does not undo it");
+        }
+    }
+
+    #[test]
+    fn a_fresh_spawn_of_a_native_focus_replaces_whatever_layout_it_had() {
+        use crate::mcp::views::tree::{default_fred_tree, default_teri_tree};
+        for (tag, expected) in [("teri", default_teri_tree()), ("fred", default_fred_tree())] {
+            let mut reg = fresh();
+            agent_built(&mut reg, tag);
+            assert_eq!(reg.init_focus(tag), expected, "{tag}");
+            assert_eq!(reg.get(tag), Some(&expected), "{tag}");
+        }
+    }
+
+    #[test]
+    fn the_seeded_native_tree_survives_a_daemon_restart() {
+        use crate::mcp::views::tree::{default_fred_tree, default_teri_tree};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.json");
+        {
+            let mut reg = PaneRegistry::with_store_path(path.clone());
+            reg.init_focus("teri");
+            reg.init_focus("fred");
+        }
+        let reloaded = PaneRegistry::with_store_path(path);
+        assert_eq!(reloaded.get("teri"), Some(&default_teri_tree()));
+        assert_eq!(reloaded.get("fred"), Some(&default_fred_tree()));
+    }
+
+    #[test]
+    fn a_freshly_spawned_native_focus_already_satisfies_the_native_pane_rules() {
+        let mut reg = fresh();
+        reg.init_focus("teri");
+        reg.init_focus("fred");
+        // Nothing left to seed or wrap.
+        assert_eq!(reg.ensure_teri_layout("teri"), None);
+        assert_eq!(reg.ensure_fred_layout("fred"), None);
+        // The native pane is protected exactly as after a focus-registry push.
+        assert_eq!(reg.close_tab("teri", "teri_surface"), Err(PaneError::NotClosable));
+        assert_eq!(reg.close_tab("fred", "fred_hud"), Err(PaneError::NotClosable));
+        // And a layout that drops it is refused.
+        let without = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Leaf { pane_id: "a".into() },
+                PaneTree::Leaf { pane_id: "repl".into() },
+            ],
+            ratios: vec![0.5, 0.5],
+        };
+        for tag in ["teri", "fred"] {
+            assert_eq!(
+                reg.set_layout(tag, &serde_json::json!({ "tree": without })),
+                Err(PaneError::NativePaneRequired),
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fresh_spawn_of_any_other_focus_is_a_bare_repl_leaf() {
+        // Includes look-alikes: only the exact builtin tags own a native pane.
+        for tag in ["teri-x", "teri-2", "fred-mail", "mother-x", "perri", "cody", "cody-core-1234", "anything"] {
+            let mut reg = fresh();
+            assert_eq!(reg.init_focus(tag), PaneTree::repl_leaf(), "{tag}");
+            assert_eq!(reg.get(tag), Some(&PaneTree::repl_leaf()), "{tag}");
+            assert_eq!(reg.pane_ids(tag), vec!["repl"], "{tag}");
+        }
+    }
+
+    // ── the native pane must be a non-tab leaf ───────────────────────────────
+
+    fn leaf(id: &str) -> PaneTree {
+        PaneTree::Leaf { pane_id: id.into() }
+    }
+
+    fn split(direction: SplitDirection, children: Vec<PaneTree>, ratios: Vec<f32>) -> PaneTree {
+        PaneTree::Split { direction, children, ratios }
+    }
+
+    fn tabs(ids: &[&str]) -> PaneTree {
+        PaneTree::Tabs {
+            children: ids.iter().map(|id| leaf(id)).collect(),
+            labels: ids.iter().map(|id| id.to_string()).collect(),
+            active: 0,
+            region: None,
+        }
+    }
+
+    /// `id` is a leaf reachable from the root through Split nodes only.
+    fn is_non_tab_leaf(tree: &PaneTree, id: &str) -> bool {
+        match tree {
+            PaneTree::Leaf { pane_id } => pane_id == id,
+            PaneTree::Split { children, .. } => children.iter().any(|c| is_non_tab_leaf(c, id)),
+            PaneTree::Tabs { .. } => false,
+        }
+    }
+
+    const NATIVE_TAGS: [(&str, &str); 2] = [("teri", "teri_surface"), ("fred", "fred_hud")];
+
+    fn seeded(tag: &str) -> PaneRegistry {
+        let mut reg = fresh();
+        reg.init_focus(tag);
+        reg.ensure_teri_layout(tag);
+        reg.ensure_fred_layout(tag);
+        reg
+    }
+
+    #[test]
+    fn a_layout_that_buries_the_native_pane_in_tabs_is_refused_and_changes_nothing() {
+        for (tag, native) in NATIVE_TAGS {
+            let mut reg = seeded(tag);
+            let before = reg.get(tag).cloned();
+            // Every shape: tabs as a top-level split child, the native pane the
+            // only tab, and a tabs node nested inside a deeper split.
+            let buried = [
+                split(SplitDirection::Vertical, vec![tabs(&[native, "notes"]), leaf("repl")], vec![0.6, 0.4]),
+                split(SplitDirection::Vertical, vec![tabs(&[native]), leaf("repl")], vec![0.6, 0.4]),
+                split(
+                    SplitDirection::Vertical,
+                    vec![
+                        split(
+                            SplitDirection::Horizontal,
+                            vec![leaf("notes"), tabs(&["scratch", native])],
+                            vec![0.5, 0.5],
+                        ),
+                        leaf("repl"),
+                    ],
+                    vec![0.6, 0.4],
+                ),
+            ];
+            for tree in buried {
+                let err = reg.set_layout(tag, &serde_json::json!({ "tree": tree })).unwrap_err();
+                assert_eq!(err, PaneError::NativePaneRequired, "{tag}: {tree:?}");
+                assert_eq!(err.code(), "native_pane_required");
+                assert_eq!(reg.get(tag).cloned(), before, "{tag}: tree unchanged");
+            }
+        }
+    }
+
+    #[test]
+    fn the_native_pane_may_sit_anywhere_in_the_splits_so_long_as_no_tabs_node_holds_it() {
+        for (tag, native) in NATIVE_TAGS {
+            let mut reg = seeded(tag);
+            let accepted = [
+                // top-level split child
+                split(SplitDirection::Vertical, vec![leaf(native), leaf("repl")], vec![0.6, 0.4]),
+                // nested split children, no tabs ancestor
+                split(
+                    SplitDirection::Vertical,
+                    vec![
+                        split(SplitDirection::Horizontal, vec![leaf(native), leaf("notes")], vec![0.5, 0.5]),
+                        leaf("repl"),
+                    ],
+                    vec![0.6, 0.4],
+                ),
+                // tabs are still fine, as long as the native pane is not in them
+                split(
+                    SplitDirection::Vertical,
+                    vec![leaf(native), tabs(&["notes", "scratch"]), leaf("repl")],
+                    vec![0.4, 0.3, 0.3],
+                ),
+            ];
+            for tree in accepted {
+                reg.set_layout(tag, &serde_json::json!({ "tree": tree }))
+                    .unwrap_or_else(|e| panic!("{tag}: {tree:?} refused with {e:?}"));
+                assert_eq!(reg.get(tag), Some(&tree), "{tag}");
+                assert!(is_non_tab_leaf(reg.get(tag).unwrap(), native));
+            }
+        }
+    }
+
+    /// Write `tree` as `tag`'s persisted layout, then load a registry from it —
+    /// the only way a buried native pane can exist, since `set_layout` forbids it.
+    fn registry_loaded_with(tag: &str, tree: PaneTree) -> (PaneRegistry, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.json");
+        let mut trees = HashMap::new();
+        trees.insert(tag.to_string(), tree);
+        save_store(&path, &trees, &HashMap::new());
+        (PaneRegistry::with_store_path(path), dir)
+    }
+
+    #[test]
+    fn a_persisted_layout_with_the_native_pane_buried_in_tabs_is_repaired_without_losing_a_pane() {
+        for (tag, native) in NATIVE_TAGS {
+            let buried_trees = [
+                // buried among other tabs
+                split(
+                    SplitDirection::Vertical,
+                    vec![tabs(&["notes", native, "scratch"]), leaf("repl")],
+                    vec![0.6, 0.4],
+                ),
+                // buried as the only tab of its node
+                split(SplitDirection::Vertical, vec![tabs(&[native]), leaf("repl")], vec![0.6, 0.4]),
+                // buried in a nested tabs node
+                split(
+                    SplitDirection::Vertical,
+                    vec![
+                        split(SplitDirection::Horizontal, vec![leaf("notes"), tabs(&["scratch", native])], vec![0.5, 0.5]),
+                        leaf("repl"),
+                    ],
+                    vec![0.6, 0.4],
+                ),
+            ];
+            for buried in buried_trees {
+                let before_ids = buried.pane_ids();
+                let (mut reg, _dir) = registry_loaded_with(tag, buried.clone());
+                assert!(!is_non_tab_leaf(reg.get(tag).unwrap(), native), "fixture really is buried");
+
+                let repaired = match tag {
+                    "teri" => reg.ensure_teri_layout(tag),
+                    _ => reg.ensure_fred_layout(tag),
+                }
+                .unwrap_or_else(|| panic!("{tag}: a buried native pane is repaired, not left alone: {buried:?}"));
+
+                assert!(is_non_tab_leaf(&repaired, native), "{tag}: {native} is a non-tab leaf: {repaired:?}");
+                let after_ids = repaired.pane_ids();
+                for id in &before_ids {
+                    assert!(after_ids.contains(id), "{tag}: pane {id} survives the repair: {after_ids:?}");
+                }
+                assert_eq!(after_ids.len(), before_ids.len(), "{tag}: nothing duplicated: {after_ids:?}");
+                assert_eq!(reg.get(tag), Some(&repaired), "{tag}: the registry holds the repair");
+                // Once repaired, it is left alone.
+                let again = match tag {
+                    "teri" => reg.ensure_teri_layout(tag),
+                    _ => reg.ensure_fred_layout(tag),
+                };
+                assert_eq!(again, None, "{tag}: repair happens once");
+            }
+        }
+    }
+
+    #[test]
+    fn a_persisted_layout_with_the_native_pane_outside_tabs_is_left_alone_even_if_it_has_tabs() {
+        for (tag, native) in NATIVE_TAGS {
+            let tree = split(
+                SplitDirection::Vertical,
+                vec![leaf(native), tabs(&["notes", "scratch"]), leaf("repl")],
+                vec![0.4, 0.3, 0.3],
+            );
+            let (mut reg, _dir) = registry_loaded_with(tag, tree.clone());
+            let result = match tag {
+                "teri" => reg.ensure_teri_layout(tag),
+                _ => reg.ensure_fred_layout(tag),
+            };
+            assert_eq!(result, None, "{tag}");
+            assert_eq!(reg.get(tag), Some(&tree), "{tag}");
+        }
     }
 
     #[test]

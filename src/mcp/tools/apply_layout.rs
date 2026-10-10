@@ -1034,7 +1034,12 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
     };
     let tree = match set_result {
         Ok(t) => t,
-        Err(e) => return json!({ "error": e.code() }),
+        Err(e) => {
+            return match e.detail() {
+                Some(detail) => json!({ "error": e.code(), "detail": detail }),
+                None => json!({ "error": e.code() }),
+            }
+        }
     };
 
     // ── broadcast structure, then fetch + broadcast each pane's content ─────
