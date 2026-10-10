@@ -733,3 +733,45 @@ final class TeriSurfaceViewTests: XCTestCase {
         XCTAssertEqual(rig.log.frames, [.refresh(source: .todos, fred: false)])
     }
 }
+
+// MARK: - Detail links (security edge cases)
+
+/// Work item text is untrusted (a Jira description, a doc in a repo). Only web
+/// links may ever be launched from the detail pane.
+final class WorkDetailViewLinkSafetyTests: XCTestCase {
+    private func detail(links: [(String, String)]) throws -> WorkItemDetail {
+        let json: [String: Any] = [
+            "item_id": "jira:X-1", "title": "T", "markdown": "[a](file:///Applications/Calculator.app)",
+            "links": links.map { ["label": $0.0, "url": $0.1] },
+        ]
+        return try JSONDecoder().decode(WorkItemDetail.self, from: try JSONSerialization.data(withJSONObject: json))
+    }
+
+    func testOnlyWebLinksBecomeOpenTargets() throws {
+        let d = try detail(links: [
+            ("file", "file:///Applications/Calculator.app"), ("ssh", "ssh://host"), ("js", "javascript:alert(1)"),
+            ("mail", "mailto:a@b.c"), ("ok", "https://example.com/browse/X-1"), ("plain http", "HTTP://example.com"),
+        ])
+        let targets = WorkDetailView.targets(for: .detail(d), item: nil)
+        XCTAssertEqual(targets.map(\.label), ["ok", "plain http"])
+    }
+
+    func testAnItemUrlThatIsNotWebIsNotAnOpenTarget() {
+        let item = WorkTestSupport.makeItem(["id": "jira:X-1", "source": "jira", "kind": "task", "title": "t",
+                                             "url": "file:///etc/passwd"])
+        XCTAssertTrue(WorkDetailView.targets(for: .none, item: item).isEmpty)
+    }
+
+    func testClickingALinkInTheBodyOpensWebLinksOnlyAndNeverFallsThrough() {
+        let view = WorkDetailView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        var opened: [URL] = []
+        view.opener = { if case .url(_, let url) = $0 { opened.append(url) } }
+        let text = NSTextView()
+
+        XCTAssertTrue(view.textView(text, clickedOnLink: URL(string: "file:///Applications/Calculator.app")!, at: 0))
+        XCTAssertTrue(view.textView(text, clickedOnLink: "x-apple.systempreferences:", at: 0))
+        XCTAssertTrue(view.textView(text, clickedOnLink: URL(string: "https://example.com/a")!, at: 0))
+
+        XCTAssertEqual(opened, [URL(string: "https://example.com/a")!], "only the web link was opened")
+    }
+}

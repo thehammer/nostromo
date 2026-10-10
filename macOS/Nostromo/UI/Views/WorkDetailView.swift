@@ -18,7 +18,7 @@ enum WorkOpenTarget: Equatable {
     }
 }
 
-final class WorkDetailView: NSView {
+final class WorkDetailView: NSView, NSTextViewDelegate {
     enum Content: Equatable {
         case none
         /// The list item's title while the daemon's detail is on its way.
@@ -101,10 +101,10 @@ final class WorkDetailView: NSView {
         }
         if case .detail(let detail) = content {
             for link in detail.links {
-                if let url = URL(string: link.url), url.scheme != nil { add(.url(label: link.label, url: url)) }
+                if let url = URL(string: link.url), isWebURL(url) { add(.url(label: link.label, url: url)) }
             }
         }
-        if let urlString = item?.url, let url = URL(string: urlString), url.scheme != nil {
+        if let urlString = item?.url, let url = URL(string: urlString), isWebURL(url) {
             add(.url(label: "Open in browser", url: url))
         }
         if let path = item?.path, !path.isEmpty {
@@ -118,19 +118,44 @@ final class WorkDetailView: NSView {
         return targets
     }
 
+    /// Work item text comes from outside (a Jira description, a doc in a repo),
+    /// so only web links are ever launched: a `file:`, `ssh:` or app-specific
+    /// scheme in it must not start anything.
+    static func isWebURL(_ url: URL) -> Bool {
+        ["http", "https"].contains(url.scheme?.lowercased() ?? "")
+    }
+
+    /// File types that would run code when opened; they are revealed in Finder instead.
+    private static let executableExtensions: Set<String> = [
+        "app", "command", "sh", "zsh", "bash", "terminal", "scpt", "scptd", "workflow", "action",
+        "pkg", "dmg", "jar", "py", "rb", "pl", "tool", "webloc", "inetloc", "fileloc",
+    ]
+
     static func openWithWorkspace(_ target: WorkOpenTarget) {
         switch target {
         case .url(_, let url):
+            guard isWebURL(url) else { return }
             NSWorkspace.shared.open(url)
         case .path(_, let path):
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else { return }
             if isDirectory.boolValue {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+            } else if executableExtensions.contains((path as NSString).pathExtension.lowercased()) {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
             } else {
                 NSWorkspace.shared.open(URL(fileURLWithPath: path))
             }
         }
+    }
+
+    // MARK: NSTextViewDelegate
+
+    /// Clicks on links in the body: web links open in the browser, anything else is ignored.
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:))
+        if let url, Self.isWebURL(url) { opener(.url(label: url.absoluteString, url: url)) }
+        return true   // handled: never fall through to the default open
     }
 
     // MARK: Rendering
@@ -185,7 +210,7 @@ final class WorkDetailView: NSView {
                 line("Links", font: NSFont.systemFont(ofSize: 12, weight: .semibold), color: Theme.fgMuted)
                 for link in detail.links {
                     var attrs: [NSAttributedString.Key: Any] = [.font: bodyFont, .foregroundColor: Theme.cornflower]
-                    if let url = URL(string: link.url) { attrs[.link] = url }
+                    if let url = URL(string: link.url), isWebURL(url) { attrs[.link] = url }
                     out.append(NSAttributedString(string: link.label + "\n", attributes: attrs))
                 }
             }
@@ -198,6 +223,7 @@ final class WorkDetailView: NSView {
     private func setUp() {
         textView.isEditable = false
         textView.isSelectable = true
+        textView.delegate = self
         textView.drawsBackground = true
         textView.backgroundColor = Theme.bg
         textView.textContainerInset = NSSize(width: 12, height: 12)
