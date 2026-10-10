@@ -43,6 +43,7 @@ fn ev(start_h: u32, start_m: u32, end_h: u32, end_m: u32, status: &str) -> Calen
         title: "Test Event".into(),
         status: status.into(),
         is_now: false,
+        ..Default::default()
     }
 }
 

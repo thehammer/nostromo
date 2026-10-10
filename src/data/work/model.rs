@@ -31,9 +31,11 @@ impl WorkSource {
 }
 
 /// Health of one source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceState {
+    /// No fetch has completed yet (also what an absent `state` field means).
+    #[default]
     Loading,
     Fresh,
     Stale,

@@ -2615,6 +2615,7 @@ mod tests {
                 vip:         true,
                 is_invite:   false,
                 is_read:     false,
+                ..Default::default()
             }],
             stale:       false,
             error:       None,
@@ -2623,6 +2624,7 @@ mod tests {
                 user_code:        "ABCD-1234".into(),
                 expires_at:       chrono::Utc::now(),
             }),
+            ..Default::default()
         };
         let calendar = CalendarSnapshot {
             events: vec![CalendarEvent {
@@ -2631,6 +2633,7 @@ mod tests {
                 title:  "Daily standup".into(),
                 status: "accepted".into(),
                 is_now: true,
+                ..Default::default()
             }],
             next: Some(NextEvent {
                 title:      "Lunch".into(),
@@ -2640,6 +2643,7 @@ mod tests {
             stale:   false,
             error:   None,
             generated_at: Some(chrono::Utc::now()),
+            ..Default::default()
         };
         round_trip_server(ServerMsg::FredState { mailbox, calendar });
     }

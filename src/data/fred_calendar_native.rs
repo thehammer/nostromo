@@ -7,8 +7,9 @@
 //!   amber = 5–15 min
 //!   sage  = > 15 min, or no upcoming event
 
-use anyhow::Result;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use std::time::Duration;
+
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
@@ -18,7 +19,9 @@ use crate::{
     data::{
         dirty_file,
         fred_calendar::{CalendarEvent, CalendarSnapshot, NextEvent},
-        graph_client::GraphClient,
+        fred_mailbox_native::{shared_graph_client, FredTiming},
+        graph_client::{failure_reason, GraphClient, ThrottleBackoff},
+        work::model::SourceState,
     },
 };
 
@@ -27,11 +30,17 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphEvent {
+    id: Option<String>,
     subject: Option<String>,
     start: Option<GraphDateTimeTimeZone>,
     end: Option<GraphDateTimeTimeZone>,
     response_status: Option<GraphResponseStatus>,
     is_cancelled: Option<bool>,
+    is_all_day: Option<bool>,
+    web_link: Option<String>,
+    location: Option<GraphLocation>,
+    online_meeting: Option<GraphOnlineMeeting>,
+    organizer: Option<GraphOrganizer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,13 +54,42 @@ struct GraphResponseStatus {
     response: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphLocation {
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphOnlineMeeting {
+    join_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphOrganizer {
+    email_address: Option<GraphOrganizerAddress>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphOrganizerAddress {
+    name: Option<String>,
+}
+
+/// While there is nothing to show (signed out, errored) look again this soon,
+/// so data appears within seconds of sign-in rather than a full poll later.
+const RETRY_WHILE_EMPTY: Duration = Duration::from_secs(5);
+
 // ── Source ────────────────────────────────────────────────────────────────────
 
 pub struct FredCalendarNativeSource {
-    config: Config,
+    timing: FredTiming,
 }
 
 impl FredCalendarNativeSource {
+    /// Production entry point: reuses the process-wide Graph client (the same
+    /// one the mailbox source uses), so sign-in happens once.
     pub fn spawn(config: Config) -> watch::Receiver<Option<CalendarSnapshot>> {
         let (tx, rx) = watch::channel(None);
         let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
@@ -60,8 +98,37 @@ impl FredCalendarNativeSource {
         dirty_file::spawn_watcher(dirty_path, dirty_tx);
 
         tokio::spawn(async move {
-            let source = FredCalendarNativeSource { config };
-            source.run(tx, &mut dirty_rx).await;
+            let graph = match shared_graph_client(&config).await {
+                Ok(g) => g,
+                Err(unavailable) => {
+                    let snapshot = CalendarSnapshot::from(unavailable);
+                    warn!("calendar graph client unavailable: {:?}", snapshot.error);
+                    let _ = tx.send(Some(snapshot));
+                    return;
+                }
+            };
+            let source = FredCalendarNativeSource { timing: FredTiming::default() };
+            source.run(graph, tx, &mut dirty_rx).await;
+        });
+
+        rx
+    }
+
+    /// Poll with an explicit (usually shared) Graph client and timing.
+    pub fn spawn_with(
+        graph: GraphClient,
+        config: Config,
+        timing: FredTiming,
+    ) -> watch::Receiver<Option<CalendarSnapshot>> {
+        let (tx, rx) = watch::channel(None);
+        let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
+
+        let dirty_path = config.fred_state_dir().join("calendar.dirty");
+        dirty_file::spawn_watcher(dirty_path, dirty_tx);
+
+        tokio::spawn(async move {
+            let source = FredCalendarNativeSource { timing };
+            source.run(graph, tx, &mut dirty_rx).await;
         });
 
         rx
@@ -69,52 +136,35 @@ impl FredCalendarNativeSource {
 
     async fn run(
         &self,
+        graph: GraphClient,
         tx: watch::Sender<Option<CalendarSnapshot>>,
         dirty_rx: &mut mpsc::UnboundedReceiver<()>,
     ) {
-        let graph = match self.build_graph_client().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!("failed to build graph client for calendar: {e:#}");
-                let _ = tx.send(Some(CalendarSnapshot {
-                    error: Some(format!("Graph client init failed: {e:#}")),
-                    stale: true,
-                    sweater: "sage".to_owned(),
-                    generated_at: Some(chrono::Utc::now()),
-                    ..Default::default()
-                }));
-                return;
-            }
-        };
-
+        let mut backoff = ThrottleBackoff::default();
         loop {
-            match graph.ensure_authed().await {
-                Ok(Some(_prompt)) => {
-                    // Calendar waits for mailbox auth prompt to drive sign-in.
-                }
-                Ok(None) => {
-                    let path = calendar_view_path();
-                    match graph.get_paged::<GraphEvent>(&path).await {
-                        Ok(events) => {
-                            debug!(count = events.len(), "calendar fetch received");
-                            let snap = build_snapshot(events);
-                            debug!(sweater = %snap.sweater, events = snap.events.len(), "calendar refreshed");
-                            let _ = tx.send(Some(snap));
-                        }
-                        Err(e) => {
-                            warn!("calendar fetch failed: {e:#}");
-                            let mut snap = tx.borrow().clone().unwrap_or_default();
-                            snap.stale = true;
-                            snap.error = Some(e.to_string());
-                            let _ = tx.send(Some(snap));
-                        }
-                    }
-                }
-                Err(e) => warn!("graph ensure_authed error: {e:#}"),
+            let previous = tx.borrow().clone();
+            let (next, throttled_for) = self.refresh(&graph, &mut backoff, previous.as_ref()).await;
+            let nothing_to_show = matches!(
+                next.state,
+                SourceState::Unauthenticated | SourceState::Error | SourceState::Loading
+            );
+            let _ = tx.send(Some(next));
+
+            if let Some(quiet) = throttled_for {
+                // Graph is throttling us: stay silent for the whole wait, dirty
+                // signals included, and forget the ones that piled up meanwhile.
+                tokio::time::sleep(quiet).await;
+                while dirty_rx.try_recv().is_ok() {}
+                continue;
             }
 
+            let wait = if nothing_to_show {
+                self.timing.calendar_poll.min(RETRY_WHILE_EMPTY)
+            } else {
+                self.timing.calendar_poll
+            };
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                _ = tokio::time::sleep(wait) => {}
                 _ = dirty_rx.recv() => {
                     debug!("calendar dirty signal received");
                 }
@@ -122,52 +172,92 @@ impl FredCalendarNativeSource {
         }
     }
 
-    async fn build_graph_client(&self) -> Result<GraphClient> {
-        let client_id = self.config.graph_client_id.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "graph_client_id not configured. \
-                     Add to ~/.config/nostromo/config.toml:\n  \
-                     graph_client_id = \"<your-azure-app-id>\"\n\n\
-                     Or use --bash-fallback flag to use legacy bash sources."
-            )
-        })?;
+    /// One poll cycle. Always yields the snapshot to publish: fresh events,
+    /// the sign-in prompt, or the previous events marked stale / an error /
+    /// rate limited. The second value is how long to stay silent when Graph
+    /// throttled us (never shorter than the normal poll interval).
+    async fn refresh(
+        &self,
+        graph: &GraphClient,
+        backoff: &mut ThrottleBackoff,
+        previous: Option<&CalendarSnapshot>,
+    ) -> (CalendarSnapshot, Option<Duration>) {
+        let poll = self.timing.calendar_poll;
+        let failure = |backoff: &mut ThrottleBackoff, what: &str, e: &anyhow::Error| {
+            let reason = failure_reason(what, e);
+            match backoff.throttled(e) {
+                Some(wait) => {
+                    let wait = wait.max(poll);
+                    let retry_at = Utc::now() + ChronoDuration::from_std(wait).unwrap_or_default();
+                    (CalendarSnapshot::rate_limited(previous, reason, retry_at), Some(wait))
+                }
+                None => (CalendarSnapshot::failed(previous, reason), None),
+            }
+        };
 
-        if client_id.trim().is_empty() {
-            return Err(anyhow::anyhow!(
-                "graph_client_id is empty. \
-                 Set a valid Azure AD application ID in ~/.config/nostromo/config.toml:\n  \
-                 graph_client_id = \"<your-azure-app-id>\"\n\n\
-                 Or use --bash-fallback flag to use legacy bash sources."
-            ));
+        // The mailbox and calendar share one client, so a pending sign-in is
+        // the same prompt for both.
+        match graph.ensure_authed().await {
+            Ok(Some(prompt)) => return (CalendarSnapshot::unauthenticated(prompt), None),
+            Ok(None) => {}
+            Err(e) => {
+                warn!("graph ensure_authed error: {e:#}");
+                return failure(backoff, "Calendar sign-in failed", &e);
+            }
         }
 
-        let tenant = self
-            .config
-            .graph_tenant
-            .clone()
-            .unwrap_or_else(|| "common".to_owned());
-        let cache_path = self.config.graph_token_cache_path();
-        GraphClient::new(client_id, tenant, cache_path).await
+        let (window_start, window_end) = self.today_window_now();
+        let path = calendar_view_path(window_start, window_end);
+        match graph.get_paged::<GraphEvent>(&path).await {
+            Ok(events) => {
+                debug!(count = events.len(), "calendar fetch received");
+                backoff.succeeded();
+                (build_snapshot(events, Utc::now(), (window_start, window_end)), None)
+            }
+            Err(e) => {
+                warn!("calendar fetch failed: {e:#}");
+                failure(backoff, "Calendar fetch failed", &e)
+            }
+        }
+    }
+
+    fn today_window_now(&self) -> (DateTime<Utc>, DateTime<Utc>) {
+        let now = Utc::now();
+        match self.timing.day_offset {
+            Some(offset) => today_window(now, &offset),
+            None => today_window(now, &chrono::Local),
+        }
     }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn calendar_view_path() -> String {
-    // Start at midnight local time today so events earlier in the day are included.
-    // Uses plain calendarView (not delta) to get expanded instances with correct dates.
-    let today_local = chrono::Local::now().date_naive();
-    let start_local = today_local.and_hms_opt(0, 0, 0).expect("midnight is valid");
-    let start_utc: DateTime<Utc> =
-        chrono::TimeZone::from_local_datetime(&chrono::Local, &start_local)
-            .single()
-            .unwrap_or_else(|| Utc::now().with_timezone(&chrono::Local))
-            .with_timezone(&Utc);
-    let end_utc = start_utc + ChronoDuration::hours(24);
+/// `[start, end)` of the calendar day containing `now` in `tz`, as UTC instants
+/// (local midnight to the next local midnight — 23 or 25 hours on DST days).
+pub fn today_window<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> (DateTime<Utc>, DateTime<Utc>) {
+    let today = now.with_timezone(tz).date_naive();
+    let tomorrow = today.succ_opt().unwrap_or(today);
+    (local_midnight(today, tz, now), local_midnight(tomorrow, tz, now + ChronoDuration::hours(24)))
+}
+
+/// Midnight starting `date` in `tz`. A zone where midnight does not exist (a
+/// DST jump at 00:00) starts the day at the first valid instant after it.
+fn local_midnight<Tz: TimeZone>(date: NaiveDate, tz: &Tz, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    for hour in 0..4 {
+        let Some(naive) = date.and_hms_opt(hour, 0, 0) else { continue };
+        if let Some(local) = tz.from_local_datetime(&naive).earliest() {
+            return local.with_timezone(&Utc);
+        }
+    }
+    fallback
+}
+
+fn calendar_view_path(start: DateTime<Utc>, end: DateTime<Utc>) -> String {
+    // Plain calendarView (not delta) returns expanded instances with correct dates.
     format!(
-        "/me/calendarView?startDateTime={}&endDateTime={}&$select=subject,start,end,responseStatus,isCancelled&$top=50",
-        start_utc.format("%Y-%m-%dT%H:%M:%SZ"),
-        end_utc.format("%Y-%m-%dT%H:%M:%SZ"),
+        "/me/calendarView?startDateTime={}&endDateTime={}&$select=id,subject,start,end,responseStatus,isCancelled,webLink,location,onlineMeeting,organizer,isAllDay&$top=50",
+        start.format("%Y-%m-%dT%H:%M:%SZ"),
+        end.format("%Y-%m-%dT%H:%M:%SZ"),
     )
 }
 
@@ -180,13 +270,17 @@ fn parse_graph_dt(s: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-fn build_snapshot(raw_events: Vec<GraphEvent>) -> CalendarSnapshot {
-    let now = Utc::now();
+fn non_empty(s: Option<String>) -> Option<String> {
+    s.filter(|v| !v.trim().is_empty())
+}
 
-    // calendarView already returns only events within today's window — no date
-    // filtering needed here.  Just parse and convert every returned event.
+fn build_snapshot(
+    raw_events: Vec<GraphEvent>,
+    now: DateTime<Utc>,
+    window: (DateTime<Utc>, DateTime<Utc>),
+) -> CalendarSnapshot {
     let mut events: Vec<CalendarEvent> = raw_events
-        .iter()
+        .into_iter()
         .filter_map(|ev| {
             let start = ev
                 .start
@@ -200,7 +294,18 @@ fn build_snapshot(raw_events: Vec<GraphEvent>) -> CalendarSnapshot {
                 .and_then(parse_graph_dt);
 
             // Skip events with no parseable start time.
-            start?;
+            let start_at = start?;
+            let is_all_day = ev.is_all_day == Some(true);
+
+            // Defensive: calendarView is already today-only, but drop anything
+            // that does not overlap today's window. (All-day events carry
+            // midnight-to-midnight times in the event's own zone: trust Graph.)
+            if !is_all_day {
+                let end_at = end.unwrap_or(start_at);
+                if end_at <= window.0 || start_at >= window.1 {
+                    return None;
+                }
+            }
 
             // calendarView returns expanded instances; subjects are always present.
             // Use "(no title)" as a safe fallback for the rare null case.
@@ -212,16 +317,9 @@ fn build_snapshot(raw_events: Vec<GraphEvent>) -> CalendarSnapshot {
             };
 
             // Normalize Graph's "Canceled: Foo" title prefix → strip prefix, force status.
-            let (title, forced_cancelled) = if raw_title.starts_with("Canceled: ") {
-                (
-                    raw_title
-                        .strip_prefix("Canceled: ")
-                        .unwrap_or(&raw_title)
-                        .to_owned(),
-                    true,
-                )
-            } else {
-                (raw_title, false)
+            let (title, forced_cancelled) = match raw_title.strip_prefix("Canceled: ") {
+                Some(rest) => (rest.to_owned(), true),
+                None => (raw_title, false),
             };
 
             let response = ev
@@ -230,33 +328,46 @@ fn build_snapshot(raw_events: Vec<GraphEvent>) -> CalendarSnapshot {
                 .and_then(|r| r.response.clone())
                 .unwrap_or_default();
 
-            let status = if forced_cancelled || ev.is_cancelled == Some(true) {
-                "cancelled".to_owned()
-            } else {
-                response
-            };
+            let is_cancelled = forced_cancelled || ev.is_cancelled == Some(true);
+            let status = if is_cancelled { "cancelled".to_owned() } else { response.clone() };
 
-            let is_now =
-                start.map(|s| s <= now).unwrap_or(false) && end.map(|e| e > now).unwrap_or(false);
+            let is_now = !is_all_day
+                && status != "cancelled"
+                && status != "declined"
+                && start_at <= now
+                && end.is_some_and(|e| e > now);
 
             Some(CalendarEvent {
+                id: ev.id.unwrap_or_default(),
                 start,
                 end,
                 title,
                 status,
                 is_now,
+                web_link: non_empty(ev.web_link),
+                location: non_empty(ev.location.and_then(|l| l.display_name)),
+                online_meeting_url: non_empty(ev.online_meeting.and_then(|m| m.join_url)),
+                organizer: non_empty(
+                    ev.organizer
+                        .and_then(|o| o.email_address)
+                        .and_then(|a| a.name),
+                ),
+                is_cancelled,
+                response_status: response,
+                is_all_day,
             })
         })
         .collect();
 
-    // Sort by start time ascending.
-    events.sort_by_key(|ev| ev.start);
+    // Sort by start time ascending (then end, so the order is deterministic).
+    events.sort_by_key(|ev| (ev.start, ev.end));
 
-    // Find next upcoming event — skip cancelled/declined.
+    // Find next upcoming event — skip cancelled/declined/all-day.
     let next = events.iter().find(|ev| {
-        ev.start.map(|s| s > now).unwrap_or(false)
+        ev.start.is_some_and(|s| s > now)
             && ev.status != "cancelled"
             && ev.status != "declined"
+            && !ev.is_all_day
     });
 
     let (next_event, sweater) = match next {
@@ -275,13 +386,18 @@ fn build_snapshot(raw_events: Vec<GraphEvent>) -> CalendarSnapshot {
         None => (None, "sage".to_owned()),
     };
 
+    let state = if events.is_empty() { SourceState::Empty } else { SourceState::Fresh };
     CalendarSnapshot {
         events,
         next: next_event,
         sweater,
         stale: false,
         error: None,
-        generated_at: Some(chrono::Utc::now()),
+        generated_at: Some(now),
+        state,
+        updated_at: Some(now),
+        auth_prompt: None,
+        retry_at: None,
     }
 }
 

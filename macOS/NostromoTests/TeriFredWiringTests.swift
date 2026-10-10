@@ -49,11 +49,11 @@ final class TeriFredWiringTests: XCTestCase {
         XCTAssertTrue(source.contains("FredBindings.makeSurface(focus: focus)"))
     }
 
-    func testBindingsHostTheExistingTeriPanelAndFredHUD() throws {
+    func testBindingsHostTheTeriPanelAndTheFredSurface() throws {
         let teri = try Self.source("UI/Views/TeriBindings.swift")
         XCTAssertTrue(teri.contains("NSHostingView(rootView: TeriTodosPanel())"))
         let fred = try Self.source("UI/Views/FredBindings.swift")
-        XCTAssertTrue(fred.contains("FredHUD()"))
+        XCTAssertTrue(fred.contains("FredSurfaceView("))
     }
 
     // MARK: - Helpers

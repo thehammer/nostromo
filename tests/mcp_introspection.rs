@@ -486,6 +486,7 @@ async fn fred_list_calendar_events_no_date_returns_all() {
                 title: "Morning standup".to_string(),
                 status: "accepted".to_string(),
                 is_now: false,
+                ..Default::default()
             },
             CalendarEvent {
                 start: Some("2026-05-14T14:00:00Z".parse().unwrap()),
@@ -493,6 +494,7 @@ async fn fred_list_calendar_events_no_date_returns_all() {
                 title: "Planning session".to_string(),
                 status: "accepted".to_string(),
                 is_now: false,
+                ..Default::default()
             },
         ],
         next: None,
@@ -500,6 +502,7 @@ async fn fred_list_calendar_events_no_date_returns_all() {
         stale: false,
         error: None,
         generated_at: None,
+        ..Default::default()
     };
     let state = seeded_state(
         None,
@@ -529,6 +532,7 @@ async fn fred_list_calendar_events_with_date_filters() {
                 title: "Today's standup".to_string(),
                 status: "accepted".to_string(),
                 is_now: false,
+                ..Default::default()
             },
             CalendarEvent {
                 start: Some("2026-05-15T14:00:00Z".parse().unwrap()),
@@ -536,6 +540,7 @@ async fn fred_list_calendar_events_with_date_filters() {
                 title: "Tomorrow's planning".to_string(),
                 status: "accepted".to_string(),
                 is_now: false,
+                ..Default::default()
             },
         ],
         next: None,
@@ -543,6 +548,7 @@ async fn fred_list_calendar_events_with_date_filters() {
         stale: false,
         error: None,
         generated_at: None,
+        ..Default::default()
     };
     let state = seeded_state(
         None,
@@ -580,12 +586,14 @@ async fn fred_get_state_fields() {
             title: "Standup".to_string(),
             status: "accepted".to_string(),
             is_now: true,
+            ..Default::default()
         }],
         next: None,
         sweater: "sage".to_string(),
         stale: false,
         error: None,
         generated_at: None,
+        ..Default::default()
     };
     let state = seeded_state(
         None,

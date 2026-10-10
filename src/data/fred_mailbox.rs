@@ -28,18 +28,27 @@ use tracing::{debug, warn};
 
 pub use crate::data::graph_client::DeviceFlowPrompt;
 
-use crate::{config::Config, data::dirty_file};
+use crate::{
+    config::Config,
+    data::{dirty_file, work::model::SourceState},
+};
 
 // ── Snapshot types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MailboxItem {
+    /// Graph message id (stable across polls). Empty for the legacy bash source.
+    #[serde(default)]
+    pub id: String,
     pub from: String,
     pub subject: String,
     pub received_at: Option<DateTime<Utc>>,
     pub vip: bool,
     pub is_invite: bool,
     pub is_read: bool,
+    /// Link that opens the message in Outlook on the web.
+    #[serde(default)]
+    pub web_link: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -56,6 +65,85 @@ pub struct MailboxSnapshot {
     /// backwards-compatible.
     #[serde(default)]
     pub auth_prompt: Option<DeviceFlowPrompt>,
+    /// What the user should see: never `fresh`/`empty` when the fetch failed.
+    #[serde(default)]
+    pub state: SourceState,
+    /// Last *successful* fetch (kept across stale snapshots).
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// When `state` is `rate_limited`: the earliest time the daemon will ask
+    /// Graph again.
+    #[serde(default)]
+    pub retry_at: Option<DateTime<Utc>>,
+}
+
+impl MailboxSnapshot {
+    /// The snapshot to publish when a fetch failed: the previous good data
+    /// (when there is any) marked `stale`, otherwise an `error` snapshot with
+    /// no items. Never `fresh`/`empty`.
+    pub fn failed(previous: Option<&MailboxSnapshot>, reason: String) -> MailboxSnapshot {
+        let has_data = previous.is_some_and(|p| p.updated_at.is_some());
+        match previous {
+            Some(prev) if has_data => MailboxSnapshot {
+                state: SourceState::Stale,
+                stale: true,
+                error: Some(reason),
+                auth_prompt: None,
+                retry_at: None,
+                ..prev.clone()
+            },
+            _ => MailboxSnapshot {
+                generated_at: Some(Utc::now()),
+                state: SourceState::Error,
+                stale: false,
+                error: Some(reason),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// The snapshot to publish when Graph is throttling us: like `failed`
+    /// (previous good data kept, marked `stale`; never `fresh`/`empty`) but in
+    /// the `rate_limited` state with the time we will ask again.
+    pub fn rate_limited(previous: Option<&MailboxSnapshot>, reason: String, retry_at: DateTime<Utc>) -> MailboxSnapshot {
+        MailboxSnapshot {
+            state: SourceState::RateLimited,
+            retry_at: Some(retry_at),
+            ..Self::failed(previous, reason)
+        }
+    }
+
+    /// The snapshot to publish while the user must sign in: no data, the
+    /// device-flow prompt, and a plain-English reason. Carries no token.
+    pub fn unauthenticated(prompt: DeviceFlowPrompt) -> MailboxSnapshot {
+        MailboxSnapshot {
+            generated_at: Some(Utc::now()),
+            state: SourceState::Unauthenticated,
+            error: Some("Sign in to Microsoft 365 to see your mail".to_owned()),
+            auth_prompt: Some(prompt),
+            ..Default::default()
+        }
+    }
+
+    /// Fill `state`/`updated_at` on a snapshot from the legacy bash source,
+    /// which knows nothing about them.
+    fn with_legacy_state(mut self) -> MailboxSnapshot {
+        self.state = if self.auth_prompt.is_some() {
+            SourceState::Unauthenticated
+        } else if self.stale {
+            SourceState::Stale
+        } else if self.error.is_some() {
+            SourceState::Error
+        } else if self.items.is_empty() && self.unread_count == 0 {
+            SourceState::Empty
+        } else {
+            SourceState::Fresh
+        };
+        if !matches!(self.state, SourceState::Error | SourceState::Unauthenticated) {
+            self.updated_at = self.updated_at.or(self.generated_at);
+        }
+        self
+    }
 }
 
 // ── Source ──────────────────────────────────────────────────────────────────
@@ -82,15 +170,16 @@ impl FredMailboxSource {
                 match source.fetch().await {
                     Ok(snap) => {
                         debug!(unread = snap.unread_count, "mailbox refreshed");
-                        let _ = tx.send(Some(snap));
+                        let _ = tx.send(Some(snap.with_legacy_state()));
                     }
                     Err(e) => {
                         warn!("mailbox fetch failed: {e:#}");
-                        // Send a stale snapshot with the error annotated.
-                        let mut snap = tx.borrow().clone().unwrap_or_default();
-                        snap.stale = true;
-                        snap.error = Some(e.to_string());
-                        let _ = tx.send(Some(snap));
+                        // Previous data marked stale, or an error with no data.
+                        let previous = tx.borrow().clone();
+                        let _ = tx.send(Some(MailboxSnapshot::failed(
+                            previous.as_ref(),
+                            e.to_string(),
+                        )));
                     }
                 }
 
