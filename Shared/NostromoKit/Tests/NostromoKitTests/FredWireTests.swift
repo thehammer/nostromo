@@ -224,3 +224,12 @@ final class FredWireTests: XCTestCase {
                         "received_at with fractional seconds should parse to a Date")
     }
 }
+
+final class WithheldWireTests: XCTestCase {
+    func testWithheldDecodes() throws {
+        let json = #"{"type":"withheld","topics":["fred","teri","work"],"reason":"requires_secure_connection"}"#.data(using: .utf8)!
+        guard case .withheld(let topics, let reason) = ServerMsg.decode(from: json) else { return XCTFail("not withheld") }
+        XCTAssertEqual(topics, ["fred", "teri", "work"])
+        XCTAssertEqual(reason, "requires_secure_connection")
+    }
+}

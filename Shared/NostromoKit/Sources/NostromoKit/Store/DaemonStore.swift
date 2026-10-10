@@ -59,6 +59,8 @@ public final class DaemonStore: ObservableObject {
 
     /// Latest Teri todos snapshot. Updated by `teri_state` broadcasts.
     @Published public private(set) var teriTodos: TeriTodosSnapshot? = nil
+    /// Topics the daemon withheld from this connection (e.g. teri, fred, work).
+    @Published public private(set) var withheldTopics: Set<String> = []
 
     /// Daemon-served focus registry, keyed by tag.
     @Published public private(set) var focuses: [String: FocusMeta] = [:]
@@ -257,6 +259,7 @@ public final class DaemonStore: ObservableObject {
                     self?.fredMailbox    = nil
                     self?.fredCalendar   = nil
                     self?.teriTodos      = nil
+                    self?.withheldTopics = []
                     // A reconnect starts fresh and says so — never
                     // resurrects pre-drop events (D8's client half of the
                     // PRD's "no persistence across a drop" requirement).
@@ -382,6 +385,9 @@ public final class DaemonStore: ObservableObject {
         case .fredState(let mailbox, let calendar):
             fredMailbox  = mailbox
             fredCalendar = calendar
+
+        case .withheld(let topics, _):
+            withheldTopics = Set(topics)
 
         case .teriState(let snap):
             teriTodos = snap

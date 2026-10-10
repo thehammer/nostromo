@@ -104,6 +104,9 @@ public enum ServerMsg {
     /// Ingestion health verdict for the ambient activity feed.
     case activityHealth(ingesting: Bool, reason: String?, lastEventAt: Date?, hookInstalled: Bool)
 
+    /// The daemon withheld these topics from this (network) connection.
+    case withheld(topics: [String], reason: String)
+
     case unknown
 }
 
@@ -409,6 +412,7 @@ public extension JSONDecoder {
 
 extension ServerMsg {
     // Private helpers for decoding the response-wrapper structs below.
+    private struct WithheldWrapper: Decodable { let topics: [String]; let reason: String }
     private struct SessionListRespWrapper:   Decodable { let sessions: [SessionInfo] }
     private struct SessionSpawnedWrapper:    Decodable { let tag: String; let session_id: String? }
     private struct SessionStateWrapper:      Decodable { let tag: String; let state: SessionState }
@@ -543,6 +547,11 @@ extension ServerMsg {
         case "fred_state":
             if let m = try? dec.decode(FredStateWrapper.self, from: data) {
                 return .fredState(mailbox: m.mailbox, calendar: m.calendar)
+            }
+
+        case "withheld":
+            if let m = try? dec.decode(WithheldWrapper.self, from: data) {
+                return .withheld(topics: m.topics, reason: m.reason)
             }
 
         case "teri_state":
