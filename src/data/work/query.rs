@@ -277,7 +277,7 @@ fn group_repo_docs(items: &[WorkItem], sort: SortKey) -> Vec<WorkGroup> {
         })
         .collect();
     // BTreeMap already ordered the repos by name; a stable sort by size keeps ties by name.
-    groups.sort_by(|a, b| b.items.len().cmp(&a.items.len()));
+    groups.sort_by_key(|g| std::cmp::Reverse(g.items.len()));
     groups
 }
 
