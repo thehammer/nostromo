@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: every job here only checks out code, builds, tests and uploads artifacts.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -80,3 +84,151 @@ jobs:
             echo "::error::a test was skipped — see the note in .github/workflows/ci.yml"
             exit 1
           fi
+
+  # ---------------------------------------------------------------------------
+  # Swift tests. Before these jobs existed, nothing on GitHub ran a single Swift
+  # test: `make mac-test` and `make kit-test` were local-only, so a PR could go
+  # green while breaking the Mac app or NostromoKit.
+  #
+  # Shared decisions (kept here once rather than repeated per job):
+  #   * No path filters. A path-filtered job that is skipped reports as
+  #     "skipped", which a required check treats as passing — the exact silent
+  #     gap these jobs exist to close.
+  #   * `macos-26` + an explicitly selected Xcode, same pins as
+  #     macos-launch-smoke.yml, so a runner-image rollover shows up as a diff
+  #     here rather than as an unexplained red.
+  #   * Concurrency is per job and ref, cancelling superseded *pull request*
+  #     runs only. Runs on `main` are never cancelled, so every merge commit
+  #     gets a verdict.
+  #   * No dependency or DerivedData cache. The project has no remote SwiftPM
+  #     dependencies (NostromoKit is a local package), so there is nothing to
+  #     cache safely, and restoring stale DerivedData could make a stale build
+  #     product pass a test the current source would fail.
+  # ---------------------------------------------------------------------------
+  swift-tests-mac:
+    name: Swift tests (Mac app)
+    runs-on: macos-26
+    timeout-minutes: 45
+    concurrency:
+      group: swift-tests-mac-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+
+      - name: Log toolchain, OS and display state
+        run: |
+          xcodebuild -version
+          sw_vers
+          system_profiler SPDisplaysDataType
+
+      # The app's mono font is Fira Code Nerd Font (Theme.firaCode), which a
+      # developer has installed in ~/Library/Fonts but a hosted runner does not.
+      # Without it AppKit falls back to SF Mono, whose line metrics differ, and
+      # the rendered-height goldens in ChatTurnViewLayoutTests (recorded against
+      # Fira Code) come out 3-120 pt short. Install the exact release the
+      # goldens were recorded with, pinned by version and checksum, so the
+      # font can neither drift under the tests nor be swapped by a bad download.
+      - name: Install Fira Code Nerd Font (pinned)
+        env:
+          FIRA_VERSION: v3.4.0
+          FIRA_SHA256: 7cc4ffd8f7a1fc914cdab7b149808298165ff7a7f40e40d82dea9ebe41e8ca0b
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/FiraCode.zip" \
+            "https://github.com/ryanoasis/nerd-fonts/releases/download/${FIRA_VERSION}/FiraCode.zip"
+          echo "${FIRA_SHA256}  $RUNNER_TEMP/FiraCode.zip" | shasum -a 256 -c -
+          mkdir -p "$HOME/Library/Fonts"
+          unzip -q -o "$RUNNER_TEMP/FiraCode.zip" 'FiraCodeNerdFont-*.ttf' -d "$HOME/Library/Fonts"
+          ls "$HOME/Library/Fonts"
+
+      # The same command a developer runs locally (the `NostromoTests` scheme).
+      - name: make mac-test
+        run: make mac-test
+
+      # The Makefile filters xcodebuild's output down to a few lines, so the
+      # .xcresult bundle is where the per-test failure detail lives.
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-tests-mac-xcresult
+          path: macOS/build/Logs/Test
+          if-no-files-found: warn
+          retention-days: 14
+
+  swift-tests-kit:
+    name: Swift tests (NostromoKit)
+    runs-on: macos-26
+    timeout-minutes: 30
+    concurrency:
+      group: swift-tests-kit-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+
+      - name: Log toolchain and OS versions
+        run: |
+          swift --version
+          sw_vers
+
+      # The same command a developer runs locally.
+      - name: make kit-test
+        run: |
+          set -o pipefail
+          make kit-test 2>&1 | tee "$RUNNER_TEMP/kit-test.log"
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-tests-kit-log
+          path: ${{ runner.temp }}/kit-test.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  ios-simulator-build:
+    name: iOS simulator build
+    runs-on: macos-26
+    timeout-minutes: 30
+    concurrency:
+      group: ios-simulator-build-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+
+      - name: Log toolchain and OS versions
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      # Compile check only: no device, no signing, no tests. Catches iOS
+      # compile breaks (the iOS app is not part of `make mac-test`).
+      - name: Build for iOS Simulator
+        run: |
+          set -o pipefail
+          cd iOS
+          xcodebuild -project Nostromo.xcodeproj -scheme Nostromo \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/ios-derived" \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/ios-build.log" | grep -E "error:|warning:|\*\* BUILD"
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-build-log
+          path: ${{ runner.temp }}/ios-build.log
+          if-no-files-found: warn
+          retention-days: 14

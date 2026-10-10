@@ -34,7 +34,7 @@ make kit-test
 ```
 
 which is `swift test --package-path Shared/NostromoKit` — a plain SwiftPM
-test run. **No paired iOS device and no simulator required or used.** As of
+test run, and also the `Swift tests (NostromoKit)` PR check. **No paired iOS device and no simulator required or used.** As of
 `ios-curated-view-parity` W2 this runs 124+ tests in just over a second.
 
 **What it can verify:** decoding correctness, `Equatable` conformance,
@@ -56,10 +56,10 @@ analogue of macOS's own source-text fitness functions
 (`macOS/NostromoTests/DecisionStoreTests.swift`,
 `macOS/NostromoTests/TurnInteractionTests.swift`,
 `ActivityTickerWiringTests.swift`, the last three checks in
-`LayoutChangeClassifierTests`) — except macOS's equivalent suite runs only
-as part of `mac-test`, which is itself local-only (device/simulator-bound
-`xcodebuild`), while this one actually runs in CI, because it's Python
-scanning Swift text rather than a compiled Swift test bundle.
+`LayoutChangeClassifierTests`) — the macOS suite runs as part of `mac-test`
+(the `Swift tests (Mac app)` PR check; see `docs/ci.md`), while this one is
+Python scanning Swift text rather than a compiled Swift test bundle, so it
+needs no Xcode at all.
 
 **Run:**
 
