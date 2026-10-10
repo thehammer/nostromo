@@ -236,6 +236,7 @@ async fn main() -> Result<()> {
         republish_rx: Some(server.subscribe_republish()),
         jira_site: nostromo::data::work::credentials::JiraSite::from_config(&config),
         todos_refresh: Some(todos_refresh),
+        jira: Some(Arc::new(nostromo::data::work::jira::JiraWorkSource::from_config(&config))),
     });
     nostromo::data::work::install_work_service(work_hub.clone());
 
