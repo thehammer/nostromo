@@ -15,6 +15,10 @@ struct TeriTabConfig {
     let list: WorkListConfig?
     /// Shown over an empty list when the source is healthy and has nothing.
     let emptyMessage: String
+    /// The tab became visible (including the restored tab at launch).
+    var onShow: (() -> Void)?
+    /// The user left the tab, or the surface went away while it was showing.
+    var onLeave: (() -> Void)?
 }
 
 final class TeriSurfaceView: NSView {
@@ -66,6 +70,7 @@ final class TeriSurfaceView: NSView {
         buildViews()
         observe()
         showSelectedTab()
+        configs[selectedTab]?.onShow?()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -73,6 +78,7 @@ final class TeriSurfaceView: NSView {
     deinit {
         if let deepLinkObserver { center.removeObserver(deepLinkObserver) }
         viewState.flush()   // a change made in the last half second must not be lost
+        configs[selectedTab]?.onLeave?()
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -87,9 +93,11 @@ final class TeriSurfaceView: NSView {
     /// Switch to `tab` (remembered across relaunches).
     func select(_ tab: TeriTab) {
         guard tab != selectedTab else { return }
+        configs[selectedTab]?.onLeave?()
         selectedTab = tab
         viewState.update { $0.selectedTab = tab }
         showSelectedTab()
+        configs[tab]?.onShow?()
     }
 
     /// Select an item in the current tab (as if the user had clicked it).
