@@ -3860,9 +3860,16 @@ async fn a_tcp_client_cannot_resume_an_ordinary_awaiting_mother_job_but_a_unix_c
     )
     .await;
     let calls = wait_for_fake_call("mother", "r5-resume-unix").await;
+    // The answer text is handed over in a private temp file (`--from-file`), never in argv
+    // (an answer can start with a dash or span lines), so the control proves the CALL arrived
+    // with the file form for this job; it cannot (and need not) see the text in the argv.
     assert!(
-        calls.iter().any(|c| c.starts_with("resume") && c.contains("UNIX-ANSWER")),
-        "the local peer's answer must reach `mother resume`: {calls:?}"
+        calls.iter().any(|c| c.starts_with("resume r5-resume-unix") && c.contains("--from-file")),
+        "the local peer's answer must reach `mother resume <id> --from-file ...`: {calls:?}"
+    );
+    assert!(
+        calls.iter().all(|c| !c.contains("UNIX-ANSWER")),
+        "the answer text must never appear in the CLI argv: {calls:?}"
     );
 
     // Not work-derived: an ordinary job, the kind round 4 let a network peer answer.
