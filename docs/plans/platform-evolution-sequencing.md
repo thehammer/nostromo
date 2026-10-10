@@ -99,6 +99,11 @@ until the second mobile drop.
 **Decision binding point:** before any iPhone/iPad ships. Not binding
 on the Mac-native app.
 
+**Resolved 2026-10-10:** VPN-to-Mac via the operator's existing WireGuard
+(UDM Pro), with the primary daemon moved to the always-on Mac Mini and the
+managed laptop demoted to an outbound-only satellite. No hosted hub; AWS
+hosts only the APNs push relay. See `docs/plans/websocket-backplane.md`.
+
 ### B3. Auth / pairing model
 Tied to B2. iPhone vision §"Open bets" suggests pairing-flow (QR on Mac
 + scanned on phone) → long-lived device token. We need this even for
