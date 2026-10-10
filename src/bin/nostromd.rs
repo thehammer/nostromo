@@ -222,7 +222,22 @@ async fn main() -> Result<()> {
     // the MCP tools and the broadcasters read the same channels.
     let fred_mailbox_rx  = FredMailboxNativeSource::spawn(config.clone());
     let fred_calendar_rx = FredCalendarNativeSource::spawn(config.clone());
-    let teri_todos_rx    = TeriTodosNativeSource::spawn();
+    let todos_refresh    = Arc::new(tokio::sync::Notify::new());
+    let teri_todos_rx    = TeriTodosNativeSource::spawn_with_refresh(Arc::clone(&todos_refresh));
+
+    // The work hub merges every Teri work source (todos now; repo docs, Jira
+    // and Sentry as they land), broadcasts changes and answers `WorkService`
+    // requests from the Mac. It is built after the Teri source and before the
+    // MCP state so the MCP tools read the same hub.
+    let work_hub = nostromo::data::work::hub::WorkHub::spawn(nostromo::data::work::hub::HubDeps {
+        broadcast_tx: broadcast_tx.clone(),
+        todos_rx: teri_todos_rx.clone(),
+        session_mgr: Some(Arc::clone(&session_mgr)),
+        republish_rx: Some(server.subscribe_republish()),
+        jira_site: nostromo::data::work::credentials::JiraSite::from_config(&config),
+        todos_refresh: Some(todos_refresh),
+    });
+    nostromo::data::work::install_work_service(work_hub.clone());
 
     // Hosts the layout/introspection/focus tool surface inside nostromd so that
     // daemon-hosted agent sessions can assemble their own pane workspaces. Pane
@@ -278,6 +293,7 @@ async fn main() -> Result<()> {
                     fred_mailbox_rx: fred_mailbox_rx.clone(),
                     fred_calendar_rx: fred_calendar_rx.clone(),
                     teri_todos_rx: teri_todos_rx.clone(),
+                    work_hub: Some(work_hub.clone()),
                 },
             );
 
@@ -747,7 +763,8 @@ async fn run_teri_broadcaster(
         // Emit the current value first (covers the initial snapshot), then wait
         // for the next change before emitting again.
         if let Some(snap) = rx.borrow_and_update().clone() {
-            let _ = tx.send(ServerMsg::TeriState { todos: snap });
+            // Bodies are bounded for the wire; the hub reads the full ones from `rx`.
+            let _ = tx.send(ServerMsg::TeriState { todos: snap.for_wire() });
         }
         tokio::select! {
             r = rx.changed() => {
@@ -847,5 +864,50 @@ mod tests {
             matches!(next_frame(&mut rx).await, ServerMsg::TeriState { todos } if todos.stale),
             "a republish request must re-send TeriState without waiting for the source"
         );
+    }
+    fn big_todos(n: i64, body_bytes: usize) -> nostromo::data::teri_todos::TeriTodosSnapshot {
+        use nostromo::data::teri_todos::{TeriTodo, TeriTodosSnapshot};
+        TeriTodosSnapshot {
+            generated_at: Some(chrono::Utc::now()),
+            items: (1..=n)
+                .map(|i| TeriTodo {
+                    id: i,
+                    title: format!("Todo {i}"),
+                    status: "open".into(),
+                    priority: 2,
+                    due_date: None,
+                    jira_key: None,
+                    body: Some(format!("body {i}: {}", "é".repeat(body_bytes / 2))),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_teri_broadcast_frame_stays_under_the_frame_limit_even_for_huge_todo_bodies() {
+        use nostromo::ipc::protocol::MAX_FRAME_LEN;
+        let (tx, mut rx) = broadcast::channel(16);
+        let (todos_tx, todos_rx) = watch::channel(Some(big_todos(500, 10 * 1024)));
+        let (republish_tx, republish_rx) = watch::channel(0u64);
+        tokio::spawn(run_teri_broadcaster(todos_rx, tx, republish_rx));
+
+        let frame_len = |msg: &ServerMsg| {
+            assert!(matches!(msg, ServerMsg::TeriState { .. }));
+            serde_json::to_vec(msg).unwrap().len()
+        };
+        let first = next_frame(&mut rx).await;
+        let len = frame_len(&first);
+        assert!(len < MAX_FRAME_LEN, "initial TeriState frame is {len} bytes, over MAX_FRAME_LEN {MAX_FRAME_LEN}");
+
+        republish_tx.send_modify(|g| *g += 1);
+        let again = next_frame(&mut rx).await;
+        let len = frame_len(&again);
+        assert!(len < MAX_FRAME_LEN, "republished TeriState frame is {len} bytes, over MAX_FRAME_LEN");
+
+        // The value the hub reads is untouched: full bodies.
+        let hub_side = todos_tx.borrow();
+        let body = hub_side.as_ref().unwrap().items[0].body.as_deref().unwrap();
+        assert_eq!(body.len(), "body 1: ".len() + 10 * 1024, "the watch value keeps the full body");
     }
 }

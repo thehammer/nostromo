@@ -1873,6 +1873,7 @@ mod tests {
                 priority: 1,
                 due_date: Some("2026-07-01".into()),
                 jira_key: Some("CORE-123".into()),
+                body: None,
             }],
             stale: false,
             error: None,

@@ -20,6 +20,7 @@ use crate::{
         rate_limits::{BudgetPosture, RateLimits},
         teri_todos::TeriTodosSnapshot,
         tickets::{TicketCache, TicketRegistry},
+        work::hub::WorkHub,
     },
     event::AppEvent,
     ipc::{decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
@@ -193,6 +194,10 @@ pub struct McpSharedState {
     /// Live Teri todos snapshot.
     pub teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
 
+    /// The daemon's work hub (todos, repo docs, Jira, Sentry), behind
+    /// `teri.list_work_items` / `teri.get_work_item`. `None` outside the daemon.
+    pub work_hub: Option<Arc<WorkHub>>,
+
     // ── event-mirrored receivers (Phase 2) ────────────────────────────────────
     // These wrap AppEvent-driven data (Mother jobs/status, rate limits, posture)
     // in watch channels so MCP tool handlers can read them without going through
@@ -254,6 +259,7 @@ impl McpSharedState {
             fred_mailbox_rx,
             fred_calendar_rx,
             teri_todos_rx,
+            work_hub: None,
             mother_jobs_rx,
             mother_source_rx: watch::channel(MotherSourceState::Loading).1,
             mother_feed: None,
@@ -398,6 +404,7 @@ impl McpSharedState {
         state.fred_mailbox_rx = sources.fred_mailbox_rx;
         state.fred_calendar_rx = sources.fred_calendar_rx;
         state.teri_todos_rx = sources.teri_todos_rx;
+        state.work_hub = sources.work_hub;
         state
     }
 }
@@ -416,4 +423,6 @@ pub struct DaemonSources {
     pub fred_mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
     pub fred_calendar_rx: watch::Receiver<Option<CalendarSnapshot>>,
     pub teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
+    /// The work hub behind `teri.list_work_items`; `None` leaves those tools unavailable.
+    pub work_hub: Option<Arc<WorkHub>>,
 }

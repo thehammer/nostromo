@@ -191,6 +191,34 @@ pub fn tool_descriptors() -> Vec<Value> {
             "description": "Returns Teri's active todo list (open, in_progress, blocked items).",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
+        json!({
+            "name": "teri.list_work_items",
+            "description": "Lists the work items Teri shows (todos, repo docs, Jira, Sentry) with each source's status. Returns { statuses, total, items }; `total` counts matches before limit/offset. Check `statuses` first: a source that is not_configured, unauthenticated, rate_limited or error has no (or stale) items.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "enum": ["todos", "repo_docs", "jira", "sentry"] },
+                    "kind": { "type": "string", "description": "todo, bug, feature, idea, wip, a Jira issue type, issue" },
+                    "repo": { "type": "string" },
+                    "project": { "type": "string", "description": "Jira project key or Sentry project slug" },
+                    "status": { "type": "string" },
+                    "environment": { "type": "string" },
+                    "query": { "type": "string", "description": "Case-insensitive; every whitespace-separated term must match the title or body text" },
+                    "limit": { "type": "integer", "description": "Default 100, max 500" },
+                    "offset": { "type": "integer" }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "teri.get_work_item",
+            "description": "Returns one work item's detail (fields, markdown body, files, links) by id from teri.list_work_items, e.g. todo:12 or jira:CORE-1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        }),
         // ── Phase 3: pane / view mutations ────────────────────────────────
         json!({
             "name": "nostromo.set_pane_content",
@@ -786,6 +814,10 @@ async fn dispatch_inner(
 
         // ── Phase 2: Teri ─────────────────────────────────────────────────
         "teri.list_todos" => teri::list_todos(state),
+        "teri.list_work_items" => {
+            teri::list_work_items(state, arguments.unwrap_or(&Value::Null))
+        }
+        "teri.get_work_item" => teri::get_work_item(state, arguments.unwrap_or(&Value::Null)).await,
 
         // ── Phase 3: pane / view mutations ────────────────────────────────
         "nostromo.set_pane_content" => {

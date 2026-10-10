@@ -1,5 +1,11 @@
-import AppKit
+import Foundation
 
-// Scaffold placeholder (FND-1). Filled by T1 (teri-fred-t1-repo-docs); it compiles today so the
-// Xcode project never needs another edit (design contract §10.1).
-final class TeriRepoDocsTab: NSView {}
+/// The Repo docs tab. Until its slice lands the source reports "Coming soon" and the
+/// surface shows that state; this minimal config lists whatever arrives.
+enum TeriRepoDocsTab {
+    static let config = TeriTabConfig(
+        tab: .repoDocs,
+        sourceName: "Repo docs",
+        list: .generic(sourceLabel: "Repo docs"),
+        emptyMessage: "No open bugs, features, ideas or todos in your repos.")
+}

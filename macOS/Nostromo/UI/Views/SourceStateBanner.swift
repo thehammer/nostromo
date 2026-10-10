@@ -39,6 +39,12 @@ final class SourceStateBanner: NSView {
         apply(Self.content(for: status, sourceName: sourceName, now: now))
     }
 
+    /// A plain one-line message (no Retry), for states that are not a source's
+    /// health, such as Picks that have not been built yet.
+    func showMessage(_ message: String) {
+        apply(Content(message: message, showsRetry: false))
+    }
+
     /// Present a source's state when it is not a `SourceStatus` (Fred's
     /// snapshots carry their own `state`). `nil` state means "no snapshot yet".
     func show(state: SourceState?, updatedAt: Date?, reason: String?, retryAt: Date? = nil,
@@ -83,9 +89,10 @@ final class SourceStateBanner: NSView {
         case .stale:
             let age = updatedAt.map { " last updated \(relative($0, now: now))" } ?? ""
             return Content(message: "Stale:\(age)\(reason)", showsRetry: true)
-        case .notConfigured, .unauthenticated:
-            let why = rawReason ?? "no credentials found"
-            return Content(message: "\(sourceName): \(why)", showsRetry: false)
+        case .notConfigured:
+            return Content(message: "\(sourceName): \(rawReason ?? "not set up")", showsRetry: false)
+        case .unauthenticated:
+            return Content(message: "\(sourceName): \(rawReason ?? "not signed in; check its credentials")", showsRetry: false)
         case .rateLimited:
             let retry = retryAt.map { "; retrying at \(clock($0))" } ?? ""
             return Content(message: "Rate-limited by \(sourceName)\(retry)", showsRetry: false)

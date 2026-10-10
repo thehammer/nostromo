@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 
 final class WorkStoreTests: XCTestCase {
 
@@ -144,5 +145,196 @@ final class WorkStoreTests: XCTestCase {
         let outcome = try! JSONDecoder().decode(SendOutcome.self, from: #"{"kind":"seeded"}"#.data(using: .utf8)!)
         store.resolve(requestId: "r1", with: .sendResult(.ok(outcome)))
         XCTAssertEqual(second.count, 1)
+    }
+
+    // MARK: - Connection flag (T0)
+
+    func testTheStoreStartsConnectedAndTogglesWithSetConnected() {
+        let store = WorkStore()
+        XCTAssertTrue(store.isConnected)
+        var seen: [Bool] = []
+        let sub = store.$isConnected.sink { seen.append($0) }
+        store.setConnected(false)
+        XCTAssertFalse(store.isConnected)
+        store.setConnected(true)
+        XCTAssertTrue(store.isConnected)
+        XCTAssertEqual(seen, [true, false, true], "views can observe the change")
+        sub.cancel()
+    }
+
+    // MARK: - Detail requests (T0)
+
+    private func detail(_ id: String, _ title: String) -> WorkItemDetail {
+        WorkTestSupport.makeDetail(itemId: id, title: title, markdown: "body of \(title)")
+    }
+
+    private func requestId(of frame: WorkClientMessage) -> String? {
+        guard case .detailRequest(let rid, _) = frame else { return nil }
+        return rid
+    }
+
+    func testRequestDetailSendsADetailRequestFrameAndResolvesWithTheAnswer() throws {
+        let store = WorkStore()
+        var sent: [WorkClientMessage] = []
+        store.sendFrame = { sent.append($0) }
+        var responses: [WorkResponse] = []
+
+        store.requestDetail("todo:7") { responses.append($0) }
+
+        XCTAssertEqual(sent.count, 1)
+        guard case .detailRequest(let rid, let itemId) = sent[0] else { return XCTFail("sent \(sent)") }
+        XCTAssertEqual(itemId, "todo:7")
+        XCTAssertFalse(rid.isEmpty)
+        // On the wire it is a work_detail_request carrying item_id.
+        let wire = try JSONSerialization.jsonObject(with: JSONEncoder().encode(sent[0])) as? [String: Any]
+        XCTAssertEqual(wire?["type"] as? String, "work_detail_request")
+        XCTAssertEqual(wire?["item_id"] as? String, "todo:7")
+        XCTAssertEqual(wire?["request_id"] as? String, rid)
+        XCTAssertTrue(responses.isEmpty, "nothing resolved yet")
+        XCTAssertEqual(store.pendingRequestCount, 1)
+
+        store.resolve(requestId: rid, with: .detail(.ok(detail("todo:7", "Seven"))))
+
+        XCTAssertEqual(responses.count, 1)
+        guard case .detail(.ok(let d)) = responses[0] else { return XCTFail("got \(responses)") }
+        XCTAssertEqual(d.title, "Seven")
+        XCTAssertEqual(store.pendingRequestCount, 0)
+    }
+
+    func testEveryDetailRequestGetsItsOwnRequestId() {
+        let store = WorkStore()
+        var sent: [WorkClientMessage] = []
+        store.sendFrame = { sent.append($0) }
+        store.requestDetail("todo:1") { _ in }
+        store.requestDetail("todo:2") { _ in }
+        let ids = sent.compactMap(requestId(of:))
+        XCTAssertEqual(ids.count, 2)
+        XCTAssertEqual(Set(ids).count, 2, "two in-flight requests must not share an id (the second would supersede the first)")
+        XCTAssertEqual(store.pendingRequestCount, 2)
+    }
+
+    func testRequestDetailWithNoConnectionFailsInsteadOfWaitingForATimeout() {
+        let store = WorkStore()
+        XCTAssertNil(store.sendFrame)
+        let done = expectation(description: "completed")
+        var response: WorkResponse?
+        store.requestDetail("todo:1") { r in response = r; done.fulfill() }
+        wait(for: [done], timeout: 2)
+
+        guard case .failed(let err)? = response else { return XCTFail("got \(String(describing: response))") }
+        XCTAssertEqual(err.code, "not_connected")
+        XCTAssertEqual(store.pendingRequestCount, 0, "nothing is left waiting")
+    }
+
+    // MARK: - Refresh (T0)
+
+    func testRefreshSendsAWorkRefreshFrameForOneSourceOrAll() {
+        let store = WorkStore()
+        var sent: [WorkClientMessage] = []
+        store.sendFrame = { sent.append($0) }
+
+        store.refresh(source: .jira)
+        store.refresh(source: nil)
+
+        XCTAssertEqual(sent, [.refresh(source: .jira, fred: false), .refresh(source: nil, fred: false)])
+    }
+
+    func testRefreshWithNoConnectionIsANoOpNotACrash() {
+        let store = WorkStore()
+        store.refresh(source: .todos)   // no sendFrame: must simply do nothing
+        XCTAssertEqual(store.pendingRequestCount, 0)
+    }
+
+    // MARK: - listSnapshot (T0)
+
+    private func seededTodosStore() -> WorkStore {
+        let store = WorkStore()
+        store.apply(snapshot: .todos, group: nil, items: [
+            WorkTestSupport.todo(1, "Write report", status: "open", priority: 3, due: "2026-10-12"),
+            WorkTestSupport.todo(2, "Fix webhook", status: "in_progress", priority: 1, due: "2026-10-11"),
+            WorkTestSupport.todo(3, "Book travel", status: "open", priority: 1),
+            WorkTestSupport.todo(4, "Audit access", status: "blocked", priority: 1),
+            WorkTestSupport.todo(5, "Call plumber", status: "open", priority: 3, due: "2026-10-09"),
+        ])
+        // Items of other sources must never leak into a todos snapshot.
+        store.apply(snapshot: .jira, group: nil, items: [
+            WorkTestSupport.makeItem(["id": "jira:X-1", "source": "jira", "kind": "task", "title": "Jira thing",
+                                      "status": "open"]),
+        ])
+        return store
+    }
+
+    private func ids(_ groups: [WorkGroup]) -> [[String]] { groups.map { $0.items.map(\.id) } }
+
+    func testListSnapshotOrdersTodosByPriorityThenDueDateNoneLastThenTitle() {
+        let snap = seededTodosStore().listSnapshot(source: .todos, filter: WorkFilter(), sort: .newest, facets: [])
+
+        XCTAssertEqual(snap.groups.count, 1)
+        XCTAssertNil(snap.groups.first?.key)
+        XCTAssertEqual(ids(snap.groups), [["todo:2", "todo:4", "todo:3", "todo:5", "todo:1"]])
+        XCTAssertEqual(snap.totalCount, 5, "only the requested source counts")
+        XCTAssertEqual(snap.filteredCount, 5)
+        XCTAssertTrue(snap.facetCounts.isEmpty, "facets were not requested")
+    }
+
+    func testListSnapshotCountsBeforeAndAfterFiltering() {
+        var f = WorkFilter()
+        f.statuses = ["open"]
+        let snap = seededTodosStore().listSnapshot(source: .todos, filter: f, sort: .newest, facets: [])
+
+        XCTAssertEqual(snap.totalCount, 5, "total is the source's size before any filter")
+        XCTAssertEqual(snap.filteredCount, 3)
+        XCTAssertEqual(ids(snap.groups), [["todo:3", "todo:5", "todo:1"]])
+    }
+
+    func testListSnapshotFacetCountsIgnoreTheFacetsOwnFilter() {
+        var f = WorkFilter()
+        f.statuses = ["open"]
+        let snap = seededTodosStore().listSnapshot(source: .todos, filter: f, sort: .newest, facets: [.status, .kind])
+
+        XCTAssertEqual(snap.facetCounts[.status], ["open": 3, "in_progress": 1, "blocked": 1])
+        XCTAssertEqual(snap.facetCounts[.kind], ["todo": 3], "other facets honour the status filter")
+        XCTAssertNil(snap.facetCounts[.repo], "only requested facets are computed")
+    }
+
+    func testListSnapshotAppliesTheSearchQueryToTitleAndBody() {
+        let store = WorkStore()
+        store.apply(snapshot: .todos, group: nil, items: [
+            WorkTestSupport.todo(1, "Fix webhook", searchText: "Fix webhook\nCheck the retry backoff"),
+            WorkTestSupport.todo(2, "Book travel"),
+        ])
+        var f = WorkFilter()
+        f.query = "backoff"
+        let snap = store.listSnapshot(source: .todos, filter: f, sort: .newest, facets: [])
+        XCTAssertEqual(ids(snap.groups), [["todo:1"]])
+        XCTAssertEqual(snap.filteredCount, 1)
+        XCTAssertEqual(snap.totalCount, 2)
+    }
+
+    func testListSnapshotForASourceWithNoItemsHasNoGroups() {
+        let snap = WorkStore().listSnapshot(source: .sentry, filter: WorkFilter(), sort: .newest, facets: [.status])
+        XCTAssertTrue(snap.groups.isEmpty)
+        XCTAssertEqual(snap.totalCount, 0)
+        XCTAssertEqual(snap.filteredCount, 0)
+    }
+
+    func testListSnapshotGroupsRepoDocsAcrossTheirPerRepoSnapshots() {
+        let store = WorkStore()
+        func doc(_ repo: String, _ n: Int, _ created: String) -> WorkItem {
+            WorkTestSupport.makeItem(["id": "doc:\(repo):\(n)", "source": "repo_docs", "kind": "bug", "repo": repo,
+                                      "title": "\(repo) doc \(n)", "created_at": created])
+        }
+        store.apply(snapshot: .repoDocs, group: "small", items: [doc("small", 1, "2026-10-01T00:00:00Z")])
+        store.apply(snapshot: .repoDocs, group: "big", items: [
+            doc("big", 1, "2026-10-01T00:00:00Z"), doc("big", 2, "2026-10-05T00:00:00Z"),
+        ])
+
+        let newest = store.listSnapshot(source: .repoDocs, filter: WorkFilter(), sort: .newest, facets: [])
+        XCTAssertEqual(newest.groups.map(\.key), ["big", "small"], "bigger group first")
+        XCTAssertEqual(ids(newest.groups), [["doc:big:2", "doc:big:1"], ["doc:small:1"]])
+
+        let oldest = store.listSnapshot(source: .repoDocs, filter: WorkFilter(), sort: .oldest, facets: [])
+        XCTAssertEqual(ids(oldest.groups).first, ["doc:big:1", "doc:big:2"])
+        XCTAssertEqual(oldest.totalCount, 3)
     }
 }
