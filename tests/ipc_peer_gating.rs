@@ -3749,8 +3749,8 @@ async fn sessions_under_whitespace_case_and_qualified_fred_and_teri_tags_are_unr
 //
 // The TCP listener is unauthenticated and LAN-exposed, so a network peer may
 // only read: every request that is not on the small read-only allow list
-// (hello, subscribe, ping, session_list, session_attach/detach, pty_attach/
-// detach/list, focus_list, activity_snapshot_request) is refused with
+// (hello, subscribe, ping, session_list, session_attach/detach, pty_detach,
+// pty_list, focus_list, activity_snapshot_request) is refused with
 // `requires_secure_connection` and has NO side effect, whatever the content or
 // the focus. Unix-socket peers keep working exactly as before.
 //
@@ -4368,7 +4368,15 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
     no_error(&attack(&mut tcp, ClientMsg::SessionDetach { tag: "cody-ro".into() }).await, "session_detach");
     let frames = attack(&mut tcp, ClientMsg::PtyList).await;
     assert!(frames.iter().any(|m| matches!(m, ServerMsg::PtyListResp { .. })), "{frames:?}");
-    no_error(&attack(&mut tcp, ClientMsg::PtyAttach { pty_id: "r5-ro".into() }).await, "pty_attach");
+    // `pty_attach` is NOT read-only: it takes the PTY's single attachment slot from the Mac
+    // client (killing its live stream), so a network peer is refused. (Round 5 review.)
+    let frames = attack(&mut tcp, ClientMsg::PtyAttach { pty_id: "r5-ro".into() }).await;
+    assert_refused(&frames, "pty_attach");
+    let frames = sync(&mut unix).await;
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::PtyDetach { .. })),
+        "the refused TCP pty_attach must not detach the local client: {frames:?}"
+    );
     no_error(&attack(&mut tcp, ClientMsg::PtyDetach { pty_id: "r5-ro".into() }).await, "pty_detach");
     let frames = attack(&mut tcp, ClientMsg::FocusList).await;
     assert!(frames.iter().any(|m| matches!(m, ServerMsg::FocusListResp { .. })), "{frames:?}");

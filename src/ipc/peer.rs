@@ -757,9 +757,8 @@ pub enum NetworkPolicy {
 /// * `SessionList`/`FocusList`/`PtyList`: snapshots, redacted for network peers.
 /// * `SessionAttach`/`ActivitySnapshotRequest`: read a session's transcript or
 ///   activity; refused for a sensitive tag by [`targets_sensitive_session`].
-/// * `PtyAttach`: reads the PTY's output (see the PR's remaining-read-exposure
-///   list); it neither writes to nor resizes the PTY.
-/// * `SessionDetach`/`PtyDetach`: release the peer's own attachment only.
+/// * `SessionDetach`/`PtyDetach`: release the peer's own attachment only (a no-op
+///   for a peer that is not the attached client).
 ///
 /// Everything else is refused, notably: `MotherResume` and every
 /// `MotherAction` (feeds attacker text to a job's agent, or cancels/retries it),
@@ -767,7 +766,9 @@ pub enum NetworkPolicy {
 /// credentials), every `DecisionAnswer` (the answer is returned to the asking
 /// agent as a trusted tool result), `FocusRegistryPush`, `PtyKill`, `ClosePane`,
 /// `SessionControl`, `SessionInterrupt`, `SessionAnswerPermission`,
-/// `SessionSend`, `SessionSpawn`, `PtySpawn`, `PtyInput`, `PtyResize`,
+/// `SessionSend`, `SessionSpawn`, `PtySpawn`, `PtyAttach` (it takes the PTY's
+/// single attachment slot from the Mac client and kills its live stream, so it
+/// is not read-only), `PtyInput`, `PtyResize`,
 /// `RenderedShape` (it overwrites what `get_view_state` reports to agents) and
 /// the work/picks/seed verbs. An iOS client over the LAN is therefore read-only
 /// until authentication exists.
@@ -780,12 +781,12 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::SessionAttach { .. }
         | ClientMsg::SessionDetach { .. }
         | ClientMsg::PtyList
-        | ClientMsg::PtyAttach { .. }
         | ClientMsg::PtyDetach { .. }
         | ClientMsg::FocusList
         | ClientMsg::ActivitySnapshotRequest { .. } => NetworkPolicy::Allowed,
 
         ClientMsg::PtySpawn { .. }
+        | ClientMsg::PtyAttach { .. }
         | ClientMsg::PtyInput { .. }
         | ClientMsg::PtyResize { .. }
         | ClientMsg::PtyKill { .. }
@@ -1381,7 +1382,6 @@ mod tests {
         "FocusList",
         "Hello",
         "Ping",
-        "PtyAttach",
         "PtyDetach",
         "PtyList",
         "SessionAttach",
@@ -1395,6 +1395,65 @@ mod tests {
     fn variant_name(msg: &ClientMsg) -> String {
         let dbg = format!("{msg:?}");
         dbg.split(|c: char| !c.is_alphanumeric()).next().unwrap_or_default().to_string()
+    }
+
+
+    /// Number of `ClientMsg` variants. Adding a variant: add an arm to `ordinal` with the next
+    /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
+    /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
+    /// fixture list (and so the exactness test) covering it.
+    const CLIENT_MSG_VARIANTS: usize = 33;
+
+    /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
+    fn ordinal(msg: &ClientMsg) -> usize {
+        match msg {
+            ClientMsg::Hello { .. } => 0,
+            ClientMsg::Subscribe { .. } => 1,
+            ClientMsg::Ping => 2,
+            ClientMsg::PtySpawn { .. } => 3,
+            ClientMsg::PtyInput { .. } => 4,
+            ClientMsg::PtyResize { .. } => 5,
+            ClientMsg::PtyKill { .. } => 6,
+            ClientMsg::PtyAttach { .. } => 7,
+            ClientMsg::PtyDetach { .. } => 8,
+            ClientMsg::PtyList => 9,
+            ClientMsg::SessionSpawn { .. } => 10,
+            ClientMsg::SessionAttach { .. } => 11,
+            ClientMsg::SessionDetach { .. } => 12,
+            ClientMsg::SessionSend { .. } => 13,
+            ClientMsg::ClosePane { .. } => 14,
+            ClientMsg::SessionInterrupt { .. } => 15,
+            ClientMsg::SessionControl { .. } => 16,
+            ClientMsg::SessionAnswerPermission { .. } => 17,
+            ClientMsg::SessionList => 18,
+            ClientMsg::FocusRegistryPush { .. } => 19,
+            ClientMsg::FocusList => 20,
+            ClientMsg::MotherAction { .. } => 21,
+            ClientMsg::MotherResume { .. } => 22,
+            ClientMsg::PerriAction { .. } => 23,
+            ClientMsg::DecisionAnswer { .. } => 24,
+            ClientMsg::ActivitySnapshotRequest { .. } => 25,
+            ClientMsg::RenderedShape { .. } => 26,
+            ClientMsg::WorkDetailRequest { .. } => 27,
+            ClientMsg::WorkRefresh { .. } => 28,
+            ClientMsg::PicksRefresh { .. } => 29,
+            ClientMsg::WorkSendPreviewRequest { .. } => 30,
+            ClientMsg::WorkSend { .. } => 31,
+            ClientMsg::FredSeed { .. } => 32,
+        }
+    }
+
+    #[test]
+    fn the_fixture_list_covers_every_client_msg_variant_exactly_once() {
+        let mut ords: Vec<usize> = every_client_msg().iter().map(ordinal).collect();
+        ords.sort_unstable();
+        let expected: Vec<usize> = (0..CLIENT_MSG_VARIANTS).collect();
+        assert_eq!(
+            ords, expected,
+            "every_client_msg() must contain exactly one fixture per ClientMsg variant \
+             (ordinal 0..{CLIENT_MSG_VARIANTS}); a new verb needs an `ordinal` arm, a bumped \
+             constant and a fixture"
+        );
     }
 
     #[test]
