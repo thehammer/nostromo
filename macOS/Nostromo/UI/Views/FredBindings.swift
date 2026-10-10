@@ -1,5 +1,9 @@
-import Foundation
+import AppKit
 
-// Scaffold placeholder (FND-1). Filled by F0 (teri-fred-f0-inbox-and-today); the Fred lane's only glue to AppStore/NostromodClient. App target only.; it compiles today so the
-// Xcode project never needs another edit (design contract §10.1).
-enum FredBindings {}
+/// The Fred lane's glue to the app: builds the native HUD the daemon's
+/// `fred_hud` pane maps to (see `DynamicFocusView.makeLeafView`).
+enum FredBindings {
+    static func makeSurface(focus: Focus) -> NSView {
+        FredHUD()
+    }
+}

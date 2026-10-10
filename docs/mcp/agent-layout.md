@@ -204,3 +204,15 @@ subscribes to the base topics immediately and sends a second `subscribe`
 adding `work` only when that connection's `welcome` lists it; a later
 `subscribe` on a live connection replaces the topic list and replays retained
 frames for the topics it adds (never to a network peer).
+
+## Native panes
+
+Some panes are hosted natively by the Mac app rather than filled by an agent:
+`mother_queue` (Mother), `teri_surface` (Teri) and `fred_hud` (Fred). The daemon
+seeds each focus's default layout when the Mac pushes its focus registry (a
+Teri/Fred layout that already exists without its native pane is wrapped, native
+pane first, so nothing is lost). `teri_surface` and `fred_hud` cannot be closed
+(`close_pane` returns `not_closable`) or dropped: `apply_layout` / `set_layout`
+on `teri` or `fred` with a tree that lacks the focus's native pane is refused
+with `native_pane_required` and the layout is left unchanged. `reset_panes`
+restores the default native layout for those two focuses.

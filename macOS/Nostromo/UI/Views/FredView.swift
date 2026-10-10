@@ -72,7 +72,7 @@ class FredView: NSView, NSSplitViewDelegate {
 
 // MARK: - FredHUD (mailbox pane + calendar pane)
 
-private class FredHUD: NSView, NSSplitViewDelegate {
+class FredHUD: NSView, NSSplitViewDelegate {
 
     private let mailboxPane  = FredMailboxPane()
     private let calendarPane = FredCalendarPane()

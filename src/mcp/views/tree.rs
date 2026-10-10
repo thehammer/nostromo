@@ -227,6 +227,58 @@ pub fn default_mother_tree() -> PaneTree {
     }
 }
 
+/// Pane id of Teri's native surface (the todo list), hosted by the Mac app.
+pub const TERI_SURFACE: &str = "teri_surface";
+/// Pane id of Fred's native HUD (inbox + calendar), hosted by the Mac app.
+pub const FRED_HUD: &str = "fred_hud";
+
+/// Ratio of the native pane in the Teri default layout (and in a wrap).
+pub const TERI_NATIVE_RATIO: f32 = 0.62;
+/// Ratio of the native pane in the Fred default layout (and in a wrap).
+pub const FRED_NATIVE_RATIO: f32 = 0.55;
+
+/// Teri's default layout: the native surface beside the REPL.
+pub fn default_teri_tree() -> PaneTree {
+    PaneTree::Split {
+        direction: SplitDirection::Horizontal,
+        children: vec![
+            PaneTree::Leaf {
+                pane_id: TERI_SURFACE.to_string(),
+            },
+            PaneTree::Leaf {
+                pane_id: "repl".to_string(),
+            },
+        ],
+        ratios: vec![TERI_NATIVE_RATIO, 0.38],
+    }
+}
+
+/// Fred's default layout: the native HUD above the REPL.
+pub fn default_fred_tree() -> PaneTree {
+    PaneTree::Split {
+        direction: SplitDirection::Vertical,
+        children: vec![
+            PaneTree::Leaf {
+                pane_id: FRED_HUD.to_string(),
+            },
+            PaneTree::Leaf {
+                pane_id: "repl".to_string(),
+            },
+        ],
+        ratios: vec![FRED_NATIVE_RATIO, 0.45],
+    }
+}
+
+/// The native (Mac-hosted) pane a focus tag owns, if any.
+pub fn native_pane_for(tag: &str) -> Option<&'static str> {
+    match tag {
+        "mother" => Some("mother_queue"),
+        "teri" => Some(TERI_SURFACE),
+        "fred" => Some(FRED_HUD),
+        _ => None,
+    }
+}
+
 /// True when `tree` holds a pane named `queue` that is NOT a tab — the old
 /// arrangement, where the queue was a region of its own beside the detail tabs.
 pub fn has_bare_queue(tree: &PaneTree) -> bool {

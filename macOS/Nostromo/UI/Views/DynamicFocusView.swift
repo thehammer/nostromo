@@ -416,6 +416,16 @@ final class DynamicFocusView: NSView {
             let mother = MotherView()
             leafViews[paneId] = mother
             return mother
+        } else if paneId == "teri_surface" {
+            // Native Teri todo list, daemon-seeded so it shows with no agent turn.
+            let surface = TeriBindings.makeSurface(focus: focus)
+            leafViews[paneId] = surface
+            return surface
+        } else if paneId == "fred_hud" {
+            // Native Fred inbox + calendar HUD, daemon-seeded likewise.
+            let hud = FredBindings.makeSurface(focus: focus)
+            leafViews[paneId] = hud
+            return hud
         } else {
             let wrapper = PaneContentNSView()
             wrapper.paneId = paneId

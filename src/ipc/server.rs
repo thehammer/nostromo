@@ -978,7 +978,9 @@ fn handle_client_msg(
                 for focus in &updated {
                     let seeded = reg
                         .ensure_review_layout(&focus.tag)
-                        .or_else(|| reg.ensure_mother_layout(&focus.tag));
+                        .or_else(|| reg.ensure_mother_layout(&focus.tag))
+                        .or_else(|| reg.ensure_teri_layout(&focus.tag))
+                        .or_else(|| reg.ensure_fred_layout(&focus.tag));
                     if let Some(tree) = seeded {
                         let _ = broadcast_tx.send(ServerMsg::FocusLayout {
                             tag: focus.tag.clone(),

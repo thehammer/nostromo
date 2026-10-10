@@ -91,6 +91,8 @@ pub enum PaneError {
     /// The pane exists but may not be closed: the review queue and the REPL are
     /// never closable, and neither is anything that isn't a tab.
     NotClosable,
+    /// A Teri/Fred layout that would drop the focus's native pane.
+    NativePaneRequired,
 }
 
 impl PaneError {
@@ -103,6 +105,7 @@ impl PaneError {
             PaneError::InvalidPosition => "invalid_position",
             PaneError::InvalidLayout => "invalid_layout",
             PaneError::NotClosable => "not_closable",
+            PaneError::NativePaneRequired => "native_pane_required",
         }
     }
 }
@@ -342,7 +345,8 @@ impl PaneRegistry {
         }
         let is_queue = pane_id == "queue"
             || self.source_for(tag, pane_id) == Some(crate::mcp::tools::apply_layout::SOURCE_PR_QUEUE);
-        if pane_id == "repl" || is_queue {
+        let is_native = Self::is_protected_native_pane(tag, pane_id);
+        if pane_id == "repl" || is_queue || is_native {
             return Err(PaneError::NotClosable);
         }
         let mut new_tree = tree;
@@ -418,6 +422,86 @@ impl PaneRegistry {
             &serde_json::json!({ "tree": crate::mcp::views::tree::default_mother_tree() }),
         )
         .ok()
+    }
+
+    /// The Teri focus: the builtin `teri`.
+    pub fn is_teri_focus(tag: &str) -> bool {
+        tag == "teri"
+    }
+
+    /// The Fred focus: the builtin `fred`.
+    pub fn is_fred_focus(tag: &str) -> bool {
+        tag == "fred"
+    }
+
+    /// Give the Teri focus its native surface (see [`Self::ensure_native_layout`]).
+    pub fn ensure_teri_layout(&mut self, tag: &str) -> Option<PaneTree> {
+        if !Self::is_teri_focus(tag) {
+            return None;
+        }
+        self.ensure_native_layout(
+            tag,
+            crate::mcp::views::tree::TERI_SURFACE,
+            crate::mcp::views::tree::TERI_NATIVE_RATIO,
+            0.38,
+            SplitDirection::Horizontal,
+            crate::mcp::views::tree::default_teri_tree(),
+        )
+    }
+
+    /// Give the Fred focus its native HUD (see [`Self::ensure_native_layout`]).
+    pub fn ensure_fred_layout(&mut self, tag: &str) -> Option<PaneTree> {
+        if !Self::is_fred_focus(tag) {
+            return None;
+        }
+        self.ensure_native_layout(
+            tag,
+            crate::mcp::views::tree::FRED_HUD,
+            crate::mcp::views::tree::FRED_NATIVE_RATIO,
+            0.45,
+            SplitDirection::Vertical,
+            crate::mcp::views::tree::default_fred_tree(),
+        )
+    }
+
+    /// Seed `native` into `tag`'s layout. A bare REPL becomes `default`; a layout
+    /// that already holds the native pane is left alone; any other layout (e.g.
+    /// one an agent built) is wrapped — native pane first, the old tree second —
+    /// so no previous pane is lost. Returns the tree when anything changed.
+    fn ensure_native_layout(
+        &mut self,
+        tag: &str,
+        native: &str,
+        native_ratio: f32,
+        rest_ratio: f32,
+        direction: SplitDirection,
+        default: PaneTree,
+    ) -> Option<PaneTree> {
+        let current = self.get_or_init(tag);
+        let new_tree = if matches!(&current, PaneTree::Leaf { pane_id } if pane_id == REPL_PANE_ID) {
+            default
+        } else if current.pane_ids().iter().any(|p| p == native) {
+            return None;
+        } else {
+            PaneTree::Split {
+                direction,
+                children: vec![
+                    PaneTree::Leaf {
+                        pane_id: native.to_string(),
+                    },
+                    current,
+                ],
+                ratios: vec![native_ratio, rest_ratio],
+            }
+        };
+        self.set_layout(tag, &serde_json::json!({ "tree": new_tree })).ok()
+    }
+
+    /// Whether `pane_id` is `tag`'s native pane (Teri/Fred only: Mother's keeps
+    /// its pre-existing behaviour).
+    fn is_protected_native_pane(tag: &str, pane_id: &str) -> bool {
+        (Self::is_teri_focus(tag) || Self::is_fred_focus(tag))
+            && crate::mcp::views::tree::native_pane_for(tag) == Some(pane_id)
     }
 
     /// The source bound to `pane_id` within `tag`, if any.
@@ -602,7 +686,13 @@ impl PaneRegistry {
         if !self.trees.contains_key(tag) {
             return Err(PaneError::UnknownView);
         }
-        let tree = PaneTree::repl_leaf();
+        let tree = if Self::is_teri_focus(tag) {
+            crate::mcp::views::tree::default_teri_tree()
+        } else if Self::is_fred_focus(tag) {
+            crate::mcp::views::tree::default_fred_tree()
+        } else {
+            PaneTree::repl_leaf()
+        };
         self.trees.insert(tag.to_string(), tree.clone());
         self.prune_to_tree(tag);
         self.persist();
@@ -651,6 +741,13 @@ impl PaneRegistry {
             let new_tree: PaneTree = serde_json::from_value(tree_value.clone())
                 .map_err(|_| PaneError::InvalidLayout)?;
             validate_tree(&new_tree)?;
+            if let Some(native) = crate::mcp::views::tree::native_pane_for(tag)
+                .filter(|_| Self::is_teri_focus(tag) || Self::is_fred_focus(tag))
+            {
+                if !new_tree.pane_ids().iter().any(|p| p == native) {
+                    return Err(PaneError::NativePaneRequired);
+                }
+            }
             self.trees.insert(tag.to_string(), new_tree.clone());
             self.prune_to_tree(tag);
             self.persist();
@@ -2780,5 +2877,211 @@ mod mother_layout_tests {
         let mut reg = fresh();
         reg.ensure_mother_layout("mother").unwrap();
         assert_eq!(reg.close_tab("mother", "mother_queue"), Err(PaneError::NotClosable));
+    }
+}
+
+#[cfg(test)]
+mod native_surface_tests {
+    //! Teri and Fred each own a Mac-hosted native pane (`teri_surface` /
+    //! `fred_hud`) that sits beside the REPL and cannot be dropped.
+    use super::*;
+
+    fn fresh() -> PaneRegistry {
+        PaneRegistry::in_memory()
+    }
+
+    fn direction_of(tree: &PaneTree) -> SplitDirection {
+        match tree {
+            PaneTree::Split { direction, .. } => *direction,
+            other => panic!("expected a split, got {other:?}"),
+        }
+    }
+
+    /// An agent-built layout: `notes` | `scratch` above the REPL.
+    fn agent_built(reg: &mut PaneRegistry, tag: &str) -> Vec<String> {
+        reg.get_or_init(tag);
+        reg.create_pane(tag, "notes", SplitPosition::Right, REPL_PANE_ID).unwrap();
+        reg.create_pane(tag, "scratch", SplitPosition::Below, "notes").unwrap();
+        reg.pane_ids(tag)
+    }
+
+    #[test]
+    fn a_bare_teri_focus_gets_its_surface_beside_the_repl() {
+        let mut reg = fresh();
+        let tree = reg.ensure_teri_layout("teri").expect("a bare teri focus is seeded");
+        assert_eq!(tree.pane_ids(), vec!["teri_surface".to_string(), "repl".to_string()]);
+        assert_eq!(direction_of(&tree), SplitDirection::Horizontal);
+        assert_eq!(reg.pane_ids("teri"), tree.pane_ids(), "the registry holds what was returned");
+    }
+
+    #[test]
+    fn a_bare_fred_focus_gets_its_hud_above_the_repl() {
+        let mut reg = fresh();
+        let tree = reg.ensure_fred_layout("fred").expect("a bare fred focus is seeded");
+        assert_eq!(tree.pane_ids(), vec!["fred_hud".to_string(), "repl".to_string()]);
+        assert_eq!(direction_of(&tree), SplitDirection::Vertical);
+        assert_eq!(reg.pane_ids("fred"), tree.pane_ids());
+    }
+
+    #[test]
+    fn seeding_is_idempotent_and_reports_nothing_the_second_time() {
+        let mut reg = fresh();
+        reg.ensure_teri_layout("teri").unwrap();
+        reg.ensure_fred_layout("fred").unwrap();
+        assert_eq!(reg.ensure_teri_layout("teri"), None);
+        assert_eq!(reg.ensure_fred_layout("fred"), None);
+        assert_eq!(reg.pane_ids("teri"), vec!["teri_surface", "repl"]);
+        assert_eq!(reg.pane_ids("fred"), vec!["fred_hud", "repl"]);
+    }
+
+    #[test]
+    fn a_layout_that_already_has_the_native_pane_is_left_alone() {
+        let mut reg = fresh();
+        reg.ensure_teri_layout("teri").unwrap();
+        reg.create_pane("teri", "notes", SplitPosition::Below, "repl").unwrap();
+        let before = reg.pane_ids("teri");
+        assert_eq!(reg.ensure_teri_layout("teri"), None);
+        assert_eq!(reg.pane_ids("teri"), before);
+    }
+
+    #[test]
+    fn an_agent_built_teri_layout_is_wrapped_with_the_surface_first_and_loses_no_pane() {
+        let mut reg = fresh();
+        let before = agent_built(&mut reg, "teri");
+        let tree = reg.ensure_teri_layout("teri").expect("a layout lacking the surface is wrapped");
+        let after = tree.pane_ids();
+        assert_eq!(after.first().map(String::as_str), Some("teri_surface"));
+        for id in &before {
+            assert!(after.contains(id), "pane {id} must survive the wrap: {after:?}");
+        }
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(reg.pane_ids("teri"), after);
+    }
+
+    #[test]
+    fn an_agent_built_fred_layout_is_wrapped_with_the_hud_first_and_loses_no_pane() {
+        let mut reg = fresh();
+        let before = agent_built(&mut reg, "fred");
+        let tree = reg.ensure_fred_layout("fred").expect("a layout lacking the hud is wrapped");
+        let after = tree.pane_ids();
+        assert_eq!(after.first().map(String::as_str), Some("fred_hud"));
+        for id in &before {
+            assert!(after.contains(id), "pane {id} must survive the wrap: {after:?}");
+        }
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(reg.ensure_fred_layout("fred"), None, "wrapping happens once");
+    }
+
+    #[test]
+    fn the_native_panes_are_not_closable() {
+        let mut reg = fresh();
+        reg.ensure_teri_layout("teri").unwrap();
+        reg.ensure_fred_layout("fred").unwrap();
+        assert_eq!(reg.close_tab("teri", "teri_surface"), Err(PaneError::NotClosable));
+        assert_eq!(reg.close_tab("fred", "fred_hud"), Err(PaneError::NotClosable));
+        assert_eq!(reg.pane_ids("teri"), vec!["teri_surface", "repl"]);
+        assert_eq!(reg.pane_ids("fred"), vec!["fred_hud", "repl"]);
+    }
+
+    #[test]
+    fn a_layout_without_the_native_pane_is_refused_and_changes_nothing() {
+        for (tag, seed) in [("teri", true), ("fred", false)] {
+            let mut reg = fresh();
+            if seed {
+                reg.ensure_teri_layout(tag).unwrap();
+            } else {
+                reg.ensure_fred_layout(tag).unwrap();
+            }
+            let before = reg.pane_ids(tag);
+            let tree = PaneTree::Split {
+                direction: SplitDirection::Vertical,
+                children: vec![
+                    PaneTree::Leaf { pane_id: "a".into() },
+                    PaneTree::Leaf { pane_id: "repl".into() },
+                ],
+                ratios: vec![0.5, 0.5],
+            };
+            let err = reg.set_layout(tag, &serde_json::json!({ "tree": tree })).unwrap_err();
+            assert_eq!(err, PaneError::NativePaneRequired, "{tag}");
+            assert_eq!(err.code(), "native_pane_required");
+            assert_eq!(reg.pane_ids(tag), before, "{tag}: tree unchanged");
+        }
+    }
+
+    #[test]
+    fn a_layout_that_keeps_the_native_pane_is_accepted() {
+        let mut reg = fresh();
+        reg.ensure_teri_layout("teri").unwrap();
+        let tree = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Leaf { pane_id: "teri_surface".into() },
+                PaneTree::Leaf { pane_id: "notes".into() },
+                PaneTree::Leaf { pane_id: "repl".into() },
+            ],
+            ratios: vec![0.4, 0.3, 0.3],
+        };
+        reg.set_layout("teri", &serde_json::json!({ "tree": tree })).expect("native pane kept");
+        assert_eq!(reg.pane_ids("teri"), vec!["teri_surface", "notes", "repl"]);
+    }
+
+    #[test]
+    fn a_focus_may_not_use_the_other_focuss_native_pane_as_a_substitute() {
+        let mut reg = fresh();
+        reg.ensure_teri_layout("teri").unwrap();
+        let tree = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Leaf { pane_id: "fred_hud".into() },
+                PaneTree::Leaf { pane_id: "repl".into() },
+            ],
+            ratios: vec![0.5, 0.5],
+        };
+        assert_eq!(
+            reg.set_layout("teri", &serde_json::json!({ "tree": tree })),
+            Err(PaneError::NativePaneRequired)
+        );
+    }
+
+    #[test]
+    fn reset_restores_the_native_default_instead_of_a_bare_repl() {
+        let mut reg = fresh();
+        reg.ensure_teri_layout("teri").unwrap();
+        reg.ensure_fred_layout("fred").unwrap();
+        reg.create_pane("teri", "notes", SplitPosition::Below, "repl").unwrap();
+        reg.create_pane("fred", "notes", SplitPosition::Below, "repl").unwrap();
+
+        reg.reset("teri").unwrap();
+        reg.reset("fred").unwrap();
+
+        assert_eq!(reg.pane_ids("teri"), vec!["teri_surface", "repl"]);
+        assert_eq!(reg.pane_ids("fred"), vec!["fred_hud", "repl"]);
+    }
+
+    #[test]
+    fn other_focuses_are_unaffected() {
+        let mut reg = fresh();
+        for tag in ["perri", "mother", "cody-x", "teri-2", "fred-mail", "anything"] {
+            assert_eq!(reg.ensure_teri_layout(tag), None, "ensure_teri on {tag}");
+            assert_eq!(reg.ensure_fred_layout(tag), None, "ensure_fred on {tag}");
+        }
+        assert_eq!(reg.ensure_teri_layout("fred"), None);
+        assert_eq!(reg.ensure_fred_layout("teri"), None);
+
+        // A layout without any native pane is still fine for them, and the
+        // surface names are ordinary pane ids outside Teri/Fred.
+        for tag in ["perri", "cody-x", "teri-2"] {
+            reg.get_or_init(tag);
+            let tree = PaneTree::Split {
+                direction: SplitDirection::Vertical,
+                children: vec![
+                    PaneTree::Leaf { pane_id: "a".into() },
+                    PaneTree::Leaf { pane_id: "repl".into() },
+                ],
+                ratios: vec![0.5, 0.5],
+            };
+            reg.set_layout(tag, &serde_json::json!({ "tree": tree }))
+                .unwrap_or_else(|e| panic!("{tag}: {e:?}"));
+        }
     }
 }
