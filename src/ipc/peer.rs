@@ -323,7 +323,7 @@ impl SensitiveTags {
     /// daemon.
     ///
     /// Defense in depth: since `session_send` is refused for network peers
-    /// ([`starts_or_feeds_process`]) the server no longer marks on that path;
+    /// ([`refused_for_network`]) the server no longer marks on that path;
     /// the marking still propagates (a focus a driven session creates is driven
     /// too) and covers any future path that lets a network peer write.
     pub fn mark_network_driven(&self, tag: &str) {
@@ -731,46 +731,88 @@ pub fn outbound(trust: PeerTrust, msg: ServerMsg, tags: &SensitiveTags) -> Optio
 
 // ── client → server classification ───────────────────────────────────────────
 
-/// Classify a client-to-daemon message. `true` means a network peer must be
-/// refused with `requires_secure_connection`, whatever tag it names. (Requests
-/// that name a sensitive *tag* are caught by [`targets_sensitive_session`].)
-pub fn is_sensitive_client_msg(msg: &ClientMsg) -> bool {
-    match msg {
-        ClientMsg::WorkDetailRequest { .. }
-        | ClientMsg::WorkRefresh { .. }
-        | ClientMsg::PicksRefresh { .. }
-        | ClientMsg::WorkSendPreviewRequest { .. }
-        | ClientMsg::WorkSend { .. }
-        | ClientMsg::FredSeed { .. } => true,
+/// What a network (TCP) peer may do with a client-to-daemon message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkPolicy {
+    /// Read-only, or no side effect on any session, job, decision, registry or
+    /// process. Still subject to [`targets_sensitive_session`].
+    Allowed,
+    /// Refused with `requires_secure_connection`, before any dispatch.
+    Refused,
+}
 
+/// The network-peer policy: **a network peer is read-only until the listener is
+/// authenticated.** Default-deny: a request is [`NetworkPolicy::Allowed`] only
+/// if it is listed in the first arm below, and a variant added to `ClientMsg`
+/// must be classified here (the match has no wildcard) *and* in the
+/// allow-list-exactness test in this module. Add a verb to the allow list only
+/// with a security argument: it must not mutate state, start/drive/kill a
+/// process or session, answer a prompt/decision/permission, act on a Mother job
+/// or a PR, rewrite the registry, close a pane or inject text, and must not
+/// return Teri/Fred-derived data (see [`targets_sensitive_session`]).
+///
+/// Why each allowed verb is safe:
+/// * `Hello`/`Subscribe`/`Ping`: handshake and topic selection; the outbound
+///   filter ([`outbound`]) already withholds sensitive frames.
+/// * `SessionList`/`FocusList`/`PtyList`: snapshots, redacted for network peers.
+/// * `SessionAttach`/`ActivitySnapshotRequest`: read a session's transcript or
+///   activity; refused for a sensitive tag by [`targets_sensitive_session`].
+/// * `PtyAttach`: reads the PTY's output (see the PR's remaining-read-exposure
+///   list); it neither writes to nor resizes the PTY.
+/// * `SessionDetach`/`PtyDetach`: release the peer's own attachment only.
+///
+/// Everything else is refused, notably: `MotherResume` and every
+/// `MotherAction` (feeds attacker text to a job's agent, or cancels/retries it),
+/// every `PerriAction` (`approve` posts a GitHub review with the user's
+/// credentials), every `DecisionAnswer` (the answer is returned to the asking
+/// agent as a trusted tool result), `FocusRegistryPush`, `PtyKill`, `ClosePane`,
+/// `SessionControl`, `SessionInterrupt`, `SessionAnswerPermission`,
+/// `SessionSend`, `SessionSpawn`, `PtySpawn`, `PtyInput`, `PtyResize`,
+/// `RenderedShape` (it overwrites what `get_view_state` reports to agents) and
+/// the work/picks/seed verbs. An iOS client over the LAN is therefore read-only
+/// until authentication exists.
+pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
+    match msg {
         ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
         | ClientMsg::Ping
-        | ClientMsg::PtySpawn { .. }
+        | ClientMsg::SessionList
+        | ClientMsg::SessionAttach { .. }
+        | ClientMsg::SessionDetach { .. }
+        | ClientMsg::PtyList
         | ClientMsg::PtyAttach { .. }
         | ClientMsg::PtyDetach { .. }
+        | ClientMsg::FocusList
+        | ClientMsg::ActivitySnapshotRequest { .. } => NetworkPolicy::Allowed,
+
+        ClientMsg::PtySpawn { .. }
         | ClientMsg::PtyInput { .. }
         | ClientMsg::PtyResize { .. }
         | ClientMsg::PtyKill { .. }
-        | ClientMsg::PtyList
         | ClientMsg::SessionSpawn { .. }
-        | ClientMsg::SessionAttach { .. }
-        | ClientMsg::SessionDetach { .. }
         | ClientMsg::SessionSend { .. }
-        | ClientMsg::ClosePane { .. }
         | ClientMsg::SessionInterrupt { .. }
         | ClientMsg::SessionControl { .. }
         | ClientMsg::SessionAnswerPermission { .. }
-        | ClientMsg::SessionList
+        | ClientMsg::ClosePane { .. }
         | ClientMsg::FocusRegistryPush { .. }
-        | ClientMsg::FocusList
         | ClientMsg::MotherAction { .. }
         | ClientMsg::MotherResume { .. }
         | ClientMsg::PerriAction { .. }
         | ClientMsg::DecisionAnswer { .. }
-        | ClientMsg::ActivitySnapshotRequest { .. }
-        | ClientMsg::RenderedShape { .. } => false,
+        | ClientMsg::RenderedShape { .. }
+        | ClientMsg::WorkDetailRequest { .. }
+        | ClientMsg::WorkRefresh { .. }
+        | ClientMsg::PicksRefresh { .. }
+        | ClientMsg::WorkSendPreviewRequest { .. }
+        | ClientMsg::WorkSend { .. }
+        | ClientMsg::FredSeed { .. } => NetworkPolicy::Refused,
     }
+}
+
+/// Is `msg` refused for a network peer whatever it names? See [`network_policy`].
+pub fn refused_for_network(msg: &ClientMsg) -> bool {
+    network_policy(msg) == NetworkPolicy::Refused
 }
 
 /// Does `msg` read, drive or create a session/focus (or Mother job) that
@@ -822,66 +864,10 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
     }
 }
 
-/// Does `msg` start a process, or write to / drive one that is already running?
-/// Refused for a network peer whatever it names:
-///
-/// * a session of **any** agent is hosted with the MCP bridge, whose
-///   `fred.*`/`teri.*`/`mother.*` tools would make the daemon fetch Teri/Fred
-///   data and stream it back as an ordinary transcript;
-/// * `pty_spawn`/`pty_input` run commands as the user;
-/// * `session_send` to an *existing* ordinary session is the same thing by
-///   another route: the agent has Bash and Read, so "run this script" makes an
-///   unauthenticated LAN peer a local client of the daemon's sockets (a
-///   `LocalOther` view of everything). Withholding the MCP tools from such a
-///   session does not close that, so the write itself is refused;
-/// * `session_answer_permission` approves a tool action in a session.
-///
-/// Until the listener is authenticated an iOS client on the LAN therefore
-/// cannot start sessions or PTYs, chat with a session, or answer its prompts.
-/// It can still list and attach to (read) non-sensitive sessions, detach, and
-/// interrupt (which only stops a turn).
-pub fn starts_or_feeds_process(msg: &ClientMsg) -> bool {
-    match msg {
-        ClientMsg::SessionSpawn { .. }
-        | ClientMsg::PtySpawn { .. }
-        | ClientMsg::PtyInput { .. }
-        | ClientMsg::SessionSend { .. }
-        | ClientMsg::SessionAnswerPermission { .. } => true,
-
-        ClientMsg::Hello { .. }
-        | ClientMsg::Subscribe { .. }
-        | ClientMsg::Ping
-        | ClientMsg::PtyAttach { .. }
-        | ClientMsg::PtyDetach { .. }
-        | ClientMsg::PtyResize { .. }
-        | ClientMsg::PtyKill { .. }
-        | ClientMsg::PtyList
-        | ClientMsg::SessionAttach { .. }
-        | ClientMsg::SessionDetach { .. }
-        | ClientMsg::ClosePane { .. }
-        | ClientMsg::SessionInterrupt { .. }
-        | ClientMsg::SessionControl { .. }
-        | ClientMsg::SessionList
-        | ClientMsg::FocusRegistryPush { .. }
-        | ClientMsg::FocusList
-        | ClientMsg::MotherAction { .. }
-        | ClientMsg::MotherResume { .. }
-        | ClientMsg::PerriAction { .. }
-        | ClientMsg::DecisionAnswer { .. }
-        | ClientMsg::ActivitySnapshotRequest { .. }
-        | ClientMsg::RenderedShape { .. }
-        | ClientMsg::WorkDetailRequest { .. }
-        | ClientMsg::WorkRefresh { .. }
-        | ClientMsg::PicksRefresh { .. }
-        | ClientMsg::WorkSendPreviewRequest { .. }
-        | ClientMsg::WorkSend { .. }
-        | ClientMsg::FredSeed { .. } => false,
-    }
-}
-
-/// Must a network peer's `msg` be refused? (Any family above.)
+/// Must a network peer's `msg` be refused? Yes unless it is on the allow list
+/// ([`network_policy`]) and does not name a sensitive session.
 pub fn refuse_for_network(msg: &ClientMsg, tags: &SensitiveTags) -> bool {
-    is_sensitive_client_msg(msg) || targets_sensitive_session(msg, tags) || starts_or_feeds_process(msg)
+    refused_for_network(msg) || targets_sensitive_session(msg, tags)
 }
 
 // ── trimming for network peers ───────────────────────────────────────────────
@@ -1026,10 +1012,10 @@ mod tests {
             ClientMsg::FredSeed { request_id: "r".into(), text: "t".into() },
         ];
         for msg in &sensitive {
-            assert!(is_sensitive_client_msg(msg), "{msg:?}");
+            assert!(refused_for_network(msg), "{msg:?}");
         }
-        assert!(!is_sensitive_client_msg(&ClientMsg::Ping));
-        assert!(!is_sensitive_client_msg(&ClientMsg::SessionList));
+        assert!(!refused_for_network(&ClientMsg::Ping));
+        assert!(!refused_for_network(&ClientMsg::SessionList));
     }
 
     #[test]
@@ -1124,7 +1110,7 @@ mod tests {
         assert!(refuse_for_network(&spawn("anything", "fred"), &tags));
         assert!(refuse_for_network(&spawn("anything", "Teri"), &tags));
         // A spawn for any agent is refused: an ordinary agent's session is a
-        // proxy to the Teri/Fred tools (see `starts_or_feeds_process`).
+        // proxy to the Teri/Fred tools (see `refused_for_network`).
         assert!(refuse_for_network(&spawn("anything", "cody"), &tags));
         // Detaching only releases the peer's own attachment.
         assert!(!refuse_for_network(&ClientMsg::SessionDetach { tag: "fred".into() }, &tags));
@@ -1302,8 +1288,10 @@ mod tests {
         let resume = |id: &str| ClientMsg::MotherResume { job_id: id.into(), answer: "a".into() };
         assert!(refuse_for_network(&action("job-work"), &tags));
         assert!(refuse_for_network(&resume("job-work"), &tags));
-        assert!(!refuse_for_network(&action("job-plain"), &tags));
-        assert!(!refuse_for_network(&resume("job-plain"), &tags));
+        // Default-deny: an ordinary job is refused too (resume feeds the job's
+        // agent attacker text; cancel/retry/force-start/archive change it).
+        assert!(refuse_for_network(&action("job-plain"), &tags));
+        assert!(refuse_for_network(&resume("job-plain"), &tags));
     }
 
     // ── round 3 ───────────────────────────────────────────────────────────────
@@ -1383,74 +1371,65 @@ mod tests {
         ]
     }
 
-    /// The independent oracle: which requests start a process or write to one.
-    /// Deliberately a wildcard-free `match`: adding a `ClientMsg` variant breaks
-    /// this test's build until someone decides which side it falls on.
-    fn oracle_starts_or_feeds_process(msg: &ClientMsg) -> bool {
-        match msg {
-            ClientMsg::SessionSpawn { .. }
-            | ClientMsg::PtySpawn { .. }
-            | ClientMsg::PtyInput { .. }
-            | ClientMsg::SessionSend { .. }
-            | ClientMsg::SessionAnswerPermission { .. } => true,
-            ClientMsg::Hello { .. }
-            | ClientMsg::Subscribe { .. }
-            | ClientMsg::Ping
-            | ClientMsg::PtyAttach { .. }
-            | ClientMsg::PtyDetach { .. }
-            | ClientMsg::PtyResize { .. }
-            | ClientMsg::PtyKill { .. }
-            | ClientMsg::PtyList
-            | ClientMsg::SessionAttach { .. }
-            | ClientMsg::SessionDetach { .. }
-            | ClientMsg::ClosePane { .. }
-            | ClientMsg::SessionInterrupt { .. }
-            | ClientMsg::SessionControl { .. }
-            | ClientMsg::SessionList
-            | ClientMsg::FocusRegistryPush { .. }
-            | ClientMsg::FocusList
-            | ClientMsg::MotherAction { .. }
-            | ClientMsg::MotherResume { .. }
-            | ClientMsg::PerriAction { .. }
-            | ClientMsg::DecisionAnswer { .. }
-            | ClientMsg::ActivitySnapshotRequest { .. }
-            | ClientMsg::RenderedShape { .. }
-            | ClientMsg::WorkDetailRequest { .. }
-            | ClientMsg::WorkRefresh { .. }
-            | ClientMsg::PicksRefresh { .. }
-            | ClientMsg::WorkSendPreviewRequest { .. }
-            | ClientMsg::WorkSend { .. }
-            | ClientMsg::FredSeed { .. } => false,
+    /// The allow list, written out independently of [`network_policy`]. A
+    /// network peer is read-only: exactly these requests are allowed. Adding a
+    /// `ClientMsg` variant that is not listed here defaults to *refused* and
+    /// this test (plus the wildcard-free match in `network_policy`) makes the
+    /// author classify it with a security argument.
+    const NETWORK_ALLOWED: &[&str] = &[
+        "ActivitySnapshotRequest",
+        "FocusList",
+        "Hello",
+        "Ping",
+        "PtyAttach",
+        "PtyDetach",
+        "PtyList",
+        "SessionAttach",
+        "SessionDetach",
+        "SessionList",
+        "Subscribe",
+    ];
+
+    /// The variant name of a `ClientMsg` (its serde `type` tag is snake case, so
+    /// use the Debug name, which is the variant identifier).
+    fn variant_name(msg: &ClientMsg) -> String {
+        let dbg = format!("{msg:?}");
+        dbg.split(|c: char| !c.is_alphanumeric()).next().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn the_network_allow_list_is_exactly_the_explicit_read_only_set() {
+        let mut allowed: Vec<String> = every_client_msg()
+            .iter()
+            .filter(|m| network_policy(m) == NetworkPolicy::Allowed)
+            .map(variant_name)
+            .collect();
+        allowed.sort();
+        let mut expected: Vec<String> = NETWORK_ALLOWED.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        assert_eq!(allowed, expected, "a new verb must default to refused: classify it deliberately");
+    }
+
+    #[test]
+    fn every_client_msg_is_covered_by_the_fixture_list_once() {
+        let names: Vec<String> = every_client_msg().iter().map(variant_name).collect();
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(names.len(), unique.len(), "duplicate fixture: {names:?}");
+        // The fixture list must name every allowed verb (so the exactness test
+        // above cannot pass vacuously because a fixture is missing).
+        for allowed in NETWORK_ALLOWED {
+            assert!(names.iter().any(|n| n == allowed), "no fixture for allowed verb {allowed}");
         }
     }
 
     #[test]
-    fn starts_or_feeds_process_is_true_for_spawns_pty_input_session_send_and_permission_answers_and_for_nothing_else() {
-        for msg in every_client_msg() {
-            assert_eq!(starts_or_feeds_process(&msg), oracle_starts_or_feeds_process(&msg), "{msg:?}");
-        }
-    }
-
-    #[test]
-    fn starts_or_feeds_process_does_not_depend_on_the_agent_or_the_tag() {
-        for (tag, agent) in [("x1", "claude"), ("cody-1", "cody"), ("fred", "fred"), ("", ""), ("x:fred", "teri:teri")] {
-            let spawn = ClientMsg::SessionSpawn {
-                tag: tag.into(),
-                agent_name: agent.into(),
-                view_name: "v".into(),
-                cwd: None,
-                session_id: None,
-                remote_control: false,
-            };
-            assert!(starts_or_feeds_process(&spawn), "{tag:?}/{agent:?}");
-        }
-    }
-
-    #[test]
-    fn a_network_peer_is_refused_every_process_starting_or_feeding_request_whatever_the_tag_or_agent() {
+    fn every_refused_verb_is_refused_for_a_network_peer_whatever_the_tag_or_agent() {
         let tags = SensitiveTags::in_memory();
-        for msg in every_client_msg().iter().filter(|m| oracle_starts_or_feeds_process(m)) {
-            assert!(refuse_for_network(msg, &tags), "{msg:?} must be refused for a network peer");
+        for msg in every_client_msg() {
+            let allowed = NETWORK_ALLOWED.contains(&variant_name(&msg).as_str());
+            assert_eq!(!refuse_for_network(&msg, &tags), allowed, "{msg:?}");
         }
         // Still refused for an agent and tag nobody would call sensitive.
         let spawn = ClientMsg::SessionSpawn {
@@ -1465,25 +1444,30 @@ mod tests {
     }
 
     #[test]
-    fn a_network_peer_may_still_attach_detach_interrupt_and_list_for_an_ordinary_session() {
+    fn a_network_peer_may_still_attach_detach_and_list_for_an_ordinary_session() {
         let tags = SensitiveTags::in_memory();
         for msg in [
             ClientMsg::SessionAttach { tag: "cody-x".into() },
             ClientMsg::SessionDetach { tag: "cody-x".into() },
-            ClientMsg::SessionInterrupt { tag: "cody-x".into() },
             ClientMsg::SessionList,
             ClientMsg::Ping,
         ] {
             assert!(!refuse_for_network(&msg, &tags), "{msg:?}");
         }
+        // Allowed verbs stay refused for a sensitive tag.
+        let sensitive = tags_with("cody-x");
+        assert!(refuse_for_network(&ClientMsg::SessionAttach { tag: "cody-x".into() }, &sensitive));
+        assert!(refuse_for_network(&ClientMsg::ActivitySnapshotRequest { tag: "cody-x".into() }, &sensitive));
     }
 
     #[test]
-    fn a_network_peer_cannot_write_to_or_answer_a_permission_for_any_session_whatever_its_tag() {
+    fn a_network_peer_cannot_write_to_interrupt_or_answer_a_permission_for_any_session_whatever_its_tag() {
         let tags = SensitiveTags::in_memory();
         for tag in ["cody-x", "x1", "", "ghost", "claudia"] {
             for msg in [
                 ClientMsg::SessionSend { tag: tag.into(), text: "hi".into(), images: vec![] },
+                ClientMsg::SessionInterrupt { tag: tag.into() },
+                ClientMsg::SessionControl { tag: tag.into(), action: SessionAction::Stop },
                 ClientMsg::SessionAnswerPermission {
                     tag: tag.into(),
                     request_id: "r".into(),
@@ -1491,7 +1475,7 @@ mod tests {
                 },
             ] {
                 assert!(refuse_for_network(&msg, &tags), "{msg:?}");
-                assert!(starts_or_feeds_process(&msg), "{msg:?}");
+                assert!(refused_for_network(&msg), "{msg:?}");
             }
         }
     }

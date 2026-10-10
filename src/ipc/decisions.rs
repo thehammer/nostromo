@@ -58,6 +58,10 @@ pub enum AnswerOutcome {
     AlreadyAnswered,
     /// `request_id` was never issued by this registry.
     UnknownRequest,
+    /// `choice_id` is not one of the choices the request offered. The request
+    /// stays active and unresolved: the answer never reaches the asking agent,
+    /// so free text cannot be smuggled to it through `decision_answer`.
+    UnknownChoice,
 }
 
 /// Outcome of [`DecisionRegistry::resolve_active`], the shared internal path
@@ -74,6 +78,8 @@ enum ResolveResult {
 /// One outstanding (on-the-wire) decision request for a tag.
 struct ActiveEntry {
     tag: String,
+    /// The ids of the choices the request offered; the only ids an answer may name.
+    choice_ids: Vec<String>,
     reply: oneshot::Sender<DecisionOutcome>,
 }
 
@@ -160,6 +166,7 @@ impl DecisionRegistry {
     ) -> (String, oneshot::Receiver<DecisionOutcome>, Option<ServerMsg>) {
         let request_id = Uuid::new_v4().to_string();
         let (reply, rx) = oneshot::channel();
+        let choice_ids = choices.iter().map(|c| c.id.clone()).collect();
         let msg = ServerMsg::DecisionRequest {
             tag: tag.clone(),
             request_id: request_id.clone(),
@@ -177,7 +184,7 @@ impl DecisionRegistry {
             (request_id, rx, None)
         } else {
             self.active_by_tag.insert(tag.clone(), request_id.clone());
-            self.active.insert(request_id.clone(), ActiveEntry { tag, reply });
+            self.active.insert(request_id.clone(), ActiveEntry { tag, choice_ids, reply });
             (request_id, rx, Some(msg))
         }
     }
@@ -185,8 +192,16 @@ impl DecisionRegistry {
     // ── resolution ────────────────────────────────────────────────────────────
 
     /// Resolve the active request `request_id` with the operator's answer.
-    /// `choice_id: None` means dismissed without choosing.
+    /// `choice_id: None` means dismissed without choosing. A `Some` id must be
+    /// one the request offered (exact match), whoever is asking: the id is
+    /// handed to the agent as a trusted tool result, so an unknown one is
+    /// rejected with [`AnswerOutcome::UnknownChoice`] and the request stays open.
     pub fn answer(&mut self, request_id: &str, choice_id: Option<String>) -> AnswerOutcome {
+        if let (Some(id), Some(entry)) = (&choice_id, self.active.get(request_id)) {
+            if !entry.choice_ids.iter().any(|offered| offered == id) {
+                return AnswerOutcome::UnknownChoice;
+            }
+        }
         let outcome = match choice_id {
             Some(id) => DecisionOutcome::Answered(id),
             None => DecisionOutcome::Dismissed,
@@ -286,8 +301,10 @@ impl DecisionRegistry {
         if queue.is_empty() {
             self.queues.remove(tag);
         }
-        let request_id = match &next.msg {
-            ServerMsg::DecisionRequest { request_id, .. } => request_id.clone(),
+        let (request_id, choice_ids) = match &next.msg {
+            ServerMsg::DecisionRequest { request_id, choices, .. } => {
+                (request_id.clone(), choices.iter().map(|c| c.id.clone()).collect())
+            }
             _ => unreachable!("QueuedEntry::msg is always a DecisionRequest"),
         };
         self.active_by_tag.insert(tag.to_string(), request_id.clone());
@@ -295,6 +312,7 @@ impl DecisionRegistry {
             request_id,
             ActiveEntry {
                 tag: tag.to_string(),
+                choice_ids,
                 reply: next.reply,
             },
         );
@@ -420,6 +438,9 @@ mod tests {
             AnswerOutcome::UnknownRequest => {
                 panic!("{context}: expected Answered, got UnknownRequest")
             }
+            AnswerOutcome::UnknownChoice => {
+                panic!("{context}: expected Answered, got UnknownChoice")
+            }
         }
     }
 
@@ -435,6 +456,9 @@ mod tests {
             }
             AnswerOutcome::UnknownRequest => {
                 panic!("{context}: expected Answered, got UnknownRequest")
+            }
+            AnswerOutcome::UnknownChoice => {
+                panic!("{context}: expected Answered, got UnknownChoice")
             }
         }
     }
@@ -595,6 +619,9 @@ mod tests {
             }
             AnswerOutcome::UnknownRequest => {
                 panic!("a known-but-resolved request_id must be AlreadyAnswered, not UnknownRequest")
+            }
+            AnswerOutcome::UnknownChoice => {
+                panic!("a resolved request_id must be AlreadyAnswered, not UnknownChoice")
             }
         }
 

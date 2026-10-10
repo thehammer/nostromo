@@ -670,11 +670,9 @@ fn handle_client_msg(
     perri_state_dir: &Path,
     decisions: &Arc<Mutex<DecisionRegistry>>,
 ) {
-    // Deny-by-default for network peers: a sensitive request, or any request
-    // that reads or drives a Teri/Fred-derived session, changes nothing.
-    if trust.is_network()
-        && (refuse_for_network(&msg, sensitive) || answers_sensitive_decision(&msg, sensitive, decisions))
-    {
+    // Default-deny for network peers (see `peer::refuse_for_network`): anything
+    // but an explicitly allowed read-only request changes nothing.
+    if trust.is_network() && refuse_for_network(&msg, sensitive) {
         refuse_over_network(&msg, targeted_tx);
         return;
     }
@@ -813,7 +811,7 @@ fn handle_client_msg(
         ClientMsg::SessionSend { tag, text, images } => {
             let mut mgr = session_mgr.lock().unwrap();
             // A network peer never reaches here (`session_send` is refused for
-            // it, see `peer::starts_or_feeds_process`). Kept as defense in
+            // it, see `peer::refused_for_network`). Kept as defense in
             // depth: if a network peer ever can write, withdraw the session's
             // Teri/Fred/Mother tools first. (Only a live session can be
             // written to, which also bounds how many tags this records.)
@@ -1090,6 +1088,12 @@ fn handle_client_msg(
                 AnswerOutcome::UnknownRequest => {
                     warn!(conn_key, %request_id, "DecisionAnswer for an unknown request_id");
                 }
+                AnswerOutcome::UnknownChoice => {
+                    warn!(conn_key, %request_id, "DecisionAnswer named a choice the request did not offer");
+                    let _ = targeted_tx.send(ServerMsg::Error {
+                        message: "decision_answer: choice_id is not one of the offered choices".to_string(),
+                    });
+                }
             }
         }
 
@@ -1228,25 +1232,7 @@ fn seed_fred(
     }
 }
 
-/// Is `msg` an answer to a decision request of a sensitive focus? The request
-/// id is unguessable and its request is never sent to a network peer, so this
-/// is defence in depth for a leaked id.
-fn answers_sensitive_decision(
-    msg: &ClientMsg,
-    sensitive: &SensitiveTags,
-    decisions: &Arc<Mutex<DecisionRegistry>>,
-) -> bool {
-    let ClientMsg::DecisionAnswer { request_id, .. } = msg else {
-        return false;
-    };
-    decisions
-        .lock()
-        .unwrap()
-        .tag_of_active(request_id)
-        .is_some_and(|tag| sensitive.tag_is_sensitive(&tag))
-}
-
-/// Answer a sensitive request from a network peer with
+/// Answer a refused request from a network peer with
 /// `requires_secure_connection`, in the targeted frame that matches the
 /// request (or a plain `Error` for requests that have no result frame).
 fn refuse_over_network(msg: &ClientMsg, targeted_tx: &mpsc::UnboundedSender<ServerMsg>) {
