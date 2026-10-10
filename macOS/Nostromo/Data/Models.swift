@@ -566,9 +566,13 @@ struct TeriTodosSnapshot: Decodable {
     let items:       [TeriTodo]
     let stale:       Bool
     let error:       String?
+    /// True when Teri has no database yet: an empty state, not a failure.
+    /// Absent from an older daemon's frame (decodes as `false`).
+    let notConfigured: Bool
 
     enum CodingKeys: String, CodingKey {
-        case generatedAt = "generated_at"
+        case generatedAt   = "generated_at"
+        case notConfigured = "not_configured"
         case items, stale, error
     }
 
@@ -578,6 +582,30 @@ struct TeriTodosSnapshot: Decodable {
         items       = (try? c.decode([TeriTodo].self,      forKey: .items))  ?? []
         stale       = (try? c.decode(Bool.self,            forKey: .stale))  ?? false
         error       = try? c.decodeIfPresent(String.self,  forKey: .error)
+        notConfigured = (try? c.decode(Bool.self,          forKey: .notConfigured)) ?? false
+    }
+}
+
+/// What the Teri todos panel shows for a snapshot. Decided here, away from the
+/// view, so a missing snapshot or a failure can never read as "No Todos".
+enum TeriTodosPanelState: Equatable {
+    /// No snapshot yet (starting up, or the daemon is disconnected).
+    case loading
+    /// The read failed and there is nothing to show.
+    case error(String)
+    /// Teri has no database yet.
+    case notConfigured
+    /// A healthy, genuinely empty list.
+    case empty
+    /// Todos to show; `stale` and `error` ride along as markers.
+    case list(stale: Bool, error: String?)
+
+    static func resolve(_ snapshot: TeriTodosSnapshot?) -> TeriTodosPanelState {
+        guard let snapshot else { return .loading }
+        if !snapshot.items.isEmpty { return .list(stale: snapshot.stale, error: snapshot.error) }
+        if let error = snapshot.error { return .error(error) }
+        if snapshot.notConfigured { return .notConfigured }
+        return .empty
     }
 }
 

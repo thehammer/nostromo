@@ -1007,7 +1007,17 @@ async fn the_same_policy_that_denies_perri_leaves_mother_fred_and_teris_tool_lis
             json!({ "name": "perri-standard" }),
         )
         .await;
-        assert_eq!(res["ok"], true, "{agent} must still be able to call it: {res}");
+        if agent == "mother" {
+            assert_eq!(res["ok"], true, "{agent} must still be able to call it: {res}");
+        } else {
+            // Teri and Fred own a native pane (FND-3): perri-standard has no
+            // such pane, so the tool RAN and refused it — proof the call was
+            // not withdrawn.
+            assert_eq!(
+                res["error"], "native_pane_required",
+                "{agent} must still be able to call it (and gets the native-pane refusal): {res}"
+            );
+        }
     }
 }
 

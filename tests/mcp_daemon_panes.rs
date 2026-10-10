@@ -129,10 +129,10 @@ async fn daemon_get_self_starts_as_single_repl() {
         .await
         .expect("server should bind");
 
-    let (mut reader, mut writer) = connect(&socket_path, "mother").await;
+    let (mut reader, mut writer) = connect(&socket_path, "agent").await;
     let info = call_tool(&mut reader, &mut writer, 2, "nostromo.get_self", json!({})).await;
 
-    assert_eq!(info["view_id"], "mother");
+    assert_eq!(info["view_id"], "agent");
     assert_eq!(pane_ids(&info), vec!["repl"]);
 }
 
@@ -147,7 +147,7 @@ async fn daemon_create_pane_then_reset_round_trip() {
         .await
         .expect("server should bind");
 
-    let (mut reader, mut writer) = connect(&socket_path, "mother").await;
+    let (mut reader, mut writer) = connect(&socket_path, "agent").await;
 
     // create_pane: split repl to the right with a "jobs" pane.
     let res = call_tool(
@@ -169,7 +169,7 @@ async fn daemon_create_pane_then_reset_round_trip() {
     let msg = bcast.recv().await.expect("a layout broadcast");
     match msg {
         ServerMsg::FocusLayout { tag, tree, .. } => {
-            assert_eq!(tag, "mother");
+            assert_eq!(tag, "agent");
             assert_eq!(tree.pane_ids(), vec!["repl", "jobs"]);
         }
         other => panic!("expected FocusLayout, got {other:?}"),
@@ -191,7 +191,7 @@ async fn daemon_create_pane_invalid_inputs_return_stable_errors() {
         .await
         .expect("server should bind");
 
-    let (mut reader, mut writer) = connect(&socket_path, "mother").await;
+    let (mut reader, mut writer) = connect(&socket_path, "agent").await;
 
     // Unknown relative_to → unknown_pane, and the focus is not wedged.
     let res = call_tool(

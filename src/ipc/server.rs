@@ -767,19 +767,33 @@ fn handle_client_msg(
             session_id,
             remote_control,
         } => {
-            let result = {
+            let (result, registry) = {
                 let mut mgr = session_mgr.lock().unwrap();
-                mgr.spawn_session(
+                let result = mgr.spawn_session(
                     tag.clone(),
                     agent_name,
                     view_name,
                     cwd,
                     session_id,
                     remote_control,
-                )
+                );
+                (result, mgr.pane_registry())
             };
             match result {
                 Ok(session_id) => {
+                    // A fresh spawn re-seeds the layout (`init_focus`), which for a
+                    // focus that owns a native pane replaces the tree a window may
+                    // still hold. Tell every client the tree the daemon now has.
+                    if crate::mcp::views::tree::native_pane_for(&tag).is_some() {
+                        let tree = registry.and_then(|reg| reg.lock().unwrap().get(&tag).cloned());
+                        if let Some(tree) = tree {
+                            let _ = broadcast_tx.send(ServerMsg::FocusLayout {
+                                tag: tag.clone(),
+                                tree,
+                                focused_pane: None,
+                            });
+                        }
+                    }
                     let _ = targeted_tx.send(ServerMsg::SessionSpawned { tag, session_id });
                 }
                 Err(e) => {
@@ -978,7 +992,9 @@ fn handle_client_msg(
                 for focus in &updated {
                     let seeded = reg
                         .ensure_review_layout(&focus.tag)
-                        .or_else(|| reg.ensure_mother_layout(&focus.tag));
+                        .or_else(|| reg.ensure_mother_layout(&focus.tag))
+                        .or_else(|| reg.ensure_teri_layout(&focus.tag))
+                        .or_else(|| reg.ensure_fred_layout(&focus.tag));
                     if let Some(tree) = seeded {
                         let _ = broadcast_tx.send(ServerMsg::FocusLayout {
                             tag: focus.tag.clone(),

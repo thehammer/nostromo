@@ -227,6 +227,81 @@ pub fn default_mother_tree() -> PaneTree {
     }
 }
 
+/// Pane id of Teri's native surface (the todo list), hosted by the Mac app.
+pub const TERI_SURFACE: &str = "teri_surface";
+/// Pane id of Fred's native HUD (inbox + calendar), hosted by the Mac app.
+pub const FRED_HUD: &str = "fred_hud";
+
+/// Ratio of the native pane in the Teri default layout (and in a wrap).
+pub const TERI_NATIVE_RATIO: f32 = 0.62;
+/// Ratio of the native pane in the Fred default layout (and in a wrap).
+pub const FRED_NATIVE_RATIO: f32 = 0.55;
+
+/// Teri's default layout: the native surface beside the REPL.
+pub fn default_teri_tree() -> PaneTree {
+    PaneTree::Split {
+        direction: SplitDirection::Horizontal,
+        children: vec![
+            PaneTree::Leaf {
+                pane_id: TERI_SURFACE.to_string(),
+            },
+            PaneTree::Leaf {
+                pane_id: "repl".to_string(),
+            },
+        ],
+        ratios: vec![TERI_NATIVE_RATIO, 0.38],
+    }
+}
+
+/// Fred's default layout: the native HUD above the REPL.
+pub fn default_fred_tree() -> PaneTree {
+    PaneTree::Split {
+        direction: SplitDirection::Vertical,
+        children: vec![
+            PaneTree::Leaf {
+                pane_id: FRED_HUD.to_string(),
+            },
+            PaneTree::Leaf {
+                pane_id: "repl".to_string(),
+            },
+        ],
+        ratios: vec![FRED_NATIVE_RATIO, 0.45],
+    }
+}
+
+/// The native (Mac-hosted) pane a focus tag owns, if any.
+pub fn native_pane_for(tag: &str) -> Option<&'static str> {
+    match tag {
+        "mother" => Some("mother_queue"),
+        "teri" => Some(TERI_SURFACE),
+        "fred" => Some(FRED_HUD),
+        _ => None,
+    }
+}
+
+/// A focus's seeded default layout when it owns a native pane (`mother`,
+/// `teri`, `fred`); `None` for every other tag. The single place that decides
+/// which focuses start from a native tree rather than a bare REPL.
+pub fn default_native_tree(tag: &str) -> Option<PaneTree> {
+    match tag {
+        "mother" => Some(default_mother_tree()),
+        "teri" => Some(default_teri_tree()),
+        "fred" => Some(default_fred_tree()),
+        _ => None,
+    }
+}
+
+/// True when `pane_id` is a leaf reachable from the root through `Split` nodes
+/// only, i.e. NOT inside a `Tabs` node, so it is on screen by default rather
+/// than behind another tab.
+pub fn is_top_level_leaf(tree: &PaneTree, pane_id: &str) -> bool {
+    match tree {
+        PaneTree::Leaf { pane_id: id } => id == pane_id,
+        PaneTree::Split { children, .. } => children.iter().any(|c| is_top_level_leaf(c, pane_id)),
+        PaneTree::Tabs { .. } => false,
+    }
+}
+
 /// True when `tree` holds a pane named `queue` that is NOT a tab — the old
 /// arrangement, where the queue was a region of its own beside the detail tabs.
 pub fn has_bare_queue(tree: &PaneTree) -> bool {

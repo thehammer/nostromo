@@ -204,3 +204,26 @@ subscribes to the base topics immediately and sends a second `subscribe`
 adding `work` only when that connection's `welcome` lists it; a later
 `subscribe` on a live connection replaces the topic list and replays retained
 frames for the topics it adds (never to a network peer).
+
+## Native panes
+
+Some panes are hosted natively by the Mac app rather than filled by an agent:
+`mother_queue` (Mother), `teri_surface` (Teri) and `fred_hud` (Fred). The daemon
+seeds each focus's default layout when the Mac pushes its focus registry, and
+again on every fresh session spawn (`init_focus` seeds the native tree for
+`mother`, `teri` and `fred` and the spawn broadcasts it). A Teri/Fred layout that
+already exists without its native pane is wrapped, native pane first, so nothing
+is lost.
+
+`teri_surface` and `fred_hud` can neither be closed nor dropped nor hidden:
+
+- **Closing** is a UI entry point, not an agent tool: the tab's x button sends
+  `ClientMsg::ClosePane`, which the daemon refuses with `not_closable` for the
+  native pane. Agents have no close tool.
+- **Dropping or burying** is what the agent tools can try: `apply_layout` and
+  `set_pane_layout` on `teri` or `fred` with a tree that lacks the focus's
+  native pane, or that nests it inside a Tabs node (it must be a non-tab leaf,
+  reachable through splits only, so it shows by default), are refused with
+  `native_pane_required` and the layout is left unchanged.
+- `reset_panes` (agent tool) restores the default native layout for those two
+  focuses.

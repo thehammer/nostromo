@@ -41,6 +41,21 @@ final class TeriFredWiringTests: XCTestCase {
         XCTAssertTrue(source.contains("meta.selectForClient == client.clientId"))
     }
 
+    func testMakeLeafViewRoutesTheNativeTeriAndFredPanes() throws {
+        let source = try Self.source("UI/Views/DynamicFocusView.swift")
+        XCTAssertTrue(source.contains(#"paneId == "teri_surface""#))
+        XCTAssertTrue(source.contains("TeriBindings.makeSurface(focus: focus)"))
+        XCTAssertTrue(source.contains(#"paneId == "fred_hud""#))
+        XCTAssertTrue(source.contains("FredBindings.makeSurface(focus: focus)"))
+    }
+
+    func testBindingsHostTheExistingTeriPanelAndFredHUD() throws {
+        let teri = try Self.source("UI/Views/TeriBindings.swift")
+        XCTAssertTrue(teri.contains("NSHostingView(rootView: TeriTodosPanel())"))
+        let fred = try Self.source("UI/Views/FredBindings.swift")
+        XCTAssertTrue(fred.contains("FredHUD()"))
+    }
+
     // MARK: - Helpers
 
     private static func source(_ relative: String) throws -> String {
