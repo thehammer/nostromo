@@ -116,13 +116,26 @@ final class WorkStoreTests: XCTestCase {
         XCTAssertEqual(store.pendingRequestCount, 0)
     }
 
-    func testTheDisplacedWaitersTimeoutDoesNotCutTheNewWaitersWaitShort() {
-        let store = WorkStore(requestTimeout: 0.4)
+    func testTheDisplacedWaitersTimeoutDoesNotCutTheNewWaitersWaitShort() throws {
+        // Timing-based, so it measures REAL elapsed time instead of trusting that a run-loop pump
+        // returns on schedule (under the load of the full suite a "0.25 s" pump can take much
+        // longer, and then the second waiter's own timer legitimately fires).
+        let timeout: TimeInterval = 0.6
+        let store = WorkStore(requestTimeout: timeout)
         var second: [WorkResponse] = []
         store.expect(requestId: "r1") { _ in }
-        pumpMainQueue(for: 0.25)                       // t = 0.25 s
+        let firstRegisteredAt = Date()
+        pumpMainQueue(for: 0.3)
         store.expect(requestId: "r1") { second.append($0) }
-        pumpMainQueue(for: 0.3)                        // t = 0.55 s: the first timer (0.4 s) has fired
+        let secondRegisteredAt = Date()
+
+        // Pump in small slices until the FIRST timer has certainly fired (it was armed at
+        // firstRegisteredAt) while the SECOND one (armed at secondRegisteredAt) has not.
+        while Date().timeIntervalSince(firstRegisteredAt) < timeout + 0.1 {
+            pumpMainQueue(for: 0.02)
+        }
+        try XCTSkipIf(Date().timeIntervalSince(secondRegisteredAt) >= timeout - 0.05,
+                      "the machine was too loaded to hold the window between the two timers")
 
         XCTAssertTrue(second.isEmpty,
                       "the first registration's timeout resolved the second waiter early: \(second)")
