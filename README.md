@@ -158,6 +158,14 @@ This unloads the agent, removes the plist, and deletes the binary.
 |---------------|------------------------------------------------|
 | `--no-daemon` | Skip daemon connection and run in-process mode |
 
+## PR checks
+
+Every pull request against `main` runs the Rust build/lint/test, the Python
+tooling tests, the Swift tests for the Mac app (`make mac-test`) and for
+NostromoKit (`make kit-test`), and an iOS simulator build on GitHub. Those
+two Make targets remain the local commands. See [`docs/ci.md`](docs/ci.md)
+for the job list, runtimes and how to make a check required.
+
 ## Health check
 
 ```bash
