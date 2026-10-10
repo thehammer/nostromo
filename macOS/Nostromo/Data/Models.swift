@@ -586,29 +586,6 @@ struct TeriTodosSnapshot: Decodable {
     }
 }
 
-/// What the Teri todos panel shows for a snapshot. Decided here, away from the
-/// view, so a missing snapshot or a failure can never read as "No Todos".
-enum TeriTodosPanelState: Equatable {
-    /// No snapshot yet (starting up, or the daemon is disconnected).
-    case loading
-    /// The read failed and there is nothing to show.
-    case error(String)
-    /// Teri has no database yet.
-    case notConfigured
-    /// A healthy, genuinely empty list.
-    case empty
-    /// Todos to show; `stale` and `error` ride along as markers.
-    case list(stale: Bool, error: String?)
-
-    static func resolve(_ snapshot: TeriTodosSnapshot?) -> TeriTodosPanelState {
-        guard let snapshot else { return .loading }
-        if !snapshot.items.isEmpty { return .list(stale: snapshot.stale, error: snapshot.error) }
-        if let error = snapshot.error { return .error(error) }
-        if snapshot.notConfigured { return .notConfigured }
-        return .empty
-    }
-}
-
 // MARK: - Activity
 
 /// One entry in an agent's ambient activity stream, as broadcast by the

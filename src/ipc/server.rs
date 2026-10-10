@@ -36,7 +36,7 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
-        MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     pty_manager::PtyManager,
     session_manager::SessionManager,
@@ -522,7 +522,7 @@ where
                             Ok(b) => b,
                             Err(e) => { warn!("serialise error: {e}"); continue; }
                         };
-                        if write_frame(&mut writer, &bytes).await.is_err() {
+                        if write_outbound(&mut writer, &bytes, &conn_key).await.is_err() {
                             break Ok(());
                         }
                     }
@@ -547,7 +547,7 @@ where
                     Ok(b) => b,
                     Err(e) => { warn!("serialise targeted msg: {e}"); continue; }
                 };
-                if write_frame(&mut writer, &bytes).await.is_err() {
+                if write_outbound(&mut writer, &bytes, &conn_key).await.is_err() {
                     break Ok(());
                 }
             }
@@ -643,9 +643,24 @@ where
     for msg in messages {
         let bytes = serde_json::to_vec(&msg).unwrap_or_default();
         if !bytes.is_empty() {
-            let _ = write_frame(writer, &bytes).await;
+            let _ = write_outbound(writer, &bytes, "replay").await;
         }
     }
+}
+
+/// Write one server frame. A frame over [`MAX_FRAME_LEN`] cannot be carried:
+/// it is dropped with a warning and the connection stays up. (Treating it as a
+/// write failure would close the connection, and the client would reconnect
+/// and be replayed the same retained frame.) `Err` means the socket itself failed.
+async fn write_outbound<W>(writer: &mut W, bytes: &[u8], conn: &str) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    if bytes.len() > MAX_FRAME_LEN {
+        warn!(conn, len = bytes.len(), max = MAX_FRAME_LEN, "dropping an oversized server frame");
+        return Ok(());
+    }
+    write_frame(writer, bytes).await
 }
 
 // ── PTY command dispatch ──────────────────────────────────────────────────────

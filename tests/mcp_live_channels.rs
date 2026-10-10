@@ -263,6 +263,44 @@ async fn teri_list_todos_with_items_is_fresh_and_carries_the_items_and_timestamp
 }
 
 #[tokio::test]
+async fn teri_list_todos_bounds_every_body_and_the_whole_reply_for_huge_todo_bodies() {
+    use nostromo::data::teri_todos::WIRE_BODY_MAX_BYTES;
+    let h = harness().await;
+    let big: TeriTodosSnapshot = serde_json::from_value(json!({
+        "generated_at": "2026-10-09T15:00:00Z",
+        "items": (1..=500).map(|i| json!({
+            "id": i, "title": format!("todo {i}"), "status": "open", "priority": 2,
+            "due_date": null, "jira_key": null,
+            "body": format!("body-of-todo-{i}: {}", "é".repeat(5 * 1024)),
+        })).collect::<Vec<_>>(),
+        "stale": false, "error": null, "not_configured": false,
+    }))
+    .unwrap();
+    h.todos_tx.send(Some(big)).unwrap();
+    let mut c = Client::connect(&h).await;
+
+    let res = c.call("teri.list_todos", json!({})).await;
+
+    assert_eq!(res["state"], "fresh", "shape keeps state");
+    assert!(res["updated_at"].is_string(), "shape keeps updated_at");
+    let items = res["items"].as_array().expect("shape keeps items");
+    assert_eq!(items.len(), 500);
+    for item in items {
+        let body = item["body"].as_str().expect("body present");
+        assert!(
+            body.len() <= WIRE_BODY_MAX_BYTES,
+            "body of {} is {} bytes, over WIRE_BODY_MAX_BYTES",
+            item["id"],
+            body.len()
+        );
+        let id = item["id"].as_i64().unwrap();
+        assert!(body.starts_with(&format!("body-of-todo-{id}: é")), "keeps the start of the body");
+    }
+    let total = res.to_string().len();
+    assert!(total < 4 * 1024 * 1024, "reply is {total} bytes");
+}
+
+#[tokio::test]
 async fn teri_list_todos_with_no_items_is_empty() {
     let h = harness().await;
     h.todos_tx.send(Some(todos(0, false, None))).unwrap();

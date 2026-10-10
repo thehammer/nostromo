@@ -317,9 +317,14 @@ final class TeriSurfaceViewTests: XCTestCase {
         return UserDefaults(suiteName: name)!
     }
 
+    /// Name of the suite `makeDefaults()` handed out last.
+    private var lastSuiteName: String { suites.last! }
+
     /// A real surface in an offscreen window. `seed` runs before the surface exists
     /// (the app-relaunch case: data already in the store when the view appears).
     private func makeRig(defaults: UserDefaults? = nil,
+                         scheduler: WorkScheduler = .main,
+                         size: NSSize = NSSize(width: 900, height: 700),
                          seed: (WorkStore) -> Void = { _ in }) -> Rig {
         let store = WorkStore()
         let log = FrameLog()
@@ -327,8 +332,8 @@ final class TeriSurfaceViewTests: XCTestCase {
         seed(store)
         let defaults = defaults ?? makeDefaults()
         let center = NotificationCenter()
-        let window = makeRigWindow(self)
-        let surface = TeriSurfaceView(store: store, defaults: defaults, center: center)
+        let window = makeRigWindow(self, size: size)
+        let surface = TeriSurfaceView(store: store, defaults: defaults, center: center, scheduler: scheduler)
         surface.frame = window.contentView!.bounds
         surface.autoresizingMask = [.width, .height]
         window.contentView!.addSubview(surface)
@@ -732,6 +737,339 @@ final class TeriSurfaceViewTests: XCTestCase {
         XCTAssertTrue(rig.surface.performKeyEquivalent(with: keyEvent("r", code: 15, window: rig.window)))
         XCTAssertEqual(rig.log.frames, [.refresh(source: .todos, fred: false)])
     }
+
+    // MARK: View state is never lost
+
+    func testTheSurfaceSavesItsViewStateThroughTheInjectedScheduler() {
+        let manual = ManualScheduler()
+        let defaults = makeDefaults()
+        let rig = makeRig(defaults: defaults, scheduler: manual.scheduler)
+
+        rig.surface.select(.jira)
+
+        XCTAssertNil(defaults.data(forKey: TeriViewState.defaultsKey), "nothing is written before the debounce runs")
+        manual.fireAll()
+        XCTAssertEqual(TeriViewState.load(from: defaults).selectedTab, .jira)
+    }
+
+    func testClosingTheSurfaceWithAChangeStillPendingDoesNotLoseIt() {
+        let manual = ManualScheduler()
+        let defaults = makeDefaults()
+        let window = makeRigWindow(self)
+        weak var weakSurface: TeriSurfaceView?
+
+        autoreleasepool {
+            let surface = TeriSurfaceView(store: WorkStore(), defaults: defaults, center: NotificationCenter(),
+                                          scheduler: manual.scheduler)
+            weakSurface = surface
+            surface.frame = window.contentView!.bounds
+            window.contentView!.addSubview(surface)
+            surface.layoutSubtreeIfNeeded()
+            surface.select(.jira)
+            surface.selectItem(id: "jira:CORE-1")
+            surface.removeFromSuperview()
+        }
+        // The scheduler never ran: only tearing the surface down can have saved it.
+
+        XCTAssertNil(weakSurface, "precondition: the surface is gone")
+        let loaded = TeriViewState.load(from: defaults)
+        XCTAssertEqual(loaded.selectedTab, .jira, "the tab chosen just before closing was lost")
+        XCTAssertEqual(loaded[.jira].selectedItemId, "jira:CORE-1", "the selection made just before closing was lost")
+    }
+
+    // MARK: Keyboard right after opening (no click)
+
+    private func isInside(_ responder: NSResponder?, _ view: NSView) -> Bool {
+        if let v = responder as? NSView, v.isDescendant(of: view) { return true }
+        if let editor = responder as? NSTextView, editor.isFieldEditor, let owner = editor.delegate as? NSView {
+            return owner.isDescendant(of: view)
+        }
+        return false
+    }
+
+    private func activeList(_ rig: Rig) -> WorkListView? {
+        rigAllSubviews(of: rig.surface).compactMap { $0 as? WorkListView }.first
+    }
+
+    private func searchField(_ rig: Rig) -> NSSearchField? {
+        rigAllSubviews(of: rig.surface).compactMap { $0 as? NSSearchField }.first
+    }
+
+    /// The list (its outline) is what has the keyboard.
+    private func listHasFocus(_ rig: Rig) -> Bool {
+        guard let list = activeList(rig), let outline = rig.window.firstResponder as? NSOutlineView else { return false }
+        return outline.isDescendant(of: list)
+    }
+
+    private func searchHasFocus(_ rig: Rig) -> Bool {
+        guard let field = searchField(rig) else { return false }
+        let responder = rig.window.firstResponder
+        return responder === field || (responder as? NSView)?.isDescendant(of: field) == true
+            || (responder as? NSTextView)?.delegate === field
+    }
+
+    private func tabButton(_ rig: Rig, _ tab: TeriTab) -> NSButton? {
+        rigAllSubviews(of: rig.surface).compactMap { $0 as? NSButton }.first { $0.title.hasPrefix(tab.title) }
+    }
+
+    private func click(_ button: NSButton) {
+        button.sendAction(button.action, to: button.target)
+    }
+
+    /// A rig whose surface has just been added to a key window; nothing clicked.
+    private func openedRig(defaults: UserDefaults? = nil, seed: (WorkStore) -> Void = { _ in },
+                           file: StaticString = #filePath, line: UInt = #line) -> Rig {
+        let rig = makeRig(defaults: defaults, seed: seed)
+        XCTAssertTrue(waitUntil(2) { self.listHasFocus(rig) },
+                      "the list never took the keyboard; first responder is \(String(describing: rig.window.firstResponder))",
+                      file: file, line: line)
+        return rig
+    }
+
+    func testOpeningTheSurfaceGivesTheKeyboardToTheTabsListWithoutAClick() {
+        let rig = makeRig(seed: { seedTodos($0) })
+
+        XCTAssertTrue(waitUntil(2) { self.listHasFocus(rig) },
+                      "first responder is \(String(describing: rig.window.firstResponder))")
+        XCTAssertTrue(isInside(rig.window.firstResponder, rig.surface))
+    }
+
+    func testCommandTwoAndThreeSwitchTabsRightAfterOpening() {
+        let defaults = makeDefaults()
+        var saved = TeriViewState()
+        saved.selectedTab = .sentry
+        saved.save(to: defaults)
+        let rig = openedRig(defaults: defaults)
+
+        XCTAssertTrue(rig.surface.performKeyEquivalent(with: keyEvent("2", code: 19, window: rig.window)))
+        XCTAssertEqual(rig.surface.selectedTab, .todos)
+
+        XCTAssertTrue(rig.window.performKeyEquivalent(with: keyEvent("3", code: 20, window: rig.window)),
+                      "the window routes the shortcut to the surface")
+        XCTAssertEqual(rig.surface.selectedTab, .jira)
+    }
+
+    func testCommandFFocusesTheSearchFieldRightAfterOpening() {
+        let rig = openedRig(seed: { seedTodos($0) })
+
+        XCTAssertTrue(rig.surface.performKeyEquivalent(with: keyEvent("f", code: 3, window: rig.window)))
+
+        XCTAssertTrue(searchHasFocus(rig), "first responder is \(String(describing: rig.window.firstResponder))")
+        XCTAssertTrue(isInside(rig.window.firstResponder, rig.surface))
+    }
+
+    func testCommandRRefreshesTheVisibleSourceRightAfterOpening() {
+        let rig = openedRig()
+        rig.log.frames.removeAll()
+
+        XCTAssertTrue(rig.surface.performKeyEquivalent(with: keyEvent("r", code: 15, window: rig.window)))
+
+        XCTAssertEqual(rig.log.frames, [.refresh(source: rig.surface.selectedTab.source!, fred: false)])
+    }
+
+    func testCommandOOpensTheSelectedItemsLinkRightAfterOpening() throws {
+        let rig = makeRig(seed: { store in
+            store.apply(snapshot: .todos, group: nil, items: [
+                WorkTestSupport.makeItem(["id": "todo:5", "source": "todos", "kind": "todo", "title": "Link me",
+                                          "status": "open", "search_text": "Link me", "url": "https://example.com/x"]),
+            ])
+            store.apply(status: SourceStatus(source: .todos, state: .fresh, count: 1))
+        })
+        XCTAssertTrue(waitUntil(2) { self.listHasFocus(rig) }, "the list never took the keyboard")
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 1 })
+        let detail = try XCTUnwrap(rigAllSubviews(of: rig.surface).compactMap { $0 as? WorkDetailView }.first)
+        var opened: [URL] = []
+        detail.opener = { if case .url(_, let url) = $0 { opened.append(url) } }
+        rig.log.frames.removeAll()
+        rig.surface.selectItem(id: "todo:5")
+        let request = try XCTUnwrap(rig.log.detailRequests.first)
+        rig.store.resolve(requestId: request.requestId,
+                          with: .detail(.ok(WorkTestSupport.makeDetail(itemId: "todo:5", title: "Link me (detail)"))))
+        XCTAssertTrue(waitUntil { rig.surface.detailTitle == "Link me (detail)" })
+
+        XCTAssertTrue(rig.surface.performKeyEquivalent(with: keyEvent("o", code: 31, window: rig.window)))
+
+        XCTAssertEqual(opened, [URL(string: "https://example.com/x")!])
+    }
+
+    /// Puts the keyboard in the current list the way a user's click would, independent of
+    /// what the surface does by itself on opening.
+    private func focusList(_ rig: Rig) throws {
+        let outline = try XCTUnwrap(rigAllSubviews(of: rig.surface).compactMap { $0 as? NSOutlineView }.first)
+        XCTAssertTrue(rig.window.makeFirstResponder(outline))
+        XCTAssertTrue(listHasFocus(rig), "precondition: the list has the keyboard")
+    }
+
+    private func focusSearch(_ rig: Rig) throws {
+        let field = try XCTUnwrap(searchField(rig))
+        XCTAssertTrue(rig.window.makeFirstResponder(field))
+        XCTAssertTrue(searchHasFocus(rig), "precondition: typing in the search field")
+    }
+
+    func testSwitchingTabsMovesTheKeyboardIntoTheNewTabsList() throws {
+        let rig = makeRig()
+        try focusList(rig)
+        let todosList = activeList(rig)
+
+        rig.surface.select(.jira)
+
+        XCTAssertFalse(activeList(rig) === todosList, "precondition: Jira has its own list")
+        XCTAssertTrue(waitUntil(2) { self.listHasFocus(rig) },
+                      "first responder is \(String(describing: rig.window.firstResponder))")
+    }
+
+    func testClickingTheCurrentTabBringsTheKeyboardBackToItsList() throws {
+        let rig = makeRig(seed: { seedTodos($0) })
+        try focusSearch(rig)
+
+        click(try XCTUnwrap(tabButton(rig, rig.surface.selectedTab)))
+
+        XCTAssertTrue(waitUntil(2) { self.listHasFocus(rig) },
+                      "first responder is \(String(describing: rig.window.firstResponder))")
+    }
+
+    func testClickingAnotherTabWhileTypingInTheSearchFieldMovesTheKeyboardToThatTabsList() throws {
+        let rig = makeRig()
+        try focusSearch(rig)
+        let before = activeList(rig)
+
+        click(try XCTUnwrap(tabButton(rig, .sentry)))
+
+        XCTAssertEqual(rig.surface.selectedTab, .sentry)
+        XCTAssertFalse(activeList(rig) === before)
+        XCTAssertTrue(waitUntil(2) { self.listHasFocus(rig) },
+                      "first responder is \(String(describing: rig.window.firstResponder))")
+    }
+
+    func testClickingAnotherTabFromTheListMovesTheKeyboardToThatTabsList() throws {
+        let rig = makeRig()
+        try focusList(rig)
+
+        click(try XCTUnwrap(tabButton(rig, .jira)))
+
+        XCTAssertEqual(rig.surface.selectedTab, .jira)
+        XCTAssertTrue(waitUntil(2) { self.listHasFocus(rig) },
+                      "first responder is \(String(describing: rig.window.firstResponder))")
+    }
+
+    func testOpeningTheSurfaceDoesNotStealFocusFromATextFieldElsewhereInTheWindow() {
+        let window = makeRigWindow(self)
+        let field = NSTextField(string: "half-typed reply")
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        window.contentView!.addSubview(field)
+        XCTAssertTrue(window.makeFirstResponder(field))
+        XCTAssertNotNil(field.currentEditor(), "precondition: the field is being edited")
+
+        let surface = TeriSurfaceView(store: WorkStore(), defaults: makeDefaults(), center: NotificationCenter())
+        surface.frame = NSRect(x: 0, y: 30, width: 900, height: 600)
+        window.contentView!.addSubview(surface)
+        surface.layoutSubtreeIfNeeded()
+        settle()
+
+        XCTAssertTrue((window.firstResponder as? NSTextView)?.delegate === field,
+                      "the surface took focus from the field: \(String(describing: window.firstResponder))")
+    }
+
+    func testOpeningTheSurfaceDoesNotStealFocusFromATextViewWithASelection() {
+        let window = makeRigWindow(self)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        textView.string = "some notes worth keeping"
+        textView.isEditable = true
+        window.contentView!.addSubview(textView)
+        XCTAssertTrue(window.makeFirstResponder(textView))
+        textView.setSelectedRange(NSRange(location: 5, length: 5))
+
+        let surface = TeriSurfaceView(store: WorkStore(), defaults: makeDefaults(), center: NotificationCenter())
+        surface.frame = NSRect(x: 0, y: 110, width: 900, height: 500)
+        window.contentView!.addSubview(surface)
+        surface.layoutSubtreeIfNeeded()
+        settle()
+
+        XCTAssertTrue(window.firstResponder === textView, "first responder is \(String(describing: window.firstResponder))")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 5, length: 5))
+    }
+
+    // MARK: Split ratio
+
+    private func splitView(_ rig: Rig) -> NSSplitView? {
+        rigAllSubviews(of: rig.surface).compactMap { $0 as? NSSplitView }.first { $0.isVertical }
+    }
+
+    private func seedSplit(_ fraction: Double) -> UserDefaults {
+        let defaults = makeDefaults()
+        var saved = TeriViewState()
+        saved.splitFraction = fraction
+        saved.save(to: defaults)
+        return defaults
+    }
+
+    func testTheListPaneComesBackAtTheSavedWidth() {
+        let rig = makeRig(defaults: seedSplit(0.4), size: NSSize(width: 1000, height: 600))
+        rig.surface.layoutSubtreeIfNeeded()
+
+        _ = waitUntil { abs(rig.surface.listPaneFraction - 0.4) < 0.02 }
+
+        XCTAssertEqual(Double(rig.surface.listPaneFraction), 0.4, accuracy: 0.02)
+    }
+
+    func testTheSplitIsRememberedInTheViewStateAndNotInAGlobalDefaultsKey() throws {
+        func splitKeys() -> Set<String> {
+            Set(UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.hasPrefix("NSSplitView") })
+        }
+        let before = splitKeys()
+        let manual = ManualScheduler()
+        let defaults = seedSplit(0.4)
+        let rig = makeRig(defaults: defaults, scheduler: manual.scheduler, size: NSSize(width: 1000, height: 600))
+        rig.surface.layoutSubtreeIfNeeded()
+        let split = try XCTUnwrap(splitView(rig))
+
+        split.setPosition(600, ofDividerAt: 0)
+        split.layoutSubtreeIfNeeded()
+        rig.surface.dividerDragEnded()   // what the split view calls when the mouse is released
+        manual.fireAll()
+
+        XCTAssertEqual(splitKeys().subtracting(before), [], "AppKit's own split autosave is global; the fraction belongs in the view state")
+        let domain = try XCTUnwrap(defaults.persistentDomain(forName: lastSuiteName))
+        XCTAssertTrue(domain.keys.allSatisfy { $0.hasPrefix("nostromo.") }, "keys written: \(domain.keys)")
+        let data = try XCTUnwrap(defaults.data(forKey: TeriViewState.defaultsKey))
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(obj["splitFraction"] as? Double ?? -1, 0.6, accuracy: 0.02,
+                       "the dragged-to fraction is stored inside the view-state JSON")
+    }
+
+    func testDraggingTheDividerStoresTheNewFraction() throws {
+        let manual = ManualScheduler()
+        let defaults = seedSplit(0.4)
+        let rig = makeRig(defaults: defaults, scheduler: manual.scheduler, size: NSSize(width: 1000, height: 600))
+        rig.surface.layoutSubtreeIfNeeded()
+        let split = try XCTUnwrap(splitView(rig))
+
+        split.setPosition(600, ofDividerAt: 0)
+        split.layoutSubtreeIfNeeded()
+        let actual = split.arrangedSubviews[0].frame.width / split.bounds.width
+        XCTAssertEqual(Double(actual), 0.6, accuracy: 0.02, "precondition: the divider really moved")
+        rig.surface.dividerDragEnded()   // what the split view calls when the mouse is released
+        manual.fireAll()
+
+        let stored = try XCTUnwrap(TeriViewState.load(from: defaults).splitFraction)
+        XCTAssertEqual(stored, 0.6, accuracy: 0.02)
+    }
+
+    func testResizingTheWindowDoesNotChangeTheRememberedFraction() throws {
+        let manual = ManualScheduler()
+        let defaults = seedSplit(0.4)
+        let rig = makeRig(defaults: defaults, scheduler: manual.scheduler, size: NSSize(width: 1000, height: 600))
+        rig.surface.layoutSubtreeIfNeeded()
+
+        rig.window.setContentSize(NSSize(width: 1400, height: 600))
+        rig.surface.layoutSubtreeIfNeeded()
+        manual.fireAll()
+        XCTAssertTrue(waitUntil { abs(rig.surface.listPaneFraction - 0.4) < 0.02 },
+                      "the list keeps its proportion when the window grows: \(rig.surface.listPaneFraction)")
+
+        let stored = try XCTUnwrap(TeriViewState.load(from: defaults).splitFraction)
+        XCTAssertEqual(stored, 0.4, accuracy: 0.0001, "only dragging the divider changes the remembered width")
+    }
 }
 
 // MARK: - Detail links (security edge cases)
@@ -773,5 +1111,73 @@ final class WorkDetailViewLinkSafetyTests: XCTestCase {
         XCTAssertTrue(view.textView(text, clickedOnLink: URL(string: "https://example.com/a")!, at: 0))
 
         XCTAssertEqual(opened, [URL(string: "https://example.com/a")!], "only the web link was opened")
+    }
+}
+
+
+// MARK: - "Open in…" says why it is disabled
+
+final class WorkDetailOpenInTests: XCTestCase {
+    private func makeView() -> WorkDetailView {
+        WorkDetailView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+    }
+
+    private func openPopup(_ view: WorkDetailView) -> NSPopUpButton {
+        rigAllSubviews(of: view).compactMap { $0 as? NSPopUpButton }.first!
+    }
+
+    private func detail(links: [(String, String)] = []) throws -> WorkItemDetail {
+        let json: [String: Any] = ["item_id": "todo:1", "title": "Fix payment webhook", "markdown": "Check the retry backoff.",
+                                   "links": links.map { ["label": $0.0, "url": $0.1] }]
+        return try JSONDecoder().decode(WorkItemDetail.self, from: try JSONSerialization.data(withJSONObject: json))
+    }
+
+    private let linkedTodo = WorkTestSupport.todo(1, "Fix payment webhook", linked: ["CORE-1"])
+
+    func testALinkedJiraKeyWithNoLinkExplainsThatItCannotBeOpened() throws {
+        let view = makeView()
+        view.show(.detail(try detail()), item: linkedTodo)
+
+        XCTAssertFalse(view.openPrimary(), "there is nothing to open")
+        let reason = try XCTUnwrap(view.openDisabledReason, "a disabled Open in… must say why")
+        XCTAssertTrue(reason.contains("CORE-1"), reason)
+        XCTAssertTrue(reason.contains("Jira"), "name the missing Jira site: \(reason)")
+        let popup = openPopup(view)
+        XCTAssertFalse(popup.isEnabled)
+        XCTAssertEqual(popup.toolTip, reason, "the tooltip is the reason")
+    }
+
+    func testAnItemWithAWebLinkCanBeOpenedAndNeedsNoExplanation() throws {
+        let view = makeView()
+        view.show(.detail(try detail(links: [("Runbook", "https://example.com/runbook")])), item: linkedTodo)
+
+        XCTAssertNil(view.openDisabledReason)
+        let popup = openPopup(view)
+        XCTAssertTrue(popup.isEnabled)
+        XCTAssertTrue(popup.toolTip?.isEmpty ?? true, "no tooltip while it works: \(String(describing: popup.toolTip))")
+    }
+
+    func testAnItemWithNothingToOpenAtAllSaysSo() throws {
+        let view = makeView()
+        view.show(.detail(try detail()), item: WorkTestSupport.todo(2, "Call the plumber"))
+
+        XCTAssertFalse(view.openPrimary())
+        let reason = try XCTUnwrap(view.openDisabledReason)
+        XCTAssertFalse(reason.isEmpty)
+        let popup = openPopup(view)
+        XCTAssertFalse(popup.isEnabled)
+        XCTAssertEqual(popup.toolTip, reason)
+    }
+
+    func testWhileTheDetailIsLoadingOpenInIsDisabledAndSaysWhy() throws {
+        let view = makeView()
+        view.show(.loading(title: "Fix payment webhook"), item: linkedTodo)
+
+        XCTAssertFalse(view.openPrimary())
+        let reason = try XCTUnwrap(view.openDisabledReason)
+        XCTAssertFalse(reason.isEmpty)
+        let popup = openPopup(view)
+        XCTAssertFalse(popup.isEnabled)
+        XCTAssertEqual(popup.toolTip, reason)
     }
 }

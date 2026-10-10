@@ -89,14 +89,28 @@ final class WorkListView: NSView {
     private let placeholderLabel = NSTextField(wrappingLabelWithString: "")
     private let skeleton = WorkSkeletonView()
 
+    private let scheduler: WorkScheduler
+    private let searchDebounce: TimeInterval
+    private var cancelPendingSearch: (() -> Void)?
+
     private var roots: [Node] = []
     private var snapshot: WorkListSnapshot?
     private var isApplying = false
+    /// What the outline currently shows, to skip a reload when nothing visible changed.
+    private var shownLayout: [LayoutEntry]?
+    /// What the filter bar was last built for.
+    private var shownControls: ControlsKey?
+    /// Row content by item id, valid for one calendar day (rows say "Due today").
+    private var rowCache: [String: (item: WorkItem, content: WorkRowContent)] = [:]
+    private var rowCacheDay: Date?
+
+    /// How many times the chips and menus were rebuilt (tests: unchanged data must not rebuild).
+    private(set) var filterControlRebuildCount = 0
 
     // MARK: Nodes
 
     private final class Node {
-        let item: WorkItem?
+        var item: WorkItem?
         let content: WorkRowContent?
         let groupKey: String?
         let groupTitle: String?
@@ -113,10 +127,26 @@ final class WorkListView: NSView {
         }
     }
 
+    /// One row of the outline as drawn: what must differ for a reload to be needed.
+    private struct LayoutEntry: Equatable {
+        let groupKey: String?
+        let groupTitle: String?
+        let itemId: String?
+        let content: WorkRowContent?
+        let depth: Int
+    }
+
+    private struct ControlsKey: Equatable {
+        let counts: [WorkFacet: [String: Int]]
+        let filter: WorkFilter
+    }
+
     // MARK: Init
 
-    init(config: WorkListConfig) {
+    init(config: WorkListConfig, scheduler: WorkScheduler = .main, searchDebounce: TimeInterval = 0.12) {
         self.config = config
+        self.scheduler = scheduler
+        self.searchDebounce = searchDebounce
         super.init(frame: .zero)
         setUp()
     }
@@ -130,6 +160,8 @@ final class WorkListView: NSView {
         self.filter = filter
         self.sort = sort
         self.collapsedGroups = Set(collapsedGroups)
+        cancelPendingSearch?()
+        cancelPendingSearch = nil
         searchField.stringValue = filter.query
         if let index = config.sortOptions.firstIndex(where: { $0.key == sort }) {
             sortPopup.selectItem(at: index)
@@ -141,18 +173,26 @@ final class WorkListView: NSView {
     /// yet; `placeholder` is a message over an empty list ("Nothing to do").
     func apply(snapshot: WorkListSnapshot, isLoading: Bool, placeholder: String?) {
         self.snapshot = snapshot
-        let selectedId = selectedItem?.id
-        roots = buildNodes(from: snapshot)
-
-        isApplying = true
-        outline.reloadData()
-        for node in roots where node.item == nil {
-            if let key = node.groupKey, !collapsedGroups.contains(key) { outline.expandItem(node) }
+        let newRoots = buildNodes(from: snapshot)
+        let layout = Self.layout(of: newRoots)
+        if layout == shownLayout {
+            // Same rows as drawn: refresh the items behind them (a hidden field may
+            // have changed) without touching the outline, its scroll position or selection.
+            for (old, new) in zip(flatten(roots), flatten(newRoots)) { old.item = new.item }
+        } else {
+            let selectedId = selectedItem?.id
+            roots = newRoots
+            shownLayout = layout
+            isApplying = true
+            outline.reloadData()
+            for node in roots where node.item == nil {
+                if let key = node.groupKey, !collapsedGroups.contains(key) { outline.expandItem(node) }
+            }
+            if let selectedId, let row = row(forItemId: selectedId) {
+                outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+            isApplying = false
         }
-        if let selectedId, let row = row(forItemId: selectedId) {
-            outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        }
-        isApplying = false
 
         let isEmpty = snapshot.filteredCount == 0
         skeleton.isHidden = !(isLoading && snapshot.totalCount == 0)
@@ -161,7 +201,7 @@ final class WorkListView: NSView {
             : nil
         placeholderLabel.stringValue = message ?? ""
         placeholderLabel.isHidden = message == nil || !skeleton.isHidden
-        rebuildFilterControls()
+        rebuildFilterControlsIfNeeded()
     }
 
     /// Select the row for `itemId` (nil clears). Notifies only when `notify`.
@@ -292,13 +332,37 @@ final class WorkListView: NSView {
     }
 
     private func buildNodes(from snapshot: WorkListSnapshot) -> [Node] {
-        func itemNode(_ item: WorkItem) -> Node { Node(item: item, content: config.rowContent(item)) }
+        let today = Calendar.current.startOfDay(for: Date())
+        if rowCacheDay != today { rowCache.removeAll(); rowCacheDay = today }
+        // Bounded: ids of items that left the list are only dropped here.
+        if rowCache.count > 4 * max(snapshot.totalCount, 250) { rowCache.removeAll() }
+
+        func itemNode(_ item: WorkItem) -> Node {
+            if let cached = rowCache[item.id], cached.item == item {
+                return Node(item: item, content: cached.content)
+            }
+            let content = config.rowContent(item)
+            rowCache[item.id] = (item, content)
+            return Node(item: item, content: content)
+        }
         // A source that is one flat list has a single group with no key: no header rows.
         if snapshot.groups.count == 1, snapshot.groups[0].key == nil {
             return snapshot.groups[0].items.map(itemNode)
         }
         return snapshot.groups.map { group in
             Node(groupKey: group.key ?? "", title: config.groupTitle(group), children: group.items.map(itemNode))
+        }
+    }
+
+    private func flatten(_ nodes: [Node]) -> [Node] {
+        nodes.flatMap { [$0] + flatten($0.children) }
+    }
+
+    private static func layout(of roots: [Node], depth: Int = 0) -> [LayoutEntry] {
+        roots.flatMap { node in
+            [LayoutEntry(groupKey: node.groupKey, groupTitle: node.groupTitle, itemId: node.item?.id,
+                         content: node.content, depth: depth)]
+                + layout(of: node.children, depth: depth + 1)
         }
     }
 
@@ -311,7 +375,16 @@ final class WorkListView: NSView {
 
     // MARK: Filter bar
 
+    /// Rebuild the chips and menus only when their counts or the selected filter changed.
+    private func rebuildFilterControlsIfNeeded() {
+        let key = ControlsKey(counts: snapshot?.facetCounts ?? [:], filter: filter)
+        guard key != shownControls else { return }
+        rebuildFilterControls()
+    }
+
     private func rebuildFilterControls() {
+        filterControlRebuildCount += 1
+        shownControls = ControlsKey(counts: snapshot?.facetCounts ?? [:], filter: filter)
         let counts = snapshot?.facetCounts ?? [:]
         // Chips
         chipStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -395,7 +468,16 @@ final class WorkListView: NSView {
         toggle(choice.value, in: choice.facet)
     }
 
+    /// Each keystroke restarts a short timer; the filter runs once typing pauses.
     @objc private func searchChanged() {
+        cancelPendingSearch?()
+        cancelPendingSearch = scheduler.schedule(searchDebounce) { [weak self] in
+            self?.cancelPendingSearch = nil
+            self?.applySearchText()
+        }
+    }
+
+    private func applySearchText() {
         guard filter.query != searchField.stringValue else { return }
         filter.query = searchField.stringValue
         onFilterChange?(filter, sort)

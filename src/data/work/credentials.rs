@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 /// Default credentials file (`~/.claude/credentials/.env`).
@@ -69,11 +69,43 @@ impl EnvFile {
     }
 }
 
-/// Look `name` up in the process environment, then in
-/// `~/.claude/credentials/.env` (re-read when its mtime changes).
-pub fn lookup(name: &str) -> Option<String> {
-    static DEFAULT: OnceLock<EnvFile> = OnceLock::new();
-    DEFAULT.get_or_init(|| EnvFile::new(default_env_path())).lookup(name)
+const JIRA_SITE_VAR: &str = "ATLASSIAN_SITE_NAME";
+
+/// Where the Jira site (host name such as `example.atlassian.net`) for links
+/// comes from: the configured override, then the environment, then the
+/// credentials file at the configured path.
+pub struct JiraSite {
+    configured: Option<String>,
+    file: EnvFile,
+}
+
+impl JiraSite {
+    /// `configured` is `Config::jira_site`; `env_path` the credentials file.
+    pub fn new(configured: Option<String>, env_path: impl Into<PathBuf>) -> Self {
+        Self { configured, file: EnvFile::new(env_path) }
+    }
+
+    /// From the daemon config (`jira_site`, `jira_credentials_path`).
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        Self::new(
+            config.jira_site.clone(),
+            config.jira_credentials_path.clone().unwrap_or_else(default_env_path),
+        )
+    }
+
+    /// The site, if any. Reads a file: call from a blocking context.
+    pub fn lookup(&self) -> Option<String> {
+        let usable = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        usable(self.configured.clone())
+            .or_else(|| usable(std::env::var(JIRA_SITE_VAR).ok()))
+            .or_else(|| usable(self.file.file_value(JIRA_SITE_VAR)))
+    }
+}
+
+impl Default for JiraSite {
+    fn default() -> Self {
+        Self::new(None, default_env_path())
+    }
 }
 
 /// Expand `${NAME}` references in `value`, the way the shell that normally
@@ -192,5 +224,21 @@ mod tests {
     fn a_missing_file_resolves_nothing() {
         let env = EnvFile::new("/nonexistent/nostromo/.env");
         assert_eq!(env.lookup("NOSTROMO_TEST_CRED_NOPE"), None);
+    }
+
+    // ── JiraSite ──────────────────────────────────────────────────────────────
+    // Only the case that does not depend on the process environment lives
+    // here: the jira tests in `data::tickets::jira` set ATLASSIAN_SITE_NAME
+    // under a lock of their own, so anything that reads or clears it would
+    // race them. The env/file/blank/missing cases are in
+    // `tests/jira_site_lookup.rs` (a process of its own).
+
+    #[test]
+    fn a_configured_jira_site_wins_over_the_credentials_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "ATLASSIAN_SITE_NAME=file.atlassian.net\n").unwrap();
+        let site = JiraSite::new(Some("override.atlassian.net".into()), path);
+        assert_eq!(site.lookup().as_deref(), Some("override.atlassian.net"));
     }
 }

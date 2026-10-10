@@ -10,6 +10,8 @@
 		WK0000000000000000000002 /* WorkModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000001 /* WorkModels.swift */; };
 		WK0000000000000000000003 /* WorkModels.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000001 /* WorkModels.swift */; };
 		WK0000000000000000000005 /* WorkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000004 /* WorkStore.swift */; };
+		WK0000000000000000000096 /* WorkScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000095 /* WorkScheduler.swift */; };
+		WK0000000000000000000097 /* WorkScheduler.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000095 /* WorkScheduler.swift */; };
 		WK0000000000000000000006 /* WorkStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000004 /* WorkStore.swift */; };
 		WK0000000000000000000008 /* WorkQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000007 /* WorkQuery.swift */; };
 		WK0000000000000000000009 /* WorkQuery.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000007 /* WorkQuery.swift */; };
@@ -52,6 +54,8 @@
 		WK0000000000000000000064 /* WorkStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000063 /* WorkStoreTests.swift */; };
 		NH0000000000000000000004 /* WorkStoreConnectionLossTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = NH0000000000000000000003 /* WorkStoreConnectionLossTests.swift */; };
 		NH0000000000000000000002 /* NostromodClientHandshakeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = NH0000000000000000000001 /* NostromodClientHandshakeTests.swift */; };
+		WK00000000000000000000A3 /* TeriViewStateStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK00000000000000000000A1 /* TeriViewStateStoreTests.swift */; };
+		WK00000000000000000000A4 /* WorkListSearchPerformanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK00000000000000000000A2 /* WorkListSearchPerformanceTests.swift */; };
 		WK0000000000000000000066 /* TeriSurfaceViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000065 /* TeriSurfaceViewTests.swift */; };
 		WK0000000000000000000068 /* TeriRepoDocsTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000067 /* TeriRepoDocsTabTests.swift */; };
 		WK0000000000000000000070 /* TeriJiraTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000069 /* TeriJiraTabTests.swift */; };
@@ -62,7 +66,6 @@
 		WK0000000000000000000080 /* FocusBadgesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000079 /* FocusBadgesTests.swift */; };
 		WK0000000000000000000094 /* SidebarBadgeModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000093 /* SidebarBadgeModelTests.swift */; };
 		WK0000000000000000000082 /* TeriFredWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000081 /* TeriFredWiringTests.swift */; };
-		WK0000000000000000000084 /* TeriTodosPanelStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000083 /* TeriTodosPanelStateTests.swift */; };
 		SC00000000000000000000F1 /* TranscriptSelectionColorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */; };
 		AM00000000000000000000F1 /* AppControlMouseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AM00000000000000000000F0 /* AppControlMouseTests.swift */; };
 		PS00000000000000000000F1 /* ProseSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PS00000000000000000000F0 /* ProseSelectionTests.swift */; };
@@ -295,6 +298,7 @@
 /* Begin PBXFileReference section */
 		WK0000000000000000000001 /* WorkModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkModels.swift; sourceTree = "<group>"; };
 		WK0000000000000000000004 /* WorkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkStore.swift; sourceTree = "<group>"; };
+		WK0000000000000000000095 /* WorkScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkScheduler.swift; sourceTree = "<group>"; };
 		WK0000000000000000000007 /* WorkQuery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkQuery.swift; sourceTree = "<group>"; };
 		WK0000000000000000000010 /* TeriViewState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriViewState.swift; sourceTree = "<group>"; };
 		WK0000000000000000000013 /* TeriSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriSurfaceView.swift; sourceTree = "<group>"; };
@@ -319,6 +323,8 @@
 		WK0000000000000000000063 /* WorkStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkStoreTests.swift; sourceTree = "<group>"; };
 		NH0000000000000000000003 /* WorkStoreConnectionLossTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkStoreConnectionLossTests.swift; sourceTree = "<group>"; };
 		NH0000000000000000000001 /* NostromodClientHandshakeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromodClientHandshakeTests.swift; sourceTree = "<group>"; };
+		WK00000000000000000000A1 /* TeriViewStateStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriViewStateStoreTests.swift; sourceTree = "<group>"; };
+		WK00000000000000000000A2 /* WorkListSearchPerformanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkListSearchPerformanceTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000065 /* TeriSurfaceViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriSurfaceViewTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000067 /* TeriRepoDocsTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriRepoDocsTabTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000069 /* TeriJiraTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriJiraTabTests.swift; sourceTree = "<group>"; };
@@ -329,7 +335,6 @@
 		WK0000000000000000000079 /* FocusBadgesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusBadgesTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000093 /* SidebarBadgeModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarBadgeModelTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000081 /* TeriFredWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriFredWiringTests.swift; sourceTree = "<group>"; };
-		WK0000000000000000000083 /* TeriTodosPanelStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriTodosPanelStateTests.swift; sourceTree = "<group>"; };
 		SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptSelectionColorTests.swift; sourceTree = "<group>"; };
 		AM00000000000000000000F0 /* AppControlMouseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlMouseTests.swift; sourceTree = "<group>"; };
 		PS00000000000000000000F0 /* ProseSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProseSelectionTests.swift; sourceTree = "<group>"; };
@@ -556,6 +561,7 @@
 			children = (
 				WK0000000000000000000001 /* WorkModels.swift */,
 				WK0000000000000000000004 /* WorkStore.swift */,
+				WK0000000000000000000095 /* WorkScheduler.swift */,
 				WK0000000000000000000007 /* WorkQuery.swift */,
 				WK0000000000000000000010 /* TeriViewState.swift */,
 				HH000000000000000000010 /* TurnReconciler.swift */,
@@ -696,6 +702,8 @@
 				NH0000000000000000000003 /* WorkStoreConnectionLossTests.swift */,
 				NH0000000000000000000001 /* NostromodClientHandshakeTests.swift */,
 				WK0000000000000000000065 /* TeriSurfaceViewTests.swift */,
+				WK00000000000000000000A2 /* WorkListSearchPerformanceTests.swift */,
+				WK00000000000000000000A1 /* TeriViewStateStoreTests.swift */,
 				WK0000000000000000000067 /* TeriRepoDocsTabTests.swift */,
 				WK0000000000000000000069 /* TeriJiraTabTests.swift */,
 				WK0000000000000000000071 /* TeriSentryTabTests.swift */,
@@ -705,7 +713,6 @@
 				WK0000000000000000000079 /* FocusBadgesTests.swift */,
 				WK0000000000000000000093 /* SidebarBadgeModelTests.swift */,
 				WK0000000000000000000081 /* TeriFredWiringTests.swift */,
-				WK0000000000000000000083 /* TeriTodosPanelStateTests.swift */,
 				LL0000000000000000000006 /* CodeDocumentTests.swift */,
 				LL0000000000000000000007 /* DiffDocumentTests.swift */,
 				LL0000000000000000000008 /* ScrollDecisionTests.swift */,
@@ -875,6 +882,7 @@
 			files = (
 				WK0000000000000000000002 /* WorkModels.swift in Sources */,
 				WK0000000000000000000005 /* WorkStore.swift in Sources */,
+				WK0000000000000000000096 /* WorkScheduler.swift in Sources */,
 				WK0000000000000000000008 /* WorkQuery.swift in Sources */,
 				WK0000000000000000000011 /* TeriViewState.swift in Sources */,
 				WK0000000000000000000014 /* TeriSurfaceView.swift in Sources */,
@@ -992,6 +1000,7 @@
 			files = (
 				WK0000000000000000000003 /* WorkModels.swift in TestSources */,
 				WK0000000000000000000006 /* WorkStore.swift in TestSources */,
+				WK0000000000000000000097 /* WorkScheduler.swift in TestSources */,
 				WK0000000000000000000009 /* WorkQuery.swift in TestSources */,
 				WK0000000000000000000012 /* TeriViewState.swift in TestSources */,
 				WK0000000000000000000015 /* TeriSurfaceView.swift in TestSources */,
@@ -1015,6 +1024,8 @@
 				NH0000000000000000000004 /* WorkStoreConnectionLossTests.swift in Sources */,
 				NH0000000000000000000002 /* NostromodClientHandshakeTests.swift in Sources */,
 				WK0000000000000000000066 /* TeriSurfaceViewTests.swift in Sources */,
+				WK00000000000000000000A4 /* WorkListSearchPerformanceTests.swift in Sources */,
+				WK00000000000000000000A3 /* TeriViewStateStoreTests.swift in Sources */,
 				WK0000000000000000000068 /* TeriRepoDocsTabTests.swift in Sources */,
 				WK0000000000000000000070 /* TeriJiraTabTests.swift in Sources */,
 				WK0000000000000000000072 /* TeriSentryTabTests.swift in Sources */,
@@ -1024,7 +1035,6 @@
 				WK0000000000000000000080 /* FocusBadgesTests.swift in Sources */,
 				WK0000000000000000000094 /* SidebarBadgeModelTests.swift in Sources */,
 				WK0000000000000000000082 /* TeriFredWiringTests.swift in Sources */,
-				WK0000000000000000000084 /* TeriTodosPanelStateTests.swift in Sources */,
 				HH000000000000000000012 /* TurnReconciler.swift in TestSources */,
 				HH000000000000000000022 /* TurnPayloadStore.swift in TestSources */,
 				HH000000000000000000042 /* MemoryWatchdog.swift in TestSources */,

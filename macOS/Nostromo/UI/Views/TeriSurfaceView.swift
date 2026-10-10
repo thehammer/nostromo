@@ -23,6 +23,7 @@ final class TeriSurfaceView: NSView {
     private let store: WorkStore
     private let viewState: TeriViewStateStore
     private let center: NotificationCenter
+    private let scheduler: WorkScheduler
     private var cancellables = Set<AnyCancellable>()
     private var deepLinkObserver: NSObjectProtocol?
 
@@ -30,7 +31,7 @@ final class TeriSurfaceView: NSView {
     private var tabButtons: [TeriTab: NSButton] = [:]
     private let disconnectedBanner = SourceStateBanner()
     private let sourceBanner = SourceStateBanner()
-    private let splitView = DarkSplitView()
+    private let splitView = TeriSplitView()
     private let listHost = NSView()
     private let detailView = WorkDetailView()
     private let configs: [TeriTab: TeriTabConfig]
@@ -42,13 +43,19 @@ final class TeriSurfaceView: NSView {
     /// The item the detail pane is showing (or loading), to avoid re-requesting it.
     private var detailItem: WorkItem?
     private var detailToken = 0
+    /// The split width the remembered fraction was last applied for: it is applied
+    /// again whenever the split view's width changes (a window resize keeps the ratio).
+    private var splitAppliedWidth: CGFloat = 0
+
 
     // MARK: Init
 
-    init(store: WorkStore, defaults: UserDefaults = .standard, center: NotificationCenter = .default) {
+    init(store: WorkStore, defaults: UserDefaults = .standard, center: NotificationCenter = .default,
+         scheduler: WorkScheduler = .main) {
         self.store = store
         self.center = center
-        let viewState = TeriViewStateStore(defaults: defaults)
+        self.scheduler = scheduler
+        let viewState = TeriViewStateStore(defaults: defaults, scheduler: scheduler, center: center)
         self.viewState = viewState
         let all = [TeriPicksTab.config, TeriTodosTab.config, TeriJiraTab.config,
                    TeriSentryTab.config, TeriRepoDocsTab.config]
@@ -66,7 +73,16 @@ final class TeriSurfaceView: NSView {
 
     deinit {
         if let deepLinkObserver { center.removeObserver(deepLinkObserver) }
+        viewState.flush()   // a change made in the last half second must not be lost
     }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        focusActiveList()
+    }
+
 
     // MARK: Public
 
@@ -100,6 +116,11 @@ final class TeriSurfaceView: NSView {
         guard let source = selectedTab.source, store.status(for: source)?.state == .empty,
               store.items(for: source).isEmpty else { return nil }
         return configs[selectedTab]?.emptyMessage
+    }
+
+    /// Width of the list pane as a fraction of the split view.
+    var listPaneFraction: CGFloat {
+        splitView.bounds.width > 0 ? listHost.frame.width / splitView.bounds.width : 0
     }
 
     var isDisconnectedBannerVisible: Bool { !disconnectedBanner.isHidden }
@@ -181,6 +202,8 @@ final class TeriSurfaceView: NSView {
         listHost.translatesAutoresizingMaskIntoConstraints = false
         splitView.isVertical = true
         splitView.dividerStyle = .thin
+        splitView.onDividerDragEnded = { [weak self] in self?.dividerDragEnded() }
+        splitView.onLayout = { [weak self] in self?.applyRememberedSplit() }
         splitView.addArrangedSubview(listHost)
         splitView.addArrangedSubview(detailView)
         listHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
@@ -227,6 +250,7 @@ final class TeriSurfaceView: NSView {
         let tab = TeriTab.allCases[sender.tag]
         select(tab)
         updateTabButtons()   // a click toggled the button; show the real selection
+        focusActiveList()    // a button click does not take the keyboard; the list should
     }
 
     private func showSelectedTab() {
@@ -245,13 +269,24 @@ final class TeriSurfaceView: NSView {
         detailToken += 1
         detailView.show(.none)
         reload()
+        focusActiveList()
+    }
+
+    /// Give the keyboard to the active tab's list (or to the surface itself when
+    /// the tab has none), so ⌘1–⌘5, ⌘F, ⌘R and ⌘O work without a click first.
+    /// Never takes it from text being edited elsewhere in the window.
+    private func focusActiveList() {
+        guard let window,
+              TeriFocusPolicy.mayTakeKeyboard(currentFirstResponder: window.firstResponder, surface: self)
+        else { return }
+        if let list = lists[selectedTab] { list.focusList() } else { window.makeFirstResponder(self) }
     }
 
     /// The list for `tab`, created on first use with its remembered filter state.
     private func listView(for tab: TeriTab) -> WorkListView? {
         if let existing = lists[tab] { return existing }
         guard let config = configs[tab]?.list else { return nil }
-        let list = WorkListView(config: config)
+        let list = WorkListView(config: config, scheduler: scheduler)
         let remembered = viewState.state[tab]
         list.restore(filter: remembered.filter, sort: remembered.sort, collapsedGroups: remembered.collapsedGroups)
         list.onSelectionChange = { [weak self] item in
@@ -376,5 +411,64 @@ final class TeriSurfaceView: NSView {
         case .rateLimited:            return "\(tab.title) ◔ Rate-limited"
         case .error:                  return "\(tab.title) ⚠ Error"
         }
+    }
+}
+
+// MARK: - Split position
+
+extension TeriSurfaceView {
+    /// The user let go of the divider: remember where it is. (AppKit's own
+    /// resize notifications cannot be told apart from a drag, so only the mouse
+    /// tracking in `TeriSplitView` counts.)
+    func dividerDragEnded() {
+        guard splitView.bounds.width > 0 else { return }
+        let fraction = Double(listPaneFraction)
+        viewState.update { $0.splitFraction = fraction }
+    }
+
+    /// Put the divider where the user left it, and keep that proportion when the window is resized.
+    fileprivate func applyRememberedSplit() {
+        let width = splitView.bounds.width
+        guard width > 0, width != splitAppliedWidth, let fraction = viewState.state.splitFraction else { return }
+        splitAppliedWidth = width
+        splitView.layoutSubtreeIfNeeded()
+        splitView.setPosition(CGFloat(fraction) * width, ofDividerAt: 0)
+    }
+}
+
+/// The split view, telling its owner when a divider drag ends.
+final class TeriSplitView: DarkSplitView {
+    var onDividerDragEnded: (() -> Void)?
+    /// Called after every layout pass (the split view's width is final by then).
+    var onLayout: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)   // tracks the drag until the mouse is released
+        onDividerDragEnded?()
+    }
+}
+
+// MARK: - Keyboard focus policy
+
+enum TeriFocusPolicy {
+    /// Whether the surface may move the keyboard into its list: when nothing in the
+    /// window holds it, or the holder is part of the surface. Never from text being
+    /// edited (or selected) in a text view elsewhere (the idea of
+    /// `TranscriptFocusPolicy`), nor from another visible view.
+    static func mayTakeKeyboard(currentFirstResponder: NSResponder?, surface: NSView) -> Bool {
+        if let text = currentFirstResponder as? NSTextView {
+            // A field editor is the window's transient editor for whichever field is
+            // being edited; the field is the thing that lives in a view hierarchy.
+            let owner: NSView? = text.isFieldEditor ? text.delegate as? NSView : text
+            return owner?.isDescendant(of: surface) ?? false
+        }
+        // Another live view in the window (another focus's list) keeps its keyboard.
+        guard let view = currentFirstResponder as? NSView else { return true }
+        return view.isDescendant(of: surface) || view.isHiddenOrHasHiddenAncestor
     }
 }

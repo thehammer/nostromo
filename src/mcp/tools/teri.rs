@@ -75,7 +75,10 @@ pub(crate) fn summary(state: &McpSharedState) -> (&'static str, usize) {
 ///
 /// Returns the `TeriTodosSnapshot` fields plus `state`
 /// (`loading|not_configured|error|stale|empty|fresh`), `updated_at` and, when
-/// there is something to explain, `reason`.
+/// there is something to explain, `reason`. Each item carries `id`, `title`,
+/// `status`, `priority`, `due_date`, `jira_key` and, when the todo has notes,
+/// `body`: a preview cut to `WIRE_BODY_MAX_BYTES` (ending in `…` when cut).
+/// The full text is available from `teri.get_work_item`.
 pub fn list_todos(state: &McpSharedState) -> Value {
     let borrow = state.teri_todos_rx.borrow();
     let Some(snap) = borrow.as_ref() else {
@@ -88,7 +91,7 @@ pub fn list_todos(state: &McpSharedState) -> Value {
             "error": null,
         });
     };
-    let mut out = serde_json::to_value(snap).unwrap_or_else(
+    let mut out = serde_json::to_value(snap.for_wire()).unwrap_or_else(
         |e| json!({ "error": "serialization_failed", "detail": e.to_string() }),
     );
     if let Some(obj) = out.as_object_mut() {

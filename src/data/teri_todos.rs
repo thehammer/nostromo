@@ -12,12 +12,13 @@
 //! The snapshot never carries the database path.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{Connection, OpenFlags};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Notify};
 use tracing::warn;
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -50,7 +51,60 @@ pub struct TeriTodo {
     pub body: Option<String>,
 }
 
+/// Longest todo body kept in memory (characters). The SQL query cuts at this,
+/// so a pasted megabyte of notes cannot bloat the daemon.
+pub const STORE_BODY_MAX_CHARS: usize = 65_536;
+/// Longest todo body on the legacy `TeriState` frame and in `teri.list_todos`
+/// (bytes, including the `…` that marks a cut). The work hub keeps the longer
+/// stored body for search and the detail view.
+pub const WIRE_BODY_MAX_BYTES: usize = 4096;
+/// The legacy `TeriState` frame is kept under this many serialized bytes
+/// (`MAX_FRAME_LEN` is 4 MiB; a connection cannot carry more).
+pub const TERI_STATE_MAX_BYTES: usize = 3 * 1024 * 1024;
+
+const CUT_MARK: &str = "…";
+
 impl TeriTodosSnapshot {
+    /// The snapshot as it may go on the wire (the `TeriState` frame and
+    /// `teri.list_todos`): every body is cut to [`WIRE_BODY_MAX_BYTES`] on a
+    /// character boundary, and if the result still serializes over
+    /// [`TERI_STATE_MAX_BYTES`] the bodies are dropped, then trailing todos.
+    /// `self` (what the hub reads) is untouched.
+    pub fn for_wire(&self) -> TeriTodosSnapshot {
+        let mut wire = self.clone();
+        for todo in &mut wire.items {
+            if let Some(body) = todo.body.as_mut() {
+                cut_body(body);
+            }
+        }
+        if serialized_len(&wire) <= TERI_STATE_MAX_BYTES {
+            return wire;
+        }
+        warn!(todos = wire.items.len(), "teri todos over the frame budget; dropping bodies");
+        wire.items.iter_mut().for_each(|t| t.body = None);
+        if serialized_len(&wire) <= TERI_STATE_MAX_BYTES {
+            return wire;
+        }
+        let total = wire.items.len();
+        let mut budget = TERI_STATE_MAX_BYTES.saturating_sub(serialized_len(&TeriTodosSnapshot {
+            items: Vec::new(),
+            ..wire.clone()
+        }));
+        let mut keep = 0;
+        for todo in &wire.items {
+            // +1 for the comma between array elements.
+            let size = serde_json::to_vec(todo).map_or(usize::MAX, |b| b.len() + 1);
+            if size > budget {
+                break;
+            }
+            budget -= size;
+            keep += 1;
+        }
+        warn!(kept = keep, total, "teri todos still over the frame budget; trimming todos");
+        wire.items.truncate(keep);
+        wire
+    }
+
     /// Same todos and same health, ignoring when it was read. Used to avoid
     /// republishing an unchanged poll.
     fn same_content(&self, other: &Self) -> bool {
@@ -61,6 +115,23 @@ impl TeriTodosSnapshot {
     }
 }
 
+fn serialized_len(snap: &TeriTodosSnapshot) -> usize {
+    serde_json::to_vec(snap).map_or(usize::MAX, |b| b.len())
+}
+
+/// Cut `body` to [`WIRE_BODY_MAX_BYTES`], ending in `…` when anything was cut.
+fn cut_body(body: &mut String) {
+    if body.len() <= WIRE_BODY_MAX_BYTES {
+        return;
+    }
+    let mut cut = WIRE_BODY_MAX_BYTES - CUT_MARK.len();
+    while !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    body.truncate(cut);
+    body.push_str(CUT_MARK);
+}
+
 pub struct TeriTodosNativeSource;
 
 impl TeriTodosNativeSource {
@@ -69,11 +140,25 @@ impl TeriTodosNativeSource {
         Self::spawn_at(db_path())
     }
 
+    /// [`spawn`](Self::spawn) with a manual refresh trigger: a poke on
+    /// `refresh` re-reads at once (what ⌘R on the Teri surface asks for).
+    pub fn spawn_with_refresh(refresh: Arc<Notify>) -> watch::Receiver<Option<TeriTodosSnapshot>> {
+        Self::spawn_at_with_refresh(db_path(), refresh)
+    }
+
     /// Watch the Teri database at `path` (tests point this at a temp file).
     pub fn spawn_at(path: PathBuf) -> watch::Receiver<Option<TeriTodosSnapshot>> {
+        Self::spawn_at_with_refresh(path, Arc::new(Notify::new()))
+    }
+
+    /// [`spawn_at`](Self::spawn_at) with a manual refresh trigger.
+    pub fn spawn_at_with_refresh(
+        path: PathBuf,
+        refresh: Arc<Notify>,
+    ) -> watch::Receiver<Option<TeriTodosSnapshot>> {
         let (tx, rx) = watch::channel(None);
         tokio::spawn(async move {
-            run(path, tx).await;
+            run(path, tx, refresh).await;
         });
         rx
     }
@@ -84,7 +169,7 @@ fn db_path() -> PathBuf {
     PathBuf::from(home).join(".teri").join("teri.db")
 }
 
-async fn run(path: PathBuf, tx: watch::Sender<Option<TeriTodosSnapshot>>) {
+async fn run(path: PathBuf, tx: watch::Sender<Option<TeriTodosSnapshot>>, refresh: Arc<Notify>) {
     let (wake_tx, mut wake_rx) = mpsc::unbounded_channel::<()>();
     let mut watcher = watch_db_dir(&path, wake_tx.clone());
     loop {
@@ -118,6 +203,7 @@ async fn run(path: PathBuf, tx: watch::Sender<Option<TeriTodosSnapshot>>) {
                     while wake_rx.try_recv().is_ok() {}
                     break;
                 }
+                _ = refresh.notified() => break,
                 _ = tokio::time::sleep(STAT_INTERVAL) => {
                     if stat_signature(&path) != seen || read_at.elapsed() >= SAFETY_POLL { break; }
                 }
@@ -205,7 +291,7 @@ fn query_todos(path: &PathBuf) -> rusqlite::Result<Vec<TeriTodo>> {
     conn.execute_batch("PRAGMA query_only = ON;")?;
 
     let mut stmt = conn.prepare(
-        "SELECT id, title, status, priority, due_date, jira_key, body
+        "SELECT id, title, status, priority, due_date, jira_key, substr(body, 1, ?1)
          FROM todos
          WHERE status IN ('open','in_progress','blocked')
            AND (snoozed_until IS NULL OR snoozed_until < datetime('now'))
@@ -213,7 +299,7 @@ fn query_todos(path: &PathBuf) -> rusqlite::Result<Vec<TeriTodo>> {
                   CASE WHEN due_date IS NULL THEN 1 ELSE 0 END,
                   due_date ASC",
     )?;
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map([STORE_BODY_MAX_CHARS as i64], |r| {
         Ok(TeriTodo {
             id: r.get(0)?,
             title: r.get(1)?,
@@ -262,5 +348,45 @@ mod tests {
         assert!(snap.stale, "{snap:?}");
         assert!(snap.error.is_some(), "{snap:?}");
         assert!(snap.items.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refresh_poke_does_not_break_the_loop_and_a_later_change_is_still_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("teri.db");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE todos (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT,
+                   status TEXT NOT NULL DEFAULT 'open', priority INTEGER NOT NULL DEFAULT 3,
+                   due_date TEXT, jira_key TEXT, snoozed_until TEXT);
+                 INSERT INTO todos (title) VALUES ('first');",
+            )
+            .unwrap();
+        let refresh = Arc::new(Notify::new());
+        let mut rx = TeriTodosNativeSource::spawn_at_with_refresh(path, refresh.clone());
+
+        let first = tokio::time::timeout(Duration::from_secs(5), rx.wait_for(|s| s.is_some()))
+            .await
+            .expect("a first snapshot within 5s")
+            .unwrap()
+            .clone()
+            .unwrap();
+        assert_eq!(first.items.len(), 1, "{first:?}");
+
+        writer.execute("INSERT INTO todos (title) VALUES ('second')", []).unwrap();
+        refresh.notify_one();
+
+        let next = tokio::time::timeout(
+            Duration::from_secs(5),
+            rx.wait_for(|s| s.as_ref().is_some_and(|s| s.items.len() == 2)),
+        )
+        .await
+        .expect("the change after a refresh poke arrives within 5s")
+        .unwrap()
+        .clone()
+        .unwrap();
+        assert_eq!(next.error, None, "{next:?}");
     }
 }

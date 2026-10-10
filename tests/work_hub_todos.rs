@@ -10,13 +10,14 @@ use std::time::{Duration, Instant};
 
 use chrono::{NaiveDate, Utc};
 use nostromo::data::teri_todos::{TeriTodo, TeriTodosNativeSource, TeriTodosSnapshot};
+use nostromo::data::work::credentials::JiraSite;
 use nostromo::data::work::hub::{HubDeps, WorkHub};
 use nostromo::data::work::query::WorkFilter;
 use nostromo::data::work::todos::adapt;
 use nostromo::data::work::{SourceState, SourceStatus, WorkItem, WorkService, WorkSource};
 use nostromo::ipc::protocol::ServerMsg;
 use rusqlite::Connection;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Notify};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -425,6 +426,182 @@ async fn a_detail_request_for_an_unknown_item_is_an_error() {
 
     assert!(hub.detail("bogus:1").await.is_err(), "unknown prefix");
     assert!(hub.detail("todo:9999").await.is_err(), "a todo that does not exist");
+}
+
+// ── hub: the stale banner keeps the last healthy timestamp ───────────────────
+
+fn failed_read(at: chrono::DateTime<Utc>) -> TeriTodosSnapshot {
+    TeriTodosSnapshot {
+        generated_at: Some(at),
+        items: vec![],
+        stale: true,
+        error: Some("database is locked".into()),
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_read_after_a_healthy_one_keeps_the_last_healthy_timestamp_on_the_stale_status() {
+    let t0 = Utc::now() - chrono::Duration::hours(2);
+    let t1 = t0 + chrono::Duration::hours(1);
+    let healthy = TeriTodosSnapshot {
+        generated_at: Some(t0),
+        items: vec![
+            todo(1, "One", "open", 3, None, None, None),
+            todo(2, "Two", "open", 2, None, None, None),
+            todo(3, "Three", "blocked", 1, None, None, None),
+        ],
+        ..Default::default()
+    };
+    let (hub, ttx, mut brx) = hub_with_channel(Some(healthy));
+    wait_for_status(&hub, WorkSource::Todos, |s| s.state == SourceState::Fresh).await;
+
+    ttx.send(Some(failed_read(t1))).unwrap();
+
+    let s = wait_for_status(&hub, WorkSource::Todos, |s| s.state == SourceState::Stale).await;
+    assert_eq!(s.count, 3, "the last good list stays visible");
+    assert_eq!(s.updated_at, Some(t0), "updated_at is when the list was last read OK, not when the failure happened");
+    let frame = recv_until(&mut brx, |m| match m {
+        ServerMsg::WorkSourceStatus { status }
+            if status.source == WorkSource::Todos && status.state == SourceState::Stale =>
+        {
+            Some(status.clone())
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(frame.updated_at, Some(t0), "the broadcast frame carries the last healthy timestamp too");
+
+    // Still failing later: still the same healthy timestamp.
+    ttx.send(Some(failed_read(t1 + chrono::Duration::hours(1)))).unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let s = hub.status(WorkSource::Todos);
+    assert_eq!((s.state, s.count, s.updated_at), (SourceState::Stale, 3, Some(t0)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_read_with_no_earlier_healthy_list_is_an_error_with_no_items() {
+    let (hub, _ttx, _brx) = hub_with_channel(Some(failed_read(Utc::now())));
+
+    let s = wait_for_status(&hub, WorkSource::Todos, |s| s.state != SourceState::Loading).await;
+
+    assert_eq!(s.state, SourceState::Error, "never fresh or empty: {s:?}");
+    assert_eq!(s.count, 0);
+    assert!(hub.items(&WorkFilter::default()).is_empty());
+}
+
+// ── hub: the Jira link in a todo's detail ────────────────────────────────────
+
+/// The process env must not influence the site: only the configured value and
+/// the file under test may. (Only removed, never set, so tests cannot race on
+/// a value.)
+fn hub_with_jira_site(site: JiraSite) -> (std::sync::Arc<WorkHub>, broadcast::Receiver<ServerMsg>) {
+    std::env::remove_var("ATLASSIAN_SITE_NAME");
+    let (btx, brx) = broadcast::channel(1024);
+    let (_ttx, trx) = watch::channel(Some(fresh(mixed_todos())));
+    std::mem::forget(_ttx); // keep the source alive for the test's duration
+    let hub = WorkHub::spawn(HubDeps { jira_site: site, ..HubDeps::new(btx, trx) });
+    (hub, brx)
+}
+
+fn env_file(contents: Option<&str>) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".env");
+    if let Some(c) = contents {
+        std::fs::write(&path, c).unwrap();
+    }
+    (dir, path)
+}
+
+fn jira_urls(d: &nostromo::data::work::WorkDetail) -> Vec<String> {
+    d.links.iter().map(|l| l.url.clone()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_todos_jira_key_links_to_the_site_from_the_credentials_file() {
+    let (_dir, path) = env_file(Some("ATLASSIAN_SITE_NAME=example.atlassian.net\n"));
+    let (hub, mut brx) = hub_with_jira_site(JiraSite::new(None, path));
+    next_todos_where(&mut brx, |i| i.len() == 6).await;
+
+    let d = hub.detail("todo:3").await.expect("detail");
+
+    assert_eq!(jira_urls(&d), vec!["https://example.atlassian.net/browse/CORE-1"], "{d:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_jira_site_wins_over_the_credentials_file_in_the_detail_link() {
+    let (_dir, path) = env_file(Some("ATLASSIAN_SITE_NAME=example.atlassian.net\n"));
+    let (hub, mut brx) = hub_with_jira_site(JiraSite::new(Some("override.atlassian.net".into()), path));
+    next_todos_where(&mut brx, |i| i.len() == 6).await;
+
+    let d = hub.detail("todo:3").await.expect("detail");
+
+    assert_eq!(jira_urls(&d), vec!["https://override.atlassian.net/browse/CORE-1"], "{d:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_jira_site_the_detail_has_no_link_but_still_lists_the_key() {
+    for contents in [None, Some(""), Some("ATLASSIAN_SITE_NAME=\n")] {
+        let (_dir, path) = env_file(contents);
+        let (hub, mut brx) = hub_with_jira_site(JiraSite::new(None, path));
+        next_todos_where(&mut brx, |i| i.len() == 6).await;
+
+        let d = hub.detail("todo:3").await.expect("detail");
+
+        assert!(d.links.is_empty(), "file {contents:?}: no site, no link: {:?}", d.links);
+        assert!(
+            d.fields.iter().any(|(k, v)| k == "Jira" && v == "CORE-1"),
+            "file {contents:?}: the Jira field still lists the key: {:?}",
+            d.fields
+        );
+    }
+}
+
+// ── hub: manual refresh pokes the todos source ───────────────────────────────
+
+fn hub_with_todos_refresh() -> (std::sync::Arc<WorkHub>, std::sync::Arc<Notify>) {
+    let notify = std::sync::Arc::new(Notify::new());
+    let (btx, _brx) = broadcast::channel(1024);
+    let (ttx, trx) = watch::channel(Some(fresh(mixed_todos())));
+    std::mem::forget(ttx);
+    let hub = WorkHub::spawn(HubDeps { todos_refresh: Some(notify.clone()), ..HubDeps::new(btx, trx) });
+    (hub, notify)
+}
+
+async fn poked(notify: &Notify, within: Duration) -> bool {
+    tokio::time::timeout(within, notify.notified()).await.is_ok()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refreshing_the_todos_source_pokes_the_source_once_and_a_second_refresh_within_the_debounce_does_not() {
+    let (hub, notify) = hub_with_todos_refresh();
+
+    hub.refresh(Some(WorkSource::Todos), false).await.unwrap();
+    assert!(poked(&notify, WAIT).await, "the todos source was never poked by a manual refresh");
+
+    hub.refresh(Some(WorkSource::Todos), false).await.unwrap();
+    assert!(
+        !poked(&notify, Duration::from_millis(300)).await,
+        "a second refresh inside the debounce must not poke the source again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refreshing_every_source_also_pokes_the_todos_source() {
+    let (hub, notify) = hub_with_todos_refresh();
+
+    hub.refresh(None, false).await.unwrap();
+
+    assert!(poked(&notify, WAIT).await, "refresh of all sources never poked the todos source");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refreshing_another_source_does_not_poke_the_todos_source() {
+    let (hub, notify) = hub_with_todos_refresh();
+
+    hub.refresh(Some(WorkSource::Jira), false).await.unwrap();
+
+    assert!(!poked(&notify, Duration::from_millis(300)).await, "a Jira refresh must leave the todos source alone");
 }
 
 // ── the real source: SQLite file → broadcast ─────────────────────────────────

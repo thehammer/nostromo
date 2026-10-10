@@ -75,11 +75,45 @@ enum TeriTodosTab {
     }
 
     private static func format(_ date: Date, _ pattern: String, calendar: Calendar) -> String {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.locale = calendar.locale ?? Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = pattern
+        TeriDateFormatters.string(from: date, pattern: pattern, calendar: calendar)
+    }
+}
+
+/// Date formatters for the Teri rows, one per (pattern, calendar, time zone,
+/// locale). A `DateFormatter` is expensive to make and a list redraws hundreds
+/// of rows, so they are made once and reused.
+enum TeriDateFormatters {
+    /// How many `DateFormatter`s have been created (tests: rows must reuse them).
+    private(set) static var createdCount = 0
+
+    private struct Key: Hashable {
+        let pattern: String
+        let calendar: Calendar.Identifier
+        let timeZone: String
+        let locale: String
+    }
+
+    private static var cache: [Key: DateFormatter] = [:]
+    private static let lock = NSLock()
+
+    static func string(from date: Date, pattern: String, calendar: Calendar) -> String {
+        let locale = calendar.locale ?? Locale(identifier: "en_US_POSIX")
+        let key = Key(pattern: pattern, calendar: calendar.identifier,
+                      timeZone: calendar.timeZone.identifier, locale: locale.identifier)
+        lock.lock()
+        defer { lock.unlock() }
+        let formatter: DateFormatter
+        if let cached = cache[key] {
+            formatter = cached
+        } else {
+            formatter = DateFormatter()
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
+            formatter.locale = locale
+            formatter.dateFormat = pattern
+            cache[key] = formatter
+            createdCount += 1
+        }
         return formatter.string(from: date)
     }
 }

@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use tokio::sync::{broadcast, watch, Notify};
 use tracing::warn;
 
@@ -61,6 +62,10 @@ pub struct HubDeps {
     /// Changes when the server's retained-frame cache lagged: the hub then
     /// sends everything again.
     pub republish_rx: Option<watch::Receiver<u64>>,
+    /// Where the Jira site for todo links comes from.
+    pub jira_site: credentials::JiraSite,
+    /// Poked when a manual refresh of the todos source passes the debounce.
+    pub todos_refresh: Option<Arc<Notify>>,
 }
 
 impl HubDeps {
@@ -68,7 +73,14 @@ impl HubDeps {
         broadcast_tx: broadcast::Sender<ServerMsg>,
         todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
     ) -> Self {
-        Self { broadcast_tx, todos_rx, session_mgr: None, republish_rx: None }
+        Self {
+            broadcast_tx,
+            todos_rx,
+            session_mgr: None,
+            republish_rx: None,
+            jira_site: credentials::JiraSite::default(),
+            todos_refresh: None,
+        }
     }
 }
 
@@ -82,6 +94,8 @@ pub struct WorkHub {
     dirty: Notify,
     /// Per source: fires when a manual refresh passed the debounce.
     refresh: HashMap<WorkSource, Arc<Notify>>,
+    /// Source of the Jira host for todo links (reads a file: use off the async threads).
+    jira_site: Arc<credentials::JiraSite>,
 }
 
 struct State {
@@ -90,6 +104,8 @@ struct State {
     todos: Option<TeriTodosSnapshot>,
     /// Todos from the last healthy read: shown (as stale) when a read fails.
     last_good_todos: Vec<TeriTodo>,
+    /// When that healthy read happened: what a stale banner reports as its age.
+    last_good_at: Option<DateTime<Utc>>,
 }
 
 struct Slot {
@@ -144,21 +160,26 @@ impl WorkHub {
     /// Build the hub, start following every source and start publishing.
     /// Must be called inside a tokio runtime.
     pub fn spawn(deps: HubDeps) -> Arc<Self> {
-        let HubDeps { broadcast_tx, todos_rx, session_mgr, republish_rx } = deps;
-        let refresh: HashMap<WorkSource, Arc<Notify>> =
+        let HubDeps { broadcast_tx, todos_rx, session_mgr, republish_rx, jira_site, todos_refresh } = deps;
+        let mut refresh: HashMap<WorkSource, Arc<Notify>> =
             [WorkSource::RepoDocs, WorkSource::Jira, WorkSource::Sentry]
                 .into_iter()
                 .map(|s| (s, Arc::new(Notify::new())))
                 .collect();
+        if let Some(notify) = todos_refresh {
+            refresh.insert(WorkSource::Todos, notify);
+        }
         let hub = Arc::new(Self {
             ctx: HubContext { broadcast_tx, session_mgr },
             state: Mutex::new(State {
                 slots: SOURCE_ORDER.iter().map(|s| (*s, Slot::new(*s))).collect(),
                 todos: None,
                 last_good_todos: Vec::new(),
+                last_good_at: None,
             }),
             dirty: Notify::new(),
             refresh,
+            jira_site: Arc::new(jira_site),
         });
 
         let sources = [
@@ -242,11 +263,14 @@ impl WorkHub {
             let healthy = snap.error.is_none() && !snap.stale && !snap.not_configured;
             if healthy {
                 state.last_good_todos = snap.items.clone();
+                state.last_good_at = snap.generated_at;
             } else if snap.error.is_some() && snap.items.is_empty() && !state.last_good_todos.is_empty()
             {
                 // A failed read keeps showing the last good list, marked stale.
                 snap.items = state.last_good_todos.clone();
                 snap.stale = true;
+                // The banner says how old the LIST is, not when the failed read ran.
+                snap.generated_at = state.last_good_at.or(snap.generated_at);
             }
             state.todos = Some(snap.clone());
         }
@@ -392,7 +416,11 @@ impl WorkService for WorkHub {
                 let snap = snap.ok_or_else(|| {
                     WorkError::new("unknown_item", "Todos have not loaded yet")
                 })?;
-                let site = credentials::lookup("ATLASSIAN_SITE_NAME");
+                // Reads a credentials file: keep it off the async threads.
+                let jira_site = Arc::clone(&self.jira_site);
+                let site = tokio::task::spawn_blocking(move || jira_site.lookup())
+                    .await
+                    .unwrap_or_default();
                 todos::detail(&snap, item_id, site.as_deref())
             }
             "doc" => repo_docs::detail(item_id).await,

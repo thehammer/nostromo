@@ -34,6 +34,7 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
 
     private(set) var content: Content = .none
     private(set) var openTargets: [WorkOpenTarget] = []
+    private var shownItem: WorkItem?
 
     private let textView = NSTextView()
     private let scroll = NSScrollView()
@@ -61,6 +62,24 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
         }
     }
 
+    /// Why "Open in…" is disabled (also its tooltip); nil while it works.
+    var openDisabledReason: String? {
+        guard openTargets.isEmpty else { return nil }
+        switch content {
+        case .none:
+            return "Select an item to open it"
+        case .loading:
+            return "Still loading this item"
+        case .failed:
+            return "This item could not be loaded"
+        case .detail:
+            if let key = shownItem?.linked.first {
+                return "Can't open \(key): no Jira site is configured (set ATLASSIAN_SITE_NAME for the daemon)"
+            }
+            return "Nothing to open for this item"
+        }
+    }
+
     /// Plain text on screen (tests, accessibility).
     var renderedText: String { textView.string }
 
@@ -73,6 +92,7 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
     /// Show `content`. `item` supplies the item's own url/path as extra "Open in…" targets.
     func show(_ content: Content, item: WorkItem? = nil) {
         self.content = content
+        shownItem = item
         openTargets = Self.targets(for: content, item: item)
         rebuildOpenMenu()
         textView.textStorage?.setAttributedString(Self.attributedText(for: content))
@@ -273,6 +293,7 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
             openButton.menu?.addItem(item)
         }
         openButton.isEnabled = !openTargets.isEmpty
+        openButton.toolTip = openDisabledReason
     }
 
     @objc private func openChosen(_ sender: NSMenuItem) {
