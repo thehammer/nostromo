@@ -15,6 +15,7 @@ struct WithheldPlaceholderView: View {
             Image(systemName: "lock.shield")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             Text("Requires a secure connection to your Mac")
                 .font(.title3.weight(.semibold))
                 .multilineTextAlignment(.center)
@@ -24,6 +25,8 @@ struct WithheldPlaceholderView: View {
                 .multilineTextAlignment(.center)
         }
         .padding()
+        // One VoiceOver element: the heading and the explanation read together.
+        .accessibilityElement(children: .combine)
     }
 }
 

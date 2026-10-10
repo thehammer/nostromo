@@ -232,4 +232,16 @@ final class WithheldWireTests: XCTestCase {
         XCTAssertEqual(topics, ["fred", "teri", "work"])
         XCTAssertEqual(reason, "requires_secure_connection")
     }
+
+    /// A future daemon may add fields to the frame; the client must keep decoding it.
+    func testWithheldWithExtraFieldsStillDecodes() throws {
+        let json = #"{"type":"withheld","topics":["teri"],"reason":"requires_secure_connection","future":{"a":1}}"#.data(using: .utf8)!
+        guard case .withheld(let topics, _) = ServerMsg.decode(from: json) else { return XCTFail("not withheld") }
+        XCTAssertEqual(topics, ["teri"])
+    }
+
+    func testAnUnrecognisedTypeStillDecodesToUnknown() throws {
+        let json = #"{"type":"definitely_not_a_frame","x":1}"#.data(using: .utf8)!
+        guard case .unknown = ServerMsg.decode(from: json) else { return XCTFail("expected .unknown") }
+    }
 }

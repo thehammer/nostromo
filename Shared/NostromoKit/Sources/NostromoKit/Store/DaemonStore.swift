@@ -385,12 +385,15 @@ public final class DaemonStore: ObservableObject {
         case .fredState(let mailbox, let calendar):
             fredMailbox  = mailbox
             fredCalendar = calendar
+            // Real data arriving means the daemon is no longer withholding it.
+            withheldTopics.remove("fred")
 
         case .withheld(let topics, _):
             withheldTopics = Set(topics)
 
         case .teriState(let snap):
             teriTodos = snap
+            withheldTopics.remove("teri")
 
         case .focusLayout(let tag, let tree, let focusedPane):
             var model = focusLayouts[tag] ?? FocusLayoutModel.initial
