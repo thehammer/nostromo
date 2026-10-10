@@ -15,6 +15,14 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     /// Second-line text currently shown. Exposed for tests.
     var secondaryText: String? { secondaryLabel?.stringValue }
 
+    // Test hooks (read-only geometry in this view's coordinates, and click simulation
+    // that runs the same actions the gesture recognizers do). Used by logic tests only.
+    var pillFrame: NSRect? { pillBox.isHidden ? nil : pillBox.frame }
+    var attentionDotFrame: NSRect? { attentionDot.isHidden ? nil : attentionDot.frame }
+    var labelFrame: NSRect { label.frame }
+    func simulateRowClick() { tapped() }
+    func simulatePillClick() { pillTapped() }
+
     var isActive: Bool = false {
         didSet { updateAppearance() }
     }
@@ -231,15 +239,18 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             ? Theme.cornflower.withAlphaComponent(0.12).cgColor
             : NSColor.clear.cgColor
 
+        // An attributed string overrides the label's lineBreakMode, so carry truncation here.
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byTruncatingTail
         if isActive {
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: Theme.tabFontBold, .foregroundColor: NSColor.white,
+                .font: Theme.tabFontBold, .foregroundColor: NSColor.white, .paragraphStyle: para,
             ]
             label.attributedStringValue = NSAttributedString(string: displayOverride, attributes: attrs)
         } else {
             let color = sweaterColor ?? Theme.fgMuted
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: Theme.tabFont, .foregroundColor: color,
+                .font: Theme.tabFont, .foregroundColor: color, .paragraphStyle: para,
             ]
             label.attributedStringValue = NSAttributedString(string: displayOverride, attributes: attrs)
         }

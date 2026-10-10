@@ -97,7 +97,10 @@ enum BadgeProviders {
     }
 
     private static func meetingLine(_ calendar: CalendarSnapshot?, now: Date) -> (detail: String, words: String, attention: Bool)? {
-        guard let calendar, calendar.error == nil, !calendar.stale else { return nil }
+        guard let calendar else { return nil }
+        if calendar.error != nil || calendar.stale {
+            return ("Calendar unavailable", "calendar unavailable", false)
+        }
         let live = calendar.events.filter { !["declined", "cancelled"].contains($0.status.lowercased()) }
         if let current = live.first(where: { e in
             guard let s = e.start, let end = e.end else { return false }
@@ -138,8 +141,13 @@ enum BadgeProviders {
 
     // MARK: Perri
 
-    static func perri(queueCount: Int) -> FocusBadge? {
-        guard queueCount > 0 else { return nil }
+    /// A stale, failed or still-loading queue never shows a count: the in-memory queue
+    /// may be out of date. Stale/failed shows "!" (queue unavailable); loading shows nothing.
+    static func perri(queueCount: Int, stale: Bool = false, error: String? = nil, loading: Bool = false) -> FocusBadge? {
+        if error != nil || stale {
+            return FocusBadge(pill: "!", accessibilityLabel: "Perri, queue unavailable")
+        }
+        guard !loading, queueCount > 0 else { return nil }
         return FocusBadge(pill: "\(queueCount)",
                           accessibilityLabel: "Perri, \(queueCount) \(queueCount == 1 ? "PR" : "PRs") waiting")
     }
@@ -149,7 +157,7 @@ enum BadgeProviders {
     /// `calendar` decides what "today" is (the app passes America/Chicago).
     static func teri(todos: TeriTodosSnapshot?, now: Date, calendar: Calendar) -> FocusBadge? {
         guard let todos else { return nil }
-        if todos.error != nil {
+        if todos.error != nil || todos.stale {
             return FocusBadge(detail: "Todos unavailable", accessibilityLabel: "Teri, todos unavailable")
         }
         let count = todos.items.count
