@@ -66,6 +66,9 @@ pub struct HubDeps {
     pub jira_site: credentials::JiraSite,
     /// Poked when a manual refresh of the todos source passes the debounce.
     pub todos_refresh: Option<Arc<Notify>>,
+    /// The live Jira source. `None` (tests) leaves the dormant placeholder, so
+    /// nothing reaches a real Jira.
+    pub jira: Option<Arc<jira::JiraWorkSource>>,
 }
 
 impl HubDeps {
@@ -80,6 +83,7 @@ impl HubDeps {
             republish_rx: None,
             jira_site: credentials::JiraSite::default(),
             todos_refresh: None,
+            jira: None,
         }
     }
 }
@@ -96,6 +100,8 @@ pub struct WorkHub {
     refresh: HashMap<WorkSource, Arc<Notify>>,
     /// Source of the Jira host for todo links (reads a file: use off the async threads).
     jira_site: Arc<credentials::JiraSite>,
+    /// The live Jira source, when there is one (detail requests go to it).
+    jira: Option<Arc<jira::JiraWorkSource>>,
 }
 
 struct State {
@@ -160,7 +166,7 @@ impl WorkHub {
     /// Build the hub, start following every source and start publishing.
     /// Must be called inside a tokio runtime.
     pub fn spawn(deps: HubDeps) -> Arc<Self> {
-        let HubDeps { broadcast_tx, todos_rx, session_mgr, republish_rx, jira_site, todos_refresh } = deps;
+        let HubDeps { broadcast_tx, todos_rx, session_mgr, republish_rx, jira_site, todos_refresh, jira } = deps;
         let mut refresh: HashMap<WorkSource, Arc<Notify>> =
             [WorkSource::RepoDocs, WorkSource::Jira, WorkSource::Sentry]
                 .into_iter()
@@ -180,11 +186,17 @@ impl WorkHub {
             dirty: Notify::new(),
             refresh,
             jira_site: Arc::new(jira_site),
+            jira: jira.clone(),
         });
 
+        let jira_refresh = hub.refresh[&WorkSource::Jira].clone();
+        let jira_rx = match jira {
+            Some(source) => source.spawn(jira_refresh),
+            None => jira::spawn(jira_refresh),
+        };
         let sources = [
             (WorkSource::RepoDocs, repo_docs::spawn(hub.refresh[&WorkSource::RepoDocs].clone())),
-            (WorkSource::Jira, jira::spawn(hub.refresh[&WorkSource::Jira].clone())),
+            (WorkSource::Jira, jira_rx),
             (WorkSource::Sentry, sentry::spawn(hub.refresh[&WorkSource::Sentry].clone())),
         ];
         for (source, rx) in sources {
@@ -424,7 +436,10 @@ impl WorkService for WorkHub {
                 todos::detail(&snap, item_id, site.as_deref())
             }
             "doc" => repo_docs::detail(item_id).await,
-            "jira" => jira::detail(item_id).await,
+            "jira" => match &self.jira {
+                Some(source) => source.detail(item_id).await,
+                None => Err(WorkError::not_available()),
+            },
             "sentry" => sentry::detail(item_id).await,
             _ => Err(WorkError::new("unknown_item", "Unknown kind of work item")),
         }
