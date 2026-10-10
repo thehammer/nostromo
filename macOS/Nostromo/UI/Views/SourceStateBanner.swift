@@ -15,6 +15,10 @@ final class SourceStateBanner: NSView {
     /// Called when the user presses Retry.
     var onRetry: (() -> Void)?
 
+    /// Panes whose source has no manual refresh (Fred's: the daemon retries on
+    /// its own) turn the Retry button off rather than show one that does nothing.
+    var allowsRetry = true
+
     private let label = NSTextField(labelWithString: "")
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
 
@@ -35,6 +39,18 @@ final class SourceStateBanner: NSView {
         apply(Self.content(for: status, sourceName: sourceName, now: now))
     }
 
+    /// Present a source's state when it is not a `SourceStatus` (Fred's
+    /// snapshots carry their own `state`). `nil` state means "no snapshot yet".
+    func show(state: SourceState?, updatedAt: Date?, reason: String?, sourceName: String, now: Date = Date()) {
+        apply(Self.content(state: state, updatedAt: updatedAt, reason: reason, retryAt: nil,
+                           sourceName: sourceName, now: now))
+    }
+
+    /// Hide the banner (nothing to say).
+    func clear() {
+        apply(nil)
+    }
+
     /// The single "Disconnected from nostromd" banner shown over all tabs.
     func showDisconnected() {
         apply(Self.disconnectedContent)
@@ -48,23 +64,29 @@ final class SourceStateBanner: NSView {
     static let disconnectedContent = Content(message: "Disconnected from nostromd", showsRetry: false)
 
     static func content(for status: SourceStatus?, sourceName: String, now: Date = Date()) -> Content? {
-        guard let status else {
+        content(state: status?.state, updatedAt: status?.updatedAt, reason: status?.reason,
+                retryAt: status?.retryAt, sourceName: sourceName, now: now)
+    }
+
+    static func content(state: SourceState?, updatedAt: Date?, reason rawReason: String?, retryAt: Date?,
+                        sourceName: String, now: Date = Date()) -> Content? {
+        guard let state else {
             return Content(message: "Loading \(sourceName)…", showsRetry: false)
         }
-        let reason = status.reason.map { ": \($0)" } ?? ""
-        switch status.state {
+        let reason = rawReason.map { ": \($0)" } ?? ""
+        switch state {
         case .loading:
             return Content(message: "Loading \(sourceName)…", showsRetry: false)
         case .fresh, .empty:
             return nil
         case .stale:
-            let age = status.updatedAt.map { " last updated \(relative($0, now: now))" } ?? ""
+            let age = updatedAt.map { " last updated \(relative($0, now: now))" } ?? ""
             return Content(message: "Stale:\(age)\(reason)", showsRetry: true)
         case .notConfigured, .unauthenticated:
-            let why = status.reason ?? "no credentials found"
+            let why = rawReason ?? "no credentials found"
             return Content(message: "\(sourceName): \(why)", showsRetry: false)
         case .rateLimited:
-            let retry = status.retryAt.map { "; retrying at \(clock($0))" } ?? ""
+            let retry = retryAt.map { "; retrying at \(clock($0))" } ?? ""
             return Content(message: "Rate-limited by \(sourceName)\(retry)", showsRetry: false)
         case .error:
             return Content(message: "\(sourceName) failed\(reason)", showsRetry: true)
@@ -110,7 +132,7 @@ final class SourceStateBanner: NSView {
         currentContent = content
         isHidden = content == nil
         label.stringValue = content?.message ?? ""
-        retryButton.isHidden = !(content?.showsRetry ?? false)
+        retryButton.isHidden = !((content?.showsRetry ?? false) && allowsRetry)
     }
 
     @objc private func retryPressed() { onRetry?() }

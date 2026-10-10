@@ -200,8 +200,26 @@ fn todos_not_configured() -> TeriTodosSnapshot {
     .unwrap()
 }
 
+/// The `state` a source publishes for these inputs (the sources set it; MCP
+/// reports it as is).
+fn fixture_state(auth: bool, stale: bool, error: Option<&str>, empty: bool) -> &'static str {
+    if auth {
+        "unauthenticated"
+    } else if stale {
+        "stale"
+    } else if error.is_some() {
+        "error"
+    } else if empty {
+        "empty"
+    } else {
+        "fresh"
+    }
+}
+
 fn mailbox(unread: usize, stale: bool, error: Option<&str>, auth: bool) -> MailboxSnapshot {
     serde_json::from_value(json!({
+        "state": fixture_state(auth, stale, error, unread == 0),
+        "updated_at": "2026-10-09T15:00:00Z",
         "generated_at": "2026-10-09T15:00:00Z",
         "unread_count": unread,
         "items": (0..unread).map(|i| json!({
@@ -221,6 +239,8 @@ fn mailbox(unread: usize, stale: bool, error: Option<&str>, auth: bool) -> Mailb
 
 fn calendar(events: usize, stale: bool, error: Option<&str>) -> CalendarSnapshot {
     serde_json::from_value(json!({
+        "state": fixture_state(false, stale, error, events == 0),
+        "updated_at": "2026-10-09T15:00:00Z",
         "events": (0..events).map(|i| json!({
             "start": "2026-10-09T17:00:00Z", "end": "2026-10-09T18:00:00Z",
             "title": format!("event {i}"), "status": "busy", "is_now": false

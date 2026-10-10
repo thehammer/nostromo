@@ -913,22 +913,39 @@ struct DeviceFlowPrompt: Decodable {
 
 /// Mirrors `MailboxItem` in `src/data/fred_mailbox.rs`.
 struct MailboxItem: Decodable, Identifiable {
+    /// Graph message id; synthesised from the content for the legacy bash source.
+    let id:         String
     let from:       String
     let subject:    String
     let receivedAt: Date?
     let vip:        Bool
     let isInvite:   Bool
     let isRead:     Bool
-
-    var id: String { "\(from)|\(subject)|\(receivedAt?.timeIntervalSince1970 ?? 0)" }
+    /// Opens the message in Outlook on the web.
+    let webLink:    String?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case from
         case subject
         case receivedAt = "received_at"
         case vip
         case isInvite   = "is_invite"
         case isRead     = "is_read"
+        case webLink    = "web_link"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c      = try decoder.container(keyedBy: CodingKeys.self)
+        from       = try c.decode(String.self, forKey: .from)
+        subject    = try c.decode(String.self, forKey: .subject)
+        receivedAt = try c.decodeIfPresent(Date.self, forKey: .receivedAt)
+        vip        = try c.decodeIfPresent(Bool.self, forKey: .vip)      ?? false
+        isInvite   = try c.decodeIfPresent(Bool.self, forKey: .isInvite) ?? false
+        isRead     = try c.decodeIfPresent(Bool.self, forKey: .isRead)   ?? false
+        webLink    = try c.decodeIfPresent(String.self, forKey: .webLink)
+        let wireId = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        id = wireId.isEmpty ? "\(from)|\(subject)|\(receivedAt?.timeIntervalSince1970 ?? 0)" : wireId
     }
 }
 
@@ -940,6 +957,11 @@ struct MailboxSnapshot: Decodable {
     let stale:        Bool
     let error:        String?
     let authPrompt:   DeviceFlowPrompt?
+    /// What the pane should show. Never `.fresh`/`.empty` after a failed fetch.
+    /// Derived from the other fields when an older daemon omits it.
+    let state:        SourceState
+    /// Last successful fetch.
+    let updatedAt:    Date?
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
@@ -948,6 +970,8 @@ struct MailboxSnapshot: Decodable {
         case stale
         case error
         case authPrompt  = "auth_prompt"
+        case state
+        case updatedAt   = "updated_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -958,25 +982,71 @@ struct MailboxSnapshot: Decodable {
         stale       = try c.decodeIfPresent(Bool.self,              forKey: .stale)       ?? false
         error       = try c.decodeIfPresent(String.self,            forKey: .error)
         authPrompt  = try c.decodeIfPresent(DeviceFlowPrompt.self,  forKey: .authPrompt)
+        updatedAt   = try c.decodeIfPresent(Date.self,              forKey: .updatedAt)
+        if let wire = try c.decodeIfPresent(SourceState.self, forKey: .state) {
+            state = wire
+        } else if authPrompt != nil {
+            state = .unauthenticated
+        } else if stale {
+            state = .stale
+        } else if error != nil {
+            state = .error
+        } else {
+            state = items.isEmpty && unreadCount == 0 ? .empty : .fresh
+        }
     }
 }
 
 /// Mirrors `CalendarEvent` in `src/data/fred_calendar.rs`.
 struct CalendarEvent: Decodable, Identifiable {
-    let start:  Date?
-    let end:    Date?
-    let title:  String
-    let status: String
-    let isNow:  Bool
-
-    var id: String { "\(title)|\(start?.timeIntervalSince1970 ?? 0)" }
+    /// Graph event id; synthesised from the content for the legacy bash source.
+    let id:               String
+    let start:            Date?
+    let end:              Date?
+    let title:            String
+    let status:           String
+    let isNow:            Bool
+    let webLink:          String?
+    let location:         String?
+    let onlineMeetingUrl: String?
+    let organizer:        String?
+    let isCancelled:      Bool
+    /// Raw Graph response ("accepted", "tentativelyAccepted", ...).
+    let responseStatus:   String
+    let isAllDay:         Bool
 
     enum CodingKeys: String, CodingKey {
+        case id
         case start
         case end
         case title
         case status
-        case isNow = "is_now"
+        case isNow            = "is_now"
+        case webLink          = "web_link"
+        case location
+        case onlineMeetingUrl = "online_meeting_url"
+        case organizer
+        case isCancelled      = "is_cancelled"
+        case responseStatus   = "response_status"
+        case isAllDay         = "is_all_day"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c            = try decoder.container(keyedBy: CodingKeys.self)
+        start            = try c.decodeIfPresent(Date.self,   forKey: .start)
+        end              = try c.decodeIfPresent(Date.self,   forKey: .end)
+        title            = try c.decode(String.self,          forKey: .title)
+        status           = try c.decodeIfPresent(String.self, forKey: .status)           ?? ""
+        isNow            = try c.decodeIfPresent(Bool.self,   forKey: .isNow)            ?? false
+        webLink          = try c.decodeIfPresent(String.self, forKey: .webLink)
+        location         = try c.decodeIfPresent(String.self, forKey: .location)
+        onlineMeetingUrl = try c.decodeIfPresent(String.self, forKey: .onlineMeetingUrl)
+        organizer        = try c.decodeIfPresent(String.self, forKey: .organizer)
+        isCancelled      = try c.decodeIfPresent(Bool.self,   forKey: .isCancelled)      ?? false
+        responseStatus   = try c.decodeIfPresent(String.self, forKey: .responseStatus)   ?? ""
+        isAllDay         = try c.decodeIfPresent(Bool.self,   forKey: .isAllDay)         ?? false
+        let wireId       = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        id = wireId.isEmpty ? "\(title)|\(start?.timeIntervalSince1970 ?? 0)" : wireId
     }
 }
 
@@ -998,6 +1068,13 @@ struct CalendarSnapshot: Decodable {
     let sweater: String
     let stale:   Bool
     let error:   String?
+    /// What the pane should show. Never `.fresh`/`.empty` after a failed fetch.
+    /// Derived from the other fields when an older daemon omits it.
+    let state:      SourceState
+    /// Last successful fetch.
+    let updatedAt:  Date?
+    /// The sign-in prompt while Microsoft sign-in is pending.
+    let authPrompt: DeviceFlowPrompt?
 
     enum CodingKeys: String, CodingKey {
         case events
@@ -1005,6 +1082,9 @@ struct CalendarSnapshot: Decodable {
         case sweater
         case stale
         case error
+        case state
+        case updatedAt  = "updated_at"
+        case authPrompt = "auth_prompt"
     }
 
     init(from decoder: Decoder) throws {
@@ -1014,6 +1094,19 @@ struct CalendarSnapshot: Decodable {
         sweater = try c.decodeIfPresent(String.self,          forKey: .sweater) ?? ""
         stale   = try c.decodeIfPresent(Bool.self,            forKey: .stale)   ?? false
         error   = try c.decodeIfPresent(String.self,          forKey: .error)
+        updatedAt  = try c.decodeIfPresent(Date.self,             forKey: .updatedAt)
+        authPrompt = try c.decodeIfPresent(DeviceFlowPrompt.self, forKey: .authPrompt)
+        if let wire = try c.decodeIfPresent(SourceState.self, forKey: .state) {
+            state = wire
+        } else if authPrompt != nil {
+            state = .unauthenticated
+        } else if stale {
+            state = .stale
+        } else if error != nil {
+            state = .error
+        } else {
+            state = events.isEmpty ? .empty : .fresh
+        }
     }
 }
 

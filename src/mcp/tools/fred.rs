@@ -8,9 +8,11 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
 
-use crate::data::{fred_calendar::CalendarSnapshot, fred_mailbox::MailboxSnapshot};
+use crate::data::{
+    fred_calendar::CalendarSnapshot, fred_mailbox::MailboxSnapshot, graph_client::DeviceFlowPrompt,
+    work::model::SourceState,
+};
 use crate::mcp::state::McpSharedState;
-use crate::mcp::tools::teri::source_state;
 
 /// Input for `fred.list_calendar_events`.
 #[derive(serde::Deserialize, Default)]
@@ -19,68 +21,67 @@ pub struct CalendarEventsInput {
     pub date: Option<String>,
 }
 
-/// State of a Fred source, derived from its snapshot.
+/// State of a Fred source, read straight from its snapshot.
 struct SourceView {
-    state: &'static str,
+    state: SourceState,
     updated_at: Option<DateTime<Utc>>,
     reason: Option<String>,
     auth: Option<Value>,
 }
 
-fn mailbox_view(snap: Option<&MailboxSnapshot>) -> SourceView {
-    let Some(snap) = snap else {
-        return SourceView { state: source_state::LOADING, updated_at: None, reason: None, auth: None };
-    };
-    if let Some(p) = &snap.auth_prompt {
-        // Only the sign-in prompt — never a token.
-        return SourceView {
-            state: source_state::UNAUTHENTICATED,
-            updated_at: snap.generated_at,
-            reason: Some("Microsoft sign-in required".into()),
-            auth: Some(json!({
-                "verification_uri": p.verification_uri,
-                "user_code": p.user_code,
-                "expires_at": p.expires_at,
-            })),
-        };
+impl SourceView {
+    fn loading() -> Self {
+        SourceView { state: SourceState::Loading, updated_at: None, reason: None, auth: None }
     }
+}
+
+/// The sign-in prompt as MCP shows it — never a token.
+fn auth_json(p: &DeviceFlowPrompt) -> Value {
+    json!({
+        "verification_uri": p.verification_uri,
+        "user_code": p.user_code,
+        "expires_at": p.expires_at,
+    })
+}
+
+fn mailbox_view(snap: Option<&MailboxSnapshot>) -> SourceView {
+    let Some(snap) = snap else { return SourceView::loading() };
     SourceView {
-        state: source_state::derive(false, snap.stale, snap.error.as_deref(), snap.items.is_empty()),
-        updated_at: snap.generated_at,
+        state: snap.state,
+        updated_at: snap.updated_at,
         reason: snap.error.clone(),
-        auth: None,
+        auth: snap.auth_prompt.as_ref().map(auth_json),
     }
 }
 
 fn calendar_view(snap: Option<&CalendarSnapshot>) -> SourceView {
-    let Some(snap) = snap else {
-        return SourceView { state: source_state::LOADING, updated_at: None, reason: None, auth: None };
-    };
+    let Some(snap) = snap else { return SourceView::loading() };
     SourceView {
-        state: source_state::derive(false, snap.stale, snap.error.as_deref(), snap.events.is_empty()),
-        updated_at: snap.generated_at,
+        state: snap.state,
+        updated_at: snap.updated_at,
         reason: snap.error.clone(),
-        auth: None,
+        auth: snap.auth_prompt.as_ref().map(auth_json),
     }
 }
 
 /// How bad a state is, for picking the composite `fred.get_state` state.
-fn severity(state: &str) -> u8 {
+fn severity(state: SourceState) -> u8 {
     match state {
-        source_state::UNAUTHENTICATED => 4,
-        source_state::ERROR => 3,
-        source_state::STALE => 2,
-        source_state::LOADING => 1,
-        _ => 0,
+        SourceState::Unauthenticated => 5,
+        SourceState::NotConfigured => 4,
+        SourceState::Error => 3,
+        SourceState::RateLimited | SourceState::Stale => 2,
+        SourceState::Loading => 1,
+        SourceState::Fresh | SourceState::Empty => 0,
     }
 }
 
 /// The overall state of Fred: the worse of the two sources. When both are
 /// healthy but differ (fresh + empty), something is there: `fresh`.
-fn composite_state(mailbox: &SourceView, calendar: &SourceView) -> &'static str {
+fn composite_state(mailbox: &SourceView, calendar: &SourceView) -> SourceState {
     let worst = if severity(calendar.state) > severity(mailbox.state) { calendar } else { mailbox };
     if severity(worst.state) == 0 && mailbox.state != calendar.state {
-        source_state::FRESH
+        SourceState::Fresh
     } else {
         worst.state
     }
@@ -88,15 +89,20 @@ fn composite_state(mailbox: &SourceView, calendar: &SourceView) -> &'static str 
 
 /// `(overall state, unread count, today's event count)` read straight from the
 /// snapshots — for summaries that must not serialise the whole mailbox.
-pub(crate) fn summary(state: &McpSharedState) -> (&'static str, usize, usize) {
+pub(crate) fn summary(state: &McpSharedState) -> (SourceState, usize, usize) {
     let mailbox = state.fred_mailbox_rx.borrow();
     let calendar = state.fred_calendar_rx.borrow();
     let overall = composite_state(&mailbox_view(mailbox.as_ref()), &calendar_view(calendar.as_ref()));
     (
         overall,
         mailbox.as_ref().map_or(0, |s| s.unread_count),
-        calendar.as_ref().map_or(0, |s| s.events.len()),
+        calendar.as_ref().map_or(0, meeting_count),
     )
+}
+
+/// Today's meetings: cancelled events are listed but not counted.
+fn meeting_count(snap: &CalendarSnapshot) -> usize {
+    snap.events.iter().filter(|e| !e.is_cancelled && e.status != "cancelled").count()
 }
 
 fn ser<T: serde::Serialize>(v: &T) -> Value {
@@ -182,7 +188,7 @@ pub fn get_state(state: &McpSharedState) -> Value {
     let calendar_borrow = state.fred_calendar_rx.borrow();
     let calendar = calendar_view(calendar_borrow.as_ref());
     let (today_event_count, calendar_events) = match calendar_borrow.as_ref() {
-        Some(snap) => (snap.events.len(), ser(&snap.events)),
+        Some(snap) => (meeting_count(snap), ser(&snap.events)),
         None => (0, Value::Array(vec![])),
     };
     drop(calendar_borrow);

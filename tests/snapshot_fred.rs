@@ -27,6 +27,7 @@ fn fake_mailbox() -> MailboxSnapshot {
                 vip: false,
                 is_invite: false,
                 is_read: false,
+                ..Default::default()
             },
             MailboxItem {
                 from: "Bob Jones".into(),
@@ -35,11 +36,13 @@ fn fake_mailbox() -> MailboxSnapshot {
                 vip: true,
                 is_invite: false,
                 is_read: true,
+                ..Default::default()
             },
         ],
         stale: false,
         error: None,
         auth_prompt: None,
+        ..Default::default()
     }
 }
 
@@ -52,6 +55,7 @@ fn fake_calendar() -> CalendarSnapshot {
             title: "Weekly sync".into(),
             status: "accepted".into(),
             is_now: true,
+            ..Default::default()
         }],
         next: Some(NextEvent {
             title: "1:1 with manager".into(),
@@ -61,6 +65,7 @@ fn fake_calendar() -> CalendarSnapshot {
         stale: false,
         error: None,
         generated_at: None,
+        ..Default::default()
     }
 }
 
