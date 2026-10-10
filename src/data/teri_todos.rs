@@ -1,5 +1,9 @@
-//! Teri todos native data source — polls `~/.teri/teri.db` (SQLite WAL) for
-//! active todos every 5 s and pushes snapshots to a watch channel.
+//! Teri todos native data source — reads `~/.teri/teri.db` (SQLite WAL) for
+//! active todos and pushes snapshots to a watch channel. The directory is
+//! watched (`notify`, 250 ms debounce) and the db and its `-wal` are stat'ed
+//! every 500 ms (a long-lived writer's appends do not always raise a file-system
+//! event), so a change by Teri's CLI shows up well within 5 s; a full re-read
+//! every 10 s covers anything else.
 //!
 //! The database is owned by Teri's external Claude plugin; nostromo reads it
 //! strictly read-only. A missing DB file means Teri was never set up: it is
@@ -7,12 +11,19 @@
 //! consumers can tell "Teri isn't set up" from both "no todos" and "failed".
 //! The snapshot never carries the database path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{Connection, OpenFlags};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::warn;
+
+const DEBOUNCE: Duration = Duration::from_millis(250);
+const SAFETY_POLL: Duration = Duration::from_secs(10);
+/// How often the db and `-wal` are stat'ed for a change the watch missed.
+const STAT_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TeriTodosSnapshot {
@@ -26,7 +37,7 @@ pub struct TeriTodosSnapshot {
     pub not_configured: bool,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TeriTodo {
     pub id: i64,
     pub title: String,
@@ -34,15 +45,35 @@ pub struct TeriTodo {
     pub priority: u8,             // 1..=5
     pub due_date: Option<String>, // ISO date as stored
     pub jira_key: Option<String>,
+    /// Free-text notes on the todo (searchable and shown in the detail view).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+impl TeriTodosSnapshot {
+    /// Same todos and same health, ignoring when it was read. Used to avoid
+    /// republishing an unchanged poll.
+    fn same_content(&self, other: &Self) -> bool {
+        self.items == other.items
+            && self.stale == other.stale
+            && self.error == other.error
+            && self.not_configured == other.not_configured
+    }
 }
 
 pub struct TeriTodosNativeSource;
 
 impl TeriTodosNativeSource {
+    /// Watch `~/.teri/teri.db`.
     pub fn spawn() -> watch::Receiver<Option<TeriTodosSnapshot>> {
+        Self::spawn_at(db_path())
+    }
+
+    /// Watch the Teri database at `path` (tests point this at a temp file).
+    pub fn spawn_at(path: PathBuf) -> watch::Receiver<Option<TeriTodosSnapshot>> {
         let (tx, rx) = watch::channel(None);
         tokio::spawn(async move {
-            run(tx).await;
+            run(path, tx).await;
         });
         rx
     }
@@ -53,9 +84,14 @@ fn db_path() -> PathBuf {
     PathBuf::from(home).join(".teri").join("teri.db")
 }
 
-async fn run(tx: watch::Sender<Option<TeriTodosSnapshot>>) {
+async fn run(path: PathBuf, tx: watch::Sender<Option<TeriTodosSnapshot>>) {
+    let (wake_tx, mut wake_rx) = mpsc::unbounded_channel::<()>();
+    let mut watcher = watch_db_dir(&path, wake_tx.clone());
     loop {
-        let snap = tokio::task::spawn_blocking(|| fetch_once(db_path()))
+        // Taken before the read, so a write that lands during it is seen next time.
+        let seen = stat_signature(&path);
+        let read_path = path.clone();
+        let snap = tokio::task::spawn_blocking(move || fetch_once(read_path))
             .await
             .unwrap_or_else(|join_err| TeriTodosSnapshot {
                 generated_at: Some(Utc::now()),
@@ -64,9 +100,70 @@ async fn run(tx: watch::Sender<Option<TeriTodosSnapshot>>) {
                 error: Some(format!("join error: {join_err}")),
                 not_configured: false,
             });
-        let _ = tx.send(Some(snap));
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tx.send_if_modified(|current| match current {
+            Some(prev) if prev.same_content(&snap) => false,
+            _ => {
+                *current = Some(snap);
+                true
+            }
+        });
+
+        let read_at = tokio::time::Instant::now();
+        loop {
+            tokio::select! {
+                woken = wake_rx.recv() => {
+                    if woken.is_none() { return; }
+                    // Let a burst of writes settle, then read once.
+                    tokio::time::sleep(DEBOUNCE).await;
+                    while wake_rx.try_recv().is_ok() {}
+                    break;
+                }
+                _ = tokio::time::sleep(STAT_INTERVAL) => {
+                    if stat_signature(&path) != seen || read_at.elapsed() >= SAFETY_POLL { break; }
+                }
+            }
+        }
+        if watcher.is_none() {
+            // `~/.teri` did not exist yet (or the watch failed): try again.
+            watcher = watch_db_dir(&path, wake_tx.clone());
+        }
     }
+}
+
+/// `(modified, length)` of the db and its `-wal`. A change here means a write
+/// happened. The file watch alone is not enough: a connection that stays open
+/// (as Teri's tooling may keep one) appends to the `-wal` without the
+/// file-system event stream reporting it.
+fn stat_signature(db: &Path) -> [Option<(std::time::SystemTime, u64)>; 2] {
+    let stat = |p: &Path| std::fs::metadata(p).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    [stat(db), stat(Path::new(&wal))]
+}
+
+/// Watch the directory holding the db (and its `-wal`). `None` if it cannot
+/// be watched yet; the stat check keeps the data fresh meanwhile.
+fn watch_db_dir(db: &Path, wake: mpsc::UnboundedSender<()>) -> Option<RecommendedWatcher> {
+    let dir = db.parent()?;
+    // FSEvents reports real paths: resolve symlinks (e.g. /tmp -> /private/tmp) first.
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let file_name = db.file_name()?.to_string_lossy().into_owned();
+    let wal_name = format!("{file_name}-wal");
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let Ok(event) = res else { return };
+        if matches!(event.kind, EventKind::Access(_) | EventKind::Other) {
+            return;
+        }
+        let relevant = event.paths.iter().any(|p| {
+            p.file_name().is_some_and(|n| n == file_name.as_str() || n == wal_name.as_str())
+        });
+        if relevant {
+            let _ = wake.send(());
+        }
+    })
+    .ok()?;
+    watcher.watch(&dir, RecursiveMode::NonRecursive).ok()?;
+    Some(watcher)
 }
 
 fn fetch_once(path: PathBuf) -> TeriTodosSnapshot {
@@ -108,7 +205,7 @@ fn query_todos(path: &PathBuf) -> rusqlite::Result<Vec<TeriTodo>> {
     conn.execute_batch("PRAGMA query_only = ON;")?;
 
     let mut stmt = conn.prepare(
-        "SELECT id, title, status, priority, due_date, jira_key
+        "SELECT id, title, status, priority, due_date, jira_key, body
          FROM todos
          WHERE status IN ('open','in_progress','blocked')
            AND (snoozed_until IS NULL OR snoozed_until < datetime('now'))
@@ -124,6 +221,7 @@ fn query_todos(path: &PathBuf) -> rusqlite::Result<Vec<TeriTodo>> {
             priority: r.get::<_, i64>(3)? as u8,
             due_date: r.get(4)?,
             jira_key: r.get(5)?,
+            body: r.get(6)?,
         })
     })?;
     rows.collect()

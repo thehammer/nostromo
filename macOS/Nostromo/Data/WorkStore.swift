@@ -14,6 +14,17 @@ enum WorkResponse {
     case failed(WorkError)
 }
 
+/// A source's items after filtering and grouping, plus the counts the filter
+/// bar shows. Computed by `WorkStore.listSnapshot`.
+struct WorkListSnapshot: Equatable {
+    let groups: [WorkGroup]
+    /// Items of the source before any filter.
+    let totalCount: Int
+    let filteredCount: Int
+    /// Per requested facet: value → count, ignoring that facet's own filter.
+    let facetCounts: [WorkFacet: [String: Int]]
+}
+
 /// In-memory home of the Teri work data pushed by the daemon: per-source
 /// status, items (merged across groups), Teri's picks, and the continuations
 /// of in-flight targeted requests.
@@ -31,6 +42,13 @@ final class WorkStore: ObservableObject {
     @Published private(set) var picks: PicksSnapshot?
     /// Bumped on every snapshot so views can re-query without diffing items.
     @Published private(set) var revision: Int = 0
+    /// Whether the daemon connection is up. Views dim and say "Disconnected"
+    /// while it is not, but keep the data they have.
+    @Published private(set) var isConnected: Bool = true
+
+    /// Sends a client frame to the daemon. Set by `TeriBindings`; nil in tests
+    /// that do not look at outgoing frames.
+    var sendFrame: ((WorkClientMessage) -> Void)?
 
     /// How long a request waits for its answer before resolving `.timedOut`.
     let requestTimeout: TimeInterval
@@ -74,7 +92,83 @@ final class WorkStore: ObservableObject {
     /// Number of in-flight requests (diagnostics and tests).
     var pendingRequestCount: Int { pendingRequests.count }
 
+    // MARK: - Derived lists
+
+    /// Lists with more items than this are filtered off the main thread.
+    static let backgroundThreshold = 300
+
+    private static let derivationQueue = DispatchQueue(label: "nostromo.work.derive", qos: .userInitiated)
+
+    /// `source`'s items filtered, sorted and grouped for display, with the counts
+    /// the filter bar needs. Synchronous.
+    func listSnapshot(source: WorkSource, filter: WorkFilter, sort: WorkSortKey,
+                      facets: [WorkFacet]) -> WorkListSnapshot {
+        Self.makeSnapshot(items: items(for: source), source: source, filter: filter, sort: sort, facets: facets)
+    }
+
+    /// Like `listSnapshot`, but a large source is derived on a background queue.
+    /// `completion` always runs on the main thread (immediately for a small
+    /// source). A caller that can be re-asked while one is in flight should
+    /// ignore results that are no longer current.
+    func computeListSnapshot(source: WorkSource, filter: WorkFilter, sort: WorkSortKey,
+                             facets: [WorkFacet], completion: @escaping (WorkListSnapshot) -> Void) {
+        let items = items(for: source)
+        if items.count <= Self.backgroundThreshold {
+            completion(Self.makeSnapshot(items: items, source: source, filter: filter, sort: sort, facets: facets))
+            return
+        }
+        Self.derivationQueue.async {
+            let snapshot = Self.makeSnapshot(items: items, source: source, filter: filter, sort: sort, facets: facets)
+            DispatchQueue.main.async { completion(snapshot) }
+        }
+    }
+
+    private static func makeSnapshot(items: [WorkItem], source: WorkSource, filter: WorkFilter,
+                                     sort: WorkSortKey, facets: [WorkFacet]) -> WorkListSnapshot {
+        var filter = filter
+        filter.sources = []   // the source is the tab, not a user filter
+        let matching = WorkQuery.filter(items, filter)
+        var counts: [WorkFacet: [String: Int]] = [:]
+        for facet in facets {
+            counts[facet] = WorkQuery.facetCounts(items, filter: filter, facet: facet)
+        }
+        return WorkListSnapshot(
+            groups: WorkQuery.group(matching, source: source, sort: sort),
+            totalCount: items.count,
+            filteredCount: matching.count,
+            facetCounts: counts)
+    }
+
+    // MARK: - Daemon requests
+
+    /// Ask the daemon for `itemId`'s detail; `completion` runs once with the
+    /// answer, a timeout or a failure. Fails at once when there is no connection.
+    func requestDetail(_ itemId: String, completion: @escaping (WorkResponse) -> Void) {
+        guard isConnected, let sendFrame else {
+            completion(.failed(WorkError(code: "not_connected", message: "Not connected to nostromd")))
+            return
+        }
+        let requestId = UUID().uuidString
+        expect(requestId: requestId, completion: completion)
+        sendFrame(.detailRequest(requestId: requestId, itemId: itemId))
+    }
+
+    /// Ask the daemon to refresh `source` (all sources when nil). The daemon
+    /// debounces, so asking often is harmless.
+    func refresh(source: WorkSource?) {
+        sendFrame?(.refresh(source: source, fred: false))
+    }
+
+    /// Ask the daemon to (re)generate Teri's picks.
+    func refreshPicks(reason: String) {
+        sendFrame?(.picksRefresh(reason: reason))
+    }
+
     // MARK: - Daemon pushes
+
+    func setConnected(_ connected: Bool) {
+        if isConnected != connected { isConnected = connected }
+    }
 
     func apply(status: SourceStatus) {
         statuses[status.source] = status

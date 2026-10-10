@@ -125,6 +125,7 @@ fn make_daemon_state_with_pr_source(pr_source: PrSource) -> Harness {
                     fred_mailbox_rx: tokio::sync::watch::channel(None).1,
                     fred_calendar_rx: tokio::sync::watch::channel(None).1,
                     teri_todos_rx: tokio::sync::watch::channel(None).1,
+                    work_hub: None,
                 },
             );
             let pr_tx = if pr_source == PrSource::Dead {

@@ -2,10 +2,20 @@
 //!
 //! ## Tools
 //! - `teri.list_todos()` — active todos from `teri_todos_rx`
+//! - `teri.list_work_items({source?, kind?, repo?, project?, status?,
+//!   environment?, query?, limit?, offset?})` — the same items the Teri
+//!   surface shows, from the work hub, filtered with the shared §5 semantics
+//! - `teri.get_work_item({id})` — one item's detail
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
+use crate::data::work::query::WorkFilter;
+use crate::data::work::{WorkService, WorkSource};
 use crate::mcp::state::McpSharedState;
+
+/// Default and maximum page size of `teri.list_work_items`.
+const DEFAULT_LIMIT: usize = 100;
+const MAX_LIMIT: usize = 500;
 
 /// Source states shared by the Teri and Fred tools.
 pub(crate) mod source_state {
@@ -99,6 +109,84 @@ pub fn list_todos(state: &McpSharedState) -> Value {
         }
     }
     out
+}
+
+/// Handle `teri.list_work_items(args)`.
+///
+/// `{ statuses: [SourceStatus], total, items: [WorkItem without search_text] }`;
+/// `total` counts the matches before `limit`/`offset`.
+pub fn list_work_items(state: &McpSharedState, args: &Value) -> Value {
+    let Some(hub) = state.work_hub.as_ref() else {
+        return json!({
+            "statuses": [],
+            "total": 0,
+            "items": [],
+            "reason": "work items are not available in this process",
+        });
+    };
+    let filter = match filter_from_args(args) {
+        Ok(f) => f,
+        Err(detail) => return json!({ "error": "invalid_argument", "detail": detail }),
+    };
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_LIMIT, |n| (n as usize).min(MAX_LIMIT));
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+
+    let matching = hub.items(&filter);
+    let total = matching.len();
+    let items: Vec<Value> = matching
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .filter_map(|item| serde_json::to_value(item).ok())
+        .map(|mut v| {
+            if let Some(obj) = v.as_object_mut() {
+                obj.remove("search_text");
+            }
+            v
+        })
+        .collect();
+    json!({
+        "statuses": hub.statuses(),
+        "total": total,
+        "items": items,
+    })
+}
+
+/// Handle `teri.get_work_item({id})`: the detail, or `{ error, message }`.
+pub async fn get_work_item(state: &McpSharedState, args: &Value) -> Value {
+    let Some(id) = args.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        return json!({ "error": "invalid_argument", "message": "`id` is required" });
+    };
+    let Some(hub) = state.work_hub.as_ref() else {
+        return json!({ "error": "not_available", "message": "work items are not available in this process" });
+    };
+    match hub.detail(id).await {
+        Ok(detail) => serde_json::to_value(detail)
+            .unwrap_or_else(|e| json!({ "error": "serialization_failed", "message": e.to_string() })),
+        Err(e) => json!({ "error": e.code, "message": e.message }),
+    }
+}
+
+fn filter_from_args(args: &Value) -> Result<WorkFilter, String> {
+    let empty = Map::new();
+    let obj = args.as_object().unwrap_or(&empty);
+    let text = |key: &str| obj.get(key).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let mut filter = WorkFilter::default();
+    if let Some(source) = text("source") {
+        let parsed: WorkSource = serde_json::from_value(json!(source))
+            .map_err(|_| format!("unknown source `{source}` (todos, repo_docs, jira, sentry)"))?;
+        filter.sources.push(parsed);
+    }
+    filter.kinds.extend(text("kind").map(String::from));
+    filter.repos.extend(text("repo").map(String::from));
+    filter.projects.extend(text("project").map(String::from));
+    filter.statuses.extend(text("status").map(String::from));
+    filter.environments.extend(text("environment").map(String::from));
+    filter.query = text("query").unwrap_or("").to_string();
+    Ok(filter)
 }
 
 // NOTE (Redd): these tests target the NEW `source_state::derive` signature

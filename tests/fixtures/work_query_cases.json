@@ -1,0 +1,1109 @@
+{
+  "_comment": "Shared by tests/work_query.rs and macOS/NostromoTests/WorkQueryTests.swift. items are WorkItem wire JSON; see cases for ops.",
+  "items": [
+    {
+      "id": "todo:1",
+      "source": "todos",
+      "kind": "todo",
+      "title": "Write the quarterly report",
+      "status": "open",
+      "priority": {
+        "label": "P3",
+        "rank": 3
+      },
+      "due": "2026-10-12",
+      "linked": [
+        "CORE-4"
+      ],
+      "created_at": "2026-10-01T08:00:00Z",
+      "updated_at": "2026-10-02T08:00:00Z",
+      "search_text": "Write the quarterly report\nCollect the numbers from finance first."
+    },
+    {
+      "id": "doc:alpha:bugs/open/2026-10-01-login-crash.md",
+      "source": "repo_docs",
+      "kind": "bug",
+      "repo": "alpha",
+      "title": "Login crash on expired token",
+      "severity": "high",
+      "created_at": "2026-10-01T09:00:00Z",
+      "updated_at": "2026-10-05T09:00:00Z",
+      "path": "/tmp/alpha/.claude/bugs/open/2026-10-01-login-crash.md",
+      "search_text": "Login crash on expired token\nThe session cookie is rejected when the refresh window lapses."
+    },
+    {
+      "id": "jira:CORE-1",
+      "source": "jira",
+      "kind": "bug",
+      "title": "Payment webhook retries forever",
+      "project": "CORE",
+      "status": "In Progress",
+      "status_category": "in_progress",
+      "priority": {
+        "label": "High",
+        "rank": 2
+      },
+      "created_at": "2026-09-28T10:00:00Z",
+      "updated_at": "2026-10-08T10:00:00Z",
+      "url": "https://example.invalid/browse/CORE-1",
+      "search_text": "Payment webhook retries forever"
+    },
+    {
+      "id": "sentry:1001",
+      "source": "sentry",
+      "kind": "issue",
+      "title": "TypeError: undefined is not a function",
+      "project": "web",
+      "environment": "production",
+      "status": "unresolved",
+      "created_at": "2026-10-05T08:00:00Z",
+      "updated_at": "2026-10-09T08:00:00Z",
+      "metrics": {
+        "events_24h": 42,
+        "users": 7
+      },
+      "search_text": "TypeError: undefined is not a function"
+    },
+    {
+      "id": "todo:2",
+      "source": "todos",
+      "kind": "todo",
+      "title": "Fix payment webhook",
+      "status": "in_progress",
+      "priority": {
+        "label": "P1",
+        "rank": 1
+      },
+      "due": "2026-10-11",
+      "linked": [
+        "CORE-1"
+      ],
+      "created_at": "2026-10-03T08:00:00Z",
+      "search_text": "Fix payment webhook\nCheck the retry backoff in the worker."
+    },
+    {
+      "id": "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+      "source": "repo_docs",
+      "kind": "bug",
+      "repo": "alpha",
+      "title": "Café menu renders blank",
+      "severity": "low",
+      "created_at": "2026-10-03T09:00:00Z",
+      "updated_at": "2026-10-03T09:00:00Z",
+      "search_text": "Café menu renders blank\nThe lunch menu is empty on the kiosk."
+    },
+    {
+      "id": "jira:CORE-2",
+      "source": "jira",
+      "kind": "story",
+      "title": "Ledger export",
+      "project": "CORE",
+      "status": "In Progress",
+      "status_category": "in_progress",
+      "priority": {
+        "label": "High",
+        "rank": 2
+      },
+      "updated_at": "2026-10-09T10:00:00Z",
+      "search_text": "Ledger export"
+    },
+    {
+      "id": "doc:beta:bugs/open/2026-10-02-flaky-sync.md",
+      "source": "repo_docs",
+      "kind": "bug",
+      "repo": "beta",
+      "title": "Flaky sync on cold start",
+      "severity": "medium",
+      "created_at": "2026-10-02T12:00:00.500Z",
+      "search_text": "Flaky sync on cold start\nFails roughly one boot in five."
+    },
+    {
+      "id": "sentry:1002",
+      "source": "sentry",
+      "kind": "issue",
+      "title": "ConnectionResetError talking to payments",
+      "project": "api",
+      "environment": "staging",
+      "status": "unresolved",
+      "updated_at": "2026-10-09T12:00:00Z",
+      "metrics": {
+        "events_24h": 3,
+        "users": 1
+      },
+      "search_text": "ConnectionResetError talking to payments"
+    },
+    {
+      "id": "todo:3",
+      "source": "todos",
+      "kind": "todo",
+      "title": "Book travel",
+      "status": "open",
+      "priority": {
+        "label": "P1",
+        "rank": 1
+      },
+      "search_text": "Book travel"
+    },
+    {
+      "id": "doc:alpha:features/backlog/2026-09-20-dark-mode.md",
+      "source": "repo_docs",
+      "kind": "feature",
+      "repo": "alpha",
+      "title": "Dark mode",
+      "created_at": "2026-09-20T09:00:00Z",
+      "search_text": "Dark mode\nDark mode for every screen. Needs design tokens."
+    },
+    {
+      "id": "jira:APP-3",
+      "source": "jira",
+      "kind": "bug",
+      "title": "Crash on launch",
+      "project": "APP",
+      "status": "In Review",
+      "status_category": "in_progress",
+      "priority": {
+        "label": "Highest",
+        "rank": 1
+      },
+      "updated_at": "2026-10-01T10:00:00Z",
+      "search_text": "Crash on launch"
+    },
+    {
+      "id": "doc:gamma:wip/2026-10-04-ledger-rewrite/index.md",
+      "source": "repo_docs",
+      "kind": "wip",
+      "repo": "gamma",
+      "title": "Ledger rewrite",
+      "created_at": "2026-10-04T09:00:00Z",
+      "updated_at": "2026-10-06T09:00:00Z",
+      "search_text": "Ledger rewrite\nPlan. Phase one migrates the nightly reconciliation job."
+    },
+    {
+      "id": "todo:4",
+      "source": "todos",
+      "kind": "todo",
+      "title": "Audit access list",
+      "status": "blocked",
+      "priority": {
+        "label": "P1",
+        "rank": 1
+      },
+      "search_text": "Audit access list"
+    },
+    {
+      "id": "jira:CORE-4",
+      "source": "jira",
+      "kind": "task",
+      "title": "Update runbook",
+      "project": "CORE",
+      "status": "To Do",
+      "status_category": "to_do",
+      "priority": {
+        "label": "Medium",
+        "rank": 3
+      },
+      "updated_at": "2026-10-07T10:00:00Z",
+      "search_text": "Update runbook"
+    },
+    {
+      "id": "sentry:1003",
+      "source": "sentry",
+      "kind": "issue",
+      "title": "ChunkLoadError",
+      "project": "web",
+      "environment": "production",
+      "status": "unresolved",
+      "updated_at": "2026-10-08T08:00:00Z",
+      "metrics": {
+        "events_24h": 11,
+        "users": 4
+      },
+      "search_text": "ChunkLoadError"
+    },
+    {
+      "id": "doc:beta:todos/open/2026-09-30-rotate-keys.md",
+      "source": "repo_docs",
+      "kind": "todo",
+      "repo": "beta",
+      "title": "Rotate signing keys",
+      "created_at": "2026-09-30T09:00:00Z",
+      "search_text": "Rotate signing keys"
+    },
+    {
+      "id": "todo:5",
+      "source": "todos",
+      "kind": "todo",
+      "title": "Call the plumber",
+      "status": "open",
+      "priority": {
+        "label": "P3",
+        "rank": 3
+      },
+      "due": "2026-10-09",
+      "search_text": "Call the plumber"
+    },
+    {
+      "id": "jira:APP-5",
+      "source": "jira",
+      "kind": "task",
+      "title": "Café opening hours copy",
+      "project": "APP",
+      "status": "To Do",
+      "status_category": "to_do",
+      "priority": {
+        "label": "Low",
+        "rank": 4
+      },
+      "updated_at": "2026-10-09T09:00:00Z",
+      "search_text": "Café opening hours copy"
+    },
+    {
+      "id": "doc:alpha:ideas/brainstorm.md",
+      "source": "repo_docs",
+      "kind": "idea",
+      "repo": "alpha",
+      "title": "Brainstorm: undated",
+      "search_text": "Brainstorm: undated"
+    },
+    {
+      "id": "sentry:1004",
+      "source": "sentry",
+      "kind": "issue",
+      "title": "OutOfMemoryError in batch worker",
+      "project": "api",
+      "environment": "production",
+      "status": "ongoing",
+      "updated_at": "2026-10-07T08:00:00Z",
+      "search_text": "OutOfMemoryError in batch worker"
+    },
+    {
+      "id": "jira:CORE-6",
+      "source": "jira",
+      "kind": "task",
+      "title": "Old cleanup",
+      "project": "CORE",
+      "status": "Done",
+      "status_category": "other",
+      "priority": {
+        "label": "Medium",
+        "rank": 3
+      },
+      "updated_at": "2026-09-01T10:00:00Z",
+      "search_text": "Old cleanup"
+    },
+    {
+      "id": "todo:6",
+      "source": "todos",
+      "kind": "todo",
+      "title": "Plan offsite",
+      "status": "open",
+      "priority": {
+        "label": "P5",
+        "rank": 5
+      },
+      "due": "2026-10-10",
+      "search_text": "Plan offsite"
+    },
+    {
+      "id": "doc:delta:features/backlog/2026-10-06-export.md",
+      "source": "repo_docs",
+      "kind": "feature",
+      "repo": "delta",
+      "title": "Export to CSV",
+      "created_at": "2026-10-06T09:00:00Z",
+      "search_text": "Export to CSV"
+    },
+    {
+      "id": "jira:CORE-7",
+      "source": "jira",
+      "kind": "task",
+      "title": "Triage inbox",
+      "project": "CORE",
+      "status": "To Do",
+      "status_category": "to_do",
+      "updated_at": "2026-10-09T11:00:00Z",
+      "search_text": "Triage inbox"
+    },
+    {
+      "id": "todo:7",
+      "source": "todos",
+      "kind": "todo",
+      "title": "Order CAFE supplies",
+      "status": "open",
+      "priority": {
+        "label": "P2",
+        "rank": 2
+      },
+      "due": "2026-10-15",
+      "search_text": "Order CAFE supplies"
+    }
+  ],
+  "cases": [
+    {
+      "name": "an empty filter keeps every item in input order",
+      "op": "filter",
+      "filter": {},
+      "expected_ids": [
+        "todo:1",
+        "doc:alpha:bugs/open/2026-10-01-login-crash.md",
+        "jira:CORE-1",
+        "sentry:1001",
+        "todo:2",
+        "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+        "jira:CORE-2",
+        "doc:beta:bugs/open/2026-10-02-flaky-sync.md",
+        "sentry:1002",
+        "todo:3",
+        "doc:alpha:features/backlog/2026-09-20-dark-mode.md",
+        "jira:APP-3",
+        "doc:gamma:wip/2026-10-04-ledger-rewrite/index.md",
+        "todo:4",
+        "jira:CORE-4",
+        "sentry:1003",
+        "doc:beta:todos/open/2026-09-30-rotate-keys.md",
+        "todo:5",
+        "jira:APP-5",
+        "doc:alpha:ideas/brainstorm.md",
+        "sentry:1004",
+        "jira:CORE-6",
+        "todo:6",
+        "doc:delta:features/backlog/2026-10-06-export.md",
+        "jira:CORE-7",
+        "todo:7"
+      ]
+    },
+    {
+      "name": "a whitespace-only query has no terms and keeps everything",
+      "op": "filter",
+      "filter": {
+        "query": "   "
+      },
+      "expected_ids": [
+        "todo:1",
+        "doc:alpha:bugs/open/2026-10-01-login-crash.md",
+        "jira:CORE-1",
+        "sentry:1001",
+        "todo:2",
+        "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+        "jira:CORE-2",
+        "doc:beta:bugs/open/2026-10-02-flaky-sync.md",
+        "sentry:1002",
+        "todo:3",
+        "doc:alpha:features/backlog/2026-09-20-dark-mode.md",
+        "jira:APP-3",
+        "doc:gamma:wip/2026-10-04-ledger-rewrite/index.md",
+        "todo:4",
+        "jira:CORE-4",
+        "sentry:1003",
+        "doc:beta:todos/open/2026-09-30-rotate-keys.md",
+        "todo:5",
+        "jira:APP-5",
+        "doc:alpha:ideas/brainstorm.md",
+        "sentry:1004",
+        "jira:CORE-6",
+        "todo:6",
+        "doc:delta:features/backlog/2026-10-06-export.md",
+        "jira:CORE-7",
+        "todo:7"
+      ]
+    },
+    {
+      "name": "a term that appears only in the body text matches",
+      "op": "filter",
+      "filter": {
+        "query": "reconciliation"
+      },
+      "expected_ids": [
+        "doc:gamma:wip/2026-10-04-ledger-rewrite/index.md"
+      ]
+    },
+    {
+      "name": "a todo body is searchable too",
+      "op": "filter",
+      "filter": {
+        "query": "backoff"
+      },
+      "expected_ids": [
+        "todo:2"
+      ]
+    },
+    {
+      "name": "every term must match, in any order",
+      "op": "filter",
+      "filter": {
+        "query": "token login"
+      },
+      "expected_ids": [
+        "doc:alpha:bugs/open/2026-10-01-login-crash.md"
+      ]
+    },
+    {
+      "name": "a query with one unmatched term matches nothing",
+      "op": "filter",
+      "filter": {
+        "query": "login zebra"
+      },
+      "expected_ids": []
+    },
+    {
+      "name": "terms may match different parts of an item (title and body)",
+      "op": "filter",
+      "filter": {
+        "query": "webhook backoff"
+      },
+      "expected_ids": [
+        "todo:2"
+      ]
+    },
+    {
+      "name": "search ignores case and diacritics: cafe finds Cafe-with-accent and CAFE",
+      "op": "filter",
+      "filter": {
+        "query": "cafe"
+      },
+      "expected_ids": [
+        "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+        "jira:APP-5",
+        "todo:7"
+      ]
+    },
+    {
+      "name": "search ignores case and diacritics: an accented upper-case query finds the same items",
+      "op": "filter",
+      "filter": {
+        "query": "CAFÉ"
+      },
+      "expected_ids": [
+        "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+        "jira:APP-5",
+        "todo:7"
+      ]
+    },
+    {
+      "name": "search matches substrings of words",
+      "op": "filter",
+      "filter": {
+        "query": "payment"
+      },
+      "expected_ids": [
+        "jira:CORE-1",
+        "todo:2",
+        "sentry:1002"
+      ]
+    },
+    {
+      "name": "values within one filter are ORed",
+      "op": "filter",
+      "filter": {
+        "sources": [
+          "jira",
+          "sentry"
+        ]
+      },
+      "expected_ids": [
+        "jira:CORE-1",
+        "sentry:1001",
+        "jira:CORE-2",
+        "sentry:1002",
+        "jira:APP-3",
+        "jira:CORE-4",
+        "sentry:1003",
+        "jira:APP-5",
+        "sentry:1004",
+        "jira:CORE-6",
+        "jira:CORE-7"
+      ]
+    },
+    {
+      "name": "different filters are ANDed",
+      "op": "filter",
+      "filter": {
+        "sources": [
+          "repo_docs"
+        ],
+        "kinds": [
+          "bug"
+        ],
+        "repos": [
+          "alpha",
+          "beta"
+        ]
+      },
+      "expected_ids": [
+        "doc:alpha:bugs/open/2026-10-01-login-crash.md",
+        "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+        "doc:beta:bugs/open/2026-10-02-flaky-sync.md"
+      ]
+    },
+    {
+      "name": "kind and repo filters combine as OR within and AND across",
+      "op": "filter",
+      "filter": {
+        "sources": [
+          "repo_docs"
+        ],
+        "kinds": [
+          "bug",
+          "feature"
+        ],
+        "repos": [
+          "alpha"
+        ]
+      },
+      "expected_ids": [
+        "doc:alpha:bugs/open/2026-10-01-login-crash.md",
+        "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+        "doc:alpha:features/backlog/2026-09-20-dark-mode.md"
+      ]
+    },
+    {
+      "name": "a kind filter spans sources",
+      "op": "filter",
+      "filter": {
+        "kinds": [
+          "bug"
+        ]
+      },
+      "expected_ids": [
+        "doc:alpha:bugs/open/2026-10-01-login-crash.md",
+        "jira:CORE-1",
+        "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+        "doc:beta:bugs/open/2026-10-02-flaky-sync.md",
+        "jira:APP-3"
+      ]
+    },
+    {
+      "name": "project and status filters AND together",
+      "op": "filter",
+      "filter": {
+        "projects": [
+          "CORE"
+        ],
+        "statuses": [
+          "In Progress"
+        ]
+      },
+      "expected_ids": [
+        "jira:CORE-1",
+        "jira:CORE-2"
+      ]
+    },
+    {
+      "name": "environment filter",
+      "op": "filter",
+      "filter": {
+        "environments": [
+          "production"
+        ]
+      },
+      "expected_ids": [
+        "sentry:1001",
+        "sentry:1003",
+        "sentry:1004"
+      ]
+    },
+    {
+      "name": "has_severity true keeps only items that state a severity",
+      "op": "filter",
+      "filter": {
+        "has_severity": true
+      },
+      "expected_ids": [
+        "doc:alpha:bugs/open/2026-10-01-login-crash.md",
+        "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+        "doc:beta:bugs/open/2026-10-02-flaky-sync.md"
+      ]
+    },
+    {
+      "name": "has_severity false keeps only items without a severity",
+      "op": "filter",
+      "filter": {
+        "has_severity": false
+      },
+      "expected_ids": [
+        "todo:1",
+        "jira:CORE-1",
+        "sentry:1001",
+        "todo:2",
+        "jira:CORE-2",
+        "sentry:1002",
+        "todo:3",
+        "doc:alpha:features/backlog/2026-09-20-dark-mode.md",
+        "jira:APP-3",
+        "doc:gamma:wip/2026-10-04-ledger-rewrite/index.md",
+        "todo:4",
+        "jira:CORE-4",
+        "sentry:1003",
+        "doc:beta:todos/open/2026-09-30-rotate-keys.md",
+        "todo:5",
+        "jira:APP-5",
+        "doc:alpha:ideas/brainstorm.md",
+        "sentry:1004",
+        "jira:CORE-6",
+        "todo:6",
+        "doc:delta:features/backlog/2026-10-06-export.md",
+        "jira:CORE-7",
+        "todo:7"
+      ]
+    },
+    {
+      "name": "a query combines with a source filter",
+      "op": "filter",
+      "filter": {
+        "query": "payment",
+        "sources": [
+          "todos"
+        ]
+      },
+      "expected_ids": [
+        "todo:2"
+      ]
+    },
+    {
+      "name": "repo docs group by repo: biggest group first, ties by repo name, newest first, undated last",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "repo_docs"
+        ]
+      },
+      "source": "repo_docs",
+      "expected_groups": [
+        {
+          "key": "alpha",
+          "ids": [
+            "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+            "doc:alpha:bugs/open/2026-10-01-login-crash.md",
+            "doc:alpha:features/backlog/2026-09-20-dark-mode.md",
+            "doc:alpha:ideas/brainstorm.md"
+          ]
+        },
+        {
+          "key": "beta",
+          "ids": [
+            "doc:beta:bugs/open/2026-10-02-flaky-sync.md",
+            "doc:beta:todos/open/2026-09-30-rotate-keys.md"
+          ]
+        },
+        {
+          "key": "delta",
+          "ids": [
+            "doc:delta:features/backlog/2026-10-06-export.md"
+          ]
+        },
+        {
+          "key": "gamma",
+          "ids": [
+            "doc:gamma:wip/2026-10-04-ledger-rewrite/index.md"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "repo docs oldest first keeps undated last",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "repo_docs"
+        ]
+      },
+      "source": "repo_docs",
+      "sort": "oldest",
+      "expected_groups": [
+        {
+          "key": "alpha",
+          "ids": [
+            "doc:alpha:features/backlog/2026-09-20-dark-mode.md",
+            "doc:alpha:bugs/open/2026-10-01-login-crash.md",
+            "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+            "doc:alpha:ideas/brainstorm.md"
+          ]
+        },
+        {
+          "key": "beta",
+          "ids": [
+            "doc:beta:todos/open/2026-09-30-rotate-keys.md",
+            "doc:beta:bugs/open/2026-10-02-flaky-sync.md"
+          ]
+        },
+        {
+          "key": "delta",
+          "ids": [
+            "doc:delta:features/backlog/2026-10-06-export.md"
+          ]
+        },
+        {
+          "key": "gamma",
+          "ids": [
+            "doc:gamma:wip/2026-10-04-ledger-rewrite/index.md"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "repo docs by title sort alphabetically within a group",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "repo_docs"
+        ]
+      },
+      "source": "repo_docs",
+      "sort": "title",
+      "expected_groups": [
+        {
+          "key": "alpha",
+          "ids": [
+            "doc:alpha:ideas/brainstorm.md",
+            "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+            "doc:alpha:features/backlog/2026-09-20-dark-mode.md",
+            "doc:alpha:bugs/open/2026-10-01-login-crash.md"
+          ]
+        },
+        {
+          "key": "beta",
+          "ids": [
+            "doc:beta:bugs/open/2026-10-02-flaky-sync.md",
+            "doc:beta:todos/open/2026-09-30-rotate-keys.md"
+          ]
+        },
+        {
+          "key": "delta",
+          "ids": [
+            "doc:delta:features/backlog/2026-10-06-export.md"
+          ]
+        },
+        {
+          "key": "gamma",
+          "ids": [
+            "doc:gamma:wip/2026-10-04-ledger-rewrite/index.md"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "repo docs are filtered before grouping, so emptied groups disappear",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "repo_docs"
+        ],
+        "kinds": [
+          "bug"
+        ]
+      },
+      "source": "repo_docs",
+      "expected_groups": [
+        {
+          "key": "alpha",
+          "ids": [
+            "doc:alpha:bugs/open/2026-10-03-cafe-menu.md",
+            "doc:alpha:bugs/open/2026-10-01-login-crash.md"
+          ]
+        },
+        {
+          "key": "beta",
+          "ids": [
+            "doc:beta:bugs/open/2026-10-02-flaky-sync.md"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "jira groups by status category, then priority rank (none last), then most recently updated",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "jira"
+        ]
+      },
+      "source": "jira",
+      "expected_groups": [
+        {
+          "key": "in_progress",
+          "ids": [
+            "jira:APP-3",
+            "jira:CORE-2",
+            "jira:CORE-1"
+          ]
+        },
+        {
+          "key": "to_do",
+          "ids": [
+            "jira:CORE-4",
+            "jira:APP-5",
+            "jira:CORE-7"
+          ]
+        },
+        {
+          "key": "other",
+          "ids": [
+            "jira:CORE-6"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "jira grouping applies the filter first",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "jira"
+        ],
+        "projects": [
+          "CORE"
+        ]
+      },
+      "source": "jira",
+      "expected_groups": [
+        {
+          "key": "in_progress",
+          "ids": [
+            "jira:CORE-2",
+            "jira:CORE-1"
+          ]
+        },
+        {
+          "key": "to_do",
+          "ids": [
+            "jira:CORE-4",
+            "jira:CORE-7"
+          ]
+        },
+        {
+          "key": "other",
+          "ids": [
+            "jira:CORE-6"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "jira groups with no items are omitted",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "jira"
+        ],
+        "statuses": [
+          "To Do"
+        ]
+      },
+      "source": "jira",
+      "expected_groups": [
+        {
+          "key": "to_do",
+          "ids": [
+            "jira:CORE-4",
+            "jira:APP-5",
+            "jira:CORE-7"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "sentry is one list ordered by last seen, newest first",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "sentry"
+        ]
+      },
+      "source": "sentry",
+      "expected_groups": [
+        {
+          "key": null,
+          "ids": [
+            "sentry:1002",
+            "sentry:1001",
+            "sentry:1003",
+            "sentry:1004"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "todos are one list ordered by priority, then due date (none last), then title",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "todos"
+        ]
+      },
+      "source": "todos",
+      "expected_groups": [
+        {
+          "key": null,
+          "ids": [
+            "todo:2",
+            "todo:4",
+            "todo:3",
+            "todo:7",
+            "todo:5",
+            "todo:1",
+            "todo:6"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "todos grouping applies the filter first",
+      "op": "group",
+      "filter": {
+        "sources": [
+          "todos"
+        ],
+        "statuses": [
+          "open"
+        ]
+      },
+      "source": "todos",
+      "expected_groups": [
+        {
+          "key": null,
+          "ids": [
+            "todo:3",
+            "todo:7",
+            "todo:5",
+            "todo:1",
+            "todo:6"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "kind chip counts ignore the kind filter itself",
+      "op": "facet_counts",
+      "filter": {
+        "sources": [
+          "repo_docs"
+        ],
+        "kinds": [
+          "bug"
+        ]
+      },
+      "facet": "kind",
+      "expected_counts": {
+        "bug": 3,
+        "feature": 2,
+        "wip": 1,
+        "todo": 1,
+        "idea": 1
+      }
+    },
+    {
+      "name": "repo chip counts ignore the repo filter but respect the others",
+      "op": "facet_counts",
+      "filter": {
+        "sources": [
+          "repo_docs"
+        ],
+        "kinds": [
+          "bug"
+        ],
+        "repos": [
+          "alpha"
+        ]
+      },
+      "facet": "repo",
+      "expected_counts": {
+        "alpha": 2,
+        "beta": 1
+      }
+    },
+    {
+      "name": "source chip counts ignore the source filter but respect the query",
+      "op": "facet_counts",
+      "filter": {
+        "sources": [
+          "jira"
+        ],
+        "query": "payment"
+      },
+      "facet": "source",
+      "expected_counts": {
+        "jira": 1,
+        "todos": 1,
+        "sentry": 1
+      }
+    },
+    {
+      "name": "status chip counts ignore the status filter but respect the project filter",
+      "op": "facet_counts",
+      "filter": {
+        "sources": [
+          "jira"
+        ],
+        "projects": [
+          "CORE"
+        ],
+        "statuses": [
+          "In Progress"
+        ]
+      },
+      "facet": "status",
+      "expected_counts": {
+        "In Progress": 2,
+        "To Do": 2,
+        "Done": 1
+      }
+    },
+    {
+      "name": "environment chip counts ignore the environment filter",
+      "op": "facet_counts",
+      "filter": {
+        "sources": [
+          "sentry"
+        ],
+        "environments": [
+          "staging"
+        ]
+      },
+      "facet": "environment",
+      "expected_counts": {
+        "production": 3,
+        "staging": 1
+      }
+    },
+    {
+      "name": "project counts skip items that have no project",
+      "op": "facet_counts",
+      "filter": {},
+      "facet": "project",
+      "expected_counts": {
+        "CORE": 5,
+        "web": 2,
+        "api": 2,
+        "APP": 2
+      }
+    },
+    {
+      "name": "chip counts respect the search query",
+      "op": "facet_counts",
+      "filter": {
+        "query": "cafe"
+      },
+      "facet": "kind",
+      "expected_counts": {
+        "bug": 1,
+        "task": 1,
+        "todo": 1
+      }
+    },
+    {
+      "name": "chip counts respect has_severity",
+      "op": "facet_counts",
+      "filter": {
+        "has_severity": true,
+        "repos": [
+          "beta"
+        ]
+      },
+      "facet": "repo",
+      "expected_counts": {
+        "alpha": 2,
+        "beta": 1
+      }
+    }
+  ]
+}

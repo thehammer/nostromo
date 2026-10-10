@@ -224,6 +224,18 @@ async fn main() -> Result<()> {
     let fred_calendar_rx = FredCalendarNativeSource::spawn(config.clone());
     let teri_todos_rx    = TeriTodosNativeSource::spawn();
 
+    // The work hub merges every Teri work source (todos now; repo docs, Jira
+    // and Sentry as they land), broadcasts changes and answers `WorkService`
+    // requests from the Mac. It is built after the Teri source and before the
+    // MCP state so the MCP tools read the same hub.
+    let work_hub = nostromo::data::work::hub::WorkHub::spawn(nostromo::data::work::hub::HubDeps {
+        broadcast_tx: broadcast_tx.clone(),
+        todos_rx: teri_todos_rx.clone(),
+        session_mgr: Some(Arc::clone(&session_mgr)),
+        republish_rx: Some(server.subscribe_republish()),
+    });
+    nostromo::data::work::install_work_service(work_hub.clone());
+
     // Hosts the layout/introspection/focus tool surface inside nostromd so that
     // daemon-hosted agent sessions can assemble their own pane workspaces. Pane
     // mutations are applied to `pane_registry` and broadcast as `FocusLayout` /
@@ -278,6 +290,7 @@ async fn main() -> Result<()> {
                     fred_mailbox_rx: fred_mailbox_rx.clone(),
                     fred_calendar_rx: fred_calendar_rx.clone(),
                     teri_todos_rx: teri_todos_rx.clone(),
+                    work_hub: Some(work_hub.clone()),
                 },
             );
 

@@ -94,6 +94,7 @@ async fn harness_with_feed(feed: JobsFeed) -> Harness {
             fred_mailbox_rx: mailbox_rx,
             fred_calendar_rx: calendar_rx,
             teri_todos_rx: todos_rx,
+            work_hub: None,
         },
     );
     let socket = dir.path().join("mcp.sock");

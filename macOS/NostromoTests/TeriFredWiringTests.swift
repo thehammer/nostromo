@@ -49,9 +49,12 @@ final class TeriFredWiringTests: XCTestCase {
         XCTAssertTrue(source.contains("FredBindings.makeSurface(focus: focus)"))
     }
 
-    func testBindingsHostTheExistingTeriPanelAndFredHUD() throws {
+    func testBindingsHostTheTeriSurfaceOnTheSharedStoreAndTheFredHUD() throws {
         let teri = try Self.source("UI/Views/TeriBindings.swift")
-        XCTAssertTrue(teri.contains("NSHostingView(rootView: TeriTodosPanel())"))
+        XCTAssertTrue(teri.contains("TeriSurfaceView(store: WorkStore.shared)"))
+        XCTAssertTrue(teri.contains("WorkStore.shared.sendFrame"), "outgoing work frames must reach the daemon client")
+        XCTAssertTrue(teri.contains("WorkStore.shared.setConnected"), "the store must follow the connection")
+        XCTAssertFalse(teri.contains("TeriTodosPanel"), "the old SwiftUI todo panel is gone")
         let fred = try Self.source("UI/Views/FredBindings.swift")
         XCTAssertTrue(fred.contains("FredHUD()"))
     }

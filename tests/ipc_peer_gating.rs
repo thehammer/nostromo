@@ -222,6 +222,7 @@ fn teri_state() -> ServerMsg {
                 priority: 2,
                 due_date: None,
                 jira_key: None,
+                body: None,
             }],
             ..Default::default()
         },
@@ -2753,7 +2754,13 @@ async fn a_unix_client_can_still_spawn_a_pty() {
     assert!(wait_for_file(&marker).await, "a Unix peer's pty_spawn must run its command");
 }
 
-const SENSITIVE_TOOLS: [&str; 3] = ["fred.list_unread_emails", "teri.list_todos", "mother.list_jobs"];
+const SENSITIVE_TOOLS: [&str; 5] = [
+    "fred.list_unread_emails",
+    "teri.list_todos",
+    "teri.list_work_items",
+    "teri.get_work_item",
+    "mother.list_jobs",
+];
 
 fn tool_is_forbidden(r: &ToolResult) -> bool {
     matches!(r, ToolResult::Forbidden(_))
