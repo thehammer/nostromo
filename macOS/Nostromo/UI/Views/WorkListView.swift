@@ -377,15 +377,19 @@ final class WorkListView: NSView {
 
     /// Rebuild the chips and menus only when their counts or the selected filter changed.
     private func rebuildFilterControlsIfNeeded() {
-        let key = ControlsKey(counts: snapshot?.facetCounts ?? [:], filter: filter)
-        guard key != shownControls else { return }
+        guard currentControlsKey != shownControls else { return }
         rebuildFilterControls()
+    }
+
+    private var currentControlsKey: ControlsKey {
+        ControlsKey(counts: snapshot?.facetCounts ?? [:], filter: filter)
     }
 
     private func rebuildFilterControls() {
         filterControlRebuildCount += 1
-        shownControls = ControlsKey(counts: snapshot?.facetCounts ?? [:], filter: filter)
-        let counts = snapshot?.facetCounts ?? [:]
+        let key = currentControlsKey
+        shownControls = key
+        let counts = key.counts
         // Chips
         chipStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if let facet = config.chipFacet {

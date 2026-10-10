@@ -47,7 +47,6 @@ final class TeriSurfaceView: NSView {
     /// again whenever the split view's width changes (a window resize keeps the ratio).
     private var splitAppliedWidth: CGFloat = 0
 
-
     // MARK: Init
 
     init(store: WorkStore, defaults: UserDefaults = .standard, center: NotificationCenter = .default,
@@ -82,7 +81,6 @@ final class TeriSurfaceView: NSView {
         super.viewDidMoveToWindow()
         focusActiveList()
     }
-
 
     // MARK: Public
 
@@ -230,7 +228,6 @@ final class TeriSurfaceView: NSView {
         ])
         wantsLayer = true
         layer?.backgroundColor = Theme.bg.cgColor
-
     }
 
     private func observe() {
