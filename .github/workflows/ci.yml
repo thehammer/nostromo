@@ -121,6 +121,26 @@ jobs:
           sw_vers
           system_profiler SPDisplaysDataType
 
+      # The app's mono font is Fira Code Nerd Font (Theme.firaCode), which a
+      # developer has installed in ~/Library/Fonts but a hosted runner does not.
+      # Without it AppKit falls back to SF Mono, whose line metrics differ, and
+      # the rendered-height goldens in ChatTurnViewLayoutTests (recorded against
+      # Fira Code) come out 3-120 pt short. Install the exact release the
+      # goldens were recorded with, pinned by version and checksum, so the
+      # font can neither drift under the tests nor be swapped by a bad download.
+      - name: Install Fira Code Nerd Font (pinned)
+        env:
+          FIRA_VERSION: v3.4.0
+          FIRA_SHA256: 7cc4ffd8f7a1fc914cdab7b149808298165ff7a7f40e40d82dea9ebe41e8ca0b
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/FiraCode.zip" \
+            "https://github.com/ryanoasis/nerd-fonts/releases/download/${FIRA_VERSION}/FiraCode.zip"
+          echo "${FIRA_SHA256}  $RUNNER_TEMP/FiraCode.zip" | shasum -a 256 -c -
+          mkdir -p "$HOME/Library/Fonts"
+          unzip -q -o "$RUNNER_TEMP/FiraCode.zip" 'FiraCodeNerdFont-*.ttf' -d "$HOME/Library/Fonts"
+          ls "$HOME/Library/Fonts"
+
       # The same command a developer runs locally (the `NostromoTests` scheme).
       - name: make mac-test
         run: make mac-test
