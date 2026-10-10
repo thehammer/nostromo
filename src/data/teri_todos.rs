@@ -2,8 +2,10 @@
 //! active todos every 5 s and pushes snapshots to a watch channel.
 //!
 //! The database is owned by Teri's external Claude plugin; nostromo reads it
-//! strictly read-only. A missing DB file is treated as "no todos yet" rather
-//! than an error.
+//! strictly read-only. A missing DB file means Teri was never set up: it is
+//! reported as `not_configured` (not an error, and not a bare empty list), so
+//! consumers can tell "Teri isn't set up" from both "no todos" and "failed".
+//! The snapshot never carries the database path.
 
 use std::path::PathBuf;
 
@@ -18,6 +20,10 @@ pub struct TeriTodosSnapshot {
     pub items: Vec<TeriTodo>,
     pub stale: bool,
     pub error: Option<String>,
+    /// True when Teri has no database yet (a user who never set Teri up).
+    /// That is an empty state, not a failure: `error` stays `None`.
+    #[serde(default)]
+    pub not_configured: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -56,6 +62,7 @@ async fn run(tx: watch::Sender<Option<TeriTodosSnapshot>>) {
                 items: vec![],
                 stale: true,
                 error: Some(format!("join error: {join_err}")),
+                not_configured: false,
             });
         let _ = tx.send(Some(snap));
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -69,6 +76,7 @@ fn fetch_once(path: PathBuf) -> TeriTodosSnapshot {
             items: vec![],
             stale: false,
             error: None,
+            not_configured: true,
         };
     }
     match query_todos(&path) {
@@ -77,6 +85,7 @@ fn fetch_once(path: PathBuf) -> TeriTodosSnapshot {
             items,
             stale: false,
             error: None,
+            not_configured: false,
         },
         Err(e) => {
             warn!("teri todos query failed: {e:#}");
@@ -85,6 +94,7 @@ fn fetch_once(path: PathBuf) -> TeriTodosSnapshot {
                 items: vec![],
                 stale: true,
                 error: Some(e.to_string()),
+                not_configured: false,
             }
         }
     }
@@ -117,4 +127,42 @@ fn query_todos(path: &PathBuf) -> rusqlite::Result<Vec<TeriTodo>> {
         })
     })?;
     rows.collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_database_is_not_configured_not_an_error_and_leaks_no_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join(".teri").join("teri.db");
+
+        let snap = fetch_once(missing);
+
+        assert!(snap.not_configured, "a user with no Teri db is 'not configured'");
+        assert_eq!(snap.error, None, "not an error");
+        assert!(!snap.stale);
+        assert!(snap.items.is_empty());
+        let wire = serde_json::to_string(&snap).unwrap();
+        let dir_str = dir.path().to_string_lossy();
+        assert!(
+            !wire.contains(dir_str.as_ref()),
+            "no field may carry the db path ({dir_str}): {wire}"
+        );
+    }
+
+    #[test]
+    fn a_present_but_corrupt_database_is_still_a_stale_error_not_not_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("teri.db");
+        std::fs::write(&path, vec![0xAB_u8; 4096]).unwrap();
+
+        let snap = fetch_once(path);
+
+        assert!(!snap.not_configured, "a corrupt db is a failure, not an empty state");
+        assert!(snap.stale, "{snap:?}");
+        assert!(snap.error.is_some(), "{snap:?}");
+        assert!(snap.items.is_empty());
+    }
 }

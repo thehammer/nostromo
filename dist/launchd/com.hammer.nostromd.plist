@@ -16,7 +16,9 @@
   <key>EnvironmentVariables</key>
     <dict>
       <key>RUST_LOG</key><string>info</string>
-      <key>NOSTROMD_TCP_ADDR</key><string>0.0.0.0:47100</string>
+      <!-- Loopback only: the TCP listener is unauthenticated (see .claude/wip/nostromd-tcp-47100-exposure).
+           Do NOT set 0.0.0.0 until the listener has authentication; it also breaks LAN/iOS clients by design. -->
+      <key>NOSTROMD_TCP_ADDR</key><string>127.0.0.1:47100</string>
       <key>HOME</key><string>__HOME__</string>
       <key>PATH</key><string>__HOME__/bin:__HOME__/.local/bin:__HOME__/.cargo/bin:__HOME__/.claude/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>

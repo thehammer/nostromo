@@ -1535,47 +1535,26 @@ async fn handle_mcp_command(
         }
 
         // ── MotherEnqueue ─────────────────────────────────────────────────────
-        McpCommand::MotherEnqueue { plan_path, reply } => {
-            if !plan_path.exists() || !plan_path.is_file() {
-                let _ = reply.send(Err(format!("plan_not_found: {}", plan_path.display())));
+        McpCommand::MotherEnqueue { req, reply } => {
+            if !req.plan_file.is_file() {
+                let _ = reply.send(Err(format!("plan_not_found: {}", req.plan_file.display())));
                 return;
             }
-            if let Err(e) = mother::add_plan(&plan_path).await {
-                let _ = reply.send(Err(format!("mother_cli_error: {e}")));
-                return;
-            }
-            // Re-list to find the new job (mother add doesn't return a job id).
-            match mother::list_jobs().await {
-                Ok(jobs) => {
-                    // The most recently created job is probably our new one.
-                    // Find a queued or ready job whose plan_path matches.
-                    let path_str = plan_path.to_string_lossy();
-                    let lite = jobs
-                        .iter()
-                        .find(|j| {
-                            j.plan_path.as_deref() == Some(path_str.as_ref())
-                                && (j.state == "queued" || j.state == "ready")
-                        })
-                        .or_else(|| jobs.iter().max_by_key(|j| j.created_at))
-                        .map(|j| crate::mcp::command::MotherJobLite {
-                            id: j.id.clone(),
-                            title: j.title.clone(),
-                            status: j.state.clone(),
-                        })
-                        .unwrap_or_else(|| crate::mcp::command::MotherJobLite {
-                            id: String::new(),
-                            title: String::new(),
-                            status: "unknown".into(),
-                        });
-                    let _ = reply.send(Ok(lite));
+            match mother::add_job(req).await {
+                Ok(id) => {
+                    // Best-effort title/status lookup; the id is authoritative.
+                    let job = mother::list_jobs()
+                        .await
+                        .ok()
+                        .and_then(|jobs| jobs.into_iter().find(|j| j.id == id));
+                    let _ = reply.send(Ok(crate::mcp::command::MotherJobLite {
+                        title: job.as_ref().map(|j| j.title.clone()).unwrap_or_default(),
+                        status: job.map(|j| j.state).unwrap_or_else(|| "queued".into()),
+                        id,
+                    }));
                 }
                 Err(e) => {
-                    // add_plan succeeded, but list failed — best-effort reply.
-                    let _ = reply.send(Ok(crate::mcp::command::MotherJobLite {
-                        id: String::new(),
-                        title: format!("mother_list_error: {e}"),
-                        status: "queued".into(),
-                    }));
+                    let _ = reply.send(Err(format!("mother_cli_error: {e}")));
                 }
             }
         }

@@ -89,9 +89,22 @@ Replace the legacy shell-script calls with MCP tool calls.
 Replace any `touch ~/.claude/state/fred/*.dirty` references.  Fred's data is
 now accessible directly via MCP:
 
-- `fred.list_unread_emails()` — returns the live mailbox snapshot.
-- `fred.list_calendar_events()` — returns today's calendar (or pass `{ "date": "YYYY-MM-DD" }`).
-- `fred.get_state()` — returns `{ unread_count, today_event_count, mailbox, calendar }`.
+- `fred.list_unread_emails()` — returns `{ state, updated_at, reason?, auth?, unread_count, items }`
+  (the list is `items`; it used to be `emails`).
+- `fred.list_calendar_events()` — returns `{ state, updated_at, reason?, events }` for today
+  (or pass `{ "date": "YYYY-MM-DD" }`).
+- `fred.get_state()` — returns `{ state, updated_at, reason?, auth?, unread_count, today_event_count, mailbox, calendar, mailbox_state, calendar_state }`.
+- `nostromo.get_view_state({ view_id: "fred" | "teri" })` returns the same shapes as
+  `fred.get_state` / `teri.list_todos`.
+
+Always check `state` before trusting an empty list: `loading`, `error`,
+`stale` and `unauthenticated` all come with empty or old data. For Teri,
+`not_configured` means the user has no Teri database yet (an empty state, not
+a failure).
+
+`mother.enqueue_job` now requires `repo` (a bare repo name such as `nostromo`,
+not `owner/slug`) and `branch` in addition to an absolute `plan_path`; the plan
+must contain a `suggested_config` block.
 
 Remove any lines about touching dirty-sentinel files or running shell scripts to
 trigger a refresh.

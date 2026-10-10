@@ -464,7 +464,7 @@ async fn fred_list_unread_emails_filters_read() {
     );
 
     let result = fred::list_unread_emails(&state);
-    let items = result.as_array().expect("should return array");
+    let items = result["items"].as_array().expect("should return array");
     assert_eq!(items.len(), 2, "should return only the 2 unread items");
 
     // Verify each returned item is unread.
@@ -499,6 +499,7 @@ async fn fred_list_calendar_events_no_date_returns_all() {
         sweater: "sage".to_string(),
         stale: false,
         error: None,
+        generated_at: None,
     };
     let state = seeded_state(
         None,
@@ -514,7 +515,7 @@ async fn fred_list_calendar_events_no_date_returns_all() {
 
     let input = fred::CalendarEventsInput { date: None };
     let result = fred::list_calendar_events(&state, &input);
-    let events = result.as_array().expect("should return array");
+    let events = result["events"].as_array().expect("should return array");
     assert_eq!(events.len(), 2, "no date filter should return all 2 events");
 }
 
@@ -541,6 +542,7 @@ async fn fred_list_calendar_events_with_date_filters() {
         sweater: "amber".to_string(),
         stale: false,
         error: None,
+        generated_at: None,
     };
     let state = seeded_state(
         None,
@@ -559,7 +561,7 @@ async fn fred_list_calendar_events_with_date_filters() {
         date: Some("2026-05-14".to_string()),
     };
     let result = fred::list_calendar_events(&state, &input);
-    let events = result.as_array().expect("should return array");
+    let events = result["events"].as_array().expect("should return array");
     assert_eq!(
         events.len(),
         1,
@@ -583,6 +585,7 @@ async fn fred_get_state_fields() {
         sweater: "sage".to_string(),
         stale: false,
         error: None,
+        generated_at: None,
     };
     let state = seeded_state(
         None,
@@ -732,6 +735,7 @@ async fn teri_list_todos_returns_items() {
         ],
         stale: false,
         error: None,
+        not_configured: false,
     };
     let state = seeded_state(
         None,
@@ -798,6 +802,15 @@ async fn nostromo_get_budget_posture_returns_posture() {
     let result = nostromo_meta::get_budget_posture(&state);
     // BudgetPosture serialises with #[serde(rename_all="lowercase")].
     assert_eq!(result, "elevated");
+}
+
+#[tokio::test]
+async fn nostromo_rate_limits_and_posture_stay_null_outside_the_daemon_when_unset() {
+    // The TUI path is unchanged: "not available" is only spelled out for the
+    // daemon-hosted server.
+    let state = seeded_state(None, None, None, None, None, vec![], None, None, None);
+    assert!(nostromo_meta::get_rate_limits(&state).is_null());
+    assert!(nostromo_meta::get_budget_posture(&state).is_null());
 }
 
 #[tokio::test]

@@ -6,6 +6,7 @@
 use serde_json::{json, Value};
 
 use crate::mcp::state::McpSharedState;
+use crate::mcp::tools::{fred, mother as mother_tools, teri};
 
 /// Handle `nostromo.list_views`.
 ///
@@ -29,7 +30,12 @@ pub async fn handle(state: &McpSharedState) -> Value {
 pub async fn handle_for(state: &McpSharedState, network_driven: bool) -> Value {
     let views = state.views_meta.read().await.clone();
 
-    let mut result = Vec::with_capacity(views.len());
+    let mut result = Vec::with_capacity(views.len() + 4);
+    // The daemon has no TUI to fill `views_meta`; report the built-in sources
+    // from the live channels instead.
+    if state.daemon.is_some() {
+        result.extend(builtin_entries(state));
+    }
     for view in &views {
         // The Fred/Teri/Mother summaries are unread, todo and job counts: for a
         // session a network peer is steering they are withheld.
@@ -87,4 +93,42 @@ fn summary_for(view_id: &str, state: &McpSharedState) -> Value {
         }
         _ => json!({}),
     }
+}
+
+/// `{ name, counts, state }` for each built-in source, computed from the live
+/// watch channels.
+fn builtin_entries(state: &McpSharedState) -> Vec<Value> {
+    let (teri_state, active_todos) = teri::summary(state);
+    let (fred_state, unread, today_events) = fred::summary(state);
+    let (queue, perri_state) = match state.perri_queue_rx.borrow().as_ref() {
+        None => (0, "loading"),
+        Some(s) if s.stale => (s.items.len(), "stale"),
+        Some(s) => (s.items.len(), "fresh"),
+    };
+    let jobs = state.mother_jobs_rx.borrow();
+    let count = |states: &[&str]| jobs.iter().filter(|j| states.contains(&j.state.as_str())).count();
+    let mut mother = json!({
+        "name": "mother",
+        "counts": {
+            "running": count(&["running"]),
+            "queued": count(&["queued", "ready"]),
+            "awaiting": count(&["awaiting"]),
+            "failed": count(&["failed"]),
+        },
+    });
+    if let Some(obj) = mother.as_object_mut() {
+        for (k, v) in mother_tools::source_fields(state) {
+            obj.insert(k.into(), v);
+        }
+    }
+    vec![
+        json!({ "name": "teri", "counts": { "active_todos": active_todos }, "state": teri_state }),
+        json!({
+            "name": "fred",
+            "counts": { "unread": unread, "today_events": today_events },
+            "state": fred_state,
+        }),
+        json!({ "name": "perri", "counts": { "queue": queue }, "state": perri_state }),
+        mother,
+    ]
 }

@@ -363,13 +363,20 @@ pub fn tool_descriptors() -> Vec<Value> {
         // ── Phase 3: Mother mutations ──────────────────────────────────────
         json!({
             "name": "mother.enqueue_job",
-            "description": "Enqueue a plan file as a new Mother job. Returns { id, title, status }.",
+            "description": "Enqueue a plan file as a new Mother job via `mother add`. Returns { id } (plus title/status in the TUI). `repo` (a bare repo NAME such as `nostromo`, as `mother add --repo NAME` takes — not an owner/slug) and `branch` are required. The plan file must contain a `suggested_config` block. Values for repo/branch/base/label/repo_path/depends_on must not start with `-`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "plan_path": { "type": "string", "description": "Absolute path to the plan Markdown file" }
+                    "plan_path": { "type": "string", "description": "Absolute path to the plan Markdown file; it must contain a `suggested_config` block" },
+                    "repo": { "type": "string", "description": "Bare repository name as `mother add --repo NAME` takes it, e.g. `nostromo` (not `owner/slug`). Required. Unless repo_path is given the checkout is ~/Code/<repo>." },
+                    "branch": { "type": "string", "description": "Branch the job works on (required)" },
+                    "repo_path": { "type": "string", "description": "Local path of the repository (default: ~/Code/<repo>)" },
+                    "base": { "type": "string", "description": "Base branch" },
+                    "max_cost": { "type": "number", "description": "Maximum cost in dollars" },
+                    "label": { "type": "string", "description": "Job label" },
+                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Job ids this job depends on" }
                 },
-                "required": ["plan_path"]
+                "required": ["plan_path", "repo", "branch"]
             }
         }),
         json!({

@@ -24,7 +24,7 @@ use crate::{
     event::AppEvent,
     ipc::{decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
     mcp::tool_stats::ToolStats,
-    mother::{MotherJob, MotherStatus},
+    mother::{JobsFeed, MotherJob, MotherSourceState, MotherStatus},
 };
 
 // ── identity types ─────────────────────────────────────────────────────────────
@@ -200,6 +200,15 @@ pub struct McpSharedState {
     /// Mirror of the most recent `AppEvent::MotherJobs`.
     pub mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
 
+    /// Whether `mother_jobs_rx` can be trusted (loading / fresh / stale / error).
+    /// Stays `Loading` outside the daemon, where nothing publishes it.
+    pub mother_source_rx: watch::Receiver<MotherSourceState>,
+
+    /// The daemon's job feed, when this process owns one. Mutating tools publish
+    /// through it so their effect is visible to readers without waiting for the
+    /// next poll.
+    pub mother_feed: Option<JobsFeed>,
+
     /// Mirror of the most recent `AppEvent::MotherStatusline`.
     pub mother_status_rx: watch::Receiver<Option<MotherStatus>>,
 
@@ -246,6 +255,8 @@ impl McpSharedState {
             fred_calendar_rx,
             teri_todos_rx,
             mother_jobs_rx,
+            mother_source_rx: watch::channel(MotherSourceState::Loading).1,
+            mother_feed: None,
             mother_status_rx,
             rate_limits_rx,
             budget_posture_rx,
@@ -369,24 +380,40 @@ impl McpSharedState {
     }
 
     /// Variant of [`for_daemon`] that accepts the real watch receivers from the
-    /// daemon's background sources, so `perri.list_pr_queue`, `perri.get_current_pr`,
-    /// `mother.list_jobs`, etc. return live data instead of the empty stubs from
-    /// `for_test`.
-    pub fn for_daemon_with_sources(
-        daemon: DaemonMcpBackend,
-        perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
-        perri_pr_rx: watch::Receiver<PrSnapshots>,
-        mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
-    ) -> Self {
+    /// daemon's background sources, so `perri.list_pr_queue`, `teri.list_todos`,
+    /// `fred.get_state`, `mother.list_jobs`, etc. return live data instead of
+    /// the empty stubs from `for_test`.
+    pub fn for_daemon_with_sources(daemon: DaemonMcpBackend, sources: DaemonSources) -> Self {
         let (event_tx, _dropped_rx) = mpsc::unbounded_channel();
         let mut state = Self::for_test(event_tx);
         state.daemon = Some(daemon);
-        state.perri_queue_rx = perri_queue_rx;
-        state.perri_pr_rx = perri_pr_rx;
+        state.perri_queue_rx = sources.perri_queue_rx;
+        state.perri_pr_rx = sources.perri_pr_rx;
         // The PR source owns the real sender; drop the test one so nothing in
         // the daemon can publish a snapshot behind the source's back.
         state.perri_pr_tx = None;
-        state.mother_jobs_rx = mother_jobs_rx;
+        state.mother_jobs_rx = sources.mother.jobs_rx();
+        state.mother_source_rx = sources.mother.source_rx();
+        state.mother_feed = Some(sources.mother);
+        state.fred_mailbox_rx = sources.fred_mailbox_rx;
+        state.fred_calendar_rx = sources.fred_calendar_rx;
+        state.teri_todos_rx = sources.teri_todos_rx;
         state
     }
+}
+
+/// The live watch receivers a daemon-hosted MCP server reads from.
+///
+/// A struct rather than positional arguments so a new source doesn't grow
+/// `for_daemon_with_sources`' argument list. Mother status and rate limits
+/// have no daemon source: `mother.get_status` derives from `mother_jobs_rx`.
+pub struct DaemonSources {
+    pub perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
+    pub perri_pr_rx: watch::Receiver<PrSnapshots>,
+    /// The job feed: the poller publishes into it, the MCP mutators publish
+    /// through it after each mutation, and the readers subscribe to it.
+    pub mother: JobsFeed,
+    pub fred_mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
+    pub fred_calendar_rx: watch::Receiver<Option<CalendarSnapshot>>,
+    pub teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
 }

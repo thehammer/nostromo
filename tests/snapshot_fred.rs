@@ -60,6 +60,7 @@ fn fake_calendar() -> CalendarSnapshot {
         sweater: "sage".into(),
         stale: false,
         error: None,
+        generated_at: None,
     }
 }
 
