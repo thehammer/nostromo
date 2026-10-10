@@ -56,9 +56,17 @@ class AppStore: ObservableObject {
 
     // Perri PR queue
     @Published private(set) var perriQueue:          [PRQueueItem]  = []
+    // Stale/loading are driven by `perriHealth` (the connection + whether a perri_state frame has
+    // arrived since it came up); the wire frame has no stale/error flag of its own.
     @Published private(set) var perriQueueStale:     Bool           = false
     @Published private(set) var perriQueueError:     String?        = nil
-    @Published private(set) var perriQueueLoading:   Bool           = false
+    @Published private(set) var perriQueueLoading:   Bool           = true
+    private var perriHealth = PerriQueueHealth() {
+        didSet {
+            perriQueueStale   = perriHealth.stale
+            perriQueueLoading = perriHealth.loading
+        }
+    }
 
     // Perri PR detail pane
     @Published private(set) var perriDetail:         PRDetail?      = nil
@@ -445,7 +453,10 @@ class AppStore: ObservableObject {
         // its retained work frames, and an older daemon sends none).
         client.connected
             .receive(on: DispatchQueue.main)
-            .sink { connected in
+            .sink { [weak self] connected in
+                // The Perri queue held from a dropped connection is stale until a fresh
+                // perri_state frame arrives; a new connection has not delivered one yet.
+                self?.perriHealth.connectionChanged(connected)
                 if connected {
                     WorkStore.shared.reset()
                 } else {
@@ -1098,8 +1109,8 @@ class AppStore: ObservableObject {
             // publishers the file-watchers already drive.  The file-watcher path
             // is preserved (not removed) in this wedge.
             perriQueue      = queue
-            perriQueueStale = false
             perriQueueError = nil
+            perriHealth.frameArrived()
             // `current` is already decoded as PRDetail? from the wire shape.
             if let current { perriDetail = current }
 

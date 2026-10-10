@@ -31,6 +31,7 @@ class TabBarView: NSView {
 
     /// The rows last built, so an attention change can re-flag them without a rebuild.
     private var currentRows: [NavRow] = []
+    private var badges = SidebarBadgeModel()
 
     /// Set by MainLayout when the active focus changes. Drives highlight state.
     var activeFocus: Focus? {
@@ -163,6 +164,24 @@ class TabBarView: NSView {
             .sink { [weak self] _ in self?.updateAttention() }
             .store(in: &cancellables)
 
+        // Live counts / "needs you" signals on the built-in rows, computed from data the
+        // app already holds. Debounced; applied in place (no rebuild, no height change).
+        // The 30 s tick refreshes time-based text (meeting countdown, overdue).
+        let store = AppStore.shared
+        SidebarBadgeModel.debouncedRefresh(sources: [
+            store.$fredMailbox.map { _ in () }.eraseToAnyPublisher(),
+            store.$fredCalendar.map { _ in () }.eraseToAnyPublisher(),
+            store.$teriTodos.map { _ in () }.eraseToAnyPublisher(),
+            store.$perriQueue.map { _ in () }.eraseToAnyPublisher(),
+            store.$perriQueueStale.map { _ in () }.eraseToAnyPublisher(),
+            store.$perriQueueError.map { _ in () }.eraseToAnyPublisher(),
+            store.$perriQueueLoading.map { _ in () }.eraseToAnyPublisher(),
+            store.$motherStatus.map { _ in () }.eraseToAnyPublisher(),
+            Timer.publish(every: 30, on: .main, in: .common).autoconnect().map { _ in () }.eraseToAnyPublisher(),
+        ], interval: .milliseconds(250), scheduler: DispatchQueue.main)
+        .sink { [weak self] in self?.updateBadges() }
+        .store(in: &cancellables)
+
         // Per-focus PR under review (W8) — rebuild the rows with fresh
         // labels whenever any focus's pin loads or clears. `perriDetailByTag`
         // is app-wide (not per-window), so every window's sidebar reacts to
@@ -201,7 +220,8 @@ class TabBarView: NSView {
                 let detail = perriDetailByTag[tag]
                 return (detail?.repo, detail?.prNumber)
             },
-            branchFor: { $0.projectPath.flatMap { branches[$0] } }
+            branchFor: { $0.projectPath.flatMap { branches[$0] } },
+            badgeDetailFor: { [badges] in badges.badge(for: $0)?.detail }
         )
         currentRows = rows
         var prev: NSView? = nil
@@ -221,6 +241,10 @@ class TabBarView: NSView {
             case .focus(let focus, let label, let secondary, let indented):
                 let item = NavTabItem(focus: focus, label: label, secondary: secondary, indented: indented)
                 item.onTap = { [weak self] in self?.onSwitch?(focus) }
+                item.onBadgeTap = { [weak self] in
+                    self?.onSwitch?(focus)
+                    if let target = SidebarBadgeModel.deepLink(for: focus) { FocusDeepLink.post(target) }
+                }
 
                 if !focus.isBuiltIn {
                     let menu = NSMenu()
@@ -292,7 +316,7 @@ class TabBarView: NSView {
 
         updateStates()
         updateSweaters()
-        updateAttention()
+        updateBadges()
     }
 
     @objc private func renameTapped(_ sender: NSMenuItem) {
@@ -338,8 +362,23 @@ class TabBarView: NSView {
 
     // MARK: - State updates
 
+    /// Recompute the built-in rows' badges and apply them in place.
+    private func updateBadges() {
+        let store = AppStore.shared
+        badges.update(BadgeInputs(
+            fredMailbox: store.fredMailbox, fredCalendar: store.fredCalendar, teriTodos: store.teriTodos,
+            motherStatus: store.motherStatus, perriQueueCount: store.perriQueue.count,
+            perriQueueStale: store.perriQueueStale, perriQueueError: store.perriQueueError,
+            perriQueueLoading: store.perriQueueLoading), now: Date())
+        for row in currentRows {
+            guard case .focus(let focus, _, _, _) = row else { continue }
+            items[focus.id]?.setBadge(badges.badge(for: focus.sessionTag))
+        }
+        updateAttention()
+    }
+
     private func updateAttention() {
-        let tags = AppStore.shared.attentionTags
+        let tags = badges.combinedAttentionTags(storeTags: AppStore.shared.attentionTags)
         for row in currentRows {
             guard case .focus(let focus, _, _, _) = row else { continue }
             items[focus.id]?.needsAttention = row.needsAttention(in: tags)
