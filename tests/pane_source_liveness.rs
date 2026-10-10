@@ -600,6 +600,9 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
             org: None,
             is_built_in: false,
             session_summary: None,
+            label: None,
+            project_path: None,
+            select_for_client: None,
         }
     }
     let prs: nostromo::data::perri_pr::PrSnapshots = Arc::new(

@@ -45,7 +45,7 @@ fn project_name_from(cwd: &std::path::Path) -> Option<String> {
 }
 
 /// Handle `nostromo.create_focus`.
-pub async fn create_focus(state: &McpSharedState, args: &Value, _pty_id: Option<&str>) -> Value {
+pub async fn create_focus(state: &McpSharedState, args: &Value, pty_id: Option<&str>) -> Value {
     let Some(daemon) = &state.daemon else {
         return json!({ "error": "not_supported", "detail": "create_focus requires the daemon-hosted MCP server" });
     };
@@ -76,6 +76,27 @@ pub async fn create_focus(state: &McpSharedState, args: &Value, _pty_id: Option<
     };
 
     let tag = derive_tag(&agent, &title);
+
+    // Seeded context is, in practice, text from a work item (a Jira
+    // description, a mail body, a todo): the focus's transcript, panes and
+    // metadata must never reach a network (TCP) peer. Registered before the
+    // session exists so nothing it says can be sent first.
+    //
+    // A focus created BY a Teri/Fred session (its title can be a mail subject)
+    // is sensitive too, context or not. For a daemon-hosted session the
+    // calling pty id is the focus tag.
+    {
+        let sensitive = daemon.session_mgr.lock().unwrap().sensitive_tags();
+        let from_sensitive_caller = pty_id.is_some_and(|caller| sensitive.tag_is_sensitive(caller));
+        if initial_context.is_some() || from_sensitive_caller {
+            sensitive.mark_tag(&tag);
+        }
+        // A focus spawned by a session a network peer is steering is steered
+        // by that peer too: it must not be a way back to the withheld tools.
+        if pty_id.is_some_and(|caller| sensitive.is_network_driven(caller)) {
+            sensitive.mark_network_driven(&tag);
+        }
+    }
 
     // Idempotent: a live focus with this tag returns its id rather than erroring.
     {
@@ -121,6 +142,9 @@ pub async fn create_focus(state: &McpSharedState, args: &Value, _pty_id: Option<
         org: None,
         is_built_in: false,
         session_summary: None,
+        label: None,
+        project_path: cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        select_for_client: None,
     };
     {
         let mut mgr = daemon.session_mgr.lock().unwrap();

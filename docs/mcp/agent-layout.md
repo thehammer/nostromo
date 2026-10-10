@@ -149,3 +149,58 @@ review flow works until her prompt is rewritten to use `show` instead (see
 `docs/mcp/tools.md`'s "Per-caller tool withdrawal" section — the mechanism
 that will eventually narrow Perri specifically to the curated surface ships
 inert, and stays inert until that prompt change lands).
+
+## Transport trust
+
+`nostromd` serves the Mac app over a Unix socket and iOS/LAN clients over an
+unauthenticated TCP listener. Each connection is tagged with a `PeerTrust`
+(`src/ipc/peer.rs`) by the accept loop that received it: Unix → `LocalOther`,
+TCP → `Tcp`. A network (`Tcp`) peer is **never** sent Teri/Fred data, whatever
+topics it subscribed to (an empty topic list means "everything"):
+
+- `fred_state`, `teri_state`, `work_source_status`, `work_snapshot`,
+  `teri_picks`, `work_detail`, `work_send_preview` and `work_send_result` frames
+  are dropped before topic matching, and are never replayed from the retained
+  cache. After subscribing, a network peer gets one `withheld` frame naming
+  the topics (`fred`, `teri`, `work`).
+- `work_detail_request`, `work_refresh`, `picks_refresh`,
+  `work_send_preview_request`, `work_send` and `fred_seed` are refused with
+  `requires_secure_connection` (in the matching targeted result frame) and
+  change nothing.
+- Anything that can carry the same text through an *older* frame is scoped by
+  focus tag (or Mother job id) and withheld for a **sensitive** tag: session
+  transcripts (`session_turns`, `session_turn_delta`, `session_state`,
+  `session_summary_update`, ...), `pane_content`, `focus_layout`,
+  `notification`, `decision_request` / `decision_resolved`, `activity` /
+  `activity_snapshot`, per-focus `perri_state`, and the Mother job frames of a
+  work-derived job. This applies on replay, broadcast and targeted paths.
+  Unattributed `activity` events are withheld.
+- A tag is sensitive when it is `fred` / `teri`, runs the `fred`/`teri` agent
+  (any tag), or was created from work items (`work_send`) or through
+  `nostromo.create_focus` with `initial_context` or from a Fred/Teri session
+  (`SensitiveTags`, persisted beside `daemon-sessions.json`). A network peer's
+  `session_attach` / `session_send` / `session_control` / `session_interrupt` /
+  `session_spawn`, `close_pane`, `mother_action` / `mother_resume` for a
+  sensitive tag or job are refused with `requires_secure_connection`.
+- `session_list_resp` and `mother_jobs` omit sensitive entries. In focus frames
+  a network peer sees no `project_path`, `label` or `session_summary`, and a
+  sensitive focus shows only its agent name (a work-derived tag is replaced
+  by an opaque id).
+
+Every `ServerMsg` / `ClientMsg` variant is classified in `peer.rs` through an
+exhaustive `match`, so adding a variant does not compile until it is classified.
+That is **not** a security audit: the whole unauthenticated listener is tracked
+separately (`.claude/wip/nostromd-tcp-47100-exposure`). `pty_spawn`,
+`focus_registry_push`, `perri_action`, `decision_answer` for ordinary focuses and
+the content of non-sensitive focuses are knowingly still reachable by a network
+peer; `peer.rs` lists them in a block comment.
+
+### Version skew (`Welcome.features`)
+
+An older daemon drops a connection whose `subscribe` names a topic it does not
+know. `Topic` now decodes unknown names as `unknown` (ignored), and the daemon's
+`welcome` carries an additive `features` list (`"work"`). The Mac client
+subscribes to the base topics immediately and sends a second `subscribe`
+adding `work` only when that connection's `welcome` lists it; a later
+`subscribe` on a live connection replaces the topic list and replays retained
+frames for the topics it adds (never to a network peer).

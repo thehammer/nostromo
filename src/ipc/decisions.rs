@@ -58,6 +58,10 @@ pub enum AnswerOutcome {
     AlreadyAnswered,
     /// `request_id` was never issued by this registry.
     UnknownRequest,
+    /// `choice_id` is not one of the choices the request offered. The request
+    /// stays active and unresolved: the answer never reaches the asking agent,
+    /// so free text cannot be smuggled to it through `decision_answer`.
+    UnknownChoice,
 }
 
 /// Outcome of [`DecisionRegistry::resolve_active`], the shared internal path
@@ -74,6 +78,8 @@ enum ResolveResult {
 /// One outstanding (on-the-wire) decision request for a tag.
 struct ActiveEntry {
     tag: String,
+    /// The ids of the choices the request offered; the only ids an answer may name.
+    choice_ids: Vec<String>,
     reply: oneshot::Sender<DecisionOutcome>,
 }
 
@@ -114,6 +120,10 @@ pub struct DecisionRegistry {
     /// setting `renders_decisions: true` on that frame. See
     /// [`Self::has_operator`].
     operators: HashSet<String>,
+    /// Network (TCP) connections that declared the same. Kept apart: a network
+    /// peer is never sent a decision for a sensitive focus. See
+    /// [`Self::has_operator_for`].
+    network_operators: HashSet<String>,
     /// Wired by [`DecisionRegistry::configure_broadcast`] so every resolution
     /// path can announce a [`ServerMsg::DecisionResolved`] notice — the fix
     /// for the multi-window decision-sheet bug: every presenting window (not
@@ -156,6 +166,7 @@ impl DecisionRegistry {
     ) -> (String, oneshot::Receiver<DecisionOutcome>, Option<ServerMsg>) {
         let request_id = Uuid::new_v4().to_string();
         let (reply, rx) = oneshot::channel();
+        let choice_ids = choices.iter().map(|c| c.id.clone()).collect();
         let msg = ServerMsg::DecisionRequest {
             tag: tag.clone(),
             request_id: request_id.clone(),
@@ -173,7 +184,7 @@ impl DecisionRegistry {
             (request_id, rx, None)
         } else {
             self.active_by_tag.insert(tag.clone(), request_id.clone());
-            self.active.insert(request_id.clone(), ActiveEntry { tag, reply });
+            self.active.insert(request_id.clone(), ActiveEntry { tag, choice_ids, reply });
             (request_id, rx, Some(msg))
         }
     }
@@ -181,8 +192,16 @@ impl DecisionRegistry {
     // ── resolution ────────────────────────────────────────────────────────────
 
     /// Resolve the active request `request_id` with the operator's answer.
-    /// `choice_id: None` means dismissed without choosing.
+    /// `choice_id: None` means dismissed without choosing. A `Some` id must be
+    /// one the request offered (exact match), whoever is asking: the id is
+    /// handed to the agent as a trusted tool result, so an unknown one is
+    /// rejected with [`AnswerOutcome::UnknownChoice`] and the request stays open.
     pub fn answer(&mut self, request_id: &str, choice_id: Option<String>) -> AnswerOutcome {
+        if let (Some(id), Some(entry)) = (&choice_id, self.active.get(request_id)) {
+            if !entry.choice_ids.iter().any(|offered| offered == id) {
+                return AnswerOutcome::UnknownChoice;
+            }
+        }
         let outcome = match choice_id {
             Some(id) => DecisionOutcome::Answered(id),
             None => DecisionOutcome::Dismissed,
@@ -282,8 +301,10 @@ impl DecisionRegistry {
         if queue.is_empty() {
             self.queues.remove(tag);
         }
-        let request_id = match &next.msg {
-            ServerMsg::DecisionRequest { request_id, .. } => request_id.clone(),
+        let (request_id, choice_ids) = match &next.msg {
+            ServerMsg::DecisionRequest { request_id, choices, .. } => {
+                (request_id.clone(), choices.iter().map(|c| c.id.clone()).collect())
+            }
             _ => unreachable!("QueuedEntry::msg is always a DecisionRequest"),
         };
         self.active_by_tag.insert(tag.to_string(), request_id.clone());
@@ -291,6 +312,7 @@ impl DecisionRegistry {
             request_id,
             ActiveEntry {
                 tag: tag.to_string(),
+                choice_ids,
                 reply: next.reply,
             },
         );
@@ -304,7 +326,19 @@ impl DecisionRegistry {
     /// this before submitting anything — an agent blocking on a closed GUI is
     /// a worse failure than an immediate refusal.
     pub fn has_operator(&self) -> bool {
-        !self.operators.is_empty()
+        !self.operators.is_empty() || !self.network_operators.is_empty()
+    }
+
+    /// Is there a client that can receive a decision request on a focus that is
+    /// `sensitive` (or not)? A network peer renders only ordinary focuses (a
+    /// sensitive request is never sent to it), so it counts only for those.
+    pub fn has_operator_for(&self, sensitive: bool) -> bool {
+        !self.operators.is_empty() || (!sensitive && !self.network_operators.is_empty())
+    }
+
+    /// A network (TCP) client that renders decisions; see [`Self::has_operator_for`].
+    pub fn add_network_operator(&mut self, conn_key: &str) {
+        self.network_operators.insert(conn_key.to_string());
     }
 
     pub fn add_operator(&mut self, conn_key: &str) {
@@ -313,9 +347,15 @@ impl DecisionRegistry {
 
     pub fn remove_operator(&mut self, conn_key: &str) {
         self.operators.remove(conn_key);
+        self.network_operators.remove(conn_key);
     }
 
     // ── test/diagnostic visibility ────────────────────────────────────────────
+
+    /// The focus tag an active request belongs to, if `request_id` is active.
+    pub fn tag_of_active(&self, request_id: &str) -> Option<String> {
+        self.active.get(request_id).map(|e| e.tag.clone())
+    }
 
     /// The active request id for `tag`, if any.
     pub fn active_request_id(&self, tag: &str) -> Option<String> {
@@ -398,6 +438,9 @@ mod tests {
             AnswerOutcome::UnknownRequest => {
                 panic!("{context}: expected Answered, got UnknownRequest")
             }
+            AnswerOutcome::UnknownChoice => {
+                panic!("{context}: expected Answered, got UnknownChoice")
+            }
         }
     }
 
@@ -413,6 +456,9 @@ mod tests {
             }
             AnswerOutcome::UnknownRequest => {
                 panic!("{context}: expected Answered, got UnknownRequest")
+            }
+            AnswerOutcome::UnknownChoice => {
+                panic!("{context}: expected Answered, got UnknownChoice")
             }
         }
     }
@@ -573,6 +619,9 @@ mod tests {
             }
             AnswerOutcome::UnknownRequest => {
                 panic!("a known-but-resolved request_id must be AlreadyAnswered, not UnknownRequest")
+            }
+            AnswerOutcome::UnknownChoice => {
+                panic!("a resolved request_id must be AlreadyAnswered, not UnknownChoice")
             }
         }
 
@@ -1043,5 +1092,58 @@ mod tests {
         let (_c_id, mut rx_c, _bcast_c) = submit_simple(&mut registry, "teri", "C?");
         registry.cancel_tag("teri");
         assert_eq!(rx_c.try_recv(), Ok(DecisionOutcome::Cancelled));
+    }
+
+    // ── network operators (round 3) ───────────────────────────────────────────
+    //
+    // An unauthenticated network peer may render decisions for ordinary
+    // focuses, but a request on a sensitive (Teri/Fred-derived) focus is never
+    // sent to it, so it must not count as someone who can answer one.
+
+    #[test]
+    fn with_no_operator_nobody_can_receive_a_request_on_any_kind_of_focus() {
+        let registry = DecisionRegistry::new();
+        assert!(!registry.has_operator());
+        assert!(!registry.has_operator_for(false));
+        assert!(!registry.has_operator_for(true));
+    }
+
+    #[test]
+    fn a_local_operator_counts_for_requests_on_sensitive_and_ordinary_focuses_alike() {
+        let mut registry = DecisionRegistry::new();
+        registry.add_operator("local-1");
+        assert!(registry.has_operator());
+        assert!(registry.has_operator_for(false));
+        assert!(registry.has_operator_for(true));
+    }
+
+    #[test]
+    fn a_network_operator_counts_only_for_requests_on_ordinary_focuses() {
+        let mut registry = DecisionRegistry::new();
+        registry.add_network_operator("tcp-1");
+        assert!(registry.has_operator(), "has_operator() still means any operator");
+        assert!(registry.has_operator_for(false));
+        assert!(!registry.has_operator_for(true), "a network peer never receives a sensitive request");
+    }
+
+    #[test]
+    fn a_local_operator_alongside_a_network_one_makes_sensitive_requests_deliverable() {
+        let mut registry = DecisionRegistry::new();
+        registry.add_network_operator("tcp-1");
+        registry.add_operator("local-1");
+        assert!(registry.has_operator_for(true));
+
+        registry.remove_operator("local-1");
+        assert!(!registry.has_operator_for(true), "only the network operator is left");
+        assert!(registry.has_operator_for(false));
+    }
+
+    #[test]
+    fn removing_a_network_operator_withdraws_it() {
+        let mut registry = DecisionRegistry::new();
+        registry.add_network_operator("tcp-1");
+        registry.remove_operator("tcp-1");
+        assert!(!registry.has_operator());
+        assert!(!registry.has_operator_for(false));
     }
 }

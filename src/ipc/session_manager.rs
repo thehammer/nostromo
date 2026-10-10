@@ -49,6 +49,7 @@ use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
 use super::decisions::DecisionRegistry;
+use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
 use super::pane_registry::{PaneContentProvider, PaneRegistry, PerriStateProvider};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
 use super::stream_json::{
@@ -314,6 +315,10 @@ pub struct SessionManager {
     /// — because attribution needs exactly the state this type already owns
     /// (the live `sessions` map and the `session_reverse` index).
     activity_store: crate::activity::store::ActivityStore,
+    /// Focus tags / Mother jobs that carry Teri/Fred-derived content, which a
+    /// network (TCP) peer must neither read nor drive. See
+    /// [`SensitiveTags`]; persisted beside the session id store.
+    sensitive: SensitiveTags,
 }
 
 impl SessionManager {
@@ -322,6 +327,19 @@ impl SessionManager {
     }
 
     pub fn with_store_path(store_path: PathBuf) -> Self {
+        let stored = load_id_store(&store_path);
+        let sensitive =
+            SensitiveTags::persisted_for_sessions(registry_path_beside(&store_path), !stored.is_empty());
+        if sensitive.is_degraded() {
+            // The registry may have lost registrations (a failed write before
+            // this start, or it is missing while sessions exist), so every
+            // stored session is treated as sensitive: each is registered now,
+            // before any client can connect.
+            for tag in stored.keys() {
+                sensitive.note_resumed(tag);
+            }
+            sensitive.settle_lost_history();
+        }
         Self {
             sessions: HashMap::new(),
             client_senders: Arc::new(Mutex::new(HashMap::new())),
@@ -338,7 +356,14 @@ impl SessionManager {
             decisions: None,
             session_reverse: HashMap::new(),
             activity_store: crate::activity::store::ActivityStore::new(),
+            sensitive,
         }
+    }
+
+    /// The registry of sensitive tags/jobs (a shared handle: clones see the
+    /// same registrations).
+    pub fn sensitive_tags(&self) -> SensitiveTags {
+        self.sensitive.clone()
     }
 
     /// Wire the daemon-hosted MCP bridge: the shared pane registry plus the
@@ -439,17 +464,19 @@ impl SessionManager {
     ) -> crate::activity::store::Attribution {
         use crate::activity::store::Attribution;
 
-        let tag = event
-            .focus_tag
+        let from_focus_tag = event.focus_tag.as_ref().filter(|tag| self.knows_focus(tag)).cloned();
+        let from_session_id = event
+            .session_id
             .as_ref()
-            .filter(|tag| self.knows_focus(tag))
-            .cloned()
-            .or_else(|| {
-                event
-                    .session_id
-                    .as_ref()
-                    .and_then(|sid| self.tag_for_session_id(sid))
-            });
+            .and_then(|sid| self.tag_for_session_id(sid));
+        // The two normally agree. When they do not, a sensitive owner wins:
+        // what a network peer may be shown is decided by this tag, and a
+        // hook-supplied `focus_tag` must not be able to move a Teri/Fred
+        // session's events onto an ordinary focus.
+        let tag = match from_session_id {
+            Some(sid_tag) if self.sensitive.tag_is_sensitive(&sid_tag) => Some(sid_tag),
+            sid_tag => from_focus_tag.or(sid_tag),
+        };
 
         match (tag, &event.agent_id) {
             (Some(tag), Some(agent_id)) => Attribution::Subagent {
@@ -470,7 +497,19 @@ impl SessionManager {
         event: crate::agent_bus::ActivityEvent,
     ) -> crate::agent_bus::ActivityEvent {
         let attribution = self.resolve_attribution(&event);
-        self.activity_store.ingest(event, attribution)
+        let attributed_tag = match &attribution {
+            crate::activity::store::Attribution::Focus { tag }
+            | crate::activity::store::Attribution::Subagent { tag, .. } => Some(tag.clone()),
+            crate::activity::store::Attribution::Unattributed => None,
+        };
+        let mut finalized = self.activity_store.ingest(event, attribution);
+        // The attributed focus is authoritative: a hook-supplied `focus_tag`
+        // may be absent or wrong (attribution can come from the session id),
+        // and what a network peer may see is decided by this tag.
+        if attributed_tag.is_some() {
+            finalized.focus_tag = attributed_tag;
+        }
+        finalized
     }
 
     /// [`Self::ingest_activity_event`], additionally reporting whether this
@@ -529,6 +568,15 @@ impl SessionManager {
         session_id: Option<String>,
         remote_control: bool,
     ) -> Result<Option<String>> {
+        // A Fred/Teri session has mail/calendar/todo tools and reads their
+        // data: whatever tag it runs under is sensitive. Registered before the
+        // child exists, so nothing it produces can precede the registration.
+        // A session spawned while a work item is being sent holds that item's
+        // content likewise (see `peer::within_work_send`).
+        if is_teri_or_fred_agent(&agent_name) || in_work_send() {
+            self.sensitive.mark_tag(&tag);
+        }
+
         if let Some(existing) = self.sessions.get(&tag) {
             if existing.alive() {
                 return Ok(existing.session_id.clone());
@@ -542,6 +590,9 @@ impl SessionManager {
             Some(id) => (id, true),
             None => (Uuid::new_v4().to_string(), false),
         };
+        if resume {
+            self.sensitive.note_resumed(&tag);
+        }
         self.session_reverse.insert(effective_id.clone(), tag.clone());
 
         let program = resolve_claude()?;
@@ -741,6 +792,11 @@ impl SessionManager {
         text: &str,
         images: &[String],
     ) -> Result<()> {
+        // Text sent during a work-item send is that item's content: the
+        // session it lands in is sensitive before the text is written.
+        if in_work_send() {
+            self.sensitive.mark_tag(tag);
+        }
         let session = self
             .sessions
             .get(tag)
@@ -1406,6 +1462,18 @@ impl SessionManager {
         Some(tags)
     }
 
+    /// A focus that runs the Fred/Teri agent is sensitive even when no session
+    /// of it is live yet (its persisted layout and panes are replayed to a
+    /// connecting client before the session respawns).
+    ///
+    /// Called for registries pushed by a *local* peer only: the registration is
+    /// permanent and persisted, so a network peer must not be able to grow it.
+    pub fn mark_teri_fred_focuses(&self, focuses: &[FocusMeta]) {
+        for focus in focuses.iter().filter(|f| is_teri_or_fred_agent(&f.agent_name)) {
+            self.sensitive.mark_tag(&focus.tag);
+        }
+    }
+
     /// Current focus registry snapshot.
     pub fn focus_registry(&self) -> Vec<FocusMeta> {
         self.focus_registry.clone()
@@ -1431,6 +1499,10 @@ impl SessionManager {
     /// `create_focus` MCP tool, which adds an agent-spawned focus to the
     /// daemon-owned registry.
     pub fn add_or_update_focus(&mut self, meta: FocusMeta) -> Vec<FocusMeta> {
+        self.mark_teri_fred_focuses(std::slice::from_ref(&meta));
+        if in_work_send() {
+            self.sensitive.mark_tag(&meta.tag);
+        }
         // This is the only way a focus enters the registry other than a Mac
         // push, so it is where a daemon-created tag earns its eviction
         // exemption (W7 — D8b).
@@ -2260,6 +2332,9 @@ mod tests {
             org: None,
             is_built_in: false,
             session_summary: None,
+            label: None,
+            project_path: None,
+            select_for_client: None,
         }
     }
 
@@ -2545,6 +2620,9 @@ mod tests {
             org: None,
             is_built_in: true,
             session_summary: None,
+            label: None,
+            project_path: None,
+            select_for_client: None,
         }]);
 
         let finalized = mgr.ingest_activity_event(raw_activity_event(Some("fred"), None));
@@ -3206,5 +3284,140 @@ mod image_encoding_tests {
         assert_eq!(ok.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(ok[0].media_type, "image/png");
+    }
+}
+
+/// A session or focus a work send creates or feeds holds work-item content from
+/// its first instant, so the manager registers it as sensitive while the
+/// server's work-send scope is open, before doing anything else (a service may
+/// broadcast about the new focus long before `send` returns).
+#[cfg(test)]
+mod work_send_scope_tests {
+    use super::*;
+    use crate::ipc::peer::within_work_send;
+
+    fn focus(tag: &str) -> FocusMeta {
+        FocusMeta {
+            tag: tag.into(),
+            display_name: "Cody on SECRET".into(),
+            agent_name: "cody".into(),
+            project_name: None,
+            org: None,
+            is_built_in: false,
+            session_summary: Some("SECRET".into()),
+            label: Some("SECRET".into()),
+            project_path: None,
+            select_for_client: None,
+        }
+    }
+
+    /// Kills any stub children on drop, even when an assertion fails first:
+    /// the test runtime waits for the blocking reader threads, which only end
+    /// when their child does.
+    struct Reaped(SessionManager);
+
+    impl std::ops::Deref for Reaped {
+        type Target = SessionManager;
+        fn deref(&self) -> &SessionManager {
+            &self.0
+        }
+    }
+
+    impl std::ops::DerefMut for Reaped {
+        fn deref_mut(&mut self) -> &mut SessionManager {
+            &mut self.0
+        }
+    }
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            self.0.kill_all_on_shutdown();
+        }
+    }
+
+    fn manager(dir: &tempfile::TempDir) -> Reaped {
+        Reaped(SessionManager::with_store_path(dir.path().join("sessions.json")))
+    }
+
+    /// A session that stays alive and swallows its stdin.
+    fn spawn_idle(mgr: &mut SessionManager, tag: &str) {
+        let program = PathBuf::from("/bin/sh");
+        let args = vec!["-c".to_string(), "cat > /dev/null".to_string()];
+        let managed = mgr
+            .spawn_managed(
+                tag.into(),
+                "cody".into(),
+                "View".into(),
+                None,
+                false,
+                format!("sid-{tag}"),
+                false,
+                program.clone(),
+                args.clone(),
+                Some((program, args)),
+            )
+            .expect("spawn idle stub");
+        mgr.sessions.insert(tag.to_string(), managed);
+    }
+
+    #[tokio::test]
+    async fn a_focus_added_inside_a_work_send_is_sensitive_at_once_and_one_added_outside_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let tags = mgr.sensitive_tags();
+
+        mgr.add_or_update_focus(focus("cody-ordinary"));
+        assert!(!tags.tag_is_sensitive("cody-ordinary"));
+
+        within_work_send(async {
+            mgr.add_or_update_focus(focus("cody-derived"));
+            assert!(
+                tags.tag_is_sensitive("cody-derived"),
+                "the tag must be registered by the time add_or_update_focus returns"
+            );
+        })
+        .await;
+
+        assert!(tags.tag_is_sensitive("cody-derived"), "registration is permanent");
+        assert!(!tags.tag_is_sensitive("cody-ordinary"));
+        mgr.add_or_update_focus(focus("cody-after"));
+        assert!(!tags.tag_is_sensitive("cody-after"), "the scope ended with the work send");
+    }
+
+    #[tokio::test]
+    async fn a_message_sent_inside_a_work_send_marks_the_session_sensitive_but_one_sent_outside_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let tags = mgr.sensitive_tags();
+        spawn_idle(&mut mgr, "cody-plain");
+        spawn_idle(&mut mgr, "cody-seeded");
+
+        mgr.send_user_message("cody-plain", "hello", &[]).expect("send outside the scope");
+        assert!(!tags.tag_is_sensitive("cody-plain"));
+
+        within_work_send(async {
+            mgr.send_user_message("cody-seeded", "WORK-CONTEXT", &[]).expect("send inside the scope");
+        })
+        .await;
+        assert!(tags.tag_is_sensitive("cody-seeded"));
+        assert!(!tags.tag_is_sensitive("cody-plain"));
+    }
+
+    #[tokio::test]
+    async fn a_send_inside_a_work_send_registers_the_tag_even_when_the_send_itself_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let tags = mgr.sensitive_tags();
+
+        within_work_send(async {
+            let outcome = mgr.send_user_message("cody-not-running", "WORK-CONTEXT", &[]);
+            assert!(outcome.is_err(), "there is no such session");
+        })
+        .await;
+
+        assert!(
+            tags.tag_is_sensitive("cody-not-running"),
+            "registration comes before anything that can fail, so no frame can slip out first"
+        );
     }
 }

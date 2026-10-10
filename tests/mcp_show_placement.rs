@@ -145,6 +145,9 @@ fn register_focuses(harness: &Harness, tags: &[&str]) {
             org: None,
             is_built_in: true,
             session_summary: None,
+            label: None,
+            project_path: None,
+            select_for_client: None,
         })
         .collect();
     harness.session_mgr.lock().unwrap().set_focus_registry(metas);

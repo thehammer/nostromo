@@ -16,6 +16,7 @@
 //! The targeted channel is registered with [`PtyManager::client_sender_registry`]
 //! on connect and removed on disconnect.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -29,6 +30,10 @@ use uuid::Uuid;
 use super::{
     codec::{read_frame, write_frame},
     decisions::{AnswerOutcome, DecisionRegistry},
+    peer::{
+        outbound, refuse_for_network, withheld_msg, within_work_send, PeerTrust,
+        SensitiveTags, Transport,
+    },
     protocol::{
         ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
         MIN_CLIENT_VERSION, PROTOCOL_VERSION,
@@ -36,11 +41,26 @@ use super::{
     pty_manager::PtyManager,
     session_manager::SessionManager,
 };
+use crate::data::work::{
+    fred_detail_service, work_service, SendOutcome, SendRequest, SourceState, WorkError, WorkResult,
+};
+
+/// The optional capability advertised in `Welcome.features`: this daemon serves
+/// the `work` topic and its frames.
+const FEATURE_WORK: &str = "work";
+
+/// Latest broadcast frame per retain key (see [`retain_key`]), replayed to a
+/// local client that subscribes after the frame was sent.
+type RetainedCache = Arc<Mutex<BTreeMap<String, ServerMsg>>>;
 
 /// Handle to the running IPC server.  Drop to shut down.
 pub struct Server {
     socket_path: PathBuf,
     pub tx: broadcast::Sender<ServerMsg>,
+    retained: RetainedCache,
+    /// Bumped when the retained cache lagged and must be repopulated; the
+    /// pollers that own retained frames (`fred`, `teri`) re-publish on it.
+    republish: tokio::sync::watch::Sender<u64>,
 }
 
 impl Server {
@@ -83,8 +103,14 @@ impl Server {
         let tx_clone = tx.clone();
         let path = socket_path.to_path_buf();
 
+        // Subscribe before returning so no broadcast sent after `bind` can be missed.
+        let retained: RetainedCache = Arc::new(Mutex::new(BTreeMap::new()));
+        let (republish, _) = tokio::sync::watch::channel(0u64);
+        tokio::spawn(retain_broadcasts(tx.subscribe(), Arc::clone(&retained), republish.clone()));
+
+        let retained_for_loop = Arc::clone(&retained);
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr, perri_state_dir, decisions).await {
+            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr, perri_state_dir, decisions, retained_for_loop).await {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -94,7 +120,16 @@ impl Server {
         Ok(Self {
             socket_path: path,
             tx,
+            retained,
+            republish,
         })
+    }
+
+    /// A receiver that changes whenever the retained-frame cache lagged and
+    /// every source that owns a retained frame should publish its current
+    /// state again. Pollers `select!` on `changed()` next to their own source.
+    pub fn subscribe_republish(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.republish.subscribe()
     }
 
     /// Broadcast a message to all connected, subscribed clients.
@@ -119,8 +154,9 @@ impl Server {
         decisions: Arc<Mutex<DecisionRegistry>>,
     ) {
         let tx = self.tx.clone();
+        let retained = Arc::clone(&self.retained);
         tokio::spawn(async move {
-            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr, perri_state_dir, decisions).await {
+            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr, perri_state_dir, decisions, retained).await {
                 warn!("TCP IPC accept loop exited: {e:#}");
             }
         });
@@ -142,6 +178,7 @@ async fn accept_loop(
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
     decisions: Arc<Mutex<DecisionRegistry>>,
+    retained: RetainedCache,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -152,8 +189,10 @@ async fn accept_loop(
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
                 let decisions = Arc::clone(&decisions);
+                let retained = Arc::clone(&retained);
+                let trust = PeerTrust::from_transport(Transport::Unix);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions).await {
+                    if let Err(e) = handle_client(stream, trust, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions, retained).await {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -172,6 +211,7 @@ async fn accept_loop_tcp(
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
     decisions: Arc<Mutex<DecisionRegistry>>,
+    retained: RetainedCache,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -183,8 +223,10 @@ async fn accept_loop_tcp(
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
                 let decisions = Arc::clone(&decisions);
+                let retained = Arc::clone(&retained);
+                let trust = PeerTrust::from_transport(Transport::Tcp);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions).await {
+                    if let Err(e) = handle_client(stream, trust, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions, retained).await {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -204,17 +246,24 @@ async fn accept_loop_tcp(
 /// [`AsyncWrite`].  `tokio::io::split` provides transport-agnostic halves
 /// whose `ReadHalf`/`WriteHalf` are always `Unpin`, so the handshake and
 /// the `select!` loop below need no stream-specific code.
+///
+/// `trust` says how far this peer is trusted (derived from its transport by the
+/// accept loop). A network peer is never sent Teri/Fred data and its requests
+/// for it are refused; see [`super::peer`].
+#[allow(clippy::too_many_arguments)]
 async fn handle_client<S>(
     stream: S,
+    trust: PeerTrust,
     mut broadcast_rx: broadcast::Receiver<ServerMsg>,
     broadcast_tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
     decisions: Arc<Mutex<DecisionRegistry>>,
+    retained: RetainedCache,
 ) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite,
+    S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -257,6 +306,7 @@ where
     let welcome = ServerMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
         daemon_pid: std::process::id(),
+        features: vec![FEATURE_WORK.to_string()],
     };
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
     debug!(claimed_id, conn_key, "client welcomed");
@@ -266,7 +316,7 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let (topics, renders_decisions): (Vec<Topic>, bool) = match sub {
+    let (mut topics, renders_decisions): (Vec<Topic>, bool) = match sub {
         ClientMsg::Subscribe { topics, renders_decisions } => (topics, renders_decisions),
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
@@ -289,15 +339,19 @@ where
     // operator iff it named `Topic::Decision` explicitly, or set
     // `renders_decisions: true` — the only way to make that claim without a
     // full topic enumeration when subscribing to everything.
-    let is_operator = topics.contains(&Topic::Decision) || renders_decisions;
+    let mut is_operator = topics.contains(&Topic::Decision) || renders_decisions;
     if is_operator {
-        decisions.lock().unwrap().add_operator(&conn_key);
+        add_operator(&decisions, &conn_key, trust);
     }
 
     // ── Register per-client targeted channel ──────────────────────────────────
     // Use `conn_key` (server-minted UUID) as the registry key — not the
     // client-supplied `claimed_id` — so no remote peer can impersonate an
     // existing connection by guessing or replaying another client's id.
+
+    // Which tags/jobs carry Teri/Fred-derived content. Held as a handle so the
+    // write path never takes the session manager's lock.
+    let sensitive = session_mgr.lock().unwrap().sensitive_tags();
 
     let (targeted_tx, mut targeted_rx) = mpsc::unbounded_channel::<ServerMsg>();
     {
@@ -356,7 +410,16 @@ where
                 snapshots.extend(provider.bound_pane_contents());
             }
         }
-        replay_messages(&mut writer, snapshots).await;
+        // A network peer is replayed only what it could also be sent live: the
+        // layout and pane content of a sensitive focus never leave this box.
+        // (Pane content of an ordinary dynamic focus is still replayed — the
+        // exposure of the rest of the daemon is tracked separately, see
+        // `peer.rs`.)
+        replay_messages(
+            &mut writer,
+            snapshots.into_iter().filter_map(|m| outbound(trust, m, &sensitive)),
+        )
+        .await;
     }
 
     // ── Activity replay — snapshot + health on (re)connect ────────────────────
@@ -383,7 +446,14 @@ where
             let health_msg = activity_health_msg(&mgr, hook_installed);
             (snapshots, health_msg)
         };
-        replay_messages(&mut writer, snapshots.into_iter().chain(std::iter::once(health_msg))).await;
+        replay_messages(
+            &mut writer,
+            snapshots
+                .into_iter()
+                .chain(std::iter::once(health_msg))
+                .filter_map(|m| outbound(trust, m, &sensitive)),
+        )
+        .await;
     }
 
     // ── Perri replay — push the current queue/current-PR to a new client ──
@@ -404,15 +474,35 @@ where
             (mgr.perri_state_provider(), tags)
         };
         let frames = provider.map(|p| p.perri_states(&focus_tags)).unwrap_or_default();
-        for msg in frames {
-            let bytes = serde_json::to_vec(&msg).unwrap_or_default();
-            if !bytes.is_empty() {
-                let _ = write_frame(&mut writer, &bytes).await;
-            }
-        }
+        replay_messages(&mut writer, frames.into_iter().filter_map(|m| outbound(trust, m, &sensitive)))
+            .await;
+    }
+
+    // ── Retained replay — latest Teri/Fred/work frames, local clients only ────
+    // A network peer is never replayed anything retained (all of it is
+    // sensitive); it gets one `Withheld` notice instead.
+    if trust.is_network() {
+        replay_messages(&mut writer, [withheld_msg()]).await;
+    } else {
+        replay_messages(&mut writer, retained_matching(&retained, &topics, None)).await;
     }
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
+
+    // `read_frame` is not cancel-safe (a frame is a header read then a body
+    // read), and the `select!` below drops whichever branch loses. Reading in
+    // a task of its own and receiving whole frames here means a broadcast
+    // arriving mid-frame cannot drop half a frame and desync the stream.
+    let (frame_tx, mut frames) = mpsc::channel::<Result<Vec<u8>>>(16);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            let frame = read_frame(&mut reader).await;
+            let failed = frame.is_err();
+            if frame_tx.send(frame).await.is_err() || failed {
+                break;
+            }
+        }
+    });
 
     let result: Result<()> = loop {
         tokio::select! {
@@ -420,9 +510,14 @@ where
             bcast = broadcast_rx.recv() => {
                 match bcast {
                     Ok(msg) => {
+                        // Trust gate first: a network peer never gets a
+                        // sensitive frame, whatever its topic list says.
                         if !message_matches_topics(&msg, &topics) {
                             continue;
                         }
+                        let Some(msg) = outbound(trust, msg, &sensitive) else {
+                            continue;
+                        };
                         let bytes = match serde_json::to_vec(&msg) {
                             Ok(b) => b,
                             Err(e) => { warn!("serialise error: {e}"); continue; }
@@ -442,6 +537,12 @@ where
 
             // Targeted messages (PTY output, PtySpawned, PtyAttached, etc.)
             Some(msg) = targeted_rx.recv() => {
+                // Targeted frames (session transcripts, replies, summaries)
+                // go through the same gate as broadcasts; the only
+                // sensitive frames a network peer gets are refusals.
+                let Some(msg) = outbound(trust, msg, &sensitive) else {
+                    continue;
+                };
                 let bytes = match serde_json::to_vec(&msg) {
                     Ok(b) => b,
                     Err(e) => { warn!("serialise targeted msg: {e}"); continue; }
@@ -452,8 +553,8 @@ where
             }
 
             // Commands from client
-            frame = read_frame(&mut reader) => {
-                match frame {
+            frame = frames.recv() => {
+                match frame.unwrap_or_else(|| Err(anyhow::anyhow!("reader task ended"))) {
                     Ok(bytes) => {
                         let msg: ClientMsg = match serde_json::from_slice(&bytes) {
                             Ok(m) => m,
@@ -462,7 +563,26 @@ where
                                 continue;
                             }
                         };
-                        handle_client_msg(msg, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
+                        // A later `Subscribe` replaces the topic list: a client
+                        // that learned from `Welcome.features` that the daemon
+                        // serves `work` adds it this way.
+                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions } = msg {
+                            if !is_operator && (new_topics.contains(&Topic::Decision) || renders_decisions) {
+                                add_operator(&decisions, &conn_key, trust);
+                                is_operator = true;
+                            }
+                            // Replay retained frames only for the topics this
+                            // subscribe adds; a network peer gets none.
+                            let frames = if trust.is_network() {
+                                vec![]
+                            } else {
+                                retained_matching(&retained, &new_topics, Some(&topics))
+                            };
+                            topics = new_topics;
+                            replay_messages(&mut writer, frames).await;
+                            continue;
+                        }
+                        handle_client_msg(msg, trust, &sensitive, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -475,6 +595,7 @@ where
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
+    reader_task.abort();
     debug!(
         claimed_id,
         conn_key,
@@ -493,6 +614,19 @@ where
     }
 
     result
+}
+
+/// Record `conn_key` as a client that renders decisions. A network peer is
+/// tracked apart from a local one: it is never sent a decision for a sensitive
+/// focus, so it must not keep `nostromo.ask_decision` from failing fast with
+/// `no_operator` when the Mac is closed (see `DecisionRegistry::has_operator_for`).
+fn add_operator(decisions: &Arc<Mutex<DecisionRegistry>>, conn_key: &str, trust: PeerTrust) {
+    let mut registry = decisions.lock().unwrap();
+    if trust.is_network() {
+        registry.add_network_operator(conn_key);
+    } else {
+        registry.add_operator(conn_key);
+    }
 }
 
 /// Serialize and write each message in order, best-effort: a message that
@@ -526,6 +660,8 @@ where
 #[allow(clippy::too_many_arguments)]
 fn handle_client_msg(
     msg: ClientMsg,
+    trust: PeerTrust,
+    sensitive: &SensitiveTags,
     conn_key: &str,
     pty_mgr: &Arc<Mutex<PtyManager>>,
     session_mgr: &Arc<Mutex<SessionManager>>,
@@ -534,6 +670,13 @@ fn handle_client_msg(
     perri_state_dir: &Path,
     decisions: &Arc<Mutex<DecisionRegistry>>,
 ) {
+    // Default-deny for network peers (see `peer::refuse_for_network`): anything
+    // but an explicitly allowed read-only request changes nothing.
+    if trust.is_network() && refuse_for_network(&msg, sensitive) {
+        refuse_over_network(&msg, targeted_tx);
+        return;
+    }
+
     match msg {
         ClientMsg::Ping => {
             let _ = targeted_tx.send(ServerMsg::Pong);
@@ -667,6 +810,14 @@ fn handle_client_msg(
 
         ClientMsg::SessionSend { tag, text, images } => {
             let mut mgr = session_mgr.lock().unwrap();
+            // A network peer never reaches here (`session_send` is refused for
+            // it, see `peer::refused_for_network`). Kept as defense in
+            // depth: if a network peer ever can write, withdraw the session's
+            // Teri/Fred/Mother tools first. (Only a live session can be
+            // written to, which also bounds how many tags this records.)
+            if trust.is_network() && mgr.has_live_session(&tag) {
+                sensitive.mark_network_driven(&tag);
+            }
             if let Err(e) = mgr.send_user_message(&tag, &text, &images) {
                 warn!(conn_key, %tag, "SessionSend error: {e}");
                 let _ = targeted_tx.send(ServerMsg::Error {
@@ -744,6 +895,9 @@ fn handle_client_msg(
         ClientMsg::FocusRegistryPush { focuses } => {
             let (updated, departed, reconcilable, pane_registry) = {
                 let mut mgr = session_mgr.lock().unwrap();
+                if !trust.is_network() {
+                    mgr.mark_teri_fred_focuses(&focuses);
+                }
                 let (updated, departed) = mgr.set_focus_registry(focuses);
                 (
                     updated,
@@ -934,6 +1088,12 @@ fn handle_client_msg(
                 AnswerOutcome::UnknownRequest => {
                     warn!(conn_key, %request_id, "DecisionAnswer for an unknown request_id");
                 }
+                AnswerOutcome::UnknownChoice => {
+                    warn!(conn_key, %request_id, "DecisionAnswer named a choice the request did not offer");
+                    let _ = targeted_tx.send(ServerMsg::Error {
+                        message: "decision_answer: choice_id is not one of the offered choices".to_string(),
+                    });
+                }
             }
         }
 
@@ -958,9 +1118,282 @@ fn handle_client_msg(
             }
         }
 
+        // ── Teri/Fred work views (local peers only; network refused above) ───
+        ClientMsg::WorkDetailRequest { request_id, item_id } => {
+            let tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let result = if item_id.starts_with("mail:") || item_id.starts_with("event:") {
+                    fred_detail_service().detail(&item_id).await
+                } else {
+                    work_service().detail(&item_id).await
+                };
+                let _ = tx.send(ServerMsg::WorkDetail { request_id, result: result.into() });
+            });
+        }
+
+        ClientMsg::WorkRefresh { source, fred } => {
+            tokio::spawn(async move {
+                if let Err(e) = work_service().refresh(source, fred).await {
+                    debug!(code = %e.code, "WorkRefresh not performed");
+                }
+            });
+        }
+
+        ClientMsg::PicksRefresh { reason } => {
+            tokio::spawn(async move {
+                if let Err(e) = work_service().refresh_picks(&reason).await {
+                    debug!(code = %e.code, "PicksRefresh not performed");
+                }
+            });
+        }
+
+        ClientMsg::WorkSendPreviewRequest { request_id, item_id } => {
+            let tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let result = work_service().send_preview(&item_id).await;
+                let _ = tx.send(ServerMsg::WorkSendPreview { request_id, result: result.into() });
+            });
+        }
+
+        ClientMsg::WorkSend {
+            request_id,
+            item_id,
+            destination,
+            agent,
+            working_directory,
+            label,
+            context,
+            allow_duplicate,
+        } => {
+            let tx = targeted_tx.clone();
+            let request = SendRequest {
+                item_id,
+                destination,
+                agent,
+                working_directory,
+                label,
+                context,
+                allow_duplicate,
+            };
+            let sensitive = sensitive.clone();
+            tokio::spawn(async move {
+                // Inside the scope, the session manager registers every tag
+                // the send spawns, seeds or announces *before* doing so, so
+                // nothing it creates can reach a network peer before this
+                // returns.
+                let result = within_work_send(work_service().send(request)).await;
+                // The send's outcome names what it created; registering it here
+                // as well covers a service that did not go through the session
+                // manager, and the Mother job (whose id is not known sooner).
+                if let Ok(outcome) = &result {
+                    if let Some(tag) = &outcome.focus_tag {
+                        sensitive.mark_tag(tag);
+                    }
+                    if let Some(job_id) = &outcome.job_id {
+                        sensitive.mark_job(job_id);
+                    }
+                }
+                let _ = tx.send(ServerMsg::WorkSendResult { request_id, result: result.into() });
+            });
+        }
+
+        ClientMsg::FredSeed { request_id, text } => {
+            let result = seed_fred(session_mgr, &text);
+            let _ = targeted_tx.send(ServerMsg::WorkSendResult { request_id, result });
+        }
+
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
     }
+}
+
+/// Session tag of Fred's own session.
+const FRED_TAG: &str = "fred";
+
+/// Send `text` into Fred's session as a user message.
+fn seed_fred(
+    session_mgr: &Arc<Mutex<SessionManager>>,
+    text: &str,
+) -> WorkResult<SendOutcome> {
+    let mut mgr = session_mgr.lock().unwrap();
+    if !mgr.has_live_session(FRED_TAG) {
+        return WorkResult::err("fred_not_running", "Fred's session is not running");
+    }
+    match mgr.send_user_message(FRED_TAG, text, &[]) {
+        Ok(()) => WorkResult::Ok(SendOutcome {
+            kind: "seeded".into(),
+            focus_tag: Some(FRED_TAG.into()),
+            job_id: None,
+        }),
+        Err(e) => {
+            warn!("FredSeed failed: {e:#}");
+            WorkResult::err("fred_seed_failed", format!("could not send to Fred: {e}"))
+        }
+    }
+}
+
+/// Answer a refused request from a network peer with
+/// `requires_secure_connection`, in the targeted frame that matches the
+/// request (or a plain `Error` for requests that have no result frame).
+fn refuse_over_network(msg: &ClientMsg, targeted_tx: &mpsc::UnboundedSender<ServerMsg>) {
+    let refusal = WorkError::requires_secure_connection();
+    let reply = match msg {
+        ClientMsg::WorkDetailRequest { request_id, .. } => ServerMsg::WorkDetail {
+            request_id: request_id.clone(),
+            result: WorkResult::Err(refusal),
+        },
+        ClientMsg::WorkSendPreviewRequest { request_id, .. } => ServerMsg::WorkSendPreview {
+            request_id: request_id.clone(),
+            result: WorkResult::Err(refusal),
+        },
+        ClientMsg::WorkSend { request_id, .. } | ClientMsg::FredSeed { request_id, .. } => {
+            ServerMsg::WorkSendResult {
+                request_id: request_id.clone(),
+                result: WorkResult::Err(refusal),
+            }
+        }
+        _ => ServerMsg::Error {
+            message: format!("{}: {}", refusal.code, refusal.message),
+        },
+    };
+    let _ = targeted_tx.send(reply);
+}
+
+// ── retained-message cache ────────────────────────────────────────────────────
+
+/// Key under which a broadcast frame is remembered, or `None` if it is not
+/// retained. Only the latest frame per key is kept.
+fn retain_key(msg: &ServerMsg) -> Option<String> {
+    match msg {
+        ServerMsg::FredState { .. } => Some("fred".to_string()),
+        ServerMsg::TeriState { .. } => Some("teri".to_string()),
+        ServerMsg::WorkSourceStatus { status } => Some(format!("status:{}", status.source.as_str())),
+        ServerMsg::WorkSnapshot { source, group, .. } => Some(format!(
+            "work:{}:{}",
+            source.as_str(),
+            group.as_deref().unwrap_or("")
+        )),
+        ServerMsg::TeriPicks { .. } => Some("picks".to_string()),
+        _ => None,
+    }
+}
+
+/// Retained frames a client subscribed to `topics` should be replayed, minus
+/// those it was already subscribed to under `already` (`None` = a first
+/// subscribe, nothing was delivered yet).
+fn retained_matching(
+    retained: &RetainedCache,
+    topics: &[Topic],
+    already: Option<&[Topic]>,
+) -> Vec<ServerMsg> {
+    retained
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|m| {
+            message_matches_topics(m, topics)
+                && already.is_none_or(|old| !message_matches_topics(m, old))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Update the retained cache for one broadcast frame: remember the latest
+/// frame per key, and forget what the source says is gone — a group that
+/// reports no items, and every group of a source that is no longer configured.
+fn apply_retention(cache: &mut BTreeMap<String, ServerMsg>, msg: ServerMsg) {
+    match &msg {
+        ServerMsg::WorkSnapshot { items, .. } if items.is_empty() => {
+            if let Some(key) = retain_key(&msg) {
+                cache.remove(&key);
+            }
+            return;
+        }
+        ServerMsg::WorkSourceStatus { status } if status.state == SourceState::NotConfigured => {
+            let prefix = format!("work:{}:", status.source.as_str());
+            cache.retain(|key, _| !key.starts_with(&prefix));
+        }
+        _ => {}
+    }
+    if let Some(key) = retain_key(&msg) {
+        cache.insert(key, msg);
+    }
+}
+
+/// Remember the latest retained frame per key until the broadcast channel closes.
+///
+/// If this task falls behind the channel it cannot know which retained frames
+/// it missed (including a removal), so it clears the cache rather than serve
+/// state it can no longer vouch for, and asks every source to publish again so
+/// the cache is repopulated: a Mac that reconnects after a lag must not wait
+/// for a source to change on its own before it is replayed anything.
+///
+/// Two kinds of source: the work service (refreshed here) and the pollers that
+/// own the retained `fred`/`teri` frames (poked through `republish`).
+/// Lag-triggered refreshes are coalesced: at most one runs at a time, and a
+/// burst of lags during it costs one more run, not one per lag.
+async fn retain_broadcasts(
+    mut rx: broadcast::Receiver<ServerMsg>,
+    cache: RetainedCache,
+    republish: tokio::sync::watch::Sender<u64>,
+) {
+    let resync = Arc::new(Mutex::new(Resync::Idle));
+    loop {
+        match rx.recv().await {
+            Ok(msg) => apply_retention(&mut cache.lock().unwrap(), msg),
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!("retained-message cache lagged {n} broadcast messages; clearing it and refreshing the sources");
+                cache.lock().unwrap().clear();
+                republish.send_modify(|generation| *generation = generation.wrapping_add(1));
+                request_work_resync(&resync);
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// State of the lag-triggered work refresh.
+#[derive(Debug, PartialEq, Eq)]
+enum Resync {
+    Idle,
+    /// A refresh is in flight.
+    Running,
+    /// A refresh is in flight and another lag arrived meanwhile: run once more.
+    RunAgain,
+}
+
+/// Refresh the work sources, unless a refresh is already in flight, in which
+/// case ask it to run once more when it finishes.
+fn request_work_resync(state: &Arc<Mutex<Resync>>) {
+    {
+        let mut st = state.lock().unwrap();
+        match *st {
+            Resync::Idle => *st = Resync::Running,
+            Resync::Running | Resync::RunAgain => {
+                *st = Resync::RunAgain;
+                return;
+            }
+        }
+    }
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        loop {
+            let service = work_service();
+            if let Err(e) = service.refresh(None, true).await {
+                debug!(code = %e.code, "retention resync: refresh not performed");
+            }
+            if let Err(e) = service.refresh_picks("retention_lag").await {
+                debug!(code = %e.code, "retention resync: picks refresh not performed");
+            }
+            let mut st = state.lock().unwrap();
+            if *st == Resync::RunAgain {
+                *st = Resync::Running;
+                continue;
+            }
+            *st = Resync::Idle;
+            break;
+        }
+    });
 }
 
 /// Snapshot one focus's activity streams into their wire form.
@@ -997,6 +1430,9 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherAwaitDetected(_) => subscribed(topics, Topic::MotherJobs),
         ServerMsg::MotherPeek { .. } => subscribed(topics, Topic::MotherPeek),
         ServerMsg::TeriState { .. } => subscribed(topics, Topic::Teri),
+        ServerMsg::WorkSourceStatus { .. }
+        | ServerMsg::WorkSnapshot { .. }
+        | ServerMsg::TeriPicks { .. } => subscribed(topics, Topic::Work),
         ServerMsg::FocusRegistryUpdated { .. } => subscribed(topics, Topic::Focuses),
         ServerMsg::PerriState { .. } => subscribed(topics, Topic::Perri),
         ServerMsg::FredState { .. } => subscribed(topics, Topic::Fred),

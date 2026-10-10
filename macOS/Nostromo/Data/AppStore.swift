@@ -132,6 +132,11 @@ class AppStore: ObservableObject {
     // session, or a second connected client).
     let decisionRequests = PassthroughSubject<PendingDecision, Never>()
     let decisionResolutions = PassthroughSubject<ResolvedDecision, Never>()
+    /// A daemon-announced focus that this client asked to have selected
+    /// (`select_for_client`). Each window's `MainLayout` switches to it only if
+    /// it is the key window.
+    let focusSelectionRequests = PassthroughSubject<Focus, Never>()
+    private let orgResolver = RepoOrgResolver()
 
     // MARK: - Internals
 
@@ -432,6 +437,21 @@ class AppStore: ObservableObject {
             .receive(on: DispatchQueue.main)
             .filter { $0 }                       // push on each successful (re)connect
             .sink { [weak self] _ in self?.pushFocusRegistry() }
+            .store(in: &cancellables)
+
+        // The work store holds what one connection pushed. When it drops, requests
+        // still waiting for an answer can never get one; when a connection comes
+        // up, whatever the previous one left behind is stale (the daemon re-sends
+        // its retained work frames, and an older daemon sends none).
+        client.connected
+            .receive(on: DispatchQueue.main)
+            .sink { connected in
+                if connected {
+                    WorkStore.shared.reset()
+                } else {
+                    WorkStore.shared.failPendingRequests(reason: "The daemon connection was lost")
+                }
+            }
             .store(in: &cancellables)
 
         FocusStore.shared.$focuses
@@ -1221,6 +1241,40 @@ class AppStore: ObservableObject {
             if focusLayouts[meta.tag] == nil {
                 focusLayouts[meta.tag] = FocusLayoutModel.initial
             }
+            // The daemon sends no org for a created focus; infer it from the
+            // repo remote exactly as the New Focus sheet does, so it groups
+            // under the right org rather than the "Carefeed" default.
+            if meta.org == nil, let path = focus.projectPath {
+                orgResolver.resolve(path) { org in
+                    if let org { FocusStore.shared.updateOrg(id: focus.id, org: org) }
+                }
+            }
+            // The creator asked for this focus to be selected in its own windows.
+            if meta.selectForClient == client.clientId {
+                focusSelectionRequests.send(focus)
+            }
+
+        // ── Teri/Fred work views → WorkStore ─────────────────────────────────
+        case .workSourceStatus(let status):
+            WorkStore.shared.apply(status: status)
+
+        case .workSnapshot(let source, let group, let items):
+            WorkStore.shared.apply(snapshot: source, group: group, items: items)
+
+        case .teriPicks(let picks):
+            WorkStore.shared.apply(picks: picks)
+
+        case .workDetail(let requestId, let result):
+            WorkStore.shared.resolve(requestId: requestId, with: .detail(result))
+
+        case .workSendPreview(let requestId, let result):
+            WorkStore.shared.resolve(requestId: requestId, with: .sendPreview(result))
+
+        case .workSendResult(let requestId, let result):
+            WorkStore.shared.resolve(requestId: requestId, with: .sendResult(result))
+
+        case .withheld:
+            break   // Only sent to network peers; the Mac's local connection never gets one.
 
         case .pong, .unknown:
             break

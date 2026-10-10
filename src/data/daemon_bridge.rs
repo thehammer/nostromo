@@ -90,6 +90,14 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::FredState { .. }
         // Teri todos are consumed by the Swift thin-clients.
         | ServerMsg::TeriState { .. }
+        // Teri/Fred work-view frames are consumed by the Swift thin-client.
+        | ServerMsg::WorkSourceStatus { .. }
+        | ServerMsg::WorkSnapshot { .. }
+        | ServerMsg::TeriPicks { .. }
+        | ServerMsg::WorkDetail { .. }
+        | ServerMsg::WorkSendPreview { .. }
+        | ServerMsg::WorkSendResult { .. }
+        | ServerMsg::Withheld { .. }
         // Agent-authored pane layout messages are consumed by the Swift thin-client.
         | ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }

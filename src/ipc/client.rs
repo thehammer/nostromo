@@ -207,6 +207,7 @@ async fn do_connect(path: &Path) -> Result<(SplitReader, SplitWriter, u32)> {
         ServerMsg::Welcome {
             protocol_version,
             daemon_pid,
+            ..
         } => {
             info!(daemon_pid, protocol_version, "connected to nostromd");
             if protocol_version < MIN_CLIENT_VERSION {
@@ -395,6 +396,7 @@ mod tests {
         let welcome = ServerMsg::Welcome {
             protocol_version: PROTOCOL_VERSION,
             daemon_pid,
+            features: vec![],
         };
         write_frame(&mut writer, &serde_json::to_vec(&welcome).unwrap())
             .await

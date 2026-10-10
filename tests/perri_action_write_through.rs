@@ -211,6 +211,9 @@ fn focus_meta(tag: &str) -> nostromo::ipc::protocol::FocusMeta {
         org: None,
         is_built_in: false,
         session_summary: None,
+        label: None,
+        project_path: None,
+        select_for_client: None,
     }
 }
 

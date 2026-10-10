@@ -31,6 +31,7 @@ pub mod right_panel_source;
 pub mod teri_todos;
 pub mod tickets;
 pub mod unified_diff;
+pub mod work;
 
 use std::time::Duration;
 
