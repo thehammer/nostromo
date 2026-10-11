@@ -72,6 +72,11 @@ impl SentLedger {
         }
     }
 
+    /// The file this ledger mirrors.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Record that `item_id` was sent. Persisted before it returns; on a write
     /// error the in-memory ledger still has the marker (this run's duplicate
     /// protection holds) and the error is returned for the caller to log.
@@ -304,6 +309,18 @@ pub fn focus_marker_is_live(mgr: &SessionManager, marker: &SentMarker) -> bool {
         && (mgr.has_live_session(&marker.target_id) || mgr.awaits_respawn(&marker.target_id))
 }
 
+/// Like [`focus_marker_is_live`], for duplicate protection: where that one
+/// answers "should the chip show", this answers "is a resend a duplicate". A
+/// daemon that has not yet had a registry pushed (a restart, before the Mac
+/// reconnects) cannot tell a closed focus from one it has not heard of, so a
+/// marker with no session entry here counts as live until
+/// [`SessionManager::registry_known`]; a stopped session never does.
+pub fn focus_marker_may_be_live(mgr: &SessionManager, marker: &SentMarker) -> bool {
+    let tag = &marker.target_id;
+    focus_marker_matches(mgr, marker)
+        && (mgr.has_live_session(tag) || (!mgr.has_session_entry(tag) && mgr.focus_may_exist(tag)))
+}
+
 /// Does the focus under `marker`'s tag still carry the marker's nonce? Unknown
 /// (no nonce on either side, e.g. after a restart) counts as a match.
 pub fn focus_marker_matches(mgr: &SessionManager, marker: &SentMarker) -> bool {
@@ -321,7 +338,28 @@ pub fn ledger() -> Arc<SentLedger> {
         return Arc::clone(ledger);
     }
     let mut slot = LEDGER.write().unwrap();
+    if slot.is_none() && cfg!(debug_assertions) && is_test_binary() && !teri_dir_overridden() {
+        // Release the lock first: a panic holding it would poison the ledger for every later test.
+        drop(slot);
+        panic!(
+            "a test opened the real sent ledger ({}): install_ledger a temp one and set NOSTROMO_TERI_DIR",
+            default_path().display()
+        );
+    }
     Arc::clone(slot.get_or_insert_with(|| Arc::new(SentLedger::new(default_path()))))
+}
+
+fn teri_dir_overridden() -> bool {
+    std::env::var_os("NOSTROMO_TERI_DIR").is_some_and(|d| !d.is_empty())
+}
+
+/// Is this process a cargo test binary (they live in `target/<profile>/deps`)?
+/// Only used to catch a test reaching the real `~/.nostromo/teri`.
+fn is_test_binary() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().and_then(Path::file_name).map(|n| n == "deps"))
+        .unwrap_or(false)
 }
 
 /// Replace the process-wide ledger (tests point it at a temp dir).

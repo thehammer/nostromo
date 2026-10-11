@@ -349,10 +349,18 @@ impl WorkHub {
         }
     }
 
-    /// Drop ledger markers whose focus is gone (no session and no registry
-    /// entry) or whose Mother job no longer exists.
-    async fn prune_sent(&self) {
+    /// Drop ledger markers whose focus is gone or whose Mother job no longer
+    /// exists.
+    ///
+    /// A focus marker is dropped only once the Mac has reported a registry the
+    /// daemon can vouch for ([`SessionManager::registry_known`]) and the tag
+    /// is neither running nor registered: a restarted daemon starts with an
+    /// empty registry, and pruning on that would forget live work and let a
+    /// resend duplicate it. A job marker made after the job list was asked for
+    /// is kept, since the list cannot know it.
+    pub async fn prune_sent(&self) {
         let ledger = sent::ledger();
+        let listed_at = Utc::now();
         let has_jobs = ledger
             .item_ids()
             .iter()
@@ -362,13 +370,16 @@ impl WorkHub {
         let focus_exists = |marker: &SentMarker| {
             self.ctx.session_mgr.as_ref().is_some_and(|mgr| {
                 let mgr = mgr.lock().unwrap();
-                sent::focus_marker_matches(&mgr, marker)
-                    && (mgr.has_live_session(&marker.target_id) || mgr.is_registered(&marker.target_id))
+                !mgr.registry_known()
+                    || (sent::focus_marker_matches(&mgr, marker)
+                        && (mgr.has_live_session(&marker.target_id) || mgr.focus_may_exist(&marker.target_id)))
             })
         };
         let removed = ledger.prune(&|m| match m.kind.as_str() {
             "focus" => focus_exists(m),
-            "mother_job" => jobs.as_ref().is_none_or(|jobs| jobs.contains(&m.target_id)),
+            "mother_job" => {
+                m.created_at >= listed_at || jobs.as_ref().is_none_or(|jobs| jobs.contains(&m.target_id))
+            }
             _ => true,
         });
         if removed > 0 {

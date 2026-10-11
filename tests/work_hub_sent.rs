@@ -285,3 +285,217 @@ async fn a_focus_stopped_in_this_process_stops_showing_sent_even_though_the_regi
     rig.next_snapshot(|items| sent_of(items, "todo:1").is_empty()).await;
     assert!(rig.item("todo:1").sent.is_empty());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The periodic prune must not forget live work it cannot see
+//
+// A restarted daemon has no sessions and an empty registry until the Mac has
+// pushed one. "Not registered" means nothing until then, so a focus marker is
+// pruned only once the daemon can vouch for a registry (two non-empty pushes
+// since the last empty one) that lacks the tag, with no live session either.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn push(sessions: &Mutex<SessionManager>, tags: &[&str]) {
+    sessions.lock().unwrap().set_focus_registry(tags.iter().map(|t| registry_meta(t)).collect());
+}
+
+fn tags_in_ledger(ledger: &SentLedger, item: &str) -> Vec<String> {
+    let mut tags: Vec<String> = ledger.markers(item).into_iter().map(|m| m.target_id).collect();
+    tags.sort();
+    tags
+}
+
+#[tokio::test]
+async fn a_prune_before_the_mac_has_pushed_a_registry_keeps_every_focus_marker() {
+    let rig = Rig::new(|ledger, sessions| {
+        ledger.record("todo:1", marker("focus", "cody-after-restart")).unwrap();
+        let mgr = sessions.lock().unwrap();
+        assert!(!mgr.has_live_session("cody-after-restart"), "precondition: no session");
+        assert!(mgr.focus_registry().is_empty(), "precondition: nothing pushed");
+    })
+    .await;
+
+    rig.hub.prune_sent().await;
+
+    assert_eq!(tags_in_ledger(&rig.ledger, "todo:1"), vec!["cody-after-restart".to_string()]);
+    assert_eq!(
+        tags_in_ledger(&SentLedger::new(rig.ledger.path()), "todo:1"),
+        vec!["cody-after-restart".to_string()],
+        "and the file still has it"
+    );
+}
+
+#[tokio::test]
+async fn once_two_pushes_agree_a_prune_drops_only_the_focus_markers_the_registry_lacks() {
+    let rig = Rig::new(|ledger, sessions| {
+        Rig::spawn_live(sessions, "cody-running");
+        ledger.record("todo:1", marker("focus", "cody-gone")).unwrap();
+        ledger.record("todo:1", marker("focus", "cody-listed")).unwrap();
+        ledger.record("todo:2", marker("focus", "cody-running")).unwrap();
+        ledger.record("todo:2", marker("focus", "cody-pending")).unwrap();
+        push(sessions, &["cody-listed", "cody-pending", "cody-other"]);
+        // `cody-pending` is omitted by the latest push only: a second push has to
+        // agree before it is gone.
+        push(sessions, &["cody-listed", "cody-other"]);
+        assert!(sessions.lock().unwrap().registry_known(), "precondition");
+    })
+    .await;
+
+    rig.hub.prune_sent().await;
+
+    assert_eq!(
+        tags_in_ledger(&rig.ledger, "todo:1"),
+        vec!["cody-listed".to_string()],
+        "a tag the known registry lacks, with no session, is gone"
+    );
+    assert_eq!(
+        tags_in_ledger(&rig.ledger, "todo:2"),
+        vec!["cody-pending".to_string(), "cody-running".to_string()],
+        "a live session and a pending departure both survive"
+    );
+    assert_eq!(
+        tags_in_ledger(&SentLedger::new(rig.ledger.path()), "todo:1"),
+        vec!["cody-listed".to_string()],
+        "the prune is persisted"
+    );
+}
+
+#[tokio::test]
+async fn a_focus_marker_whose_tag_was_reused_by_a_later_focus_is_pruned_even_with_the_tag_registered() {
+    let rig = Rig::new(|ledger, sessions| {
+        let mut old = marker("focus", "cody-reused");
+        old.nonce = Some("old-focus".into());
+        ledger.record("todo:1", old).unwrap();
+        sessions.lock().unwrap().set_focus_nonce("cody-reused", "new-focus".into());
+        push(sessions, &["cody-reused"]);
+        push(sessions, &["cody-reused"]);
+    })
+    .await;
+
+    rig.hub.prune_sent().await;
+
+    assert!(rig.ledger.markers("todo:1").is_empty(), "the marker belongs to a focus that is gone");
+}
+
+#[tokio::test]
+async fn an_empty_push_makes_the_registry_unknown_again_so_a_prune_keeps_the_markers() {
+    let rig = Rig::new(|ledger, sessions| {
+        ledger.record("todo:1", marker("focus", "cody-a")).unwrap();
+        ledger.record("todo:2", marker("focus", "cody-b")).unwrap();
+        push(sessions, &["cody-a"]);
+        push(sessions, &["cody-a"]);
+        // A client that reconnected before it had loaded anything.
+        push(sessions, &[]);
+        assert!(!sessions.lock().unwrap().registry_known(), "precondition");
+    })
+    .await;
+
+    rig.hub.prune_sent().await;
+
+    assert_eq!(tags_in_ledger(&rig.ledger, "todo:1"), vec!["cody-a".to_string()]);
+    assert_eq!(tags_in_ledger(&rig.ledger, "todo:2"), vec!["cody-b".to_string()], "not registered, but nothing vouches for that");
+}
+
+#[tokio::test]
+async fn a_single_non_empty_push_is_not_enough_to_prune_on() {
+    let rig = Rig::new(|ledger, sessions| {
+        ledger.record("todo:1", marker("focus", "cody-not-in-the-first-push")).unwrap();
+        push(sessions, &["cody-someone-else"]);
+        assert!(!sessions.lock().unwrap().registry_known(), "precondition");
+    })
+    .await;
+
+    rig.hub.prune_sent().await;
+
+    assert_eq!(tags_in_ledger(&rig.ledger, "todo:1"), vec!["cody-not-in-the-first-push".to_string()]);
+}
+
+// ── Mother job markers made while `mother list` is running ───────────────────
+
+/// Sets an env var for the test and restores the previous value, even on panic.
+struct EnvVar(&'static str, Option<std::ffi::OsString>);
+
+impl EnvVar {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> EnvVar {
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, value);
+        EnvVar(key, prev)
+    }
+}
+
+impl Drop for EnvVar {
+    fn drop(&mut self) {
+        match self.1.take() {
+            Some(v) => std::env::set_var(self.0, v),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+
+/// `list` announces itself, then blocks until a `release` file exists (bounded
+/// in the script itself) and answers with one job, `job-listed`.
+const BLOCKING_LIST_MOTHER: &str = r#"#!/bin/sh
+here="$(dirname "$0")"
+if [ "$1" = "list" ]; then
+  echo started > "$here/list-started"
+  i=0
+  while [ ! -e "$here/release" ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done
+  printf '[{"id":"job-listed","state":"queued"}]'
+  exit 0
+fi
+echo "mother: unexpected command: $1" >&2
+exit 2
+"#;
+
+async fn wait_for_file(path: &std::path::Path, what: &str) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !path.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_job_recorded_while_mother_is_being_listed_survives_the_prune_that_could_not_see_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = Rig::new(|ledger, _| {
+        let long_ago = Utc::now() - chrono::Duration::hours(1);
+        let mut old = marker("mother_job", "job-archived");
+        old.created_at = long_ago;
+        ledger.record("todo:1", old).unwrap();
+        let mut listed = marker("mother_job", "job-listed");
+        listed.created_at = long_ago;
+        ledger.record("todo:1", listed).unwrap();
+    })
+    .await;
+
+    let mother_dir = rig._dir.path().join("fake-mother");
+    std::fs::create_dir_all(&mother_dir).unwrap();
+    let script = mother_dir.join("mother");
+    std::fs::write(&script, BLOCKING_LIST_MOTHER).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _mother = EnvVar::set("MOTHER_BIN", &script);
+
+    let hub = Arc::clone(&rig.hub);
+    let prune = tokio::spawn(async move { hub.prune_sent().await });
+
+    // The prune is now inside `mother list`. A job queued and recorded at this
+    // moment is in the ledger but cannot be in the list it is about to get.
+    wait_for_file(&mother_dir.join("list-started"), "the prune to ask Mother for its jobs").await;
+    rig.ledger.record("todo:2", marker("mother_job", "job-just-queued")).unwrap();
+    std::fs::write(mother_dir.join("release"), "").unwrap();
+
+    tokio::time::timeout(WAIT, prune).await.expect("the prune finishes once Mother answers").unwrap();
+
+    assert_eq!(
+        tags_in_ledger(&rig.ledger, "todo:2"),
+        vec!["job-just-queued".to_string()],
+        "a job recorded after the prune started listing must not be pruned for being absent from that list"
+    );
+    assert_eq!(
+        tags_in_ledger(&rig.ledger, "todo:1"),
+        vec!["job-listed".to_string()],
+        "an old job Mother no longer lists is pruned; one it still lists is kept"
+    );
+}

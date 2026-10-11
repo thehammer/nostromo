@@ -1369,6 +1369,22 @@ async fn a_claude_symlink_that_stays_inside_the_repo_works_like_a_folder() {
 
 // ── hub integration ──────────────────────────────────────────────────────────
 
+/// The hub reads (and prunes) the process-wide sent ledger, which defaults to
+/// `~/.nostromo/teri/sent.json`: point it, and the teri dir, at a temp dir once
+/// per test process so these tests never touch the real one.
+fn isolate_sent_ledger() {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("nostromo-repo-docs-teri-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp teri dir");
+        std::env::set_var("NOSTROMO_TERI_DIR", &dir);
+        nostromo::data::work::sent::install_ledger(Arc::new(nostromo::data::work::sent::SentLedger::new(
+            dir.join("sent.json"),
+        )));
+        dir
+    });
+}
+
 /// The first message (already queued or arriving within `within`) that satisfies `done`.
 async fn recv_within(brx: &mut broadcast::Receiver<ServerMsg>, within: Duration, mut done: impl FnMut(&ServerMsg) -> bool) -> bool {
     let deadline = tokio::time::Instant::now() + within;
@@ -1401,6 +1417,7 @@ async fn hub_publishes_repo_docs_per_repo_and_republishes_a_group_as_empty_when_
     make_probe_repo(&fx.root);
     let (btx, mut brx) = broadcast::channel(1024);
     let (_ttx, trx) = watch::channel(Some(TeriTodosSnapshot { generated_at: Some(Utc::now()), ..Default::default() }));
+    isolate_sent_ledger();
     let hub = WorkHub::spawn(HubDeps { repo_docs_root: Some(fx.root.clone()), ..HubDeps::new(btx, trx) });
     let docs = WorkFilter { sources: vec![WorkSource::RepoDocs], ..Default::default() };
 

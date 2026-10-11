@@ -100,12 +100,6 @@ pub(crate) fn fence(text: &str) -> String {
     format!("{ticks}\n{body}\n{ticks}")
 }
 
-/// An id or title shown outside a fence: one line, no backticks (so it can sit
-/// in a code span or a heading without opening a fence).
-pub(crate) fn inline(text: &str) -> String {
-    one_line(text, MAX_LINE_CHARS).replace('`', "'")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,10 +145,5 @@ mod tests {
         let fenced = fence(&"y".repeat(MAX_BLOCK_CHARS + 10));
         assert!(fenced.contains("[truncated]"));
         assert!(fenced.len() < MAX_BLOCK_CHARS + 100);
-    }
-
-    #[test]
-    fn inline_has_no_backticks_or_newlines() {
-        assert_eq!(inline("a`b\n```yaml"), "a'b '''yaml");
     }
 }
