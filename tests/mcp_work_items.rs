@@ -1,6 +1,7 @@
 //! MCP `list_work_items` / `get_work_item`: the agent-facing view of the same
 //! work items the hub broadcasts to the Mac app.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,22 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, watch};
 
 const WAIT: Duration = Duration::from_secs(5);
+
+/// The hub reads (and prunes) the process-wide sent ledger, which defaults to
+/// `~/.nostromo/teri/sent.json`. Point it, and the teri dir, at a temp dir once
+/// per test process so these tests never touch the real one.
+fn isolate_sent_ledger() {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("nostromo-{}-teri-{}", "work-items", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp teri dir");
+        std::env::set_var("NOSTROMO_TERI_DIR", &dir);
+        nostromo::data::work::sent::install_ledger(std::sync::Arc::new(
+            nostromo::data::work::sent::SentLedger::new(dir.join("sent.json")),
+        ));
+        dir
+    });
+}
 
 fn todo(id: i64, title: &str, status: &str, priority: u8, due: Option<&str>, body: Option<&str>) -> TeriTodo {
     TeriTodo {
@@ -57,6 +74,7 @@ async fn rig(todos: Vec<TeriTodo>) -> Rig {
         items: todos,
         ..Default::default()
     }));
+    isolate_sent_ledger();
     let hub = WorkHub::spawn(HubDeps::new(btx, trx));
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let mut state = McpSharedState::for_test(event_tx);

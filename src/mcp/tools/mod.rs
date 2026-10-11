@@ -28,6 +28,7 @@ pub mod show;
 pub mod status_segment;
 pub mod switch_view;
 pub mod teri;
+mod untrusted;
 
 use serde_json::{json, Value};
 

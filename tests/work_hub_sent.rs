@@ -15,7 +15,7 @@ use nostromo::data::work::hub::{HubDeps, WorkHub};
 use nostromo::data::work::query::WorkFilter;
 use nostromo::data::work::sent::{install_ledger, SentLedger};
 use nostromo::data::work::{SentMarker, WorkItem, WorkSource};
-use nostromo::ipc::protocol::ServerMsg;
+use nostromo::ipc::protocol::{FocusMeta, ServerMsg};
 use nostromo::ipc::session_manager::CLAUDE_BIN_ENV;
 use nostromo::ipc::SessionManager;
 use tokio::sync::{broadcast, watch};
@@ -53,6 +53,23 @@ fn marker(kind: &str, target: &str) -> SentMarker {
         target_id: target.into(),
         label: format!("label {target}"),
         created_at: Utc::now(),
+        nonce: None,
+    }
+}
+
+/// What the Mac pushes (and the daemon keeps) for a focus.
+fn registry_meta(tag: &str) -> FocusMeta {
+    FocusMeta {
+        tag: tag.into(),
+        display_name: tag.into(),
+        agent_name: "cody".into(),
+        project_name: None,
+        org: None,
+        is_built_in: false,
+        session_summary: None,
+        label: None,
+        project_path: None,
+        select_for_client: None,
     }
 }
 
@@ -213,5 +230,58 @@ async fn closing_the_focus_clears_sent_and_clients_get_a_fresh_snapshot() {
 
     let items = rig.next_snapshot(|items| sent_of(items, "todo:1").is_empty()).await;
     assert!(sent_of(&items, "todo:2").is_empty(), "a dead marker never shows");
+    assert!(rig.item("todo:1").sent.is_empty());
+}
+
+// A restarted daemon has no sessions until the Mac reconnects and pushes its
+// focus registry; in that window an item sent before the restart must still
+// show as sent.
+
+#[tokio::test]
+async fn a_focus_known_only_from_the_pushed_registry_shows_sent_before_its_session_is_back() {
+    let rig = Rig::new(|ledger, sessions| {
+        sessions.lock().unwrap().set_focus_registry(vec![registry_meta("cody-restarted")]);
+        assert!(!sessions.lock().unwrap().has_live_session("cody-restarted"), "precondition: no session yet");
+        ledger.record("todo:1", marker("focus", "cody-restarted")).unwrap();
+    })
+    .await;
+    wait_until_items_loaded(&rig).await;
+
+    let sent = rig.item("todo:1").sent;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].target_id, "cody-restarted");
+    assert!(rig.item("todo:2").sent.is_empty());
+}
+
+#[tokio::test]
+async fn a_marker_whose_tag_is_neither_running_nor_registered_is_not_shown_even_with_a_registry() {
+    let rig = Rig::new(|ledger, sessions| {
+        sessions.lock().unwrap().set_focus_registry(vec![registry_meta("cody-someone-else")]);
+        ledger.record("todo:1", marker("focus", "cody-gone")).unwrap();
+    })
+    .await;
+    wait_until_items_loaded(&rig).await;
+    assert!(rig.item("todo:1").sent.is_empty());
+}
+
+#[tokio::test]
+async fn a_focus_stopped_in_this_process_stops_showing_sent_even_though_the_registry_still_lists_it() {
+    let mut rig = Rig::new(|ledger, sessions| {
+        Rig::spawn_live(sessions, "cody-stopped-listed");
+        sessions.lock().unwrap().set_focus_registry(vec![registry_meta("cody-stopped-listed")]);
+        ledger.record("todo:1", marker("focus", "cody-stopped-listed")).unwrap();
+    })
+    .await;
+    rig.next_snapshot(|items| !sent_of(items, "todo:1").is_empty()).await;
+
+    rig.sessions.lock().unwrap().stop("cody-stopped-listed");
+    assert!(
+        rig.sessions.lock().unwrap().focus_registry().iter().any(|f| f.tag == "cody-stopped-listed"),
+        "precondition: the registry still lists the closed focus"
+    );
+    // Make the hub look now (it also re-checks on a timer).
+    rig.ledger.record("todo:2", marker("focus", "some-dead-focus")).unwrap();
+
+    rig.next_snapshot(|items| sent_of(items, "todo:1").is_empty()).await;
     assert!(rig.item("todo:1").sent.is_empty());
 }

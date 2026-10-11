@@ -319,6 +319,9 @@ pub struct SessionManager {
     /// network (TCP) peer must neither read nor drive. See
     /// [`SensitiveTags`]; persisted beside the session id store.
     sensitive: SensitiveTags,
+    /// Per focus tag: the nonce of the focus `create_focus_core` last created
+    /// under it. In memory only (a restart forgets it).
+    focus_nonces: HashMap<String, String>,
 }
 
 impl SessionManager {
@@ -357,6 +360,7 @@ impl SessionManager {
             session_reverse: HashMap::new(),
             activity_store: crate::activity::store::ActivityStore::new(),
             sensitive,
+            focus_nonces: HashMap::new(),
         }
     }
 
@@ -1492,6 +1496,30 @@ impl SessionManager {
 
     pub fn has_live_session(&self, tag: &str) -> bool {
         self.sessions.get(tag).map(|s| s.alive()).unwrap_or(false)
+    }
+
+    /// `tag` is in the pushed focus registry but this process has no session
+    /// for it: after a daemon restart, sessions are respawned lazily as the
+    /// Mac attaches, so this focus exists and is just not running yet. A
+    /// session that was stopped in this process keeps its (exited) entry and
+    /// is not this.
+    pub fn awaits_respawn(&self, tag: &str) -> bool {
+        !self.sessions.contains_key(tag) && self.is_registered(tag)
+    }
+
+    /// `tag` is in the pushed focus registry.
+    pub fn is_registered(&self, tag: &str) -> bool {
+        self.focus_registry.iter().any(|f| f.tag == tag)
+    }
+
+    /// Record `nonce` as the identity of the focus now running under `tag`.
+    pub fn set_focus_nonce(&mut self, tag: &str, nonce: String) {
+        self.focus_nonces.insert(tag.to_owned(), nonce);
+    }
+
+    /// The nonce of the focus last created under `tag` by this process.
+    pub fn focus_nonce(&self, tag: &str) -> Option<&str> {
+        self.focus_nonces.get(tag).map(String::as_str)
     }
 
     /// Insert or replace a single focus in the registry (by `tag`), returning the

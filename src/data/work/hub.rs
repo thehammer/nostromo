@@ -284,15 +284,17 @@ impl WorkHub {
     }
 
     /// Is the focus or job a sent marker points at still there? A focus is live
-    /// while its session is; a Mother job is live until the periodic prune finds
-    /// it archived (the hub cannot ask Mother on the hot path).
+    /// while its session is (or, right after a daemon restart, while the Mac's
+    /// registry lists it and its session has yet to respawn); a Mother job is
+    /// live until the periodic prune finds it archived (the hub cannot ask
+    /// Mother on the hot path).
     fn marker_is_live(&self, marker: &SentMarker) -> bool {
         match marker.kind.as_str() {
             "focus" => self
                 .ctx
                 .session_mgr
                 .as_ref()
-                .is_some_and(|mgr| mgr.lock().unwrap().has_live_session(&marker.target_id)),
+                .is_some_and(|mgr| sent::focus_marker_is_live(&mgr.lock().unwrap(), marker)),
             _ => true,
         }
     }
@@ -348,14 +350,15 @@ impl WorkHub {
             .any(|id| ledger.markers(id).iter().any(|m| m.kind == "mother_job"));
         // Unknown (`None`) keeps every job marker.
         let jobs = if has_jobs { sent::mother_job_ids().await } else { None };
-        let focus_exists = |tag: &str| {
+        let focus_exists = |marker: &SentMarker| {
             self.ctx.session_mgr.as_ref().is_some_and(|mgr| {
                 let mgr = mgr.lock().unwrap();
-                mgr.has_live_session(tag) || mgr.focus_registry().iter().any(|f| f.tag == tag)
+                sent::focus_marker_matches(&mgr, marker)
+                    && (mgr.has_live_session(&marker.target_id) || mgr.is_registered(&marker.target_id))
             })
         };
         let removed = ledger.prune(&|m| match m.kind.as_str() {
-            "focus" => focus_exists(&m.target_id),
+            "focus" => focus_exists(m),
             "mother_job" => jobs.as_ref().is_none_or(|jobs| jobs.contains(&m.target_id)),
             _ => true,
         });

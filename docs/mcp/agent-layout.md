@@ -105,6 +105,15 @@ adds the tab. The focus carries `label` (defaults to the title in markers),
 `working_directory`, GitHub only, same rules as the Mac's `RepoOrg`) and the
 project path.
 
+**Third-party text is data.** `initial_context` (and a source item's title) is
+usually a Jira description, a mail body or a repo doc, so the core never
+interpolates it into instructions: it goes in a code fence longer than any
+backtick run it contains, after a notice that it is untrusted data from the
+source and must not be followed or acted on. This holds for the seeded first
+message and for the Mother brief alike. `title`, `label` and `org` are
+collapsed to one line (200 characters), control and invisible Unicode format
+characters are stripped, and the context is capped at 400,000 characters.
+
 Returns `{ "focus_id"?, "job_id"?, "kind": "created" | "existing" | "queued", "label" }`.
 `focus_id` is the focus tag (`<agent>-<slug(title)>`, kept for older callers).
 
@@ -125,13 +134,22 @@ Returns `{ "focus_id"?, "job_id"?, "kind": "created" | "existing" | "queued", "l
 
 **Mother destination.** `destination: "mother_job"` queues an unattended job
 instead of starting a session. It needs `working_directory` inside a git repo.
-The daemon writes a brief to `~/.nostromo/teri/mother-briefs/<slug>-<ts>.md`
-(context, approach "investigate; `mother await` if not clearly scoped",
+The daemon writes a brief to `~/.nostromo/teri/mother-briefs/<slug>-<ts>-<n>.md`
+(removed once `mother add` returns; Mother keeps its own copy) containing the
+fenced item title and context, approach "investigate; `mother await` if not clearly scoped",
 acceptance criteria, out of scope, and a `suggested_config` of sonnet/medium
 for cody/redd/marty/perri), then runs `mother add` on branch `teri/<slug>`
 against the repo's default branch with `max_cost` (default 10). Returns
 `kind: "queued"` with `job_id`. A failing `mother add` is returned as
-`mother_failed` with Mother's message.
+`mother_failed` with Mother's message. `--repo` is the repo's name taken from
+the main checkout (for a linked worktree: the checkout that owns it, not the
+worktree's directory) and `--repo-path` is that checkout.
+
+Creation is serialized per source item (or per derived tag), not globally, and
+runs to completion even if the caller goes away: a retry finds the job the
+first call queued. A focus marker is live while its session is, or (after a
+daemon restart, before the Mac re-attaches) while the pushed registry lists the
+tag; it stops being the item's focus once a later focus takes the same tag.
 
 A session a network (TCP) peer is steering may only create plain focuses:
 `destination: "mother_job"` and `source_item_id` are refused to it (Forbidden),

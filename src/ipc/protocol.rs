@@ -3897,6 +3897,7 @@ mod work_wire_tests {
                 target_id: "core-1".into(),
                 label: "CORE-1".into(),
                 created_at: ts(),
+                nonce: None,
             }],
         }
     }

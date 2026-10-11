@@ -20,6 +20,7 @@ use tokio::sync::watch;
 use tracing::warn;
 
 use super::model::SentMarker;
+use crate::ipc::SessionManager;
 
 /// How often the hub drops markers whose focus or job is gone.
 pub const PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -50,16 +51,25 @@ pub struct SentLedger {
     markers: Mutex<BTreeMap<String, Vec<SentMarker>>>,
     /// Bumped on every change so the hub can re-broadcast affected items.
     changes: watch::Sender<u64>,
+    /// Set when an unreadable file could not be moved aside: the ledger works
+    /// in memory but never writes, so the file's contents are not destroyed.
+    write_blocked: Option<String>,
 }
 
 impl SentLedger {
     /// Open the ledger at `path`, loading what is there. A missing file is an
-    /// empty ledger; an unreadable one is too (logged), so a corrupt file
-    /// never blocks sending.
+    /// empty ledger. Anything else that cannot be read (corrupt JSON, a
+    /// permission error) is moved aside to `<file>.corrupt-<n>` first, so the
+    /// next write cannot destroy it, and the ledger starts empty.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let markers = load(&path);
-        Self { path, markers: Mutex::new(markers), changes: watch::channel(0).0 }
+        let (markers, write_blocked) = load(&path);
+        Self {
+            path,
+            markers: Mutex::new(markers),
+            changes: watch::channel(0).0,
+            write_blocked,
+        }
     }
 
     /// Record that `item_id` was sent. Persisted before it returns; on a write
@@ -71,11 +81,40 @@ impl SentLedger {
         // one marker per target, not two chips pointing at the same place.
         let list = markers.entry(item_id.to_owned()).or_default();
         list.retain(|m| !(m.kind == marker.kind && m.target_id == marker.target_id));
-        list.push(marker);
-        let result = persist(&self.path, &markers);
+        if marker.kind == FOCUS_KIND {
+            if let Some(nonce) = marker.nonce.clone() {
+                supersede(&mut markers, &marker.target_id, &nonce);
+            }
+        }
+        markers.entry(item_id.to_owned()).or_default().push(marker);
+        let result = self.persist(&markers);
         drop(markers);
         self.changes.send_modify(|n| *n += 1);
         result
+    }
+
+    /// A new focus (`nonce`) now runs under `tag`: forget the focus markers of
+    /// whatever ran under it before. For a focus that was created without a
+    /// source item, so `record` never sees it.
+    pub fn supersede_focus(&self, tag: &str, nonce: &str) {
+        let mut markers = self.markers.lock().unwrap();
+        if supersede(&mut markers, tag, nonce) {
+            if let Err(e) = self.persist(&markers) {
+                warn!("sent ledger: could not write {}: {e}", self.path.display());
+            }
+            drop(markers);
+            self.changes.send_modify(|n| *n += 1);
+        }
+    }
+
+    fn persist(&self, markers: &BTreeMap<String, Vec<SentMarker>>) -> std::io::Result<()> {
+        match &self.write_blocked {
+            Some(why) => Err(std::io::Error::other(format!(
+                "not writing {}: the previous file could not be moved aside ({why})",
+                self.path.display()
+            ))),
+            None => persist(&self.path, markers),
+        }
     }
 
     /// Every marker for `item_id`, live or not.
@@ -108,7 +147,7 @@ impl SentLedger {
         });
         let removed = before - markers.values().map(Vec::len).sum::<usize>();
         if removed > 0 {
-            if let Err(e) = persist(&self.path, &markers) {
+            if let Err(e) = self.persist(&markers) {
                 warn!("sent ledger: could not write {}: {e}", self.path.display());
             }
             drop(markers);
@@ -123,16 +162,62 @@ impl SentLedger {
     }
 }
 
-fn load(path: &Path) -> BTreeMap<String, Vec<SentMarker>> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return BTreeMap::new();
-    };
-    match serde_json::from_str(&text) {
-        Ok(markers) => markers,
-        Err(e) => {
-            warn!("sent ledger: ignoring unreadable {}: {e}", path.display());
-            BTreeMap::new()
+/// Marker kind of a focus.
+const FOCUS_KIND: &str = "focus";
+
+/// Drop every focus marker for `tag` whose nonce is not `nonce`; true if any went.
+fn supersede(markers: &mut BTreeMap<String, Vec<SentMarker>>, tag: &str, nonce: &str) -> bool {
+    let before: usize = markers.values().map(Vec::len).sum();
+    markers.retain(|_, list| {
+        list.retain(|m| !(m.kind == FOCUS_KIND && m.target_id == tag && m.nonce.as_deref() != Some(nonce)));
+        !list.is_empty()
+    });
+    markers.values().map(Vec::len).sum::<usize>() != before
+}
+
+type Loaded = (BTreeMap<String, Vec<SentMarker>>, Option<String>);
+
+/// The ledger at `path`, plus why writing must stay off (see `write_blocked`).
+fn load(path: &Path) -> Loaded {
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(markers) => (markers, None),
+            Err(e) => quarantine(path, &format!("unparseable: {e}")),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (BTreeMap::new(), None),
+        Err(e) => quarantine(path, &format!("unreadable: {e}")),
+    }
+}
+
+/// Move `path` aside to `<file>.corrupt-<n>` (first unused n) and start empty.
+fn quarantine(path: &Path, why: &str) -> Loaded {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    for n in 1..=1000 {
+        let dest = path.with_file_name(format!("{name}.corrupt-{n}"));
+        if dest.symlink_metadata().is_ok() {
+            continue;
         }
+        return match std::fs::rename(path, &dest) {
+            Ok(()) => {
+                sync_dir(path);
+                warn!("sent ledger: {} was {why}; moved to {}", path.display(), dest.display());
+                (BTreeMap::new(), None)
+            }
+            Err(e) => {
+                warn!("sent ledger: {} was {why} and could not be moved aside: {e}", path.display());
+                (BTreeMap::new(), Some(format!("{why}; rename failed: {e}")))
+            }
+        };
+    }
+    warn!("sent ledger: {} was {why} and every .corrupt-<n> name is taken", path.display());
+    (BTreeMap::new(), Some(format!("{why}; no free .corrupt-<n> name")))
+}
+
+/// fsync the directory holding `path` so a rename in it survives a crash (best effort).
+fn sync_dir(path: &Path) {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    if let Ok(dir) = std::fs::File::open(dir) {
+        let _ = dir.sync_all();
     }
 }
 
@@ -146,7 +231,9 @@ fn persist(path: &Path, markers: &BTreeMap<String, Vec<SentMarker>>) -> std::io:
         let mut file = private_file(&tmp)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        std::fs::rename(&tmp, path)
+        std::fs::rename(&tmp, path)?;
+        sync_dir(path);
+        Ok(())
     };
     let result = write();
     if result.is_err() {
@@ -170,6 +257,17 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 pub fn private_file(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
+    open_private(options, path)
+}
+
+/// Create a file with mode 0600 that must not exist yet (`AlreadyExists` otherwise).
+pub fn private_file_new(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    open_private(options, path)
+}
+
+fn open_private(mut options: std::fs::OpenOptions, path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -178,15 +276,40 @@ pub fn private_file(path: &Path) -> std::io::Result<std::fs::File> {
     options.open(path)
 }
 
-/// The ids of Mother's current jobs. `None` means unknown (the list failed):
-/// callers treat unknown as "still there", never as "no jobs".
+/// How long to wait for `mother list` before treating the answer as unknown.
+const MOTHER_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The ids of Mother's current jobs. `None` means unknown (the list failed or
+/// timed out): callers treat unknown as "still there", never as "no jobs".
 pub async fn mother_job_ids() -> Option<HashSet<String>> {
-    match crate::mother::list_jobs().await {
-        Ok(jobs) => Some(jobs.into_iter().map(|j| j.id).collect()),
-        Err(e) => {
+    match tokio::time::timeout(MOTHER_LIST_TIMEOUT, crate::mother::list_jobs()).await {
+        Ok(Ok(jobs)) => Some(jobs.into_iter().map(|j| j.id).collect()),
+        Ok(Err(e)) => {
             warn!("sent ledger: could not list Mother jobs: {e}");
             None
         }
+        Err(_) => {
+            warn!("sent ledger: `mother list` timed out");
+            None
+        }
+    }
+}
+
+/// Is `marker` still the focus running under (or about to resume under) its
+/// tag? It is not if a later focus took the tag (nonce mismatch), nor if its
+/// session was stopped. After a daemon restart no session exists yet until the
+/// Mac attaches, but the pushed focus registry still lists the tag: live.
+pub fn focus_marker_is_live(mgr: &SessionManager, marker: &SentMarker) -> bool {
+    focus_marker_matches(mgr, marker)
+        && (mgr.has_live_session(&marker.target_id) || mgr.awaits_respawn(&marker.target_id))
+}
+
+/// Does the focus under `marker`'s tag still carry the marker's nonce? Unknown
+/// (no nonce on either side, e.g. after a restart) counts as a match.
+pub fn focus_marker_matches(mgr: &SessionManager, marker: &SentMarker) -> bool {
+    match (marker.nonce.as_deref(), mgr.focus_nonce(&marker.target_id)) {
+        (Some(mine), Some(current)) => mine == current,
+        _ => true,
     }
 }
 
@@ -217,6 +340,7 @@ mod tests {
             target_id: target.into(),
             label: format!("label {target}"),
             created_at: Utc::now(),
+            nonce: None,
         }
     }
 
