@@ -286,6 +286,18 @@ async fn jira_without_an_implementation_yet_says_coming_soon() {
     assert_eq!(s.reason.as_deref(), Some("Coming soon"));
 }
 
+// A hub built without a Sentry configuration must stay dormant: it reads no
+// credentials from the developer's environment and never reaches a real Sentry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sentry_stays_dormant_unless_the_hub_is_given_a_configuration() {
+    let (hub, _ttx, _brx) = hub_with_channel(Some(fresh(vec![])));
+    let s = wait_for_status(&hub, WorkSource::Sentry, |s| s.state == SourceState::NotConfigured).await;
+    assert_eq!(s.reason.as_deref(), Some("Coming soon"));
+    assert!(hub.items(&WorkFilter { sources: vec![WorkSource::Sentry], ..Default::default() }).is_empty());
+    let err = hub.detail("sentry:1").await.expect_err("no Sentry configured");
+    assert_eq!(err.code, "not_available");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_hub_reports_a_status_for_every_source() {
     let (hub, _ttx, _brx) = hub_with_channel(Some(fresh(mixed_todos())));
