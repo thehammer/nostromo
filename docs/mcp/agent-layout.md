@@ -96,15 +96,50 @@ Pushes content to a pane without touching geometry. Broadcasts `PaneContent`.
 Content shape: `{ "kind": "text", "text": "…" }` or
 `{ "kind": "json_snapshot", "value": … }`.
 
-### `nostromo.create_focus({ agent, title, working_directory?, initial_context? })`
+### `nostromo.create_focus({ agent, title, working_directory?, initial_context?, label?, org?, source_item_id?, source_item_title?, allow_duplicate?, destination?, max_cost? })`
 
 Spawns a new persistent focus running `agent`, seeds its first turn with
 `initial_context`, registers it, and broadcasts `FocusCreated` so every client
-adds the tab. Idempotent: a live focus with the derived tag returns its
-existing `focus_id`. Returns `{ "focus_id": "<agent>-<slug(title)>" }`.
+adds the tab. The focus carries `label` (defaults to the title in markers),
+`org` (when omitted: inferred from `git remote get-url origin` in
+`working_directory`, GitHub only, same rules as the Mac's `RepoOrg`) and the
+project path.
 
-Errors: `invalid_working_directory` (not an absolute existing dir),
-`spawn_failed`.
+Returns `{ "focus_id"?, "job_id"?, "kind": "created" | "existing" | "queued", "label" }`.
+`focus_id` is the focus tag (`<agent>-<slug(title)>`, kept for older callers).
+
+**Duplicate rule.**
+- With `source_item_id` (a work item id such as `jira:CORE-1` or
+  `doc:nostromo:ideas/x.md`): if a focus with a live session, or a Mother job
+  that is not archived, was already sent for that item, the call returns
+  `kind: "existing"` with its `focus_id` / `job_id` and creates nothing.
+  `allow_duplicate: true` creates a new one anyway. Closing the focus (or
+  archiving the job) makes the item sendable again.
+- Without `source_item_id`: a live focus with the derived tag returns
+  `kind: "existing"` and its `focus_id` (the original idempotency).
+- If the derived tag is already live for something else (another item with
+  the same title, or `allow_duplicate`), the new focus gets `-2`, `-3`, ….
+- Every `created` / `queued` call with `source_item_id` is recorded in the sent
+  ledger (`~/.nostromo/teri/sent.json`), which feeds "sent to <label>" on Teri
+  rows.
+
+**Mother destination.** `destination: "mother_job"` queues an unattended job
+instead of starting a session. It needs `working_directory` inside a git repo.
+The daemon writes a brief to `~/.nostromo/teri/mother-briefs/<slug>-<ts>.md`
+(context, approach "investigate; `mother await` if not clearly scoped",
+acceptance criteria, out of scope, and a `suggested_config` of sonnet/medium
+for cody/redd/marty/perri), then runs `mother add` on branch `teri/<slug>`
+against the repo's default branch with `max_cost` (default 10). Returns
+`kind: "queued"` with `job_id`. A failing `mother add` is returned as
+`mother_failed` with Mother's message.
+
+A session a network (TCP) peer is steering may only create plain focuses:
+`destination: "mother_job"` and `source_item_id` are refused to it (Forbidden),
+since they reach Mother and the sent ledger.
+
+Errors: `invalid_args`, `invalid_working_directory` (not an absolute existing
+dir), `project_required` / `not_a_git_repo` (Mother destination), `spawn_failed`,
+`mother_failed`.
 
 ## Error contract
 
