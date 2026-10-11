@@ -29,7 +29,7 @@ private let iso = ISO8601DateFormatter()
 /// search_text = "KEY summary".
 private func issue(_ key: String, _ summary: String, project: String? = nil, status: String = "To Do",
                   category: String? = "to_do", priority: (String, Int)? = nil,
-                  updated: String? = nil, searchExtra: String = "") -> WorkItem {
+                  updated: String? = nil, due: String? = nil, searchExtra: String = "") -> WorkItem {
     var f: [String: Any] = [
         "id": "jira:\(key)", "source": "jira", "kind": "Task", "title": summary,
         "project": project ?? String(key.split(separator: "-")[0]),
@@ -38,6 +38,7 @@ private func issue(_ key: String, _ summary: String, project: String? = nil, sta
     if let category { f["status_category"] = category }
     if let priority { f["priority"] = ["label": priority.0, "rank": priority.1] }
     if let updated { f["updated_at"] = updated }
+    if let due { f["due"] = due }
     return WorkTestSupport.makeItem(f)
 }
 
@@ -51,13 +52,20 @@ private func seedJira(_ store: WorkStore, _ items: [WorkItem], state: SourceStat
 
 final class TeriJiraRowContentTests: XCTestCase {
     private let now = iso.date(from: "2026-10-09T15:00:00Z")!
+    /// Fixed zone: day boundaries must not depend on the machine running the test.
+    private let calendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        return calendar
+    }()
 
     private func content(_ item: WorkItem, at now: Date? = nil) -> WorkRowContent {
-        TeriJiraTab.rowContent(for: item, now: now ?? self.now)
+        TeriJiraTab.rowContent(for: item, now: now ?? self.now, calendar: calendar)
     }
 
     private func ago(_ seconds: TimeInterval) -> String {
-        TeriJiraTab.updatedText(since: now.addingTimeInterval(-seconds), now: now)
+        TeriJiraTab.updatedText(since: now.addingTimeInterval(-seconds), now: now, calendar: calendar)
     }
 
     func testTheRowReadsKeyThenSummaryWithPriorityStatusAndAge() {
@@ -68,8 +76,24 @@ final class TeriJiraRowContentTests: XCTestCase {
         XCTAssertEqual(row.title, "RM-12 Summary")
         XCTAssertEqual(row.priorityText, "High", "priority is shown by name, as text")
         XCTAssertEqual(row.priorityRank, 2)
-        XCTAssertEqual(row.statusText, "In Review")
-        XCTAssertEqual(row.dueText, "updated 3 d ago")
+        XCTAssertEqual(row.statusText, "In Review · updated 3 d ago")
+        XCTAssertNil(row.dueText, "an issue with no due date shows none; the update time is not a due date")
+    }
+
+    func testTheDueDateAndTheUpdateTimeAreBothShown() {
+        let overdue = content(issue("RM-12", "Summary", status: "In Review", updated: "2026-10-06T15:00:00Z",
+                                    due: "2026-10-07"))
+        XCTAssertEqual(overdue.dueText, "Overdue by 2 days")
+        XCTAssertTrue(overdue.dueIsUrgent)
+        XCTAssertEqual(overdue.statusText, "In Review · updated 3 d ago")
+
+        let later = content(issue("RM-13", "Summary", status: "To Do", updated: "2026-10-09T10:00:00Z",
+                                  due: "2026-10-20"))
+        XCTAssertEqual(later.dueText, "Due Oct 20")
+        XCTAssertFalse(later.dueIsUrgent)
+        XCTAssertEqual(later.statusText, "To Do · updated today 10:00")
+
+        XCTAssertEqual(content(issue("RM-14", "S", due: "2026-10-09")).dueText, "Due today")
     }
 
     func testAnIssueWithoutPriorityOrUpdateTimeShowsNeitherAndDoesNotCrash() {
@@ -79,25 +103,33 @@ final class TeriJiraRowContentTests: XCTestCase {
         XCTAssertNil(row.priorityText)
         XCTAssertNil(row.priorityRank)
         XCTAssertNil(row.dueText)
-        XCTAssertEqual(row.statusText, "To Do")
+        XCTAssertEqual(row.statusText, "To Do", "no update time: just the status")
     }
 
-    func testTheAgeIsSpelledOutInTheLargestWholeUnit() {
-        XCTAssertEqual(ago(0), "updated just now")
-        XCTAssertEqual(ago(59), "updated just now")
-        XCTAssertEqual(ago(60), "updated 1 min ago")
-        XCTAssertEqual(ago(5 * 60 + 30), "updated 5 min ago")
-        XCTAssertEqual(ago(3_599), "updated 59 min ago")
-        XCTAssertEqual(ago(3_600), "updated 1 h ago")
-        XCTAssertEqual(ago(3 * 3_600), "updated 3 h ago")
-        XCTAssertEqual(ago(86_399), "updated 23 h ago")
-        XCTAssertEqual(ago(86_400), "updated 1 d ago")
-        XCTAssertEqual(ago(3 * 86_400 + 100), "updated 3 d ago")
+    func testTheUpdateTimeIsByCalendarDayNeverByTheMinute() {
+        // The list caches a row for the calendar day and nothing redraws it on a
+        // timer, so the text must stay true all day: no "N min ago".
+        XCTAssertEqual(ago(0), "updated today 15:00")
+        XCTAssertEqual(ago(59), "updated today 14:59")
+        XCTAssertEqual(ago(5 * 60 + 30), "updated today 14:54")
+        XCTAssertEqual(ago(15 * 3_600), "updated today 00:00")
+        XCTAssertEqual(ago(15 * 3_600 + 1), "updated yesterday")
+        XCTAssertEqual(ago(39 * 3_600), "updated yesterday")
+        XCTAssertEqual(ago(39 * 3_600 + 1), "updated 2 d ago")
+        XCTAssertEqual(ago(3 * 86_400), "updated 3 d ago")
         XCTAssertEqual(ago(40 * 86_400), "updated 40 d ago")
     }
 
+    func testTheSameTextIsTrueAtAnyLaterTimeOfTheSameDay() {
+        let updated = now.addingTimeInterval(-3 * 3_600)
+        let morning = TeriJiraTab.updatedText(since: updated, now: now, calendar: calendar)
+        let evening = TeriJiraTab.updatedText(since: updated, now: now.addingTimeInterval(8 * 3_600 - 1),
+                                              calendar: calendar)
+        XCTAssertEqual(morning, evening, "the wording must not drift while the cached row is on screen")
+    }
+
     func testAnUpdateTimeInTheFutureNeverShowsANegativeAge() {
-        XCTAssertEqual(ago(-120), "updated just now", "clock skew between daemon and app")
+        XCTAssertEqual(ago(-120), "updated today 15:02", "clock skew between daemon and app")
     }
 
     func testTheAccessibilityLabelNamesSourceTypeTitlePriorityStatusAndAge() {
@@ -244,8 +276,8 @@ final class TeriJiraTabTests: XCTestCase {
         let row = rig.surface.rowTexts[0]
         XCTAssertEqual(row.title, "RM-12 Summary")
         XCTAssertEqual(row.priorityText, "High")
-        XCTAssertEqual(row.statusText, "In Review")
-        XCTAssertTrue(row.dueText?.hasPrefix("updated ") ?? false, String(describing: row.dueText))
+        XCTAssertTrue(row.statusText?.hasPrefix("In Review · updated ") ?? false, String(describing: row.statusText))
+        XCTAssertNil(row.dueText)
     }
 
     func testIssuesArrivingAfterTheSurfaceExistsAreShownAndCounted() {

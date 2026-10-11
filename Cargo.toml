@@ -26,6 +26,12 @@ path = "src/bin/nostromo_mcp_bridge.rs"
 name = "nostromo-activity-hook"
 path = "src/bin/nostromo_activity_hook.rs"
 
+[features]
+# Test-only seams (e.g. pointing the Jira source at a local mock server). The
+# crate enables it for its own tests through the self dev-dependency below;
+# production builds never see it.
+test-support = []
+
 [dependencies]
 # TUI
 ratatui = "0.30"
@@ -99,6 +105,7 @@ url = "2"
 unicode-width = "0.1"
 
 [dev-dependencies]
+nostromo = { path = ".", features = ["test-support"] }
 insta = { version = "1", features = ["yaml"] }
 wiremock = "0.6"
 tempfile = "3"
