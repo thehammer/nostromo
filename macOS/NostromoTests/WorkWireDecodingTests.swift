@@ -35,6 +35,39 @@ final class WorkWireDecodingTests: XCTestCase {
         XCTAssertNotNil(s.retryAt, "fractional-second dates decode too")
         XCTAssertEqual(s.count, 4)
         XCTAssertEqual(s.groupErrors, [GroupError(group: "repo", reason: "boom")])
+        XCTAssertFalse(s.complete, "this frame predates `complete`: unknown must not read as complete")
+    }
+
+    func testWorkSourceStatusDecodesCompleteTrue() throws {
+        let msg = try decode(#"{"type":"work_source_status","status":{"source":"jira","state":"fresh","count":3,"complete":true}}"#)
+        guard case .workSourceStatus(let s) = msg else { return XCTFail("got \(msg)") }
+        XCTAssertEqual(s.state, .fresh)
+        XCTAssertEqual(s.count, 3)
+        XCTAssertTrue(s.complete)
+    }
+
+    func testWorkSourceStatusDecodesCompleteFalse() throws {
+        // A cut list is still `fresh` (with a reason), but is not known to be whole.
+        let msg = try decode("""
+        {"type":"work_source_status","status":{"source":"jira","state":"fresh","count":500,
+         "reason":"showing the first 500 issues; Jira has more","complete":false}}
+        """)
+        guard case .workSourceStatus(let s) = msg else { return XCTFail("got \(msg)") }
+        XCTAssertEqual(s.state, .fresh)
+        XCTAssertEqual(s.reason, "showing the first 500 issues; Jira has more")
+        XCTAssertFalse(s.complete)
+    }
+
+    func testWorkSourceStatusWithoutCompleteDecodesAsNotComplete() throws {
+        // What an older daemon sends: every field except `complete`.
+        let msg = try decode("""
+        {"type":"work_source_status","status":{"source":"repo_docs","state":"fresh",
+         "updated_at":"2026-10-09T14:30:00Z","count":12,"group_errors":[]}}
+        """)
+        guard case .workSourceStatus(let s) = msg else { return XCTFail("got \(msg)") }
+        XCTAssertEqual(s.state, .fresh)
+        XCTAssertEqual(s.count, 12)
+        XCTAssertFalse(s.complete, "absent means unknown, and unknown is never complete")
     }
 
     func testWorkSourceStatusWithOnlyRequiredFieldsDecodes() throws {
@@ -44,6 +77,7 @@ final class WorkWireDecodingTests: XCTestCase {
         XCTAssertNil(s.updatedAt)
         XCTAssertEqual(s.count, 0)
         XCTAssertTrue(s.groupErrors.isEmpty)
+        XCTAssertFalse(s.complete)
     }
 
     func testUnknownSourceStateDecodesAsErrorNotAFailure() throws {

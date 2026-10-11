@@ -1367,6 +1367,159 @@ async fn a_claude_symlink_that_stays_inside_the_repo_works_like_a_folder() {
     assert_eq!(detail.title, "Real bug");
 }
 
+// ── `complete`: true only when the list is known to be whole ─────────────────
+
+#[test]
+fn a_healthy_scan_is_complete_and_so_is_one_with_no_docs() {
+    let fx = fixture();
+    let (status, _) = scan(&fx.root);
+    assert_eq!(status.state, SourceState::Fresh);
+    assert!(status.complete, "{status:?}");
+
+    let (_tmp, root) = temp_root();
+    fs::create_dir_all(root.join("alpha/.claude/bugs/open")).unwrap();
+    let (status, _) = scan(&root);
+    assert_eq!(status.state, SourceState::Empty);
+    assert!(status.complete, "{status:?}");
+}
+
+#[test]
+fn a_partial_scan_is_still_fresh_but_not_complete() {
+    // An unreadable doc, an unexaminable doc, an unsearchable repo folder and a repo whose
+    // `.claude` leaves the repo: each leaves something out, so absence from the list means nothing.
+    for what in ["unreadable doc", "unexaminable doc", "unsearchable repo", "escaping .claude"] {
+        let fx = fixture();
+        let io = TestFs::default();
+        match what {
+            "unreadable doc" => io.deny_read(fx.root.join("alpha/.claude/bugs/open/2026-10-01-login-fails.md")),
+            "unexaminable doc" => io.deny_metadata(fx.root.join("beta/.claude/todos/open/beta-todo.md")),
+            "unsearchable repo" => {
+                put(&fx.root, "delta/.claude/bugs/open/x.md", "# Delta bug\n");
+                io.deny_symlink_metadata(fx.root.join("delta/.claude"));
+            }
+            _ => plant_escape(&fx.root, &escapes(&fx.root).swap_remove(0)),
+        }
+
+        let (status, _) = scanner_over(&fx.root, &io).scan_all();
+
+        assert_eq!(status.state, SourceState::Fresh, "{what}: the readable repos keep the list fresh: {status:?}");
+        assert!(status.reason.is_some() && !status.group_errors.is_empty(), "{what}: {status:?}");
+        assert!(!status.complete, "{what}: {status:?}");
+    }
+}
+
+#[test]
+fn a_scan_that_becomes_clean_is_complete_again() {
+    let fx = fixture();
+    let io = TestFs::default();
+    let unreadable = fx.root.join("alpha/.claude/bugs/open/2026-10-01-login-fails.md");
+    io.deny_read(&unreadable);
+    let mut scanner = scanner_over(&fx.root, &io);
+    assert!(!scanner.scan_all().0.complete);
+
+    io.allow_read(&unreadable);
+    let (status, _) = scanner.rescan_repo("alpha");
+
+    assert!(status.complete, "{status:?}");
+    assert_eq!(status.reason, None);
+}
+
+#[test]
+fn an_errored_or_missing_root_is_not_complete() {
+    let (_tmp, root) = temp_root();
+    put(&root, "delta/.claude/bugs/open/x.md", "# Unreachable\n");
+    let io = TestFs::default();
+    io.deny_symlink_metadata(root.join("delta/.claude"));
+    let (status, _) = scanner_over(&root, &io).scan_all();
+    assert_eq!(status.state, SourceState::Error);
+    assert!(!status.complete);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (status, _) = Scanner::new(tmp.path().join("no-such-dir")).scan_all();
+    assert_eq!(status.state, SourceState::NotConfigured);
+    assert!(!status.complete);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_source_loading_status_is_not_complete() {
+    let (_tmp, root) = temp_root();
+    let rx = spawn_at(root, Arc::new(Notify::new()));
+    let first = rx.borrow().clone();
+    // The channel starts at `loading`: until a scan has finished nothing is known.
+    if first.0.state == SourceState::Loading {
+        assert!(!first.0.complete);
+    }
+}
+
+// ── the live-updates note ────────────────────────────────────────────────────
+
+/// Reads through the real file system, and the first time `trigger` is read runs `hook`.
+struct HookFs {
+    trigger: PathBuf,
+    hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl DocFs for HookFs {
+    fn read_text(&self, path: &Path, limit: u64) -> io::Result<String> {
+        if path == self.trigger {
+            if let Some(hook) = self.hook.lock().unwrap().take() {
+                hook();
+            }
+        }
+        RealFs.read_text(path, limit)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_updates_unavailable_is_published_without_a_doc_changing_and_is_withdrawn_when_the_watch_recovers() {
+    let (_tmp, root) = temp_root();
+    put(&root, "alpha/.claude/ideas/2026-10-01-one.md", "# One\n");
+    put(&root, "beta/.claude/ideas/two.md", "# Two\n");
+    let one_mtime = fs::metadata(root.join("alpha/.claude/ideas/2026-10-01-one.md")).unwrap().modified().unwrap();
+    // While the scan reads beta (after alpha), alpha's `.claude` disappears: the watcher is then
+    // asked to watch a folder that is not there and cannot keep the list live. The list scanned
+    // before that (both docs) is what is published.
+    let alpha_claude = root.join("alpha/.claude");
+    let io = Arc::new(HookFs {
+        trigger: root.join("beta/.claude/ideas/two.md"),
+        hook: Mutex::new(Some(Box::new(move || fs::remove_dir_all(alpha_claude).unwrap()))),
+    });
+    let mut rx = spawn_with_fs(root.clone(), Arc::new(Notify::new()), io);
+
+    let first = wait_for(&mut rx, "the first scan result", |u| u.0.state != SourceState::Loading).await;
+
+    assert_eq!(first.0.state, SourceState::Fresh, "{:?}", first.0);
+    assert_eq!(first.0.count, 2, "{:?}", first.0);
+    let reason = first.0.reason.clone().unwrap_or_default();
+    assert!(reason.contains("Live updates unavailable"), "the note is on the very first status: {reason:?}");
+    assert!(first.0.group_errors.is_empty(), "{:?}", first.0.group_errors);
+    assert!(first.0.complete, "the list was read whole; the note is about freshness, not completeness: {:?}", first.0);
+
+    // The folder comes back with the very same doc (same text, same modification time), so nothing
+    // about the list changes: only the watch can be re-established. Events for alpha (rewritten
+    // until one is seen: file events can lag behind the watcher's start) make the source look
+    // again, retry the watch and withdraw the note.
+    put(&root, "alpha/.claude/ideas/2026-10-01-one.md", "# One\n");
+    fs::File::options().write(true).open(root.join("alpha/.claude/ideas/2026-10-01-one.md")).unwrap().set_modified(one_mtime).unwrap();
+    let deadline = Instant::now() + ARM_DEADLINE;
+    let mut attempt = 0;
+    let recovered = loop {
+        attempt += 1;
+        put(&root, &format!("alpha/touch-{attempt}.txt"), "x");
+        let seen = try_wait_for(&mut rx, ARM_ATTEMPT, |u| {
+            u.0.count == 2 && !u.0.reason.clone().unwrap_or_default().contains("Live updates unavailable")
+        })
+        .await;
+        if let Some(update) = seen {
+            break update;
+        }
+        assert!(Instant::now() < deadline, "the note was never withdrawn: {:?}", rx.borrow().0);
+    };
+    assert_eq!(recovered.0.state, SourceState::Fresh);
+    assert_eq!(recovered.0.reason, None);
+    assert!(recovered.0.complete);
+}
+
 // ── hub integration ──────────────────────────────────────────────────────────
 
 /// The hub reads (and prunes) the process-wide sent ledger, which defaults to
@@ -1479,4 +1632,398 @@ async fn hub_publishes_repo_docs_per_repo_and_republishes_a_group_as_empty_when_
     })
     .await;
     assert_eq!(hub.items(&docs).len(), 10);
+}
+
+// ── a partial scan that still has items is fresh, with a note ────────────────
+
+const PARTIAL_1_OF_1: &str = "Partial scan: 1 of 1 repos could not be fully read";
+
+#[test]
+fn one_readable_and_one_unreadable_doc_in_the_only_repo_is_fresh_with_a_partial_scan_note() {
+    let (_tmp, root) = temp_root();
+    put(&root, "alpha/.claude/bugs/open/2026-10-01-readable.md", "# Readable\n");
+    put(&root, "alpha/.claude/bugs/open/2026-10-02-unreadable.md", "# Unreadable\n");
+    let io = TestFs::default();
+    io.deny_read(root.join("alpha/.claude/bugs/open/2026-10-02-unreadable.md"));
+
+    let update = scanner_over(&root, &io).scan_all();
+
+    let (status, _) = &update;
+    assert_eq!(status.state, SourceState::Fresh, "the readable doc is shown, so this is not an error: {status:?}");
+    assert_eq!(status.reason.as_deref(), Some(PARTIAL_1_OF_1));
+    assert_eq!(status.count, 1);
+    assert!(group_error(status, "alpha").is_some_and(|r| r.contains("skipped 1 unreadable file")), "{:?}", status.group_errors);
+    assert_eq!(items_of(&update, "alpha").len(), 1);
+}
+
+#[test]
+fn a_repo_whose_only_doc_is_unreadable_is_still_an_error_with_nothing_to_show() {
+    let (_tmp, root) = temp_root();
+    put(&root, "alpha/.claude/bugs/open/2026-10-02-unreadable.md", "# Unreadable\n");
+    let io = TestFs::default();
+    io.deny_read(root.join("alpha/.claude/bugs/open/2026-10-02-unreadable.md"));
+
+    let (status, groups) = scanner_over(&root, &io).scan_all();
+
+    assert_eq!(status.state, SourceState::Error, "{status:?}");
+    assert_eq!(status.reason.as_deref(), Some("Couldn't read any repo's .claude folder"));
+    assert_eq!(status.count, 0);
+    assert_eq!(status.group_errors.len(), 1);
+    assert!(groups.iter().all(|(_, items)| items.is_empty()));
+}
+
+#[test]
+fn every_repo_partly_unreadable_but_with_items_is_fresh_and_lists_every_group_error() {
+    let (_tmp, root) = temp_root();
+    let io = TestFs::default();
+    for repo in ["alpha", "beta"] {
+        put(&root, &format!("{repo}/.claude/bugs/open/2026-10-01-readable.md"), "# Readable\n");
+        put(&root, &format!("{repo}/.claude/bugs/open/2026-10-02-unreadable.md"), "# Unreadable\n");
+        io.deny_read(root.join(format!("{repo}/.claude/bugs/open/2026-10-02-unreadable.md")));
+    }
+
+    let (status, _) = scanner_over(&root, &io).scan_all();
+
+    assert_eq!(status.state, SourceState::Fresh, "{status:?}");
+    assert_eq!(status.reason.as_deref(), Some("Partial scan: 2 of 2 repos could not be fully read"));
+    assert_eq!(status.count, 2);
+    assert_eq!(status.group_errors.len(), 2, "{:?}", status.group_errors);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_source_reports_a_partly_unreadable_only_repo_as_fresh_too() {
+    let (_tmp, root) = temp_root();
+    put(&root, "alpha/.claude/ideas/readable.md", "# Readable\n");
+    put(&root, "alpha/.claude/ideas/unreadable.md", "# Unreadable\n");
+    let io = TestFs::default();
+    io.deny_read(root.join("alpha/.claude/ideas/unreadable.md"));
+
+    let mut rx = spawn_with_fs(root, Arc::new(Notify::new()), Arc::new(io));
+
+    let update = wait_for(&mut rx, "the first scan", |u| u.0.state != SourceState::Loading).await;
+    assert_eq!(update.0.state, SourceState::Fresh, "{:?}", update.0);
+    assert!(update.0.reason.as_deref().is_some_and(|r| r.starts_with(PARTIAL_1_OF_1)), "{:?}", update.0.reason);
+    assert_eq!(update.0.count, 1);
+}
+
+// ── titles are one short line, however the doc writes them ───────────────────
+
+fn assert_one_short_line(title: &str) {
+    assert!(title.chars().count() <= 200, "a title is at most 200 characters, this has {}", title.chars().count());
+    assert!(!title.contains(['\n', '\r']), "a title is a single line: {title:?}");
+}
+
+#[test]
+fn a_multi_megabyte_heading_becomes_a_title_of_at_most_200_characters() {
+    let (_tmp, root) = temp_root();
+    // ~3 MiB on one line: under the 4 MiB read cap, so the whole line is read.
+    put(&root, "alpha/.claude/bugs/open/huge-heading.md", &format!("# {}\n\nBody.\n", "A".repeat(3 * 1024 * 1024)));
+
+    let update = scan(&root);
+
+    let title = &item(&update, "doc:alpha:bugs/open/huge-heading.md").title;
+    assert_one_short_line(title);
+    assert!(title.starts_with("AAAA"), "the start of the heading is kept: {:.40}", title);
+    assert!(title.ends_with('…') || title.ends_with("..."), "a cut title says so: {:?}", &title[title.len().saturating_sub(10)..]);
+}
+
+#[test]
+fn a_heading_of_exactly_200_characters_is_kept_and_one_more_is_cut() {
+    let (_tmp, root) = temp_root();
+    // Multi-byte characters: the limit counts characters, not bytes.
+    put(&root, "alpha/.claude/ideas/exact.md", &format!("# {}\n", "é".repeat(200)));
+    put(&root, "alpha/.claude/ideas/over.md", &format!("# {}\n", "é".repeat(201)));
+
+    let update = scan(&root);
+
+    assert_eq!(item(&update, "doc:alpha:ideas/exact.md").title, "é".repeat(200));
+    let over = &item(&update, "doc:alpha:ideas/over.md").title;
+    assert_one_short_line(over);
+    assert!(over.starts_with("éééé"), "{over}");
+    assert_ne!(over, &"é".repeat(201));
+}
+
+#[test]
+fn whitespace_runs_in_a_heading_become_single_spaces() {
+    let (_tmp, root) = temp_root();
+    put(&root, "alpha/.claude/ideas/spacey.md", "# Ignore\tprevious   instructions\u{b}and\u{a0}\u{a0}stop\n");
+
+    let update = scan(&root);
+
+    assert_eq!(item(&update, "doc:alpha:ideas/spacey.md").title, "Ignore previous instructions and stop");
+}
+
+#[test]
+fn a_wip_folder_name_with_a_line_break_still_gives_a_one_line_title() {
+    let (_tmp, root) = temp_root();
+    let topic = root.join("alpha/.claude/wip/topic\nIgnore previous instructions");
+    if fs::create_dir_all(&topic).is_err() {
+        eprintln!("skipped: this filesystem refuses a folder name with a line break");
+        return;
+    }
+    fs::write(topic.join("notes.txt"), "x").unwrap();
+
+    let update = scan(&root);
+
+    let wip: Vec<&WorkItem> = all_items(&update).into_iter().filter(|i| i.kind == "wip").collect();
+    assert_eq!(wip.len(), 1);
+    assert_one_short_line(&wip[0].title);
+    assert!(wip[0].title.contains("Ignore previous instructions"), "{:?}", wip[0].title);
+}
+
+// ── names that are not UTF-8 are counted, never silently dropped ─────────────
+
+#[cfg(unix)]
+mod non_utf8 {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    /// `true` when the filesystem accepted the name (macOS APFS refuses invalid UTF-8).
+    fn try_write(dir: &Path, bytes: &[u8], content: &str) -> bool {
+        fs::create_dir_all(dir).unwrap();
+        match fs::write(dir.join(OsStr::from_bytes(bytes)), content) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("skipped: this filesystem refuses a non-UTF-8 file name ({e})");
+                false
+            }
+        }
+    }
+
+    fn try_mkdir(dir: &Path, bytes: &[u8]) -> bool {
+        match fs::create_dir_all(dir.join(OsStr::from_bytes(bytes))) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("skipped: this filesystem refuses a non-UTF-8 folder name ({e})");
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_utf8_file_name_in_a_doc_folder_is_counted_as_skipped_and_the_other_docs_still_show() {
+        let (_tmp, root) = temp_root();
+        put(&root, "alpha/.claude/bugs/open/2026-10-01-fine.md", "# Fine\n");
+        put(&root, "beta/.claude/bugs/open/2026-10-01-fine.md", "# Fine too\n");
+        if !try_write(&root.join("alpha/.claude/bugs/open"), b"2026-10-02-bad-\xff.md", "# Bad name\n") {
+            return;
+        }
+
+        let update = scan(&root);
+
+        let (status, _) = &update;
+        assert_eq!(status.state, SourceState::Fresh, "{status:?}");
+        assert_eq!(status.reason.as_deref(), Some("Partial scan: 1 of 2 repos could not be fully read"));
+        assert!(group_error(status, "alpha").is_some_and(|r| r.contains("skipped 1 unreadable file")), "{:?}", status.group_errors);
+        assert_eq!(items_of(&update, "alpha").len(), 1, "the readable doc still shows");
+        assert_eq!(items_of(&update, "beta").len(), 1);
+        assert_eq!(status.count, 2);
+    }
+
+    #[test]
+    fn a_non_utf8_wip_folder_name_is_counted_as_skipped() {
+        let (_tmp, root) = temp_root();
+        put(&root, "alpha/.claude/ideas/fine.md", "# Fine\n");
+        put(&root, "beta/.claude/ideas/fine.md", "# Fine too\n");
+        if !try_mkdir(&root.join("alpha/.claude/wip"), b"topic-\xff") {
+            return;
+        }
+
+        let (status, _) = scan(&root);
+
+        assert_eq!(status.state, SourceState::Fresh, "{status:?}");
+        assert!(group_error(&status, "alpha").is_some_and(|r| r.contains("skipped 1 unreadable file")), "{:?}", status.group_errors);
+    }
+
+    #[test]
+    fn one_non_utf8_folder_in_the_code_root_is_not_a_repo_and_is_said_so_in_the_status() {
+        let (_tmp, root) = temp_root();
+        put(&root, "alpha/.claude/bugs/open/2026-10-01-fine.md", "# Fine\n");
+        if !try_mkdir(&root, b"not-utf8-\xff") {
+            return;
+        }
+
+        let (status, groups) = scan(&root);
+
+        assert_eq!(status.state, SourceState::Fresh, "the readable repo is still shown: {status:?}");
+        assert_eq!(status.count, 1);
+        assert!(groups.iter().all(|(g, _)| g.as_deref() == Some("alpha")), "the odd folder is not a repo");
+        let reason = status.reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("1 folder in the code root has a non-UTF-8 name and was skipped"), "{reason:?}");
+        assert!(status.group_errors.is_empty(), "it is not a repo, so not a group error: {:?}", status.group_errors);
+    }
+
+    #[test]
+    fn several_non_utf8_folders_in_the_code_root_are_counted_in_the_plural() {
+        let (_tmp, root) = temp_root();
+        put(&root, "alpha/.claude/bugs/open/2026-10-01-fine.md", "# Fine\n");
+        if !try_mkdir(&root, b"not-utf8-\xff") || !try_mkdir(&root, b"also-\xfe-bad") {
+            return;
+        }
+
+        let (status, _) = scan(&root);
+
+        let reason = status.reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("2 folders in the code root have non-UTF-8 names and were skipped"), "{reason:?}");
+    }
+
+    #[test]
+    fn a_non_utf8_plain_file_in_the_code_root_is_no_folder_and_is_not_counted() {
+        let (_tmp, root) = temp_root();
+        put(&root, "alpha/.claude/bugs/open/2026-10-01-fine.md", "# Fine\n");
+        if !try_write(&root, b"stray-\xff.txt", "not a repo") {
+            return;
+        }
+
+        let (status, _) = scan(&root);
+
+        assert_eq!(status.state, SourceState::Fresh, "{status:?}");
+        assert_eq!(status.reason, None, "a file is not a skipped folder: {:?}", status.reason);
+        assert!(status.complete, "{status:?}");
+    }
+
+    #[test]
+    fn a_non_utf8_folder_in_the_code_root_makes_the_list_incomplete() {
+        let (_tmp, root) = temp_root();
+        put(&root, "alpha/.claude/bugs/open/2026-10-01-fine.md", "# Fine\n");
+        if !try_mkdir(&root, b"not-utf8-\xff") {
+            return;
+        }
+
+        let (status, _) = scan(&root);
+
+        assert_eq!(status.state, SourceState::Fresh);
+        assert!(status.reason.is_some(), "{status:?}");
+        assert!(!status.complete, "a repo that could not be named may be the one missing: {status:?}");
+    }
+
+    #[test]
+    fn a_non_utf8_file_that_was_never_a_doc_is_not_an_unreadable_file_but_a_non_utf8_markdown_file_is() {
+        // `.txt`, no extension, a hidden name: never docs, so never counted.
+        for (name, counted) in [
+            (&b"notes-\xff.txt"[..], false),
+            (&b"notes-\xff"[..], false),
+            (&b".hidden-\xff"[..], false),
+            (&b"notes-\xff.md"[..], true),
+            (&b"NOTES-\xff.MD"[..], true),
+        ] {
+            let (_tmp, root) = temp_root();
+            put(&root, "alpha/.claude/bugs/open/2026-10-01-fine.md", "# Fine\n");
+            if !try_write(&root.join("alpha/.claude/bugs/open"), name, "x") {
+                return;
+            }
+
+            let (status, _) = scan(&root);
+
+            let label = String::from_utf8_lossy(name).into_owned();
+            assert_eq!(status.state, SourceState::Fresh, "{label}: {status:?}");
+            if counted {
+                assert!(group_error(&status, "alpha").is_some_and(|r| r.contains("skipped 1 unreadable file")), "{label}: {:?}", status.group_errors);
+                assert!(!status.complete, "{label}");
+            } else {
+                assert!(status.group_errors.is_empty(), "{label}: it was never a doc: {:?}", status.group_errors);
+                assert_eq!(status.reason, None, "{label}");
+                assert!(status.complete, "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_utf8_plain_file_in_the_claude_folder_itself_is_not_counted() {
+        let (_tmp, root) = temp_root();
+        put(&root, "alpha/.claude/bugs/open/2026-10-01-fine.md", "# Fine\n");
+        if !try_write(&root.join("alpha/.claude"), b"scratch-\xff.txt", "x") {
+            return;
+        }
+
+        let (status, _) = scan(&root);
+
+        assert!(status.group_errors.is_empty(), "{:?}", status.group_errors);
+        assert!(status.complete, "{status:?}");
+    }
+
+    #[test]
+    fn a_count_of_skipped_root_folders_is_forgotten_when_the_root_cannot_be_read_and_recovery_does_not_bring_it_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, root) = temp_root();
+        put(&root, "alpha/.claude/bugs/open/2026-10-01-fine.md", "# Fine\n");
+        let odd = root.join(OsStr::from_bytes(b"not-utf8-\xff"));
+        if !try_mkdir(&root, b"not-utf8-\xff") {
+            return;
+        }
+        let mut scanner = Scanner::new(root.clone());
+        let (status, _) = scanner.scan_all();
+        assert!(status.reason.as_deref().unwrap_or_default().contains("non-UTF-8"), "{status:?}");
+
+        // The root cannot be read now.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&root).is_ok() {
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipped: this user can read a folder without permission (running as root?)");
+            return;
+        }
+        let (status, _) = scanner.scan_all();
+        assert_eq!(status.state, SourceState::Error, "{status:?}");
+        assert!(!status.complete);
+
+        // It can be read again, and the odd folder is gone: nothing of the old count may remain.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir(&odd).unwrap();
+        let (status, _) = scanner.scan_all();
+
+        assert_eq!(status.state, SourceState::Fresh, "{status:?}");
+        assert_eq!(status.reason, None, "no resurrected note: {:?}", status.reason);
+        assert!(status.complete, "{status:?}");
+    }
+
+    #[test]
+    fn a_root_with_only_a_non_utf8_folder_is_empty_and_says_why() {
+        let (_tmp, root) = temp_root();
+        if !try_mkdir(&root, b"not-utf8-\xff") {
+            return;
+        }
+
+        let (status, _) = scan(&root);
+
+        assert_eq!(status.state, SourceState::Empty, "{status:?}");
+        assert!(status.reason.as_deref().unwrap_or_default().contains("non-UTF-8"), "{:?}", status.reason);
+    }
+}
+
+// ── the live watcher recovers from a root that did not exist at start ────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_a_code_root_created_after_start_is_watched_after_a_refresh_without_a_live_updates_note() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap().join("code"); // not created yet
+    let refresh = Arc::new(Notify::new());
+    let mut rx = spawn_at(root.clone(), refresh.clone());
+    let first = wait_for(&mut rx, "the first status", |u| u.0.state != SourceState::Loading).await;
+    assert_eq!(first.0.state, SourceState::NotConfigured, "{:?}", first.0);
+
+    put(&root, "alpha/.claude/ideas/one.md", "# One\n");
+    refresh.notify_one();
+
+    let update = wait_for(&mut rx, "the doc after a refresh", |u| u.0.count == 1).await;
+    assert_eq!(update.0.state, SourceState::Fresh, "{:?}", update.0);
+    let reason = update.0.reason.clone().unwrap_or_default();
+    assert!(
+        !reason.contains("Live updates unavailable"),
+        "the root exists now, so the failed watch on it must have been retried: {reason:?}"
+    );
+
+    // Changes now arrive without another refresh. FSEvents may take a moment to be
+    // running, so (as in `start_live`) the change is rewritten until it is seen.
+    let deadline = Instant::now() + ARM_DEADLINE;
+    let mut attempt = 0;
+    let update = loop {
+        attempt += 1;
+        put(&root, "alpha/.claude/ideas/two.md", &format!("# Two {attempt}\n"));
+        if let Some(update) = try_wait_for(&mut rx, ARM_ATTEMPT, |u| u.0.count == 2).await {
+            break update;
+        }
+        assert!(Instant::now() < deadline, "file events never reached the source after its root appeared");
+    };
+    assert!(!update.0.reason.clone().unwrap_or_default().contains("Live updates unavailable"), "{:?}", update.0.reason);
 }

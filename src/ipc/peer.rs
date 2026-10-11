@@ -965,6 +965,7 @@ mod tests {
             retry_at: None,
             count: 0,
             group_errors: vec![],
+            complete: false,
         };
         let sensitive = [
             ServerMsg::TeriState { todos: Default::default() },

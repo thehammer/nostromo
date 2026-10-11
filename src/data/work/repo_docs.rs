@@ -37,6 +37,7 @@ use tokio::sync::{watch, Notify};
 use tracing::warn;
 
 use super::hub::SourceUpdate;
+use super::untrusted::{one_line, MAX_LINE_CHARS};
 use super::model::{
     GroupError, Link, Priority, SourceState, SourceStatus, WorkDetail, WorkError, WorkItem,
     WorkSource,
@@ -114,7 +115,7 @@ pub fn spawn_at(root: PathBuf, refresh: Arc<Notify>) -> watch::Receiver<SourceUp
 
 /// [`spawn_at`] reading through `io` (tests make reads fail on purpose).
 pub fn spawn_with_fs(root: PathBuf, refresh: Arc<Notify>, io: Arc<dyn DocFs>) -> watch::Receiver<SourceUpdate> {
-    let (tx, rx) = watch::channel((status(SourceState::Loading, None, 0, Vec::new()), Vec::new()));
+    let (tx, rx) = watch::channel((status(SourceState::Loading, None, 0, Vec::new(), false), Vec::new()));
     let tx = Arc::new(tx);
     let (msg_tx, msg_rx) = mpsc::channel();
 
@@ -149,7 +150,7 @@ pub fn spawn_with_fs(root: PathBuf, refresh: Arc<Notify>, io: Arc<dyn DocFs>) ->
 
 /// The update for a source that cannot run at all: an error and no items.
 fn error_update(reason: &str) -> SourceUpdate {
-    (status(SourceState::Error, Some(reason.to_string()), 0, Vec::new()), Vec::new())
+    (status(SourceState::Error, Some(reason.to_string()), 0, Vec::new(), false), Vec::new())
 }
 
 /// Detail for a `doc:<repo>:<path>` item id under [`code_root`].
@@ -199,6 +200,8 @@ pub struct Scanner {
     /// that one created later is noticed.
     idle_dirs: BTreeSet<String>,
     root_issue: Option<RootIssue>,
+    /// Entries of the code root whose names are not UTF-8: they cannot be repos.
+    root_skipped: usize,
     /// Set while the file watcher cannot keep the list live.
     live_updates_unavailable: bool,
 }
@@ -319,6 +322,7 @@ impl Scanner {
             repos: BTreeMap::new(),
             idle_dirs: BTreeSet::new(),
             root_issue: None,
+            root_skipped: 0,
             live_updates_unavailable: false,
         }
     }
@@ -341,8 +345,21 @@ impl Scanner {
         match fs::read_dir(&self.root) {
             Ok(entries) => {
                 changed |= self.root_issue.take().is_some();
-                let mut names: Vec<String> =
-                    entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+                let mut names: Vec<String> = Vec::new();
+                let mut skipped = 0;
+                for entry in entries {
+                    let Ok(entry) = entry else {
+                        skipped += 1; // an entry the read itself failed on
+                        continue;
+                    };
+                    match entry.file_name().into_string() {
+                        Ok(name) => names.push(name),
+                        // A folder whose name is not UTF-8 cannot be a usable repo name; a plain file is no repo anyway.
+                        Err(_) if entry.path().is_dir() => skipped += 1,
+                        Err(_) => {}
+                    }
+                }
+                changed |= std::mem::replace(&mut self.root_skipped, skipped) != skipped;
                 names.sort();
                 let mut old = std::mem::take(&mut self.repos);
                 for name in names {
@@ -367,6 +384,8 @@ impl Scanner {
                     // Keep what we had: the next scan may succeed.
                     RootIssue::Unreadable(describe(&e))
                 };
+                // A skip count from an earlier read says nothing about a root we cannot read now.
+                changed |= std::mem::take(&mut self.root_skipped) != 0;
                 changed |= self.root_issue.as_ref() != Some(&issue);
                 self.root_issue = Some(issue);
             }
@@ -577,7 +596,8 @@ impl Scanner {
             Some(RootIssue::Unreadable(why)) => {
                 (SourceState::Error, Some(format!("Couldn't read {}: {why}", self.root.display())))
             }
-            None if !self.repos.is_empty() && group_errors.len() == self.repos.len() => {
+            // Error only when nothing could be shown: readable items keep the list fresh, with the partial-scan note.
+            None if count == 0 && !self.repos.is_empty() && group_errors.len() == self.repos.len() => {
                 (SourceState::Error, Some("Couldn't read any repo's .claude folder".to_string()))
             }
             None => {
@@ -590,6 +610,11 @@ impl Scanner {
                         self.repos.len()
                     ));
                 }
+                match self.root_skipped {
+                    0 => {}
+                    1 => notes.push("1 folder in the code root has a non-UTF-8 name and was skipped".to_string()),
+                    n => notes.push(format!("{n} folders in the code root have non-UTF-8 names and were skipped")),
+                }
                 if self.live_updates_unavailable {
                     notes.push(LIVE_UPDATES_UNAVAILABLE.to_string());
                 }
@@ -597,7 +622,12 @@ impl Scanner {
                 (state, (!notes.is_empty()).then(|| notes.join("; ")))
             }
         };
-        status(state, reason, count, group_errors)
+        // Whole list: nothing unreadable, skipped or cut off, and the root itself was read.
+        let complete = matches!(state, SourceState::Fresh | SourceState::Empty)
+            && group_errors.is_empty()
+            && self.root_skipped == 0
+            && self.root_issue.is_none();
+        status(state, reason, count, group_errors, complete)
     }
 }
 
@@ -625,6 +655,7 @@ fn status(
     reason: Option<String>,
     count: usize,
     group_errors: Vec<GroupError>,
+    complete: bool,
 ) -> SourceStatus {
     SourceStatus {
         source: WorkSource::RepoDocs,
@@ -634,6 +665,7 @@ fn status(
         retry_at: None,
         count,
         group_errors,
+        complete,
     }
 }
 
@@ -735,7 +767,16 @@ fn list_children(dir: &Path, judge: impl Fn(&str, &Path) -> Verdict) -> io::Resu
             continue;
         };
         let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
+        let Some(name) = name.to_str() else {
+            // Not UTF-8: it cannot be an item id. Hidden names are never docs, so those stay silent,
+            // and neither does a plain file that is not a `.md` (it was never a doc).
+            let bytes = name.as_encoded_bytes();
+            let could_be_doc = bytes.len() > 3 && bytes[bytes.len() - 3..].eq_ignore_ascii_case(b".md");
+            if !bytes.starts_with(b".") && (could_be_doc || entry.path().is_dir()) {
+                listing.skipped += 1;
+            }
+            continue;
+        };
         if name.starts_with('.') {
             continue;
         }
@@ -866,13 +907,17 @@ fn build_item(
     name: &str,
 ) -> WorkItem {
     let parsed = parse(text);
-    let title = parsed.title.unwrap_or_else(|| {
-        if kind == "wip" {
-            name.to_string()
-        } else {
-            humanize_slug(name)
-        }
-    });
+    // A heading (or a folder name) is whatever the repo's author wrote: one line, capped.
+    let title = one_line(
+        &parsed.title.unwrap_or_else(|| {
+            if kind == "wip" {
+                name.to_string()
+            } else {
+                humanize_slug(name)
+            }
+        }),
+        MAX_LINE_CHARS,
+    );
 
     let mut metrics = BTreeMap::new();
     let filed = prefix_date(name).or(parsed.front_date).map(noon_utc).or_else(|| {
@@ -924,12 +969,19 @@ fn parse(text: &str) -> Parsed {
             .and_then(|v| parse_date_prefix(&v));
     }
 
-    let mut in_fence = false;
+    // The open code fence, if any: its character and length. Only a line of the same
+    // character, at least as long and with nothing after it, closes it.
+    let mut fence: Option<(char, usize)> = None;
     for line in body.lines() {
-        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-            in_fence = !in_fence;
+        if let Some((ch, run, bare)) = fence_marker(line) {
+            match fence {
+                None => fence = Some((ch, run)),
+                Some((c, len)) if ch == c && run >= len && bare => fence = None,
+                Some(_) => {}
+            }
             continue;
         }
+        let in_fence = fence.is_some();
         if parsed.title.is_none() && !in_fence {
             if let Some(heading) = line.strip_prefix("# ") {
                 let heading = heading.trim();
@@ -949,6 +1001,15 @@ fn parse(text: &str) -> Parsed {
         }
     }
     parsed
+}
+
+/// `(fence character, run length, nothing after the run)` for a line that starts a
+/// code fence (three or more backticks or tildes, after optional indentation).
+fn fence_marker(line: &str) -> Option<(char, usize, bool)> {
+    let line = line.trim_start();
+    let c = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let run = line.chars().take_while(|&x| x == c).count();
+    (run >= 3).then(|| (c, run, line[run..].trim().is_empty()))
 }
 
 /// `(front matter, rest)`: front matter is a `---` fenced block at the very top.
@@ -1164,9 +1225,10 @@ fn run(
         if full_rescan || !due_was_empty {
             watcher.sync(&scanner.watch_targets());
         }
+        // The note about live updates rides on the status: publish it whenever it flips,
+        // even when no doc changed (a watch can fail, or recover, on its own).
+        everything_changed |= scanner.set_live_updates(watcher.is_live());
         if everything_changed || changed_repos.is_some() {
-            // The note about live updates rides on the status: publish it when it flips.
-            everything_changed |= scanner.set_live_updates(watcher.is_live());
             if everything_changed {
                 tx.send_replace(scanner.update());
             } else if let Some(repos) = changed_repos {
@@ -1191,7 +1253,10 @@ struct RepoWatcher {
     watched: HashSet<PathBuf>,
     /// Directories `notify` refused: retried on each sync, warned about once.
     failed: HashSet<PathBuf>,
+    root: PathBuf,
     root_watched: bool,
+    /// Whether a failure to watch the root was already warned about.
+    root_warned: bool,
 }
 
 impl RepoWatcher {
@@ -1203,21 +1268,40 @@ impl RepoWatcher {
             }
             let _ = msg_tx.send(Msg::Fs(event.paths));
         });
-        let mut watcher = match watcher {
+        let watcher = match watcher {
             Ok(w) => Some(w),
             Err(e) => {
                 warn!(error = %e, "repo docs: no file watcher; relying on the 5-minute rescan");
                 None
             }
         };
-        let mut root_watched = false;
-        if let Some(w) = watcher.as_mut() {
-            match w.watch(root, RecursiveMode::NonRecursive) {
-                Ok(()) => root_watched = true,
-                Err(e) => warn!(error = %e, root = %root.display(), "repo docs: cannot watch the code root"),
+        let mut this = Self {
+            watcher,
+            watched: HashSet::new(),
+            failed: HashSet::new(),
+            root: root.to_path_buf(),
+            root_watched: false,
+            root_warned: false,
+        };
+        this.watch_root();
+        this
+    }
+
+    /// Watch the code root unless it already is. A failure (the folder may not
+    /// exist yet) is retried on every [`RepoWatcher::sync`].
+    fn watch_root(&mut self) {
+        if self.root_watched {
+            return;
+        }
+        let Some(watcher) = self.watcher.as_mut() else { return };
+        match watcher.watch(&self.root, RecursiveMode::NonRecursive) {
+            Ok(()) => self.root_watched = true,
+            Err(e) => {
+                if !std::mem::replace(&mut self.root_warned, true) {
+                    warn!(error = %e, root = %self.root.display(), "repo docs: cannot watch the code root; will retry");
+                }
             }
         }
-        Self { watcher, watched: HashSet::new(), failed: HashSet::new(), root_watched }
     }
 
     /// Whether every directory that should be watched is: when false the list
@@ -1226,8 +1310,9 @@ impl RepoWatcher {
         self.watcher.is_some() && self.root_watched && self.failed.is_empty()
     }
 
-    /// Watch exactly the targets (retrying ones that failed before).
+    /// Watch exactly the targets (retrying ones that failed before, and the root).
     fn sync(&mut self, targets: &[WatchTarget]) {
+        self.watch_root();
         let Some(watcher) = self.watcher.as_mut() else { return };
         let wanted: HashSet<&PathBuf> = targets.iter().map(|t| &t.dir).collect();
         let gone: Vec<PathBuf> = self.watched.iter().filter(|d| !wanted.contains(d)).cloned().collect();
@@ -1546,5 +1631,74 @@ mod tests {
         let (front, body) = split_front_matter("---\nseverity: high\n# Title\n");
         assert_eq!(front, None);
         assert!(body.starts_with("---"));
+    }
+
+    // ── fences: the closing line must match the opening one ──────────────────
+
+    #[test]
+    fn a_tilde_line_inside_a_backtick_block_does_not_close_it() {
+        let parsed = parse("```\n~~~\n# not the title\n```\n# Real title\n");
+        assert_eq!(parsed.title.as_deref(), Some("Real title"));
+    }
+
+    #[test]
+    fn a_backtick_line_inside_a_tilde_block_does_not_close_it() {
+        let parsed = parse("~~~\n```\n# not the title\n~~~\n# Real title\n");
+        assert_eq!(parsed.title.as_deref(), Some("Real title"));
+    }
+
+    #[test]
+    fn a_shorter_fence_does_not_close_a_longer_one() {
+        let parsed = parse("````\n```\n# not the title\n````\n# Real title\n");
+        assert_eq!(parsed.title.as_deref(), Some("Real title"));
+    }
+
+    #[test]
+    fn a_longer_closing_fence_closes_a_shorter_one() {
+        let parsed = parse("```\ncode\n`````\n# Real title\n");
+        assert_eq!(parsed.title.as_deref(), Some("Real title"));
+        let parsed = parse("~~~\ncode\n~~~~~~\n# Real title\n");
+        assert_eq!(parsed.title.as_deref(), Some("Real title"));
+    }
+
+    #[test]
+    fn a_heading_right_after_the_proper_close_is_the_title() {
+        let parsed = parse("```rust\n```\n# Right after\n");
+        assert_eq!(parsed.title.as_deref(), Some("Right after"));
+    }
+
+    #[test]
+    fn severity_and_priority_lines_stay_ignored_until_the_matching_fence_closes() {
+        let text = "```\n~~~\n**Severity:** high\n**Priority:** P1\n```\n# T\n**Severity:** low\n";
+        let parsed = parse(text);
+        assert_eq!(parsed.title.as_deref(), Some("T"));
+        assert_eq!(parsed.severity.as_deref(), Some("low"), "only the line after the real close counts");
+        assert_eq!(parsed.priority, None);
+    }
+
+    // ── the live-updates note ────────────────────────────────────────────────
+
+    #[test]
+    fn the_live_updates_note_follows_the_watcher_and_never_makes_the_list_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        fs::create_dir_all(root.join("alpha/.claude/ideas")).unwrap();
+        fs::write(root.join("alpha/.claude/ideas/one.md"), "# One\n").unwrap();
+        let mut scanner = Scanner::new(root);
+        let (status, _) = scanner.scan_all();
+        assert_eq!((status.state, status.reason.as_deref(), status.complete), (SourceState::Fresh, None, true));
+
+        assert!(scanner.set_live_updates(false), "the watcher failing is a change to publish, though no doc changed");
+        let (status, _) = scanner.update();
+        assert_eq!(status.state, SourceState::Fresh);
+        assert_eq!(status.reason.as_deref(), Some(LIVE_UPDATES_UNAVAILABLE));
+        assert_eq!(status.count, 1);
+        assert!(status.complete, "the list was scanned whole; only its freshness is in doubt: {status:?}");
+
+        assert!(!scanner.set_live_updates(false), "saying the same thing again is no change");
+
+        assert!(scanner.set_live_updates(true), "the watcher coming back is a change too");
+        let (status, _) = scanner.update();
+        assert_eq!((status.reason, status.complete), (None, true));
     }
 }

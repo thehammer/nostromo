@@ -808,6 +808,25 @@ final class TeriSurfaceViewTests: XCTestCase {
             || (responder as? NSTextView)?.delegate === field
     }
 
+    func testEveryTabLabelCarriesAnExplicitLegibleColour() {
+        let rig = makeRig()
+
+        for tab in TeriTab.allCases {
+            guard let button = tabButton(rig, tab) else { return XCTFail("no button for \(tab.title)") }
+            let colour = button.attributedTitle.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+            XCTAssertNotNil(colour, "\(tab.title): an unset label colour is what made unselected tabs vanish on a dark surface")
+            rig.surface.select(tab)
+            let selected = button.attributedTitle.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+            XCTAssertEqual(selected, NSColor.white, "\(tab.title): the selected tab is white on the accent fill")
+        }
+        rig.surface.select(.todos)
+        for tab in TeriTab.allCases where tab != .todos {
+            guard let button = tabButton(rig, tab) else { return XCTFail("no button for \(tab.title)") }
+            let colour = button.attributedTitle.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+            XCTAssertEqual(colour, NSColor.labelColor, "\(tab.title): an unselected tab uses the adaptive label colour")
+        }
+    }
+
     private func tabButton(_ rig: Rig, _ tab: TeriTab) -> NSButton? {
         rigAllSubviews(of: rig.surface).compactMap { $0 as? NSButton }.first { $0.title.hasPrefix(tab.title) }
     }

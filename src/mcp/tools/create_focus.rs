@@ -19,7 +19,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::untrusted::{fence, one_line, MAX_FENCED_TITLE_CHARS, MAX_LINE_CHARS};
+use super::untrusted::{fence, one_line, unescape_id, MAX_FENCED_TITLE_CHARS, MAX_LINE_CHARS};
 use crate::data::work::model::SentMarker;
 use crate::data::work::sent;
 use crate::ipc::protocol::{FocusMeta, PaneTree, ServerMsg};
@@ -766,9 +766,10 @@ fn parse_request(args: &Value, pty_id: Option<&str>) -> Result<CreateFocusReques
     let working_directory = string("working_directory")?.filter(|s| !s.is_empty()).map(PathBuf::from);
 
     let source_item_title = string("source_item_title")?.filter(|t| !t.is_empty());
+    // The id as `teri.list_work_items` gave it is escaped; the ledger and the hub use the real one.
     let source_item = string("source_item_id")?.filter(|s| !s.is_empty()).map(|id| SourceItemRef {
         title: source_item_title.unwrap_or_else(|| title.clone()),
-        id,
+        id: unescape_id(&id),
     });
     let allow_duplicate = match args.get("allow_duplicate") {
         None | Some(Value::Null) => false,
@@ -808,6 +809,18 @@ fn parse_request(args: &Value, pty_id: Option<&str>) -> Result<CreateFocusReques
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_item_id_as_listed_is_unescaped_to_the_real_id() {
+        let args = json!({
+            "agent": "cody", "title": "T", "working_directory": "/tmp",
+            "source_item_id": "doc:repo:My%20Plan%2550.md",
+        });
+        let req = parse_request(&args, None).expect("valid");
+        assert_eq!(req.source_item.expect("item").id, "doc:repo:My Plan%50.md");
+        let plain = json!({ "agent": "cody", "title": "T", "source_item_id": "jira:CORE-1" });
+        assert_eq!(parse_request(&plain, None).unwrap().source_item.unwrap().id, "jira:CORE-1");
+    }
 
     #[test]
     fn derive_tag_slugifies_title() {
