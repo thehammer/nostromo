@@ -79,6 +79,12 @@ class MotherView: NSView {
     static let overviewPaneId = "mother_overview"
     static func tabPaneId(for jobId: String) -> String { "mother_job:\(jobId)" }
 
+    /// Posted after `requestedJobId` is set, to open that job's tab in a Mother view that exists.
+    static let openJobNotification = Notification.Name("nostromo.mother.openJob")
+    /// A job to open as soon as a Mother view has it in its list (a "queued as Mother job"
+    /// marker was clicked). Cleared once opened.
+    static var requestedJobId: String?
+
     private var cancellables = Set<AnyCancellable>()
 
     override init(frame: NSRect) { super.init(frame: frame); setup() }
@@ -146,6 +152,11 @@ class MotherView: NSView {
             self?.openJobTab(job)
         }
 
+        NotificationCenter.default.publisher(for: Self.openJobNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.openRequestedJob(in: AppStore.shared.motherJobs) }
+            .store(in: &cancellables)
+
         // Live data — empty state ("No jobs") shows until first jobs arrive
         AppStore.shared.$motherJobs
             .receive(on: DispatchQueue.main)
@@ -156,12 +167,20 @@ class MotherView: NSView {
     private func jobsDidChange(_ jobs: [MotherJob]) {
         log.debug("live jobs: \(jobs.count, privacy: .public)")
         jobList.update(jobs)
+        openRequestedJob(in: jobs)
         // Keep every open tab current. A job that left the queue (archived,
         // pruned) keeps its tab, showing the empty state, rather than the tab
         // vanishing under the reader.
         for (id, detail) in jobDetails {
             detail.show(jobs.first { $0.id == id })
         }
+    }
+
+    /// `jobs` is passed in: a `@Published` sink runs before the property holds the new value.
+    private func openRequestedJob(in jobs: [MotherJob]) {
+        guard let id = Self.requestedJobId, let job = jobs.first(where: { $0.id == id }) else { return }
+        Self.requestedJobId = nil
+        openJobTab(job)
     }
 
     private func openJobTab(_ job: MotherJob) {

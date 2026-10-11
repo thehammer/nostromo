@@ -1200,3 +1200,73 @@ final class WorkDetailOpenInTests: XCTestCase {
         XCTAssertEqual(popup.toolTip, reason)
     }
 }
+
+// MARK: - Send to agent wiring (T5)
+
+extension TeriSurfaceViewTests {
+    private func sentTodo(kind: String, label: String, target: String) -> WorkItem {
+        WorkTestSupport.makeItem([
+            "id": "todo:9", "source": "todos", "kind": "todo", "title": "Ship the thing", "search_text": "Ship the thing",
+            "status": "open", "priority": ["label": "P2", "rank": 2],
+            "sent": [["kind": kind, "target_id": target, "label": label, "created_at": "2026-10-09T15:00:00Z"]],
+        ])
+    }
+
+    func testCommandShiftSSendsTheSelectedRowAndNothingWhenNoRowIsSelected() {
+        let rig = makeRig(seed: { seedTodos($0) })
+        var sent: [String] = []
+        rig.surface.onSendToAgent = { sent.append($0) }
+        rig.surface.select(.todos)
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 2 })
+        let child = FocusableView()
+        rig.surface.addSubview(child)
+        XCTAssertTrue(rig.window.makeFirstResponder(child))
+
+        let shiftS = keyEvent("S", code: 1, window: rig.window, flags: [.command, .shift])
+        XCTAssertFalse(rig.surface.sendSelectedToAgent(), "nothing selected yet")
+        XCTAssertTrue(sent.isEmpty)
+
+        rig.surface.selectItem(id: "todo:2")
+        XCTAssertTrue(rig.surface.performKeyEquivalent(with: shiftS))
+        XCTAssertEqual(sent, ["todo:2"])
+    }
+
+    func testPlainCommandSDoesNotSend() {
+        let rig = makeRig(seed: { seedTodos($0) })
+        var sent: [String] = []
+        rig.surface.onSendToAgent = { sent.append($0) }
+        rig.surface.select(.todos)
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 2 })
+        rig.surface.selectItem(id: "todo:2")
+        let child = FocusableView()
+        rig.surface.addSubview(child)
+        XCTAssertTrue(rig.window.makeFirstResponder(child))
+
+        XCTAssertFalse(rig.surface.performKeyEquivalent(with: keyEvent("s", code: 1, window: rig.window)))
+        XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testARowShowsItsSentMarkerAndClickingItOpensTheTarget() {
+        let rig = makeRig(seed: { store in
+            store.apply(snapshot: .todos, group: nil, items: [self.sentTodo(kind: "focus", label: "Fix webhook", target: "claudia-fix-webhook")])
+            store.apply(status: SourceStatus(source: .todos, state: .fresh, count: 1))
+        })
+        var opened: [SentMarker] = []
+        rig.surface.onOpenSent = { opened.append($0) }
+        rig.surface.select(.todos)
+
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.first?.sentText == "sent to Fix webhook" })
+        XCTAssertTrue(rig.surface.clickSentMarker(itemId: "todo:9"))
+        XCTAssertEqual(opened.map(\.targetId), ["claudia-fix-webhook"])
+    }
+
+    func testAMotherJobMarkerSaysQueuedAsMotherJob() {
+        let rig = makeRig(seed: { store in
+            store.apply(snapshot: .todos, group: nil, items: [self.sentTodo(kind: "mother_job", label: "Ship the thing", target: "job-7")])
+            store.apply(status: SourceStatus(source: .todos, state: .fresh, count: 1))
+        })
+        rig.surface.select(.todos)
+
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.first?.sentText == "queued as Mother job" })
+    }
+}

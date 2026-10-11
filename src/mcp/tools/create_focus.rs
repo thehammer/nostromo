@@ -179,16 +179,46 @@ pub async fn create_focus_core(
     daemon: &DaemonMcpBackend,
     req: CreateFocusRequest,
 ) -> Result<CreateFocusOutcome, CreateFocusError> {
+    create_focus_on(FocusHost::from(daemon), req).await
+}
+
+/// What creating a focus needs from the daemon: its sessions and the broadcast
+/// channel. The work hub (which is built before the MCP backend) holds exactly
+/// these, so Send to agent reaches [`create_focus_on`] without the rest of
+/// [`DaemonMcpBackend`].
+#[derive(Clone)]
+pub struct FocusHost {
+    pub session_mgr: Arc<std::sync::Mutex<SessionManager>>,
+    pub broadcast_tx: tokio::sync::broadcast::Sender<ServerMsg>,
+}
+
+impl From<&DaemonMcpBackend> for FocusHost {
+    fn from(daemon: &DaemonMcpBackend) -> Self {
+        Self { session_mgr: Arc::clone(&daemon.session_mgr), broadcast_tx: daemon.broadcast_tx.clone() }
+    }
+}
+
+/// [`create_focus_core`] on a [`FocusHost`].
+pub async fn create_focus_on(
+    daemon: FocusHost,
+    req: CreateFocusRequest,
+) -> Result<CreateFocusOutcome, CreateFocusError> {
     let req = sanitize(req);
     validate(&req)?;
-    let daemon = daemon.clone();
-    tokio::spawn(create(daemon, req))
-        .await
+    // The work-send scope is task-local: it does not follow a spawned task,
+    // so carry it over (the session manager keys on it to register what the
+    // task spawns, seeds and announces as work-derived).
+    let task = if crate::ipc::peer::in_work_send() {
+        tokio::spawn(crate::ipc::peer::within_work_send(create(daemon, req)))
+    } else {
+        tokio::spawn(create(daemon, req))
+    };
+    task.await
         .map_err(|e| CreateFocusError::SpawnFailed(format!("create_focus task failed: {e}")))?
 }
 
 async fn create(
-    daemon: DaemonMcpBackend,
+    daemon: FocusHost,
     req: CreateFocusRequest,
 ) -> Result<CreateFocusOutcome, CreateFocusError> {
     let label = non_blank(req.label.as_deref()).unwrap_or(&req.title).to_owned();
@@ -258,7 +288,7 @@ fn validate(req: &CreateFocusRequest) -> Result<(), CreateFocusError> {
 }
 
 /// The newest live marker for `item_id`, as an `Existing` outcome.
-async fn live_marker(daemon: &DaemonMcpBackend, item_id: &str) -> Option<CreateFocusOutcome> {
+async fn live_marker(daemon: &FocusHost, item_id: &str) -> Option<CreateFocusOutcome> {
     let markers = sent::ledger().markers(item_id);
     // Asked of Mother only if a job marker needs it. Unknown (the list failed)
     // counts as live: better to return the existing job than to start a second
@@ -289,7 +319,7 @@ async fn live_marker(daemon: &DaemonMcpBackend, item_id: &str) -> Option<CreateF
 }
 
 async fn create_focus_session(
-    daemon: &DaemonMcpBackend,
+    daemon: &FocusHost,
     req: CreateFocusRequest,
     label: String,
 ) -> Result<CreateFocusOutcome, CreateFocusError> {
@@ -421,7 +451,7 @@ fn register_sensitivity(mgr: &SessionManager, tag: &str, caller: Option<&str>, h
 }
 
 /// Register the focus and tell every client about it and its initial layout.
-fn announce_focus(daemon: &DaemonMcpBackend, meta: FocusMeta) {
+fn announce_focus(daemon: &FocusHost, meta: FocusMeta) {
     let tag = meta.tag.clone();
     daemon.session_mgr.lock().unwrap().add_or_update_focus(meta.clone());
     let _ = daemon.broadcast_tx.send(ServerMsg::FocusCreated { meta });

@@ -2,8 +2,7 @@ import AppKit
 
 // The detail half of every Teri tab: one scrolling text view showing a
 // `WorkItemDetail` (title, field rows, markdown body, files, links) and a
-// button row with "Open in…" (⌘O) and a "Send to agent…" placeholder that the
-// send-to-agent slice enables.
+// button row with "Open in…" (⌘O) and "Send to agent…" (⌘⇧S, handled by the surface).
 
 /// Somewhere an item can be opened.
 enum WorkOpenTarget: Equatable {
@@ -27,8 +26,8 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
         case detail(WorkItemDetail)
     }
 
-    /// Called when the user chooses "Send to agent…" (enabled by a later slice).
-    var onSendToAgent: (() -> Void)?
+    /// Called when the user chooses "Send to agent…" with the id of the item shown.
+    var onSendToAgent: ((String) -> Void)?
     /// Performs an open. Replaceable so tests never launch anything.
     var opener: (WorkOpenTarget) -> Void = WorkDetailView.openWithWorkspace
 
@@ -83,10 +82,14 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
     /// Plain text on screen (tests, accessibility).
     var renderedText: String { textView.string }
 
-    /// Whether the "Send to agent…" button can be used.
-    var sendToAgentEnabled: Bool {
-        get { sendButton.isEnabled }
-        set { sendButton.isEnabled = newValue }
+    /// Whether the "Send to agent…" button can be used: an item is shown (even while
+    /// its detail is loading or failed: the daemon builds the context itself).
+    var sendToAgentEnabled: Bool { sendButton.isEnabled }
+
+    /// The id of the item being shown, nil when nothing is.
+    var shownItemId: String? {
+        if case .detail(let detail) = content { return detail.itemId }
+        return shownItem?.id
     }
 
     /// Show `content`. `item` supplies the item's own url/path as extra "Open in…" targets.
@@ -94,6 +97,7 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
         self.content = content
         shownItem = item
         openTargets = Self.targets(for: content, item: item)
+        sendButton.isEnabled = shownItemId != nil
         rebuildOpenMenu()
         textView.textStorage?.setAttributedString(Self.attributedText(for: content))
         textView.scrollToBeginningOfDocument(nil)
@@ -263,7 +267,7 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
         sendButton.bezelStyle = .rounded
         sendButton.target = self
         sendButton.action = #selector(sendPressed)
-        sendButton.isEnabled = false   // enabled by the send-to-agent slice
+        sendButton.isEnabled = false   // enabled while an item is shown
         let buttons = NSStackView(views: [openButton, sendButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
@@ -301,7 +305,9 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
         opener(openTargets[sender.tag])
     }
 
-    @objc private func sendPressed() { onSendToAgent?() }
+    @objc private func sendPressed() {
+        if let id = shownItemId { onSendToAgent?(id) }
+    }
 }
 
 // MARK: - Markdown

@@ -54,6 +54,9 @@ pub struct SendRequest {
     pub label: String,
     pub context: String,
     pub allow_duplicate: bool,
+    /// The `client_id` the requester gave in its `Hello`: the new focus is
+    /// selected in that client's windows.
+    pub client_id: Option<String>,
 }
 
 /// Detail provider for Fred mail (`mail:`) and calendar (`event:`) items.

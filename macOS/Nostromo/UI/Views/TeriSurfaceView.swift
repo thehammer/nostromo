@@ -28,6 +28,11 @@ final class TeriSurfaceView: NSView {
     private(set) var selectedTab: TeriTab
     /// The Picks tab's list pane (shown while Picks is the selected tab).
     private(set) var picksView: TeriPicksView?
+    /// Open the Send to agent sheet for this item id. Set by `TeriBindings`, which owns the
+    /// sheet; nil in tests that do not look at it.
+    var onSendToAgent: ((String) -> Void)?
+    /// Go to the focus or Mother job a "sent to …" marker names. Set by `TeriBindings`.
+    var onOpenSent: ((SentMarker) -> Void)?
 
     private let store: WorkStore
     private let viewState: TeriViewStateStore
@@ -75,6 +80,7 @@ final class TeriSurfaceView: NSView {
         super.init(frame: .zero)
         let picksView = TeriPicksView(store: store, now: now, calendar: calendar)
         picksView.onSelect = { [weak self] pick in self?.pickSelected(pick) }
+        picksView.onOpenSent = { [weak self] _, marker in self?.onOpenSent?(marker) }
         self.picksView = picksView
         buildViews()
         observe()
@@ -157,9 +163,29 @@ final class TeriSurfaceView: NSView {
 
     // MARK: Keyboard
 
+    /// ⌘⇧S: send the selected row (or pick) to an agent. False when nothing is selected.
+    @discardableResult
+    func sendSelectedToAgent() -> Bool {
+        let id = selectedTab == .picks ? picksView?.selectedPickId : lists[selectedTab]?.selectedItem?.id
+        guard let id, let onSendToAgent else { return false }
+        onSendToAgent(id)
+        return true
+    }
+
+    /// Click the "sent to …" marker on `itemId`'s row in the current tab (tests).
+    @discardableResult
+    func clickSentMarker(itemId: String) -> Bool {
+        lists[selectedTab]?.clickSentMarker(itemId: itemId) ?? false
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.type == .keyDown, isInKeyWindowResponderChain, flags == [.command, .shift],
+           event.charactersIgnoringModifiers?.lowercased() == "s", sendSelectedToAgent() {
+            return true
+        }
         guard event.type == .keyDown, isInKeyWindowResponderChain,
-              event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+              flags == .command,
               let key = event.charactersIgnoringModifiers
         else { return super.performKeyEquivalent(with: event) }
 
@@ -220,6 +246,7 @@ final class TeriSurfaceView: NSView {
         splitView.dividerStyle = .thin
         splitView.onDividerDragEnded = { [weak self] in self?.dividerDragEnded() }
         splitView.onLayout = { [weak self] in self?.applyRememberedSplit() }
+        detailView.onSendToAgent = { [weak self] id in self?.onSendToAgent?(id) }
         splitView.addArrangedSubview(listHost)
         splitView.addArrangedSubview(detailView)
         listHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
@@ -358,6 +385,7 @@ final class TeriSurfaceView: NSView {
             self?.viewState.update { $0[tab].collapsedGroups = groups }
         }
         list.onOpen = { [weak self] _ in self?.detailView.focusDetail() }
+        list.onOpenSent = { [weak self] _, marker in self?.onOpenSent?(marker) }
         lists[tab] = list
         return list
     }

@@ -317,6 +317,32 @@ impl WorkHub {
         out
     }
 
+    /// The held item with this id.
+    pub(crate) fn item(&self, item_id: &str) -> Option<WorkItem> {
+        let state = self.state.lock().unwrap();
+        state
+            .slots
+            .values()
+            .flat_map(|slot| slot.groups.values().flatten())
+            .find(|item| item.id == item_id)
+            .cloned()
+    }
+
+    /// The folder whose children are the repos Repo docs reads.
+    pub(crate) fn repo_docs_root(&self) -> &std::path::Path {
+        &self.repo_docs_root
+    }
+
+    /// Where the Sentry project -> repo mapping lives, when Sentry is configured.
+    pub(crate) fn sentry_repos_path(&self) -> Option<&std::path::Path> {
+        self.sentry.as_ref().map(|config| config.repos_path.as_path())
+    }
+
+    /// The sent markers for `item_id` whose focus or job is still there.
+    pub(crate) fn live_markers(&self, item_id: &str) -> Vec<SentMarker> {
+        sent::ledger().live_markers(item_id, &|m| self.marker_is_live(m))
+    }
+
     /// Teri's picks.
     pub fn picks(&self) -> &Arc<PicksStore> {
         &self.picks
@@ -720,10 +746,10 @@ impl WorkService for WorkHub {
     }
 
     async fn send_preview(&self, item_id: &str) -> Result<SendPreview, WorkError> {
-        send::preview(&self.ctx, item_id).await
+        send::preview(self, item_id).await
     }
 
     async fn send(&self, request: SendRequest) -> Result<SendOutcome, WorkError> {
-        send::send(&self.ctx, request).await
+        send::send(self, request).await
     }
 }

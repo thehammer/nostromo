@@ -39,9 +39,13 @@ struct PicksRowContent: Equatable {
 final class TeriPicksView: NSView {
     /// The user picked a row (nil: the selection went away).
     var onSelect: ((Pick?) -> Void)?
+    /// The user clicked a row's "Sent to …" line: go to that focus or job (the newest marker).
+    var onOpenSent: ((Pick, SentMarker) -> Void)?
 
     private(set) var selectedPickId: String?
     private(set) var visibleRows: [PicksRowContent] = []
+    /// The newest live sent marker of each pick's item.
+    private var sentMarkers: [String: SentMarker] = [:]
 
     private let store: WorkStore
     private let now: () -> Date
@@ -380,12 +384,13 @@ final class TeriPicksView: NSView {
 
     private func makeRows(_ picks: [Pick]) -> [PicksRowContent] {
         let ids = Set(picks.map(\.itemId))
-        var sentLabels: [String: [String]] = [:]
+        var sentMarkers: [String: [SentMarker]] = [:]
         for item in store.allItems where !item.sent.isEmpty && ids.contains(item.id) {
-            sentLabels[item.id] = item.sent.map(\.label)
+            sentMarkers[item.id] = item.sent
         }
+        self.sentMarkers = sentMarkers.compactMapValues(\.last)
         return picks.map { pick in
-            let sent = sentLabels[pick.itemId].map { "Sent to " + $0.joined(separator: ", ") }
+            let sent = sentMarkers[pick.itemId].map(Self.sentText)
             let source = pick.source.displayName
             var spoken = [source, pick.title, pick.reason]
             if pick.doneSince { spoken.append("done since") }
@@ -401,6 +406,23 @@ final class TeriPicksView: NSView {
         }
     }
 
+    /// "Sent to Fix webhook, Refund spike" for focuses, "Queued as Mother job" for jobs.
+    private static func sentText(_ markers: [SentMarker]) -> String {
+        let focusLabels = markers.filter { $0.kind != "mother_job" }.map(\.label)
+        var parts: [String] = []
+        if !focusLabels.isEmpty { parts.append("Sent to " + focusLabels.joined(separator: ", ")) }
+        if markers.contains(where: { $0.kind == "mother_job" }) { parts.append("Queued as Mother job") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Click the "Sent to …" line of `itemId`'s row (tests). False when it has none.
+    @discardableResult
+    func clickSent(itemId: String) -> Bool {
+        guard let pick = picks.first(where: { $0.itemId == itemId }), let marker = sentMarkers[itemId] else { return false }
+        onOpenSent?(pick, marker)
+        return true
+    }
+
     private func rebuildRows() {
         for view in rowViews { view.removeFromSuperview() }
         rowViews = visibleRows.enumerated().map { index, content in
@@ -409,6 +431,11 @@ final class TeriPicksView: NSView {
                 guard let self, self.picks.indices.contains(index) else { return }
                 self.select(itemId: self.picks[index].itemId)
                 self.window?.makeFirstResponder(self)
+            }
+            row.onSentClick = { [weak self] in
+                guard let self, self.picks.indices.contains(index),
+                      let marker = self.sentMarkers[self.picks[index].itemId] else { return }
+                self.onOpenSent?(self.picks[index], marker)
             }
             rowStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: rowStack.widthAnchor).isActive = true
@@ -468,6 +495,7 @@ private final class PicksFlippedView: NSView {
 /// colours (muted grey, sage, cornflower) are for the dark surface only.
 private final class PickRowView: NSView {
     var onClick: (() -> Void)?
+    var onSentClick: (() -> Void)?
     var isSelected = false {
         didSet {
             guard isSelected != oldValue else { return }
@@ -544,7 +572,13 @@ private final class PickRowView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func mouseDown(with event: NSEvent) {
+        if let sent, !sent.isHidden, sent.bounds.contains(sent.convert(event.locationInWindow, from: nil)) {
+            onSentClick?()
+        } else {
+            onClick?()
+        }
+    }
 
     private func applyColors() {
         let selected = isSelected
