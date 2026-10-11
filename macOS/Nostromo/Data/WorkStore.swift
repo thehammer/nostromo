@@ -23,6 +23,8 @@ struct WorkListSnapshot: Equatable {
     let filteredCount: Int
     /// Per requested facet: value → count, ignoring that facet's own filter.
     let facetCounts: [WorkFacet: [String: Int]]
+    /// Groups (repos) the source could not read: shown as a marker on the group.
+    var groupErrors: [GroupError] = []
 }
 
 /// In-memory home of the Teri work data pushed by the daemon: per-source
@@ -103,7 +105,8 @@ final class WorkStore: ObservableObject {
     /// the filter bar needs. Synchronous.
     func listSnapshot(source: WorkSource, filter: WorkFilter, sort: WorkSortKey,
                       facets: [WorkFacet]) -> WorkListSnapshot {
-        Self.makeSnapshot(items: items(for: source), source: source, filter: filter, sort: sort, facets: facets)
+        Self.makeSnapshot(items: items(for: source), source: source, filter: filter, sort: sort, facets: facets,
+                          groupErrors: statuses[source]?.groupErrors ?? [])
     }
 
     /// Like `listSnapshot`, but a large source is derived on a background queue.
@@ -113,18 +116,22 @@ final class WorkStore: ObservableObject {
     func computeListSnapshot(source: WorkSource, filter: WorkFilter, sort: WorkSortKey,
                              facets: [WorkFacet], completion: @escaping (WorkListSnapshot) -> Void) {
         let items = items(for: source)
+        let groupErrors = statuses[source]?.groupErrors ?? []
         if items.count <= Self.backgroundThreshold {
-            completion(Self.makeSnapshot(items: items, source: source, filter: filter, sort: sort, facets: facets))
+            completion(Self.makeSnapshot(items: items, source: source, filter: filter, sort: sort, facets: facets,
+                                         groupErrors: groupErrors))
             return
         }
         Self.derivationQueue.async {
-            let snapshot = Self.makeSnapshot(items: items, source: source, filter: filter, sort: sort, facets: facets)
+            let snapshot = Self.makeSnapshot(items: items, source: source, filter: filter, sort: sort, facets: facets,
+                                             groupErrors: groupErrors)
             DispatchQueue.main.async { completion(snapshot) }
         }
     }
 
     private static func makeSnapshot(items: [WorkItem], source: WorkSource, filter: WorkFilter,
-                                     sort: WorkSortKey, facets: [WorkFacet]) -> WorkListSnapshot {
+                                     sort: WorkSortKey, facets: [WorkFacet],
+                                     groupErrors: [GroupError]) -> WorkListSnapshot {
         var filter = filter
         filter.sources = []   // the source is the tab, not a user filter
         let matching = WorkQuery.filter(items, filter)
@@ -136,7 +143,8 @@ final class WorkStore: ObservableObject {
             groups: WorkQuery.group(matching, source: source, sort: sort),
             totalCount: items.count,
             filteredCount: matching.count,
-            facetCounts: counts)
+            facetCounts: counts,
+            groupErrors: groupErrors)
     }
 
     // MARK: - Daemon requests

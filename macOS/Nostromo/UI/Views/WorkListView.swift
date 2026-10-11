@@ -14,6 +14,8 @@ struct WorkRowContent: Equatable {
     var priorityText: String?
     /// 1 = most urgent; colours the priority text.
     var priorityRank: Int?
+    /// The type of the item, glyph and word ("✖ Bug"), left of the title.
+    var kindText: String?
     var title: String
     /// "Overdue by 2 days", "Due today", "Due Fri".
     var dueText: String?
@@ -23,10 +25,12 @@ struct WorkRowContent: Equatable {
     /// What VoiceOver reads: source, type, title, priority, age.
     var accessibilityLabel: String
 
-    init(priorityText: String? = nil, priorityRank: Int? = nil, title: String, dueText: String? = nil,
-         dueIsUrgent: Bool = false, statusText: String? = nil, accessibilityLabel: String) {
+    init(priorityText: String? = nil, priorityRank: Int? = nil, kindText: String? = nil, title: String,
+         dueText: String? = nil, dueIsUrgent: Bool = false, statusText: String? = nil,
+         accessibilityLabel: String) {
         self.priorityText = priorityText
         self.priorityRank = priorityRank
+        self.kindText = kindText
         self.title = title
         self.dueText = dueText
         self.dueIsUrgent = dueIsUrgent
@@ -43,8 +47,17 @@ struct WorkListConfig {
     var groupTitle: (WorkGroup) -> String = { $0.key ?? "" }
     /// One toggle chip per value of this facet, with its count.
     var chipFacet: WorkFacet?
+    /// The label of a chip for one facet value (default: the value itself).
+    var chipTitle: (String) -> String = { $0 }
+    /// When not empty, the chip strip always shows exactly these values, in this
+    /// order, with a count of 0 for absent ones (default: the values that have items).
+    var chipValues: [String] = []
+    /// Offers a "Has severity" toggle (filters to items that state a severity).
+    var hasSeverityToggle = false
     /// Multi-select menus, one per facet.
     var menuFacets: [WorkFacet] = []
+    /// Menus (of `menuFacets`) that also get an "All" item clearing their selection.
+    var menuAllItemFacets: Set<WorkFacet> = []
     /// Sort choices; the popup is hidden when there are fewer than two.
     var sortOptions: [(title: String, key: WorkSortKey)] = []
     var searchPlaceholder: String = "Filter"
@@ -85,6 +98,7 @@ final class WorkListView: NSView {
     private let chipStack = NSStackView()
     private let searchField = NSSearchField()
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let severityToggle = NSButton(title: "Has severity", target: nil, action: nil)
     private var menuButtons: [WorkFacet: NSPopUpButton] = [:]
     private let placeholderLabel = NSTextField(wrappingLabelWithString: "")
     private let skeleton = WorkSkeletonView()
@@ -267,6 +281,14 @@ final class WorkListView: NSView {
         filterBar.alignment = .centerY
         filterBar.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         filterBar.addArrangedSubview(chipStack)
+        if config.hasSeverityToggle {
+            severityToggle.setButtonType(.pushOnPushOff)
+            severityToggle.bezelStyle = .recessed
+            severityToggle.target = self
+            severityToggle.action = #selector(severityToggled(_:))
+            severityToggle.setAccessibilityLabel("Has severity")
+            filterBar.addArrangedSubview(severityToggle)
+        }
         for facet in config.menuFacets {
             let button = NSPopUpButton(frame: .zero, pullsDown: true)
             button.setAccessibilityLabel("Filter by \(facet.rawValue)")
@@ -349,9 +371,20 @@ final class WorkListView: NSView {
         if snapshot.groups.count == 1, snapshot.groups[0].key == nil {
             return snapshot.groups[0].items.map(itemNode)
         }
-        return snapshot.groups.map { group in
-            Node(groupKey: group.key ?? "", title: config.groupTitle(group), children: group.items.map(itemNode))
+        let reasons = Dictionary(snapshot.groupErrors.map { ($0.group, $0.reason) }, uniquingKeysWith: { first, _ in first })
+        func title(_ group: WorkGroup) -> String {
+            let base = config.groupTitle(group)
+            return reasons[group.key ?? ""].map { "\(base) ⚠ \($0)" } ?? base
         }
+        var nodes = snapshot.groups.map { group in
+            Node(groupKey: group.key ?? "", title: title(group), children: group.items.map(itemNode))
+        }
+        // A group that failed has no items but must still say so.
+        let present = Set(snapshot.groups.map { $0.key ?? "" })
+        for error in snapshot.groupErrors.sorted(by: { $0.group < $1.group }) where !present.contains(error.group) {
+            nodes.append(Node(groupKey: error.group, title: title(WorkGroup(key: error.group, items: [])), children: []))
+        }
+        return nodes
     }
 
     private func flatten(_ nodes: [Node]) -> [Node] {
@@ -394,19 +427,30 @@ final class WorkListView: NSView {
         chipStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if let facet = config.chipFacet {
             let selected = Set(values(of: facet, in: filter))
-            for (value, count) in (counts[facet] ?? [:]).sorted(by: { $0.key < $1.key }) {
+            let entries: [(value: String, count: Int)] = config.chipValues.isEmpty
+                ? (counts[facet] ?? [:]).sorted(by: { $0.key < $1.key }).map { ($0.key, $0.value) }
+                : config.chipValues.map { ($0, counts[facet]?[$0] ?? 0) }
+            for (value, count) in entries {
                 chipStack.addArrangedSubview(makeChip(value: value, count: count, isOn: selected.contains(value)))
             }
             // A selected value with no items left still needs a chip to turn it off.
-            for value in selected where counts[facet]?[value] == nil {
+            for value in selected where counts[facet]?[value] == nil && !entries.contains(where: { $0.value == value }) {
                 chipStack.addArrangedSubview(makeChip(value: value, count: 0, isOn: true))
             }
         }
+        severityToggle.state = filter.hasSeverity == true ? .on : .off
         // Menus
         for (facet, button) in menuButtons {
             let selected = Set(values(of: facet, in: filter))
             button.removeAllItems()
             button.addItem(withTitle: selected.isEmpty ? facet.rawValue.capitalized : "\(facet.rawValue.capitalized) (\(selected.count))")
+            if config.menuAllItemFacets.contains(facet) {
+                let all = NSMenuItem(title: "All", action: #selector(menuAllChosen(_:)), keyEquivalent: "")
+                all.target = self
+                all.representedObject = MenuChoice(facet: facet, value: "")
+                all.state = selected.isEmpty ? .on : .off
+                button.menu?.addItem(all)
+            }
             for (value, count) in (counts[facet] ?? [:]).sorted(by: { $0.key < $1.key }) {
                 let item = NSMenuItem(title: "\(value) (\(count))", action: #selector(menuValueChosen(_:)), keyEquivalent: "")
                 item.target = self
@@ -418,12 +462,13 @@ final class WorkListView: NSView {
     }
 
     private func makeChip(value: String, count: Int, isOn: Bool) -> NSButton {
-        let chip = NSButton(title: "\(value) \(count)", target: self, action: #selector(chipToggled(_:)))
+        let label = config.chipTitle(value)
+        let chip = NSButton(title: "\(label) \(count)", target: self, action: #selector(chipToggled(_:)))
         chip.setButtonType(.pushOnPushOff)
         chip.bezelStyle = .recessed
         chip.state = isOn ? .on : .off
         chip.identifier = NSUserInterfaceItemIdentifier(value)
-        chip.setAccessibilityLabel("\(value), \(count) items")
+        chip.setAccessibilityLabel("\(label), \(count) items")
         return chip
     }
 
@@ -459,6 +504,28 @@ final class WorkListView: NSView {
         case .status:      flip(&filter.statuses)
         case .environment: flip(&filter.environments)
         }
+        onFilterChange?(filter, sort)
+    }
+
+    private func clear(_ facet: WorkFacet) {
+        switch facet {
+        case .source:      filter.sources = []
+        case .kind:        filter.kinds = []
+        case .repo:        filter.repos = []
+        case .project:     filter.projects = []
+        case .status:      filter.statuses = []
+        case .environment: filter.environments = []
+        }
+        onFilterChange?(filter, sort)
+    }
+
+    @objc private func menuAllChosen(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? MenuChoice else { return }
+        clear(choice.facet)
+    }
+
+    @objc private func severityToggled(_ sender: NSButton) {
+        filter.hasSeverity = sender.state == .on ? true : nil
         onFilterChange?(filter, sort)
     }
 
@@ -517,7 +584,8 @@ extension WorkListView: NSOutlineViewDataSource, NSOutlineViewDelegate {
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        (item as? Node)?.item == nil
+        guard let node = item as? Node else { return false }
+        return node.item == nil && !node.children.isEmpty
     }
 
     func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool {
@@ -608,14 +676,20 @@ private final class WorkGroupCellView: NSTableCellView {
 
 private final class WorkRowCellView: NSTableCellView {
     private let priority = NSTextField(labelWithString: "")
+    private let kind = NSTextField(labelWithString: "")
+    private let kindWidth: NSLayoutConstraint
     private let title = NSTextField(labelWithString: "")
     private let due = NSTextField(labelWithString: "")
     private let status = NSTextField(labelWithString: "")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
+        kindWidth = kind.widthAnchor.constraint(equalToConstant: 0)
         super.init(frame: .zero)
         self.identifier = identifier
         priority.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold)
+        kind.font = NSFont.systemFont(ofSize: 11)
+        kind.textColor = Theme.fgMuted
+        kind.lineBreakMode = .byClipping
         title.font = NSFont.systemFont(ofSize: 13)
         title.textColor = Theme.fg
         title.lineBreakMode = .byTruncatingTail
@@ -625,7 +699,7 @@ private final class WorkRowCellView: NSTableCellView {
         let trailing = NSStackView(views: [due, status])
         trailing.orientation = .horizontal
         trailing.spacing = 8
-        for v in [priority, title, trailing] as [NSView] {
+        for v in [priority, kind, title, trailing] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -634,7 +708,10 @@ private final class WorkRowCellView: NSTableCellView {
             priority.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             priority.centerYAnchor.constraint(equalTo: centerYAnchor),
             priority.widthAnchor.constraint(equalToConstant: 26),
-            title.leadingAnchor.constraint(equalTo: priority.trailingAnchor, constant: 6),
+            kind.leadingAnchor.constraint(equalTo: priority.trailingAnchor),
+            kind.centerYAnchor.constraint(equalTo: centerYAnchor),
+            kindWidth,
+            title.leadingAnchor.constraint(equalTo: kind.trailingAnchor, constant: 6),
             title.centerYAnchor.constraint(equalTo: centerYAnchor),
             trailing.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 8),
             trailing.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
@@ -647,6 +724,8 @@ private final class WorkRowCellView: NSTableCellView {
     func configure(_ content: WorkRowContent) {
         priority.stringValue = content.priorityText ?? ""
         priority.textColor = Self.color(forRank: content.priorityRank)
+        kind.stringValue = content.kindText ?? ""
+        kindWidth.constant = content.kindText == nil ? 0 : 66
         title.stringValue = content.title
         due.stringValue = content.dueText ?? ""
         due.textColor = content.dueIsUrgent ? Theme.redSweater : Theme.fgMuted
