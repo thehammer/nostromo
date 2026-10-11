@@ -13,6 +13,7 @@
 //! - [`picks`], [`send`], [`sent`]        — T4/T5 seams (placeholders)
 
 pub mod credentials;
+pub mod endpoint;
 pub mod hub;
 pub mod jira;
 pub mod model;

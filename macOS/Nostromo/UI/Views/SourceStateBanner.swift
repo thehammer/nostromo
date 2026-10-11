@@ -85,7 +85,10 @@ final class SourceStateBanner: NSView {
         case .loading:
             return Content(message: "Loading \(sourceName)…", showsRetry: false)
         case .fresh, .empty:
-            return nil
+            // A readable source can still carry a note for the reader (a truncated list,
+            // a partial scan, no live updates). It is informational: nothing to retry.
+            guard let rawReason, !rawReason.isEmpty else { return nil }
+            return Content(message: "\(sourceName): \(rawReason)", showsRetry: false)
         case .stale:
             let age = updatedAt.map { " last updated \(relative($0, now: now))" } ?? ""
             return Content(message: "Stale:\(age)\(reason)", showsRetry: true)

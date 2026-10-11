@@ -15,6 +15,13 @@ struct TeriTabConfig {
     let list: WorkListConfig?
     /// Shown over an empty list when the source is healthy and has nothing.
     let emptyMessage: String
+    /// The tab became visible (including the restored tab at launch).
+    var onShow: (() -> Void)?
+    /// The user left the tab, or the surface went away while it was showing.
+    var onLeave: (() -> Void)?
+    /// Rows that read differently as time passes ("last seen 4 min ago"): redrawn
+    /// every this many seconds while the tab is showing, and whenever it is shown.
+    var rowRefreshInterval: TimeInterval?
 }
 
 final class TeriSurfaceView: NSView {
@@ -26,6 +33,7 @@ final class TeriSurfaceView: NSView {
     private let scheduler: WorkScheduler
     private var cancellables = Set<AnyCancellable>()
     private var deepLinkObserver: NSObjectProtocol?
+    private var cancelRowRefresh: (() -> Void)?
 
     private let tabStrip = NSStackView()
     private var tabButtons: [TeriTab: NSButton] = [:]
@@ -65,6 +73,7 @@ final class TeriSurfaceView: NSView {
         super.init(frame: .zero)
         buildViews()
         observe()
+        configs[selectedTab]?.onShow?()
         showSelectedTab()
     }
 
@@ -73,6 +82,8 @@ final class TeriSurfaceView: NSView {
     deinit {
         if let deepLinkObserver { center.removeObserver(deepLinkObserver) }
         viewState.flush()   // a change made in the last half second must not be lost
+        cancelRowRefresh?()
+        configs[selectedTab]?.onLeave?()
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -87,8 +98,10 @@ final class TeriSurfaceView: NSView {
     /// Switch to `tab` (remembered across relaunches).
     func select(_ tab: TeriTab) {
         guard tab != selectedTab else { return }
+        configs[selectedTab]?.onLeave?()
         selectedTab = tab
         viewState.update { $0.selectedTab = tab }
+        configs[tab]?.onShow?()
         showSelectedTab()
     }
 
@@ -265,8 +278,22 @@ final class TeriSurfaceView: NSView {
         detailItem = nil
         detailToken += 1
         detailView.show(.none)
+        armRowRefresh()
         reload()
         focusActiveList()
+    }
+
+    /// Redraw the selected tab's rows now and then, for a tab whose rows depend on the clock.
+    private func armRowRefresh() {
+        cancelRowRefresh?()
+        cancelRowRefresh = nil
+        guard let interval = configs[selectedTab]?.rowRefreshInterval else { return }
+        let tab = selectedTab
+        lists[tab]?.refreshRows()
+        cancelRowRefresh = scheduler.schedule(interval) { [weak self] in
+            guard let self, self.selectedTab == tab else { return }
+            self.armRowRefresh()
+        }
     }
 
     /// Give the keyboard to the active tab's list (or to the surface itself when

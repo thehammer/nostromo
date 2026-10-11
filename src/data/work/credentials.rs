@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// Default credentials file (`~/.claude/credentials/.env`).
@@ -20,9 +20,15 @@ pub fn default_env_path() -> PathBuf {
         .join(".env")
 }
 
+/// Where the "process environment" half of a lookup comes from: the real
+/// environment by default, injectable so tests never depend on the machine
+/// they run on.
+pub type ProcessEnv = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// A `.env` file that reloads itself when its mtime changes.
 pub struct EnvFile {
     path: PathBuf,
+    process_env: ProcessEnv,
     cached: Mutex<Cached>,
 }
 
@@ -35,7 +41,12 @@ struct Cached {
 
 impl EnvFile {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), cached: Mutex::new(Cached::default()) }
+        Self::with_process_env(path, Arc::new(|name| std::env::var(name).ok()))
+    }
+
+    /// Like [`new`](Self::new) with an explicit stand-in for the process environment.
+    pub fn with_process_env(path: impl Into<PathBuf>, process_env: ProcessEnv) -> Self {
+        Self { path: path.into(), process_env, cached: Mutex::new(Cached::default()) }
     }
 
     pub fn path(&self) -> &Path {
@@ -50,7 +61,7 @@ impl EnvFile {
     /// Value of `name`: a non-empty process environment variable wins, then a
     /// non-empty value from the file. A blank value counts as absent.
     pub fn lookup(&self, name: &str) -> Option<String> {
-        if let Some(v) = std::env::var(name).ok().filter(|s| !s.is_empty()) {
+        if let Some(v) = (self.process_env)(name).filter(|s| !s.is_empty()) {
             return Some(v);
         }
         self.file_value(name)
