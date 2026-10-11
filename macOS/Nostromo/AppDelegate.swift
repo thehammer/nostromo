@@ -6,7 +6,29 @@ private let appLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "App
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     private(set) var windows: [NostromoWindow] = []
-    private var windowsByScreenNumber: [Int: NostromoWindow] = [:]
+
+    /// Every window is bound to ONE display, keyed by its stable display UUID
+    /// (not `NSScreenNumber`, which can change across reconnects; not the window
+    /// index). A display that reappears gets a window with the same UUID, and so
+    /// the same remembered focus (`DisplayFocusKeys`).
+    private var windowsByDisplayUUID: [String: NostromoWindow] = [:]
+    private var placementControllers: [String: WindowPlacementController] = [:]
+
+    private let screens: ScreenProviding = SystemScreenProvider.shared
+    private let placementLog = WindowPlacementLog.shared
+    /// Monotonic; reporting identity for the daemon (`window_id`), never a memory key.
+    private var nextWindowIndex = 0
+    /// False while the launch is waiting for slow displays: `screensDidChange`
+    /// feeds the waiter instead of opening windows.
+    private var launchWindowsOpened = false
+    private var displayWaiter: DisplayAvailabilityWaiter?
+    /// Set when screen loss closed the last window (lid closed, no externals).
+    /// The app must survive that and re-open windows when a display returns.
+    private var lastWindowClosedByScreenLoss = false
+    private var didShowSeparateSpacesBanner = false
+
+    private static let displayWaitTimeout: TimeInterval = 5
+    private static let staggerInterval: TimeInterval = 0.7
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         appLog.info("applicationDidFinishLaunching — pid=\(ProcessInfo.processInfo.processIdentifier, privacy: .public) screens=\(NSScreen.screens.count, privacy: .public)")
@@ -36,30 +58,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         AppControlServer.shared.startIfEnabled(appDelegate: self)
         TranscriptDiagnostics.startStreamingIfRequested()
 
-        // `NOSTROMO_WINDOW_MODE=smoke` (W1 — launch-smoke-test): open exactly
-        // one window, for the main screen only, instead of one per attached
-        // display. Unset (the default) is byte-identical to today's
-        // behaviour — every other launch path is untouched.
-        if ProcessInfo.processInfo.environment["NOSTROMO_WINDOW_MODE"] == "smoke" {
-            appLog.info("NOSTROMO_WINDOW_MODE=smoke — opening a single non-key window")
-            if let screen = NSScreen.main {
-                openWindow(for: screen, index: 0, smoke: true)
-            } else {
-                appLog.error("NOSTROMO_WINDOW_MODE=smoke but NSScreen.main is nil — no window opened")
-            }
-        } else {
-            appLog.info("Opening windows for \(NSScreen.screens.count, privacy: .public) screen(s)")
-            for (index, screen) in NSScreen.screens.enumerated() {
-                openWindow(for: screen, index: index, smoke: false)
-            }
-        }
-
+        // Registered BEFORE any window opens: while the launch waits for slow
+        // displays, `screensDidChange` is what feeds the waiter.
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screensDidChange(_:)),
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+
+        logTopology(scope: "launch")
+
+        // `NOSTROMO_WINDOW_MODE=smoke` (W1 — launch-smoke-test): open exactly
+        // one window, for the main screen only, instead of one per attached
+        // display. Unset (the default) is byte-identical to today's
+        // behaviour — every other launch path is untouched.
+        if ProcessInfo.processInfo.environment["NOSTROMO_WINDOW_MODE"] == "smoke" {
+            appLog.info("NOSTROMO_WINDOW_MODE=smoke — opening a single non-key window")
+            launchWindowsOpened = true
+            if let screen = NSScreen.main, let display = DisplayInfo(screen: screen) {
+                openWindow(for: display, staggerDelay: 0, smoke: true)
+            } else {
+                appLog.error("NOSTROMO_WINDOW_MODE=smoke but NSScreen.main is nil — no window opened")
+            }
+        } else {
+            let displays = screens.displays
+            // One-time: legacy `nostromo.window{index}.activeTab` → per-display keys.
+            let migrated = DisplayFocusKeys.migrateLegacyKeys(onto: displays)
+            if migrated > 0 {
+                placementLog.log("launch", "migrated \(migrated) legacy window-index focus key(s) onto displays (index order = NSScreen.screens order)")
+            }
+
+            let expected = LastKnownDisplayCount.load()
+            if displays.count < expected {
+                // Externals still enumerating: wait (bounded) instead of piling
+                // every window onto the laptop. `screensDidChange` feeds the waiter.
+                placementLog.log("launch", "only \(displays.count) of last-known \(expected) display(s) attached — waiting up to \(Int(Self.displayWaitTimeout)) s", warning: true)
+                displayWaiter = DisplayAvailabilityWaiter(
+                    expected: expected,
+                    timeout: Self.displayWaitTimeout,
+                    scheduler: MainQueueScheduler.shared,
+                    screenCount: { NSScreen.screens.count }
+                ) { [weak self] reached in
+                    self?.displayWaiter = nil
+                    self?.placementLog.log("launch", reached ? "expected displays attached" : "display wait timed out", warning: !reached)
+                    self?.openLaunchWindows()
+                }
+            } else {
+                openLaunchWindows()
+            }
+        }
 
         NotificationCenter.default.addObserver(
             self,
@@ -102,8 +150,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        appLog.warning("applicationShouldTerminateAfterLastWindowClosed — returning true, windowCount=\(self.windows.count, privacy: .public)")
-        return true
+        // Closing the last window by hand routes to terminate in `windowShouldClose`,
+        // so the only close that reaches here without quitting is the orphan close
+        // when every display vanished (lid closed, no externals). That must NOT quit:
+        // the displays come back and `screensDidChange` re-opens the windows.
+        let terminate = !lastWindowClosedByScreenLoss
+        appLog.warning("applicationShouldTerminateAfterLastWindowClosed — returning \(terminate, privacy: .public), windowCount=\(self.windows.count, privacy: .public)")
+        return terminate
     }
 
     // MARK: - Debug
@@ -196,13 +249,67 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.mainMenu = mainMenu
     }
 
-    private func openWindow(for screen: NSScreen, index: Int, smoke: Bool = false) {
+    /// Open one window per attached display, then activate ONCE at the end
+    /// (windows are only ordered front while being placed, so activation can't
+    /// drag them toward the key screen mid-placement).
+    private func openLaunchWindows() {
+        launchWindowsOpened = true
+        let displays = screens.displays
+        placementLog.log("launch", "opening windows for \(displays.count) display(s)")
+        LastKnownDisplayCount.record(displays.count)
+        for (slot, display) in displays.enumerated() {
+            openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot))
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        if let mainUUID = (displays.first { $0.isMain } ?? displays.first)?.uuid {
+            windowsByDisplayUUID[mainUUID]?.makeKeyAndOrderFront(nil)
+        }
+        for (uuid, win) in windowsByDisplayUUID {
+            placementLog.log(windowScope(win, uuid), "after activate: \(win.placementSnapshot)")
+        }
+        warnIfScreensShareSpaces()
+    }
+
+    private func windowScope(_ win: NostromoWindow, _ uuid: String) -> String {
+        "win → \(uuid)"
+    }
+
+    private func logTopology(scope: String) {
+        let displays = screens.displays
+        placementLog.log(scope, "\(displays.count) display(s); NSScreen.screensHaveSeparateSpaces=\(screens.screensHaveSeparateSpaces)")
+        for display in displays { placementLog.log(scope, display.logDescription) }
+    }
+
+    /// Per-display full-screen Spaces cannot work when "Displays have separate
+    /// Spaces" is off: log loudly and tell the user once, non-modally.
+    private func warnIfScreensShareSpaces() {
+        guard !screens.screensHaveSeparateSpaces, !didShowSeparateSpacesBanner else { return }
+        didShowSeparateSpacesBanner = true
+        placementLog.log("launch", "WARNING: 'Displays have separate Spaces' is OFF — each display cannot get its own full-screen Space. Enable it in System Settings > Desktop & Dock, then log out and back in.", warning: true)
+        // Let the first window finish its layout/transition before the toast appears.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let layout = self?.windows.first?.contentView as? MainLayout else { return }
+            layout.showBanner(
+                message: "Displays don't have separate Spaces — enable it in System Settings > Desktop & Dock, then log out/in.",
+                severity: .warning
+            )
+        }
+    }
+
+    private func openWindow(for display: DisplayInfo, staggerDelay: TimeInterval, smoke: Bool = false) {
+        let index = nextWindowIndex
+        nextWindowIndex += 1
+        lastWindowClosedByScreenLoss = false
+        let scope = "win#\(index) → \(display.uuid)"
+
         // Smoke mode uses a fixed 1440x900 content frame rather than the
         // screen's frame — a real, on-screen size a `NSSplitView` can lay
         // out at, without taking over the whole display.
+        // Otherwise the frame is the display's `visibleFrame` (inside the
+        // menu-bar band), so AppKit has no reason to constrain it elsewhere.
         let contentRect = smoke
-            ? NSRect(x: screen.frame.origin.x, y: screen.frame.origin.y, width: 1440, height: 900)
-            : screen.frame
+            ? NSRect(x: display.frame.origin.x, y: display.frame.origin.y, width: 1440, height: 900)
+            : display.placementFrame
         let win = NostromoWindow(
             contentRect: contentRect,
             styleMask: [.titled, .resizable, .fullSizeContentView],
@@ -219,12 +326,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         win.collectionBehavior = [.fullScreenPrimary, .managed]
         win.backgroundColor = NSColor(calibratedWhite: 0.05, alpha: 1.0)
         win.isMovable = false
-        win.contentView = MainLayout(windowIndex: index)
+        // Window restoration must never override the origin we place at.
+        win.isRestorable = false
+        // Smoke keeps AppKit's normal frame constraining (small/headless displays).
+        win.allowsUnconstrainedFrame = !smoke
+        win.contentView = MainLayout(windowIndex: index, displayUUID: display.uuid)
         win.delegate = win
+
+        placementLog.log(scope, "created: target=\(display.logDescription) requested=\(DisplayInfo.fmt(contentRect)) → \(win.placementSnapshot)")
 
         // Position on the target screen before entering full-screen so the
         // Space is created on the right display.
-        win.setFrameOrigin(contentRect.origin)
+        if smoke {
+            win.setFrameOrigin(contentRect.origin)
+        } else {
+            win.setFrame(display.placementFrame, display: false)
+        }
+        placementLog.log(scope, "after setFrame: \(win.placementSnapshot)")
 
         win.alphaValue = 0.0
 
@@ -239,41 +357,66 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // empirical check the plan required before landing this.
             win.orderFront(nil)
         } else {
-            win.makeKeyAndOrderFront(nil)
+            // Ordered front WITHOUT activating: activation is done once, after
+            // every window is placed, so it can't pull a window toward the key screen.
+            win.orderFront(nil)
+            placementLog.log(scope, "after orderFront: \(win.placementSnapshot)")
+
+            let controller = WindowPlacementController(
+                window: win, targetUUID: display.uuid, screens: screens
+            ) { [placementLog] message, warning in
+                placementLog.log(scope, message, warning: warning)
+            }
+            placementControllers[display.uuid] = controller
+            win.lifecycleHandler = { [weak controller] event in controller?.windowEvent(event) }
             // Stagger: entering full-screen on every display in the same instant
             // is what makes a window fail (and its retry crash AppKit). One
-            // window per 0.7 s keeps transitions from overlapping.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7 * Double(index)) { [weak win] in
-                guard let win, !win.styleMask.contains(.fullScreen) else { return }
-                win.toggleFullScreen(nil)
+            // window per 0.7 s keeps transitions from overlapping. `begin()`
+            // verifies the placement, then toggles full-screen.
+            MainQueueScheduler.shared.schedule(after: staggerDelay) { [weak controller] in
+                controller?.begin()
             }
         }
 
         windows.append(win)
-
-        if let screenNumber = screen.deviceDescription[
-            NSDeviceDescriptionKey("NSScreenNumber")
-        ] as? Int {
-            windowsByScreenNumber[screenNumber] = win
-        }
+        windowsByDisplayUUID[display.uuid] = win
     }
 
     // MARK: - Screen change handling
 
     @objc private func screensDidChange(_ notification: Notification) {
-        let currentScreenNumbers = Set(NSScreen.screens.compactMap {
-            $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? Int
-        })
+        logTopology(scope: "screensDidChange")
+        guard launchWindowsOpened else {
+            displayWaiter?.screensChanged()
+            return
+        }
 
-        // Close windows whose screen has disappeared.
+        let attached = screens.displays
+        let plan = DisplayReconciler.plan(attached: attached, boundUUIDs: Set(windowsByDisplayUUID.keys))
+
+        // A momentarily empty topology (lid closed, no externals) closes every
+        // window but must not quit the app — see applicationShouldTerminateAfterLastWindowClosed.
+        if !plan.toClose.isEmpty, plan.toClose.count == windowsByDisplayUUID.count {
+            lastWindowClosedByScreenLoss = true
+        }
+
+        // Existing windows get one bounded re-home grant (macOS may have moved them).
+        for uuid in windowsByDisplayUUID.keys where !plan.toClose.contains(uuid) {
+            placementControllers[uuid]?.displaysReconfigured()
+        }
+
+        // Close windows whose display has disappeared.
         // Mark as orphaned first so windowShouldClose allows the close without
         // terminating the app. Disable animations and exit full-screen state
         // before closing to avoid the _NSExitFullScreenTransitionController
         // crash path that fires when a full-screen window is closed mid-animation.
-        for (number, win) in windowsByScreenNumber where !currentScreenNumbers.contains(number) {
-            appLog.info("screensDidChange — screen \(number, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .public)'")
+        for uuid in plan.toClose {
+            guard let win = windowsByDisplayUUID[uuid] else { continue }
+            appLog.info("screensDidChange — display \(uuid, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .public)'")
+            placementLog.log("screensDidChange", "display \(uuid) removed — closing its window")
             win.isOrphanedByScreenRemoval = true
             win.animationBehavior = .none
+            win.lifecycleHandler = nil
             if win.styleMask.contains(.fullScreen) {
                 // Exit full-screen synchronously before close so AppKit doesn't
                 // schedule an exit-transition cleanup block that outlives the window.
@@ -281,27 +424,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 mask.remove(.fullScreen)
                 win.styleMask = mask
             }
-            windowsByScreenNumber.removeValue(forKey: number)
+            windowsByDisplayUUID.removeValue(forKey: uuid)
+            placementControllers.removeValue(forKey: uuid)
             windows.removeAll { $0 === win }
             win.close()
         }
 
-        // Open windows for newly connected screens.
-        for screen in NSScreen.screens {
-            guard let number = screen.deviceDescription[
-                NSDeviceDescriptionKey("NSScreenNumber")
-            ] as? Int,
-            windowsByScreenNumber[number] == nil else { continue }
-
-            let index = windows.count
-            openWindow(for: screen, index: index)
+        // Open windows for newly connected or REconnected displays, bound to the
+        // same UUID (so they recover their remembered focus), through the same
+        // verified-placement path as launch. A base delay lets the topology settle.
+        for (slot, display) in plan.toOpen.enumerated() {
+            placementLog.log("screensDidChange", "display \(display.uuid) attached — opening window")
+            openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot + 1))
         }
+
+        LastKnownDisplayCount.record(attached.count)
     }
 
     @objc private func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NostromoWindow else { return }
         windows.removeAll { $0 === win }
-        windowsByScreenNumber = windowsByScreenNumber.filter { $0.value !== win }
+        let closedUUIDs = windowsByDisplayUUID.filter { $0.value === win }.map(\.key)
+        for uuid in closedUUIDs {
+            windowsByDisplayUUID.removeValue(forKey: uuid)
+            placementControllers.removeValue(forKey: uuid)
+        }
         appLog.warning("windowWillClose — remaining windows=\(self.windows.count, privacy: .public)")
     }
 }
