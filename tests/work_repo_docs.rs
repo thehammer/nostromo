@@ -779,6 +779,10 @@ async fn symlinks_that_leave_the_claude_folder_are_neither_listed_nor_served() {
     symlink(fx.root.join("alpha/.claude/ideas/real.md"), fx.root.join("alpha/.claude/bugs/open/inside-link.md")).unwrap();
     symlink(&wip_target, fx.root.join("alpha/.claude/wip/evil-topic")).unwrap();
     symlink(&secret, fx.root.join("alpha/.claude/wip/my-topic/index-copy.md")).unwrap();
+    // A whole doc directory that is a symlink to somewhere else.
+    put(&fx.root.parent().unwrap().join("outside/ideas-dir"), "sneaky.md", "# Sneaky\n");
+    fs::remove_dir_all(fx.root.join("beta/.claude/ideas")).ok();
+    symlink(fx.root.parent().unwrap().join("outside/ideas-dir"), fx.root.join("beta/.claude/ideas")).unwrap();
 
     let update = scan(&fx.root);
     let ids: BTreeSet<String> = items_of(&update, "alpha").into_iter().map(|i| i.id).collect();
@@ -787,6 +791,7 @@ async fn symlinks_that_leave_the_claude_folder_are_neither_listed_nor_served() {
     assert!(!ids.contains("doc:alpha:wip/evil-topic"), "{ids:?}");
     assert!(ids.contains("doc:alpha:bugs/open/inside-link.md"), "a symlink within .claude is fine: {ids:?}");
     assert!(all_items(&update).iter().all(|i| !i.search_text.contains("my-private-key-material")));
+    assert!(items_of(&update, "beta").iter().all(|i| i.kind != "idea"), "a symlinked doc directory is not followed");
 
     let served = detail_at(&fx.root, "doc:alpha:bugs/open/evil.md").await;
     assert_eq!(served.unwrap_err().code, "unknown_item");

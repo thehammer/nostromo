@@ -462,6 +462,9 @@ fn describe(e: &std::io::Error) -> String {
 /// A symlinked file must resolve inside `base` (the repo's real `.claude/`):
 /// a cloned repo must not be able to put another file's text in the list.
 fn list_dir(dir: &Path, base: &Path) -> std::io::Result<Vec<PathBuf>> {
+    if !dir_stays_inside(dir, base) {
+        return Ok(Vec::new());
+    }
     list_children(dir, |name, path| {
         has_md_extension(name) && fs::metadata(path).is_ok_and(|m| m.is_file()) && stays_inside(path, base)
     })
@@ -469,7 +472,16 @@ fn list_dir(dir: &Path, base: &Path) -> std::io::Result<Vec<PathBuf>> {
 
 /// Topic directories (not hidden) directly in `wip/`. A missing directory is empty.
 fn list_wip(dir: &Path, base: &Path) -> std::io::Result<Vec<PathBuf>> {
+    if !dir_stays_inside(dir, base) {
+        return Ok(Vec::new());
+    }
     list_children(dir, |_, path| fs::metadata(path).is_ok_and(|m| m.is_dir()) && stays_inside(path, base))
+}
+
+/// Whether a doc directory (which may itself be a symlink, or sit under one)
+/// resolves inside `base`. One that does not exist has nothing to leave.
+fn dir_stays_inside(dir: &Path, base: &Path) -> bool {
+    fs::canonicalize(dir).ok().is_none_or(|real| real.starts_with(base))
 }
 
 /// A plain entry is inside by construction; a symlink must resolve under `base`.
