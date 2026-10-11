@@ -63,6 +63,7 @@
 		WK0000000000000000000074 /* TeriPicksTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000073 /* TeriPicksTabTests.swift */; };
 		WK0000000000000000000076 /* SendToAgentSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000075 /* SendToAgentSheetTests.swift */; };
 		WK0000000000000000000078 /* FredSurfaceViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000077 /* FredSurfaceViewTests.swift */; };
+		WK00000000000000000000B2 /* FredDetailHardeningTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK00000000000000000000B1 /* FredDetailHardeningTests.swift */; };
 		WK0000000000000000000080 /* FocusBadgesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000079 /* FocusBadgesTests.swift */; };
 		WK0000000000000000000094 /* SidebarBadgeModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000093 /* SidebarBadgeModelTests.swift */; };
 		WK0000000000000000000082 /* TeriFredWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000081 /* TeriFredWiringTests.swift */; };
@@ -331,6 +332,7 @@
 		WK0000000000000000000073 /* TeriPicksTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriPicksTabTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000075 /* SendToAgentSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendToAgentSheetTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000077 /* FredSurfaceViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredSurfaceViewTests.swift; sourceTree = "<group>"; };
+		WK00000000000000000000B1 /* FredDetailHardeningTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredDetailHardeningTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000079 /* FocusBadgesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusBadgesTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000093 /* SidebarBadgeModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarBadgeModelTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000081 /* TeriFredWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriFredWiringTests.swift; sourceTree = "<group>"; };
@@ -707,6 +709,7 @@
 				WK0000000000000000000073 /* TeriPicksTabTests.swift */,
 				WK0000000000000000000075 /* SendToAgentSheetTests.swift */,
 				WK0000000000000000000077 /* FredSurfaceViewTests.swift */,
+				WK00000000000000000000B1 /* FredDetailHardeningTests.swift */,
 				WK0000000000000000000079 /* FocusBadgesTests.swift */,
 				WK0000000000000000000093 /* SidebarBadgeModelTests.swift */,
 				WK0000000000000000000081 /* TeriFredWiringTests.swift */,
@@ -1028,6 +1031,7 @@
 				WK0000000000000000000074 /* TeriPicksTabTests.swift in Sources */,
 				WK0000000000000000000076 /* SendToAgentSheetTests.swift in Sources */,
 				WK0000000000000000000078 /* FredSurfaceViewTests.swift in Sources */,
+				WK00000000000000000000B2 /* FredDetailHardeningTests.swift in Sources */,
 				WK0000000000000000000080 /* FocusBadgesTests.swift in Sources */,
 				WK0000000000000000000094 /* SidebarBadgeModelTests.swift in Sources */,
 				WK0000000000000000000082 /* TeriFredWiringTests.swift in Sources */,

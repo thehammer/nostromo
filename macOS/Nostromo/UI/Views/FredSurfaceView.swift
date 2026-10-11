@@ -195,6 +195,27 @@ enum FredPresentation {
     }
 }
 
+// MARK: - Scheduler
+
+/// Timers the surface uses, injectable so tests fire them by hand instead of
+/// waiting on the wall clock. Cancelling (or releasing) the token stops a job.
+struct FredScheduler {
+    var every: (_ interval: TimeInterval, _ action: @escaping () -> Void) -> AnyCancellable
+    var after: (_ delay: TimeInterval, _ action: @escaping () -> Void) -> AnyCancellable
+
+    static let live = FredScheduler(
+        every: { interval, action in
+            let timer = Timer(timeInterval: interval, repeats: true) { _ in action() }
+            RunLoop.main.add(timer, forMode: .common)
+            return AnyCancellable { timer.invalidate() }
+        },
+        after: { delay, action in
+            let item = DispatchWorkItem(block: action)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            return AnyCancellable { item.cancel() }
+        })
+}
+
 // MARK: - Surface
 
 /// Fred's information surface: Inbox and Today side by side, rendered from the
@@ -220,25 +241,40 @@ final class FredSurfaceView: NSView {
     private let pasteboard: NSPasteboard
     private let timeZone: TimeZone
     private let detailActions: FredDetailActions?
+    private let scheduler: FredScheduler
     private var selectedItemId: String?
     private var isReloading = false
+    private var clockJob: AnyCancellable?
+    private var bannerJob: AnyCancellable?
+    private var bannerGeneration = 0
+
+    /// The result of the last "send to Fred", kept here (not in the detail view,
+    /// which is replaced when the selection moves) so it is always shown. It
+    /// clears itself after a few seconds.
+    private(set) var seedBannerText: String?
+
+    var selectedInboxRow: Int? { inboxPane.table.selectedRow >= 0 ? inboxPane.table.selectedRow : nil }
+    var selectedTodayRow: Int? { todayPane.table.selectedRow >= 0 ? todayPane.table.selectedRow : nil }
 
     private let disconnectedBanner = SourceStateBanner()
+    private let seedBanner = NSTextField(wrappingLabelWithString: "")
     private let inboxPane: FredPane
     private let todayPane: FredPane
     private let inboxRows = FredInboxRows()
     private let todayRows = FredTodayRows()
-    private var timer: Timer?
 
     private static let refreshInterval: TimeInterval = 30
+    private static let bannerLifetime: TimeInterval = 8
 
     init(model: FredSurfaceModel,
          clock: @escaping () -> Date = { Date() },
          pasteboard: NSPasteboard = .general,
          timeZone: TimeZone = .current,
+         scheduler: FredScheduler = .live,
          detail: FredDetailActions? = nil) {
         self.model = model
         self.detailActions = detail
+        self.scheduler = scheduler
         self.clock = clock
         self.pasteboard = pasteboard
         self.timeZone = timeZone
@@ -253,8 +289,6 @@ final class FredSurfaceView: NSView {
 
     required init?(coder: NSCoder) { fatalError("FredSurfaceView is built in code") }
 
-    deinit { timer?.invalidate() }
-
     /// Re-evaluate "Now", the countdown and relative times against `clock()`.
     /// The view calls this itself every 30 s.
     func refreshClock() {
@@ -263,14 +297,13 @@ final class FredSurfaceView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        timer?.invalidate()
-        timer = nil
-        guard window != nil else { return }
-        let t = Timer(timeInterval: Self.refreshInterval, repeats: true) { [weak self] _ in
-            self?.refreshClock()
-        }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        clockJob = nil
+        if window != nil { startClock() }
+    }
+
+    /// Start the 30 s repeating refresh (replacing any running one).
+    func startClock() {
+        clockJob = scheduler.every(Self.refreshInterval) { [weak self] in self?.refreshClock() }
     }
 
     // MARK: - Layout
@@ -283,7 +316,12 @@ final class FredSurfaceView: NSView {
         super.layout()
         let bannerHeight: CGFloat = disconnectedBanner.isHidden ? 0 : Self.bannerHeight
         disconnectedBanner.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bannerHeight)
-        let top = bannerHeight
+        var top = bannerHeight
+        if !seedBanner.isHidden {
+            let h = seedBanner.sizeThatFits(NSSize(width: bounds.width - 20, height: .greatestFiniteMagnitude)).height + 8
+            seedBanner.frame = NSRect(x: 0, y: top, width: bounds.width, height: h)
+            top += h
+        }
         let half = (bounds.width / 2).rounded(.down)
         let available = max(0, bounds.height - top)
         // With a selection the lists keep the top ~40% and the detail takes the rest.
@@ -330,12 +368,52 @@ final class FredSurfaceView: NSView {
         }
         guard let subject, let actions = detailActions else { return }
         other.deselectAll(nil)
+        // Same item again (a click on the selected row, Return): keep the view,
+        // its loaded detail and any prompt the user is editing.
+        if detailView != nil, selectedItemId == subject.itemId { return }
         detailView?.removeFromSuperview()
-        let view = FredDetailView(subject: subject, actions: actions)
+        let view = FredDetailView(subject: subject, actions: reportingSeeds(actions))
         addSubview(view)
         detailView = view
         selectedItemId = subject.itemId
         needsLayout = true
+    }
+
+    /// `actions` with every seed result also reported to the surface, which
+    /// outlives the detail view the user may have moved away from.
+    private func reportingSeeds(_ actions: FredDetailActions) -> FredDetailActions {
+        var wrapped = actions
+        wrapped.seedFred = { [weak self] text, completion in
+            actions.seedFred(text) { failure in
+                completion(failure)
+                self?.showSeedResult(failure)
+            }
+        }
+        return wrapped
+    }
+
+    private func showSeedResult(_ failure: WorkError?) {
+        let text: String
+        if let failure {
+            text = failure.code == "fred_not_running"
+                ? FredDetailView.couldNotSeedNotRunning
+                : "Couldn't send to Fred: \(failure.message)"
+        } else {
+            text = FredDetailView.sentToFred
+        }
+        seedBannerText = text
+        seedBanner.stringValue = text
+        seedBanner.textColor = failure == nil ? Theme.fgMuted : Theme.redSweater
+        seedBanner.isHidden = false
+        needsLayout = true
+        bannerGeneration += 1
+        let generation = bannerGeneration
+        bannerJob = scheduler.after(Self.bannerLifetime) { [weak self] in
+            guard let self, self.bannerGeneration == generation else { return }
+            self.seedBannerText = nil
+            self.seedBanner.isHidden = true
+            self.needsLayout = true
+        }
     }
 
     private func restoreSelection() {
@@ -358,6 +436,10 @@ final class FredSurfaceView: NSView {
         disconnectedBanner.setAccessibilityIdentifier("fred.disconnected.banner")
         disconnectedBanner.allowsRetry = false
         addSubview(disconnectedBanner)
+        seedBanner.font = .systemFont(ofSize: 11)
+        seedBanner.isHidden = true
+        seedBanner.setAccessibilityIdentifier("fred.seed.banner")
+        addSubview(seedBanner)
         addSubview(inboxPane)
         addSubview(todayPane)
 
@@ -383,6 +465,10 @@ final class FredSurfaceView: NSView {
     // MARK: - Render
 
     private func render() {
+        // Reloading a table clears its selection and reports that as a change;
+        // none of it is the user selecting something.
+        isReloading = true
+        defer { isReloading = false }
         let now = clock()
         let mailbox = model.mailbox
         let calendar = model.calendar

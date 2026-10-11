@@ -5,12 +5,13 @@
 //! `GET`s: there is no write path to mail or the calendar here.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::{DateTime, FixedOffset, Local, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use serde::Deserialize;
+use url::Url;
 
 use crate::data::graph_client::{failure_reason, GraphClient, GraphHttpError};
 use crate::data::work::model::{Link, WorkDetail, WorkError};
@@ -23,28 +24,53 @@ const MAX_BODY_BYTES: usize = 32 * 1024;
 
 const MAIL_SELECT: &str = "subject,from,toRecipients,ccRecipients,receivedDateTime,body,webLink";
 const EVENT_SELECT: &str =
-    "subject,organizer,attendees,location,onlineMeeting,start,end,body,webLink";
+    "subject,organizer,attendees,location,onlineMeeting,start,end,isAllDay,isCancelled,body,webLink";
+
+/// Longest header value (From, To, Location, Attendees, ...) in characters.
+const MAX_FIELD_CHARS: usize = 1000;
+/// Longest title in characters.
+const MAX_TITLE_CHARS: usize = 300;
+/// Most people listed in one To / Cc / Attendees value; the rest are counted.
+const MAX_LISTED_PEOPLE: usize = 50;
+
+/// Hosts (and their subdomains) Microsoft serves Outlook web links from.
+const OUTLOOK_HOSTS: [&str; 5] = [
+    "outlook.office.com",
+    "outlook.office365.com",
+    "outlook.live.com",
+    "outlook.office365.us",
+    "outlook.office365.de",
+];
 
 const PREFER_TEXT: (&str, &str) = ("Prefer", "outlook.body-content-type=\"text\"");
 /// Events also ask for UTC so `start`/`end` parse without a zone database.
 const PREFER_TEXT_UTC: (&str, &str) =
     ("Prefer", "outlook.body-content-type=\"text\", outlook.timezone=\"UTC\"");
 
+/// UTC offset in force at an instant (DST-aware, so a range that crosses a
+/// transition shows each end correctly).
+type OffsetFn = Arc<dyn Fn(DateTime<Utc>) -> FixedOffset + Send + Sync>;
+
 pub struct GraphFredDetail {
     graph: GraphClient,
-    /// Zone `When` is shown in; `None` = the Mac's local zone.
-    zone: Option<FixedOffset>,
+    /// Offset times are shown in; production uses the Mac's local zone.
+    offset_at: OffsetFn,
     cache: Mutex<HashMap<String, (Instant, WorkDetail)>>,
 }
 
 impl GraphFredDetail {
     pub fn new(graph: GraphClient) -> Self {
-        Self { graph, zone: None, cache: Mutex::new(HashMap::new()) }
+        Self::with_offset_fn(graph, Arc::new(|at| *at.with_timezone(&Local).offset()))
     }
 
     /// Like [`new`](Self::new) with a pinned display zone (tests).
     pub fn with_zone(graph: GraphClient, zone: FixedOffset) -> Self {
-        Self { zone: Some(zone), ..Self::new(graph) }
+        Self::with_offset_fn(graph, Arc::new(move |_| zone))
+    }
+
+    /// Like [`new`](Self::new) with a per-instant offset, e.g. a DST rule (tests).
+    pub fn with_offset_fn(graph: GraphClient, offset_at: OffsetFn) -> Self {
+        Self { graph, offset_at, cache: Mutex::new(HashMap::new()) }
     }
 
     fn cached(&self, item_id: &str) -> Option<WorkDetail> {
@@ -94,8 +120,8 @@ impl GraphFredDetail {
         }
         Ok(WorkDetail {
             item_id: item_id.to_owned(),
-            title: non_empty(m.subject).unwrap_or_else(|| "(no subject)".to_owned()),
-            fields,
+            title: one_line(&non_empty(m.subject).unwrap_or_else(|| "(no subject)".to_owned()), MAX_TITLE_CHARS),
+            fields: clean_fields(fields),
             markdown: cap_body(trim_quoted_chain(&body_text(m.body))),
             files: vec![],
             links: open_in_outlook(m.web_link),
@@ -107,11 +133,21 @@ impl GraphFredDetail {
         let e: GraphEvent = self.fetch(&url, PREFER_TEXT_UTC).await?;
 
         let mut fields = Vec::new();
+        if e.is_cancelled == Some(true) {
+            fields.push(("Status".to_owned(), "Cancelled".to_owned()));
+        }
         if let Some(o) = &e.organizer {
             fields.push(("Organiser".to_owned(), person(o)));
         }
-        if let (Some(start), Some(end)) = (e.start.as_ref().and_then(utc), e.end.as_ref().and_then(utc)) {
-            fields.push(("When".to_owned(), self.format_range(start, end)));
+        if let (Some(start), Some(end)) = (e.start.as_ref(), e.end.as_ref()) {
+            let when = if e.is_all_day == Some(true) {
+                all_day_range(start, end)
+            } else {
+                utc(start).zip(utc(end)).map(|(s, e)| self.format_range(s, e))
+            };
+            if let Some(when) = when {
+                fields.push(("When".to_owned(), when));
+            }
         }
         if let Some(place) = e.location.and_then(|l| non_empty(l.display_name)) {
             fields.push(("Location".to_owned(), place));
@@ -121,25 +157,24 @@ impl GraphFredDetail {
             fields.push(("Join link".to_owned(), url.clone()));
         }
         if !e.attendees.is_empty() {
-            let list = e
+            let names: Vec<String> = e
                 .attendees
                 .iter()
                 .map(|a| match &a.status {
                     Some(s) => format!("{} ({})", person_name(&a.email_address), response_words(&s.response)),
                     None => person_name(&a.email_address),
                 })
-                .collect::<Vec<_>>()
-                .join(", ");
-            fields.push(("Attendees".to_owned(), list));
+                .collect();
+            fields.push(("Attendees".to_owned(), join_capped(&names)));
         }
         let mut links = open_in_outlook(e.web_link);
-        if let Some(url) = join_url {
+        if let Some(url) = join_url.filter(|u| is_https_with_host(u)) {
             links.push(Link { label: "Join meeting".to_owned(), url });
         }
         Ok(WorkDetail {
             item_id: item_id.to_owned(),
-            title: non_empty(e.subject).unwrap_or_else(|| "(no title)".to_owned()),
-            fields,
+            title: one_line(&non_empty(e.subject).unwrap_or_else(|| "(no title)".to_owned()), MAX_TITLE_CHARS),
+            fields: clean_fields(fields),
             markdown: cap_body(body_text(e.body).replace("\r\n", "\n").trim().to_owned()),
             files: vec![],
             links,
@@ -147,15 +182,11 @@ impl GraphFredDetail {
     }
 
     fn format_time(&self, at: DateTime<Utc>) -> String {
-        match self.zone {
-            Some(z) => at.with_timezone(&z).format("%a %-d %b %Y, %H:%M").to_string(),
-            None => at.with_timezone(&Local).format("%a %-d %b %Y, %H:%M").to_string(),
-        }
+        at.with_timezone(&(self.offset_at)(at)).format("%a %-d %b %Y, %H:%M").to_string()
     }
 
     fn format_range(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> String {
-        let zone = self.zone.unwrap_or_else(|| *Local.from_utc_datetime(&start.naive_utc()).offset());
-        let (s, e) = (start.with_timezone(&zone), end.with_timezone(&zone));
+        let (s, e) = (start.with_timezone(&(self.offset_at)(start)), end.with_timezone(&(self.offset_at)(end)));
         if s.date_naive() == e.date_naive() {
             format!("{}–{}", s.format("%a %-d %b %Y, %H:%M"), e.format("%H:%M"))
         } else {
@@ -217,6 +248,8 @@ struct GraphEvent {
     online_meeting: Option<GraphOnlineMeeting>,
     start: Option<GraphTime>,
     end: Option<GraphTime>,
+    is_all_day: Option<bool>,
+    is_cancelled: Option<bool>,
     body: Option<GraphBody>,
     web_link: Option<String>,
 }
@@ -295,7 +328,16 @@ fn person(r: &Recipient) -> String {
 }
 
 fn people(rs: &[Recipient]) -> String {
-    rs.iter().map(person).collect::<Vec<_>>().join(", ")
+    join_capped(&rs.iter().map(person).collect::<Vec<_>>())
+}
+
+/// Comma-join `items`, listing at most [`MAX_LISTED_PEOPLE`] ("..., and N more").
+fn join_capped(items: &[String]) -> String {
+    let mut listed = items.iter().take(MAX_LISTED_PEOPLE).cloned().collect::<Vec<_>>().join(", ");
+    if items.len() > MAX_LISTED_PEOPLE {
+        listed.push_str(&format!(", and {} more", items.len() - MAX_LISTED_PEOPLE));
+    }
+    listed
 }
 
 fn response_words(response: &Option<String>) -> &'static str {
@@ -312,17 +354,93 @@ fn body_text(body: Option<GraphBody>) -> String {
     body.and_then(|b| b.content).unwrap_or_default()
 }
 
+/// The "Open in Outlook" link, only when it is a real Outlook web link: the Mac
+/// opens it on click, so a hostile `webLink` (`file:`, `javascript:`, a lookalike
+/// host) must never reach it.
 fn open_in_outlook(web_link: Option<String>) -> Vec<Link> {
     non_empty(web_link)
+        .filter(|url| is_outlook_web_link(url))
         .map(|url| vec![Link { label: "Open in Outlook".to_owned(), url }])
         .unwrap_or_default()
 }
 
+/// True for an `https` link, with no userinfo and no non-default port, whose
+/// host is (a subdomain of) one of Microsoft's Outlook web hosts.
+pub fn is_outlook_web_link(link: &str) -> bool {
+    let Some(url) = parse_https(link) else { return false };
+    if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else { return false };
+    OUTLOOK_HOSTS
+        .iter()
+        .any(|h| host == *h || host.strip_suffix(h).is_some_and(|rest| rest.ends_with('.')))
+}
+
+fn is_https_with_host(link: &str) -> bool {
+    parse_https(link).is_some()
+}
+
+fn parse_https(link: &str) -> Option<Url> {
+    if link.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    // The URL parser forgives `https:///host` (empty authority); a browser-bound link must not rely on that.
+    if link.split_once("://").is_some_and(|(_, rest)| rest.starts_with(['/', '\\'])) {
+        return None;
+    }
+    Url::parse(link).ok().filter(|u| u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty()))
+}
+
+/// Collapse every run of whitespace and control characters (newlines included)
+/// to one space and cap the result at `max` characters (ending in `…` when cut).
+/// Header values are written by other people: they must stay on one line.
+fn one_line(s: &str, max: usize) -> String {
+    let mut out = String::with_capacity(s.len().min(max * 4));
+    let mut pending_space = false;
+    for c in s.chars() {
+        if c.is_whitespace() || c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+            pending_space = !out.is_empty();
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(c);
+        }
+    }
+    if out.chars().count() > max {
+        out = out.chars().take(max.saturating_sub(1)).collect::<String>().trim_end().to_owned();
+        out.push('…');
+    }
+    out
+}
+
+fn clean_fields(fields: Vec<(String, String)>) -> Vec<(String, String)> {
+    fields.into_iter().map(|(label, value)| (label, one_line(&value, MAX_FIELD_CHARS))).collect()
+}
+
+/// "Fri 9 Oct 2026 (all day)" or "Fri 9 Oct 2026 – Sun 11 Oct 2026 (all day)".
+/// All-day events are dates, not instants: Graph's end is the next midnight
+/// (exclusive) and nothing is converted between zones.
+fn all_day_range(start: &GraphTime, end: &GraphTime) -> Option<String> {
+    let first = naive(start)?.date();
+    let last = naive(end).map(|n| n.date()).filter(|d| *d > first).map_or(first, |d| d - ChronoDuration::days(1));
+    let day = |d: NaiveDate| d.format("%a %-d %b %Y").to_string();
+    Some(if last == first {
+        format!("{} (all day)", day(first))
+    } else {
+        format!("{} – {} (all day)", day(first), day(last))
+    })
+}
+
 /// Graph returns `dateTime` without an offset; we asked for UTC.
 fn utc(t: &GraphTime) -> Option<DateTime<Utc>> {
-    NaiveDateTime::parse_from_str(&t.date_time, "%Y-%m-%dT%H:%M:%S%.f")
-        .ok()
-        .map(|n| Utc.from_utc_datetime(&n))
+    naive(t).map(|n| Utc.from_utc_datetime(&n))
+}
+
+fn naive(t: &GraphTime) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(&t.date_time, "%Y-%m-%dT%H:%M:%S%.f").ok()
 }
 
 /// Cut a reply chain: everything from the first line starting `From:` that
