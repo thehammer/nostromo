@@ -22,6 +22,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// feeds the waiter instead of opening windows.
     private var launchWindowsOpened = false
     private var displayWaiter: DisplayAvailabilityWaiter?
+    /// Records `LastKnownDisplayCount` only once the topology has been stable for a few seconds.
+    private lazy var stableCountRecorder = StableDisplayCountRecorder(
+        scheduler: MainQueueScheduler.shared,
+        screenCount: { [screens] in screens.displays.count }
+    )
     /// Set when screen loss closed the last window (lid closed, no externals).
     /// The app must survive that and re-open windows when a display returns.
     private var lastWindowClosedByScreenLoss = false
@@ -83,12 +88,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             let displays = screens.displays
-            // One-time: legacy `nostromo.window{index}.activeTab` → per-display keys.
-            let migrated = DisplayFocusKeys.migrateLegacyKeys(onto: displays)
-            if migrated > 0 {
-                placementLog.log("launch", "migrated \(migrated) legacy window-index focus key(s) onto displays (index order = NSScreen.screens order)")
-            }
-
+            // NOTE: the legacy focus-key migration runs in `openLaunchWindows`, AFTER any
+            // display wait, so it never sees a partial display set first.
             let expected = LastKnownDisplayCount.load()
             if displays.count < expected {
                 // Externals still enumerating: wait (bounded) instead of piling
@@ -256,22 +257,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         launchWindowsOpened = true
         let displays = screens.displays
         placementLog.log("launch", "opening windows for \(displays.count) display(s)")
-        LastKnownDisplayCount.record(displays.count)
+        migrateLegacyFocusKeys(onto: displays)
+        stableCountRecorder.topologyChanged()
         for (slot, display) in displays.enumerated() {
             openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot))
         }
         NSApp.activate(ignoringOtherApps: true)
-        if let mainUUID = (displays.first { $0.isMain } ?? displays.first)?.uuid {
-            windowsByDisplayUUID[mainUUID]?.makeKeyAndOrderFront(nil)
+        // Key window: the menu-bar display's (`NSScreen.screens.first`, which `isMain` now means).
+        if let keyUUID = (displays.first { $0.isMain } ?? displays.first)?.uuid {
+            windowsByDisplayUUID[keyUUID]?.makeKeyAndOrderFront(nil)
         }
         for (uuid, win) in windowsByDisplayUUID {
-            placementLog.log(windowScope(win, uuid), "after activate: \(win.placementSnapshot)")
+            placementLog.log(windowScope(uuid), "after activate: \(win.placementSnapshot)")
         }
         warnIfScreensShareSpaces()
     }
 
-    private func windowScope(_ win: NostromoWindow, _ uuid: String) -> String {
+    private func windowScope(_ uuid: String) -> String {
         "win → \(uuid)"
+    }
+
+    /// Idempotent (per-index consumed flags): safe to run whenever displays are
+    /// (re)enumerated, and must run BEFORE the windows that read the keys are created.
+    private func migrateLegacyFocusKeys(onto displays: [DisplayInfo]) {
+        let migrated = DisplayFocusKeys.migrateLegacyKeys(onto: displays)
+        if migrated > 0 {
+            placementLog.log("launch", "migrated \(migrated) legacy window-index focus key(s) onto displays (index order = NSScreen.screens order)")
+        }
+    }
+
+    /// Close a window that has no live placement controller. Such a window would stay
+    /// `alphaValue = 0` and windowed forever; closing is safe (it is not full-screen, and
+    /// a full-screen one has its full-screen mask dropped first, like screen removal).
+    private func closeUntrackedWindow(_ win: NostromoWindow, reason: String) {
+        placementLog.log("windows", "closing untracked window '\(win.title)': \(reason)", warning: true)
+        win.isOrphanedByScreenRemoval = true
+        win.animationBehavior = .none
+        win.lifecycleHandler = nil
+        if win.styleMask.contains(.fullScreen) {
+            var mask = win.styleMask
+            mask.remove(.fullScreen)
+            win.styleMask = mask
+        }
+        windows.removeAll { $0 === win }
+        win.close()
     }
 
     private func logTopology(scope: String) {
@@ -297,6 +326,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openWindow(for display: DisplayInfo, staggerDelay: TimeInterval, smoke: Bool = false) {
+        // One window per key. A bound key must never be overwritten: the displaced window
+        // would lose its controller and sit invisible (alpha 0) and windowed forever.
+        guard windowsByDisplayUUID[display.uuid] == nil else {
+            placementLog.log("launch", "display key \(display.uuid) already has a window — not opening a second", warning: true)
+            return
+        }
         let index = nextWindowIndex
         nextWindowIndex += 1
         lastWindowClosedByScreenLoss = false
@@ -373,8 +408,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // is what makes a window fail (and its retry crash AppKit). One
             // window per 0.7 s keeps transitions from overlapping. `begin()`
             // verifies the placement, then toggles full-screen.
-            MainQueueScheduler.shared.schedule(after: staggerDelay) { [weak controller] in
-                controller?.begin()
+            MainQueueScheduler.shared.schedule(after: staggerDelay) { [weak self, weak controller, weak win] in
+                guard let win else { return }
+                guard let controller, self?.placementControllers[display.uuid] === controller else {
+                    self?.closeUntrackedWindow(win, reason: "no live placement controller for \(display.uuid)")
+                    return
+                }
+                controller.begin()
             }
         }
 
@@ -392,6 +432,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let attached = screens.displays
+        stableCountRecorder.topologyChanged()
         let plan = DisplayReconciler.plan(attached: attached, boundUUIDs: Set(windowsByDisplayUUID.keys))
 
         // A momentarily empty topology (lid closed, no externals) closes every
@@ -433,12 +474,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Open windows for newly connected or REconnected displays, bound to the
         // same UUID (so they recover their remembered focus), through the same
         // verified-placement path as launch. A base delay lets the topology settle.
+        if !plan.toOpen.isEmpty { migrateLegacyFocusKeys(onto: attached) }
         for (slot, display) in plan.toOpen.enumerated() {
             placementLog.log("screensDidChange", "display \(display.uuid) attached — opening window")
             openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot + 1))
         }
 
-        LastKnownDisplayCount.record(attached.count)
+        // Safety net: any window without a bound controller is invisible and useless.
+        for win in windows where !placementControllers.keys.contains(where: { windowsByDisplayUUID[$0] === win }) {
+            if win.allowsUnconstrainedFrame { closeUntrackedWindow(win, reason: "not bound to a controller") }
+        }
     }
 
     @objc private func windowWillClose(_ notification: Notification) {

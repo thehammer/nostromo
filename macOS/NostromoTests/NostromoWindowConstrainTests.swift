@@ -84,4 +84,92 @@ final class NostromoWindowConstrainTests: XCTestCase {
     func test_the_unconstrained_frame_behavior_is_on_by_default() {
         XCTAssertTrue(window.allowsUnconstrainedFrame)
     }
+
+    // MARK: Scope: only before / while entering full-screen
+
+    private static let allPhases: [PlacementPhase] = [
+        .idle, .placing(attempt: 1), .placing(attempt: 2), .placing(attempt: 3),
+        .enteringFullScreen, .exitingForRetry, .fullScreen, .gaveUp,
+    ]
+
+    func test_the_frame_is_left_unconstrained_while_idle_placing_or_entering_full_screen() {
+        let leaving: [PlacementPhase] = [.idle, .placing(attempt: 1), .placing(attempt: 2), .placing(attempt: 3), .enteringFullScreen]
+        for phase in leaving {
+            XCTAssertTrue(
+                NostromoWindow.leavesFrameUnconstrained(allowsUnconstrainedFrame: true, isFullScreen: false, phase: phase),
+                "\(phase)")
+        }
+    }
+
+    func test_appkits_default_constraining_applies_once_the_window_is_settled_exiting_or_gave_up() {
+        for phase in [PlacementPhase.exitingForRetry, .fullScreen, .gaveUp] {
+            XCTAssertFalse(
+                NostromoWindow.leavesFrameUnconstrained(allowsUnconstrainedFrame: true, isFullScreen: false, phase: phase),
+                "\(phase)")
+        }
+    }
+
+    func test_a_window_that_opted_out_is_never_left_unconstrained_in_any_phase() {
+        for phase in Self.allPhases {
+            XCTAssertFalse(
+                NostromoWindow.leavesFrameUnconstrained(allowsUnconstrainedFrame: false, isFullScreen: false, phase: phase),
+                "\(phase)")
+        }
+    }
+
+    func test_a_full_screen_window_is_never_left_unconstrained_in_any_phase() {
+        for phase in Self.allPhases {
+            XCTAssertFalse(
+                NostromoWindow.leavesFrameUnconstrained(allowsUnconstrainedFrame: true, isFullScreen: true, phase: phase),
+                "\(phase)")
+        }
+    }
+
+    func test_a_window_starts_in_the_idle_placement_phase() {
+        XCTAssertEqual(window.placementPhase, .idle)
+    }
+
+    func test_the_window_stores_the_placement_phase_it_is_told_about() {
+        for phase in Self.allPhases {
+            window.placementPhaseChanged(phase)
+            XCTAssertEqual(window.placementPhase, phase)
+        }
+    }
+
+    func test_while_placing_or_entering_the_proposed_frame_is_returned_unchanged() {
+        let proposed = NSRect(x: 0, y: 4000, width: 1920, height: 6000)
+        for phase in [PlacementPhase.idle, .placing(attempt: 2), .enteringFullScreen] {
+            window.placementPhaseChanged(phase)
+            XCTAssertEqual(window.constrainFrameRect(proposed, to: nil), proposed, "\(phase)")
+        }
+    }
+
+    /// What AppKit's own constraining returns for `proposed` (an opted-out window always defers to super).
+    private func appKitsAnswer(for proposed: NSRect) -> NSRect {
+        let reference = NostromoWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 800, height: 600),
+            styleMask: [.titled, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: true)
+        reference.allowsUnconstrainedFrame = false
+        return reference.constrainFrameRect(proposed, to: nil)
+    }
+
+    func test_in_settled_phases_the_window_defers_to_appkit_like_an_opted_out_window() {
+        let proposed = NSRect(x: 0, y: 4000, width: 1920, height: 6000)
+        let expected = appKitsAnswer(for: proposed)
+        for phase in [PlacementPhase.exitingForRetry, .fullScreen, .gaveUp] {
+            window.placementPhaseChanged(phase)
+            XCTAssertEqual(window.constrainFrameRect(proposed, to: nil), expected, "\(phase)")
+        }
+    }
+
+    func test_an_opted_out_window_defers_to_appkit_even_while_placing() {
+        let proposed = NSRect(x: 0, y: 4000, width: 1920, height: 6000)
+        let expected = appKitsAnswer(for: proposed)
+        window.allowsUnconstrainedFrame = false
+        window.placementPhaseChanged(.placing(attempt: 1))
+
+        XCTAssertEqual(window.constrainFrameRect(proposed, to: nil), expected)
+    }
 }

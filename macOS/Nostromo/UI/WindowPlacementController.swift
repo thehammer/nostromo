@@ -17,6 +17,16 @@ protocol PlacementWindowing: AnyObject {
     func place(on display: DisplayInfo)
     /// `toggleFullScreen(nil)` — enter OR exit, depending on current state.
     func toggleFullScreenNow()
+    /// A display configuration change is in progress (the guard `NostromoWindow`'s own
+    /// re-entry uses). Nothing frame- or toggle-related runs while it is set.
+    var isDisplayChangePending: Bool { get }
+    /// The controller's phase changed; the window mirrors it (frame-constraint scope).
+    func placementPhaseChanged(_ phase: PlacementPhase)
+}
+
+extension PlacementWindowing {
+    var isDisplayChangePending: Bool { false }
+    func placementPhaseChanged(_ phase: PlacementPhase) {}
 }
 
 /// Window → controller notifications (forwarded by `NostromoWindow`'s delegate methods).
@@ -27,6 +37,9 @@ enum WindowLifecycleEvent: Equatable {
     case willExitFullScreen
     case didExitFullScreen
     case didFailToEnterFullScreen
+    /// Fired right before `NostromoWindow`'s own delayed re-entry toggle: the last
+    /// chance to verify the window is on its display.
+    case willReenterFullScreen
 }
 
 // MARK: - WindowPlacementController
@@ -52,8 +65,18 @@ final class WindowPlacementController {
     /// Bounded wait for in-flight transitions before a toggle: poll interval × polls.
     static let gatePollInterval: TimeInterval = 0.5
     static let gateMaxPolls = 10
+    /// A screen-parameters change this recent blocks exits and re-placement (re-armed).
+    static let screenChangeSettleInterval: TimeInterval = 2.0
+    /// The post-exit re-placement runs this long after `didExitFullScreen` (never inside
+    /// the callback)…
+    static let postExitPlaceDelay: TimeInterval = 1.0
+    /// …and re-polls at most this many times, so it always lands before the window's
+    /// own re-entry (`NostromoWindow.reentryDelay`).
+    static let postExitPlaceMaxPolls = 3
     /// Exits scheduled but not yet fired, app-wide (drives `exitSpacing`).
     private static var pendingExits = 0
+
+    static func resetPendingExitsForTesting() { pendingExits = 0 }
 
     let targetUUID: String
     private(set) var machine: PlacementMachine
@@ -64,6 +87,9 @@ final class WindowPlacementController {
     private let scheduler: PlacementScheduler
     private let emit: (_ message: String, _ warning: Bool) -> Void
     private var rehomeGeneration = 0
+    /// True for `screenChangeSettleInterval` after the last screen-parameters change.
+    private var settling = false
+    private var settleGeneration = 0
 
     init(window: PlacementWindowing, targetUUID: String, screens: ScreenProviding,
          scheduler: PlacementScheduler = MainQueueScheduler.shared,
@@ -82,6 +108,7 @@ final class WindowPlacementController {
     func begin() {
         guard let window else { return }
         emit("beginPlacement: \(window.placementSnapshot)", false)
+        window.placementPhaseChanged(machine.phase)
         send(.begin(currentUUID: window.currentDisplayUUID, targetPresent: targetPresent))
     }
 
@@ -101,12 +128,15 @@ final class WindowPlacementController {
             send(.didExitFullScreen)
         case .didFailToEnterFullScreen:
             send(.didFailToEnterFullScreen)
+        case .willReenterFullScreen:
+            verifyBeforeReentry()
         }
     }
 
     /// `NSApplication.didChangeScreenParametersNotification` arrived.
     func displaysReconfigured() {
         guard let window else { return }
+        beginSettling()
         send(.displaysReconfigured(currentUUID: window.currentDisplayUUID, targetPresent: targetPresent))
     }
 
@@ -119,6 +149,7 @@ final class WindowPlacementController {
         let actions = machine.handle(event)
         if machine.phase != before {
             emit("phase \(before) → \(machine.phase)", false)
+            window?.placementPhaseChanged(machine.phase)
             if machine.phase == .fullScreen { scheduleFinalSnapshot() }
         }
         for action in actions { perform(action) }
@@ -141,13 +172,38 @@ final class WindowPlacementController {
         window.toggleFullScreenNow()
     }
 
-    /// Wrong-display exit. Waits (bounded) for in-flight transitions; if they never
-    /// drain, abandons — toggling into a live transition is what crashed AppKit.
+    /// Wrong-display exit. The decision to exit was made when an event arrived, 3 s or
+    /// more ago; the topology may have moved since, so EVERYTHING is re-verified now:
+    /// a window already on its display, a vanished target, or a display change still
+    /// settling drops the exit (a needless exit/re-enter during a display
+    /// reconfiguration is exactly crash paths #2/#3 in NostromoWindow). If in-flight
+    /// transitions never drain it abandons — toggling into one crashed AppKit.
     private func attemptExit(pollsLeft: Int) {
         guard let window, machine.phase == .exitingForRetry else { return }
         guard window.isFullScreen else {
             // Nothing to exit; no didExit will come, so advance the machine ourselves.
             send(.didExitFullScreen)
+            return
+        }
+        guard targetPresent else {
+            emit("exit dropped: target display \(targetUUID) no longer attached", true)
+            send(.exitDropped)
+            return
+        }
+        if window.currentDisplayUUID == targetUUID {
+            emit("exit dropped: window is already on its target display", false)
+            send(.exitDropped)
+            return
+        }
+        if window.isDisplayChangePending || settling {
+            guard pollsLeft > 0 else {
+                emit("exit dropped: display change still settling after the bounded wait", true)
+                send(.exitDropped)
+                return
+            }
+            scheduler.schedule(after: Self.gatePollInterval) { [weak self] in
+                self?.attemptExit(pollsLeft: pollsLeft - 1)
+            }
             return
         }
         if window.isAnyTransitionInFlight {
@@ -162,6 +218,47 @@ final class WindowPlacementController {
         }
         emit("exiting full-screen to re-home: \(window.placementSnapshot)", true)
         window.toggleFullScreenNow()
+    }
+
+    /// Re-place after a wrong-display exit, a moment AFTER `didExitFullScreen`, with
+    /// the same fire-time checks. Never toggles; skipping is safe because the window's
+    /// own re-entry re-verifies (`verifyBeforeReentry`).
+    private func attemptPostExitPlace(pollsLeft: Int) {
+        guard let window, !window.isFullScreen, targetPresent else { return }
+        if window.currentDisplayUUID == targetUUID {
+            emit("post-exit placement skipped: window already on target", false)
+            return
+        }
+        if window.isAnyTransitionInFlight || window.isDisplayChangePending || settling {
+            guard pollsLeft > 0 else {
+                emit("post-exit placement skipped: transition / display change still in progress", true)
+                return
+            }
+            scheduler.schedule(after: Self.gatePollInterval) { [weak self] in
+                self?.attemptPostExitPlace(pollsLeft: pollsLeft - 1)
+            }
+            return
+        }
+        perform(.place)
+    }
+
+    /// Last check before `NostromoWindow`'s own re-entry toggle: if the window slipped
+    /// off its display, put it back so the Space lands on the right one. Never toggles.
+    private func verifyBeforeReentry() {
+        guard let window, !window.isFullScreen, targetPresent,
+              window.currentDisplayUUID != targetUUID else { return }
+        emit("before re-entry: window not on target — re-placing", true)
+        perform(.place)
+    }
+
+    private func beginSettling() {
+        settling = true
+        settleGeneration += 1
+        let generation = settleGeneration
+        scheduler.schedule(after: Self.screenChangeSettleInterval) { [weak self] in
+            guard let self, self.settleGeneration == generation else { return }
+            self.settling = false
+        }
     }
 
     /// Settled-state record: the FINAL `window.screen` a moment after entry.
@@ -192,6 +289,11 @@ final class WindowPlacementController {
             scheduler.schedule(after: 0) { [weak self] in
                 guard let self, let window = self.window else { return }
                 self.send(.screenChanged(currentUUID: window.currentDisplayUUID, targetPresent: self.targetPresent))
+            }
+
+        case .schedulePlaceAfterExit:
+            scheduler.schedule(after: Self.postExitPlaceDelay) { [weak self] in
+                self?.attemptPostExitPlace(pollsLeft: Self.postExitPlaceMaxPolls)
             }
 
         case let .scheduleVerifyTimeout(attempt):

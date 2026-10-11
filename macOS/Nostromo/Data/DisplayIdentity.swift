@@ -60,8 +60,35 @@ struct DisplayInfo: Equatable {
             visibleFrame: screen.visibleFrame,
             backingScaleFactor: screen.backingScaleFactor,
             localizedName: screen.localizedName,
-            isMain: screen == NSScreen.main
+            // The menu-bar screen (`NSScreen.screens.first`), NOT `NSScreen.main`, which
+            // is the screen of the current key window and moves with focus.
+            isMain: screen == NSScreen.screens.first
         )
+    }
+
+    /// Makes display keys unique and non-empty. Two displays can share a UUID
+    /// (identical external monitors, mirroring), and a key collision would leave one
+    /// window untracked. Order is preserved; the first display keeps its bare UUID
+    /// (stable), later duplicates get `#2`, `#3`, …; an empty UUID falls back to
+    /// `display-number-<screenNumber>`.
+    static func disambiguated(_ displays: [DisplayInfo]) -> [DisplayInfo] {
+        var taken = Set<String>()
+        return displays.map { display in
+            let base = display.uuid.isEmpty ? "display-number-\(display.screenNumber)" : display.uuid
+            var key = base
+            var suffix = 2
+            while taken.contains(key) {
+                key = "\(base)#\(suffix)"
+                suffix += 1
+            }
+            taken.insert(key)
+            return key == display.uuid ? display : display.withUUID(key)
+        }
+    }
+
+    func withUUID(_ uuid: String) -> DisplayInfo {
+        DisplayInfo(uuid: uuid, screenNumber: screenNumber, frame: frame, visibleFrame: visibleFrame,
+                    backingScaleFactor: backingScaleFactor, localizedName: localizedName, isMain: isMain)
     }
 
     static func screenNumber(of screen: NSScreen) -> UInt32? {
@@ -97,7 +124,14 @@ protocol ScreenProviding: AnyObject {
 final class SystemScreenProvider: ScreenProviding {
     static let shared = SystemScreenProvider()
 
-    var displays: [DisplayInfo] { NSScreen.screens.compactMap { DisplayInfo(screen: $0) } }
+    var displays: [DisplayInfo] { DisplayInfo.disambiguated(NSScreen.screens.compactMap { DisplayInfo(screen: $0) }) }
+
+    /// The (disambiguated) key a window on `screen` is bound to. Use this, not the raw
+    /// display UUID, so a window on the second of two same-UUID displays matches its key.
+    func displayKey(for screen: NSScreen) -> String? {
+        guard let number = DisplayInfo.screenNumber(of: screen) else { return nil }
+        return displays.first { $0.screenNumber == number }?.uuid
+    }
     var screensHaveSeparateSpaces: Bool { NSScreen.screensHaveSeparateSpaces }
 }
 
@@ -110,35 +144,44 @@ final class SystemScreenProvider: ScreenProviding {
 /// set of attached displays changed. Now keyed by display UUID.
 enum DisplayFocusKeys {
 
-    static let migrationFlagKey = "nostromo.displayFocusKeysMigrated.v1"
+    /// Per-index "consumed" flag: the legacy value at window index `i` has been dealt
+    /// with. Per index (not global) because launch can see only SOME displays (an
+    /// external still waking): a global one-shot would copy index 0 and lose the rest.
+    static func migratedFlagKey(windowIndex: Int) -> String {
+        "nostromo.displayFocusKeysMigrated.v2.window\(windowIndex)"
+    }
 
     static func legacyKey(windowIndex: Int) -> String { "nostromo.window\(windowIndex).activeTab" }
 
     static func activeTabKey(displayUUID: String) -> String { "nostromo.display.\(displayUUID).activeTab" }
 
-    /// One-time migration of the legacy per-index keys onto display UUIDs.
+    /// Migration of the legacy per-index keys onto display UUIDs. Safe to call every
+    /// time displays are (re)enumerated: idempotent.
     ///
     /// **Mapping rule:** the legacy index `i` is the display at position `i` of
-    /// `displays`, which is `NSScreen.screens` order at the time of the
-    /// migration (that is how the old code assigned indices at launch).
-    /// A UUID key that already exists is never overwritten. Legacy keys are left
-    /// in place (harmless, and keeps a downgrade working). Runs once: guarded by
-    /// `migrationFlagKey`, and only marks itself done when at least one display
-    /// was available to migrate onto.
+    /// `displays`, which is `NSScreen.screens` order at the time of the migration
+    /// (that is how the old code assigned indices at launch). A UUID key that already
+    /// has a value is never overwritten (that index counts as consumed). An index with
+    /// no display yet (position >= `displays.count`) is left alone for a later call.
+    /// Legacy keys are left in place (harmless, and keeps a downgrade working).
     ///
     /// - Returns: the number of keys copied.
     @discardableResult
     static func migrateLegacyKeys(onto displays: [DisplayInfo], defaults: UserDefaults = .standard) -> Int {
-        guard !displays.isEmpty, !defaults.bool(forKey: migrationFlagKey) else { return 0 }
         var copied = 0
         for (index, display) in displays.enumerated() {
+            let flag = migratedFlagKey(windowIndex: index)
+            guard !defaults.bool(forKey: flag) else { continue }
             let newKey = activeTabKey(displayUUID: display.uuid)
-            guard defaults.string(forKey: newKey) == nil,
-                  let legacy = defaults.string(forKey: legacyKey(windowIndex: index)) else { continue }
+            if defaults.string(forKey: newKey) != nil {
+                defaults.set(true, forKey: flag)
+                continue
+            }
+            guard let legacy = defaults.string(forKey: legacyKey(windowIndex: index)) else { continue }
             defaults.set(legacy, forKey: newKey)
+            defaults.set(true, forKey: flag)
             copied += 1
         }
-        defaults.set(true, forKey: migrationFlagKey)
         return copied
     }
 }
@@ -158,9 +201,11 @@ enum DisplayReconciler {
 
     static func plan(attached: [DisplayInfo], boundUUIDs: Set<String>) -> Plan {
         let attachedUUIDs = Set(attached.map(\.uuid))
+        var seen = Set<String>()
         return Plan(
             toClose: boundUUIDs.subtracting(attachedUUIDs).sorted(),
-            toOpen: attached.filter { !boundUUIDs.contains($0.uuid) }
+            // First wins on a repeated key: never two windows for one key.
+            toOpen: attached.filter { !boundUUIDs.contains($0.uuid) && seen.insert($0.uuid).inserted }
         )
     }
 }
@@ -180,6 +225,35 @@ enum LastKnownDisplayCount {
     static func record(_ count: Int, defaults: UserDefaults = .standard) {
         guard count > 0 else { return }
         defaults.set(count, forKey: key)
+    }
+}
+
+/// Records the display count only once the topology has been stable for `settle`
+/// seconds: a transient drop (sleep/wake, hot-plug flicker) must not teach the next
+/// launch to expect fewer displays. Every change restarts the wait; only the latest
+/// pending check records, reading the count at fire time.
+final class StableDisplayCountRecorder {
+    private let scheduler: PlacementScheduler
+    private let screenCount: () -> Int
+    private let defaults: UserDefaults
+    private let settle: TimeInterval
+    private var generation = 0
+
+    init(scheduler: PlacementScheduler, screenCount: @escaping () -> Int,
+         defaults: UserDefaults = .standard, settle: TimeInterval = 3.0) {
+        self.scheduler = scheduler
+        self.screenCount = screenCount
+        self.defaults = defaults
+        self.settle = settle
+    }
+
+    func topologyChanged() {
+        generation += 1
+        let armed = generation
+        scheduler.schedule(after: settle) { [weak self] in
+            guard let self, self.generation == armed else { return }
+            LastKnownDisplayCount.record(self.screenCount(), defaults: self.defaults)
+        }
     }
 }
 

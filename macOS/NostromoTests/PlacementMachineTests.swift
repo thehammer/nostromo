@@ -254,13 +254,14 @@ final class PlacementMachineTests: XCTestCase {
         XCTAssertEqual(machine.phase, .exitingForRetry)
     }
 
-    func test_after_exiting_for_retry_the_window_is_re_placed_and_the_machine_does_not_re_enter_itself() {
+    func test_after_exiting_for_retry_the_re_placement_is_deferred_and_the_machine_does_not_re_enter_itself() {
         driveToEnteringFullScreen()
         send(.didEnterFullScreen(currentUUID: other))
 
         let actions = send(.didExitFullScreen)
 
-        XCTAssertEqual(commands(actions), [.place])
+        XCTAssertEqual(commands(actions), [.schedulePlaceAfterExit])
+        XCTAssertFalse(actions.contains(.place), "no frame work inside the didExit callback: the placement is scheduled, not immediate")
         XCTAssertFalse(actions.contains(.enterFullScreen),
                        "NostromoWindow's own delayed re-entry does the toggle; the machine must not double-toggle")
         XCTAssertEqual(machine.phase, .enteringFullScreen)
@@ -375,13 +376,14 @@ final class PlacementMachineTests: XCTestCase {
         XCTAssertEqual(machine.phase, .exitingForRetry)
     }
 
-    func test_the_re_home_retry_re_places_after_the_exit_completes() {
+    func test_the_re_home_retry_schedules_a_re_placement_after_the_exit_completes() {
         driveToFullScreen()
         send(.displaysReconfigured(currentUUID: other, targetPresent: true))
 
         let actions = send(.didExitFullScreen)
 
-        XCTAssertEqual(commands(actions), [.place])
+        XCTAssertEqual(commands(actions), [.schedulePlaceAfterExit])
+        XCTAssertFalse(actions.contains(.place))
         XCTAssertFalse(actions.contains(.enterFullScreen))
     }
 
@@ -575,5 +577,189 @@ final class PlacementMachineTests: XCTestCase {
 
         XCTAssertEqual(exits, PlacementMachine.maxLifetimeRetries)
         XCTAssertEqual(machine.phase, .gaveUp)
+    }
+
+    // MARK: exitDropped (the controller decided at fire time not to exit)
+
+    func test_a_dropped_exit_returns_to_full_screen_and_refunds_the_retry_it_consumed() {
+        driveToFullScreen()
+        send(.displaysReconfigured(currentUUID: other, targetPresent: true))
+        XCTAssertEqual(machine.phase, .exitingForRetry)
+        XCTAssertEqual(machine.retryBudget, 0)
+        XCTAssertEqual(machine.retriesUsed, 1)
+
+        let actions = send(.exitDropped)
+
+        XCTAssertEqual(commands(actions), [], "dropping an exit starts no transition and places nothing")
+        XCTAssertEqual(machine.phase, .fullScreen)
+        XCTAssertEqual(machine.retryBudget, 1)
+        XCTAssertEqual(machine.retriesUsed, 0)
+    }
+
+    func test_a_dropped_wrong_landing_exit_gets_its_retry_back_too() {
+        driveToEnteringFullScreen()
+        send(.didEnterFullScreen(currentUUID: other))
+        XCTAssertEqual(machine.retryBudget, 0)
+
+        send(.exitDropped)
+
+        XCTAssertEqual(machine.phase, .fullScreen)
+        XCTAssertEqual(machine.retryBudget, PlacementMachine.maxFullScreenRetries)
+        XCTAssertEqual(machine.retriesUsed, 0)
+    }
+
+    func test_dropped_exits_do_not_count_toward_the_lifetime_cap() {
+        driveToFullScreen()
+
+        // More attempts than the lifetime cap, each one dropped before it toggled.
+        for _ in 0..<(PlacementMachine.maxLifetimeRetries + 2) {
+            let actions = send(.displaysReconfigured(currentUUID: other, targetPresent: true))
+            XCTAssertTrue(actions.contains(.exitFullScreen), "a dropped exit must not use up a lifetime retry")
+            send(.exitDropped)
+            XCTAssertEqual(machine.phase, .fullScreen)
+        }
+    }
+
+    func test_after_a_dropped_exit_a_drift_inside_the_grant_can_still_be_re_homed() {
+        driveToFullScreen()
+        send(.displaysReconfigured(currentUUID: other, targetPresent: true))
+        send(.exitDropped)
+
+        let actions = send(.screenChanged(currentUUID: other, targetPresent: true))
+
+        XCTAssertTrue(actions.contains(.exitFullScreen))
+        XCTAssertEqual(machine.phase, .exitingForRetry)
+    }
+
+    private func assertExitDroppedIsIgnored(file: StaticString = #filePath, line: UInt = #line) {
+        let before = (machine.phase, machine.retryBudget, machine.retriesUsed)
+
+        let actions = send(.exitDropped)
+
+        XCTAssertEqual(commands(actions), [], file: file, line: line)
+        XCTAssertEqual(machine.phase, before.0, file: file, line: line)
+        XCTAssertEqual(machine.retryBudget, before.1, "no retry may be refunded for an exit that was never armed", file: file, line: line)
+        XCTAssertEqual(machine.retriesUsed, before.2, file: file, line: line)
+    }
+
+    func test_a_dropped_exit_is_ignored_while_idle() {
+        assertExitDroppedIsIgnored()
+    }
+
+    func test_a_dropped_exit_is_ignored_while_placing() {
+        send(.begin(currentUUID: other, targetPresent: true))
+        assertExitDroppedIsIgnored()
+    }
+
+    func test_a_dropped_exit_is_ignored_while_entering_full_screen() {
+        driveToEnteringFullScreen()
+        assertExitDroppedIsIgnored()
+    }
+
+    func test_a_dropped_exit_is_ignored_in_full_screen() {
+        driveToFullScreen()
+        assertExitDroppedIsIgnored()
+    }
+
+    func test_a_dropped_exit_is_ignored_after_giving_up() {
+        driveToEnteringFullScreen()
+        send(.didEnterFullScreen(currentUUID: other))
+        send(.exitAbandoned)
+        XCTAssertEqual(machine.phase, .gaveUp)
+        assertExitDroppedIsIgnored()
+    }
+
+    // MARK: Launch-time drift is not fought (retry budget spent on a good landing)
+
+    func test_a_drag_of_the_space_after_a_normal_launch_is_not_fought() {
+        driveToFullScreen()
+
+        let actions = send(.screenChanged(currentUUID: other, targetPresent: true))
+
+        XCTAssertEqual(commands(actions), [], "a Mission Control drag is the user's choice, with no reconfiguration to blame")
+        XCTAssertEqual(machine.phase, .fullScreen)
+    }
+
+    func test_a_drag_after_a_launch_that_needed_placement_is_not_fought_either() {
+        driveToEnteringFullScreen()
+        send(.didEnterFullScreen(currentUUID: target))
+        XCTAssertEqual(machine.phase, .fullScreen)
+
+        let actions = send(.screenChanged(currentUUID: other, targetPresent: true))
+
+        XCTAssertFalse(actions.contains(.exitFullScreen))
+        XCTAssertEqual(machine.phase, .fullScreen)
+    }
+
+    func test_a_drag_after_a_system_exit_and_clean_re_entry_is_not_fought() {
+        driveToFullScreen()
+        send(.willExitFullScreen)
+        send(.didExitFullScreen)
+        send(.didEnterFullScreen(currentUUID: target))
+        XCTAssertEqual(machine.phase, .fullScreen)
+
+        let actions = send(.screenChanged(currentUUID: other, targetPresent: true))
+
+        XCTAssertFalse(actions.contains(.exitFullScreen))
+        XCTAssertEqual(machine.phase, .fullScreen)
+    }
+
+    func test_after_a_reconfiguration_a_drift_is_re_homed_again() {
+        driveToFullScreen()
+        XCTAssertFalse(send(.screenChanged(currentUUID: other, targetPresent: true)).contains(.exitFullScreen))
+
+        send(.displaysReconfigured(currentUUID: target, targetPresent: true))
+        let actions = send(.screenChanged(currentUUID: other, targetPresent: true))
+
+        XCTAssertTrue(actions.contains(.exitFullScreen))
+        XCTAssertEqual(machine.phase, .exitingForRetry)
+    }
+
+    func test_a_launch_whose_first_entry_lands_wrong_still_gets_its_one_retry_and_then_stops_fighting() {
+        driveToEnteringFullScreen()
+
+        XCTAssertTrue(send(.didEnterFullScreen(currentUUID: other)).contains(.exitFullScreen))
+        send(.didExitFullScreen)
+        send(.didEnterFullScreen(currentUUID: target))
+        XCTAssertEqual(machine.phase, .fullScreen)
+
+        XCTAssertFalse(send(.screenChanged(currentUUID: other, targetPresent: true)).contains(.exitFullScreen))
+        XCTAssertEqual(machine.phase, .fullScreen)
+    }
+
+    func test_a_clean_re_entry_inside_a_reconfiguration_grant_keeps_the_grant() {
+        driveToFullScreen()
+        send(.displaysReconfigured(currentUUID: target, targetPresent: true))   // grant opens
+        send(.willExitFullScreen)
+        send(.didExitFullScreen)
+        send(.didEnterFullScreen(currentUUID: target))                          // lands on target, grant still open
+
+        let actions = send(.screenChanged(currentUUID: other, targetPresent: true))
+
+        XCTAssertTrue(actions.contains(.exitFullScreen), "the grant has not expired, so drift is still re-homed")
+    }
+
+    func test_a_landing_after_the_grant_expired_does_not_keep_the_old_grant() {
+        send(.begin(currentUUID: target, targetPresent: true))                  // entering full-screen
+        send(.displaysReconfigured(currentUUID: target, targetPresent: true))   // grant opens mid-entry
+        send(.rehomeWindowExpired)                                              // grant closes before the entry lands
+        send(.didEnterFullScreen(currentUUID: target))
+        XCTAssertEqual(machine.phase, .fullScreen)
+
+        let actions = send(.screenChanged(currentUUID: other, targetPresent: true))
+
+        XCTAssertFalse(actions.contains(.exitFullScreen))
+        XCTAssertEqual(machine.phase, .fullScreen)
+    }
+
+    func test_a_landing_inside_an_open_grant_keeps_the_grant() {
+        send(.begin(currentUUID: target, targetPresent: true))
+        send(.displaysReconfigured(currentUUID: target, targetPresent: true))   // grant opens mid-entry
+        send(.didEnterFullScreen(currentUUID: target))
+
+        let actions = send(.screenChanged(currentUUID: other, targetPresent: true))
+
+        XCTAssertTrue(actions.contains(.exitFullScreen))
+        XCTAssertEqual(machine.phase, .exitingForRetry)
     }
 }

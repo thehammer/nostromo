@@ -52,11 +52,20 @@ enum PlacementEvent: Equatable {
     /// The re-home grant from `displaysReconfigured` timed out: a later,
     /// user-driven move of the window is no longer fought.
     case rehomeWindowExpired
+    /// The controller re-verified at fire time and decided NOT to exit (the window is
+    /// already on its target, the target display is gone, or the topology is still
+    /// settling). Back to `.fullScreen`; the retry consumed when the exit was armed is
+    /// refunded, because no exit happened.
+    case exitDropped
 }
 
 enum PlacementAction: Equatable {
     /// `setFrame` the window to the target display's `placementFrame`.
     case place
+    /// Re-place the window after a wrong-display exit — NOT now: the exit's own
+    /// callback is the most fragile moment, so the controller defers it and
+    /// re-verifies when it fires.
+    case schedulePlaceAfterExit
     /// Arm a bounded wait; deliver `.verifyTimeout(attempt:…)` when it elapses.
     case scheduleVerifyTimeout(attempt: Int)
     /// Request `toggleFullScreen` (the executor must still guard `!isFullScreen`).
@@ -80,6 +89,8 @@ struct PlacementMachine {
     /// Remaining wrong-display retries (exit → re-place → re-enter).
     private(set) var retryBudget = PlacementMachine.maxFullScreenRetries
     private(set) var retriesUsed = 0
+    /// True between `.displaysReconfigured` and `.rehomeWindowExpired`.
+    private var rehomeGrantActive = false
 
     init(targetUUID: String) { self.targetUUID = targetUUID }
 
@@ -136,6 +147,10 @@ struct PlacementMachine {
                 // did not drive (the window's own re-entry): judge it the same way.
                 if current == targetUUID {
                     phase = .fullScreen
+                    // A first successful entry ends the launch retry: from here only a
+                    // display reconfiguration re-arms it, so a deliberate drag of the
+                    // Space (Mission Control) is never fought.
+                    if !rehomeGrantActive { retryBudget = 0 }
                     return [.log("full-screen entered on target display — OK")]
                 }
                 return retryOrGiveUp(current: current, cause: "full-screen entered on wrong display")
@@ -165,10 +180,12 @@ struct PlacementMachine {
         case .didExitFullScreen:
             switch phase {
             case .exitingForRetry:
-                // Re-place now; NostromoWindow's own 3 s post-exit re-entry then
-                // enters full-screen on the right display. We do NOT toggle.
+                // Re-place LATER (deferred + re-verified by the controller), never inside
+                // this callback; NostromoWindow's own post-exit re-entry then enters
+                // full-screen on the right display. We do NOT toggle.
                 phase = .enteringFullScreen
-                return [.log("exited full-screen for retry — re-placing, window's own re-entry follows"), .place]
+                return [.log("exited full-screen for retry — re-placing shortly, window's own re-entry follows"),
+                        .schedulePlaceAfterExit]
             case .fullScreen:
                 // User / system exit; the window re-enters on its own. Re-judge on entry.
                 phase = .enteringFullScreen
@@ -179,13 +196,22 @@ struct PlacementMachine {
 
         case let .displaysReconfigured(current, targetPresent):
             retryBudget = Self.maxFullScreenRetries
+            rehomeGrantActive = true
             var actions: [PlacementAction] = [.scheduleRehomeExpiry]
             if phase == .fullScreen {
                 actions += rehomeIfDrifted(current: current, targetPresent: targetPresent, cause: "displaysReconfigured")
             }
             return actions
 
+        case .exitDropped:
+            guard phase == .exitingForRetry else { return [] }
+            phase = .fullScreen
+            retryBudget += 1
+            retriesUsed = max(0, retriesUsed - 1)
+            return [.log("exit for re-home dropped at fire time — staying full-screen")]
+
         case .rehomeWindowExpired:
+            rehomeGrantActive = false
             if phase == .fullScreen || phase == .gaveUp { retryBudget = 0 }
             return []
         }
@@ -197,6 +223,11 @@ struct PlacementMachine {
         guard let current, current != targetUUID else { return [] }
         guard targetPresent else {
             return [.log("\(cause): on \(current) but target display absent — not re-homing")]
+        }
+        // No budget (the launch retry is spent and no reconfiguration re-armed it): this is
+        // the user's own move (e.g. Mission Control) — leave it alone, stay `.fullScreen`.
+        guard retryBudget > 0 else {
+            return [.log("\(cause): window on \(current), no re-home budget — leaving it")]
         }
         return retryOrGiveUp(current: current, cause: "\(cause): window drifted to \(current)")
     }

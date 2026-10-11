@@ -24,6 +24,14 @@ private final class FakeWindow: PlacementWindowing {
         return transitionInFlight
     }
 
+    /// A display-configuration change is in progress on the window (mirrors `NostromoWindow`'s flag).
+    var displayChangePending = false
+    var isDisplayChangePending: Bool { displayChangePending }
+
+    /// Every phase the controller mirrored onto the window, in order.
+    private(set) var phasesSeen: [PlacementPhase] = []
+    func placementPhaseChanged(_ phase: PlacementPhase) { phasesSeen.append(phase) }
+
     var placementSnapshot: String { "fake-window on \(currentDisplayUUID ?? "nil") fullScreen=\(isFullScreen)" }
 
     private(set) var placedOn: [DisplayInfo] = []
@@ -123,6 +131,8 @@ final class WindowPlacementControllerTests: XCTestCase {
         emitted = []
         scheduler = FakeScheduler()
         screens = FakeScreens(Topology.all)
+        // `pendingExits` is app-wide static state: never let one test's leftovers skew another's exit delays.
+        WindowPlacementController.resetPendingExitsForTesting()
     }
 
     /// Exits are serialized through app-wide static state that is only balanced when the
@@ -131,6 +141,7 @@ final class WindowPlacementControllerTests: XCTestCase {
         scheduler?.runAll()
         controller = nil
         window = nil
+        WindowPlacementController.resetPendingExitsForTesting()
         super.tearDown()
     }
 
@@ -160,7 +171,50 @@ final class WindowPlacementControllerTests: XCTestCase {
         window.isFullScreen = false
         window.currentDisplayUUID = Topology.main.uuid
         controller.windowEvent(.didExitFullScreen)
-        scheduler.runAll()                       // re-placement + re-check
+        scheduler.runAll()                       // the delayed re-placement (+ re-check) runs
+    }
+
+    /// Wrong landing; the deferred exit is armed but has NOT fired. Window is full-screen on main.
+    private func landWrongWithExitArmed() {
+        makeController(windowOn: target.uuid)
+        enterFullScreen(landingOn: Topology.main.uuid)
+        XCTAssertEqual(controller.phase, .exitingForRetry)
+        XCTAssertEqual(window.toggleCount, 1)
+    }
+
+    /// Fire the one armed exit (and nothing else).
+    private func fireExit(file: StaticString = #filePath, line: UInt = #line) {
+        let works = scheduler.take(delay: WindowPlacementController.exitRunway)
+        XCTAssertEqual(works.count, 1, "expected exactly one armed exit", file: file, line: line)
+        for work in works { work() }
+    }
+
+    /// The exit toggled and AppKit reported it. The delayed re-placement is armed but has NOT fired.
+    private func exitReportedByAppKit() {
+        landWrongWithExitArmed()
+        scheduler.runAll()                       // the deferred exit toggles
+        XCTAssertEqual(window.toggleCount, 2)
+        window.isFullScreen = false
+        window.currentDisplayUUID = Topology.main.uuid
+        controller.windowEvent(.didExitFullScreen)
+    }
+
+    /// Fire the armed post-exit re-placement (and nothing else).
+    private func firePostExitPlace(file: StaticString = #filePath, line: UInt = #line) {
+        let works = scheduler.take(delay: WindowPlacementController.postExitPlaceDelay)
+        XCTAssertEqual(works.count, 1, "expected exactly one armed post-exit placement", file: file, line: line)
+        for work in works { work() }
+    }
+
+    /// Run scheduled work one item at a time and report how many items ran; bounded.
+    @discardableResult
+    private func runCountingSteps() -> Int {
+        var steps = 0
+        while scheduler.runNext() {
+            steps += 1
+            if steps > 100 { XCTFail("scheduler never drained: unbounded polling?"); break }
+        }
+        return steps
     }
 
     // MARK: Already on the right display
@@ -722,5 +776,381 @@ final class WindowPlacementControllerTests: XCTestCase {
         scheduler.runAll()
         XCTAssertEqual(window.toggleCount, togglesA + 1)
         XCTAssertEqual(windowB.toggleCount, togglesB + 1)
+    }
+
+    // MARK: B1: the exit is re-verified when it fires
+
+    func test_an_exit_is_dropped_when_the_window_is_back_on_the_target_by_the_time_it_fires() {
+        landWrongWithExitArmed()
+        window.currentDisplayUUID = target.uuid     // macOS settled it back on its own
+
+        fireExit()
+        scheduler.runAll()
+
+        XCTAssertEqual(window.toggleCount, 1, "the stale exit must not toggle")
+        XCTAssertEqual(controller.phase, .fullScreen)
+        XCTAssertEqual(controller.machine.retryBudget, PlacementMachine.maxFullScreenRetries, "the unused retry is refunded")
+        XCTAssertEqual(controller.machine.retriesUsed, 0)
+    }
+
+    func test_an_exit_is_dropped_when_the_target_display_was_removed_before_it_fires() {
+        landWrongWithExitArmed()
+        screens.displays = [Topology.main, Topology.aboveRight]   // target unplugged
+
+        fireExit()
+        scheduler.runAll()
+
+        XCTAssertEqual(window.toggleCount, 1)
+        XCTAssertEqual(window.placedOn, [])
+        XCTAssertEqual(controller.phase, .fullScreen)
+    }
+
+    func test_an_exit_never_fires_while_a_display_change_stays_pending_and_the_polling_is_bounded() {
+        landWrongWithExitArmed()
+        window.displayChangePending = true
+
+        scheduler.runAll()   // also fails the test itself if the polling is unbounded
+
+        XCTAssertEqual(window.toggleCount, 1, "no exit toggle while a display change is in progress")
+        XCTAssertEqual(controller.phase, .fullScreen, "after the polls run out the exit is dropped")
+        XCTAssertTrue(scheduler.pending.isEmpty)
+    }
+
+    func test_an_exit_held_back_by_a_pending_display_change_fires_once_if_the_change_clears_in_time() {
+        landWrongWithExitArmed()
+        window.displayChangePending = true
+
+        fireExit()
+        XCTAssertEqual(window.toggleCount, 1)
+        XCTAssertEqual(controller.phase, .exitingForRetry, "re-armed, not dropped, while polls remain")
+        XCTAssertTrue(scheduler.pending.map(\.delay).contains(WindowPlacementController.gatePollInterval))
+
+        window.displayChangePending = false
+        scheduler.runAll()
+
+        XCTAssertEqual(window.toggleCount, 2, "exactly one exit toggle once the change cleared")
+    }
+
+    func test_an_exit_is_re_armed_not_toggled_when_a_screen_change_landed_just_before_it_fires() {
+        makeController(windowOn: target.uuid)
+        enterFullScreen(landingOn: target.uuid)
+        scheduler.runAll()
+        let base = window.toggleCount
+
+        window.currentDisplayUUID = Topology.main.uuid
+        controller.displaysReconfigured()                      // drift: exit armed, settle window opens
+        XCTAssertEqual(controller.phase, .exitingForRetry)
+        for clear in scheduler.take(delay: WindowPlacementController.screenChangeSettleInterval) { clear() }
+
+        controller.displaysReconfigured()                      // another change right before the exit fires
+        fireExit()
+
+        XCTAssertEqual(window.toggleCount, base, "still settling: the exit must be re-armed, not toggled")
+        XCTAssertEqual(controller.phase, .exitingForRetry)
+
+        for clear in scheduler.take(delay: WindowPlacementController.screenChangeSettleInterval) { clear() }
+        scheduler.runAll()
+
+        XCTAssertEqual(window.toggleCount, base + 1, "fires exactly once after the settle window cleared")
+    }
+
+    func test_only_the_latest_screen_change_settle_clear_ends_the_settling() {
+        makeController(windowOn: target.uuid)
+        enterFullScreen(landingOn: target.uuid)
+        scheduler.runAll()
+        let base = window.toggleCount
+
+        window.currentDisplayUUID = Topology.main.uuid
+        controller.displaysReconfigured()
+        controller.displaysReconfigured()
+        let clears = scheduler.take(delay: WindowPlacementController.screenChangeSettleInterval)
+        XCTAssertEqual(clears.count, 2)
+
+        clears[0]()                                            // superseded: must not end the settling
+        fireExit()
+        XCTAssertEqual(window.toggleCount, base, "the superseded clear must not release the exit")
+
+        clears[1]()                                            // the latest one does
+        scheduler.runAll()
+        XCTAssertEqual(window.toggleCount, base + 1)
+    }
+
+    func test_a_still_drifted_window_with_nothing_pending_exits_exactly_once() {
+        landWrongWithExitArmed()
+
+        fireExit()
+        scheduler.runAll()
+
+        XCTAssertEqual(window.toggleCount, 2)
+        XCTAssertEqual(controller.phase, .exitingForRetry)
+    }
+
+    func test_a_dropped_exit_does_not_toggle_however_often_it_is_called() {
+        landWrongWithExitArmed()
+        window.currentDisplayUUID = target.uuid
+        let works = scheduler.take(delay: WindowPlacementController.exitRunway)
+        XCTAssertEqual(works.count, 1)
+
+        works[0]()
+        works[0]()
+        window.currentDisplayUUID = Topology.main.uuid          // even if it drifts again afterwards
+        works[0]()
+
+        XCTAssertEqual(window.toggleCount, 1)
+        XCTAssertEqual(controller.phase, .fullScreen)
+    }
+
+    func test_a_window_already_back_on_the_target_drops_the_exit_even_with_a_display_change_pending() {
+        landWrongWithExitArmed()
+        window.currentDisplayUUID = target.uuid
+        window.displayChangePending = true
+
+        fireExit()
+
+        XCTAssertEqual(window.toggleCount, 1)
+        XCTAssertEqual(controller.phase, .fullScreen, "dropped at once, not re-armed")
+    }
+
+    // MARK: B2: re-placement after an exit is delayed, never inside the didExit callback
+
+    func test_the_re_placement_after_an_exit_does_not_happen_inside_the_did_exit_callback() {
+        exitReportedByAppKit()
+
+        XCTAssertEqual(window.placedOn, [], "no frame work synchronously inside windowDidExitFullScreen")
+        XCTAssertEqual(window.toggleCount, 2)
+        XCTAssertEqual(controller.phase, .enteringFullScreen)
+        XCTAssertEqual(scheduler.pending.map(\.delay).filter { $0 == WindowPlacementController.postExitPlaceDelay }.count, 1)
+
+        firePostExitPlace()
+
+        XCTAssertEqual(window.placedOn.map(\.uuid), [target.uuid])
+        XCTAssertEqual(window.toggleCount, 2, "the controller never re-enters itself")
+    }
+
+    func test_the_delayed_re_placement_is_skipped_if_the_window_is_full_screen_again() {
+        exitReportedByAppKit()
+        window.isFullScreen = true
+
+        firePostExitPlace()
+        scheduler.runAll()
+
+        XCTAssertEqual(window.placedOn, [])
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_the_delayed_re_placement_is_skipped_if_the_target_display_is_gone() {
+        exitReportedByAppKit()
+        screens.displays = [Topology.main, Topology.aboveRight]
+
+        firePostExitPlace()
+        scheduler.runAll()
+
+        XCTAssertEqual(window.placedOn, [])
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_the_delayed_re_placement_makes_no_place_call_if_the_window_is_already_on_the_target() {
+        exitReportedByAppKit()
+        window.currentDisplayUUID = target.uuid
+
+        firePostExitPlace()
+        scheduler.runAll()
+
+        XCTAssertEqual(window.placedOn, [], "already there: nothing to place")
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_the_delayed_re_placement_waits_for_an_in_flight_transition_and_then_places_once() {
+        exitReportedByAppKit()
+        window.transitionInFlight = true
+
+        firePostExitPlace()
+        XCTAssertEqual(window.placedOn, [], "a transition is in flight: do not touch the frame")
+        XCTAssertTrue(scheduler.pending.map(\.delay).contains(WindowPlacementController.gatePollInterval))
+
+        window.transitionInFlight = false
+        scheduler.runAll()
+
+        XCTAssertEqual(window.placedOn.map(\.uuid), [target.uuid], "placed exactly once")
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_the_delayed_re_placement_waits_for_a_pending_display_change_and_then_places_once() {
+        exitReportedByAppKit()
+        window.displayChangePending = true
+
+        firePostExitPlace()
+        XCTAssertEqual(window.placedOn, [])
+
+        window.displayChangePending = false
+        scheduler.runAll()
+
+        XCTAssertEqual(window.placedOn.map(\.uuid), [target.uuid])
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_the_delayed_re_placement_waits_for_a_screen_change_to_settle_and_then_places_once() {
+        exitReportedByAppKit()
+        controller.displaysReconfigured()          // display topology just changed
+
+        firePostExitPlace()
+        XCTAssertEqual(window.placedOn, [], "settling: do not place yet")
+
+        for clear in scheduler.take(delay: WindowPlacementController.screenChangeSettleInterval) { clear() }
+        scheduler.runAll()
+
+        XCTAssertEqual(window.placedOn.map(\.uuid), [target.uuid])
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_the_delayed_re_placement_gives_up_after_its_bounded_polls_without_ever_toggling() {
+        exitReportedByAppKit()
+        window.transitionInFlight = true            // never drains
+
+        firePostExitPlace()
+        let repolls = runCountingSteps()
+
+        XCTAssertGreaterThanOrEqual(repolls, 1)
+        XCTAssertLessThanOrEqual(repolls, WindowPlacementController.postExitPlaceMaxPolls)
+        XCTAssertEqual(window.placedOn, [], "skipped, not forced")
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_when_the_delayed_re_placement_gave_up_the_windows_own_re_entry_verifies_before_toggling() {
+        exitReportedByAppKit()
+        window.transitionInFlight = true
+        firePostExitPlace()
+        runCountingSteps()
+        XCTAssertEqual(window.placedOn, [])
+
+        // NostromoWindow is about to re-enter on its own.
+        window.transitionInFlight = false
+        controller.windowEvent(.willReenterFullScreen)
+
+        XCTAssertEqual(window.placedOn.map(\.uuid), [target.uuid])
+        XCTAssertEqual(window.toggleCount, 2, "the controller places; the window toggles")
+    }
+
+    func test_the_post_exit_placement_window_closes_before_the_windows_own_re_entry() {
+        XCTAssertLessThan(
+            WindowPlacementController.postExitPlaceDelay
+                + WindowPlacementController.gatePollInterval * Double(WindowPlacementController.postExitPlaceMaxPolls),
+            NostromoWindow.reentryDelay,
+            "all post-exit placement work must be over before NostromoWindow re-enters")
+    }
+
+    // MARK: B2: willReenterFullScreen verify-before-toggle
+
+    /// Retry path finished its placement; NostromoWindow's own re-entry is about to run.
+    private func awaitingOwnReentry() {
+        exitReportedByAppKit()
+        scheduler.runAll()                          // delayed re-placement runs
+        XCTAssertEqual(window.placedOn.count, 1)
+        XCTAssertEqual(window.currentDisplayUUID, target.uuid)
+    }
+
+    func test_before_the_windows_own_re_entry_a_window_that_slipped_off_the_target_is_placed_again() {
+        awaitingOwnReentry()
+        window.currentDisplayUUID = Topology.main.uuid     // slipped off after the placement
+
+        controller.windowEvent(.willReenterFullScreen)
+
+        XCTAssertEqual(window.placedOn.count, 2)
+        XCTAssertEqual(window.placedOn.last?.uuid, target.uuid, "placed synchronously, before the toggle")
+        XCTAssertEqual(window.toggleCount, 2, "the controller never toggles from this event")
+    }
+
+    func test_before_the_windows_own_re_entry_a_window_already_on_the_target_is_left_alone() {
+        awaitingOwnReentry()
+
+        controller.windowEvent(.willReenterFullScreen)
+
+        XCTAssertEqual(window.placedOn.count, 1)
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_before_the_windows_own_re_entry_nothing_is_placed_if_the_target_display_is_gone() {
+        awaitingOwnReentry()
+        window.currentDisplayUUID = Topology.main.uuid
+        screens.displays = [Topology.main, Topology.aboveRight]
+
+        controller.windowEvent(.willReenterFullScreen)
+
+        XCTAssertEqual(window.placedOn.count, 1)
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_before_the_windows_own_re_entry_nothing_is_placed_if_the_window_is_already_full_screen() {
+        awaitingOwnReentry()
+        window.currentDisplayUUID = Topology.main.uuid
+        window.isFullScreen = true
+
+        controller.windowEvent(.willReenterFullScreen)
+
+        XCTAssertEqual(window.placedOn.count, 1)
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    // MARK: Launch-time drift is not fought
+
+    func test_a_drag_of_the_space_after_a_normal_launch_is_left_alone() {
+        makeController(windowOn: target.uuid)
+        enterFullScreen(landingOn: target.uuid)
+        scheduler.runAll()
+        let toggles = window.toggleCount
+
+        window.currentDisplayUUID = Topology.main.uuid      // Mission Control drag
+        controller.windowEvent(.didChangeScreen)
+        scheduler.runAll()
+
+        XCTAssertEqual(controller.phase, .fullScreen)
+        XCTAssertEqual(window.toggleCount, toggles)
+        XCTAssertEqual(window.placedOn, [])
+    }
+
+    // MARK: Phase mirrored onto the window
+
+    /// Consecutive duplicates removed, so it does not matter whether the initial phase is mirrored once or twice.
+    private func distinctPhasesSeen() -> [PlacementPhase] {
+        var out: [PlacementPhase] = []
+        for phase in window.phasesSeen where out.last != phase { out.append(phase) }
+        return out
+    }
+
+    func test_every_phase_change_is_mirrored_onto_the_window_starting_with_the_initial_phase() {
+        makeController(windowOn: Topology.main.uuid)
+
+        controller.begin()
+        scheduler.runAll()
+        window.isFullScreen = true
+        window.currentDisplayUUID = target.uuid
+        controller.windowEvent(.didEnterFullScreen)
+
+        XCTAssertEqual(distinctPhasesSeen(), [.idle, .placing(attempt: 1), .enteringFullScreen, .fullScreen])
+        XCTAssertEqual(window.phasesSeen.last, controller.phase)
+    }
+
+    func test_the_retry_phases_are_mirrored_onto_the_window_too() {
+        makeController(windowOn: target.uuid)
+        landWrongAndExit()
+        XCTAssertEqual(window.phasesSeen.last, controller.phase)
+
+        window.isFullScreen = true
+        window.currentDisplayUUID = target.uuid
+        controller.windowEvent(.didEnterFullScreen)
+        scheduler.runAll()
+
+        XCTAssertEqual(distinctPhasesSeen(),
+                       [.idle, .enteringFullScreen, .exitingForRetry, .enteringFullScreen, .fullScreen])
+        XCTAssertEqual(window.phasesSeen.last, controller.phase)
+    }
+
+    func test_giving_up_is_mirrored_onto_the_window() {
+        screens.displays = [Topology.main]               // target absent
+        makeController(windowOn: Topology.main.uuid)
+
+        controller.begin()
+
+        XCTAssertEqual(distinctPhasesSeen(), [.idle, .gaveUp])
     }
 }

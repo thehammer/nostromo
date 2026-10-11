@@ -46,17 +46,23 @@ final class WindowPlacementLog {
         queue.async { [self] in append(line) }
     }
 
-    /// Block until queued writes have landed (tests, termination).
+    #if DEBUG
+    /// Test support: block until queued writes have landed. `queue.sync` blocks the
+    /// caller, so production code must never call this (least of all on the main
+    /// thread); it does not exist in Release builds.
     func flush() { queue.sync {} }
+    #endif
 
     // MARK: - File
 
     private func append(_ line: String) {
         let fm = FileManager.default
         do {
-            try fm.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // Owner-only: the log names displays and window frames, nobody else's business.
+            try fm.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
             if !fm.fileExists(atPath: fileURL.path) {
-                fm.createFile(atPath: fileURL.path, contents: nil)
+                fm.createFile(atPath: fileURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
             }
             let handle = try FileHandle(forWritingTo: fileURL)
             defer { try? handle.close() }
@@ -76,5 +82,7 @@ final class WindowPlacementLog {
             tail = tail[tail.index(after: newline)...]
         }
         try? Data(tail).write(to: fileURL, options: .atomic)
+        // An atomic write replaces the file; keep it owner-only.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
 }

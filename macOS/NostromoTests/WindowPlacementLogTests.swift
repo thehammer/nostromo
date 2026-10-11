@@ -136,6 +136,59 @@ final class WindowPlacementLogTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: logURL.path))
     }
 
+    // MARK: Permissions (the log is private to the user)
+
+    private func permissions(of url: URL) -> Int? {
+        ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? NSNumber)
+            .map { $0.intValue & 0o777 }
+    }
+
+    func test_the_log_file_is_created_readable_and_writable_by_its_owner_only() {
+        let log = WindowPlacementLog(fileURL: logURL)
+
+        log.log("launch", "hello")
+        log.flush()
+
+        XCTAssertEqual(permissions(of: logURL), 0o600)
+    }
+
+    func test_a_directory_the_log_creates_is_accessible_by_its_owner_only() {
+        let deep = tempRoot.appendingPathComponent("a/b/logs/window-placement.log")
+        let log = WindowPlacementLog(fileURL: deep)
+
+        log.log("launch", "hello")
+        log.flush()
+
+        XCTAssertEqual(permissions(of: deep.deletingLastPathComponent()), 0o700)
+        XCTAssertEqual(permissions(of: deep), 0o600)
+    }
+
+    func test_an_existing_directory_and_file_are_not_an_error_and_logging_still_works() throws {
+        let dir = logURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        FileManager.default.createFile(atPath: logURL.path, contents: Data("old line\n".utf8),
+                                       attributes: [.posixPermissions: 0o644])
+        let log = WindowPlacementLog(fileURL: logURL)
+
+        log.log("launch", "new line")
+        log.flush()
+
+        let text = contents(of: logURL)
+        XCTAssertTrue(text.contains("old line"))
+        XCTAssertTrue(text.contains("new line"))
+    }
+
+    func test_the_file_stays_owner_only_after_it_is_trimmed() {
+        let log = WindowPlacementLog(fileURL: logURL, maxBytes: 2_000)
+
+        for i in 0..<500 { log.log("win#0", numbered(i)) }
+        log.flush()
+
+        XCTAssertFalse(contents(of: logURL).contains(numbered(0)), "precondition: a trim happened")
+        XCTAssertEqual(permissions(of: logURL), 0o600)
+    }
+
     // MARK: Size cap
 
     func test_the_file_never_exceeds_the_byte_cap_after_flush() {
