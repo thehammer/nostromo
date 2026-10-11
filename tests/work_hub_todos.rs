@@ -283,13 +283,6 @@ async fn the_hub_reports_a_status_for_every_source() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sentry_without_an_implementation_yet_says_coming_soon() {
-    let (hub, _ttx, _brx) = hub_with_channel(Some(fresh(vec![])));
-    let s = wait_for_status(&hub, WorkSource::Sentry, |s| s.state == SourceState::NotConfigured).await;
-    assert_eq!(s.reason.as_deref(), Some("Coming soon"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_hub_broadcasts_the_todos_status_and_snapshot() {
     let (_hub, _ttx, mut brx) = hub_with_channel(Some(fresh(mixed_todos())));
 

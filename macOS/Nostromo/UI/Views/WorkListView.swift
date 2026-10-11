@@ -110,6 +110,8 @@ final class WorkListView: NSView {
     private var roots: [Node] = []
     private var snapshot: WorkListSnapshot?
     private var isApplying = false
+    private var appliedIsLoading = false
+    private var appliedPlaceholder: String?
     /// What the outline currently shows, to skip a reload when nothing visible changed.
     private var shownLayout: [LayoutEntry]?
     /// What the filter bar was last built for.
@@ -187,6 +189,8 @@ final class WorkListView: NSView {
     /// yet; `placeholder` is a message over an empty list ("Nothing to do").
     func apply(snapshot: WorkListSnapshot, isLoading: Bool, placeholder: String?) {
         self.snapshot = snapshot
+        appliedIsLoading = isLoading
+        appliedPlaceholder = placeholder
         let newRoots = buildNodes(from: snapshot)
         let layout = Self.layout(of: newRoots)
         if layout == shownLayout {
@@ -216,6 +220,15 @@ final class WorkListView: NSView {
         placeholderLabel.stringValue = message ?? ""
         placeholderLabel.isHidden = message == nil || !skeleton.isHidden
         rebuildFilterControlsIfNeeded()
+    }
+
+    /// Draw every row again from the current snapshot. Rows are cached per item,
+    /// so a row that depends on something outside the item (the clock, what the
+    /// user has already seen) is otherwise only redrawn when its item changes.
+    func refreshRows() {
+        rowCache.removeAll()
+        guard let snapshot else { return }
+        apply(snapshot: snapshot, isLoading: appliedIsLoading, placeholder: appliedPlaceholder)
     }
 
     /// Select the row for `itemId` (nil clears). Notifies only when `notify`.
