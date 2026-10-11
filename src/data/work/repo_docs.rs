@@ -322,7 +322,8 @@ impl Scanner {
         let no_cache = HashMap::new();
         let old_cache = previous.map_or(&no_cache, |p| &p.cache);
         // One unreadable folder flags the repo but the readable ones still show.
-        state.error = read_docs(name, &claude_dir, old_cache, &mut state);
+        let real = state.claude_real.clone();
+        state.error = read_docs(name, &claude_dir, &real, old_cache, &mut state);
         state.items.sort_by(|a, b| a.id.cmp(&b.id));
         Some(state)
     }
@@ -362,6 +363,7 @@ impl Scanner {
 fn read_docs(
     repo: &str,
     claude_dir: &Path,
+    claude_real: &Path,
     old_cache: &HashMap<PathBuf, CachedItem>,
     state: &mut RepoState,
 ) -> Option<String> {
@@ -373,7 +375,7 @@ fn read_docs(
         }
     };
     for (rel, kind) in DOC_DIRS {
-        match list_dir(&claude_dir.join(rel)) {
+        match list_dir(&claude_dir.join(rel), claude_real) {
             Ok(files) => {
                 for path in files {
                     let read = read_file_item(repo, kind, rel, &path, old_cache);
@@ -385,10 +387,10 @@ fn read_docs(
             }
         }
     }
-    match list_wip(&claude_dir.join(WIP_DIR)) {
+    match list_wip(&claude_dir.join(WIP_DIR), claude_real) {
         Ok(topics) => {
             for topic in topics {
-                let read = read_wip_item(repo, &topic, old_cache);
+                let read = read_wip_item(repo, &topic, claude_real, old_cache);
                 keep(topic, read);
             }
         }
@@ -457,15 +459,23 @@ fn describe(e: &std::io::Error) -> String {
 }
 
 /// `*.md` files (not hidden) directly in `dir`. A missing directory is empty.
-fn list_dir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+/// A symlinked file must resolve inside `base` (the repo's real `.claude/`):
+/// a cloned repo must not be able to put another file's text in the list.
+fn list_dir(dir: &Path, base: &Path) -> std::io::Result<Vec<PathBuf>> {
     list_children(dir, |name, path| {
-        has_md_extension(name) && fs::metadata(path).is_ok_and(|m| m.is_file())
+        has_md_extension(name) && fs::metadata(path).is_ok_and(|m| m.is_file()) && stays_inside(path, base)
     })
 }
 
 /// Topic directories (not hidden) directly in `wip/`. A missing directory is empty.
-fn list_wip(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    list_children(dir, |_, path| fs::metadata(path).is_ok_and(|m| m.is_dir()))
+fn list_wip(dir: &Path, base: &Path) -> std::io::Result<Vec<PathBuf>> {
+    list_children(dir, |_, path| fs::metadata(path).is_ok_and(|m| m.is_dir()) && stays_inside(path, base))
+}
+
+/// A plain entry is inside by construction; a symlink must resolve under `base`.
+fn stays_inside(path: &Path, base: &Path) -> bool {
+    !fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink())
+        || fs::canonicalize(path).is_ok_and(|real| real.starts_with(base))
 }
 
 /// The non-hidden children of `dir` that `keep` accepts (given name and path).
@@ -520,11 +530,12 @@ fn read_file_item(
 fn read_wip_item(
     repo: &str,
     dir: &Path,
+    base: &Path,
     cache: &HashMap<PathBuf, CachedItem>,
 ) -> Option<(Stamp, WorkItem)> {
     let dir_meta = fs::metadata(dir).ok()?;
     let index = dir.join("index.md");
-    let index_meta = fs::metadata(&index).ok().filter(|m| m.is_file());
+    let index_meta = fs::metadata(&index).ok().filter(|m| m.is_file() && stays_inside(&index, base));
     let stamp = Stamp {
         mtime: index_meta.as_ref().and_then(|m| m.modified().ok()),
         size: index_meta.as_ref().map_or(0, |m| m.len()),
@@ -942,7 +953,7 @@ fn detail_blocking(root: &Path, item_id: &str) -> Result<WorkDetail, WorkError> 
         }
         let index = path.join("index.md");
         match fs::metadata(&index) {
-            Ok(m) if m.is_file() => (read_detail_text(&index).unwrap_or_default(), Some(m)),
+            Ok(m) if m.is_file() && stays_inside(&index, &real_claude) => (read_detail_text(&index).unwrap_or_default(), Some(m)),
             _ => (String::new(), None),
         }
     } else {
@@ -955,7 +966,7 @@ fn detail_blocking(root: &Path, item_id: &str) -> Result<WorkDetail, WorkError> 
 
     let fields = detail_fields(&item, kind, repo, rel);
 
-    let files = if is_wip { wip_files(&path) } else { Vec::new() };
+    let files = if is_wip { wip_files(&path, &real_claude) } else { Vec::new() };
     let link = url::Url::from_file_path(&path).ok().map(|u| Link {
         label: if is_wip { "Open folder".to_string() } else { "Open file".to_string() },
         url: u.to_string(),
@@ -1031,14 +1042,17 @@ fn read_detail_text(path: &Path) -> Option<String> {
 }
 
 /// Absolute paths of a wip folder's other files (not `index.md`, not hidden), sorted.
-fn wip_files(dir: &Path) -> Vec<String> {
+fn wip_files(dir: &Path, base: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
     let mut files: Vec<String> = entries
         .flatten()
         .filter(|e| {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            !name.starts_with('.') && name != "index.md" && fs::metadata(e.path()).is_ok_and(|m| m.is_file())
+            !name.starts_with('.')
+                && name != "index.md"
+                && fs::metadata(e.path()).is_ok_and(|m| m.is_file())
+                && stays_inside(&e.path(), base)
         })
         .map(|e| e.path().to_string_lossy().into_owned())
         .collect();

@@ -766,6 +766,34 @@ async fn detail_of_a_deleted_doc_is_unknown_item() {
     assert_unknown(&fx.root, "doc:no-such-repo:bugs/open/x.md").await;
 }
 
+/// A cloned repo must not be able to list (or serve) another file's text by naming a symlink `*.md`.
+#[tokio::test]
+async fn symlinks_that_leave_the_claude_folder_are_neither_listed_nor_served() {
+    let fx = fixture();
+    let secret = fx.root.parent().unwrap().join("outside/secret.md");
+    put(secret.parent().unwrap(), "secret.md", "# Stolen\n\nmy-private-key-material\n");
+    let wip_target = fx.root.parent().unwrap().join("outside/wip-target");
+    put(&wip_target, "index.md", "# Stolen wip\n");
+    put(&fx.root, "alpha/.claude/ideas/real.md", "# Real idea\n");
+    symlink(&secret, fx.root.join("alpha/.claude/bugs/open/evil.md")).unwrap();
+    symlink(fx.root.join("alpha/.claude/ideas/real.md"), fx.root.join("alpha/.claude/bugs/open/inside-link.md")).unwrap();
+    symlink(&wip_target, fx.root.join("alpha/.claude/wip/evil-topic")).unwrap();
+    symlink(&secret, fx.root.join("alpha/.claude/wip/my-topic/index-copy.md")).unwrap();
+
+    let update = scan(&fx.root);
+    let ids: BTreeSet<String> = items_of(&update, "alpha").into_iter().map(|i| i.id).collect();
+
+    assert!(!ids.contains("doc:alpha:bugs/open/evil.md"), "{ids:?}");
+    assert!(!ids.contains("doc:alpha:wip/evil-topic"), "{ids:?}");
+    assert!(ids.contains("doc:alpha:bugs/open/inside-link.md"), "a symlink within .claude is fine: {ids:?}");
+    assert!(all_items(&update).iter().all(|i| !i.search_text.contains("my-private-key-material")));
+
+    let served = detail_at(&fx.root, "doc:alpha:bugs/open/evil.md").await;
+    assert_eq!(served.unwrap_err().code, "unknown_item");
+    let wip = detail_at(&fx.root, "doc:alpha:wip/my-topic").await.unwrap();
+    assert!(wip.files.iter().all(|f| !f.ends_with("index-copy.md")), "{:?}", wip.files);
+}
+
 #[tokio::test]
 async fn detail_refuses_ids_that_escape_the_doc_directories() {
     let fx = fixture();
