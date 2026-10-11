@@ -11,7 +11,8 @@ enum FredBindings {
         let surface = FredSurfaceView(model: FredSurfaceModel(
             mailbox: store.fredMailbox,
             calendar: store.fredCalendar,
-            isConnected: store.client.connected.value))
+            isConnected: store.client.connected.value),
+            detail: detailActions(store))
         // `@Published` publishes before the property changes, so combine the
         // emitted values rather than re-reading the store.
         Publishers.CombineLatest3(store.$fredMailbox,
@@ -23,5 +24,15 @@ enum FredBindings {
             }
             .store(in: &surface.subscriptions)
         return surface
+    }
+
+    /// Daemon-backed detail and seed requests (Unix socket only: the daemon
+    /// refuses both over TCP) and the Outlook opener. The bridge re-checks every
+    /// URL before `NSWorkspace` sees it.
+    private static func detailActions(_ store: AppStore) -> FredDetailActions {
+        FredDetailBridge.actions(
+            workStore: .shared,
+            send: { store.client.send($0) },
+            open: { NSWorkspace.shared.open($0) })
     }
 }

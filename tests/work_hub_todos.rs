@@ -259,13 +259,13 @@ async fn hub_status_for_todos_is_loading_until_the_source_reports() {
     assert_eq!(s.count, 6);
 }
 
+// One test per placeholder source, kept apart: the slice that implements a
+// source deletes only its own test, so the slices do not edit the same lines.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sources_without_an_implementation_yet_say_coming_soon() {
+async fn jira_without_an_implementation_yet_says_coming_soon() {
     let (hub, _ttx, _brx) = hub_with_channel(Some(fresh(vec![])));
-    for source in [WorkSource::RepoDocs, WorkSource::Jira, WorkSource::Sentry] {
-        let s = wait_for_status(&hub, source, |s| s.state == SourceState::NotConfigured).await;
-        assert_eq!(s.reason.as_deref(), Some("Coming soon"), "{source:?}");
-    }
+    let s = wait_for_status(&hub, WorkSource::Jira, |s| s.state == SourceState::NotConfigured).await;
+    assert_eq!(s.reason.as_deref(), Some("Coming soon"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

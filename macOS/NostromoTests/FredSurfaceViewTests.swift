@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import Combine
 
 // Behavioural spec for Fred's native surface (slice F0): an Inbox pane and a Today pane
 // rendered from `MailboxSnapshot` / `CalendarSnapshot`.
@@ -48,6 +49,54 @@ final class FredSurfaceViewTests: XCTestCase {
     private var window: NSWindow?
     private var sut: FredSurfaceView!
 
+    /// Stands in for the surface's repeating and one-shot timers. Nothing here waits on a
+    /// wall clock: tests fire jobs by hand.
+    private final class FakeScheduler {
+        final class Job {
+            let interval: TimeInterval
+            let repeats: Bool
+            let action: () -> Void
+            var cancelled = false
+            var consumed = false
+            init(interval: TimeInterval, repeats: Bool, action: @escaping () -> Void) {
+                self.interval = interval; self.repeats = repeats; self.action = action
+            }
+        }
+
+        private(set) var jobs: [Job] = []
+
+        var scheduler: FredScheduler {
+            FredScheduler(
+                every: { [unowned self] interval, action in self.register(interval, repeats: true, action) },
+                after: { [unowned self] interval, action in self.register(interval, repeats: false, action) })
+        }
+
+        private func register(_ interval: TimeInterval, repeats: Bool, _ action: @escaping () -> Void) -> AnyCancellable {
+            let job = Job(interval: interval, repeats: repeats, action: action)
+            jobs.append(job)
+            return AnyCancellable { job.cancelled = true }
+        }
+
+        var activeEvery: [Job] { jobs.filter { $0.repeats && !$0.cancelled } }
+        var activeAfter: [Job] { jobs.filter { !$0.repeats && !$0.cancelled && !$0.consumed } }
+        var allAfter: [Job] { jobs.filter { !$0.repeats } }
+
+        /// One 30 s period elapses for every live repeating job.
+        func tickAll() { activeEvery.forEach { $0.action() } }
+
+        /// Run `job` even if it was cancelled: a timer that was already dispatched when it was
+        /// cancelled can still deliver its callback.
+        func fire(_ job: Job) {
+            job.consumed = true
+            job.action()
+        }
+
+        /// Run every live one-shot job.
+        func fireAfter() { activeAfter.forEach(fire) }
+    }
+
+    private let fakeScheduler = FakeScheduler()
+
     override func setUp() {
         super.setUp()
         pasteboard = NSPasteboard(name: NSPasteboard.Name("fred-test-\(UUID().uuidString)"))
@@ -66,13 +115,16 @@ final class FredSurfaceViewTests: XCTestCase {
     private func makeView(mailbox: MailboxSnapshot? = nil,
                           calendar: CalendarSnapshot? = nil,
                           isConnected: Bool = true,
-                          timeZone: TimeZone = FredSurfaceViewTests.chicago) -> FredSurfaceView {
+                          timeZone: TimeZone = FredSurfaceViewTests.chicago,
+                          detail: FredDetailActions? = nil) -> FredSurfaceView {
         let clock = self.clock
         let view = FredSurfaceView(
             model: FredSurfaceModel(mailbox: mailbox, calendar: calendar, isConnected: isConnected),
             clock: { clock.now },
             pasteboard: pasteboard,
-            timeZone: timeZone)
+            timeZone: timeZone,
+            scheduler: fakeScheduler.scheduler,
+            detail: detail)
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 420),
                          styleMask: [.titled], backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
@@ -125,6 +177,14 @@ final class FredSurfaceViewTests: XCTestCase {
         ["verification_uri": p.uri, "user_code": p.code, "expires_at": isoOut.string(from: p.expires)]
     }
 
+    /// The Outlook link a list item carries.
+    private enum Link {
+        /// `https://outlook.office.com/m/<index>` (mail) or `/e/<index>` (events).
+        case standard
+        case absent
+        case custom(String)
+    }
+
     private struct Mail {
         var from: String
         var subject: String
@@ -133,6 +193,9 @@ final class FredSurfaceViewTests: XCTestCase {
         var vip = false
         var invite = false
         var read = false
+        /// Defaults to `m-<index>`.
+        var id: String?
+        var link: Link = .standard
     }
 
     private func mailbox(state: String? = "fresh",
@@ -141,25 +204,33 @@ final class FredSurfaceViewTests: XCTestCase {
                          stale: Bool = false,
                          error: String? = nil,
                          updatedAt: Date? = nil,
+                         retryAt: Date? = nil,
                          prompt: Prompt? = nil) throws -> MailboxSnapshot {
         var obj: [String: Any] = [
             "generated_at": isoOut.string(from: now),
             "unread_count": unread ?? items.filter { !$0.read }.count,
             "stale": stale,
             "items": items.enumerated().map { i, m -> [String: Any] in
-                ["id": "m-\(i)",
-                 "web_link": "https://outlook.example/m/\(i)",
-                 "from": m.from,
-                 "subject": m.subject,
-                 "received_at": isoOut.string(from: now.addingTimeInterval(-m.ago)),
-                 "vip": m.vip,
-                 "is_invite": m.invite,
-                 "is_read": m.read]
+                var o: [String: Any] = [
+                    "id": m.id ?? "m-\(i)",
+                    "from": m.from,
+                    "subject": m.subject,
+                    "received_at": isoOut.string(from: now.addingTimeInterval(-m.ago)),
+                    "vip": m.vip,
+                    "is_invite": m.invite,
+                    "is_read": m.read]
+                switch m.link {
+                case .standard: o["web_link"] = "https://outlook.office.com/m/\(i)"
+                case .absent: break
+                case .custom(let url): o["web_link"] = url
+                }
+                return o
             },
         ]
         if let state { obj["state"] = state }
         if let error { obj["error"] = error }
         if let updatedAt { obj["updated_at"] = isoOut.string(from: updatedAt) }
+        if let retryAt { obj["retry_at"] = isoOut.string(from: retryAt) }
         if let prompt { obj["auth_prompt"] = promptJSON(prompt) }
         return try decode(MailboxSnapshot.self, obj)
     }
@@ -172,6 +243,9 @@ final class FredSurfaceViewTests: XCTestCase {
         var status = "accepted"
         var isAllDay: Bool?
         var isCancelled: Bool?
+        /// Defaults to `e-<index>`.
+        var id: String?
+        var link: Link = .standard
     }
 
     private func calendar(state: String? = "fresh",
@@ -179,14 +253,14 @@ final class FredSurfaceViewTests: XCTestCase {
                           stale: Bool = false,
                           error: String? = nil,
                           updatedAt: Date? = nil,
+                          retryAt: Date? = nil,
                           prompt: Prompt? = nil) throws -> CalendarSnapshot {
         var obj: [String: Any] = [
             "sweater": "",
             "stale": stale,
             "events": events.enumerated().map { i, e -> [String: Any] in
                 var o: [String: Any] = [
-                    "id": "e-\(i)",
-                    "web_link": "https://outlook.example/e/\(i)",
+                    "id": e.id ?? "e-\(i)",
                     "start": isoOut.string(from: e.start),
                     "end": isoOut.string(from: e.end),
                     "title": e.title,
@@ -197,12 +271,18 @@ final class FredSurfaceViewTests: XCTestCase {
                 ]
                 if let a = e.isAllDay { o["is_all_day"] = a }
                 if let c = e.isCancelled { o["is_cancelled"] = c }
+                switch e.link {
+                case .standard: o["web_link"] = "https://outlook.office.com/e/\(i)"
+                case .absent: break
+                case .custom(let url): o["web_link"] = url
+                }
                 return o
             },
         ]
         if let state { obj["state"] = state }
         if let error { obj["error"] = error }
         if let updatedAt { obj["updated_at"] = isoOut.string(from: updatedAt) }
+        if let retryAt { obj["retry_at"] = isoOut.string(from: retryAt) }
         if let prompt { obj["auth_prompt"] = promptJSON(prompt) }
         return try decode(CalendarSnapshot.self, obj)
     }
@@ -1149,5 +1229,977 @@ final class FredSurfaceViewTests: XCTestCase {
         XCTAssertFalse(try text("fred.today.header").contains("No meetings"))
         XCTAssertNotNil(try bannerMessage("fred.today.banner"))
         XCTAssertEqual(try rowCount(todayTable), 0)
+    }
+
+    // MARK: - F1: detail and Ask Fred
+
+    /// Records what the view asked of its injected collaborators. Closures answer synchronously.
+    private final class DetailFake {
+        var requested: [String] = []
+        var seeds: [String] = []
+        var opened: [URL] = []
+        var detailResult: (String) -> Result<WorkItemDetail, WorkError> = { id in
+            .failure(WorkError(code: "not_found", message: "no detail for \(id)"))
+        }
+        var seedError: WorkError?
+        /// When set, `seedFred` completions are parked in `pendingSeeds` for the test to run later.
+        var deferSeed = false
+        var pendingSeeds: [(WorkError?) -> Void] = []
+        /// When set, `requestDetail` completions are parked in `pendingDetails`.
+        var deferDetail = false
+        var pendingDetails: [(Result<WorkItemDetail, WorkError>) -> Void] = []
+
+        var actions: FredDetailActions {
+            FredDetailActions(
+                requestDetail: { id, done in
+                    self.requested.append(id)
+                    if self.deferDetail { self.pendingDetails.append(done) } else { done(self.detailResult(id)) }
+                },
+                seedFred: { text, done in
+                    self.seeds.append(text)
+                    if self.deferSeed { self.pendingSeeds.append(done) } else { done(self.seedError) }
+                },
+                open: { self.opened.append($0) })
+        }
+    }
+
+    private func mailDetail(id: String = "mail:m-0") throws -> WorkItemDetail {
+        try decode(WorkItemDetail.self, [
+            "item_id": id,
+            "title": "Quarterly numbers",
+            "fields": [["From", "Alice Smith <alice@example.com>"],
+                       ["To", "Bob Jones <bob@example.com>"],
+                       ["Received", "Sat 10 Oct 2026, 09:10"]],
+            "markdown": "Hello Bob,\nNumbers attached.",
+            "files": [String](),
+            "links": [["label": "Open in Outlook", "url": "https://outlook.office.com/detail/mail"]],
+        ])
+    }
+
+    private func eventDetail(id: String = "event:e-0") throws -> WorkItemDetail {
+        try decode(WorkItemDetail.self, [
+            "item_id": id,
+            "title": "Eng sync",
+            "fields": [["Organiser", "Olive <olive@example.com>"],
+                       ["When", "Sat 10 Oct 2026, 09:30\u{2013}10:00"],
+                       ["Attendees", "Ann (accepted), Ben (no response)"]],
+            "markdown": "Agenda: roadmap",
+            "files": [String](),
+            "links": [["label": "Open in Outlook", "url": "https://outlook.office.com/detail/event"]],
+        ])
+    }
+
+    private func oneMailView(_ fake: DetailFake) throws {
+        makeView(mailbox: try mailbox(items: [Mail(from: "Alice", subject: "Quarterly numbers")]),
+                 detail: fake.actions)
+    }
+
+    private func oneEventView(_ fake: DetailFake) throws {
+        makeView(calendar: try calendar(events: [Ev(title: "Eng sync", start: at("09:30"), end: at("10:00"))]),
+                 detail: fake.actions)
+    }
+
+    func testNothingIsSelectedSoNoDetailIsShownUntilARowIsSelected() throws {
+        let fake = DetailFake()
+        try oneMailView(fake)
+        XCTAssertNil(sut.detailView)
+        XCTAssertTrue(fake.requested.isEmpty)
+    }
+
+    func testSelectingAnInboxRowRequestsThatMessageAndShowsItsFieldsAndBody() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] _ in .success(try! mailDetail()) }
+        try oneMailView(fake)
+        sut.selectInboxRow(0)
+        XCTAssertEqual(fake.requested, ["mail:m-0"])
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.displayedFields.map(\.label), ["From", "To", "Received"])
+        XCTAssertEqual(d.displayedFields.first?.value, "Alice Smith <alice@example.com>")
+        XCTAssertEqual(d.displayedBody, "Hello Bob,\nNumbers attached.")
+        XCTAssertNil(d.errorText)
+    }
+
+    func testSelectingATodayEventRequestsThatEventAndShowsItsFieldsAndAgenda() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] _ in .success(try! eventDetail()) }
+        try oneEventView(fake)
+        sut.selectTodayRow(0)
+        XCTAssertEqual(fake.requested, ["event:e-0"])
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.displayedFields.map(\.label), ["Organiser", "When", "Attendees"])
+        XCTAssertEqual(d.displayedBody, "Agenda: roadmap")
+    }
+
+    func testADetailErrorIsShownInTheDetailAndNeverAsAnEmptyMessage() throws {
+        let fake = DetailFake()
+        fake.detailResult = { _ in .failure(WorkError(code: "not_found", message: "That item no longer exists in Outlook")) }
+        try oneMailView(fake)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.errorText, "That item no longer exists in Outlook")
+        XCTAssertTrue(d.displayedFields.isEmpty)
+        XCTAssertEqual(d.displayedBody, "")
+    }
+
+    // MARK: Ask Fred / Prep with Fred
+
+    private func loadedMailDetailView(_ fake: DetailFake) throws -> FredDetailView {
+        fake.detailResult = { [self] _ in .success(try! mailDetail()) }
+        try oneMailView(fake)
+        sut.selectInboxRow(0)
+        return try XCTUnwrap(sut.detailView)
+    }
+
+    func testAskFredOpensAConfirmationWithTheDefaultPromptAndSendsNothingYet() throws {
+        let fake = DetailFake()
+        let d = try loadedMailDetailView(fake)
+        XCTAssertFalse(d.isConfirming)
+        d.beginSeed()
+        XCTAssertTrue(d.isConfirming)
+        XCTAssertEqual(d.promptText, FredDetailPrompts.ask(try mailDetail(), nonce: try promptNonce(d.promptText)))
+        XCTAssertTrue(fake.seeds.isEmpty, "nothing is sent until the user confirms")
+    }
+
+    func testConfirmingSendsExactlyOneSeedWithTheEditedPromptAndCloses() throws {
+        let fake = DetailFake()
+        let d = try loadedMailDetailView(fake)
+        d.beginSeed()
+        d.promptText = "Just tell me if this needs a reply."
+        d.confirmSeed()
+        XCTAssertEqual(fake.seeds, ["Just tell me if this needs a reply."])
+        XCTAssertFalse(d.isConfirming)
+        XCTAssertNil(d.errorText)
+        d.confirmSeed()
+        XCTAssertEqual(fake.seeds.count, 1, "a second confirm with nothing open sends nothing")
+    }
+
+    func testCancellingSendsNothingAndCloses() throws {
+        let fake = DetailFake()
+        let d = try loadedMailDetailView(fake)
+        d.beginSeed()
+        d.cancelSeed()
+        XCTAssertTrue(fake.seeds.isEmpty)
+        XCTAssertFalse(d.isConfirming)
+    }
+
+    func testWhenFredIsNotRunningTheUserIsToldHowToRecoverAndSuccessIsNotClaimed() throws {
+        let fake = DetailFake()
+        fake.seedError = WorkError(code: "fred_not_running", message: "raw daemon text")
+        let d = try loadedMailDetailView(fake)
+        d.beginSeed()
+        d.confirmSeed()
+        XCTAssertEqual(d.errorText, "Fred's session isn't running; open Fred's chat once and retry.")
+        XCTAssertEqual(fake.seeds.count, 1)
+        XCTAssertFalse(d.isConfirming && d.errorText == nil, "no success state is shown")
+    }
+
+    func testPrepWithFredOnAnEventSeedsTheMeetingPrompt() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] _ in .success(try! eventDetail()) }
+        try oneEventView(fake)
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        d.beginSeed()
+        let nonce = try promptNonce(d.promptText)
+        XCTAssertEqual(d.promptText, FredDetailPrompts.prep(try eventDetail(), nonce: nonce))
+        d.confirmSeed()
+        XCTAssertEqual(fake.seeds, [FredDetailPrompts.prep(try eventDetail(), nonce: nonce)])
+    }
+
+    // MARK: Open in Outlook
+
+    func testOpenInOutlookHandsTheDetailsLinkToTheOpener() throws {
+        let fake = DetailFake()
+        let d = try loadedMailDetailView(fake)
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: "https://outlook.office.com/detail/mail")!])
+    }
+
+    func testOpenInOutlookFallsBackToTheListItemsLinkWhenTheDetailFailed() throws {
+        let fake = DetailFake()
+        try oneMailView(fake)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertNotNil(d.errorText)
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: "https://outlook.office.com/m/0")!])
+    }
+
+    // MARK: Default prompts
+
+    /// The per-prompt fence nonce, read back from the prompt the view seeded.
+    private func promptNonce(_ prompt: String, file: StaticString = #filePath, line: UInt = #line) throws -> String {
+        let re = try NSRegularExpression(pattern: "untrusted_(email|agenda)_([0-9a-f]{16,})")
+        let m = try XCTUnwrap(re.firstMatch(in: prompt, range: NSRange(prompt.startIndex..., in: prompt)),
+                              "no fence tag in the prompt: \(prompt)", file: file, line: line)
+        return String(prompt[try XCTUnwrap(Range(m.range(at: 2), in: prompt), file: file, line: line)])
+    }
+
+    func testTheAskPromptOpensWithTheInstructionsAndCarriesTheMessage() throws {
+        let p = FredDetailPrompts.ask(try mailDetail())
+        XCTAssertTrue(p.hasPrefix("Here is an email from my inbox. Summarise it and tell me if it needs a reply; if so, draft one for me to review. Do not send anything."), p)
+        for piece in ["Alice Smith <alice@example.com>", "Bob Jones <bob@example.com>",
+                      "Sat 10 Oct 2026, 09:10", "Quarterly numbers", "Hello Bob,\nNumbers attached."] {
+            XCTAssertTrue(p.contains(piece), "missing \(piece) in \(p)")
+        }
+    }
+
+    func testThePrepPromptOpensWithTheInstructionsAndCarriesTheMeeting() throws {
+        let p = FredDetailPrompts.prep(try eventDetail())
+        XCTAssertTrue(p.hasPrefix("Brief me for this meeting: related email threads, related Jira issues, and open questions. Do not RSVP or change the calendar."), p)
+        for piece in ["Eng sync", "Olive <olive@example.com>", "Ann (accepted), Ben (no response)", "Agenda: roadmap"] {
+            XCTAssertTrue(p.contains(piece), "missing \(piece) in \(p)")
+        }
+    }
+
+    // MARK: - F1 hardening: fixtures
+
+    private func customDetail(id: String, title: String = "Eng sync", fields: [[String]] = [],
+                              markdown: String = "Agenda: roadmap",
+                              link: String? = "https://outlook.office.com/detail/event") throws -> WorkItemDetail {
+        try decode(WorkItemDetail.self, [
+            "item_id": id,
+            "title": title,
+            "fields": fields,
+            "markdown": markdown,
+            "files": [String](),
+            "links": link.map { [["label": "Open in Outlook", "url": $0]] } ?? [],
+        ])
+    }
+
+    /// A successful detail for whatever item is asked about.
+    private func answerEverything(_ fake: DetailFake) {
+        fake.detailResult = { [self] id in
+            id.hasPrefix("mail:") ? .success(try! mailDetail(id: id)) : .success(try! eventDetail(id: id))
+        }
+    }
+
+    private func mailList(ids: [String] = ["m-0", "m-1", "m-2"], read: Set<String> = []) -> [Mail] {
+        ids.enumerated().map { i, id in
+            Mail(from: "Sender \(id) <s@x.com>", subject: "Subject \(id)", ago: 300 + 300 * TimeInterval(i),
+                 read: read.contains(id), id: id)
+        }
+    }
+
+    private func eventFixture(_ id: String) -> Ev {
+        switch id {
+        case "e-new": return Ev(title: "Standup", start: at("08:00"), end: at("08:30"), id: id)
+        case "e-0": return Ev(title: "Eng sync", start: at("09:30"), end: at("10:00"), id: id)
+        case "e-1": return Ev(title: "Design review", start: at("11:30"), end: at("12:30"), id: id)
+        default: return Ev(title: "Retro", start: at("14:00"), end: at("15:00"), id: id)
+        }
+    }
+
+    private func eventList(ids: [String] = ["e-0", "e-1", "e-2"]) -> [Ev] { ids.map(eventFixture) }
+
+    private func listsView(_ fake: DetailFake, mailIds: [String] = ["m-0", "m-1", "m-2"],
+                           eventIds: [String] = ["e-0", "e-1", "e-2"]) throws {
+        answerEverything(fake)
+        makeView(mailbox: try mailbox(items: mailList(ids: mailIds)),
+                 calendar: try calendar(events: eventList(ids: eventIds)),
+                 detail: fake.actions)
+    }
+
+    private func setModel(mailIds: [String]? = ["m-0", "m-1", "m-2"], read: Set<String> = [],
+                          eventIds: [String]? = ["e-0", "e-1", "e-2"]) throws {
+        sut.model = FredSurfaceModel(
+            mailbox: try mailIds.map { try mailbox(items: mailList(ids: $0, read: read)) },
+            calendar: try eventIds.map { try calendar(events: eventList(ids: $0)) },
+            isConnected: true)
+        sut.layoutSubtreeIfNeeded()
+    }
+
+    // MARK: - F1 hardening: the clock is a scheduler, not a wall-clock timer
+
+    func testStartClockInstallsOneThirtySecondRepeatingRefreshAndNoOtherRepeatingJob() throws {
+        makeView(calendar: try calendar(events: [engSync]))
+        sut.startClock()
+        XCTAssertEqual(fakeScheduler.activeEvery.map(\.interval), [30],
+                       "one live 30 s repeating job, however many times the clock is (re)started")
+    }
+
+    func testTheRepeatingRefreshRecomputesTheCountdownFromTheInjectedClock() throws {
+        makeView(calendar: try calendar(events: [engSync]))
+        sut.startClock()
+        XCTAssertEqual(try text("fred.today.countdown"), "Next: Eng sync in 12 min")
+        now = at("09:28")   // ten minutes pass; nothing re-renders until the job fires
+        fakeScheduler.tickAll()
+        XCTAssertEqual(try text("fred.today.countdown"), "Next: Eng sync in 2 min")
+    }
+
+    func testLeavingTheWindowStopsTheRepeatingRefresh() throws {
+        makeView(calendar: try calendar(events: [engSync]))
+        sut.startClock()
+        XCTAssertFalse(fakeScheduler.activeEvery.isEmpty)
+        window?.contentView = nil
+        XCTAssertTrue(fakeScheduler.activeEvery.isEmpty, "no repeating job outlives the view's window")
+    }
+
+    // MARK: - F1 hardening: selecting the same item twice
+
+    func testSelectingTheSameInboxRowTwiceKeepsTheSameDetailViewAndAsksTheDaemonOnce() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectInboxRow(0)
+        let first = try XCTUnwrap(sut.detailView)
+        sut.selectInboxRow(0)
+        XCTAssertTrue(sut.detailView === first, "re-selecting the open item must not rebuild its detail")
+        XCTAssertEqual(fake.requested, ["mail:m-0"])
+    }
+
+    func testSelectingTheSameTodayRowTwiceKeepsTheSameDetailViewAndAsksTheDaemonOnce() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectTodayRow(1)
+        let first = try XCTUnwrap(sut.detailView)
+        sut.selectTodayRow(1)
+        XCTAssertTrue(sut.detailView === first)
+        XCTAssertEqual(fake.requested, ["event:e-1"])
+    }
+
+    func testSelectingADifferentRowReplacesTheDetailViewAndRequestsThatItem() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectInboxRow(0)
+        let first = try XCTUnwrap(sut.detailView)
+        sut.selectInboxRow(1)
+        let second = try XCTUnwrap(sut.detailView)
+        XCTAssertFalse(second === first)
+        XCTAssertEqual(fake.requested, ["mail:m-0", "mail:m-1"])
+        sut.selectTodayRow(0)
+        XCTAssertFalse(try XCTUnwrap(sut.detailView) === second)
+        XCTAssertEqual(fake.requested.last, "event:e-0")
+    }
+
+    func testAnEditedPromptSurvivesSelectingTheSameRowAgain() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        d.beginSeed()
+        d.promptText = "My edited prompt"
+        sut.selectInboxRow(0)
+        XCTAssertTrue(sut.detailView === d)
+        XCTAssertTrue(d.isConfirming)
+        XCTAssertEqual(d.promptText, "My edited prompt")
+        XCTAssertEqual(fake.requested.count, 1)
+    }
+
+    func testAnEditedPromptSurvivesAClockTickAndAModelUpdateThatKeepsTheItem() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectInboxRow(1)
+        let d = try XCTUnwrap(sut.detailView)
+        d.beginSeed()
+        d.promptText = "My edited prompt"
+
+        sut.startClock()
+        now = at("09:20")
+        fakeScheduler.tickAll()
+        sut.refreshClock()
+        XCTAssertEqual(d.promptText, "My edited prompt", "a tick must not reset the prompt")
+
+        try setModel(read: ["m-0"])   // the item stays, its row moves
+        XCTAssertTrue(sut.detailView === d)
+        XCTAssertTrue(d.isConfirming)
+        XCTAssertEqual(d.promptText, "My edited prompt")
+        XCTAssertEqual(fake.requested.count, 1)
+    }
+
+    // MARK: - F1 hardening: the selection survives a re-render
+
+    func testNothingIsSelectedUntilTheUserSelectsARow() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        XCTAssertNil(sut.selectedInboxRow)
+        XCTAssertNil(sut.selectedTodayRow)
+    }
+
+    func testTheSelectedInboxMessageStaysSelectedWhenItsRowMovesBecauseAnotherMessageWasRead() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectInboxRow(1)   // m-1
+        XCTAssertEqual(sut.selectedInboxRow, 1)
+        let d = try XCTUnwrap(sut.detailView)
+
+        try setModel(read: ["m-0"])   // unread first: m-1, m-2, then the read m-0
+        XCTAssertEqual(sut.selectedInboxRow, 0, "the same message, at its new row")
+        XCTAssertNil(sut.selectedTodayRow)
+        XCTAssertTrue(sut.detailView === d)
+        XCTAssertEqual(fake.requested, ["mail:m-1"], "no new detail request for the same item")
+
+        try setModel(read: ["m-1"])   // now it is read and sinks below the unread ones
+        XCTAssertEqual(sut.selectedInboxRow, 2)
+        XCTAssertTrue(sut.detailView === d)
+        XCTAssertEqual(fake.requested.count, 1)
+    }
+
+    func testTheSelectedInboxMessageStaysSelectedWhenANewerMessageArrivesAboveIt() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectInboxRow(1)
+        let d = try XCTUnwrap(sut.detailView)
+        try setModel(mailIds: ["m-new", "m-0", "m-1", "m-2"])
+        XCTAssertEqual(sut.selectedInboxRow, 2)
+        XCTAssertTrue(sut.detailView === d)
+        XCTAssertEqual(fake.requested.count, 1)
+    }
+
+    func testTheSelectedTodayEventStaysSelectedWhenAnEarlierMeetingAppears() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectTodayRow(1)   // e-1
+        XCTAssertEqual(sut.selectedTodayRow, 1)
+        let d = try XCTUnwrap(sut.detailView)
+        try setModel(eventIds: ["e-new", "e-0", "e-1", "e-2"])
+        XCTAssertEqual(sut.selectedTodayRow, 2)
+        XCTAssertNil(sut.selectedInboxRow)
+        XCTAssertTrue(sut.detailView === d)
+        XCTAssertEqual(fake.requested, ["event:e-1"])
+    }
+
+    func testAClockTickKeepsTheSelectionTheDetailViewAndTheRequestCount() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.startClock()
+        sut.selectInboxRow(2)
+        let inboxDetail = try XCTUnwrap(sut.detailView)
+        for minute in ["09:19", "09:20", "09:21"] {
+            now = at(minute)
+            fakeScheduler.tickAll()
+            XCTAssertEqual(sut.selectedInboxRow, 2)
+            XCTAssertNil(sut.selectedTodayRow)
+        }
+        sut.refreshClock()
+        XCTAssertEqual(sut.selectedInboxRow, 2)
+        XCTAssertTrue(sut.detailView === inboxDetail)
+        XCTAssertEqual(fake.requested, ["mail:m-2"])
+
+        sut.selectTodayRow(0)
+        let todayDetail = try XCTUnwrap(sut.detailView)
+        now = at("09:40")
+        fakeScheduler.tickAll()
+        sut.refreshClock()
+        XCTAssertEqual(sut.selectedTodayRow, 0)
+        XCTAssertNil(sut.selectedInboxRow, "only one table holds the selection")
+        XCTAssertTrue(sut.detailView === todayDetail)
+        XCTAssertEqual(fake.requested, ["mail:m-2", "event:e-0"])
+    }
+
+    func testSelectingInTheOtherTableClearsTheFirstTablesSelection() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectInboxRow(0)
+        sut.selectTodayRow(2)
+        XCTAssertNil(sut.selectedInboxRow)
+        XCTAssertEqual(sut.selectedTodayRow, 2)
+        sut.selectInboxRow(1)
+        XCTAssertEqual(sut.selectedInboxRow, 1)
+        XCTAssertNil(sut.selectedTodayRow)
+        try setModel(read: ["m-2"])
+        XCTAssertEqual(sut.selectedInboxRow, 1)
+        XCTAssertNil(sut.selectedTodayRow)
+    }
+
+    func testWhenTheSelectedItemLeavesTheModelTheDetailStaysAndNoRowIsSelected() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        try setModel(mailIds: ["m-1", "m-2"])   // m-0 is gone (e.g. deleted or moved out of the Inbox)
+        XCTAssertNil(sut.selectedInboxRow)
+        XCTAssertNil(sut.selectedTodayRow)
+        XCTAssertTrue(sut.detailView === d, "the open detail is kept: it still describes what the user was reading")
+        XCTAssertEqual(fake.requested, ["mail:m-0"])
+        try setModel(mailIds: nil, eventIds: nil)
+        XCTAssertNil(sut.selectedInboxRow)
+        XCTAssertTrue(sut.detailView === d)
+        XCTAssertEqual(fake.requested.count, 1)
+    }
+
+    func testManyModelUpdatesNeverRequestADetailForTheSameItemAgain() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectInboxRow(1)
+        XCTAssertEqual(fake.requested, ["mail:m-1"])
+        for i in 0..<6 {
+            try setModel(read: i.isMultiple(of: 2) ? ["m-0"] : [])
+            sut.refreshClock()
+        }
+        try setModel(mailIds: ["m-2", "m-1", "m-0"])
+        render(mailbox: try mailbox(items: mailList(ids: ["m-1"])), calendar: nil)
+        XCTAssertEqual(fake.requested, ["mail:m-1"])
+        // Replace the list with different items that no longer contain the selection.
+        try setModel(mailIds: ["x-1", "x-2"], eventIds: ["e-new"])
+        try setModel(mailIds: ["x-3"], eventIds: [])
+        XCTAssertEqual(fake.requested, ["mail:m-1"], "re-rendering is never a selection by the user")
+    }
+
+    func testReloadingAListWhileATodayEventIsSelectedNeverRequestsADetailForTheInbox() throws {
+        let fake = DetailFake()
+        try listsView(fake)
+        sut.selectTodayRow(0)
+        for read in [Set<String>(), ["m-0"], ["m-0", "m-1"]] {
+            try setModel(read: read)
+        }
+        XCTAssertEqual(fake.requested, ["event:e-0"])
+        XCTAssertEqual(sut.selectedTodayRow, 0)
+        XCTAssertNil(sut.selectedInboxRow)
+    }
+
+    // MARK: - F1 hardening: a seed that finishes after the view was replaced
+
+    private func deferredSeedSetup(_ fake: DetailFake) throws {
+        fake.deferSeed = true
+        try listsView(fake)
+    }
+
+    /// Select `row`, open its confirmation and send, leaving the seed pending.
+    private func startPendingSeed(inboxRow row: Int) throws {
+        sut.selectInboxRow(row)
+        let d = try XCTUnwrap(sut.detailView)
+        d.beginSeed()
+        d.confirmSeed()
+    }
+
+    func testAFredNotRunningResultAfterTheViewWasReplacedStillTellsTheUserHowToRecover() throws {
+        let fake = DetailFake()
+        try deferredSeedSetup(fake)
+        try startPendingSeed(inboxRow: 0)   // no local reference to the view: it may be freed
+        XCTAssertEqual(fake.pendingSeeds.count, 1)
+        sut.selectInboxRow(1)
+        XCTAssertNil(sut.seedBannerText, "nothing has been reported yet")
+        fake.pendingSeeds[0](WorkError(code: "fred_not_running", message: "raw"))
+        XCTAssertEqual(sut.seedBannerText, FredDetailView.couldNotSeedNotRunning)
+        XCTAssertTrue(allText().contains(FredDetailView.couldNotSeedNotRunning),
+                      "the message is on screen even though its detail view is gone; saw \(allText())")
+    }
+
+    func testASuccessfulSeedAfterTheViewWasReplacedStillConfirmsToTheUser() throws {
+        let fake = DetailFake()
+        try deferredSeedSetup(fake)
+        try startPendingSeed(inboxRow: 0)
+        sut.selectInboxRow(1)
+        fake.pendingSeeds[0](nil)
+        XCTAssertEqual(sut.seedBannerText, "Sent to Fred. Switch to Fred's chat to follow along.")
+        XCTAssertTrue(allText().contains("Sent to Fred. Switch to Fred's chat to follow along."))
+    }
+
+    func testAnotherSeedErrorAfterTheViewWasReplacedReportsTheDaemonsMessage() throws {
+        let fake = DetailFake()
+        try deferredSeedSetup(fake)
+        try startPendingSeed(inboxRow: 0)
+        sut.selectTodayRow(0)
+        fake.pendingSeeds[0](WorkError(code: "boom", message: "the pipe broke"))
+        XCTAssertEqual(sut.seedBannerText, "Couldn't send to Fred: the pipe broke")
+    }
+
+    func testTheSeedBannerIsAlsoSetWhenTheViewIsStillOpen() throws {
+        let fake = DetailFake()
+        try deferredSeedSetup(fake)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        d.beginSeed()
+        d.confirmSeed()
+        fake.pendingSeeds[0](nil)
+        XCTAssertEqual(sut.seedBannerText, "Sent to Fred. Switch to Fred's chat to follow along.")
+        XCTAssertFalse(d.isConfirming)
+    }
+
+    func testTheSeedBannerClearsWhenTheEightSecondTimerFires() throws {
+        let fake = DetailFake()
+        try deferredSeedSetup(fake)
+        try startPendingSeed(inboxRow: 0)
+        fake.pendingSeeds[0](nil)
+        XCTAssertNotNil(sut.seedBannerText)
+        XCTAssertEqual(fakeScheduler.activeAfter.map(\.interval), [8])
+        fakeScheduler.fireAfter()
+        XCTAssertNil(sut.seedBannerText)
+        XCTAssertFalse(allText().contains("Sent to Fred. Switch to Fred's chat to follow along."))
+    }
+
+    func testAnOldBannerTimerFiringLateNeverWipesANewerBanner() throws {
+        let fake = DetailFake()
+        try deferredSeedSetup(fake)
+        try startPendingSeed(inboxRow: 0)
+        sut.selectInboxRow(1)
+        try startPendingSeed(inboxRow: 2)
+        XCTAssertEqual(fake.pendingSeeds.count, 2)
+
+        fake.pendingSeeds[0](nil)
+        let firstClear = try XCTUnwrap(fakeScheduler.allAfter.last)
+        fake.pendingSeeds[1](WorkError(code: "boom", message: "second failed"))
+        XCTAssertEqual(sut.seedBannerText, "Couldn't send to Fred: second failed", "the newer result replaces the older")
+        let secondClear = try XCTUnwrap(fakeScheduler.allAfter.last)
+        XCTAssertFalse(firstClear === secondClear)
+        XCTAssertEqual(secondClear.interval, 8)
+
+        fakeScheduler.fire(firstClear)   // even if it was cancelled, a dispatched timer can still run
+        XCTAssertEqual(sut.seedBannerText, "Couldn't send to Fred: second failed")
+        fakeScheduler.fire(secondClear)
+        XCTAssertNil(sut.seedBannerText)
+    }
+
+    // MARK: - F1 hardening: Mac-side stale and rate-limited display
+
+    func testRateLimitedPanesWithDataSayWhenTheyRetryAndTheRowsStayUsable() throws {
+        let fake = DetailFake()
+        answerEverything(fake)
+        let updated = now.addingTimeInterval(-20 * 60)
+        makeView(mailbox: try mailbox(state: "rate_limited", unread: 12, items: mailList(), stale: true,
+                                      error: "Mail fetch failed: Microsoft is rate limiting requests (429)",
+                                      updatedAt: updated, retryAt: retryInstant),
+                 calendar: try calendar(state: "rate_limited", events: [engSync, designReview], stale: true,
+                                        error: "Calendar fetch failed: Microsoft is rate limiting requests (429)",
+                                        updatedAt: updated, retryAt: retryInstant),
+                 detail: fake.actions)
+        for id in ["fred.inbox.banner", "fred.today.banner"] {
+            let message = try XCTUnwrap(try bannerMessage(id), "\(id) is showing")
+            XCTAssertTrue(message.contains("Rate-limited"), message)
+            XCTAssertTrue(message.contains("retrying at"), message)
+        }
+        XCTAssertEqual(try text("fred.inbox.header"), "Inbox · 12 unread", "the last good count stays")
+        XCTAssertEqual(try rowCount(inboxTable), 3)
+        XCTAssertEqual(try rowCount(todayTable), 2)
+
+        sut.selectInboxRow(1)
+        XCTAssertEqual(fake.requested, ["mail:m-1"], "a rate-limited list still opens details")
+        XCTAssertEqual(sut.selectedInboxRow, 1)
+        XCTAssertNil(try XCTUnwrap(sut.detailView).errorText)
+        sut.startClock()
+        fakeScheduler.tickAll()
+        XCTAssertTrue(try XCTUnwrap(try bannerMessage("fred.inbox.banner")).contains("retrying at"))
+        XCTAssertEqual(sut.selectedInboxRow, 1)
+
+        sut.selectTodayRow(0)
+        XCTAssertEqual(fake.requested, ["mail:m-1", "event:e-0"])
+    }
+
+    func testStaleBannerKeepsCountingWhileARowStaysSelected() throws {
+        let fake = DetailFake()
+        answerEverything(fake)
+        makeView(mailbox: try mailbox(state: "stale", unread: 12, items: mailList(), stale: true,
+                                      error: "Graph timeout", updatedAt: now.addingTimeInterval(-14 * 60)),
+                 detail: fake.actions)
+        sut.selectInboxRow(0)
+        XCTAssertEqual(fake.requested, ["mail:m-0"], "stale data is still selectable")
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertTrue(try XCTUnwrap(try bannerMessage("fred.inbox.banner")).hasPrefix("Stale: last updated 14 min ago"))
+        advance(to: at("09:19"))
+        let message = try XCTUnwrap(try bannerMessage("fred.inbox.banner"))
+        XCTAssertTrue(message.hasPrefix("Stale: last updated 15 min ago"), message)
+        XCTAssertTrue(message.hasSuffix("Graph timeout"), message)
+        XCTAssertEqual(sut.selectedInboxRow, 0)
+        XCTAssertTrue(sut.detailView === d)
+        XCTAssertEqual(fake.requested.count, 1)
+    }
+
+    func testRecoveringFromRateLimitingKeepsTheOpenDetail() throws {
+        let fake = DetailFake()
+        answerEverything(fake)
+        makeView(mailbox: try mailbox(state: "rate_limited", unread: 3, items: mailList(), stale: true,
+                                      updatedAt: now.addingTimeInterval(-60), retryAt: retryInstant),
+                 detail: fake.actions)
+        sut.selectInboxRow(2)
+        let d = try XCTUnwrap(sut.detailView)
+        render(mailbox: try mailbox(state: "fresh", items: mailList()))
+        XCTAssertNil(try bannerMessage("fred.inbox.banner"))
+        XCTAssertTrue(sut.detailView === d)
+        XCTAssertEqual(sut.selectedInboxRow, 2)
+        XCTAssertEqual(fake.requested, ["mail:m-2"])
+    }
+
+    func testARateLimitedPaneThatNeverFetchedAnythingHasNoRowToOpen() throws {
+        let fake = DetailFake()
+        answerEverything(fake)
+        makeView(mailbox: try mailbox(state: "rate_limited", unread: 0, items: [], stale: true, retryAt: retryInstant),
+                 detail: fake.actions)
+        sut.selectInboxRow(0)
+        XCTAssertNil(sut.detailView)
+        XCTAssertTrue(fake.requested.isEmpty)
+        XCTAssertNil(sut.selectedInboxRow)
+    }
+
+    // MARK: - F1 hardening: Open in Outlook only ever opens a validated link
+
+    private func openButton(_ d: FredDetailView) throws -> NSButton { try requireView("fred.detail.open", in: d) }
+    private func seedButton(_ d: FredDetailView) throws -> NSButton { try requireView("fred.detail.seed", in: d) }
+
+    private func mailView(_ fake: DetailFake, link: Link = .standard) throws {
+        makeView(mailbox: try mailbox(items: [Mail(from: "Alice", subject: "Quarterly numbers", link: link)]),
+                 detail: fake.actions)
+    }
+
+    func testAnUnsafeDetailLinkIsNeverOpenedAndTheValidListLinkIsUsedInstead() throws {
+        for bad in ["file:///etc/passwd", "javascript:alert(1)", "http://outlook.office.com/x",
+                    "https://outlook.office.com.evil.example/x", "https://outlook.office.com@evil.example/"] {
+            let fake = DetailFake()
+            fake.detailResult = { [self] id in .success(try! customDetail(id: id, fields: [["From", "A"]], link: bad)) }
+            try mailView(fake)
+            sut.selectInboxRow(0)
+            let d = try XCTUnwrap(sut.detailView)
+            XCTAssertTrue(d.openButtonIsEnabled, bad)
+            d.openInOutlook()
+            XCTAssertEqual(fake.opened, [URL(string: "https://outlook.office.com/m/0")!], "detail link \(bad)")
+        }
+    }
+
+    func testAValidDetailLinkWinsAndAnUnsafeListLinkIsIgnored() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] _ in .success(try! mailDetail()) }
+        try mailView(fake, link: .custom("file:///etc/passwd"))
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: "https://outlook.office.com/detail/mail")!])
+    }
+
+    func testWithNoSafeLinkAnywhereTheButtonIsDisabledExplainsWhyAndOpensNothing() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] id in
+            .success(try! customDetail(id: id, fields: [["From", "A"]], link: "javascript:alert(1)"))
+        }
+        try mailView(fake, link: .custom("http://outlook.office.com/m/0"))
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertFalse(d.openButtonIsEnabled)
+        let tip = try XCTUnwrap(d.openButtonToolTip)
+        XCTAssertFalse(tip.trimmingCharacters(in: .whitespaces).isEmpty)
+        XCTAssertFalse(try openButton(d).isEnabled, "the control agrees with the property")
+        XCTAssertEqual(try openButton(d).toolTip, tip)
+        d.openInOutlook()
+        XCTAssertTrue(fake.opened.isEmpty)
+    }
+
+    func testAMessageWithNoLinkAtAllCannotBeOpened() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] id in .success(try! customDetail(id: id, fields: [["From", "A"]], link: nil)) }
+        try mailView(fake, link: .absent)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertFalse(d.openButtonIsEnabled)
+        XCTAssertNotNil(d.openButtonToolTip)
+        d.openInOutlook()
+        XCTAssertTrue(fake.opened.isEmpty)
+    }
+
+    func testAValidLinkEnablesTheButtonWithoutATooltipBeforeAndAfterTheDetailLoads() throws {
+        let fake = DetailFake()
+        fake.deferDetail = true
+        try mailView(fake)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertTrue(d.openButtonIsEnabled, "before the detail loads the list item's link is used")
+        XCTAssertNil(d.openButtonToolTip)
+        XCTAssertTrue(try openButton(d).isEnabled)
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: "https://outlook.office.com/m/0")!])
+
+        fake.pendingDetails[0](.success(try mailDetail()))
+        XCTAssertTrue(d.openButtonIsEnabled)
+        XCTAssertNil(d.openButtonToolTip)
+        XCTAssertTrue(try openButton(d).isEnabled)
+    }
+
+    func testBeforeTheDetailLoadsAnUnsafeListLinkLeavesTheButtonDisabled() throws {
+        for link in [Link.custom("https://evil.example/m/0"), .custom("file:///etc/passwd"), .absent] {
+            let fake = DetailFake()
+            fake.deferDetail = true
+            try mailView(fake, link: link)
+            sut.selectInboxRow(0)
+            let d = try XCTUnwrap(sut.detailView)
+            XCTAssertFalse(d.openButtonIsEnabled)
+            XCTAssertNotNil(d.openButtonToolTip)
+            d.openInOutlook()
+            XCTAssertTrue(fake.opened.isEmpty)
+        }
+    }
+
+    func testTheDetailLinkEnablesTheButtonWhenTheListLinkIsUnsafe() throws {
+        let fake = DetailFake()
+        fake.deferDetail = true
+        try mailView(fake, link: .custom("file:///etc/passwd"))
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertFalse(d.openButtonIsEnabled)
+        fake.pendingDetails[0](.success(try mailDetail()))
+        XCTAssertTrue(d.openButtonIsEnabled)
+        XCTAssertNil(d.openButtonToolTip)
+    }
+
+    // MARK: - F1 hardening: cancelled and all-day events
+
+    private func eventView(_ fake: DetailFake, _ ev: Ev = Ev(title: "Eng sync", start: FredSurfaceViewTests.at("09:30"), end: FredSurfaceViewTests.at("10:00"))) throws {
+        makeView(calendar: try calendar(events: [ev]), detail: fake.actions)
+    }
+
+    func testAMailsAskFredButtonIsEnabledOnceLoadedAndNeverCancelled() throws {
+        let fake = DetailFake()
+        fake.deferDetail = true
+        try oneMailView(fake)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertFalse(d.seedButtonIsEnabled, "nothing to seed until the detail has loaded")
+        XCTAssertEqual(d.seedButtonTitle, "Ask Fred…")
+        fake.pendingDetails[0](.success(try customDetail(id: "mail:m-0", title: "Cancelled: lunch",
+                                                         fields: [["Status", "Cancelled"]])))
+        XCTAssertFalse(d.isCancelled, "a message is never cancelled")
+        XCTAssertTrue(d.seedButtonIsEnabled)
+        XCTAssertEqual(d.seedButtonTitle, "Ask Fred…")
+        XCTAssertTrue(try seedButton(d).isEnabled)
+        XCTAssertEqual(try seedButton(d).title, "Ask Fred…")
+        d.beginSeed()
+        XCTAssertTrue(d.isConfirming)
+    }
+
+    func testPrepWithFredIsEnabledForALiveEventOnceItsDetailLoads() throws {
+        let fake = DetailFake()
+        fake.deferDetail = true
+        try eventView(fake)
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertFalse(d.seedButtonIsEnabled)
+        XCTAssertFalse(d.isCancelled)
+        fake.pendingDetails[0](.success(try eventDetail()))
+        XCTAssertTrue(d.seedButtonIsEnabled)
+        XCTAssertFalse(d.isCancelled)
+        XCTAssertEqual(d.seedButtonTitle, "Prep with Fred")
+        XCTAssertTrue(try seedButton(d).isEnabled)
+    }
+
+    func testAnEventTheDetailSaysIsCancelledCannotBeSeededEvenThoughTheListDoesNotKnow() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] id in
+            .success(try! customDetail(id: id, fields: [["Status", "Cancelled"], ["When", "Sat 10 Oct 2026, 09:30\u{2013}10:00"]]))
+        }
+        try eventView(fake)   // the list event is not cancelled
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.displayedFields.first?.label, "Status")
+        XCTAssertEqual(d.displayedFields.first?.value, "Cancelled")
+        XCTAssertTrue(d.isCancelled)
+        XCTAssertFalse(d.seedButtonIsEnabled)
+        XCTAssertFalse(try seedButton(d).isEnabled)
+        XCTAssertEqual(d.seedButtonTitle, "Prep with Fred", "the label does not change; the button is just off")
+
+        d.beginSeed()
+        XCTAssertFalse(d.isConfirming)
+        XCTAssertEqual(d.promptText, "", "no prompt is prepared for a cancelled meeting")
+        d.confirmSeed()
+        XCTAssertTrue(fake.seeds.isEmpty)
+    }
+
+    func testACancelledEventInTheListIsNotSeedableBeforeAndAfterItsDetailLoads() throws {
+        let fake = DetailFake()
+        fake.deferDetail = true
+        try eventView(fake, Ev(title: "Eng sync", start: at("09:30"), end: at("10:00"), isCancelled: true))
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertTrue(d.isCancelled, "known from the list row before the detail arrives")
+        XCTAssertFalse(d.seedButtonIsEnabled)
+        d.beginSeed()
+        XCTAssertFalse(d.isConfirming)
+
+        fake.pendingDetails[0](.success(try eventDetail()))   // the detail carries no Status field
+        XCTAssertTrue(d.isCancelled)
+        XCTAssertFalse(d.seedButtonIsEnabled)
+        d.beginSeed()
+        XCTAssertFalse(d.isConfirming)
+        XCTAssertEqual(d.seedButtonTitle, "Prep with Fred")
+        XCTAssertTrue(fake.seeds.isEmpty)
+    }
+
+    func testACancelledStatusInTheListIsEnoughEvenWhenTheDetailFails() throws {
+        let fake = DetailFake()   // default: every detail request fails
+        try eventView(fake, Ev(title: "Eng sync", start: at("09:30"), end: at("10:00"), status: "cancelled"))
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertNotNil(d.errorText)
+        XCTAssertTrue(d.isCancelled)
+        XCTAssertFalse(d.seedButtonIsEnabled)
+        d.beginSeed()
+        XCTAssertFalse(d.isConfirming)
+    }
+
+    func testAnEventWithAnotherStatusIsNotCancelled() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] id in .success(try! customDetail(id: id, fields: [["Status", "Tentative"]])) }
+        try eventView(fake)
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertFalse(d.isCancelled)
+        XCTAssertTrue(d.seedButtonIsEnabled)
+        d.beginSeed()
+        XCTAssertTrue(d.isConfirming)
+    }
+
+    func testAnAllDayEventShowsItsWhenVerbatimAndCanBePrepped() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] id in
+            .success(try! customDetail(id: id, title: "Offsite", fields: [["When", "Fri 9 Oct 2026 (all day)"]]))
+        }
+        try eventView(fake, Ev(title: "Offsite", start: at("00:00"), end: at("23:59"), isAllDay: true))
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.displayedFields.map(\.label), ["When"])
+        XCTAssertEqual(d.displayedFields.first?.value, "Fri 9 Oct 2026 (all day)", "shown as sent, never time-converted")
+        XCTAssertFalse(d.isCancelled)
+        XCTAssertTrue(d.seedButtonIsEnabled)
+        d.beginSeed()
+        XCTAssertTrue(d.isConfirming)
+        XCTAssertTrue(d.promptText.contains("When: Fri 9 Oct 2026 (all day)"), d.promptText)
+    }
+
+    func testAMultiDayAllDayEventShowsItsWholeRangeVerbatim() throws {
+        let fake = DetailFake()
+        let when = "Fri 9 Oct 2026 \u{2013} Sun 11 Oct 2026 (all day)"
+        fake.detailResult = { [self] id in .success(try! customDetail(id: id, title: "Offsite", fields: [["When", when]])) }
+        try eventView(fake, Ev(title: "Offsite", start: at("00:00"), end: at("23:59"), isAllDay: true))
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.displayedFields.first?.value, when)
+        XCTAssertTrue(d.seedButtonIsEnabled)
+        XCTAssertEqual(try rowField(todayTable, 0, "fred.row.timerange").stringValue, "All day")
+    }
+
+    func testARecurringInstanceDetailBehavesLikeAnyOtherEvent() throws {
+        let fake = DetailFake()
+        let id = "AAMkAGI2TG93AAA=_20261010T143000Z"
+        fake.detailResult = { [self] item in
+            .success(try! customDetail(id: item, fields: [["Organiser", "Olive <olive@example.com>"],
+                                                          ["Recurrence", "Weekly on Saturday"],
+                                                          ["When", "Sat 10 Oct 2026, 09:30\u{2013}10:00"]]))
+        }
+        try eventView(fake, Ev(title: "Eng sync", start: at("09:30"), end: at("10:00"), id: id))
+        sut.selectTodayRow(0)
+        XCTAssertEqual(fake.requested, ["event:\(id)"])
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertEqual(d.displayedFields.map(\.label), ["Organiser", "Recurrence", "When"])
+        XCTAssertFalse(d.isCancelled)
+        XCTAssertTrue(d.seedButtonIsEnabled)
+        XCTAssertTrue(d.openButtonIsEnabled)
+        d.beginSeed()
+        XCTAssertTrue(d.isConfirming)
+    }
+
+    // MARK: Daylight-saving boundaries in the Mac list (already correct; these pin it)
+
+    private func isoDate(_ s: String) -> Date { ISO8601DateFormatter().date(from: s)! }
+
+    private func listEvent(_ start: String, _ end: String) throws -> CalendarEvent {
+        let ev = Ev(title: "Boundary", start: isoDate(start), end: isoDate(end))
+        return try XCTUnwrap(try calendar(events: [ev]).events.first)
+    }
+
+    func testTheListFormatsAnEventThatSpansTheFallBackHourInChicago() throws {
+        // 2026-11-01: 02:00 CDT becomes 01:00 CST. 06:30Z is 1:30 am CDT, 08:00Z is 2:00 am CST.
+        let e = try listEvent("2026-11-01T06:30:00Z", "2026-11-01T08:00:00Z")
+        XCTAssertEqual(FredPresentation.timeRange(e, in: Self.chicago), "1:30–2:00 am")
+    }
+
+    func testTheListFormatsAnEventThatSpansTheSpringForwardGapInChicago() throws {
+        // 2026-03-08: 02:00 CST becomes 03:00 CDT. 07:30Z is 1:30 am CST, 09:30Z is 4:30 am CDT.
+        let e = try listEvent("2026-03-08T07:30:00Z", "2026-03-08T09:30:00Z")
+        XCTAssertEqual(FredPresentation.timeRange(e, in: Self.chicago), "1:30–4:30 am")
     }
 }
