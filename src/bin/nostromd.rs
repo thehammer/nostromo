@@ -237,6 +237,7 @@ async fn main() -> Result<()> {
         jira_site: nostromo::data::work::credentials::JiraSite::from_config(&config),
         todos_refresh: Some(todos_refresh),
         jira: Some(Arc::new(nostromo::data::work::jira::JiraWorkSource::from_config(&config))),
+        sentry: Some(nostromo::data::work::sentry::SentryConfig::from_environment()),
         repo_docs_root: None,
     });
     nostromo::data::work::install_work_service(work_hub.clone());
