@@ -648,6 +648,14 @@ fn is_denied_to_network_driven(
     if name == "nostromo.get_view_state" {
         return view_id.is_some_and(|v| is_sensitive_target(tags, v));
     }
+    // A plain focus is just another network-driven session (it inherits the
+    // flag). Queuing a Mother job is the `mother.` tools by another door, and a
+    // source item reads (`existing`: its focus tag, job id, label) and writes
+    // the sent ledger the Teri work list is built from.
+    if name == "nostromo.create_focus" {
+        return args.get("destination").and_then(Value::as_str) == Some("mother_job")
+            || args.get("source_item_id").is_some_and(|v| !v.is_null());
+    }
     if !FOCUS_SCOPED_TOOLS.contains(&name) {
         return false;
     }

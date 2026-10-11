@@ -2992,6 +2992,34 @@ async fn get_view_state_for_fred_teri_and_mother_is_denied_to_a_network_driven_s
 }
 
 #[tokio::test]
+async fn create_focus_cannot_queue_a_mother_job_or_touch_the_sent_ledger_for_a_network_driven_session() {
+    // The ordinary control below really sends an item: keep it off the real ledger.
+    let ledger_dir = tempfile::tempdir().unwrap();
+    nostromo::data::work::sent::install_ledger(std::sync::Arc::new(
+        nostromo::data::work::sent::SentLedger::new(ledger_dir.path().join("sent.json")),
+    ));
+    let h = spawn_server().await;
+    let state = mcp_state(&h);
+    let (mut unix, _) = h.unix(vec![]).await;
+    spawn_fake_session(&mut unix, "cody-nd", "cody", "v-fnd4-nd").await;
+    spawn_fake_session(&mut unix, "cody-ok", "cody", "v-fnd4-ok").await;
+    h.session_mgr.lock().unwrap().sensitive_tags().mark_network_driven("cody-nd");
+
+    for (what, args) in [
+        ("a Mother job", json!({"agent": "cody", "title": "FND4-ND-A", "destination": "mother_job"})),
+        ("a source item", json!({"agent": "cody", "title": "FND4-ND-B", "source_item_id": "jira:CORE-1"})),
+    ] {
+        let driven = call(&state, "nostromo.create_focus", args.clone(), "cody-nd").await;
+        assert!(tool_is_forbidden(&driven), "create_focus with {what} for a network-driven session: {}", describe(&driven));
+        let normal = call(&state, "nostromo.create_focus", args, "cody-ok").await;
+        assert!(!tool_is_forbidden(&normal), "an ordinary session is unaffected ({what}): {}", describe(&normal));
+    }
+    // A plain focus is still allowed (and inherits the flag, see the tests above).
+    let plain = call(&state, "nostromo.create_focus", json!({"agent": "cody", "title": "FND4-ND-C"}), "cody-nd").await;
+    assert!(tool_is_ok(&plain), "{}", describe(&plain));
+}
+
+#[tokio::test]
 async fn list_views_withholds_the_fred_teri_and_mother_summaries_from_a_network_driven_session() {
     let h = spawn_server().await;
     let state = mcp_state(&h);

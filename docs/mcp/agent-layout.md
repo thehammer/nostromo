@@ -133,6 +133,10 @@ against the repo's default branch with `max_cost` (default 10). Returns
 `kind: "queued"` with `job_id`. A failing `mother add` is returned as
 `mother_failed` with Mother's message.
 
+A session a network (TCP) peer is steering may only create plain focuses:
+`destination: "mother_job"` and `source_item_id` are refused to it (Forbidden),
+since they reach Mother and the sent ledger.
+
 Errors: `invalid_args`, `invalid_working_directory` (not an absolute existing
 dir), `project_required` / `not_a_git_repo` (Mother destination), `spawn_failed`,
 `mother_failed`.
