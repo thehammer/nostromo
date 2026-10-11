@@ -27,7 +27,8 @@ enum TeriRepoDocsTab {
     /// What one doc row shows, relative to `now`.
     static func rowContent(for item: WorkItem, now: Date, calendar: Calendar) -> WorkRowContent {
         let kindWord = kinds[item.kind]?.word ?? item.kind.capitalized
-        let filed = filedText(item.createdAt, now: now, calendar: calendar)
+        // A date taken from the file system (a checkout resets it) is only approximate.
+        let filed = filedText(item.createdAt, now: now, calendar: calendar, approximate: item.metrics["date_inferred"] != nil)
         return WorkRowContent(
             priorityText: item.priority?.label,
             priorityRank: item.priority?.rank,
@@ -56,9 +57,15 @@ enum TeriRepoDocsTab {
         return ([ "\(repo)  \(items.count)" ] + parts).joined(separator: " · ")
     }
 
-    /// "today", "yesterday", "3 days ago", "2 weeks ago", "5 months ago", "2 years ago".
-    static func filedText(_ created: Date?, now: Date, calendar: Calendar) -> String? {
+    /// "today", "yesterday", "3 days ago", "2 weeks ago", "5 months ago", "2 years ago";
+    /// with a leading "~" when the date is only approximate ("~3 days ago").
+    static func filedText(_ created: Date?, now: Date, calendar: Calendar, approximate: Bool = false) -> String? {
         guard let created else { return nil }
+        let text = relativeText(created, now: now, calendar: calendar)
+        return approximate ? "~" + text : text
+    }
+
+    private static func relativeText(_ created: Date, now: Date, calendar: Calendar) -> String {
         let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: created),
                                            to: calendar.startOfDay(for: now)).day ?? 0
         switch days {
@@ -101,7 +108,7 @@ enum TeriRepoDocsTab {
         var parts = [kindWord, item.repo ?? "", item.title].filter { !$0.isEmpty }
         if let severity = item.severity { parts.append("severity \(severity)") }
         if let priority = item.priority { parts.append("priority \(priority.label)") }
-        if let filed { parts.append("filed \(filed)") }
+        if let filed { parts.append(filed.hasPrefix("~") ? "filed about \(filed.dropFirst()), date approximate" : "filed \(filed)") }
         return parts.joined(separator: ", ")
     }
 }

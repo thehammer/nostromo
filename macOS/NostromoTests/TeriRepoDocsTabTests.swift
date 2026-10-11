@@ -44,7 +44,7 @@ private func iso(_ date: Date) -> String {
 /// One repo doc as the daemon would send it.
 private func docItem(repo: String = "referral-monitor", kind: String = "bug", title: String = "A doc",
                      path: String? = nil, severity: String? = nil, createdAt: Date? = nil,
-                     priority: Int? = nil, searchText: String? = nil) -> WorkItem {
+                     priority: Int? = nil, searchText: String? = nil, metrics: [String: Int]? = nil) -> WorkItem {
     let rel = path ?? "docs/\(kind)s/\(title.replacingOccurrences(of: " ", with: "-")).md"
     var fields: [String: Any] = [
         "id": "doc:\(repo):\(rel)", "source": "repo_docs", "kind": kind, "repo": repo,
@@ -53,6 +53,7 @@ private func docItem(repo: String = "referral-monitor", kind: String = "bug", ti
     if let severity { fields["severity"] = severity }
     if let createdAt { fields["created_at"] = iso(createdAt) }
     if let priority { fields["priority"] = ["label": "P\(priority)", "rank": priority] }
+    if let metrics { fields["metrics"] = metrics }
     return WorkTestSupport.makeItem(fields)
 }
 
@@ -282,7 +283,42 @@ final class TeriRepoDocsTabTests: XCTestCase {
         }
     }
 
+    func testAnApproximateFiledDateIsMarkedWithATildeAtEveryScale() {
+        XCTAssertEqual(TeriRepoDocsTab.filedText(daysAgo(3), now: now, calendar: calendar, approximate: true), "~3 days ago")
+        XCTAssertEqual(TeriRepoDocsTab.filedText(daysAgo(0, hour: 8), now: now, calendar: calendar, approximate: true), "~today")
+        XCTAssertEqual(TeriRepoDocsTab.filedText(daysAgo(1), now: now, calendar: calendar, approximate: true), "~yesterday")
+        XCTAssertEqual(TeriRepoDocsTab.filedText(daysAgo(21), now: now, calendar: calendar, approximate: true), "~3 weeks ago")
+        XCTAssertEqual(TeriRepoDocsTab.filedText(daysAgo(730), now: now, calendar: calendar, approximate: true), "~2 years ago")
+    }
+
+    func testAnExactFiledDateHasNoTilde() {
+        XCTAssertEqual(TeriRepoDocsTab.filedText(daysAgo(3), now: now, calendar: calendar, approximate: false), "3 days ago")
+        XCTAssertEqual(TeriRepoDocsTab.filedText(daysAgo(3), now: now, calendar: calendar), "3 days ago")
+    }
+
+    func testADocWithNoDateHasNoFiledTextEvenWhenApproximate() {
+        XCTAssertNil(TeriRepoDocsTab.filedText(nil, now: now, calendar: calendar, approximate: true))
+    }
+
     // MARK: Row content
+
+    func testTheDateColumnIsMarkedApproximateOnlyForADateTakenFromTheFileSystem() {
+        let inferred = content(docItem(createdAt: daysAgo(3), metrics: ["date_inferred": 1]))
+        XCTAssertEqual(inferred.dueText, "~3 days ago")
+        XCTAssertFalse(inferred.dueIsUrgent)
+        XCTAssertEqual(content(docItem(createdAt: daysAgo(3))).dueText, "3 days ago")
+        XCTAssertEqual(content(docItem(createdAt: daysAgo(3), metrics: ["truncated": 1])).dueText, "3 days ago",
+                       "other metrics say nothing about the date")
+    }
+
+    func testTheAccessibilityLabelSaysWhenTheDateIsApproximate() {
+        let item = docItem(repo: "r", kind: "idea", title: "T", createdAt: daysAgo(3), metrics: ["date_inferred": 1])
+        let label = content(item).accessibilityLabel
+
+        XCTAssertFalse(label.contains("~"), "a tilde is not read aloud well: \(label)")
+        XCTAssertTrue(label.contains("3 days ago"), label)
+        XCTAssertTrue(label.lowercased().contains("approximate"), label)
+    }
 
     func testEachKindIsLabelledWithItsWordAfterAGlyph() {
         let words = ["bug": "Bug", "feature": "Feature", "idea": "Idea", "todo": "Todo", "wip": "WIP"]
@@ -355,6 +391,24 @@ final class TeriRepoDocsTabTests: XCTestCase {
                        "Idea, r, T")
         XCTAssertEqual(content(docItem(repo: "r", kind: "wip", title: "T", priority: 1)).accessibilityLabel,
                        "WIP, r, T, priority P1")
+    }
+
+    // MARK: Source banner notes
+
+    func testAReadableSourceThatLeftSomethingOutShowsABannerWithTheDaemonsNote() throws {
+        let note = "Partial scan: 1 of 4 repos could not be fully read"
+        for state in [SourceState.fresh, .empty] {
+            let banner = SourceStateBanner.content(state: state, updatedAt: nil, reason: note, retryAt: nil,
+                                                   sourceName: "Repo docs", now: now)
+            XCTAssertTrue(try XCTUnwrap(banner, "\(state)").message.contains(note), banner?.message ?? "nil")
+        }
+    }
+
+    func testAReadableSourceWithNothingToReportShowsNoBanner() {
+        for state in [SourceState.fresh, .empty] {
+            XCTAssertNil(SourceStateBanner.content(state: state, updatedAt: nil, reason: nil, retryAt: nil,
+                                                   sourceName: "Repo docs", now: now), "\(state)")
+        }
     }
 }
 

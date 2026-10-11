@@ -1,30 +1,41 @@
 //! Teri "Repo docs" source (T1): scans `<root>/<repo>/.claude/` doc-mgr layouts
 //! and publishes them as work items. These tests pin the observable contract:
 //! what is (and is not) an item, how titles / dates / severity / priority are
-//! read, how failures are reported, how fast scans are, how the live watcher
-//! reacts, what the detail view returns and how the hub republishes it.
+//! read, how failures are reported (every file that could not be read is
+//! counted, never silently dropped), how rescans avoid re-reading unchanged
+//! files, how the live watcher reacts, what the detail view returns and how
+//! the hub republishes it.
 //!
 //! Every root is a canonicalised temp dir (macOS temp lives under /var, a
 //! symlink to /private/var) so path comparisons are exact.
+//!
+//! Nothing here asserts on wall-clock time and nothing waits a fixed time:
+//! failures are injected through `DocFs` (so they behave the same for a root
+//! user as for anyone else), work is measured by counting reads, and live
+//! changes are polled for with a generous bound.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::io;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
 use nostromo::data::teri_todos::TeriTodosSnapshot;
 use nostromo::data::work::hub::{HubDeps, SourceUpdate, WorkHub};
 use nostromo::data::work::query::WorkFilter;
-use nostromo::data::work::repo_docs::{detail_at, spawn_at, Scanner};
-use nostromo::data::work::{SourceState, WorkDetail, WorkItem, WorkSource};
+use nostromo::data::work::repo_docs::{detail_at, spawn_at, spawn_with_fs, DocFs, RealFs, Scanner};
+use nostromo::data::work::{SourceState, SourceStatus, WorkDetail, WorkItem, WorkService, WorkSource};
 use nostromo::ipc::protocol::ServerMsg;
 use tempfile::TempDir;
 use tokio::sync::{broadcast, watch, Notify};
 
-const LIVE_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a live change may take to show up before a test gives up. Generous on
+/// purpose: it only costs time when something is broken.
+const LIVE_DEADLINE: Duration = Duration::from_secs(30);
 
 // ── fixture ──────────────────────────────────────────────────────────────────
 
@@ -95,25 +106,82 @@ fn fixture() -> Fx {
     Fx { _tmp: tmp, root }
 }
 
-/// `chmod 000` on a repo's `.claude`, restored on drop so the temp dir can be removed.
-struct Locked(PathBuf);
+// ── injected file-system faults and counters ─────────────────────────────────
 
-impl Drop for Locked {
-    fn drop(&mut self) {
-        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+#[derive(Default)]
+struct Faults {
+    deny_read: Mutex<HashSet<PathBuf>>,
+    deny_metadata: Mutex<HashSet<PathBuf>>,
+    deny_symlink_metadata: Mutex<HashSet<PathBuf>>,
+    panic_on_read: AtomicBool,
+    reads: AtomicUsize,
+}
+
+/// The real file system, except where a test says otherwise: chosen paths answer
+/// `PermissionDenied` (whoever runs the tests), reads are counted, and a read can
+/// be made to panic. Clones share their settings.
+#[derive(Clone, Default)]
+struct TestFs(Arc<Faults>);
+
+fn denied() -> io::Error {
+    io::Error::from(io::ErrorKind::PermissionDenied)
+}
+
+impl TestFs {
+    fn deny_read(&self, path: impl Into<PathBuf>) {
+        self.0.deny_read.lock().unwrap().insert(path.into());
+    }
+    fn allow_read(&self, path: &Path) {
+        self.0.deny_read.lock().unwrap().remove(path);
+    }
+    fn deny_metadata(&self, path: impl Into<PathBuf>) {
+        self.0.deny_metadata.lock().unwrap().insert(path.into());
+    }
+    fn deny_symlink_metadata(&self, path: impl Into<PathBuf>) {
+        self.0.deny_symlink_metadata.lock().unwrap().insert(path.into());
+    }
+    fn allow_symlink_metadata(&self, path: &Path) {
+        self.0.deny_symlink_metadata.lock().unwrap().remove(path);
+    }
+    fn allow_metadata(&self, path: &Path) {
+        self.0.deny_metadata.lock().unwrap().remove(path);
+    }
+    fn panic_on_read(&self, on: bool) {
+        self.0.panic_on_read.store(on, Ordering::SeqCst);
+    }
+    /// How many times a doc's text was read (attempts included).
+    fn reads(&self) -> usize {
+        self.0.reads.load(Ordering::SeqCst)
     }
 }
 
-/// Adds an unreadable repo. `None` when the permission has no effect (running as root).
-fn lock_repo(root: &Path, repo: &str) -> Option<Locked> {
-    put(root, &format!("{repo}/.claude/bugs/open/x.md"), "# Unreachable\n");
-    let claude = root.join(repo).join(".claude");
-    let guard = Locked(claude.clone());
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o000)).unwrap();
-    if fs::read_dir(&claude).is_ok() {
-        return None;
+impl DocFs for TestFs {
+    fn metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+        if self.0.deny_metadata.lock().unwrap().contains(path) {
+            return Err(denied());
+        }
+        RealFs.metadata(path)
     }
-    Some(guard)
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+        if self.0.deny_symlink_metadata.lock().unwrap().contains(path) {
+            return Err(denied());
+        }
+        RealFs.symlink_metadata(path)
+    }
+    fn read_text(&self, path: &Path, limit: u64) -> io::Result<String> {
+        self.0.reads.fetch_add(1, Ordering::SeqCst);
+        if self.0.panic_on_read.load(Ordering::SeqCst) {
+            panic!("injected: reading {} panics", path.display());
+        }
+        if self.0.deny_read.lock().unwrap().contains(path) {
+            return Err(denied());
+        }
+        RealFs.read_text(path, limit)
+    }
+}
+
+fn scanner_over(root: &Path, io: &TestFs) -> Scanner {
+    Scanner::with_fs(root.to_path_buf(), Arc::new(io.clone()))
 }
 
 fn scan(root: &Path) -> SourceUpdate {
@@ -372,7 +440,7 @@ fn search_text_is_capped_at_64_kib_without_splitting_a_character() {
 // ── source status ────────────────────────────────────────────────────────────
 
 #[test]
-fn a_healthy_scan_is_fresh_with_the_total_item_count_and_no_errors() {
+fn a_healthy_scan_is_fresh_with_the_total_item_count_and_no_errors_and_no_note() {
     let fx = fixture();
 
     let (status, _) = scan(&fx.root);
@@ -381,34 +449,184 @@ fn a_healthy_scan_is_fresh_with_the_total_item_count_and_no_errors() {
     assert_eq!(status.state, SourceState::Fresh);
     assert_eq!(status.count, 12);
     assert!(status.group_errors.is_empty());
+    assert_eq!(status.reason, None, "nothing was left out, so there is nothing to say");
+}
+
+fn group_error<'a>(status: &'a SourceStatus, repo: &str) -> Option<&'a str> {
+    status.group_errors.iter().find(|e| e.group == repo).map(|e| e.reason.as_str())
+}
+
+/// A scan that left something out is readable, but must never look plain "fresh".
+fn assert_partial(status: &SourceStatus, failed_repos: usize, of_repos: usize) {
+    assert_eq!(status.state, SourceState::Fresh, "only an every-repo failure is an error: {status:?}");
+    assert_eq!(
+        status.reason.as_deref(),
+        Some(format!("Partial scan: {failed_repos} of {of_repos} repos could not be fully read").as_str())
+    );
+    assert_eq!(status.group_errors.len(), failed_repos, "{:?}", status.group_errors);
+}
+
+// ── silent read failures are counted ─────────────────────────────────────────
+
+#[test]
+fn a_doc_that_cannot_be_read_is_counted_and_the_scan_is_never_plain_fresh() {
+    let fx = fixture();
+    let io = TestFs::default();
+    let unreadable = fx.root.join("alpha/.claude/bugs/open/2026-10-01-login-fails.md");
+    io.deny_read(&unreadable);
+    let mut scanner = scanner_over(&fx.root, &io);
+
+    let update = scanner.scan_all();
+
+    let (status, _) = &update;
+    assert_partial(status, 1, 4);
+    let reason = group_error(status, "alpha").expect("alpha carries the error");
+    assert!(reason.contains("skipped 1 unreadable file"), "{reason}");
+    assert!(!reason.contains("files"), "one file is singular: {reason}");
+    assert_eq!(status.count, 11);
+    assert_eq!(items_of(&update, "alpha").len(), 7, "the readable docs of the repo still show");
+    assert!(items_of(&update, "alpha").iter().all(|i| i.id != ALPHA_BUG));
+    assert_eq!(items_of(&update, "beta").len(), 2, "other repos are unaffected");
+
+    // The failure is not remembered: once the file can be read again the repo is clean.
+    io.allow_read(&unreadable);
+    let update = scanner.rescan_repo("alpha");
+    assert_eq!(update.0.reason, None);
+    assert!(update.0.group_errors.is_empty(), "{:?}", update.0.group_errors);
+    assert_eq!(update.0.count, 12);
+    assert_eq!(item(&update, ALPHA_BUG).title, "Login button does nothing");
 }
 
 #[test]
-fn an_unreadable_repo_is_reported_and_the_other_repos_are_unaffected() {
+fn several_unreadable_docs_are_all_counted() {
     let fx = fixture();
-    let Some(_guard) = lock_repo(&fx.root, "delta") else { return }; // running as root: chmod can't deny
+    let io = TestFs::default();
+    io.deny_read(fx.root.join("alpha/.claude/bugs/open/2026-10-01-login-fails.md"));
+    io.deny_read(fx.root.join("alpha/.claude/features/backlog/dark-mode.md"));
+    io.deny_read(fx.root.join("alpha/.claude/ideas/undated-idea_for_later.md"));
 
-    let update = scan(&fx.root);
+    let (status, _) = scanner_over(&fx.root, &io).scan_all();
+
+    assert_partial(&status, 1, 4);
+    let reason = group_error(&status, "alpha").unwrap();
+    assert!(reason.contains("skipped 3 unreadable files"), "{reason}");
+}
+
+#[test]
+fn a_doc_that_cannot_be_examined_is_counted_too() {
+    let fx = fixture();
+    let io = TestFs::default();
+    let unreadable = fx.root.join("beta/.claude/todos/open/beta-todo.md");
+    io.deny_metadata(&unreadable);
+    let mut scanner = scanner_over(&fx.root, &io);
+
+    let update = scanner.scan_all();
+
+    assert_partial(&update.0, 1, 4);
+    assert!(group_error(&update.0, "beta").unwrap().contains("skipped 1 unreadable file"));
+    assert_eq!(items_of(&update, "beta").len(), 1, "the other beta doc still shows");
+    assert_eq!(items_of(&update, "alpha").len(), 8);
+
+    io.allow_metadata(&unreadable);
+    let update = scanner.rescan_repo("beta");
+    assert_eq!(update.0.reason, None);
+    assert_eq!(items_of(&update, "beta").len(), 2);
+}
+
+#[test]
+fn a_wip_folder_whose_index_cannot_be_read_is_listed_without_a_body_and_not_remembered() {
+    let fx = fixture();
+    let io = TestFs::default();
+    let index = fx.root.join("alpha/.claude/wip/my-topic/index.md");
+    io.deny_read(&index);
+    let mut scanner = scanner_over(&fx.root, &io);
+
+    let update = scanner.scan_all();
+
+    assert_partial(&update.0, 1, 4);
+    assert!(group_error(&update.0, "alpha").unwrap().contains("skipped 1 unreadable file"));
+    assert_eq!(update.0.count, 12, "the folder is still an item");
+    let wip = item(&update, ALPHA_WIP);
+    assert_eq!(wip.title, "my-topic", "with no body to read the folder name is the title");
+    assert!(!wip.search_text.contains("Plan body"), "{:?}", wip.search_text);
+
+    // Retried on the next scan, not served from a cache of the failure.
+    io.allow_read(&index);
+    let update = scanner.rescan_repo("alpha");
+    assert_eq!(update.0.reason, None);
+    assert!(update.0.group_errors.is_empty());
+    let wip = item(&update, ALPHA_WIP);
+    assert_eq!(wip.title, "My topic plan");
+    assert!(wip.search_text.contains("Plan body"));
+}
+
+#[test]
+fn a_wip_index_that_cannot_be_examined_is_listed_without_a_body_and_counted() {
+    let fx = fixture();
+    let io = TestFs::default();
+    let index = fx.root.join("alpha/.claude/wip/my-topic/index.md");
+    io.deny_metadata(&index);
+    let mut scanner = scanner_over(&fx.root, &io);
+
+    let update = scanner.scan_all();
+
+    assert_partial(&update.0, 1, 4);
+    assert_eq!(item(&update, ALPHA_WIP).title, "my-topic");
+
+    io.allow_metadata(&index);
+    let update = scanner.rescan_repo("alpha");
+    assert_eq!(update.0.reason, None);
+    assert_eq!(item(&update, ALPHA_WIP).title, "My topic plan");
+}
+
+#[test]
+fn a_repo_whose_folder_cannot_be_searched_is_a_group_error_not_a_vanished_repo() {
+    let fx = fixture();
+    put(&fx.root, "delta/.claude/bugs/open/x.md", "# Delta bug\n");
+    let io = TestFs::default();
+    let claude = fx.root.join("delta/.claude");
+    io.deny_symlink_metadata(&claude); // what a repo directory without search permission does
+    let mut scanner = scanner_over(&fx.root, &io);
+
+    let update = scanner.scan_all();
 
     let (status, _) = &update;
-    assert_eq!(status.state, SourceState::Fresh, "only an every-repo failure is an error");
-    assert_eq!(status.count, 12);
-    assert_eq!(status.group_errors.len(), 1, "{:?}", status.group_errors);
-    assert_eq!(status.group_errors[0].group, "delta");
-    assert!(!status.group_errors[0].reason.trim().is_empty());
+    assert_partial(status, 1, 5);
+    assert!(!group_error(status, "delta").expect("delta is reported, not dropped").trim().is_empty());
     assert!(items_of(&update, "delta").is_empty());
+    assert_eq!(status.count, 12);
     assert_eq!(items_of(&update, "alpha").len(), 8);
-    assert_eq!(items_of(&update, "beta").len(), 2);
+
+    io.allow_symlink_metadata(&claude);
+    let update = scanner.rescan_repo("delta");
+    assert_eq!(update.0.state, SourceState::Fresh);
+    assert_eq!(update.0.reason, None);
+    assert_eq!(items_of(&update, "delta").len(), 1);
+}
+
+#[test]
+fn a_claude_folder_that_cannot_be_examined_is_a_group_error() {
+    let fx = fixture();
+    let io = TestFs::default();
+    io.deny_metadata(fx.root.join("gamma/.claude"));
+
+    let (status, _) = scanner_over(&fx.root, &io).scan_all();
+
+    assert_partial(&status, 1, 4);
+    assert!(!group_error(&status, "gamma").unwrap().trim().is_empty());
 }
 
 #[test]
 fn when_every_repo_fails_the_source_is_in_error() {
     let (_tmp, root) = temp_root();
-    let Some(_guard) = lock_repo(&root, "delta") else { return };
+    put(&root, "delta/.claude/bugs/open/x.md", "# Unreachable\n");
+    let io = TestFs::default();
+    io.deny_symlink_metadata(root.join("delta/.claude"));
 
-    let (status, groups) = scan(&root);
+    let (status, groups) = scanner_over(&root, &io).scan_all();
 
     assert_eq!(status.state, SourceState::Error);
+    assert!(status.reason.as_deref().is_some_and(|r| !r.trim().is_empty()), "{status:?}");
     assert_eq!(status.count, 0);
     assert_eq!(status.group_errors.len(), 1);
     assert!(groups.iter().all(|(_, items)| items.is_empty()));
@@ -440,7 +658,7 @@ fn a_missing_root_is_not_configured() {
     assert!(groups.iter().all(|(_, items)| items.is_empty()));
 }
 
-// ── performance and incremental rescans ──────────────────────────────────────
+// ── incremental rescans (measured in reads, not seconds) ─────────────────────
 
 const PERF_REPOS: usize = 10;
 const PERF_DOCS: usize = 100;
@@ -466,45 +684,44 @@ fn perf_tree() -> (TempDir, PathBuf) {
 }
 
 #[test]
-fn a_thousand_doc_tree_scans_cold_in_under_two_seconds() {
+fn a_cold_scan_reads_each_doc_exactly_once() {
     let (_tmp, root) = perf_tree();
-    let mut scanner = Scanner::new(root);
+    let io = TestFs::default();
+    let mut scanner = scanner_over(&root, &io);
 
-    let started = Instant::now();
     let (status, _) = scanner.scan_all();
-    let took = started.elapsed();
 
     assert_eq!(status.count, PERF_REPOS * PERF_DOCS);
-    assert!(took < Duration::from_secs(2), "cold scan took {took:?}");
+    assert_eq!(io.reads(), PERF_REPOS * PERF_DOCS);
 }
 
 #[test]
-fn an_unchanged_tree_rescans_quickly_from_the_parse_cache() {
+fn an_unchanged_tree_rescans_without_reading_a_single_doc() {
     let (_tmp, root) = perf_tree();
-    let mut scanner = Scanner::new(root);
+    let io = TestFs::default();
+    let mut scanner = scanner_over(&root, &io);
     scanner.scan_all();
+    let after_cold_scan = io.reads();
 
-    let started = Instant::now();
     let (status, _) = scanner.scan_all();
-    let took = started.elapsed();
 
     assert_eq!(status.count, PERF_REPOS * PERF_DOCS);
-    assert!(took < Duration::from_millis(500), "unchanged rescan took {took:?}");
+    assert_eq!(io.reads() - after_cold_scan, 0, "every parse came from the cache");
 }
 
 #[test]
-fn rescanning_one_repo_after_editing_one_file_is_fast_and_reflects_the_edit() {
+fn rescanning_one_repo_after_editing_one_file_reads_only_that_file_and_reflects_the_edit() {
     let (_tmp, root) = perf_tree();
-    let mut scanner = Scanner::new(root.clone());
+    let io = TestFs::default();
+    let mut scanner = scanner_over(&root, &io);
     scanner.scan_all();
     // Different content and size, so neither mtime nor length can match the cached entry.
     put(&root, &perf_path(3, 7), &format!("# Rewritten heading\n\n{}", "A much longer replacement body. ".repeat(80)));
+    let before = io.reads();
 
-    let started = Instant::now();
     let update = scanner.rescan_repo("repo-03");
-    let took = started.elapsed();
 
-    assert!(took < Duration::from_millis(200), "single-repo rescan took {took:?}");
+    assert_eq!(io.reads() - before, 1, "only the edited file is read again");
     let id = format!("doc:repo-03:{}", perf_path(3, 7).split_once("/.claude/").unwrap().1);
     assert_eq!(item(&update, &id).title, "Rewritten heading");
     assert_eq!(update.0.count, PERF_REPOS * PERF_DOCS, "the update still covers every repo");
@@ -528,30 +745,76 @@ fn rescan_repo_picks_up_added_and_removed_docs_in_that_repo() {
 
 // ── live watching (spawn_at) ─────────────────────────────────────────────────
 
-async fn wait_for(rx: &mut watch::Receiver<SourceUpdate>, what: &str, pred: impl Fn(&SourceUpdate) -> bool) -> SourceUpdate {
-    let deadline = tokio::time::Instant::now() + LIVE_DEADLINE;
+/// The first update (the current one included) that satisfies `pred`, or `None` after `within`.
+async fn try_wait_for(
+    rx: &mut watch::Receiver<SourceUpdate>,
+    within: Duration,
+    pred: impl Fn(&SourceUpdate) -> bool,
+) -> Option<SourceUpdate> {
+    let deadline = tokio::time::Instant::now() + within;
     loop {
         let current = rx.borrow_and_update().clone();
         if pred(&current) {
-            return current;
+            return Some(current);
         }
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(left, rx.changed()).await {
             Ok(Ok(())) => {}
-            Ok(Err(_)) => panic!("source stopped publishing while waiting for: {what}"),
-            Err(_) => panic!("timed out after {LIVE_DEADLINE:?} waiting for: {what}; last status {:?}", current.0),
+            Ok(Err(_)) => panic!("source stopped publishing"),
+            Err(_) => return None,
         }
     }
 }
 
-/// Starts the live source and waits for its first real scan. The short sleep
-/// afterwards only gives FSEvents time to arm: events for changes made before
-/// the stream is running are not delivered, and there is no signal to await.
+async fn wait_for(rx: &mut watch::Receiver<SourceUpdate>, what: &str, pred: impl Fn(&SourceUpdate) -> bool) -> SourceUpdate {
+    match try_wait_for(rx, LIVE_DEADLINE, pred).await {
+        Some(update) => update,
+        None => panic!("timed out after {LIVE_DEADLINE:?} waiting for: {what}; last status {:?}", rx.borrow().0),
+    }
+}
+
+// FSEvents delivers nothing for changes made before its stream is running, and
+// there is no signal to await. So "armed" is established by evidence: a probe
+// doc in a repo of its own is rewritten until its appearance is published, then
+// removed again (and its removal awaited). The probe repo stays, with no items.
+const PROBE_REPO: &str = "zz-probe";
+const PROBE_ID: &str = "doc:zz-probe:ideas/probe.md";
+const PROBE_FILE: &str = "zz-probe/.claude/ideas/probe.md";
+/// One arming attempt waits this long for the probe to show up; a miss rewrites it.
+const ARM_ATTEMPT: Duration = Duration::from_millis(1500);
+const ARM_DEADLINE: Duration = Duration::from_secs(30);
+
+fn make_probe_repo(root: &Path) {
+    fs::create_dir_all(root.join(PROBE_REPO).join(".claude/ideas")).unwrap();
+}
+
+fn write_probe(root: &Path, attempt: u32) {
+    put(root, PROBE_FILE, &format!("# Probe {attempt}\n"));
+}
+
+fn has_probe(update: &SourceUpdate) -> bool {
+    all_items(update).iter().any(|i| i.id == PROBE_ID)
+}
+
+/// Starts the live source and returns once file events demonstrably reach it.
 async fn start_live(root: &Path) -> (watch::Receiver<SourceUpdate>, Arc<Notify>) {
+    make_probe_repo(root);
     let refresh = Arc::new(Notify::new());
     let mut rx = spawn_at(root.to_path_buf(), refresh.clone());
     wait_for(&mut rx, "the first scan result", |u| u.0.state != SourceState::Loading).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let deadline = Instant::now() + ARM_DEADLINE;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        write_probe(root, attempt);
+        if try_wait_for(&mut rx, ARM_ATTEMPT, has_probe).await.is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "file events never reached the live source");
+    }
+    fs::remove_file(root.join(PROBE_FILE)).unwrap();
+    wait_for(&mut rx, "the probe doc to disappear", |u| !has_probe(u)).await;
     (rx, refresh)
 }
 
@@ -655,6 +918,92 @@ async fn live_manual_refresh_picks_up_a_change() {
     refresh.notify_one();
 
     wait_for(&mut rx, "the doc after a manual refresh", |u| count_in(u, "gamma") == 2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_a_claude_folder_created_in_a_repo_that_had_none_is_picked_up_without_a_refresh() {
+    let fx = fixture();
+    fs::create_dir_all(fx.root.join("bare/.git")).unwrap(); // a repo directory that exists but has no .claude
+    let (mut rx, _refresh) = start_live(&fx.root).await;
+    assert_eq!(count_in(&rx.borrow(), "bare"), 0);
+
+    put(&fx.root, "bare/.claude/bugs/open/2026-10-10-first.md", "# First doc of a new .claude\n");
+
+    let update = wait_for(&mut rx, "the new .claude's doc", |u| count_in(u, "bare") == 1).await;
+    assert_eq!(items_of(&update, "bare")[0].id, "doc:bare:bugs/open/2026-10-10-first.md");
+    assert_eq!(update.0.count, 13);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_a_claude_folder_removed_and_created_again_is_picked_up_without_a_refresh() {
+    let fx = fixture();
+    let (mut rx, _refresh) = start_live(&fx.root).await;
+    fs::remove_dir_all(fx.root.join("beta/.claude")).unwrap();
+    wait_for(&mut rx, "beta to disappear with its .claude", |u| count_in(u, "beta") == 0).await;
+
+    put(&fx.root, "beta/.claude/bugs/open/2026-10-10-reborn.md", "# Reborn\n");
+
+    let update = wait_for(&mut rx, "beta's re-created .claude", |u| count_in(u, "beta") == 1).await;
+    assert_eq!(items_of(&update, "beta")[0].id, "doc:beta:bugs/open/2026-10-10-reborn.md");
+}
+
+/// What is never observable cannot be asserted directly, so this pins what an
+/// observer sees: a repo whose `.claude` points out of it contributes nothing,
+/// however the outside changes, and says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn live_a_claude_symlink_that_leaves_the_repo_publishes_nothing_from_outside() {
+    let fx = fixture();
+    let outside = fx.root.parent().unwrap().join("outside-claude");
+    put(&outside, "bugs/open/secret.md", "# Secret\n\nescaped-secret-marker\n");
+    fs::create_dir_all(fx.root.join("evil")).unwrap();
+    symlink(&outside, fx.root.join("evil/.claude")).unwrap();
+    let (mut rx, _refresh) = start_live(&fx.root).await;
+
+    let update = rx.borrow().clone();
+    assert!(items_of(&update, "evil").is_empty());
+    assert!(group_error(&update.0, "evil").is_some_and(|r| r.contains("leaves the repo")), "{:?}", update.0.group_errors);
+    assert!(update.0.reason.is_some(), "never plain fresh: {:?}", update.0);
+
+    // Changes outside, then a change inside the repos as a marker that events are flowing.
+    put(&outside, "bugs/open/later-secret.md", "# Later\n\nescaped-secret-marker\n");
+    put(&fx.root, "beta/.claude/bugs/open/2026-10-12-sentinel.md", "# Sentinel\n");
+    let update = wait_for(&mut rx, "the sentinel doc", |u| count_in(u, "beta") == 3).await;
+
+    assert!(items_of(&update, "evil").is_empty());
+    assert!(all_items(&update).iter().all(|i| !i.search_text.contains("escaped-secret-marker")));
+    assert!(group_error(&update.0, "evil").is_some());
+}
+
+// ── the watcher thread dying is visible ──────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_that_panics_at_startup_ends_in_an_error_status_with_a_reason() {
+    let fx = fixture();
+    let io = TestFs::default();
+    io.panic_on_read(true);
+
+    let mut rx = spawn_with_fs(fx.root.clone(), Arc::new(Notify::new()), Arc::new(io));
+
+    let update = wait_for(&mut rx, "an error status", |u| u.0.state == SourceState::Error).await;
+    assert!(update.0.reason.as_deref().is_some_and(|r| !r.trim().is_empty()), "{:?}", update.0);
+    assert_eq!(update.0.count, 0);
+    assert!(all_items(&update).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rescan_that_panics_replaces_a_fresh_list_with_an_error_status() {
+    let fx = fixture();
+    let io = TestFs::default();
+    let refresh = Arc::new(Notify::new());
+    let mut rx = spawn_with_fs(fx.root.clone(), refresh.clone(), Arc::new(io.clone()));
+    wait_for(&mut rx, "the first, healthy scan", |u| u.0.state == SourceState::Fresh).await;
+
+    io.panic_on_read(true);
+    put(&fx.root, "gamma/.claude/todos/open/2026-10-10-boom.md", "# Triggers a read\n");
+    refresh.notify_one();
+
+    let update = wait_for(&mut rx, "an error status", |u| u.0.state == SourceState::Error).await;
+    assert!(update.0.reason.as_deref().is_some_and(|r| !r.trim().is_empty()), "{:?}", update.0);
 }
 
 // ── detail ───────────────────────────────────────────────────────────────────
@@ -830,33 +1179,229 @@ async fn detail_refuses_ids_of_other_sources() {
     }
 }
 
-// ── hub integration (the only test that touches the environment) ─────────────
+// ── truncation is visible ────────────────────────────────────────────────────
 
-async fn recv_until(brx: &mut broadcast::Receiver<ServerMsg>, what: &str, mut done: impl FnMut(&ServerMsg) -> bool) {
-    let deadline = tokio::time::Instant::now() + LIVE_DEADLINE;
+#[tokio::test]
+async fn a_doc_longer_than_the_searchable_limit_says_so_on_the_item_and_in_its_detail() {
+    let fx = fixture();
+    let body = "searchable words, many of them. ".repeat(3_000); // ~96 KiB
+    let on_disk = format!("# Long doc\n\n{body}");
+    put(&fx.root, "alpha/.claude/ideas/long.md", &on_disk);
+    let update = scan(&fx.root);
+
+    assert_eq!(item(&update, "doc:alpha:ideas/long.md").metrics.get("truncated"), Some(&1));
+    assert!(!item(&update, ALPHA_BUG).metrics.contains_key("truncated"), "a short doc is not flagged");
+
+    let detail = detail_at(&fx.root, "doc:alpha:ideas/long.md").await.expect("detail");
+    let search = field(&detail, "Search").expect("a Search field explains the cut");
+    assert!(search.starts_with("truncated"), "{search}");
+    assert_eq!(detail.markdown, on_disk, "the detail itself shows the whole doc");
+
+    let short = detail_at(&fx.root, ALPHA_BUG).await.expect("detail");
+    assert_eq!(field(&short, "Search"), None);
+}
+
+#[tokio::test]
+async fn a_wip_folder_with_more_than_500_files_says_it_lists_only_the_first_500() {
+    let fx = fixture();
+    for n in 0..520 {
+        put(&fx.root, &format!("alpha/.claude/wip/big/file-{n:03}.txt"), "x");
+    }
+    put(&fx.root, "alpha/.claude/wip/big/index.md", "# Big folder\n");
+
+    let detail = detail_at(&fx.root, "doc:alpha:wip/big").await.expect("detail");
+
+    assert_eq!(detail.files.len(), 500);
+    let notes: Vec<&str> = detail.fields.iter().filter(|(k, _)| k == "Note").map(|(_, v)| v.as_str()).collect();
+    assert!(notes.iter().any(|n| n.contains("showing the first 500 of 520 files")), "{notes:?}");
+
+    let small = detail_at(&fx.root, ALPHA_WIP).await.expect("detail");
+    assert_eq!(field(&small, "Note"), None, "a short list needs no note");
+}
+
+// ── severity and priority inside code fences ─────────────────────────────────
+
+#[test]
+fn severity_and_priority_lines_inside_code_fences_are_not_read() {
+    let fx = fixture();
+    put(&fx.root, "gamma/.claude/ideas/fenced.md",
+        "# Fenced example\n\n```markdown\n**Severity:** critical\n**Priority:** P1\n```\n");
+    put(&fx.root, "gamma/.claude/ideas/tilde-fenced.md",
+        "# Tilde example\n\n~~~\n**Severity:** critical\n**Priority:** P1\n~~~\n");
+    put(&fx.root, "gamma/.claude/ideas/real-after-fence.md",
+        "# Real lines after an example\n\n```\n**Severity:** critical\n**Priority:** P1\n```\n\n**Severity:** low\n**Priority:** P4\n");
+
+    let update = scan(&fx.root);
+
+    for id in ["doc:gamma:ideas/fenced.md", "doc:gamma:ideas/tilde-fenced.md"] {
+        let doc = item(&update, id);
+        assert_eq!(doc.severity, None, "{id}");
+        assert_eq!(doc.priority, None, "{id}");
+    }
+    let real = item(&update, "doc:gamma:ideas/real-after-fence.md");
+    assert_eq!(real.severity.as_deref(), Some("low"));
+    assert_eq!(real.priority.as_ref().map(|p| p.label.as_str()), Some("P4"));
+}
+
+// ── names containing a colon ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ids_of_repos_and_files_with_colons_round_trip_into_detail() {
+    let (_tmp, root) = temp_root();
+    put(&root, "a:b/.claude/bugs/open/note:with-colon.md", "# Colon in the file name\n");
+    put(&root, "a:b/.claude/wip/topic:x/index.md", "# Colon in the folder name\n");
+    put(&root, "x:ideas/.claude/ideas/y.md", "# Repo name that looks like a doc directory\n");
+    put(&root, "x:wip/.claude/todos/open/z.md", "# Repo name ending in wip\n");
+    let update = scan(&root);
+
+    let expected: BTreeSet<&str> = [
+        "doc:a:b:bugs/open/note:with-colon.md",
+        "doc:a:b:wip/topic:x",
+        "doc:x:ideas:ideas/y.md",
+        "doc:x:wip:todos/open/z.md",
+    ]
+    .into_iter()
+    .collect();
+    let ids: BTreeSet<&str> = all_items(&update).iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(ids, expected);
+
+    for scanned in all_items(&update) {
+        let detail = detail_at(&root, &scanned.id).await.unwrap_or_else(|e| panic!("{}: {e:?}", scanned.id));
+        assert_eq!(detail.item_id, scanned.id);
+        assert_eq!(detail.title, scanned.title, "{}", scanned.id);
+        assert_eq!(field(&detail, "Repo"), scanned.repo.as_deref(), "{}", scanned.id);
+    }
+}
+
+// ── `.claude` itself is a symlink ────────────────────────────────────────────
+
+const SECRET: &str = "escaped-secret-marker";
+
+/// A repo `evil` whose `.claude` points somewhere that is not inside it, and
+/// docs at that somewhere which must never be read.
+struct Escape {
+    how: &'static str,
+    /// What the symlink points at, as written.
+    target: PathBuf,
+    /// The directory the symlink resolves to (it holds `bugs/open/secret.md` and `wip/stolen/index.md`).
+    resolves_to: PathBuf,
+}
+
+fn escapes(root: &Path) -> Vec<Escape> {
+    let tmp = root.parent().unwrap();
+    vec![
+        Escape { how: ".claude -> ..", target: "..".into(), resolves_to: root.to_path_buf() },
+        Escape { how: ".claude -> ../..", target: "../..".into(), resolves_to: tmp.to_path_buf() },
+        Escape { how: ".claude -> an absolute path outside", target: tmp.join("outside-claude"), resolves_to: tmp.join("outside-claude") },
+        Escape { how: ".claude -> .", target: ".".into(), resolves_to: root.join("evil") },
+    ]
+}
+
+fn plant_escape(root: &Path, e: &Escape) {
+    put(&e.resolves_to, "bugs/open/secret.md", &format!("# Secret\n\n{SECRET}\n"));
+    put(&e.resolves_to, "wip/stolen/index.md", &format!("# Stolen\n\n{SECRET}\n"));
+    fs::create_dir_all(root.join("evil")).unwrap();
+    symlink(&e.target, root.join("evil/.claude")).unwrap();
+}
+
+#[tokio::test]
+async fn a_claude_symlink_that_leaves_the_repo_contributes_nothing_and_is_reported() {
+    for how in 0..4 {
+        let fx = fixture();
+        let escape = escapes(&fx.root).swap_remove(how);
+        plant_escape(&fx.root, &escape);
+        let label = escape.how;
+        let mut scanner = Scanner::new(fx.root.clone());
+
+        let update = scanner.scan_all();
+
+        let (status, _) = &update;
+        assert!(items_of(&update, "evil").is_empty(), "{label}");
+        assert!(all_items(&update).iter().all(|i| !i.search_text.contains(SECRET) && !i.id.contains("secret")), "{label}");
+        assert_eq!(status.count, 12, "{label}: the real repos are unaffected");
+        let reason = group_error(status, "evil").unwrap_or_else(|| panic!("{label}: no group error {:?}", status.group_errors));
+        assert!(reason.contains("leaves the repo"), "{label}: {reason}");
+        assert!(status.reason.is_some(), "{label}: never plain fresh: {status:?}");
+        assert_eq!(status.state, SourceState::Fresh, "{label}: the other repos are fine");
+
+        // Rescanning that one repo says the same.
+        let again = scanner.rescan_repo("evil");
+        assert!(items_of(&again, "evil").is_empty(), "{label}");
+        assert!(group_error(&again.0, "evil").is_some(), "{label}");
+
+        for id in ["doc:evil:bugs/open/secret.md", "doc:evil:wip/stolen"] {
+            match detail_at(&fx.root, id).await {
+                Err(e) => assert_eq!(e.code, "unknown_item", "{label}: {id}"),
+                Ok(d) => panic!("{label}: {id} was served: {:?}", d.markdown),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_root_whose_only_repo_escapes_through_its_claude_symlink_is_in_error() {
+    let (_tmp, root) = temp_root();
+    let escape = escapes(&root).swap_remove(0);
+    plant_escape(&root, &escape);
+
+    let (status, groups) = scan(&root);
+
+    assert_eq!(status.state, SourceState::Error);
+    assert_eq!(status.count, 0);
+    assert!(groups.iter().all(|(_, items)| items.is_empty()));
+}
+
+#[tokio::test]
+async fn a_claude_symlink_that_stays_inside_the_repo_works_like_a_folder() {
+    let (_tmp, root) = temp_root();
+    put(&root, "dot/config/claude-docs/bugs/open/real.md", "# Real bug\n");
+    symlink("config/claude-docs", root.join("dot/.claude")).unwrap();
+
+    let update = scan(&root);
+
+    assert_eq!(update.0.state, SourceState::Fresh);
+    assert_eq!(update.0.reason, None);
+    assert!(update.0.group_errors.is_empty(), "{:?}", update.0.group_errors);
+    assert_eq!(items_of(&update, "dot").len(), 1);
+    let detail = detail_at(&root, "doc:dot:bugs/open/real.md").await.expect("detail");
+    assert_eq!(detail.title, "Real bug");
+}
+
+// ── hub integration ──────────────────────────────────────────────────────────
+
+/// The first message (already queued or arriving within `within`) that satisfies `done`.
+async fn recv_within(brx: &mut broadcast::Receiver<ServerMsg>, within: Duration, mut done: impl FnMut(&ServerMsg) -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(left, brx.recv()).await {
-            Err(_) => panic!("timed out after {LIVE_DEADLINE:?} waiting for: {what}"),
+            Err(_) => return false,
             Ok(Ok(msg)) => {
                 if done(&msg) {
-                    return;
+                    return true;
                 }
             }
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
-            Ok(Err(broadcast::error::RecvError::Closed)) => panic!("broadcast closed waiting for: {what}"),
+            Ok(Err(broadcast::error::RecvError::Closed)) => panic!("broadcast closed"),
         }
     }
+}
+
+async fn recv_until(brx: &mut broadcast::Receiver<ServerMsg>, what: &str, done: impl FnMut(&ServerMsg) -> bool) {
+    assert!(recv_within(brx, LIVE_DEADLINE, done).await, "timed out after {LIVE_DEADLINE:?} waiting for: {what}");
+}
+
+fn is_probe_snapshot(msg: &ServerMsg, items: usize) -> bool {
+    matches!(msg, ServerMsg::WorkSnapshot { source: WorkSource::RepoDocs, group: Some(g), items: i } if g == PROBE_REPO && i.len() == items)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_publishes_repo_docs_per_repo_and_republishes_a_group_as_empty_when_it_vanishes() {
     let fx = fixture();
-    // Safe here only because no other test in this binary reads or sets the variable.
-    std::env::set_var("NOSTROMO_CODE_ROOT", &fx.root);
+    make_probe_repo(&fx.root);
     let (btx, mut brx) = broadcast::channel(1024);
     let (_ttx, trx) = watch::channel(Some(TeriTodosSnapshot { generated_at: Some(Utc::now()), ..Default::default() }));
-    let hub = WorkHub::spawn(HubDeps::new(btx, trx));
+    let hub = WorkHub::spawn(HubDeps { repo_docs_root: Some(fx.root.clone()), ..HubDeps::new(btx, trx) });
     let docs = WorkFilter { sources: vec![WorkSource::RepoDocs], ..Default::default() };
 
     // One WorkSnapshot per repo, each carrying that repo's items.
@@ -877,8 +1422,26 @@ async fn hub_publishes_repo_docs_per_repo_and_republishes_a_group_as_empty_when_
     assert_eq!(hub.status(WorkSource::RepoDocs).count, 12);
     assert_eq!(hub.items(&docs).len(), 12);
 
+    // The hub reads details under the same root it was given.
+    let detail = hub.detail(ALPHA_BUG).await.expect("detail under the injected root");
+    assert_eq!(detail.title, "Login button does nothing");
+
+    // File events reach the hub: rewrite a probe doc until its snapshot arrives, then remove it.
+    let deadline = Instant::now() + ARM_DEADLINE;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        write_probe(&fx.root, attempt);
+        if recv_within(&mut brx, ARM_ATTEMPT, |msg| is_probe_snapshot(msg, 1)).await {
+            break;
+        }
+        assert!(Instant::now() < deadline, "file events never reached the hub");
+    }
+    fs::remove_file(fx.root.join(PROBE_FILE)).unwrap();
+    recv_until(&mut brx, "the probe's group to empty", |msg| is_probe_snapshot(msg, 0)).await;
+    assert_eq!(hub.items(&docs).len(), 12);
+
     // A repo whose only doc is deleted is published once more with no items.
-    tokio::time::sleep(Duration::from_millis(300)).await; // let FSEvents arm
     fs::remove_file(fx.root.join("gamma/.claude/ideas/2026-08-15-gamma-idea.md")).unwrap();
     recv_until(&mut brx, "an empty snapshot for gamma", |msg| {
         matches!(msg, ServerMsg::WorkSnapshot { source: WorkSource::RepoDocs, group: Some(g), items } if g == "gamma" && items.is_empty())
