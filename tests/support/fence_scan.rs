@@ -12,15 +12,13 @@ use serde_json::Value;
 const OPEN: &str = "<<<UNTRUSTED-";
 const CLOSE: &str = "<<<END-UNTRUSTED-";
 
-/// What an agent must never see in a string: Unicode tag characters, bidi controls,
-/// zero-width characters, separators and C0/C1 controls (newline and tab included:
-/// a one-line value has neither).
+/// What an agent must never see in a string: whatever the daemon's own sanitiser strips
+/// (control characters, newline and tab included: a one-line value has neither; bidi
+/// controls, zero-width and tag characters, variation selectors, blank fillers ...).
+/// Deliberately delegates to the production predicate, so this helper can never share a
+/// gap with it.
 pub fn is_forbidden(c: char) -> bool {
-    c.is_control()
-        || matches!(c,
-            '\u{E0000}'..='\u{E007F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-            | '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{2060}'..='\u{2064}'
-            | '\u{FEFF}' | '\u{00AD}' | '\u{061C}')
+    nostromo::data::work::is_invisible(c)
 }
 
 /// `text` spelled in Unicode tag characters (U+E0000 + the ASCII code): invisible, but
@@ -78,7 +76,7 @@ fn is_fenced(path: &[String]) -> bool {
     let p: Vec<&str> = path.iter().map(String::as_str).collect();
     matches!(
         p.as_slice(),
-        ["items", "title" | "repo" | "project" | "status" | "severity" | "environment" | "url" | "path" | "linked"]
+        ["items", "title" | "repo" | "project" | "status" | "severity" | "environment" | "url" | "path" | "linked" | "reason"]
             | ["items", "priority", "label"]
             | ["items", "sent", "label"]
             | ["statuses", "group_errors", "group" | "reason"]
@@ -106,7 +104,7 @@ fn walk(value: &Value, path: &mut Vec<String>, nonce: &str, fenced_count: &mut u
                     assert!(!s.contains(&bad), "{here}: `{bad}` outside a fence in {s:?}");
                 }
                 match here.as_str() {
-                    "items.id" => {
+                    "items.id" | "items.item_id" => {
                         assert!(!s.contains("<<<") && !s.contains(">>>"), "{here}: a delimiter in an id: {s:?}");
                         assert!(
                             s.chars().all(|c| c.is_ascii_alphanumeric() || "._:/@+=,~-%".contains(c)),

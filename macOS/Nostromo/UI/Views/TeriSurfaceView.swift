@@ -60,7 +60,7 @@ final class TeriSurfaceView: NSView {
     // MARK: Init
 
     init(store: WorkStore, defaults: UserDefaults = .standard, center: NotificationCenter = .default,
-         scheduler: WorkScheduler = .main) {
+         scheduler: WorkScheduler = .main, now: @escaping () -> Date = Date.init, calendar: Calendar = .current) {
         self.store = store
         self.center = center
         self.scheduler = scheduler
@@ -73,7 +73,7 @@ final class TeriSurfaceView: NSView {
         self.selectedTab = viewState.state.selectedTab
             ?? ((store.picks?.items.isEmpty == false) ? .picks : .todos)
         super.init(frame: .zero)
-        let picksView = TeriPicksView(store: store)
+        let picksView = TeriPicksView(store: store, now: now, calendar: calendar)
         picksView.onSelect = { [weak self] pick in self?.pickSelected(pick) }
         self.picksView = picksView
         buildViews()

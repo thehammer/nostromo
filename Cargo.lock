@@ -2327,6 +2327,7 @@ dependencies = [
  "hostname",
  "image",
  "insta",
+ "libc",
  "mdns-sd",
  "nostromo",
  "notify",

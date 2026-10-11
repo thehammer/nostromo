@@ -39,16 +39,20 @@ pub(crate) const MAX_PATH_CHARS: usize = 500;
 pub(crate) const MAX_BLOCK_CHARS: usize = 400_000;
 
 /// Control characters, invisible Unicode format characters (category Cc and
-/// Cf) and the Unicode line/paragraph separators: never legitimate in a title
-/// or a ticket, often used to hide text.
-pub(crate) fn is_invisible(c: char) -> bool {
+/// Cf), variation selectors, the Unicode line/paragraph separators and the
+/// code points that render as blank (fillers): never legitimate in a title or a
+/// ticket, often used to hide text. Variation selectors are dropped too: a
+/// base character keeps its plain form, and U+E0100..U+E01EF can carry bytes.
+pub fn is_invisible(c: char) -> bool {
     c.is_control()
         || matches!(c,
-            '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}' | '\u{08E2}'
-            | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{1BCA0}'..='\u{1BCA3}'
-            | '\u{1D173}'..='\u{1D17A}' | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
+            '\u{00AD}' | '\u{034F}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}'
+            | '\u{0890}'..='\u{0891}' | '\u{08E2}' | '\u{115F}' | '\u{1160}' | '\u{180E}'
+            | '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E00FF}' | '\u{E0100}'..='\u{E01EF}')
 }
 
 /// `text` as one trimmed line of at most `max_chars` characters: invisible

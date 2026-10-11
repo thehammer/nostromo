@@ -45,8 +45,14 @@ final class TeriPicksView: NSView {
     private var cancellables = Set<AnyCancellable>()
     private var reloadScheduled = false
     private var isShowing = false
-    /// The local day a first-open request was last sent for: one per day per view.
+    /// The local day a first-open request was last SENT for: one per day per view.
+    /// Set only once a frame actually went out.
     private var firstOpenDay: Date?
+    /// A first-open request the tab wanted to make but could not yet (no connection,
+    /// no way to send, no picks snapshot yet): retried when the store changes,
+    /// never from the clock.
+    private var firstOpenPending = false
+    private var keyObserver: NSObjectProtocol?
     private var clockTimer: Timer?
     private var picks: [Pick] = []
 
@@ -68,12 +74,23 @@ final class TeriPicksView: NSView {
         store.objectWillChange
             .sink { [weak self] _ in self?.scheduleReload() }
             .store(in: &cancellables)
+        // A window coming to the front is a person arriving: the other moment
+        // (with the tab becoming visible) a day's first picks may be requested.
+        keyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, let window = self.window, note.object as? NSWindow === window else { return }
+            self.windowDidBecomeKey()
+        }
         reload()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    deinit { clockTimer?.invalidate() }
+    deinit {
+        clockTimer?.invalidate()
+        if let keyObserver { NotificationCenter.default.removeObserver(keyObserver) }
+    }
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -86,6 +103,11 @@ final class TeriPicksView: NSView {
     var refreshingText: String? { isRefreshingVisible ? refreshingLabel.stringValue : nil }
     var isRefreshButtonEnabled: Bool { refreshButton.isEnabled }
     var refreshButtonTitle: String { refreshButton.title }
+    /// The explicit foreground colour of the button's title.
+    var refreshButtonTitleColor: NSColor? {
+        refreshButton.attributedTitle.length == 0 ? nil
+            : refreshButton.attributedTitle.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+    }
     var unavailableNote: String? { unavailableLabel.isHidden ? nil : unavailableLabel.stringValue }
     var errorNote: String? { errorLabel.isHidden ? nil : errorLabel.stringValue }
     var emptyStateText: String? { emptyLabel.isHidden ? nil : emptyLabel.stringValue }
@@ -103,15 +125,30 @@ final class TeriPicksView: NSView {
     func tabDidShow() {
         isShowing = true
         reload()
+        requestFirstOpenPicksIfDue()
         clockTimer?.invalidate()
         // The header says how long ago: keep it true while the tab stays open.
-        clockTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.reload() }
+        clockTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.clockTick() }
     }
 
     func tabDidLeave() {
         isShowing = false
+        firstOpenPending = false
         clockTimer?.invalidate()
         clockTimer = nil
+    }
+
+    /// What the 60 s timer does: keep the header's "2 h ago" true. It never asks
+    /// for picks: a tab left open overnight with nobody there must not start an
+    /// unattended generation at midnight.
+    func clockTick() {
+        reload(retryFirstOpen: false)
+    }
+
+    /// The text colours the row at `index` draws right now (source, title, reason,
+    /// then "done since" and "Sent to" when present).
+    func textColors(forRow index: Int) -> [NSColor] {
+        rowViews.indices.contains(index) ? rowViews[index].textColors : []
     }
 
     /// Select `itemId`'s row (as a click does) and report it.
@@ -182,6 +219,12 @@ final class TeriPicksView: NSView {
         refreshButton.target = self
         refreshButton.action = #selector(pressRefresh)
         refreshButton.bezelStyle = .recessed
+        // Explicit colour, as the tab buttons have: the default title colour follows
+        // the system appearance and goes dark on this always-dark surface.
+        refreshButton.attributedTitle = NSAttributedString(string: "Refresh picks", attributes: [
+            .foregroundColor: Theme.fg,
+            .font: Theme.statusFont,
+        ])
         refreshButton.setAccessibilityLabel("Refresh picks")
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -253,7 +296,7 @@ final class TeriPicksView: NSView {
         }
     }
 
-    private func reload() {
+    private func reload(retryFirstOpen: Bool = true) {
         let snapshot = store.picks
         picks = snapshot?.items ?? []
         let rows = makeRows(picks)
@@ -280,24 +323,46 @@ final class TeriPicksView: NSView {
         emptyLabel.stringValue = TeriPicksTab.config.emptyMessage
         emptyLabel.isHidden = !(rows.isEmpty && !generating)
         dimIfDisconnected()
-        requestFirstOpenPicksIfDue()
+        if retryFirstOpen && firstOpenPending { requestFirstOpenPicksIfDue() }
     }
 
     private func dimIfDisconnected() {
         alphaValue = store.isConnected ? 1 : 0.5
     }
 
+    /// A window of this view came to the front.
+    private func windowDidBecomeKey() {
+        guard isShowing else { return }
+        requestFirstOpenPicksIfDue()
+    }
+
     /// The first time the tab is open on a day whose picks Teri has not made yet,
-    /// ask the daemon to make them. Once per local day per view, so a failed
-    /// generation is never retried in a loop (the button is for that).
+    /// ask the daemon to make them. Called when the tab is shown and when its
+    /// window becomes key (plus store changes while a request is pending), never
+    /// from the clock. Once per local day per view, and the day counts as done
+    /// only once the frame was sent, so a failed generation is never retried in a
+    /// loop from here (the daemon keeps its own attempt state too; the button is
+    /// for retrying).
     private func requestFirstOpenPicksIfDue() {
-        guard isShowing, let snapshot = store.picks, !snapshot.generating else { return }
+        guard isShowing else {
+            firstOpenPending = false
+            return
+        }
+        guard let snapshot = store.picks else {
+            firstOpenPending = true   // the picks have not arrived yet
+            return
+        }
+        firstOpenPending = false
+        guard !snapshot.generating else { return }
         let today = calendar.startOfDay(for: now())
         guard firstOpenDay != today else { return }
         let isStale = snapshot.generatedAt.map { $0 < today } ?? true
         guard isStale else { return }
-        firstOpenDay = today
-        store.refreshPicks(reason: "first_open")
+        if store.refreshPicks(reason: "first_open") {
+            firstOpenDay = today
+        } else {
+            firstOpenPending = true   // not connected, or nothing to send with: when that changes
+        }
     }
 
     // MARK: Rows
@@ -386,53 +451,66 @@ private final class PicksFlippedView: NSView {
 }
 
 /// One pick: source and title on the first line, the reason (and markers) under it.
+///
+/// The selected row is filled with `Theme.bgBarActive` and draws its text in the
+/// light colours that theme pins for that fill (all at least 5:1); the unselected
+/// colours (muted grey, sage, cornflower) are for the dark surface only.
 private final class PickRowView: NSView {
     var onClick: (() -> Void)?
     var isSelected = false {
         didSet {
             guard isSelected != oldValue else { return }
-            layer?.backgroundColor = isSelected ? Theme.selectionBackground.cgColor : NSColor.clear.cgColor
+            layer?.backgroundColor = isSelected ? Theme.bgBarActive.cgColor : NSColor.clear.cgColor
+            applyColors()
         }
     }
 
+    private let content: PicksRowContent
+    private let source: NSTextField
+    private let title: NSTextField
+    private let reason: NSTextField
+    private let doneSince: NSTextField?
+    private let sent: NSTextField?
+
+    /// Every text colour drawn now: source, title, reason, done-since and sent when present.
+    var textColors: [NSColor] {
+        [source.textColor, Self.color(of: title), Self.color(of: reason), doneSince?.textColor, sent?.textColor]
+            .compactMap { $0 }
+    }
+
     init(content: PicksRowContent) {
+        self.content = content
+        source = NSTextField(labelWithString: content.sourceText)
+        title = NSTextField(labelWithString: "")
+        reason = NSTextField(labelWithString: "")
+        doneSince = content.doneSinceText.map { NSTextField(labelWithString: $0) }
+        sent = content.sentText.map { NSTextField(labelWithString: $0) }
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
 
-        let source = NSTextField(labelWithString: content.sourceText)
         source.font = Theme.statusFont
-        source.textColor = Theme.fgMuted
         source.setContentHuggingPriority(.required, for: .horizontal)
-
-        let title = NSTextField(labelWithAttributedString: Self.styled(content.title, struck: content.isStruck,
-                                                                       font: Theme.tabFontBold, color: Theme.fg))
         title.lineBreakMode = .byTruncatingTail
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         var firstLine: [NSView] = [source, title]
-        if let done = content.doneSinceText {
-            let label = NSTextField(labelWithString: done)
-            label.font = Theme.statusFont
-            label.textColor = Theme.sage
-            label.setContentHuggingPriority(.required, for: .horizontal)
-            firstLine.append(label)
+        if let doneSince {
+            doneSince.font = Theme.statusFont
+            doneSince.setContentHuggingPriority(.required, for: .horizontal)
+            firstLine.append(doneSince)
         }
         let top = NSStackView(views: firstLine)
         top.orientation = .horizontal
         top.spacing = 6
 
-        let reason = NSTextField(labelWithAttributedString: Self.styled(
-            content.reason, struck: content.isStruck, font: Theme.tabFont, color: Theme.fgMuted))
         reason.lineBreakMode = .byWordWrapping
         reason.maximumNumberOfLines = 0
         reason.preferredMaxLayoutWidth = 420
         var lines: [NSView] = [top, reason]
-        if let sent = content.sentText {
-            let label = NSTextField(labelWithString: sent)
-            label.font = Theme.statusFont
-            label.textColor = Theme.cornflower
-            lines.append(label)
+        if let sent {
+            sent.font = Theme.statusFont
+            lines.append(sent)
         }
         let column = NSStackView(views: lines)
         column.orientation = .vertical
@@ -447,6 +525,7 @@ private final class PickRowView: NSView {
             column.leadingAnchor.constraint(equalTo: leadingAnchor),
             column.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
+        applyColors()
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel(content.accessibilityLabel)
@@ -455,6 +534,22 @@ private final class PickRowView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     override func mouseDown(with event: NSEvent) { onClick?() }
+
+    private func applyColors() {
+        let selected = isSelected
+        let muted = selected ? Theme.tabCaptionOnActive : Theme.fgMuted
+        let primary = selected ? NSColor.white : Theme.fg
+        source.textColor = muted
+        doneSince?.textColor = selected ? Theme.fg : Theme.sage
+        sent?.textColor = selected ? Theme.fg : Theme.cornflower
+        title.attributedStringValue = Self.styled(content.title, struck: content.isStruck, font: Theme.tabFontBold, color: primary)
+        reason.attributedStringValue = Self.styled(content.reason, struck: content.isStruck, font: Theme.tabFont, color: muted)
+    }
+
+    private static func color(of field: NSTextField) -> NSColor? {
+        guard field.attributedStringValue.length > 0 else { return field.textColor }
+        return field.attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+    }
 
     private static func styled(_ text: String, struck: Bool, font: NSFont, color: NSColor) -> NSAttributedString {
         var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]

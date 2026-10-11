@@ -694,6 +694,7 @@ private final class WorkRowCellView: NSTableCellView {
     private let title = NSTextField(labelWithString: "")
     private let due = NSTextField(labelWithString: "")
     private let status = NSTextField(labelWithString: "")
+    private var content: WorkRowContent?
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         kindWidth = kind.widthAnchor.constraint(equalToConstant: 0)
@@ -735,17 +736,41 @@ private final class WorkRowCellView: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     func configure(_ content: WorkRowContent) {
-        priority.stringValue = content.priorityText ?? ""
-        priority.textColor = Self.color(forRank: content.priorityRank)
+        self.content = content
         kind.stringValue = content.kindText ?? ""
         kindWidth.constant = content.kindText == nil ? 0 : 66
         title.stringValue = content.title
+        priority.stringValue = content.priorityText ?? ""
         due.stringValue = content.dueText ?? ""
-        due.textColor = content.dueIsUrgent ? Theme.redSweater : Theme.fgMuted
         status.stringValue = content.statusText ?? ""
+        applyColors()
         setAccessibilityElement(true)
         setAccessibilityRole(.row)
         setAccessibilityLabel(content.accessibilityLabel)
+    }
+
+    /// The row sits on the system selection fill (a saturated blue) when selected in
+    /// the key window; the dark-surface colours (muted grey, amber, red) are
+    /// unreadable on it, so the text goes light there.
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { if backgroundStyle != oldValue { applyColors() } }
+    }
+
+    private func applyColors() {
+        guard let content else { return }
+        if backgroundStyle == .emphasized {
+            priority.textColor = .white
+            kind.textColor = Theme.tabCaptionOnActive
+            title.textColor = .white
+            due.textColor = .white
+            status.textColor = Theme.tabCaptionOnActive
+        } else {
+            priority.textColor = Self.color(forRank: content.priorityRank)
+            kind.textColor = Theme.fgMuted
+            title.textColor = Theme.fg
+            due.textColor = content.dueIsUrgent ? Theme.redSweater : Theme.fgMuted
+            status.textColor = Theme.fgMuted
+        }
     }
 
     private static func color(forRank rank: Int?) -> NSColor {

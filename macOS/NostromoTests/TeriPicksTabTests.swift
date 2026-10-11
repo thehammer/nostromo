@@ -4,31 +4,43 @@ import AppKit
 // Slice T4: the Picks tab of the Teri surface. Picks are Teri's agent-chosen next
 // actions across all four sources. The view is fed by a `WorkStore` we seed
 // ourselves and its outgoing daemon frames are captured from `store.sendFrame`.
-// Nothing here asserts on pixels, depends on a window server beyond one offscreen
-// window, or waits a fixed time: changes are polled for on the run loop, and a
-// "nothing was sent" check drains the run loop once before looking.
+// Nothing here asserts on pixels or depends on a window server beyond one offscreen
+// window. Nothing reads the wall clock or waits a fixed time either: "now" is an
+// injected, fixed Date; a change that hops through the main queue is awaited by
+// flushing the main queue until the state holds (pass or fail depends on state,
+// never on elapsed time); and a "nothing was sent" check flushes the main queue
+// (what the view had queued has then run) before looking.
 //
 // Day arithmetic is pinned to America/Chicago with a fixed clock, so results do
 // not depend on the machine running the tests. October 2026 is still CDT (-05:00).
 
 // MARK: - Helpers
 
-/// Pump the main run loop until `condition` holds (true) or `timeout` passes (false).
-@discardableResult
-private func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
-    while !condition() {
-        if Date() > deadline { return false }
-        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+/// Run everything already queued on the main queue, and whatever that queues in
+/// turn (a few generations). Returns when the queue has been serviced, however
+/// long that takes; there is no deadline.
+private func flushMain(generations: Int = 3) {
+    for _ in 0..<generations {
+        var ran = false
+        DispatchQueue.main.async { ran = true }
+        while !ran { RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01)) }
     }
-    return true
 }
 
-/// Let anything already queued on the main run loop run, so a "nothing happened"
-/// assertion is not just a view that has not caught up yet.
-private func drain(_ seconds: TimeInterval = 0.1) {
-    RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+/// Flush the main queue until `condition` holds (true), giving up after a generous
+/// number of turns (false). The bound counts turns, not seconds.
+@discardableResult
+private func waitUntil(maxTurns: Int = 500, _ condition: () -> Bool) -> Bool {
+    for _ in 0..<maxTurns {
+        if condition() { return true }
+        flushMain(generations: 1)
+    }
+    return condition()
 }
+
+/// Let anything already queued on the main queue run, so a "nothing happened"
+/// assertion is not just a view that has not caught up yet.
+private func drain() { flushMain() }
 
 private final class FrameLog {
     var frames: [WorkClientMessage] = []
@@ -114,6 +126,51 @@ private func seedItem(_ store: WorkStore, _ item: WorkItem) {
     store.apply(snapshot: item.source, group: nil, items: [item])
 }
 
+/// Picks generated an hour before `morning`: made today, so not stale.
+private func freshSnapshot(items: [[String: Any]] = fiveItems) -> PicksSnapshot {
+    snapshot(generatedAt: isoParser.string(from: morning.addingTimeInterval(-3_600)), items: items)
+}
+
+/// Picks from three days before `morning`: stale in any time zone.
+private func staleSnapshot(items: [[String: Any]] = fiveItems) -> PicksSnapshot {
+    snapshot(generatedAt: isoParser.string(from: morning.addingTimeInterval(-3 * 86_400)), items: items)
+}
+
+// MARK: - Colour maths (WCAG 2.x)
+
+private func srgbComponents(_ color: NSColor) -> [CGFloat] {
+    guard let c = color.usingColorSpace(.sRGB) else {
+        XCTFail("colour \(color) has no sRGB representation")
+        return [0, 0, 0, 1]
+    }
+    return [c.redComponent, c.greenComponent, c.blueComponent, c.alphaComponent]
+}
+
+/// `color` as seen over an opaque `backdrop` (alpha composited), as sRGB r, g, b.
+private func composited(_ color: NSColor, over backdrop: NSColor) -> [CGFloat] {
+    let f = srgbComponents(color), b = srgbComponents(backdrop)
+    return (0..<3).map { f[$0] * f[3] + b[$0] * (1 - f[3]) }
+}
+
+private func relativeLuminance(_ rgb: [CGFloat]) -> Double {
+    let lin = rgb.map { v -> Double in
+        let c = Double(v)
+        return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+}
+
+/// WCAG contrast ratio of text `color` drawn on the opaque `background`, 1...21.
+private func contrastRatio(_ color: NSColor, on background: NSColor) -> Double {
+    let l1 = relativeLuminance(composited(color, over: background))
+    let l2 = relativeLuminance(composited(background, over: background))
+    return (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
+}
+
+private func sameColour(_ a: NSColor, _ b: NSColor) -> Bool {
+    zip(srgbComponents(a), srgbComponents(b)).allSatisfy { abs($0 - $1) < 0.002 }
+}
+
 // MARK: - The view
 
 final class TeriPicksTabTests: XCTestCase {
@@ -123,7 +180,9 @@ final class TeriPicksTabTests: XCTestCase {
         let clock: TestClock
         let view: TeriPicksView
 
-        init(now: Date = morning, picks: PicksSnapshot? = nil, seed: (WorkStore) -> Void = { _ in }) {
+        /// `window`: host the view in it (for the "window became key" paths).
+        init(now: Date = morning, picks: PicksSnapshot? = nil, window: NSWindow? = nil,
+             seed: (WorkStore) -> Void = { _ in }) {
             let clock = TestClock(now)
             self.clock = clock
             let log = self.log
@@ -131,6 +190,10 @@ final class TeriPicksTabTests: XCTestCase {
             if let picks { store.apply(picks: picks) }
             seed(store)
             view = TeriPicksView(store: store, now: { clock.now }, calendar: chicago)
+            if let window, let content = window.contentView {
+                view.frame = content.bounds
+                content.addSubview(view)
+            }
         }
 
         var titles: [String] { view.visibleRows.map(\.title) }
@@ -570,6 +633,280 @@ final class TeriPicksTabTests: XCTestCase {
 
         XCTAssertEqual(rig.log.frames, [.picksRefresh(reason: "manual")])
     }
+
+    // MARK: First open: only on a real activation, only once it was really sent
+
+    private let nextDay = at("2026-10-12T00:05:00-05:00")
+
+    private func jiraStatusChange() -> SourceStatus { SourceStatus(source: .jira, state: .fresh, count: 1) }
+
+    private func postKey(_ window: NSWindow) {
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+    }
+
+    func testShowingTheTabWhileDisconnectedSendsNothingAndAsksExactlyOnceWhenTheConnectionReturns() {
+        let rig = ViewRig(picks: staleSnapshot()) { $0.setConnected(false) }
+
+        rig.view.tabDidShow()
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "there is no connection to send on: \(rig.log.frames)")
+
+        rig.store.setConnected(true)
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 },
+                      "the day was not used up by the attempt that could not send: \(rig.log.frames)")
+
+        rig.store.apply(status: jiraStatusChange())
+        rig.store.setConnected(false)
+        rig.store.setConnected(true)
+        rig.view.tabDidShow()
+        drain()
+        XCTAssertEqual(rig.log.frames, [.picksRefresh(reason: "first_open")], "still exactly one")
+    }
+
+    func testShowingTheTabWithNoWayToSendAsksExactlyOnceWhenOneAppears() {
+        let rig = ViewRig(picks: staleSnapshot()) { $0.sendFrame = nil }
+
+        rig.view.tabDidShow()
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty)
+
+        let log = rig.log
+        rig.store.sendFrame = { log.frames.append($0) }
+        // Setting the sender is not itself observable; any store change lets the view look again.
+        rig.store.apply(status: jiraStatusChange())
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "frames: \(rig.log.frames)")
+
+        rig.store.apply(status: jiraStatusChange())
+        drain()
+        XCTAssertEqual(rig.log.frames, [.picksRefresh(reason: "first_open")])
+    }
+
+    func testARequestThatCouldNotBeSentIsNotSentLaterIfTheTabWasLeftInTheMeantime() {
+        let rig = ViewRig(picks: staleSnapshot()) { $0.setConnected(false) }
+        rig.view.tabDidShow()
+        rig.view.tabDidLeave()
+
+        rig.store.setConnected(true)
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "the tab is not showing: \(rig.log.frames)")
+
+        rig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "showing it again asks: \(rig.log.frames)")
+    }
+
+    func testTheHostingWindowBecomingKeyAsksWhenTheTabIsShowingAndANewDayHasStarted() {
+        let window = makeRigWindow(self)
+        let rig = ViewRig(picks: freshSnapshot(), window: window)
+        rig.view.tabDidShow()
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "today's picks exist: \(rig.log.frames)")
+
+        rig.clock.now = nextDay   // the tab stayed open across midnight; today's picks are not made yet
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "time passing alone asks nothing: \(rig.log.frames)")
+
+        postKey(window)
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "frames: \(rig.log.frames)")
+
+        postKey(window)
+        drain()
+        XCTAssertEqual(rig.log.frames, [.picksRefresh(reason: "first_open")], "once per day, key window or not")
+    }
+
+    func testTheWindowBecomingKeyAfterTheDayWasAlreadyRequestedAsksNothingMore() {
+        let window = makeRigWindow(self)
+        let rig = ViewRig(picks: staleSnapshot(), window: window)
+        rig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 })
+
+        postKey(window)
+        drain()
+
+        XCTAssertEqual(rig.log.frames, [.picksRefresh(reason: "first_open")])
+    }
+
+    func testTheWindowBecomingKeyAsksNothingWhileTheTabIsNotShowing() {
+        let window = makeRigWindow(self)
+        let rig = ViewRig(picks: staleSnapshot(), window: window)
+
+        postKey(window)
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "never shown: \(rig.log.frames)")
+
+        rig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 })
+        rig.view.tabDidLeave()
+        rig.clock.now = nextDay
+        postKey(window)
+        drain()
+        XCTAssertEqual(rig.log.firstOpenCount, 1, "left the tab: \(rig.log.frames)")
+    }
+
+    func testAnotherWindowBecomingKeyAsksNothing() {
+        let window = makeRigWindow(self)
+        let other = makeRigWindow(self)
+        let rig = ViewRig(picks: freshSnapshot(), window: window)
+        rig.view.tabDidShow()
+        rig.clock.now = nextDay
+
+        postKey(other)
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "not this view's window: \(rig.log.frames)")
+
+        postKey(window)
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 })
+    }
+
+    func testATabLeftShowingAcrossMidnightNeverAsksFromTheClockOrFromStoreChanges() {
+        let rig = ViewRig(picks: freshSnapshot())
+        rig.view.tabDidShow()
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty)
+
+        rig.clock.now = nextDay
+        rig.view.clockTick()
+        rig.view.clockTick()
+        rig.store.apply(status: jiraStatusChange())
+        drain()
+
+        XCTAssertTrue(rig.log.frames.isEmpty, "the 60 s clock must never request picks: \(rig.log.frames)")
+        XCTAssertEqual(rig.view.headerText, "Generated yesterday 07:00", "the clock does keep the header true")
+
+        rig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "showing the tab after midnight asks: \(rig.log.frames)")
+        drain()
+        XCTAssertEqual(rig.log.frames, [.picksRefresh(reason: "first_open")])
+    }
+
+    func testTheClockAcrossMidnightDoesNotAskAgainAfterADayThatWasAlreadyRequestedEither() {
+        let rig = ViewRig(picks: staleSnapshot())
+        rig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 })
+
+        rig.clock.now = nextDay
+        rig.view.clockTick()
+        drain()
+        XCTAssertEqual(rig.log.firstOpenCount, 1, "a new day re-arms the request, but only a showing may use it")
+
+        rig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 2 }, "frames: \(rig.log.frames)")
+    }
+
+    // MARK: Refresh sender contract
+
+    func testRefreshPicksSendsTheFrameAndReportsTrueWhenConnected() {
+        let store = WorkStore()
+        let log = FrameLog()
+        store.sendFrame = { log.frames.append($0) }
+
+        XCTAssertTrue(store.refreshPicks(reason: "manual"))
+        XCTAssertEqual(log.frames, [.picksRefresh(reason: "manual")])
+    }
+
+    func testRefreshPicksSendsNothingAndReportsFalseWhileDisconnected() {
+        let store = WorkStore()
+        let log = FrameLog()
+        store.sendFrame = { log.frames.append($0) }
+        store.setConnected(false)
+
+        XCTAssertFalse(store.refreshPicks(reason: "first_open"))
+        XCTAssertTrue(log.frames.isEmpty, "\(log.frames)")
+    }
+
+    func testRefreshPicksReportsFalseWhenThereIsNoSender() {
+        let store = WorkStore()
+        store.sendFrame = nil
+
+        XCTAssertFalse(store.refreshPicks(reason: "manual"))
+    }
+
+    // MARK: Row text legibility
+
+    private func rowFixture(window: NSWindow? = nil) -> ViewRig {
+        // Row 4 (jira:RM-3) is done since and has been sent somewhere: every marker is drawn on it.
+        ViewRig(picks: freshSnapshot(), window: window) { store in
+            seedItem(store, liveItem("jira:RM-3", source: "jira", title: "RM-3 Old migration", sent: ["Fix webhook"]))
+        }
+    }
+
+    private let markerNames = ["source", "title", "reason", "done since", "sent"]
+
+    func testEveryTextColourOnTheSelectedRowIsLegibleAgainstTheSelectionFill() {
+        let rig = rowFixture()
+        XCTAssertTrue(waitUntil { rig.view.visibleRows.count == 5 && rig.view.visibleRows[4].sentText != nil })
+
+        for (index, itemId) in [(4, "jira:RM-3"), (0, "todo:7")] {
+            rig.view.select(itemId: itemId)
+            let colours = rig.view.textColors(forRow: index)
+            XCTAssertEqual(colours.count, index == 4 ? 5 : 3,
+                           "source, title, reason, then done since and sent when the row has them")
+            for (position, colour) in colours.enumerated() {
+                let ratio = contrastRatio(colour, on: Theme.bgBarActive)
+                XCTAssertGreaterThanOrEqual(ratio, 4.5,
+                    "\(markerNames[position]) text on selected row \(index) is \(String(format: "%.2f", ratio)):1 on the selection fill")
+            }
+        }
+    }
+
+    func testUnselectedRowsKeepTheirMutedAndAccentColoursAndStayLegibleOnTheSurface() {
+        let rig = rowFixture()
+        XCTAssertTrue(waitUntil { rig.view.visibleRows.count == 5 && rig.view.visibleRows[4].sentText != nil })
+
+        let colours = rig.view.textColors(forRow: 4)
+        XCTAssertEqual(colours.count, 5)
+        let expected = [Theme.fgMuted, Theme.fg, Theme.fgMuted, Theme.sage, Theme.cornflower]
+        for (position, colour) in colours.enumerated() {
+            XCTAssertTrue(sameColour(colour, expected[position]), "\(markerNames[position]) keeps its palette colour")
+            // Measured against today's palette: fgMuted 5.8, fg 14.2, sage 8.5, cornflower 6.5 (all >= 4.5).
+            XCTAssertGreaterThanOrEqual(contrastRatio(colour, on: Theme.bg), 4.5, markerNames[position])
+        }
+    }
+
+    func testDeselectingARowRestoresItsUnselectedColours() {
+        let rig = rowFixture()
+        XCTAssertTrue(waitUntil { rig.view.visibleRows.count == 5 && rig.view.visibleRows[4].sentText != nil })
+        let before = rig.view.textColors(forRow: 4)
+
+        rig.view.select(itemId: "jira:RM-3")
+        rig.view.select(itemId: "todo:7")   // moves the selection off row 4
+
+        let after = rig.view.textColors(forRow: 4)
+        XCTAssertEqual(after.count, before.count)
+        for (position, colour) in after.enumerated() {
+            XCTAssertTrue(sameColour(colour, before[position]), "\(markerNames[position]) is back to its unselected colour")
+        }
+    }
+
+    // MARK: Refresh button legibility
+
+    func testTheRefreshButtonTitleHasAnExplicitLegibleColourAndStillSaysRefreshPicks() {
+        let rig = ViewRig(picks: freshSnapshot())
+        XCTAssertTrue(waitUntil { rig.view.isRefreshButtonEnabled })
+
+        let colour = rig.view.refreshButtonTitleColor
+        XCTAssertNotNil(colour, "an unset title colour is what made PR #229's tab labels vanish on a dark surface")
+        if let colour {
+            XCTAssertGreaterThanOrEqual(contrastRatio(colour, on: Theme.bg), 4.5)
+        }
+        XCTAssertEqual(rig.view.refreshButtonTitle, "Refresh picks")
+    }
+
+    func testTheRefreshButtonKeepsItsLegibleColourThroughAGenerationCycle() {
+        let rig = ViewRig(picks: freshSnapshot())
+        XCTAssertTrue(waitUntil { rig.view.isRefreshButtonEnabled })
+
+        rig.store.apply(picks: snapshot(generatedAt: "2026-10-11T07:00:00-05:00", generating: true, items: fiveItems))
+        XCTAssertTrue(waitUntil { !rig.view.isRefreshButtonEnabled })
+        rig.store.apply(picks: freshSnapshot())
+        XCTAssertTrue(waitUntil { rig.view.isRefreshButtonEnabled })
+
+        let colour = rig.view.refreshButtonTitleColor
+        XCTAssertNotNil(colour)
+        if let colour {
+            XCTAssertGreaterThanOrEqual(contrastRatio(colour, on: Theme.bg), 4.5)
+        }
+        XCTAssertEqual(rig.view.refreshButtonTitle, "Refresh picks")
+    }
 }
 
 // MARK: - The surface
@@ -607,7 +944,8 @@ final class TeriPicksSurfaceTests: XCTestCase {
         return UserDefaults(suiteName: name)!
     }
 
-    /// A real surface in an offscreen window; `seed` runs before it exists.
+    /// A real surface in an offscreen window; `seed` runs before it exists. Its clock is
+    /// the fixed `morning` in Chicago and its scheduler never fires by itself.
     private func makeRig(defaults: UserDefaults? = nil, seed: (WorkStore) -> Void = { _ in }) -> Rig {
         let store = WorkStore()
         let log = FrameLog()
@@ -615,7 +953,7 @@ final class TeriPicksSurfaceTests: XCTestCase {
         seed(store)
         let window = makeRigWindow(self, size: NSSize(width: 900, height: 700))
         let surface = TeriSurfaceView(store: store, defaults: defaults ?? makeDefaults(), center: NotificationCenter(),
-                                      scheduler: .main)
+                                      scheduler: ManualScheduler().scheduler, now: { morning }, calendar: chicago)
         surface.frame = window.contentView!.bounds
         surface.autoresizingMask = [.width, .height]
         window.contentView!.addSubview(surface)
@@ -623,15 +961,11 @@ final class TeriPicksSurfaceTests: XCTestCase {
         return Rig(store: store, window: window, surface: surface, log: log)
     }
 
-    /// Picks generated just now by the real clock, so nothing here is "stale".
-    private func freshPicks(items: [[String: Any]] = fiveItems) -> PicksSnapshot {
-        snapshot(generatedAt: isoParser.string(from: Date()), items: items)
-    }
+    /// Picks generated an hour before the injected clock: made today, so nothing here is "stale".
+    private func freshPicks(items: [[String: Any]] = fiveItems) -> PicksSnapshot { freshSnapshot(items: items) }
 
-    /// Picks from three days ago by the real clock: always before today, in any time zone.
-    private func stalePicks(items: [[String: Any]] = fiveItems) -> PicksSnapshot {
-        snapshot(generatedAt: isoParser.string(from: Date().addingTimeInterval(-3 * 86_400)), items: items)
-    }
+    /// Picks from three days before the injected clock: before today, in any time zone.
+    private func stalePicks(items: [[String: Any]] = fiveItems) -> PicksSnapshot { staleSnapshot(items: items) }
 
     private func focusInside(_ rig: Rig) {
         let child = PicksFocusableView()
@@ -688,6 +1022,14 @@ final class TeriPicksSurfaceTests: XCTestCase {
     }
 
     private func titlesOf(_ items: [[String: Any]]) -> [String] { items.map { $0["title"] as! String } }
+
+    func testTheSurfaceHandsItsInjectedClockToThePicksView() throws {
+        let rig = makeRig(seed: { $0.apply(picks: self.freshPicks()) })
+
+        let picksView = try XCTUnwrap(rig.surface.picksView)
+        // An hour before the injected "morning"; against the wall clock this would read as days ago.
+        XCTAssertTrue(waitUntil { picksView.headerText == "Generated 1 h ago" }, picksView.headerText)
+    }
 
     // MARK: First open through the surface
 

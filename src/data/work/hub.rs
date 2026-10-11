@@ -171,6 +171,20 @@ impl Slot {
     }
 }
 
+/// Every source's status with the ids it holds, in source order.
+fn presence_of(state: &State) -> Vec<SourcePresence> {
+    SOURCE_ORDER
+        .iter()
+        .map(|source| {
+            let slot = &state.slots[source];
+            SourcePresence {
+                status: slot.status.clone(),
+                ids: slot.groups.values().flatten().map(|item| item.id.clone()).collect(),
+            }
+        })
+        .collect()
+}
+
 fn loading_status(source: WorkSource) -> SourceStatus {
     SourceStatus {
         source,
@@ -313,31 +327,26 @@ impl WorkHub {
         self.picks.publish(entries, self)
     }
 
-    /// Source and title of each of `ids` the hub holds right now.
-    pub(crate) fn item_headlines(&self, ids: HashSet<&str>) -> HashMap<String, (WorkSource, String)> {
+    /// Source and title of each of `ids` the hub holds right now, together with
+    /// every source's presence, read under ONE lock so the two agree.
+    pub(crate) fn picks_view(
+        &self,
+        ids: &HashSet<&str>,
+    ) -> (HashMap<String, (WorkSource, String)>, Vec<SourcePresence>) {
         let state = self.state.lock().unwrap();
-        state
+        let known = state
             .slots
             .values()
             .flat_map(|slot| slot.groups.values().flatten())
             .filter(|item| ids.contains(item.id.as_str()))
             .map(|item| (item.id.clone(), (item.source, item.title.clone())))
-            .collect()
+            .collect();
+        (known, presence_of(&state))
     }
 
     /// Every source's status with the ids it holds.
     pub(crate) fn source_presence(&self) -> Vec<SourcePresence> {
-        let state = self.state.lock().unwrap();
-        SOURCE_ORDER
-            .iter()
-            .map(|source| {
-                let slot = &state.slots[source];
-                SourcePresence {
-                    status: slot.status.clone(),
-                    ids: slot.groups.values().flatten().map(|item| item.id.clone()).collect(),
-                }
-            })
-            .collect()
+        presence_of(&self.state.lock().unwrap())
     }
 
     pub fn status(&self, source: WorkSource) -> SourceStatus {

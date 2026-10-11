@@ -85,6 +85,7 @@ notify = "6"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
 regex = "1"
 
 # SQLite (Teri todos)
