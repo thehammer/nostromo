@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
@@ -29,9 +30,11 @@ use crate::{
     data::{
         dirty_file,
         fred_calendar::CalendarSnapshot,
+        fred_detail::GraphFredDetail,
         fred_mailbox::{MailboxItem, MailboxSnapshot},
         graph_client::{failure_reason, GraphClient, ThrottleBackoff},
         work::model::SourceState,
+        work::service::install_fred_detail_service,
     },
 };
 
@@ -151,6 +154,8 @@ impl FredMailboxNativeSource {
                     return;
                 }
             };
+            // The same client serves message/event detail requests.
+            install_fred_detail_service(Arc::new(GraphFredDetail::new(graph.clone())));
             let source = FredMailboxNativeSource { config, timing: FredTiming::default() };
             source.run(graph, tx, &mut dirty_rx).await;
         });
