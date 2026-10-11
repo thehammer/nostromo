@@ -1,8 +1,10 @@
 //! Handling of third-party text (a Jira description, a mail body, a repo doc)
 //! on its way into an agent's prompt or an unattended Mother plan.
 //!
-//! The text is data, never instructions. Two defences, applied by
-//! `create_focus_core` for every caller and both destinations:
+//! The text is data, never instructions. Two defences. The sources and the
+//! Teri tools use the sanitising half ([`one_line`], [`MAX_LINE_CHARS`]) to keep
+//! item titles to one capped line; `create_focus_core` applies both for every
+//! caller and both destinations:
 //!
 //! - **Fence**: the text goes inside a code fence longer than any backtick run
 //!   it contains, so nothing in it can close the fence or open a heading,

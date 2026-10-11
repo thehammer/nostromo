@@ -11,6 +11,7 @@
 //! - [`todos`]       — Teri todo adapter
 //! - [`repo_docs`], [`jira`], [`sentry`] — sources (placeholders until T1–T3)
 //! - [`picks`], [`send`], [`sent`]        — T4/T5 seams (placeholders)
+//! - [`untrusted`]   — one-line capping and fencing of third-party text
 
 pub mod credentials;
 pub mod endpoint;
@@ -25,6 +26,7 @@ pub mod sent;
 pub mod sentry;
 pub mod service;
 pub mod todos;
+pub(crate) mod untrusted;
 
 pub use model::*;
 pub use service::{
