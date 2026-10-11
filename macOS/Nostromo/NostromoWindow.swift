@@ -27,6 +27,49 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
+    /// Placement observer (set by AppDelegate). Receives screen / full-screen
+    /// lifecycle events so the window's display can be verified. Observation only:
+    /// it never changes what the safeguards below do.
+    var lifecycleHandler: ((WindowLifecycleEvent) -> Void)?
+
+    /// True for the real (always-full-screen) windows. The launch-smoke window — a
+    /// fixed 1440x900 that must stay on a possibly small display — opts out.
+    var allowsUnconstrainedFrame = true
+
+    /// A window whose frame is `screen.frame` (it includes the menu-bar band, so it is
+    /// taller than `visibleFrame`) gets "constrained" by AppKit, which can shove it onto
+    /// the main display — notably for displays stacked above/left of main. Before
+    /// full-screen the frame we ask for is the frame we get; once full-screen, AppKit owns it.
+    ///
+    /// Scoped to the placement phases only: a window left windowed after the controller
+    /// gave up (it is `isMovable = false`) must still be pulled back on-screen by AppKit.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        if Self.leavesFrameUnconstrained(allowsUnconstrainedFrame: allowsUnconstrainedFrame,
+                                         isFullScreen: styleMask.contains(.fullScreen),
+                                         phase: placementPhase) {
+            return frameRect
+        }
+        return super.constrainFrameRect(frameRect, to: screen)
+    }
+
+    /// Mirrors `WindowPlacementController`'s phase (set via `placementPhaseChanged`).
+    var placementPhase: PlacementPhase = .idle
+
+    /// `.idle` covers the initial `setFrame` at creation, before the controller begins.
+    static func leavesFrameUnconstrained(allowsUnconstrainedFrame: Bool, isFullScreen: Bool,
+                                         phase: PlacementPhase) -> Bool {
+        guard allowsUnconstrainedFrame, !isFullScreen else { return false }
+        switch phase {
+        case .idle, .placing, .enteringFullScreen: return true
+        case .exitingForRetry, .fullScreen, .gaveUp: return false
+        }
+    }
+
+    /// Delay between `windowDidExitFullScreen` and the window's own re-entry toggle.
+    /// 0.6 s was insufficient (crash path #3). The controller's post-exit re-placement
+    /// must land comfortably before this.
+    static let reentryDelay: TimeInterval = 3.0
+
     /// Guards against re-entry triggering another exit during startup or when
     /// multiple windows are entering full-screen simultaneously.
     private var isReenteringFullScreen = false
@@ -53,7 +96,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     // sibling window, and back off.
 
     /// Windows currently mid enter/exit transition (app-wide).
-    private static var transitioning = Set<ObjectIdentifier>()
+    fileprivate static var transitioning = Set<ObjectIdentifier>()
     private static let maxStartupRetries = 2
     private var startupRetries = 0
     /// Set when startup retries are exhausted. The window stays windowed until
@@ -92,7 +135,12 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         }
     }
 
+    func windowDidChangeScreen(_ notification: Notification) {
+        lifecycleHandler?(.didChangeScreen)
+    }
+
     func windowWillEnterFullScreen(_ notification: Notification) {
+        lifecycleHandler?(.willEnterFullScreen)
         Self.transitioning.insert(ObjectIdentifier(self))
         winLog.info("windowWillEnterFullScreen — \(self.title, privacy: .public)")
         // Set directly, not through `animator()`: a fade here runs under
@@ -105,6 +153,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
+        lifecycleHandler?(.didEnterFullScreen)
         winLog.info("windowDidEnterFullScreen — \(self.title, privacy: .public)")
         Self.transitioning.remove(ObjectIdentifier(self))
         startupRetries = 0
@@ -114,6 +163,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     }
 
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        lifecycleHandler?(.didFailToEnterFullScreen)
         Self.transitioning.remove(ObjectIdentifier(self))
         isReenteringFullScreen = false
 
@@ -149,11 +199,16 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     }
 
     func windowWillExitFullScreen(_ notification: Notification) {
+        lifecycleHandler?(.willExitFullScreen)
         Self.transitioning.insert(ObjectIdentifier(self))
         winLog.warning("windowWillExitFullScreen — \(self.title, privacy: .public) — will re-enter after exit completes")
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
+        // Observation only: a wrong-display retry re-places the window ~1 s LATER
+        // (deferred and re-verified by the controller, never inside this callback),
+        // so the delayed re-entry below enters full-screen on the right display.
+        lifecycleHandler?(.didExitFullScreen)
         Self.transitioning.remove(ObjectIdentifier(self))
         winLog.warning("windowDidExitFullScreen — \(self.title, privacy: .public) — scheduling re-entry")
         guard !isReenteringFullScreen else {
@@ -179,7 +234,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         // progress and the ENTER transition's failure handler crashes when it
         // references the stale EXIT controller. 3 s gives macOS enough runway
         // to complete all cleanup before we attempt re-entry.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.reentryDelay) { [weak self] in
             NotificationCenter.default.removeObserver(observer)
             guard let self, !self.styleMask.contains(.fullScreen) else {
                 self?.isReenteringFullScreen = false
@@ -198,11 +253,13 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
                     }
                     winLog.warning("windowDidExitFullScreen — follow-up re-entry after display settle (\(self.title, privacy: .public))")
                     self.displayChangePending = false
+                    self.lifecycleHandler?(.willReenterFullScreen)
                     self.toggleFullScreen(nil)
                 }
                 return
             }
             winLog.warning("windowDidExitFullScreen — calling toggleFullScreen to re-enter (\(self.title, privacy: .public))")
+            self.lifecycleHandler?(.willReenterFullScreen)
             self.toggleFullScreen(nil)
         }
     }
@@ -235,5 +292,34 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     // Swallow Escape so it can't trigger a full-screen exit via cancelOperation.
     override func cancelOperation(_ sender: Any?) {
         winLog.debug("cancelOperation swallowed (Escape key)")
+    }
+}
+
+// MARK: - PlacementWindowing
+
+extension NostromoWindow: PlacementWindowing {
+    var currentDisplayUUID: String? { screen.flatMap { SystemScreenProvider.shared.displayKey(for: $0) } }
+
+    var isDisplayChangePending: Bool { displayChangePending }
+
+    func placementPhaseChanged(_ phase: PlacementPhase) { placementPhase = phase }
+
+    var isFullScreen: Bool { styleMask.contains(.fullScreen) }
+
+    var isAnyTransitionInFlight: Bool { !Self.transitioning.isEmpty }
+
+    var placementSnapshot: String {
+        let screenText = screen.flatMap { s in
+            SystemScreenProvider.shared.displayKey(for: s).map { "\($0) (\(s.localizedName))" }
+        } ?? "nil"
+        return "frame=\(DisplayInfo.fmt(frame)) screen=\(screenText) fullScreen=\(isFullScreen) alpha=\(alphaValue)"
+    }
+
+    func place(on display: DisplayInfo) {
+        setFrame(display.placementFrame, display: false)
+    }
+
+    func toggleFullScreenNow() {
+        toggleFullScreen(nil)
     }
 }

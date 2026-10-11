@@ -438,6 +438,30 @@ lets `bin/nostromo-launch-smoke` (see below) point a launch at its own
 per-run temp file instead of appending to the operator's real
 `diagnostics.jsonl`. Unset, behaviour is unchanged.
 
+## Window placement log (`~/.nostromo/logs/window-placement.log`)
+
+Always on, capped at 256 KiB (oldest half dropped on overflow), no secrets. Also
+in `os_log` under category `WindowPlacement`. Paste it back after a bad launch.
+
+```
+2026-10-11T14:03:22.418Z [launch] 3 display(s); NSScreen.screensHaveSeparateSpaces=true
+2026-10-11T14:03:22.418Z [launch] screen#1 uuid=37D8832A-… frame=(0,0 1710x1073) visible=(0,0 1710x1049) scale=2.0 name="Built-in Retina Display" main=true
+2026-10-11T14:03:22.431Z [win → 37D8832A-…] created: target=… requested=(0,0 1710x1049) → frame=… screen=… fullScreen=false
+2026-10-11T14:03:22.440Z [win → 37D8832A-…] after setFrame / after orderFront / beginPlacement / place / placed
+2026-10-11T14:03:22.9Z  [win → 37D8832A-…] before toggleFullScreen / willEnterFullScreen / didChangeScreen / didEnterFullScreen
+2026-10-11T14:03:24.0Z  [win → 37D8832A-…] phase enteringFullScreen → fullScreen
+2026-10-11T14:03:25.0Z  [win → 37D8832A-…] FINAL (on target): frame=… screen=37D8832A-… (Built-in Retina Display)
+```
+
+Each window is bound to a display UUID (`CGDisplayCreateUUIDFromDisplayID`), not
+`NSScreenNumber` and not an index. `FINAL (NOT on target)` and `WARNING` lines
+are the ones to look for. Placement is: place on the target display's
+`visibleFrame` → verify `window.screen` (via `didChangeScreen`, bounded to 3
+attempts) → `toggleFullScreen` → verify again → one bounded exit/re-place/re-enter
+retry → give up (never loops). Per-display focus memory lives in
+`nostromo.display.<uuid>.activeTab`; the legacy `nostromo.window<N>.activeTab`
+keys are copied once onto displays in `NSScreen.screens` order.
+
 ## `NOSTROMO_WINDOW_MODE`
 
 ```sh

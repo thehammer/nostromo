@@ -28,9 +28,13 @@ class MainLayout: NSView {
 
     // MARK: - Per-window focus state
 
+    /// Reporting identity only (daemon `window_id`) — NOT used to remember anything.
     private let windowIndex: Int
+    /// The display this window is bound to. Focus memory is keyed by this UUID
+    /// (see `DisplayFocusKeys`), so it follows the display across reconnects.
+    private let displayUUID: String
     private var activeFocus: Focus
-    private var udKey: String { "nostromo.window\(windowIndex).activeTab" }
+    private var udKey: String { DisplayFocusKeys.activeTabKey(displayUUID: displayUUID) }
 
     private var cancellables = Set<AnyCancellable>()
     private var presentedSheet: CreateFocusSheet?  // retained for sheet lifetime
@@ -38,10 +42,11 @@ class MainLayout: NSView {
 
     // MARK: - Init
 
-    init(windowIndex: Int) {
+    init(windowIndex: Int, displayUUID: String) {
         self.windowIndex = windowIndex
+        self.displayUUID = displayUUID
         // Restore active focus by ID from UserDefaults; fall back to mother
-        let savedId = UserDefaults.standard.string(forKey: "nostromo.window\(windowIndex).activeTab")
+        let savedId = UserDefaults.standard.string(forKey: DisplayFocusKeys.activeTabKey(displayUUID: displayUUID))
         let allFocuses = FocusStore.shared.focuses
         self.activeFocus = allFocuses.first { $0.id == savedId } ?? allFocuses.first { $0.id == "mother" } ?? Focus.builtIns[1]
         super.init(frame: .zero)
@@ -49,6 +54,11 @@ class MainLayout: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// A transient, non-modal banner (e.g. the one-time "separate Spaces is off" warning).
+    func showBanner(message: String, severity: ToastSeverity) {
+        toastView.showToast(message: message, severity: severity)
+    }
 
     // MARK: - Setup
 
