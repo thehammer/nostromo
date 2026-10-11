@@ -323,14 +323,21 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "nostromo.create_focus",
-            "description": "Programmatically create a new persistent focus running a named agent persona in a working directory, with seeded first-turn context. Returns the new focus_id. Errors: invalid_working_directory, spawn_failed.",
+            "description": "Programmatically create a new persistent focus running a named agent persona in a working directory, with seeded first-turn context, or (destination 'mother_job') queue an unattended Mother job instead. Returns { focus_id?, job_id?, kind, label } where kind is 'created', 'existing' or 'queued' (focus_id is kept for older callers). Duplicate rule: when source_item_id is given, a focus (with a live session) or Mother job (not archived) already sent for that item is returned as kind 'existing' and nothing is created, unless allow_duplicate is true; without source_item_id a live focus with the same agent+title tag is returned as 'existing'. Two different items with the same title get distinct tags (-2, -3, ...). The focus carries label, org (inferred from the repo's GitHub origin when omitted) and project path. A Mother job needs working_directory inside a git repo. Errors: invalid_args, invalid_working_directory, project_required, not_a_git_repo, spawn_failed, mother_failed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "agent":             { "type": "string", "description": "Agent persona name (e.g. 'cody', 'fred')" },
-                    "working_directory": { "type": "string", "description": "Absolute path for the session's cwd; omit for a pathless focus" },
+                    "working_directory": { "type": "string", "description": "Absolute path for the session's cwd; omit for a pathless focus. Required (a git repo) for destination 'mother_job'" },
                     "title":             { "type": "string", "description": "Tab title (e.g. 'CORE-1234')" },
-                    "initial_context":   { "type": "string", "description": "Markdown/text folded into the new session's first turn so it does not start blank" }
+                    "initial_context":   { "type": "string", "description": "Markdown/text folded into the new session's first turn so it does not start blank (for a Mother job: the brief's Context section)" },
+                    "label":             { "type": "string", "description": "User-facing label shown on the focus and in 'sent to <label>' markers; defaults to the title" },
+                    "org":               { "type": "string", "description": "Org section for the focus (e.g. 'Carefeed'); omit to infer it from the working directory's GitHub origin" },
+                    "source_item_id":    { "type": "string", "description": "Id of the work item this is started from (e.g. 'jira:CORE-1', 'doc:nostromo:ideas/x.md'); enables item-keyed duplicate protection and the 'sent to' marker" },
+                    "source_item_title": { "type": "string", "description": "Title of that work item (defaults to title)" },
+                    "allow_duplicate":   { "type": "boolean", "description": "Create a new focus/job even if one is already live for source_item_id (default false)" },
+                    "destination":       { "type": "string", "enum": ["focus", "mother_job"], "description": "'focus' (default) starts a session; 'mother_job' queues an unattended Mother job" },
+                    "max_cost":          { "type": "number", "description": "Mother job budget in USD (destination 'mother_job' only; default 10)" }
                 },
                 "required": ["agent", "title"]
             }
