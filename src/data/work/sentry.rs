@@ -299,6 +299,8 @@ fn status(
         retry_at,
         count,
         group_errors: Vec::new(),
+        // Callers that know the list is whole say so (see `fetch_round`).
+        complete: false,
     }
 }
 
@@ -365,8 +367,9 @@ async fn fetch_round(
     let now = config.now();
     *hold_until = hold.filter(|t| *t > now);
 
-    let publish = |state, reason, retry_at, items: &Vec<WorkItem>, last_ok| -> SourceUpdate {
-        (status(state, reason, last_ok, retry_at, items.len()), vec![(None, items.clone())])
+    let publish = |state, reason, retry_at, complete, items: &Vec<WorkItem>, last_ok| -> SourceUpdate {
+        let status = SourceStatus { complete, ..status(state, reason, last_ok, retry_at, items.len()) };
+        (status, vec![(None, items.clone())])
     };
     let hold_wait = |base: Duration, hold_until: &Option<DateTime<Utc>>| {
         hold_until
@@ -379,6 +382,8 @@ async fn fetch_round(
             *failures = 0;
             *last_ok = Some(now);
             *items = fetched.items;
+            // Unreadable issues leave the list incomplete too, but only a cut gets the banner.
+            let partial = fetched.truncated || fetched.unreadable > 0;
             let truncated = fetched.truncated.then(|| TRUNCATED_REASON.to_string());
             // A hold that outlasts the freshness window means the list will be
             // out of date before it can be refreshed: say so.
@@ -391,7 +396,9 @@ async fn fetch_round(
                 None if items.is_empty() => (SourceState::Empty, None, None),
                 None => (SourceState::Fresh, truncated, None),
             };
-            (publish(state, reason, retry_at, items, *last_ok), hold_wait(config.poll_interval, hold_until))
+            // Whole only when nothing was cut or unreadable and the list is not held past its freshness window.
+            let complete = !partial && matches!(state, SourceState::Fresh | SourceState::Empty);
+            (publish(state, reason, retry_at, complete, items, *last_ok), hold_wait(config.poll_interval, hold_until))
         }
         Err(rejected @ (ApiError::Unauthenticated | ApiError::Forbidden)) => {
             items.clear();
@@ -412,7 +419,7 @@ async fn fetch_round(
             *hold_until = Some(retry_at);
             let wait = (retry_at - now).to_std().unwrap_or_default();
             let reason = "Sentry is rate-limiting requests; waiting before the next try".to_string();
-            (publish(SourceState::RateLimited, Some(reason), Some(retry_at), items, *last_ok), wait)
+            (publish(SourceState::RateLimited, Some(reason), Some(retry_at), false, items, *last_ok), wait)
         }
         Err(other) => {
             *failures = failures.saturating_add(1);
@@ -424,7 +431,7 @@ async fn fetch_round(
             } else {
                 (SourceState::Error, format!("Couldn't load Sentry issues ({what})"))
             };
-            (publish(state, Some(reason), None, items, *last_ok), hold_wait(delay, hold_until))
+            (publish(state, Some(reason), None, false, items, *last_ok), hold_wait(delay, hold_until))
         }
     }
 }
@@ -584,6 +591,8 @@ struct Fetched {
     items: Vec<WorkItem>,
     /// A search had more issues than [`MAX_ISSUES_PER_QUERY`].
     truncated: bool,
+    /// Issues in the responses that could not be turned into items.
+    unreadable: usize,
 }
 
 /// Every page of every search, or an error: a failure part-way never yields a
@@ -598,6 +607,7 @@ async fn fetch_issues(
     let mut seen = HashSet::new();
     let mut items = Vec::new();
     let mut truncated = false;
+    let mut unreadable = 0usize;
     for search in &SEARCHES {
         let mut cursor: Option<String> = None;
         let mut count = 0usize;
@@ -625,11 +635,14 @@ async fn fetch_issues(
                     break;
                 }
                 count += 1;
-                if let Some(item) = to_item(issue, repos) {
-                    parsed += 1;
-                    if seen.insert(item.id.clone()) {
-                        items.push(item);
+                match to_item(issue, repos) {
+                    Some(item) => {
+                        parsed += 1;
+                        if seen.insert(item.id.clone()) {
+                            items.push(item);
+                        }
                     }
+                    None => unreadable += 1,
                 }
             }
             // A page of things that are not issues is a broken response, not "no issues".
@@ -646,7 +659,7 @@ async fn fetch_issues(
             }
         }
     }
-    Ok(Fetched { items, truncated })
+    Ok(Fetched { items, truncated, unreadable })
 }
 
 // ── mapping ───────────────────────────────────────────────────────────────────

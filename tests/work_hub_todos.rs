@@ -22,15 +22,20 @@ use tokio::sync::{broadcast, watch, Notify};
 const WAIT: Duration = Duration::from_secs(5);
 
 
+/// A Repo docs root that does not exist: a hub with none of its own would read (and
+/// watch) the user's real code folder.
+fn no_docs_root() -> Option<PathBuf> {
+    Some(std::env::temp_dir().join(format!("nostromo-hub-todos-no-code-{}", std::process::id())))
+}
+
 /// The hub reads (and prunes) the process-wide sent ledger, which defaults to
-/// `~/.nostromo/teri/sent.json`. Point it, and the teri dir, at a temp dir once
-/// per test process so these tests never touch the real one.
+/// `~/.nostromo/teri/sent.json`. Point it at a temp one, once per test process,
+/// so these tests never touch the real one.
 fn isolate_sent_ledger() {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("nostromo-{}-teri-{}", "hub-todos", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp teri dir");
-        std::env::set_var("NOSTROMO_TERI_DIR", &dir);
         nostromo::data::work::sent::install_ledger(std::sync::Arc::new(
             nostromo::data::work::sent::SentLedger::new(dir.join("sent.json")),
         ));
@@ -80,7 +85,7 @@ fn hub_with_channel(
     let (btx, brx) = broadcast::channel(1024);
     let (ttx, trx) = watch::channel(initial);
     isolate_sent_ledger();
-    let hub = WorkHub::spawn(HubDeps::new(btx, trx));
+    let hub = WorkHub::spawn(HubDeps { repo_docs_root: no_docs_root(), ..HubDeps::new(btx, trx) });
     (hub, ttx, brx)
 }
 
@@ -149,6 +154,74 @@ fn a_user_without_a_teri_database_is_not_configured_with_a_plain_english_reason(
     assert_eq!(status.count, 0);
     let reason = status.reason.expect("not_configured must say why");
     assert!(reason.contains("teri.db"), "reason should name the missing store: {reason}");
+}
+
+// ── `complete`: true only when the list is known to be whole ──────────────────
+
+#[test]
+fn a_good_read_is_complete_whether_it_has_todos_or_none() {
+    let (with_items, _) = adapt(&fresh(vec![todo(1, "One", "open", 2, None, None, None)]));
+    assert_eq!(with_items.state, SourceState::Fresh);
+    assert!(with_items.complete, "{with_items:?}");
+
+    let (empty, _) = adapt(&fresh(vec![]));
+    assert_eq!(empty.state, SourceState::Empty);
+    assert!(empty.complete, "{empty:?}");
+}
+
+#[test]
+fn a_stale_failed_or_missing_store_is_never_complete() {
+    let stale = TeriTodosSnapshot {
+        generated_at: Some(Utc::now()),
+        items: vec![todo(1, "Keep me", "open", 2, None, None, None)],
+        stale: true,
+        error: Some("database is locked".into()),
+        ..Default::default()
+    };
+    let failed = TeriTodosSnapshot { generated_at: Some(Utc::now()), error: Some("no such table: todos".into()), ..Default::default() };
+    let missing = TeriTodosSnapshot { not_configured: true, generated_at: Some(Utc::now()), ..Default::default() };
+    for (label, snap, state) in [
+        ("stale", stale, SourceState::Stale),
+        ("error", failed, SourceState::Error),
+        ("not configured", missing, SourceState::NotConfigured),
+    ] {
+        let (status, _) = adapt(&snap);
+        assert_eq!(status.state, state, "{label}");
+        assert!(!status.complete, "{label}: {status:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_reports_a_source_that_has_not_loaded_yet_as_not_complete_and_a_loaded_one_as_complete() {
+    let (hub, ttx, _brx) = hub_with_channel(None);
+    let loading = hub.status(WorkSource::Todos);
+    assert_eq!(loading.state, SourceState::Loading);
+    assert!(!loading.complete, "nothing is known yet: {loading:?}");
+
+    ttx.send(Some(fresh(vec![todo(1, "One", "open", 2, None, None, None)]))).unwrap();
+
+    let loaded = wait_for_status(&hub, WorkSource::Todos, |s| s.state == SourceState::Fresh).await;
+    assert!(loaded.complete, "{loaded:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_complete_flag_travels_in_the_broadcast_status_frame() {
+    let (_hub, ttx, mut brx) = hub_with_channel(Some(fresh(vec![todo(1, "One", "open", 2, None, None, None)])));
+    let healthy = recv_until(&mut brx, |m| match m {
+        ServerMsg::WorkSourceStatus { status } if status.source == WorkSource::Todos && status.state == SourceState::Fresh => Some(status.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(healthy.complete);
+
+    // A failed read keeps the last good items as stale: same items, no longer known to be whole.
+    ttx.send(Some(TeriTodosSnapshot { generated_at: Some(Utc::now()), error: Some("database is locked".into()), ..Default::default() })).unwrap();
+    let stale = recv_until(&mut brx, |m| match m {
+        ServerMsg::WorkSourceStatus { status } if status.source == WorkSource::Todos && status.state == SourceState::Stale => Some(status.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(!stale.complete, "{stale:?}");
 }
 
 #[test]
@@ -531,7 +604,7 @@ fn hub_with_jira_site(site: JiraSite) -> (std::sync::Arc<WorkHub>, broadcast::Re
     let (_ttx, trx) = watch::channel(Some(fresh(mixed_todos())));
     std::mem::forget(_ttx); // keep the source alive for the test's duration
     isolate_sent_ledger();
-    let hub = WorkHub::spawn(HubDeps { jira_site: site, ..HubDeps::new(btx, trx) });
+    let hub = WorkHub::spawn(HubDeps { jira_site: site, repo_docs_root: no_docs_root(), ..HubDeps::new(btx, trx) });
     (hub, brx)
 }
 
@@ -596,7 +669,7 @@ fn hub_with_todos_refresh() -> (std::sync::Arc<WorkHub>, std::sync::Arc<Notify>)
     let (ttx, trx) = watch::channel(Some(fresh(mixed_todos())));
     std::mem::forget(ttx);
     isolate_sent_ledger();
-    let hub = WorkHub::spawn(HubDeps { todos_refresh: Some(notify.clone()), ..HubDeps::new(btx, trx) });
+    let hub = WorkHub::spawn(HubDeps { todos_refresh: Some(notify.clone()), repo_docs_root: no_docs_root(), ..HubDeps::new(btx, trx) });
     (hub, notify)
 }
 
@@ -711,7 +784,7 @@ fn hub_on_db(path: PathBuf) -> (std::sync::Arc<WorkHub>, broadcast::Receiver<Ser
     let (btx, brx) = broadcast::channel(1024); // subscribed before anything can send
     let todos_rx = TeriTodosNativeSource::spawn_at(path);
     isolate_sent_ledger();
-    let hub = WorkHub::spawn(HubDeps::new(btx, todos_rx));
+    let hub = WorkHub::spawn(HubDeps { repo_docs_root: no_docs_root(), ..HubDeps::new(btx, todos_rx) });
     (hub, brx)
 }
 

@@ -256,6 +256,7 @@ fn source_status(source: WorkSource) -> ServerMsg {
             retry_at: None,
             count: 1,
             group_errors: vec![],
+            complete: false,
         },
     }
 }
@@ -2534,6 +2535,7 @@ async fn a_source_that_stops_being_configured_has_its_retained_snapshots_evicted
             retry_at: None,
             count: 0,
             group_errors: vec![],
+            complete: false,
         },
     });
     let_retention_settle().await;

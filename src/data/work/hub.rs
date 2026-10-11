@@ -165,6 +165,7 @@ fn loading_status(source: WorkSource) -> SourceStatus {
         retry_at: None,
         count: 0,
         group_errors: Vec::new(),
+        complete: false,
     }
 }
 
@@ -176,6 +177,7 @@ fn same_signature(a: &SourceStatus, b: &SourceStatus) -> bool {
         && a.retry_at == b.retry_at
         && a.count == b.count
         && a.group_errors == b.group_errors
+        && a.complete == b.complete
 }
 
 impl WorkHub {

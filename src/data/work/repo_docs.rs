@@ -115,7 +115,7 @@ pub fn spawn_at(root: PathBuf, refresh: Arc<Notify>) -> watch::Receiver<SourceUp
 
 /// [`spawn_at`] reading through `io` (tests make reads fail on purpose).
 pub fn spawn_with_fs(root: PathBuf, refresh: Arc<Notify>, io: Arc<dyn DocFs>) -> watch::Receiver<SourceUpdate> {
-    let (tx, rx) = watch::channel((status(SourceState::Loading, None, 0, Vec::new()), Vec::new()));
+    let (tx, rx) = watch::channel((status(SourceState::Loading, None, 0, Vec::new(), false), Vec::new()));
     let tx = Arc::new(tx);
     let (msg_tx, msg_rx) = mpsc::channel();
 
@@ -150,7 +150,7 @@ pub fn spawn_with_fs(root: PathBuf, refresh: Arc<Notify>, io: Arc<dyn DocFs>) ->
 
 /// The update for a source that cannot run at all: an error and no items.
 fn error_update(reason: &str) -> SourceUpdate {
-    (status(SourceState::Error, Some(reason.to_string()), 0, Vec::new()), Vec::new())
+    (status(SourceState::Error, Some(reason.to_string()), 0, Vec::new(), false), Vec::new())
 }
 
 /// Detail for a `doc:<repo>:<path>` item id under [`code_root`].
@@ -348,10 +348,15 @@ impl Scanner {
                 let mut names: Vec<String> = Vec::new();
                 let mut skipped = 0;
                 for entry in entries {
-                    match entry.map(|e| e.file_name().into_string()) {
-                        Ok(Ok(name)) => names.push(name),
-                        // Unreadable entry, or a name that is not UTF-8 (so not a usable repo name).
-                        Ok(Err(_)) | Err(_) => skipped += 1,
+                    let Ok(entry) = entry else {
+                        skipped += 1; // an entry the read itself failed on
+                        continue;
+                    };
+                    match entry.file_name().into_string() {
+                        Ok(name) => names.push(name),
+                        // A folder whose name is not UTF-8 cannot be a usable repo name; a plain file is no repo anyway.
+                        Err(_) if entry.path().is_dir() => skipped += 1,
+                        Err(_) => {}
                     }
                 }
                 changed |= std::mem::replace(&mut self.root_skipped, skipped) != skipped;
@@ -379,6 +384,8 @@ impl Scanner {
                     // Keep what we had: the next scan may succeed.
                     RootIssue::Unreadable(describe(&e))
                 };
+                // A skip count from an earlier read says nothing about a root we cannot read now.
+                changed |= std::mem::take(&mut self.root_skipped) != 0;
                 changed |= self.root_issue.as_ref() != Some(&issue);
                 self.root_issue = Some(issue);
             }
@@ -615,7 +622,12 @@ impl Scanner {
                 (state, (!notes.is_empty()).then(|| notes.join("; ")))
             }
         };
-        status(state, reason, count, group_errors)
+        // Whole list: nothing unreadable, skipped or cut off, and the root itself was read.
+        let complete = matches!(state, SourceState::Fresh | SourceState::Empty)
+            && group_errors.is_empty()
+            && self.root_skipped == 0
+            && self.root_issue.is_none();
+        status(state, reason, count, group_errors, complete)
     }
 }
 
@@ -643,6 +655,7 @@ fn status(
     reason: Option<String>,
     count: usize,
     group_errors: Vec<GroupError>,
+    complete: bool,
 ) -> SourceStatus {
     SourceStatus {
         source: WorkSource::RepoDocs,
@@ -652,6 +665,7 @@ fn status(
         retry_at: None,
         count,
         group_errors,
+        complete,
     }
 }
 
@@ -754,8 +768,11 @@ fn list_children(dir: &Path, judge: impl Fn(&str, &Path) -> Verdict) -> io::Resu
         };
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
-            // Not UTF-8: it cannot be an item id. Hidden names are never docs, so those stay silent.
-            if !name.as_encoded_bytes().starts_with(b".") {
+            // Not UTF-8: it cannot be an item id. Hidden names are never docs, so those stay silent,
+            // and neither does a plain file that is not a `.md` (it was never a doc).
+            let bytes = name.as_encoded_bytes();
+            let could_be_doc = bytes.len() > 3 && bytes[bytes.len() - 3..].eq_ignore_ascii_case(b".md");
+            if !bytes.starts_with(b".") && (could_be_doc || entry.path().is_dir()) {
                 listing.skipped += 1;
             }
             continue;
@@ -1657,5 +1674,31 @@ mod tests {
         assert_eq!(parsed.title.as_deref(), Some("T"));
         assert_eq!(parsed.severity.as_deref(), Some("low"), "only the line after the real close counts");
         assert_eq!(parsed.priority, None);
+    }
+
+    // ── the live-updates note ────────────────────────────────────────────────
+
+    #[test]
+    fn the_live_updates_note_follows_the_watcher_and_never_makes_the_list_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        fs::create_dir_all(root.join("alpha/.claude/ideas")).unwrap();
+        fs::write(root.join("alpha/.claude/ideas/one.md"), "# One\n").unwrap();
+        let mut scanner = Scanner::new(root);
+        let (status, _) = scanner.scan_all();
+        assert_eq!((status.state, status.reason.as_deref(), status.complete), (SourceState::Fresh, None, true));
+
+        assert!(scanner.set_live_updates(false), "the watcher failing is a change to publish, though no doc changed");
+        let (status, _) = scanner.update();
+        assert_eq!(status.state, SourceState::Fresh);
+        assert_eq!(status.reason.as_deref(), Some(LIVE_UPDATES_UNAVAILABLE));
+        assert_eq!(status.count, 1);
+        assert!(status.complete, "the list was scanned whole; only its freshness is in doubt: {status:?}");
+
+        assert!(!scanner.set_live_updates(false), "saying the same thing again is no change");
+
+        assert!(scanner.set_live_updates(true), "the watcher coming back is a change too");
+        let (status, _) = scanner.update();
+        assert_eq!((status.reason, status.complete), (None, true));
     }
 }

@@ -47,19 +47,24 @@ struct SourceStatus: Decodable, Hashable {
     let retryAt: Date?
     let count: Int
     let groupErrors: [GroupError]
+    /// True only when the daemon knows the list is whole (nothing cut at a cap, no
+    /// unreadable or skipped item, no partial scan). Absent (an older daemon) is
+    /// `false`: unknown never reads as complete. The Mac app only displays state;
+    /// agents are what rely on it.
+    let complete: Bool
 
     enum CodingKeys: String, CodingKey {
-        case source, state, reason, count
+        case source, state, reason, count, complete
         case updatedAt   = "updated_at"
         case retryAt     = "retry_at"
         case groupErrors = "group_errors"
     }
 
     init(source: WorkSource, state: SourceState, updatedAt: Date? = nil, reason: String? = nil,
-         retryAt: Date? = nil, count: Int = 0, groupErrors: [GroupError] = []) {
+         retryAt: Date? = nil, count: Int = 0, groupErrors: [GroupError] = [], complete: Bool = false) {
         self.source = source; self.state = state; self.updatedAt = updatedAt
         self.reason = reason; self.retryAt = retryAt; self.count = count
-        self.groupErrors = groupErrors
+        self.groupErrors = groupErrors; self.complete = complete
     }
 
     init(from decoder: Decoder) throws {
@@ -71,6 +76,7 @@ struct SourceStatus: Decodable, Hashable {
         retryAt     = try c.decodeIfPresent(Date.self, forKey: .retryAt)
         count       = try c.decodeIfPresent(Int.self, forKey: .count) ?? 0
         groupErrors = try c.decodeIfPresent([GroupError].self, forKey: .groupErrors) ?? []
+        complete    = try c.decodeIfPresent(Bool.self, forKey: .complete) ?? false
     }
 }
 
