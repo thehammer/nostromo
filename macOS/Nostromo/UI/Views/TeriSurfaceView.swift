@@ -11,7 +11,7 @@ struct TeriTabConfig {
     let tab: TeriTab
     /// Capitalised name used in banners ("Jira: …").
     let sourceName: String
-    /// nil for a tab with no list (Picks, until it is built).
+    /// nil for a tab with no list (Picks has its own view, `TeriPicksView`).
     let list: WorkListConfig?
     /// Shown over an empty list when the source is healthy and has nothing.
     let emptyMessage: String
@@ -26,6 +26,8 @@ struct TeriTabConfig {
 
 final class TeriSurfaceView: NSView {
     private(set) var selectedTab: TeriTab
+    /// The Picks tab's list pane (shown while Picks is the selected tab).
+    private(set) var picksView: TeriPicksView?
 
     private let store: WorkStore
     private let viewState: TeriViewStateStore
@@ -71,9 +73,12 @@ final class TeriSurfaceView: NSView {
         self.selectedTab = viewState.state.selectedTab
             ?? ((store.picks?.items.isEmpty == false) ? .picks : .todos)
         super.init(frame: .zero)
+        let picksView = TeriPicksView(store: store)
+        picksView.onSelect = { [weak self] pick in self?.pickSelected(pick) }
+        self.picksView = picksView
         buildViews()
         observe()
-        configs[selectedTab]?.onShow?()
+        tabBecameVisible(selectedTab)
         showSelectedTab()
     }
 
@@ -83,7 +88,7 @@ final class TeriSurfaceView: NSView {
         if let deepLinkObserver { center.removeObserver(deepLinkObserver) }
         viewState.flush()   // a change made in the last half second must not be lost
         cancelRowRefresh?()
-        configs[selectedTab]?.onLeave?()
+        tabWasLeft(selectedTab)
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -98,10 +103,10 @@ final class TeriSurfaceView: NSView {
     /// Switch to `tab` (remembered across relaunches).
     func select(_ tab: TeriTab) {
         guard tab != selectedTab else { return }
-        configs[selectedTab]?.onLeave?()
+        tabWasLeft(selectedTab)
         selectedTab = tab
         viewState.update { $0.selectedTab = tab }
-        configs[tab]?.onShow?()
+        tabBecameVisible(tab)
         showSelectedTab()
     }
 
@@ -163,7 +168,7 @@ final class TeriSurfaceView: NSView {
             select(TeriTab.allCases[Int(key)! - 1])
             return true
         case "r":
-            if let source = selectedTab.source { store.refresh(source: source) } else { store.refreshPicks(reason: "manual") }
+            if let source = selectedTab.source { store.refresh(source: source) } else { picksView?.pressRefresh() }
             return true
         case "f":
             guard let list = lists[selectedTab] else { return false }
@@ -263,9 +268,28 @@ final class TeriSurfaceView: NSView {
         focusActiveList()    // a button click does not take the keyboard; the list should
     }
 
+    private func tabBecameVisible(_ tab: TeriTab) {
+        configs[tab]?.onShow?()
+        if tab == .picks { picksView?.tabDidShow() }
+    }
+
+    private func tabWasLeft(_ tab: TeriTab) {
+        configs[tab]?.onLeave?()
+        if tab == .picks { picksView?.tabDidLeave() }
+    }
+
     private func showSelectedTab() {
         for subview in listHost.subviews { subview.removeFromSuperview() }
-        if let list = listView(for: selectedTab) {
+        if selectedTab == .picks, let picks = picksView {
+            picks.translatesAutoresizingMaskIntoConstraints = false
+            listHost.addSubview(picks)
+            NSLayoutConstraint.activate([
+                picks.topAnchor.constraint(equalTo: listHost.topAnchor),
+                picks.bottomAnchor.constraint(equalTo: listHost.bottomAnchor),
+                picks.leadingAnchor.constraint(equalTo: listHost.leadingAnchor),
+                picks.trailingAnchor.constraint(equalTo: listHost.trailingAnchor),
+            ])
+        } else if let list = listView(for: selectedTab) {
             list.translatesAutoresizingMaskIntoConstraints = false
             listHost.addSubview(list)
             NSLayoutConstraint.activate([
@@ -280,6 +304,9 @@ final class TeriSurfaceView: NSView {
         detailView.show(.none)
         armRowRefresh()
         reload()
+        if selectedTab == .picks, let id = viewState.state[.picks].selectedItemId {
+            picksView?.select(itemId: id)   // the remembered pick's detail, when it is still picked
+        }
         focusActiveList()
     }
 
@@ -303,7 +330,13 @@ final class TeriSurfaceView: NSView {
         guard let window,
               TeriFocusPolicy.mayTakeKeyboard(currentFirstResponder: window.firstResponder, surface: self)
         else { return }
-        if let list = lists[selectedTab] { list.focusList() } else { window.makeFirstResponder(self) }
+        if let list = lists[selectedTab] {
+            list.focusList()
+        } else if selectedTab == .picks, let picks = picksView {
+            picks.focusRows()
+        } else {
+            window.makeFirstResponder(self)
+        }
     }
 
     /// The list for `tab`, created on first use with its remembered filter state.
@@ -349,9 +382,8 @@ final class TeriSurfaceView: NSView {
         if store.isConnected { disconnectedBanner.isHidden = true } else { disconnectedBanner.showDisconnected() }
 
         guard let source = selectedTab.source, let config = configs[selectedTab], let list = listView(for: selectedTab) else {
-            // No list yet (Picks): say so.
-            sourceBanner.showMessage(store.picks == nil ? "Picks: Coming soon" : "Picks")
-            detailView.show(.none)
+            // Picks: its own view reads the store, and its detail follows its selection.
+            sourceBanner.clear()
             return
         }
         let status = store.status(for: source)
@@ -399,24 +431,44 @@ final class TeriSurfaceView: NSView {
         detailToken += 1
         let token = detailToken
         if isNewItem { detailView.show(.loading(title: item.title), item: item) }
+        loadDetail(id, title: item.title, item: item, token: token)
+    }
+
+    /// A pick was chosen (or went away): show the detail the item has in its own tab.
+    private func pickSelected(_ pick: Pick?) {
+        viewState.update { $0[.picks].selectedItemId = pick?.itemId }
+        detailItem = nil
+        detailToken += 1
+        guard let pick else {
+            detailView.show(.none)
+            return
+        }
+        let token = detailToken
+        let item = store.allItems.first { $0.id == pick.itemId }
+        detailView.show(.loading(title: pick.title), item: item)
+        loadDetail(pick.itemId, title: pick.title, item: item, token: token)
+    }
+
+    /// Ask the daemon for `id`'s detail and show it, unless `token` has gone stale.
+    private func loadDetail(_ id: String, title: String, item: WorkItem?, token: Int) {
         store.requestDetail(id) { [weak self] response in
             guard let self, token == self.detailToken else { return }
             switch response {
             case .detail(.ok(let detail)):
                 self.detailView.show(.detail(detail), item: item)
             case .detail(.err(let error)), .failed(let error):
-                self.failDetail(item, message: error.message)
+                self.failDetail(title: title, item: item, message: error.message)
             case .timedOut:
-                self.failDetail(item, message: "The daemon did not answer in time")
+                self.failDetail(title: title, item: item, message: "The daemon did not answer in time")
             case .sendPreview, .sendResult:
                 break
             }
         }
     }
 
-    private func failDetail(_ item: WorkItem, message: String) {
+    private func failDetail(title: String, item: WorkItem?, message: String) {
         detailItem = nil   // the next reload tries again
-        detailView.show(.failed(title: item.title, message: message), item: item)
+        detailView.show(.failed(title: title, message: message), item: item)
     }
 
     // MARK: Tab titles

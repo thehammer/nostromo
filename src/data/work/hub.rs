@@ -10,7 +10,7 @@
 //! frames to a client that connects later.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -31,7 +31,8 @@ use super::model::{
 };
 use super::query::{self, WorkFilter};
 use super::service::{SendRequest, WorkService};
-use super::{credentials, picks, repo_docs, send, sent, jira, sentry, todos};
+use super::picks::{self, PickEntry, PicksGenerator, PicksSessionHost, PicksStore, PublishError, SessionManagerHost, SourcePresence};
+use super::{credentials, repo_docs, send, sent, jira, sentry, todos};
 
 /// What one source publishes: its status and its items, one entry per group
 /// (`None` for sources that are a single flat list, the repo for repo docs).
@@ -79,6 +80,13 @@ pub struct HubDeps {
     pub sentry: Option<sentry::SentryConfig>,
     /// The folder whose children are the repos for Repo docs; `None` is [`repo_docs::code_root`].
     pub repo_docs_root: Option<PathBuf>,
+    /// Where Teri's picks are saved; `None` keeps them in memory only (tests).
+    pub picks_path: Option<PathBuf>,
+    /// Runs the hidden picks-generation session. `None` uses `session_mgr`; with
+    /// neither, a picks refresh answers `not_available`.
+    pub picks_host: Option<Arc<dyn PicksSessionHost>>,
+    /// How long a generation may take; `None` is [`picks::GENERATION_TIMEOUT`].
+    pub picks_timeout: Option<Duration>,
 }
 
 impl HubDeps {
@@ -96,6 +104,9 @@ impl HubDeps {
             jira: None,
             sentry: None,
             repo_docs_root: None,
+            picks_path: None,
+            picks_host: None,
+            picks_timeout: None,
         }
     }
 }
@@ -118,6 +129,10 @@ pub struct WorkHub {
     sentry: Option<Arc<sentry::SentryConfig>>,
     /// Where Repo docs items live.
     repo_docs_root: PathBuf,
+    /// Teri's picks.
+    picks: Arc<PicksStore>,
+    /// Runs picks generations; `None` when there is no session host.
+    picks_generator: Option<Arc<PicksGenerator>>,
 }
 
 struct State {
@@ -192,8 +207,17 @@ impl WorkHub {
             jira,
             sentry,
             repo_docs_root,
+            picks_path,
+            picks_host,
+            picks_timeout,
         } = deps;
         let sentry = sentry.map(Arc::new);
+        let picks = PicksStore::load(picks_path, broadcast_tx.clone());
+        let picks_host = picks_host.or_else(|| {
+            session_mgr.clone().map(|mgr| Arc::new(SessionManagerHost::new(mgr)) as Arc<dyn PicksSessionHost>)
+        });
+        let picks_generator = picks_host
+            .map(|host| PicksGenerator::new(picks.clone(), host, picks_timeout.unwrap_or(picks::GENERATION_TIMEOUT)));
         let repo_docs_root = repo_docs_root.unwrap_or_else(repo_docs::code_root);
         let mut refresh: HashMap<WorkSource, Arc<Notify>> =
             [WorkSource::RepoDocs, WorkSource::Jira, WorkSource::Sentry]
@@ -217,6 +241,8 @@ impl WorkHub {
             jira: jira.clone(),
             sentry: sentry.clone(),
             repo_docs_root: repo_docs_root.clone(),
+            picks: picks.clone(),
+            picks_generator,
         });
 
         let jira_refresh = hub.refresh[&WorkSource::Jira].clone();
@@ -246,6 +272,7 @@ impl WorkHub {
 
         tokio::spawn(publisher(Arc::clone(&hub)));
         tokio::spawn(follow_sent(Arc::clone(&hub)));
+        picks.broadcast();
         if let Some(rx) = republish_rx {
             tokio::spawn(follow_republish(Arc::clone(&hub), rx));
         }
@@ -274,6 +301,43 @@ impl WorkHub {
         out
     }
 
+    /// Teri's picks.
+    pub fn picks(&self) -> &Arc<PicksStore> {
+        &self.picks
+    }
+
+    /// Publish Teri's picks (`teri.publish_picks`).
+    pub fn publish_picks(&self, entries: &[PickEntry]) -> Result<crate::data::work::PicksSnapshot, PublishError> {
+        self.picks.publish(entries, self)
+    }
+
+    /// Source and title of each of `ids` the hub holds right now.
+    pub(crate) fn item_headlines(&self, ids: HashSet<&str>) -> HashMap<String, (WorkSource, String)> {
+        let state = self.state.lock().unwrap();
+        state
+            .slots
+            .values()
+            .flat_map(|slot| slot.groups.values().flatten())
+            .filter(|item| ids.contains(item.id.as_str()))
+            .map(|item| (item.id.clone(), (item.source, item.title.clone())))
+            .collect()
+    }
+
+    /// Every source's status with the ids it holds.
+    pub(crate) fn source_presence(&self) -> Vec<SourcePresence> {
+        let state = self.state.lock().unwrap();
+        SOURCE_ORDER
+            .iter()
+            .map(|source| {
+                let slot = &state.slots[source];
+                SourcePresence {
+                    status: slot.status.clone(),
+                    ids: slot.groups.values().flatten().map(|item| item.id.clone()).collect(),
+                }
+            })
+            .collect()
+    }
+
     pub fn status(&self, source: WorkSource) -> SourceStatus {
         self.state.lock().unwrap().slots[&source].status.clone()
     }
@@ -298,6 +362,8 @@ impl WorkHub {
             slot.status = status;
             slot.groups = groups;
         }
+        // Outside the state lock: it reads the hub back.
+        self.picks.recompute_done_since(self);
         self.dirty.notify_one();
     }
 
@@ -427,6 +493,7 @@ impl WorkHub {
             let mut state = self.state.lock().unwrap();
             state.slots.values_mut().for_each(Slot::forget_published);
         }
+        self.picks.broadcast();
         self.dirty.notify_one();
     }
 
@@ -631,7 +698,14 @@ impl WorkService for WorkHub {
     }
 
     async fn refresh_picks(&self, reason: &str) -> Result<(), WorkError> {
-        picks::refresh(&self.ctx, reason).await
+        match &self.picks_generator {
+            Some(generator) => generator.refresh(reason).await,
+            None if reason == "retention_lag" => {
+                self.picks.broadcast();
+                Ok(())
+            }
+            None => Err(WorkError::not_available()),
+        }
     }
 
     async fn send_preview(&self, item_id: &str) -> Result<SendPreview, WorkError> {

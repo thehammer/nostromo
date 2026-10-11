@@ -6,9 +6,12 @@
 //!   environment?, query?, limit?, offset?})` — the same items the Teri
 //!   surface shows, from the work hub, filtered with the shared §5 semantics
 //! - `teri.get_work_item({id})` — one item's detail
+//! - `teri.get_picks()` — Teri's current picks, as the Picks tab shows them
+//! - `teri.publish_picks({picks: [{item_id, reason}]})` — publish 3–7 picks
 
 use serde_json::{json, Map, Value};
 
+use crate::data::work::picks::PickEntry;
 use crate::data::work::query::WorkFilter;
 use crate::data::work::{WorkService, WorkSource};
 use crate::mcp::state::McpSharedState;
@@ -175,6 +178,41 @@ pub async fn get_work_item(state: &McpSharedState, args: &Value) -> Value {
                 .unwrap_or_else(|e| json!({ "error": "serialization_failed", "message": e.to_string() }))
         }
         Err(e) => json!({ "error": e.code, "message": e.message }),
+    }
+}
+
+/// Handle `teri.get_picks()`: the same `PicksSnapshot` the Picks tab shows.
+pub fn get_picks(state: &McpSharedState) -> Value {
+    let Some(hub) = state.work_hub.as_ref() else {
+        return json!({ "error": "not_available", "message": "picks are not available in this process" });
+    };
+    serde_json::to_value(hub.picks().snapshot())
+        .unwrap_or_else(|e| json!({ "error": "serialization_failed", "message": e.to_string() }))
+}
+
+/// Handle `teri.publish_picks({picks})`.
+///
+/// `{ ok: true, picks: PicksSnapshot }`, or `{ error, message }`:
+/// `invalid_argument` for a malformed call, `invalid_picks` when the daemon
+/// refuses the picks (the message names the bad ids). The agent supplies only
+/// item ids and reasons; source, title and unavailable sources are the daemon's.
+pub fn publish_picks(state: &McpSharedState, args: &Value) -> Value {
+    let Some(hub) = state.work_hub.as_ref() else {
+        return json!({ "error": "not_available", "message": "picks are not available in this process" });
+    };
+    let entries: Vec<PickEntry> = match args.get("picks").cloned().map(serde_json::from_value) {
+        Some(Ok(entries)) => entries,
+        Some(Err(e)) => {
+            return json!({
+                "error": "invalid_argument",
+                "message": format!("`picks` must be a list of {{item_id, reason}}: {e}"),
+            })
+        }
+        None => return json!({ "error": "invalid_argument", "message": "`picks` is required" }),
+    };
+    match hub.publish_picks(&entries) {
+        Ok(snapshot) => json!({ "ok": true, "picks": snapshot }),
+        Err(e) => json!({ "error": "invalid_picks", "message": e.to_string() }),
     }
 }
 

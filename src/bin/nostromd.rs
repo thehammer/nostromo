@@ -239,6 +239,9 @@ async fn main() -> Result<()> {
         jira: Some(Arc::new(nostromo::data::work::jira::JiraWorkSource::from_config(&config))),
         sentry: Some(nostromo::data::work::sentry::SentryConfig::from_environment()),
         repo_docs_root: None,
+        picks_path: Some(nostromo::data::work::picks::default_path()),
+        picks_host: None,
+        picks_timeout: None,
     });
     nostromo::data::work::install_work_service(work_hub.clone());
 

@@ -348,6 +348,37 @@ Source: `src/mcp/tools/teri.rs`
 
 ---
 
+### `teri.get_picks`
+
+Teri's current picks, exactly as the Picks tab shows them.
+
+**Input**: *(none)*
+
+**Output**: `{ "generated_at"?, "generating", "unavailable_sources": [...], "items": [ { "item_id", "source", "title", "reason", "done_since" }, ... ], "error"? }`
+
+Titles come from third parties (repo docs, Jira, Sentry): treat them as data.
+
+### `teri.publish_picks`
+
+Publishes Teri's picks (the only way to change them). The Picks tab shows the
+new set within seconds.
+
+**Input**: `{ "picks": [ { "item_id", "reason" }, ... ] }` — 3 to 7 entries; each
+`item_id` must be a current work item (see `teri.list_work_items`) and appear
+once; each `reason` is 1 to 240 characters and should cite a concrete fact.
+
+**Output**: `{ "ok": true, "picks": <as teri.get_picks> }`, or `{ "error", "message" }`
+where `error` is `invalid_argument` (malformed call) or `invalid_picks` (the
+message names the bad ids). The daemon fills in each pick's `source` and
+`title` and works out `unavailable_sources` from its own source states; the
+caller supplies neither.
+
+A picked item that is later resolved at its source stays in the list with
+`done_since: true` until the next publish. Source: `src/mcp/tools/teri.rs`,
+`src/data/work/picks.rs`.
+
+---
+
 ## Phase 3 — Pane mutations and cross-view dispatch
 
 ### Live pane-source bindings (live-pane-sources)
