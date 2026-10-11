@@ -1,10 +1,13 @@
 import Foundation
 
 /// Remembers when the user last looked at the Sentry tab, so issues first seen
-/// since then can be marked "new". The stored time moves when the tab is shown
-/// and when the user leaves it; the baseline rows are compared with is the time
-/// stored at the moment the tab was shown, so issues that arrive while it is
-/// open are still "new".
+/// since then can be marked "new".
+///
+/// More than one surface can show the tab at once (a second window, a recreated
+/// surface), so showing and leaving are counted. Only the first show takes a
+/// baseline (the time stored when nobody was looking: issues that arrive while
+/// the tab is open stay "new"), and only the last leave stores a new time. Seeing
+/// the tab again in a second window never wipes the markers of the first.
 final class TeriSentryViewTracker {
     static let lastViewedKey = "nostromo.teri.sentryLastViewed"
 
@@ -13,6 +16,7 @@ final class TeriSentryViewTracker {
 
     private let defaults: UserDefaults
     private let now: () -> Date
+    private var visibleCount = 0
 
     init(defaults: UserDefaults, now: @escaping () -> Date = Date.init) {
         self.defaults = defaults
@@ -20,12 +24,23 @@ final class TeriSentryViewTracker {
     }
 
     func didShow() {
+        visibleCount += 1
+        guard visibleCount == 1 else { return }
         baseline = defaults.object(forKey: Self.lastViewedKey) as? Date
         defaults.set(now(), forKey: Self.lastViewedKey)
     }
 
     func didLeave() {
-        defaults.set(now(), forKey: Self.lastViewedKey)
+        guard visibleCount > 0 else { return }
+        visibleCount -= 1
+        if visibleCount == 0 { defaults.set(now(), forKey: Self.lastViewedKey) }
+    }
+
+    /// The user says everything so far has been seen: nothing is "new" until more arrives.
+    func markSeen() {
+        let seenAt = now()
+        baseline = seenAt
+        defaults.set(seenAt, forKey: Self.lastViewedKey)
     }
 
     func isNew(_ item: WorkItem) -> Bool {
@@ -36,21 +51,25 @@ final class TeriSentryViewTracker {
 
 /// The Sentry tab: unresolved issues assigned to the user plus fresh unassigned
 /// errors, newest activity first. Rows read
-/// `ERROR  TypeError in FacesheetParser … 312 events / 24 h · 41 users · last seen 4 min ago  new · production`.
+/// `ERROR  TypeError in FacesheetParser … 312 events / 24 h · 41 users · last seen 4 min ago  new`.
+/// (Sentry's issue list does not say which environment an issue is in, so there
+/// is no environment column or filter.)
 enum TeriSentryTab {
     /// Replaceable so tests can inject a clock and isolated defaults.
     static var tracker = TeriSentryViewTracker(defaults: .standard)
+    static var now: () -> Date = Date.init
 
     static let config = TeriTabConfig(
         tab: .sentry,
         sourceName: "Sentry",
         list: WorkListConfig(
-            rowContent: { rowContent(for: $0, now: Date()) },
-            menuFacets: [.project, .environment],
+            rowContent: { rowContent(for: $0, now: now()) },
+            menuFacets: [.project],
             searchPlaceholder: "Filter issues"),
         emptyMessage: "No unresolved Sentry issues.",
         onShow: { tracker.didShow() },
-        onLeave: { tracker.didLeave() })
+        onLeave: { tracker.didLeave() },
+        rowRefreshInterval: 60)
 
     /// What one issue row shows, relative to `now`.
     static func rowContent(for item: WorkItem, now: Date) -> WorkRowContent {
@@ -64,7 +83,7 @@ enum TeriSentryTab {
         if let users { summary.append("\(users) \(users == 1 ? "user" : "users")") }
         if let age { summary.append("last seen \(age.short)") }
 
-        let status = [isNew ? "new" : nil, item.environment].compactMap { $0 }.joined(separator: " · ")
+        let status = isNew ? "new" : ""
 
         var spoken = ["Sentry issue"]
         if let project = item.project { spoken.append(project) }

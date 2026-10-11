@@ -84,7 +84,11 @@ final class SourceStateBanner: NSView {
         switch state {
         case .loading:
             return Content(message: "Loading \(sourceName)…", showsRetry: false)
-        case .fresh, .empty:
+        case .fresh:
+            // Healthy, but a source may have a note for the reader (a truncated list).
+            guard let rawReason, !rawReason.isEmpty else { return nil }
+            return Content(message: "\(sourceName): \(rawReason)", showsRetry: false)
+        case .empty:
             return nil
         case .stale:
             let age = updatedAt.map { " last updated \(relative($0, now: now))" } ?? ""
