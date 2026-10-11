@@ -2328,6 +2328,7 @@ dependencies = [
  "image",
  "insta",
  "mdns-sd",
+ "nostromo",
  "notify",
  "oauth2",
  "octocrab",
