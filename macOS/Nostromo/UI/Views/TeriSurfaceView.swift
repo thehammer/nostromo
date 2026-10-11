@@ -377,9 +377,18 @@ final class TeriSurfaceView: NSView {
     private func updateTabButtons() {
         for tab in TeriTab.allCases {
             guard let button = tabButtons[tab] else { continue }
-            button.title = tabButtonTitle(tab)
-            button.state = tab == selectedTab ? .on : .off
-            button.setAccessibilityLabel(tabButtonTitle(tab))
+            let title = tabButtonTitle(tab)
+            let selected = tab == selectedTab
+            button.title = title
+            // A recessed push-on-push-off button draws its off state with a system colour
+            // that almost vanishes on a dark surface (and goes dimmer still when the
+            // window is not key). Colour the label explicitly so every tab stays legible.
+            button.attributedTitle = NSAttributedString(string: title, attributes: [
+                .foregroundColor: selected ? NSColor.white : NSColor.labelColor,
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: selected ? .semibold : .regular),
+            ])
+            button.state = selected ? .on : .off
+            button.setAccessibilityLabel(title)
         }
     }
 
