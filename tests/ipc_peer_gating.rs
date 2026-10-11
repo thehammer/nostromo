@@ -2773,11 +2773,13 @@ async fn a_unix_client_can_still_spawn_a_pty() {
     assert!(wait_for_file(&marker).await, "a Unix peer's pty_spawn must run its command");
 }
 
-const SENSITIVE_TOOLS: [&str; 5] = [
+const SENSITIVE_TOOLS: [&str; 7] = [
     "fred.list_unread_emails",
     "teri.list_todos",
     "teri.list_work_items",
     "teri.get_work_item",
+    "teri.get_picks",
+    "teri.publish_picks",
     "mother.list_jobs",
 ];
 

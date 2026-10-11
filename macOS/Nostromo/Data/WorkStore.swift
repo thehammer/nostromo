@@ -168,8 +168,14 @@ final class WorkStore: ObservableObject {
     }
 
     /// Ask the daemon to (re)generate Teri's picks.
-    func refreshPicks(reason: String) {
-        sendFrame?(.picksRefresh(reason: reason))
+    /// Ask the daemon for new picks. True only when the frame was sent: false while
+    /// disconnected or with nothing to send with, so a caller never mistakes "could
+    /// not ask" for "asked".
+    @discardableResult
+    func refreshPicks(reason: String) -> Bool {
+        guard isConnected, let sendFrame else { return false }
+        sendFrame(.picksRefresh(reason: reason))
+        return true
     }
 
     // MARK: - Daemon pushes

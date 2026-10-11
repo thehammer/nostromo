@@ -85,6 +85,7 @@ notify = "6"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
 regex = "1"
 
 # SQLite (Teri todos)
@@ -103,6 +104,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 serde_yaml = "0.9"
 url = "2"
 unicode-width = "0.1"
+unicode-normalization = "0.1.25"
 
 [dev-dependencies]
 nostromo = { path = ".", features = ["test-support"] }

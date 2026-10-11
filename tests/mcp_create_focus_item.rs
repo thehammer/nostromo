@@ -1359,13 +1359,10 @@ fn outside_the_context_fence(brief: &str) -> String {
 }
 
 /// Control characters and invisible format characters (bidi overrides, zero-width,
-/// line/paragraph separators, Unicode tag characters).
+/// line/paragraph separators, Unicode tag characters, fillers ...). Deliberately the production
+/// predicate, so this helper can never share a gap with it.
 fn is_invisible(c: char) -> bool {
-    c.is_control()
-        || matches!(c,
-            '\u{AD}' | '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
-            | '\u{E0000}'..='\u{E007F}')
+    nostromo::data::work::is_invisible(c)
 }
 
 fn norm(s: &str) -> String {

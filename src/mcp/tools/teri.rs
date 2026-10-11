@@ -6,12 +6,15 @@
 //!   environment?, query?, limit?, offset?})` — the same items the Teri
 //!   surface shows, from the work hub, filtered with the shared §5 semantics
 //! - `teri.get_work_item({id})` — one item's detail
+//! - `teri.get_picks()` — Teri's current picks, as the Picks tab shows them
+//! - `teri.publish_picks({picks: [{item_id, reason}]})` — publish 3–7 picks
 //!
 //! Everything these two tools return that someone else wrote is wrapped by the
 //! shared nonce fence in `data::work::untrusted`; see [`list_work_items`].
 
 use serde_json::{json, Map, Value};
 
+use crate::data::work::picks::PickEntry;
 use crate::data::work::query::WorkFilter;
 use crate::data::work::untrusted::{
     cut_bytes, escape_id, fence, one_line, sanitize_block, unescape_id, NonceFence, MAX_ID_CHARS,
@@ -302,6 +305,82 @@ pub async fn get_work_item(state: &McpSharedState, args: &Value) -> Value {
             })
         }
         Err(e) => json!({ "error": e.code, "message": e.message }),
+    }
+}
+
+/// Handle `teri.get_picks()`: the same picks the Picks tab shows.
+///
+/// A pick's `title` comes from a third party and its `reason` was derived from
+/// third-party text by an agent, so both are data to a reader: each goes out as
+/// one capped line inside the call's nonce fence, with the notice once at the
+/// top; ids are escaped like the list's. The same rule binds anything that
+/// later seeds a prompt from a pick (T5): fence `title` and `reason` with the
+/// shared untrusted helper.
+pub fn get_picks(state: &McpSharedState) -> Value {
+    let Some(hub) = state.work_hub.as_ref() else {
+        return json!({ "error": "not_available", "message": "picks are not available in this process" });
+    };
+    let snapshot = hub.picks().snapshot();
+    let fence = NonceFence::new();
+    // A pick whose id cannot be escaped to a safe, bounded form is left out, as the list does.
+    let items: Vec<Value> = snapshot
+        .items
+        .iter()
+        .filter_map(|p| {
+            Some(json!({
+                "item_id": escape_id(&p.item_id)?,
+                "source": p.source,
+                "title": fence.line(&p.title, MAX_LINE_CHARS),
+                "reason": fence.line(&p.reason, MAX_LINE_CHARS),
+                "done_since": p.done_since,
+            }))
+        })
+        .collect();
+    let mut out = json!({
+        "notice": fence.notice(),
+        "generating": snapshot.generating,
+        "unavailable_sources": snapshot.unavailable_sources,
+        "items": items,
+    });
+    if let Some(obj) = out.as_object_mut() {
+        if let Some(at) = snapshot.generated_at {
+            obj.insert("generated_at".into(), json!(at));
+        }
+        if let Some(error) = &snapshot.error {
+            obj.insert("error".into(), json!(one_line(error, MAX_REASON_CHARS)));
+        }
+    }
+    out
+}
+
+/// Handle `teri.publish_picks({picks})`.
+///
+/// `{ ok: true, picks: PicksSnapshot }`, or `{ error, message }`:
+/// `invalid_argument` for a malformed call, `invalid_picks` when the daemon
+/// refuses the picks (the message names the bad ids). The agent supplies only
+/// item ids (as `teri.list_work_items` gave them, escaped: see [`escape_id`])
+/// and reasons; source, title and unavailable sources are the daemon's, and
+/// every reason is sanitised before it is stored.
+pub fn publish_picks(state: &McpSharedState, args: &Value) -> Value {
+    let Some(hub) = state.work_hub.as_ref() else {
+        return json!({ "error": "not_available", "message": "picks are not available in this process" });
+    };
+    let entries: Vec<PickEntry> = match args.get("picks").cloned().map(serde_json::from_value::<Vec<PickEntry>>) {
+        Some(Ok(entries)) => entries
+            .into_iter()
+            .map(|e| PickEntry { item_id: unescape_id(&e.item_id), reason: e.reason })
+            .collect(),
+        Some(Err(e)) => {
+            return json!({
+                "error": "invalid_argument",
+                "message": format!("`picks` must be a list of {{item_id, reason}}: {e}"),
+            })
+        }
+        None => return json!({ "error": "invalid_argument", "message": "`picks` is required" }),
+    };
+    match hub.publish_picks(&entries) {
+        Ok(snapshot) => json!({ "ok": true, "picks": snapshot }),
+        Err(e) => json!({ "error": "invalid_picks", "message": e.to_string() }),
     }
 }
 

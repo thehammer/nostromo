@@ -271,3 +271,253 @@ final class TeriDateFormatterReuseTests: XCTestCase {
         XCTAssertNotEqual(german, english, "a German calendar must not get the cached English weekday")
     }
 }
+
+// MARK: - A selected row stays readable (generic list rows)
+//
+// Contract for `WorkListView`'s row text on the two selection fills AppKit paints:
+//
+//  - Row selected in the key window (cell `backgroundStyle == .emphasized`): the fill is the
+//    system selection colour (`selectedContentBackgroundColor`, a saturated blue by default).
+//    EVERY text (priority, kind, title, due, status, urgent or not) is white. White is the
+//    lightest colour there is, so it is the best the platform allows: on the default blue it
+//    is ~3.65:1, short of the 4.5:1 body-text bar. When white reaches 4.5 on the user's accent
+//    that is the bar; otherwise the documented floor is 3.0 (the large-text / UI bar) and the
+//    text must still be white, because no lighter colour would be better.
+//  - Row selected but its window not active (`backgroundStyle != .emphasized`, the row view
+//    still `isSelected`): the fill is `unemphasizedSelectedContentBackgroundColor`, a grey that
+//    flips between light and dark with the appearance. Every text reaches 4.5:1 on it, in both
+//    appearances (so the colours are adaptive, not the dark-surface ones).
+//  - An unselected row keeps its dark-surface colours, and a row leaving the selection gets them back.
+//
+// The real list builds the cells; the tests then put the row in each state the way AppKit does
+// (select the row, then hand the cell its background style again). System colours are resolved
+// under the cell's own effective appearance, never hard-coded.
+
+private struct SelColor { var r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat }
+
+private func selResolve(_ color: NSColor, in appearance: NSAppearance) -> SelColor? {
+    var out: SelColor?
+    appearance.performAsCurrentDrawingAppearance {
+        guard let c = color.usingColorSpace(.sRGB) else { return }
+        out = SelColor(r: c.redComponent, g: c.greenComponent, b: c.blueComponent, a: c.alphaComponent)
+    }
+    return out
+}
+
+private func selOver(_ top: SelColor, _ back: SelColor) -> SelColor {
+    SelColor(r: top.r * top.a + back.r * (1 - top.a), g: top.g * top.a + back.g * (1 - top.a),
+             b: top.b * top.a + back.b * (1 - top.a), a: 1)
+}
+
+private func selLuminance(_ c: SelColor) -> CGFloat {
+    func lin(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+    return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// WCAG contrast ratio of `text` on the opaque `fill`.
+private func selContrast(_ text: SelColor, on fill: SelColor) -> CGFloat {
+    let l1 = selLuminance(selOver(text, fill)), l2 = selLuminance(fill)
+    return (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
+}
+
+private func selClose(_ a: SelColor, _ b: SelColor) -> Bool {
+    abs(a.r - b.r) < 0.01 && abs(a.g - b.g) < 0.01 && abs(a.b - b.b) < 0.01
+}
+
+private func selDescribe(_ c: SelColor) -> String { String(format: "rgb(%.2f, %.2f, %.2f)", c.r, c.g, c.b) }
+
+final class WorkRowSelectionContrastTests: XCTestCase {
+    private let appearances: [(name: String, appearance: NSAppearance)] = [
+        ("darkAqua", NSAppearance(named: .darkAqua)!),
+        ("aqua", NSAppearance(named: .aqua)!),
+    ]
+
+    /// Four rows covering every colour the row draws: P1 + urgent due, P2, P3, P5.
+    private let items = [
+        WorkTestSupport.todo(1, "Urgent first", priority: 1),
+        WorkTestSupport.todo(2, "Second", priority: 2),
+        WorkTestSupport.todo(3, "Third", priority: 3),
+        WorkTestSupport.todo(4, "Fifth", priority: 5),
+    ]
+
+    private enum Part: String, CaseIterable { case priority, kind, title, due, status }
+
+    private struct Rig {
+        let window: RigWindow
+        let outline: NSOutlineView
+    }
+
+    private func makeRig(_ appearance: NSAppearance) throws -> Rig {
+        let window = makeRigWindow(self, appearance: appearance)
+        let config = WorkListConfig(
+            rowContent: { item in
+                WorkRowContent(priorityText: item.priority?.label, priorityRank: item.priority?.rank,
+                               kindText: "✖ Bug", title: item.title, dueText: "Due today",
+                               dueIsUrgent: item.title.hasPrefix("Urgent"), statusText: "open",
+                               accessibilityLabel: item.title)
+            },
+            sortOptions: [])
+        let list = WorkListView(config: config, scheduler: ManualScheduler().scheduler)
+        list.frame = NSRect(x: 0, y: 0, width: 700, height: 300)
+        window.contentView!.addSubview(list)
+        list.apply(snapshot: flatSnapshot(items), isLoading: false, placeholder: nil)
+        list.layoutSubtreeIfNeeded()
+        rigSettle()
+        let outline = try XCTUnwrap(allViews(list).compactMap { $0 as? NSOutlineView }.first)
+        return Rig(window: window, outline: outline)
+    }
+
+    private func fields(_ cell: NSTableCellView, _ item: WorkItem) throws -> [Part: NSTextField] {
+        let texts = allViews(cell).compactMap { $0 as? NSTextField }
+        func field(_ text: String) throws -> NSTextField {
+            try XCTUnwrap(texts.first { $0.stringValue == text }, "no text field showing \(text)")
+        }
+        return [
+            .priority: try field(item.priority?.label ?? ""),
+            .kind: try field("✖ Bug"),
+            .title: try field(item.title),
+            .due: try field("Due today"),
+            .status: try field("open"),
+        ]
+    }
+
+    private enum State { case unselected, emphasisedSelection, inactiveSelection }
+
+    /// A system fill as the row paints it under the cell's appearance, over the list's backdrop.
+    private func selectionFill(_ color: NSColor, under cell: NSView) throws -> SelColor {
+        let backdrop = try XCTUnwrap(selResolve(NSColor.controlBackgroundColor, in: cell.effectiveAppearance))
+        return selOver(try XCTUnwrap(selResolve(color, in: cell.effectiveAppearance)), backdrop)
+    }
+
+    /// Put `item`'s row into `state` the way AppKit does, then read the colours its text is drawn in.
+    private func colours(_ rig: Rig, _ item: WorkItem, _ state: State) throws -> (cell: NSTableCellView, text: [Part: SelColor]) {
+        let cell = try cellFor(rig, item)
+        let row = rig.outline.row(for: cell)
+        XCTAssertGreaterThanOrEqual(row, 0, "precondition: the cell is in a row")
+        switch state {
+        case .unselected:
+            rig.outline.deselectAll(nil)
+            cell.backgroundStyle = .normal
+        case .emphasisedSelection:
+            rig.outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            cell.backgroundStyle = .emphasized
+        case .inactiveSelection:
+            rig.outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            cell.backgroundStyle = .normal
+        }
+        if state != .unselected {
+            let rowView = try XCTUnwrap(cell.superview as? NSTableRowView, "the cell sits in its row view")
+            XCTAssertTrue(rowView.isSelected, "precondition: the row is selected")
+        }
+        var out: [Part: SelColor] = [:]
+        for (part, field) in try fields(cell, item) {
+            out[part] = try XCTUnwrap(selResolve(field.textColor ?? .black, in: cell.effectiveAppearance),
+                                      "\(part) has a colour")
+        }
+        return (cell, out)
+    }
+
+    private func cellFor(_ rig: Rig, _ item: WorkItem) throws -> NSTableCellView {
+        for row in 0..<rig.outline.numberOfRows {
+            if let cell = rig.outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView,
+               allViews(cell).contains(where: { ($0 as? NSTextField)?.stringValue == item.title }) {
+                return cell
+            }
+        }
+        return try XCTUnwrap(nil as NSTableCellView?, "no row shows \(item.title)")
+    }
+
+    // MARK: Selected in the key window
+
+    func testEveryTextOnTheEmphasisedSelectionIsWhiteAndAsReadableAsWhiteCanBe() throws {
+        for (name, appearance) in appearances {
+            let rig = try makeRig(appearance)
+            for item in items {
+                let (cell, text) = try colours(rig, item, .emphasisedSelection)
+                let fill = try selectionFill(NSColor.selectedContentBackgroundColor, under: cell)
+                let white = SelColor(r: 1, g: 1, b: 1, a: 1)
+                let best = selContrast(white, on: fill)
+                // White is ~3.65:1 on the default blue: under 4.5, so the floor applies there.
+                let bar: CGFloat = best >= 4.5 ? 4.5 : 3.0
+                XCTAssertGreaterThanOrEqual(best, 3.0,
+                    "\(name): even white is only \(best):1 on this Mac's selection colour \(selDescribe(fill))")
+                for part in Part.allCases {
+                    let colour = try XCTUnwrap(text[part])
+                    XCTAssertTrue(selClose(colour, white),
+                        "\(name) \(item.title): \(part) is \(selDescribe(colour)); on the emphasised selection all text is white")
+                    XCTAssertGreaterThanOrEqual(selContrast(colour, on: fill), bar,
+                        "\(name) \(item.title): \(part) on \(selDescribe(fill))")
+                }
+            }
+        }
+    }
+
+    // MARK: Selected in an inactive window
+
+    func testEveryTextOnTheInactiveSelectionIsReadableOnItsGreyFillInBothAppearances() throws {
+        for (name, appearance) in appearances {
+            let rig = try makeRig(appearance)
+            for item in items {
+                let (cell, text) = try colours(rig, item, .inactiveSelection)
+                let fill = try selectionFill(NSColor.unemphasizedSelectedContentBackgroundColor, under: cell)
+                for part in Part.allCases {
+                    let colour = try XCTUnwrap(text[part])
+                    let ratio = selContrast(colour, on: fill)
+                    XCTAssertGreaterThanOrEqual(ratio, 4.5,
+                        "\(name) \(item.title): \(part) \(selDescribe(colour)) on the inactive selection \(selDescribe(fill)) is \(ratio):1")
+                }
+            }
+        }
+    }
+
+    // MARK: Not selected
+
+    func testAnUnselectedRowKeepsItsDarkSurfaceColours() throws {
+        let rig = try makeRig(appearances[0].appearance)
+        func expected(_ colour: NSColor) throws -> SelColor {
+            try XCTUnwrap(selResolve(colour, in: appearances[0].appearance))
+        }
+        let cases: [(WorkItem, Part, NSColor)] = [
+            (items[0], .title, Theme.fg),
+            (items[0], .kind, Theme.fgMuted),
+            (items[0], .status, Theme.fgMuted),
+            (items[0], .priority, Theme.redSweater),
+            (items[0], .due, Theme.redSweater),      // urgent
+            (items[1], .priority, Theme.amber),
+            (items[1], .due, Theme.fgMuted),         // not urgent
+            (items[2], .priority, Theme.cornflower),
+            (items[3], .priority, Theme.fgMuted),
+        ]
+        for (item, part, colour) in cases {
+            let (_, text) = try colours(rig, item, .unselected)
+            let actual = try XCTUnwrap(text[part])
+            let want = try expected(colour)
+            XCTAssertTrue(selClose(actual, want),
+                          "\(item.title) \(part) is \(selDescribe(actual)), expected \(selDescribe(want))")
+        }
+    }
+
+    // MARK: Changing state
+
+    func testARowFollowsItsStateThroughSelectionActivationAndDeselection() throws {
+        for (name, appearance) in appearances {
+            let rig = try makeRig(appearance)
+            let item = items[0]
+            let (_, before) = try colours(rig, item, .unselected)
+
+            let (_, emphasised) = try colours(rig, item, .emphasisedSelection)
+            _ = try colours(rig, item, .inactiveSelection)
+            let (_, emphasisedAgain) = try colours(rig, item, .emphasisedSelection)
+            let (_, after) = try colours(rig, item, .unselected)
+
+            for part in Part.allCases {
+                let b = try XCTUnwrap(before[part]), e = try XCTUnwrap(emphasised[part])
+                let e2 = try XCTUnwrap(emphasisedAgain[part])
+                let a = try XCTUnwrap(after[part])
+                XCTAssertTrue(selClose(e, SelColor(r: 1, g: 1, b: 1, a: 1)), "\(name) \(part) emphasised: \(selDescribe(e))")
+                XCTAssertTrue(selClose(e2, e), "\(name) \(part): activating the window again gives white again")
+                XCTAssertTrue(selClose(a, b), "\(name) \(part): a deselected row gets its own colours back (\(selDescribe(a)) vs \(selDescribe(b)))")
+            }
+        }
+    }
+}

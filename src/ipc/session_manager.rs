@@ -147,6 +147,33 @@ impl Shared {
     }
 }
 
+// ── restricted sessions ───────────────────────────────────────────────────────
+
+/// What an unattended session that reads third-party text may do.
+///
+/// A session with restrictions runs WITHOUT `--dangerously-skip-permissions`:
+/// `--permission-mode dontAsk` denies anything not pre-approved, and the
+/// allow-list is the control. Three layers, so no single flag is trusted:
+///
+/// 1. `--tools` removes every built-in tool not in [`Self::builtin_tools`] (no
+///    Bash, Write, Edit, Agent, WebFetch ...),
+/// 2. `--allowedTools` pre-approves only [`Self::allowed_tools`]; the rest is
+///    denied rather than prompted,
+/// 3. `--strict-mcp-config` loads only the daemon's own MCP bridge, and the
+///    daemon's MCP dispatch separately limits this tag to its own tool list
+///    (see `mcp::tools`), whatever the client asks for.
+///
+/// The session also runs in its own process group, which `stop` kills whole.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRestrictions {
+    /// Built-in tools left available (`--tools`); empty means none.
+    pub builtin_tools: Vec<String>,
+    /// Tools pre-approved (`--allowedTools`), MCP tools as `mcp__<server>__<tool>`.
+    pub allowed_tools: Vec<String>,
+    /// Hard spend cap for the session (`--max-budget-usd`).
+    pub max_budget_usd: Option<f64>,
+}
+
 // ── managed session ───────────────────────────────────────────────────────────
 
 struct ManagedSession {
@@ -198,11 +225,27 @@ struct ManagedSession {
     /// Set to `true` once the summary has been derived and broadcast to all
     /// connected clients. Resets on restart (new `ManagedSession`).
     summary_sent: Arc<AtomicBool>,
+    /// The child leads its own process group (restricted sessions), so a kill
+    /// takes its children and subagents with it.
+    own_process_group: bool,
 }
 
 impl ManagedSession {
     fn alive(&self) -> bool {
         !self.shared.exited.load(Ordering::SeqCst)
+    }
+
+    /// Kill the child, and its whole process group when it leads one.
+    fn kill(&mut self) {
+        #[cfg(unix)]
+        if self.own_process_group {
+            // The group id is the child's pid (see `process_group(0)` at spawn).
+            // SAFETY: killpg is a plain syscall; a stale id just fails with ESRCH.
+            unsafe {
+                libc::killpg(self.child.id() as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        let _ = self.child.kill();
     }
 
     fn state(&self) -> SessionState {
@@ -322,6 +365,10 @@ pub struct SessionManager {
     /// Per focus tag: the nonce of the focus `create_focus_core` last created
     /// under it. In memory only (a restart forgets it).
     focus_nonces: HashMap<String, String>,
+    /// Per focus tag: the tool allow-list and cost cap its session runs under
+    /// (see [`SessionRestrictions`]). Looked up on EVERY spawn of the tag, so a
+    /// restart, a crash recovery or a client-driven respawn is restricted too.
+    restrictions: HashMap<String, SessionRestrictions>,
 }
 
 impl SessionManager {
@@ -361,6 +408,13 @@ impl SessionManager {
             activity_store: crate::activity::store::ActivityStore::new(),
             sensitive,
             focus_nonces: HashMap::new(),
+            // The picking session's tag is boxed in from the start, not from the
+            // moment the picks host spawns it: whoever starts a session under
+            // that tag (a client, a respawn) gets the same allow-list.
+            restrictions: HashMap::from([(
+                crate::data::work::picks::PICKS_TAG.to_owned(),
+                crate::data::work::picks::picks_restrictions(),
+            )]),
         }
     }
 
@@ -577,7 +631,9 @@ impl SessionManager {
         // child exists, so nothing it produces can precede the registration.
         // A session spawned while a work item is being sent holds that item's
         // content likewise (see `peer::within_work_send`).
-        if is_teri_or_fred_agent(&agent_name) || in_work_send() {
+        // A restricted session (the picks session) reads work-item data with no
+        // agent name to say so, so it is sensitive by its restriction.
+        if is_teri_or_fred_agent(&agent_name) || in_work_send() || self.restrictions.contains_key(&tag) {
             self.sensitive.mark_tag(&tag);
         }
 
@@ -600,12 +656,13 @@ impl SessionManager {
         self.session_reverse.insert(effective_id.clone(), tag.clone());
 
         let program = resolve_claude()?;
-        let args = build_claude_args(
+        let args = build_claude_args_with(
             &agent_name,
             &view_name,
             remote_control,
             &effective_id,
             resume,
+            self.restrictions.get(&tag),
         );
 
         let managed = self.spawn_managed(
@@ -667,6 +724,15 @@ impl SessionManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()); // piped for crash diagnostics (was null)
+
+        // A restricted session leads its own process group, so `stop` can kill
+        // its children and subagents too, not just the child.
+        let own_process_group = self.restrictions.contains_key(&tag);
+        #[cfg(unix)]
+        if own_process_group {
+            use std::os::unix::process::CommandExt as _;
+            cmd.process_group(0);
+        }
 
         // MCP bridge wiring for real (non-stubbed) `claude` sessions. The child
         // registers the `nostromo-mcp-bridge` stdio server (--mcp-config) and
@@ -783,6 +849,7 @@ impl SessionManager {
             last_exit_code: None,
             stop_reason: None,
             summary_sent: Arc::new(AtomicBool::new(false)),
+            own_process_group,
         })
     }
 
@@ -1008,7 +1075,7 @@ impl SessionManager {
         if let Some(session) = self.sessions.get_mut(tag) {
             session.intentional_stop.store(true, Ordering::SeqCst);
             session.stop_reason = Some(StopReason::User);
-            let _ = session.child.kill();
+            session.kill();
             session.shared.exited.store(true, Ordering::SeqCst);
             session.shared.broadcast(SessionEvent::PermanentlyDown {
                 reason: StopReason::User,
@@ -1503,6 +1570,18 @@ impl SessionManager {
         self.sessions.get(tag).map(|s| s.alive()).unwrap_or(false)
     }
 
+    /// Run every future session of `tag` under `restrictions` (a restart or a
+    /// crash recovery included). Not undone for the life of the process: the
+    /// tag is reserved for restricted use.
+    pub fn restrict_tag(&mut self, tag: &str, restrictions: SessionRestrictions) {
+        self.restrictions.insert(tag.to_owned(), restrictions);
+    }
+
+    /// The restrictions `tag`'s sessions run under, if any.
+    pub fn restrictions_for(&self, tag: &str) -> Option<&SessionRestrictions> {
+        self.restrictions.get(tag)
+    }
+
     /// `tag` is in the pushed focus registry but this process has no session
     /// for it: after a daemon restart, sessions are respawned lazily as the
     /// Mac attaches, so this focus exists and is just not running yet. A
@@ -1583,7 +1662,7 @@ impl SessionManager {
     pub fn kill_all_on_shutdown(&mut self) {
         for (tag, session) in &mut self.sessions {
             session.intentional_stop.store(true, Ordering::SeqCst);
-            let _ = session.child.kill();
+            session.kill();
             for (_, h) in session.forwarders.drain() {
                 h.abort();
             }
@@ -1888,7 +1967,8 @@ fn capture_exit_code(child: &mut Child) -> Option<i32> {
     }
 }
 
-/// Build the `claude` argument vector for a persistent stream-json session.
+/// Build the `claude` argument vector for a persistent stream-json session. An
+/// empty `agent_name` starts the session with no `--agent`.
 pub fn build_claude_args(
     agent_name: &str,
     view_name: &str,
@@ -1896,29 +1976,72 @@ pub fn build_claude_args(
     session_id: &str,
     resume: bool,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        // Full permission bypass for daemon-hosted sessions. A headless
-        // stream-json session has no way to answer an interactive permission
-        // prompt, so the softer `--settings {defaultMode:bypassPermissions}`
-        // would dead-end on prompts it still raises (notably compound `a && b`
-        // commands). `--dangerously-skip-permissions` skips the checks outright
-        // — matching sessions.toml and the in-process TUI views — so agents
-        // like Perri can run their gh/compound commands. Scoped to this child
-        // process; never touches the operator's global ~/.claude/settings.json.
-        "--dangerously-skip-permissions".into(),
-        "--input-format".into(),
-        "stream-json".into(),
-        "--output-format".into(),
-        "stream-json".into(),
-        "--verbose".into(),
-        // Re-emit stdin-origin user messages on stdout (tagged isReplay) so the
-        // daemon renders every user message off the output stream.
-        "--replay-user-messages".into(),
-        "--agent".into(),
-        agent_name.into(),
-        "-n".into(),
-        view_name.into(),
-    ];
+    build_claude_args_with(agent_name, view_name, remote_control, session_id, resume, None)
+}
+
+/// [`build_claude_args`], optionally under [`SessionRestrictions`].
+///
+/// Unrestricted sessions keep `--dangerously-skip-permissions` (see below).
+/// A restricted one drops it for `--permission-mode dontAsk` plus the
+/// allow-list flags: the allow-list is then the only thing it may use.
+pub fn build_claude_args_with(
+    agent_name: &str,
+    view_name: &str,
+    remote_control: bool,
+    session_id: &str,
+    resume: bool,
+    restrictions: Option<&SessionRestrictions>,
+) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    match restrictions {
+        None => args.push(
+            // Full permission bypass for daemon-hosted sessions. A headless
+            // stream-json session has no way to answer an interactive permission
+            // prompt, so the softer `--settings {defaultMode:bypassPermissions}`
+            // would dead-end on prompts it still raises (notably compound `a && b`
+            // commands). `--dangerously-skip-permissions` skips the checks outright
+            // — matching sessions.toml and the in-process TUI views — so agents
+            // like Perri can run their gh/compound commands. Scoped to this child
+            // process; never touches the operator's global ~/.claude/settings.json.
+            "--dangerously-skip-permissions".into(),
+        ),
+        Some(r) => {
+            // No bypass: nothing outside the allow-list can run, and nothing
+            // prompts (a headless session could not answer anyway).
+            args.extend(["--permission-mode".into(), "dontAsk".into()]);
+            args.extend(["--tools".into(), r.builtin_tools.join(",")]);
+            args.extend(["--allowedTools".into(), r.allowed_tools.join(",")]);
+            args.push("--strict-mcp-config".into());
+            // An unattended run must not execute the operator's code: only the
+            // (empty) project's settings load, so no user hooks, CLAUDE.md,
+            // plugins, user agents or skills; and no slash commands or skills.
+            args.extend(["--setting-sources".into(), "project".into()]);
+            args.push("--disable-slash-commands".into());
+            if let Some(budget) = r.max_budget_usd {
+                args.extend(["--max-budget-usd".into(), format!("{budget}")]);
+            }
+        }
+    }
+    args.extend(
+        [
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            // Re-emit stdin-origin user messages on stdout (tagged isReplay) so the
+            // daemon renders every user message off the output stream.
+            "--replay-user-messages",
+        ]
+        .map(String::from),
+    );
+    // No name, no `--agent`: a restricted session carries its instructions in its
+    // prompt, because a plugin agent's own `tools:` list overrides `--tools` and
+    // leaves the session without the tools it needs.
+    if !agent_name.is_empty() {
+        args.extend(["--agent".into(), agent_name.into()]);
+    }
+    args.extend(["-n".into(), view_name.into()]);
     if remote_control {
         args.push("--remote-control".into());
         args.push(view_name.into());
@@ -2217,6 +2340,89 @@ mod tests {
         let args = build_claude_args("teri", "Teri", false, "sid-2", true);
         assert!(args.windows(2).any(|w| w == ["--resume", "sid-2"]));
         assert!(!args.iter().any(|a| a == "--session-id"));
+    }
+
+    // ── restricted sessions ─────────────────────────────────────────────────
+
+    fn restricted() -> SessionRestrictions {
+        SessionRestrictions {
+            builtin_tools: vec!["ToolSearch".into()],
+            allowed_tools: vec!["mcp__nostromo__teri_list_work_items".into(), "ToolSearch".into()],
+            max_budget_usd: Some(2.0),
+        }
+    }
+
+    #[test]
+    fn the_picks_tag_is_restricted_from_the_start() {
+        let mgr = SessionManager::with_store_path(tmp_store());
+        assert_eq!(
+            mgr.restrictions_for(crate::data::work::picks::PICKS_TAG),
+            Some(&crate::data::work::picks::picks_restrictions())
+        );
+        assert_eq!(mgr.restrictions_for("fred"), None);
+    }
+
+    #[test]
+    fn restricted_args_carry_the_allow_list_and_no_permission_bypass() {
+        let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid", false, Some(&restricted()));
+        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"), "{args:?}");
+        for pair in [
+            ["--permission-mode", "dontAsk"],
+            ["--tools", "ToolSearch"],
+            ["--allowedTools", "mcp__nostromo__teri_list_work_items,ToolSearch"],
+            ["--max-budget-usd", "2"],
+        ] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
+        }
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        // A named agent is still passed to a restricted session ...
+        assert!(args.windows(2).any(|w| w == ["--agent", "teri:teri"]));
+        // ... which never loads user settings, hooks, plugins or slash commands.
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", "project"]), "{args:?}");
+        assert!(args.iter().any(|a| a == "--disable-slash-commands"), "{args:?}");
+        // The unrestricted vector is unchanged.
+        assert_eq!(
+            build_claude_args_with("a", "v", false, "sid", false, None),
+            build_claude_args("a", "v", false, "sid", false)
+        );
+    }
+
+    #[test]
+    fn a_restricted_session_with_no_agent_name_gets_no_agent_flag() {
+        let args = build_claude_args_with("", "Teri picks", false, "sid", false, Some(&restricted()));
+        assert!(!args.iter().any(|a| a == "--agent"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("teri:teri")), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", "project"]), "{args:?}");
+        assert!(args.iter().any(|a| a == "--disable-slash-commands"), "{args:?}");
+        // An unrestricted session with no agent name has no agent flag either, and gains nothing else.
+        let plain = build_claude_args_with("", "v", false, "sid", false, None);
+        assert!(!plain.iter().any(|a| a == "--agent" || a == "--setting-sources" || a == "--disable-slash-commands"), "{plain:?}");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_restricted_session_kills_its_children_too() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.restrict_tag("boxed", restricted());
+        let pid_file = std::env::temp_dir().join(format!("nostromo-pg-{}", Uuid::new_v4()));
+        // The stub starts a long-lived grandchild and waits on it.
+        spawn_stub(&mut mgr, "boxed", &format!("sleep 300 & echo $! > {}; wait", pid_file.display()));
+        let grandchild = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|t| t.trim().parse::<i32>().ok()) {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        // SAFETY: signal 0 only probes for existence.
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) == 0 };
+        assert!(alive(grandchild));
+
+        mgr.stop("boxed");
+
+        // Killed by the group signal; a reaped-by-init process disappears shortly after.
+        while alive(grandchild) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = std::fs::remove_file(&pid_file);
     }
 
     #[test]

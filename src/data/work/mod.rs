@@ -28,6 +28,11 @@ pub mod service;
 pub mod todos;
 pub(crate) mod untrusted;
 
+/// The invisible-character predicate, for the integration tests' fence scanner
+/// (`tests/support/fence_scan.rs`), so the scanner cannot share a gap with the sanitiser.
+#[cfg(feature = "test-support")]
+pub use untrusted::is_invisible;
+
 pub use model::*;
 pub use service::{
     fred_detail_service, install_fred_detail_service, install_work_service, work_service,
