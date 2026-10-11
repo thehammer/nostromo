@@ -408,7 +408,13 @@ impl SessionManager {
             activity_store: crate::activity::store::ActivityStore::new(),
             sensitive,
             focus_nonces: HashMap::new(),
-            restrictions: HashMap::new(),
+            // The picking session's tag is boxed in from the start, not from the
+            // moment the picks host spawns it: whoever starts a session under
+            // that tag (a client, a respawn) gets the same allow-list.
+            restrictions: HashMap::from([(
+                crate::data::work::picks::PICKS_TAG.to_owned(),
+                crate::data::work::picks::picks_restrictions(),
+            )]),
         }
     }
 
@@ -2332,6 +2338,16 @@ mod tests {
             allowed_tools: vec!["mcp__nostromo__teri_list_work_items".into(), "ToolSearch".into()],
             max_budget_usd: Some(2.0),
         }
+    }
+
+    #[test]
+    fn the_picks_tag_is_restricted_from_the_start() {
+        let mgr = SessionManager::with_store_path(tmp_store());
+        assert_eq!(
+            mgr.restrictions_for(crate::data::work::picks::PICKS_TAG),
+            Some(&crate::data::work::picks::picks_restrictions())
+        );
+        assert_eq!(mgr.restrictions_for("fred"), None);
     }
 
     #[test]

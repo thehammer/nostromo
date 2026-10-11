@@ -322,17 +322,18 @@ pub fn get_picks(state: &McpSharedState) -> Value {
     };
     let snapshot = hub.picks().snapshot();
     let fence = NonceFence::new();
+    // A pick whose id cannot be escaped to a safe, bounded form is left out, as the list does.
     let items: Vec<Value> = snapshot
         .items
         .iter()
-        .map(|p| {
-            json!({
-                "item_id": escape_id(&p.item_id).unwrap_or_else(|| one_line(&p.item_id, MAX_ID_CHARS)),
+        .filter_map(|p| {
+            Some(json!({
+                "item_id": escape_id(&p.item_id)?,
                 "source": p.source,
                 "title": fence.line(&p.title, MAX_LINE_CHARS),
                 "reason": fence.line(&p.reason, MAX_LINE_CHARS),
                 "done_since": p.done_since,
-            })
+            }))
         })
         .collect();
     let mut out = json!({

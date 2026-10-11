@@ -180,12 +180,19 @@ fn manager() -> (SessionManager, tempfile::TempDir) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tag_can_be_reserved_for_restricted_sessions_and_says_which_restrictions() {
     let (mut mgr, _dir) = manager();
-    assert_eq!(mgr.restrictions_for(PICKS_TAG), None);
+    assert_eq!(mgr.restrictions_for("reserved-tag"), None);
 
-    mgr.restrict_tag(PICKS_TAG, picks_restrictions());
+    mgr.restrict_tag("reserved-tag", picks_restrictions());
 
-    assert_eq!(mgr.restrictions_for(PICKS_TAG), Some(&picks_restrictions()));
+    assert_eq!(mgr.restrictions_for("reserved-tag"), Some(&picks_restrictions()));
     assert_eq!(mgr.restrictions_for("some-other-tag"), None, "only the named tag is restricted");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_picks_tag_is_restricted_from_the_moment_the_manager_exists() {
+    // Not only once the picks host has spawned it: a client or a respawn starting that tag is boxed in too.
+    let (mgr, _dir) = manager();
+    assert_eq!(mgr.restrictions_for(PICKS_TAG), Some(&picks_restrictions()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
