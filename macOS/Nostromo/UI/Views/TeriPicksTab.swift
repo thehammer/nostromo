@@ -10,6 +10,10 @@ enum TeriPicksTab {
         sourceName: "Picks",
         list: nil,
         emptyMessage: "Teri has not picked anything yet.")
+
+    /// How long after an activation (tab shown, window key) a store change may still
+    /// carry out the first-open request that could not go out at that moment.
+    static let pendingRetryWindow: TimeInterval = 30
 }
 
 /// What one pick row shows.
@@ -48,10 +52,11 @@ final class TeriPicksView: NSView {
     /// The local day a first-open request was last SENT for: one per day per view.
     /// Set only once a frame actually went out.
     private var firstOpenDay: Date?
-    /// A first-open request the tab wanted to make but could not yet (no connection,
-    /// no way to send, no picks snapshot yet): retried when the store changes,
-    /// never from the clock.
-    private var firstOpenPending = false
+    /// When the activation (tab shown, window key) was whose first-open request could
+    /// not go out yet (no connection, no way to send, no picks snapshot yet). A store
+    /// change retries it only within [`TeriPicksTab.pendingRetryWindow`] of that
+    /// activation, so an unattended reconnect never starts a generation; never from the clock.
+    private var firstOpenPendingSince: Date?
     private var keyObserver: NSObjectProtocol?
     private var clockTimer: Timer?
     private var picks: [Pick] = []
@@ -125,7 +130,7 @@ final class TeriPicksView: NSView {
     func tabDidShow() {
         isShowing = true
         reload()
-        requestFirstOpenPicksIfDue()
+        requestFirstOpenPicksIfDue(activatedAt: now())
         clockTimer?.invalidate()
         // The header says how long ago: keep it true while the tab stays open.
         clockTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.clockTick() }
@@ -133,7 +138,7 @@ final class TeriPicksView: NSView {
 
     func tabDidLeave() {
         isShowing = false
-        firstOpenPending = false
+        firstOpenPendingSince = nil
         clockTimer?.invalidate()
         clockTimer = nil
     }
@@ -323,7 +328,13 @@ final class TeriPicksView: NSView {
         emptyLabel.stringValue = TeriPicksTab.config.emptyMessage
         emptyLabel.isHidden = !(rows.isEmpty && !generating)
         dimIfDisconnected()
-        if retryFirstOpen && firstOpenPending { requestFirstOpenPicksIfDue() }
+        if retryFirstOpen, let since = firstOpenPendingSince {
+            if now().timeIntervalSince(since) <= TeriPicksTab.pendingRetryWindow {
+                requestFirstOpenPicksIfDue(activatedAt: since)
+            } else {
+                firstOpenPendingSince = nil   // nobody was there to ask for it: only a new activation does
+            }
+        }
     }
 
     private func dimIfDisconnected() {
@@ -333,26 +344,26 @@ final class TeriPicksView: NSView {
     /// A window of this view came to the front.
     private func windowDidBecomeKey() {
         guard isShowing else { return }
-        requestFirstOpenPicksIfDue()
+        requestFirstOpenPicksIfDue(activatedAt: now())
     }
 
     /// The first time the tab is open on a day whose picks Teri has not made yet,
     /// ask the daemon to make them. Called when the tab is shown and when its
-    /// window becomes key (plus store changes while a request is pending), never
-    /// from the clock. Once per local day per view, and the day counts as done
+    /// window becomes key (plus store changes within `pendingRetryWindow` of one
+    /// of those, while a request is pending), never from the clock. Once per local day per view, and the day counts as done
     /// only once the frame was sent, so a failed generation is never retried in a
     /// loop from here (the daemon keeps its own attempt state too; the button is
     /// for retrying).
-    private func requestFirstOpenPicksIfDue() {
+    private func requestFirstOpenPicksIfDue(activatedAt: Date) {
         guard isShowing else {
-            firstOpenPending = false
+            firstOpenPendingSince = nil
             return
         }
         guard let snapshot = store.picks else {
-            firstOpenPending = true   // the picks have not arrived yet
+            firstOpenPendingSince = activatedAt   // the picks have not arrived yet
             return
         }
-        firstOpenPending = false
+        firstOpenPendingSince = nil
         guard !snapshot.generating else { return }
         let today = calendar.startOfDay(for: now())
         guard firstOpenDay != today else { return }
@@ -361,7 +372,7 @@ final class TeriPicksView: NSView {
         if store.refreshPicks(reason: "first_open") {
             firstOpenDay = today
         } else {
-            firstOpenPending = true   // not connected, or nothing to send with: when that changes
+            firstOpenPendingSince = activatedAt   // not connected, or nothing to send with: when that changes
         }
     }
 

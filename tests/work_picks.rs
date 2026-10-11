@@ -18,13 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Utc};
 use nostromo::data::teri_todos::{TeriTodo, TeriTodosSnapshot};
 use nostromo::data::work::hub::{HubDeps, WorkHub};
 use nostromo::data::work::picks::{
-    picks_restrictions, sanitize_reason, PickEntry, PicksGenerator, PicksSessionHost, PicksStore, PublishError,
-    FIRST_OPEN_FAILURE_COOLDOWN, GENERATION_TIMEOUT, MANUAL_COOLDOWN, MAX_PICKS, MAX_REASON_CHARS, MIN_PICKS,
-    PICKS_AGENT, PICKS_BUILTIN_TOOLS, PICKS_MAX_BUDGET_USD, PICKS_MCP_TOOLS, PICKS_PROMPT, PICKS_TAG,
+    picks_restrictions, sanitize_reason, transcript_dir_for, GeneratorEnv, PickEntry, PicksGenerator,
+    PicksSessionHost, PicksStore, PublishError, FIRST_OPEN_FAILURE_COOLDOWN, GENERATION_TIMEOUT, MANUAL_COOLDOWN,
+    MAX_PICKS, MAX_REASON_CHARS, MIN_PICKS, PICKS_BUILTIN_TOOLS, PICKS_MAX_BUDGET_USD, PICKS_MCP_TOOLS, PICKS_PROMPT,
+    PICKS_TAG,
 };
 use nostromo::data::work::{PicksSnapshot, SourceState, WorkService, WorkSource};
 use nostromo::ipc::protocol::ServerMsg;
@@ -238,7 +239,7 @@ async fn the_limits_are_three_to_seven_picks_with_reasons_up_to_240_characters()
     assert_eq!((MIN_PICKS, MAX_PICKS, MAX_REASON_CHARS), (3, 7, 240));
     assert_eq!(GENERATION_TIMEOUT, Duration::from_secs(5 * 60));
     assert!(PICKS_PROMPT.contains("teri_publish_picks"), "the prompt must name the tool to publish with");
-    assert_eq!((PICKS_TAG, PICKS_AGENT), ("teri-picks", "teri:teri"));
+    assert_eq!(PICKS_TAG, "teri-picks");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -447,6 +448,90 @@ fn markdown_links_keep_their_text_and_images_keep_their_alt_text() {
 }
 
 #[test]
+fn full_width_and_other_compatibility_forms_are_normalised_in_a_reason() {
+    // NFKC: full-width Latin and punctuation become plain ASCII, a base letter plus combining accent is composed.
+    assert_eq!(sr("\u{FF26}\u{FF49}\u{FF58}\u{3000}\u{FF52}\u{FF4D}\u{FF0D}\u{FF11}\u{FF12}"), Some("Fix rm-12".into()));
+    assert_eq!(sr("cafe\u{301} done"), Some("caf\u{e9} done".into()));
+    assert_eq!(sr("\u{FF76}\u{FF80}\u{FF76}\u{FF85}"), Some("\u{30AB}\u{30BF}\u{30AB}\u{30CA}".into()), "half-width katakana");
+}
+
+#[test]
+fn full_width_url_forms_are_normalised_then_removed_like_any_other_url() {
+    let cases = [
+        // `http` in full-width letters, ASCII `://`
+        ("See \u{FF48}\u{FF54}\u{FF54}\u{FF50}://evil.example/x now", "See now"),
+        // every character full-width: scheme, colon, slashes, host, dots, path
+        (
+            "Go \u{FF48}\u{FF54}\u{FF54}\u{FF50}\u{FF53}\u{FF1A}\u{FF0F}\u{FF0F}\u{FF45}\u{FF56}\u{FF49}\u{FF4C}\u{FF0E}\u{FF45}\u{FF58}\u{FF0F}\u{FF58} now",
+            "Go now",
+        ),
+        // full-width `www.` host
+        ("Open \u{FF57}\u{FF57}\u{FF57}\u{FF0E}\u{FF45}\u{FF56}\u{FF49}\u{FF4C}\u{FF0E}\u{FF45}\u{FF58} now", "Open now"),
+        // full-width bare host with a path
+        ("Open \u{FF45}\u{FF56}\u{FF49}\u{FF4C}\u{FF0E}\u{FF43}\u{FF4F}\u{FF0F}\u{FF58} now", "Open now"),
+        // full-width `mailto:`
+        ("Mail \u{FF4D}\u{FF41}\u{FF49}\u{FF4C}\u{FF54}\u{FF4F}\u{FF1A}boss@example.com today", "Mail today"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(sr(raw), Some(expected.into()), "{raw:?}");
+    }
+    assert_eq!(sr("\u{FF48}\u{FF54}\u{FF54}\u{FF50}://evil.example"), None, "nothing but a link says nothing");
+}
+
+#[test]
+fn a_bare_domain_with_a_path_is_removed_like_a_url() {
+    let cases = [
+        ("See evil.com/x now", "See now"),
+        ("see sub.evil.co.uk/path?q=1", "see"),
+        ("Go to EVIL.COM/Login now", "Go to now"),
+        ("Fetch evil.example:8080/x today", "Fetch today"),
+        ("Open evil.io/a/b/c.html then", "Open then"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(sr(raw), Some(expected.into()), "{raw:?}");
+    }
+    assert_eq!(sr("evil.com/x"), None);
+}
+
+#[test]
+fn a_bare_host_without_a_path_is_kept_because_it_cannot_be_told_from_a_file_name() {
+    // `foo.rs`, `main.py` and `README.md` are also valid host names (Serbia, Paraguay, Moldova), so a
+    // dotted word with no scheme, no `www.` and no path is ordinary prose, not a link.
+    for text in ["Fix foo.rs", "Rename main.py", "Read README.md first", "Ask about evil.com", "Check the staging.example host"] {
+        assert_eq!(sr(text), Some(text.into()), "{text:?}");
+    }
+}
+
+#[test]
+fn ordinary_prose_with_dots_numbers_and_paths_is_left_alone() {
+    for text in [
+        "Ship v1.2 today",
+        "About 3.5 hours left",
+        "Use e.g. the staging copy",
+        "Due Mon. at 5pm",
+        "RM-1234 is blocked.",
+        "Done by 5 p.m. today.",
+        "Ask Dr. Smith about it",
+        "Costs $3.50/month, 12/10 deadline",
+        "Update src/data/work/picks.rs",
+        "Update docs/v1.2/notes.md",
+        "Needs read/write access and/or a retry",
+        "3 of 5 done, i.e. 60.0% (see RM-1234.)",
+    ] {
+        assert_eq!(sr(text), Some(text.into()), "{text:?}");
+    }
+}
+
+#[test]
+fn zero_width_filler_characters_mongolian_khmer_and_braille_are_dropped_from_a_reason() {
+    assert_eq!(sr("a\u{180B}b\u{180C}c\u{180D}d\u{180E}e\u{180F}f"), Some("abcdef".into()));
+    assert_eq!(sr("a\u{17B4}b\u{17B5}c"), Some("abc".into()));
+    assert_eq!(sr("a\u{2800}b"), Some("ab".into()), "the blank braille pattern");
+    assert_eq!(sr("\u{2800}\u{2800}"), None, "nothing visible is nothing");
+    assert_eq!(sr("\u{2801}\u{1780}\u{1820}"), Some("\u{2801}\u{1780}\u{1820}".into()), "real braille, Khmer and Mongolian letters stay");
+}
+
+#[test]
 fn a_reason_with_nothing_left_after_sanitising_is_refused() {
     for raw in [
         "",
@@ -455,6 +540,8 @@ fn a_reason_with_nothing_left_after_sanitising_is_refused() {
         "https://evil.example",
         "https://a.example https://b.example",
         "www.evil.example",
+        "evil.example/only/a/path",
+        "\u{FF48}\u{FF54}\u{FF54}\u{FF50}://evil.example/x",
         "\u{200B}\u{202E}\u{E0041}",
         "``` `` `",
         "\u{FE0F}\u{3164}",
@@ -485,8 +572,9 @@ fn an_absurdly_long_reason_is_refused_even_when_little_survives_sanitising() {
 
 #[test]
 fn ordinary_visible_text_survives_sanitising() {
+    // Text that is already in compatibility-normalised (NFKC) form: sanitising does not touch it.
     let text = "Ship the release \u{1F680} caf\u{e9} \u{65E5}\u{672C}\u{8A9E} \u{D55C}\u{AD6D}\u{C5B4} \
-                \u{FF76}\u{FF80}\u{FF76}\u{FF85} e\u{301} \u{3163} \u{FE10} \u{2014} 3 of 5 done (Fri)";
+                \u{30AB}\u{30BF}\u{30AB}\u{30CA} \u{2014} 3 of 5 done (Fri)";
     assert_eq!(sr(text), Some(text.into()));
 }
 
@@ -505,7 +593,11 @@ fn sanitising_never_leaves_what_it_promised_to_remove_and_is_stable() {
         "WWW.EVIL.EXAMPLE and Www.Evil.Example",
         "x://y and custom+scheme://z",
         "\u{FE0F}\u{E0100}\u{3164}x",
+        "\u{FF48}\u{FF54}\u{FF54}\u{FF50}\u{FF53}\u{FF1A}\u{FF0F}\u{FF0F}evil.example/x and \u{FF57}\u{FF57}\u{FF57}\u{FF0E}evil.example",
+        "evil.example/x and sub.evil.co.uk/p?q=1 and more",
+        "\u{FF45}\u{FF56}\u{FF49}\u{FF4C}\u{FF0E}\u{FF43}\u{FF4F}\u{FF0F}\u{FF58}",
     ];
+    let bare_domain_with_path = regex::Regex::new(r"(?i)[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}(:\d+)?/").unwrap();
     for raw in corpus {
         let Some(out) = sr(raw) else { continue };
         assert!(!out.chars().any(fence_scan::is_forbidden), "{raw:?} -> {out:?} has an invisible character");
@@ -514,6 +606,7 @@ fn sanitising_never_leaves_what_it_promised_to_remove_and_is_stable() {
         for bad in ["://", "www.", "mailto:"] {
             assert!(!lower.contains(bad), "{raw:?} -> {out:?} still has `{bad}`");
         }
+        assert!(!bare_domain_with_path.is_match(&out), "{raw:?} -> {out:?} still has a domain with a path");
         assert!(out.chars().count() <= MAX_REASON_CHARS, "{raw:?}");
         assert_eq!(out, out.trim(), "{raw:?}");
         assert!(!out.contains("  "), "{raw:?} -> {out:?}");
@@ -1202,7 +1295,7 @@ async fn broadcast_resends_the_current_picks_as_a_frame() {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Call {
-    Spawn { tag: String, agent: String, cwd: PathBuf, restrictions: SessionRestrictions },
+    Spawn { tag: String, cwd: PathBuf, restrictions: SessionRestrictions },
     Send { tag: String, text: String },
     Stop { tag: String },
 }
@@ -1226,6 +1319,14 @@ struct FakeHost {
     /// Make the "session" leave a file in its working directory when it gets its prompt.
     scribble_in_cwd: AtomicBool,
     on_send: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Where this host's "claude" keeps transcripts: at spawn it leaves one for the session's
+    /// working directory there, the way the real CLI does, whether or not the spawn then fails.
+    projects_dir: Mutex<Option<PathBuf>>,
+    /// The transcript directories the fake claude made (one per spawn).
+    transcripts: Mutex<Vec<PathBuf>>,
+    /// Also leave look-alike transcript directories of other "projects" beside each real one.
+    make_decoys: AtomicBool,
+    decoys: Mutex<Vec<PathBuf>>,
 }
 
 impl FakeHost {
@@ -1269,7 +1370,22 @@ impl FakeHost {
 }
 
 impl PicksSessionHost for FakeHost {
-    fn spawn(&self, tag: &str, agent: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String> {
+    fn spawn(&self, tag: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String> {
+        if let Some(projects) = self.projects_dir.lock().unwrap().clone() {
+            let dir = transcript_dir_for(&projects, cwd);
+            fs::create_dir_all(&dir).expect("the fake claude can make its transcript directory");
+            fs::write(dir.join("session.jsonl"), "{\"type\":\"user\"}\n").expect("and write a transcript");
+            if self.make_decoys.load(Ordering::SeqCst) {
+                let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+                let shorter: String = name.chars().take(name.chars().count() - 1).collect();
+                for decoy in [projects.join(format!("{name}-2")), projects.join(shorter)] {
+                    fs::create_dir_all(&decoy).unwrap();
+                    fs::write(decoy.join("session.jsonl"), "someone else's transcript").unwrap();
+                    self.decoys.lock().unwrap().push(decoy);
+                }
+            }
+            self.transcripts.lock().unwrap().push(dir);
+        }
         self.cwds.lock().unwrap().push(CwdAtSpawn {
             path: cwd.to_path_buf(),
             is_dir: cwd.is_dir(),
@@ -1278,7 +1394,6 @@ impl PicksSessionHost for FakeHost {
         });
         self.calls.lock().unwrap().push(Call::Spawn {
             tag: tag.into(),
-            agent: agent.into(),
             cwd: cwd.into(),
             restrictions: restrictions.clone(),
         });
@@ -1311,9 +1426,28 @@ impl PicksSessionHost for FakeHost {
     }
 }
 
+/// A calendar of the tests' own: a fixed "today", no stored snapshot ever falls on it, and no
+/// transcript directory is looked after (so no test goes near the real `~/.claude`).
+fn neutral_env() -> GeneratorEnv {
+    env_with(NaiveDate::from_ymd_opt(2026, 10, 11).unwrap(), |_| NaiveDate::MIN, None)
+}
+
+fn env_with(
+    today: NaiveDate,
+    date_of: impl Fn(DateTime<Utc>) -> NaiveDate + Send + Sync + 'static,
+    projects_dir: Option<PathBuf>,
+) -> GeneratorEnv {
+    GeneratorEnv { today: Arc::new(move || today), date_of: Arc::new(date_of), projects_dir }
+}
+
 fn generator(rig: &Rig, timeout: Duration) -> (Arc<FakeHost>, Arc<PicksGenerator>) {
     let host = Arc::new(FakeHost::default());
-    let generator = PicksGenerator::new(rig.hub.picks().clone(), host.clone() as Arc<dyn PicksSessionHost>, timeout);
+    let generator = PicksGenerator::with_env(
+        rig.hub.picks().clone(),
+        host.clone() as Arc<dyn PicksSessionHost>,
+        timeout,
+        neutral_env(),
+    );
     (host, generator)
 }
 
@@ -1478,10 +1612,10 @@ async fn a_manual_refresh_runs_a_hidden_teri_session_and_ends_with_the_new_picks
     let calls = host.calls();
     assert_eq!(host.spawns(), 1, "{calls:?}");
     let spawn = calls.iter().find_map(|c| match c {
-        Call::Spawn { tag, agent, restrictions, .. } => Some((tag.clone(), agent.clone(), restrictions.clone())),
+        Call::Spawn { tag, restrictions, .. } => Some((tag.clone(), restrictions.clone())),
         _ => None,
     });
-    assert_eq!(spawn, Some(("teri-picks".to_string(), "teri:teri".to_string(), picks_restrictions())), "{calls:?}");
+    assert_eq!(spawn, Some(("teri-picks".to_string(), picks_restrictions())), "{calls:?}");
     assert!(calls.contains(&Call::Send { tag: "teri-picks".into(), text: PICKS_PROMPT.to_string() }), "{calls:?}");
     assert_eq!(host.stops(), 1, "the hidden session is ended after the publish: {calls:?}");
     assert!(calls.contains(&Call::Stop { tag: "teri-picks".into() }));
@@ -1639,7 +1773,7 @@ async fn a_session_that_cannot_be_started_fails_the_refresh_and_can_be_retried()
     let rig = paused_rig().await;
     let previous = rig.hub.publish_picks(&entries(&["todo:1", "todo:2", "todo:3"])).unwrap();
     let (host, generator, _day) = paused_generator(&rig, Duration::from_secs(120));
-    *host.spawn_error.lock().unwrap() = Some("no such agent: teri:teri".into());
+    *host.spawn_error.lock().unwrap() = Some("claude is not installed".into());
 
     refresh(&generator, "manual").await.expect("the refresh itself is accepted");
 
@@ -1647,7 +1781,7 @@ async fn a_session_that_cannot_be_started_fails_the_refresh_and_can_be_retried()
     let snap = rig.hub.picks().snapshot();
     let error = snap.error.clone().unwrap();
     assert!(error.starts_with("Picks refresh failed: "), "{error}");
-    assert!(error.contains("no such agent: teri:teri"), "{error}");
+    assert!(error.contains("claude is not installed"), "{error}");
     assert_eq!(snap.items, previous.items);
     assert!(!snap.generating);
     assert_eq!(host.sends(), 0, "nothing is sent to a session that did not start");
@@ -1795,9 +1929,9 @@ async fn the_hub_routes_refresh_requests_to_the_session_host_it_was_given() {
 // ── 5b. when a generation may start (daemon-side attempt state) ───────────────
 
 #[test]
-fn the_cooldowns_are_thirty_minutes_after_a_failed_first_open_and_a_minute_between_manual_runs() {
+fn the_cooldowns_are_thirty_minutes_after_a_failed_first_open_and_five_minutes_between_manual_runs() {
     assert_eq!(FIRST_OPEN_FAILURE_COOLDOWN, Duration::from_secs(30 * 60));
-    assert_eq!(MANUAL_COOLDOWN, Duration::from_secs(60));
+    assert_eq!(MANUAL_COOLDOWN, Duration::from_secs(5 * 60));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1885,7 +2019,7 @@ async fn after_a_successful_first_open_later_opens_the_same_day_do_nothing_and_a
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_manual_refresh_within_a_minute_of_the_last_run_is_ignored_and_after_a_minute_it_runs() {
+async fn a_manual_refresh_within_five_minutes_of_the_last_run_is_ignored_and_after_five_minutes_it_runs() {
     let mut rig = paused_rig().await;
     let (host, generator, _day) = paused_generator(&rig, Duration::from_secs(120));
     host.publishes_on_send(&rig.hub, &["todo:1", "todo:2", "todo:3"]);
@@ -1895,18 +2029,20 @@ async fn a_manual_refresh_within_a_minute_of_the_last_run_is_ignored_and_after_a
     assert_eq!(host.spawns(), 1);
 
     assert_refused(&mut rig, &host, &generator, "manual").await;
-    advance(MANUAL_COOLDOWN - Duration::from_secs(1)).await;
+    advance(Duration::from_secs(61)).await; // a minute in: no longer enough
+    assert_refused(&mut rig, &host, &generator, "manual").await;
+    advance(Duration::from_secs(237)).await; // 4 min 58 s in
     assert_refused(&mut rig, &host, &generator, "manual").await;
     assert_eq!(host.spawns(), 1);
 
-    advance(Duration::from_secs(2)).await;
+    advance(Duration::from_secs(3)).await; // 5 min 1 s in
     refresh(&generator, "manual").await.unwrap();
     wait_until("the second run", || host.spawns() == 2).await;
     wait_idle(&rig, &generator, "it to end", |s| !s.generating).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_failed_first_open_does_not_stop_the_user_asking_manually_after_a_minute() {
+async fn a_failed_first_open_does_not_stop_the_user_asking_manually_after_five_minutes() {
     let mut rig = paused_rig().await;
     let (host, generator, _day) = paused_generator(&rig, Duration::from_secs(120));
     host.fail_sends_with("session went away");
@@ -1948,6 +2084,307 @@ async fn a_new_generation_hides_the_previous_error_while_it_runs() {
     rig.hub.publish_picks(&entries(&["todo:1", "todo:2", "todo:3"])).unwrap();
     wait_idle(&rig, &generator, "the run to end", |s| s.items.len() == 3).await;
     assert_eq!(rig.hub.picks().snapshot().error, None);
+}
+
+// ── 5c. first_open also reads the stored picks' date ──────────────────────────
+
+/// America/Chicago in October (CDT, UTC-5), as a fixed offset.
+fn cdt() -> FixedOffset {
+    FixedOffset::west_opt(5 * 3600).unwrap()
+}
+
+fn chicago_date(at: DateTime<Utc>) -> NaiveDate {
+    at.with_timezone(&cdt()).date_naive()
+}
+
+fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(y, m, d).unwrap()
+}
+
+/// An instant given as a Chicago (CDT) wall-clock time.
+fn chicago(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
+    cdt().with_ymd_and_hms(y, m, d, h, min, 0).unwrap().with_timezone(&Utc)
+}
+
+fn saved_picks(generated_at: Option<DateTime<Utc>>) -> PicksSnapshot {
+    let pick = |n: i64| nostromo::data::work::Pick {
+        item_id: format!("todo:{n}"),
+        source: WorkSource::Todos,
+        title: format!("Todo {n}"),
+        reason: "Due today".into(),
+        done_since: false,
+    };
+    PicksSnapshot { generated_at, items: vec![pick(1), pick(2), pick(3)], ..Default::default() }
+}
+
+/// Does a freshly started daemon, with picks.json at `path`, start a session for `reason`? Any
+/// session it starts is made to fail at once, so this returns quickly either way.
+async fn starts_a_session_from(reason: &str, path: Option<PathBuf>, env: GeneratorEnv) -> bool {
+    let (store, _rx) = store_at(path);
+    let host = Arc::new(FakeHost::default());
+    host.fail_sends_with("stop here");
+    let generator =
+        PicksGenerator::with_env(store, host.clone() as Arc<dyn PicksSessionHost>, GENERATION_TIMEOUT, env);
+    refresh(&generator, reason).await.expect("a request is accepted whether or not it starts anything");
+    wait_until("the generator to be idle", || !generator.is_generating()).await;
+    assert!(host.spawns() <= 1, "{:?}", host.calls());
+    host.spawns() == 1
+}
+
+/// Same, with picks generated at `saved` (or no picks.json at all).
+async fn starts_a_session(reason: &str, saved: Option<DateTime<Utc>>, today: NaiveDate) -> bool {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("picks.json");
+    if saved.is_some() {
+        fs::write(&path, serde_json::to_string(&saved_picks(saved)).unwrap()).unwrap();
+    }
+    starts_a_session_from(reason, Some(path), env_with(today, chicago_date, None)).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_first_open_is_refused_when_a_manual_refresh_already_published_picks_today() {
+    let mut rig = paused_rig().await;
+    let today = ymd(2026, 10, 11);
+    let host = Arc::new(FakeHost::default());
+    // Every instant falls on `today`, whatever the wall clock says.
+    let env = env_with(today, move |_| today, None);
+    let generator =
+        PicksGenerator::with_env(rig.hub.picks().clone(), host.clone() as Arc<dyn PicksSessionHost>, GENERATION_TIMEOUT, env);
+    host.publishes_on_send(&rig.hub, &["todo:1", "todo:2", "todo:3"]);
+    refresh(&generator, "manual").await.unwrap();
+    wait_idle(&rig, &generator, "the manual run", |s| s.items.len() == 3).await;
+    assert_eq!(host.spawns(), 1);
+
+    assert_refused(&mut rig, &host, &generator, "first_open").await;
+    assert_eq!(host.spawns(), 1, "today's picks are left alone");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_daemon_restart_a_first_open_is_still_refused_when_the_stored_picks_are_from_today() {
+    let rig = rig().await;
+    let published = rig.hub.publish_picks(&entries(&["todo:1", "todo:2", "todo:3"])).unwrap();
+    let published_on = chicago_date(published.generated_at.expect("a publish stamps its time"));
+
+    // A new process: nothing in memory but what picks.json says.
+    let restarted_the_same_day = starts_a_session_from(
+        "first_open",
+        Some(rig.picks_path()),
+        env_with(published_on, chicago_date, None),
+    )
+    .await;
+    assert!(!restarted_the_same_day, "picks were generated today; a relaunch must not generate again");
+
+    let restarted_next_day = starts_a_session_from(
+        "first_open",
+        Some(rig.picks_path()),
+        env_with(published_on.succ_opt().unwrap(), chicago_date, None),
+    )
+    .await;
+    assert!(restarted_next_day, "the next local day generates again");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_open_runs_when_the_stored_picks_are_from_an_earlier_local_date_or_there_are_none() {
+    let today = ymd(2026, 10, 11);
+    assert!(starts_a_session("first_open", Some(chicago(2026, 10, 10, 15, 0)), today).await, "yesterday");
+    assert!(starts_a_session("first_open", Some(chicago(2026, 9, 1, 8, 0)), today).await, "weeks ago");
+    assert!(starts_a_session("first_open", None, today).await, "no picks at all");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_open_is_refused_for_stored_picks_from_any_time_of_the_same_local_date() {
+    let today = ymd(2026, 10, 11);
+    for (what, at) in [
+        ("just after local midnight", chicago(2026, 10, 11, 0, 5)),
+        ("midday", chicago(2026, 10, 11, 12, 0)),
+        ("a minute before the end of the day", chicago(2026, 10, 11, 23, 59)),
+    ] {
+        assert!(!starts_a_session("first_open", Some(at), today).await, "{what}: {at}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_day_is_the_local_calendar_date_not_twenty_four_hours() {
+    // 23:30 yesterday and 00:30 today (local) are an hour apart and different days.
+    let late_last_night = chicago(2026, 10, 10, 23, 30);
+    let just_after_midnight = chicago(2026, 10, 11, 0, 30);
+    assert_eq!((just_after_midnight - late_last_night).num_minutes(), 60);
+    assert!(starts_a_session("first_open", Some(late_last_night), ymd(2026, 10, 11)).await);
+
+    // 00:05 and 23:50 (local) are nearly a day apart yet the same day.
+    let early = chicago(2026, 10, 11, 0, 5);
+    assert!((chicago(2026, 10, 11, 23, 50) - early).num_hours() >= 20);
+    assert!(!starts_a_session("first_open", Some(early), ymd(2026, 10, 11)).await);
+
+    // The UTC date is not the local one: 21:00 Oct 10 in Chicago is already Oct 11 in UTC.
+    let evening = chicago(2026, 10, 10, 21, 0);
+    assert_eq!(evening.date_naive(), ymd(2026, 10, 11), "the test's premise");
+    assert!(!starts_a_session("first_open", Some(evening), ymd(2026, 10, 10)).await, "same local day");
+    assert!(starts_a_session("first_open", Some(evening), ymd(2026, 10, 11)).await, "next local day");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_manual_refresh_is_not_held_back_by_the_date_of_the_stored_picks() {
+    let today = ymd(2026, 10, 11);
+    assert!(starts_a_session("manual", Some(chicago(2026, 10, 11, 9, 0)), today).await);
+    assert!(starts_a_session("manual", Some(chicago(2026, 10, 10, 9, 0)), today).await);
+}
+
+// ── 5d. the run's transcripts are cleaned up, and only those ──────────────────
+
+struct TranscriptRig {
+    rig: Rig,
+    host: Arc<FakeHost>,
+    generator: Arc<PicksGenerator>,
+    /// Stand-in for `~/.claude/projects`.
+    projects: tempfile::TempDir,
+    unrelated: PathBuf,
+}
+
+/// Paused-clock rig whose generator looks after the transcripts under a temp `projects` directory.
+async fn transcript_rig(timeout: Duration) -> TranscriptRig {
+    let rig = paused_rig().await;
+    let projects = tempfile::tempdir().unwrap();
+    let unrelated = projects.path().join("-Users-someone-code-project");
+    fs::create_dir_all(&unrelated).unwrap();
+    fs::write(unrelated.join("keep.jsonl"), "another project's transcript").unwrap();
+    let host = Arc::new(FakeHost::default());
+    *host.projects_dir.lock().unwrap() = Some(projects.path().to_path_buf());
+    host.make_decoys.store(true, Ordering::SeqCst);
+    let env = env_with(ymd(2026, 10, 11), |_| NaiveDate::MIN, Some(projects.path().to_path_buf()));
+    let generator =
+        PicksGenerator::with_env(rig.hub.picks().clone(), host.clone() as Arc<dyn PicksSessionHost>, timeout, env);
+    TranscriptRig { rig, host, generator, projects, unrelated }
+}
+
+impl TranscriptRig {
+    /// The run's own transcript directory is gone; everything that merely looks like it is not.
+    async fn assert_only_the_runs_transcripts_were_deleted(&self) {
+        let made = self.host.transcripts.lock().unwrap().clone();
+        assert_eq!(made.len(), 1, "the fake claude made one transcript directory: {made:?}");
+        let mine = &made[0];
+        wait_until("the run's transcript directory to be deleted", || !mine.exists()).await;
+
+        let decoys = self.host.decoys.lock().unwrap().clone();
+        assert_eq!(decoys.len(), 2);
+        for decoy in decoys.iter().chain([&self.unrelated]) {
+            assert!(decoy.join(if decoy == &self.unrelated { "keep.jsonl" } else { "session.jsonl" }).is_file(), "{decoy:?} must survive");
+        }
+        let mut left: Vec<PathBuf> = fs::read_dir(self.projects.path()).unwrap().map(|e| e.unwrap().path()).collect();
+        left.sort();
+        let mut expected: Vec<PathBuf> = decoys.into_iter().chain([self.unrelated.clone()]).collect();
+        expected.sort();
+        assert_eq!(left, expected, "nothing else under the projects directory was touched");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn after_a_successful_run_its_transcript_directory_is_deleted_and_nothing_else_is() {
+    let t = transcript_rig(Duration::from_secs(120)).await;
+    t.host.publishes_on_send(&t.rig.hub, &["todo:1", "todo:2", "todo:3"]);
+
+    refresh(&t.generator, "manual").await.unwrap();
+    wait_idle(&t.rig, &t.generator, "the run", |s| s.items.len() == 3).await;
+
+    assert_eq!(t.rig.hub.picks().snapshot().error, None);
+    t.assert_only_the_runs_transcripts_were_deleted().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn after_a_failed_run_its_transcript_directory_is_deleted_and_nothing_else_is() {
+    let t = transcript_rig(Duration::from_secs(120)).await;
+    t.host.fail_sends_with("session went away");
+
+    refresh(&t.generator, "manual").await.unwrap();
+    wait_idle(&t.rig, &t.generator, "the failure", |s| s.error.is_some()).await;
+
+    t.assert_only_the_runs_transcripts_were_deleted().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn after_a_session_that_would_not_start_its_transcript_directory_is_deleted_too() {
+    let t = transcript_rig(Duration::from_secs(120)).await;
+    *t.host.spawn_error.lock().unwrap() = Some("claude exited at once".into());
+
+    refresh(&t.generator, "manual").await.unwrap();
+    wait_idle(&t.rig, &t.generator, "the failure", |s| s.error.is_some()).await;
+
+    t.assert_only_the_runs_transcripts_were_deleted().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn after_a_run_that_timed_out_its_transcript_directory_is_deleted_and_nothing_else_is() {
+    let t = transcript_rig(Duration::from_secs(120)).await;
+
+    refresh(&t.generator, "manual").await.unwrap();
+    wait_until("the prompt to be sent", || t.host.sends() == 1).await;
+    advance(Duration::from_secs(121)).await;
+    wait_idle(&t.rig, &t.generator, "the timeout", |s| s.error.is_some()).await;
+
+    t.assert_only_the_runs_transcripts_were_deleted().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn with_no_projects_directory_a_run_deletes_no_transcripts_and_does_not_fail() {
+    let rig = paused_rig().await;
+    let projects = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    *host.projects_dir.lock().unwrap() = Some(projects.path().to_path_buf());
+    let env = env_with(ymd(2026, 10, 11), |_| NaiveDate::MIN, None);
+    let generator = PicksGenerator::with_env(
+        rig.hub.picks().clone(),
+        host.clone() as Arc<dyn PicksSessionHost>,
+        Duration::from_secs(120),
+        env,
+    );
+    host.publishes_on_send(&rig.hub, &["todo:1", "todo:2", "todo:3"]);
+
+    refresh(&generator, "manual").await.unwrap();
+    wait_idle(&rig, &generator, "the run", |s| s.items.len() == 3).await;
+
+    assert_eq!(rig.hub.picks().snapshot().error, None, "a run with nowhere to clean up still succeeds");
+    let made = host.transcripts.lock().unwrap().clone();
+    assert_eq!(made.len(), 1);
+    assert!(made[0].join("session.jsonl").is_file(), "nothing was deleted: {made:?}");
+}
+
+#[test]
+fn a_transcript_directory_is_the_real_cwd_with_every_non_alphanumeric_character_turned_into_a_dash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let cwd = tmp.path().join("my proj.v1_2").join("h\u{e9}llo");
+    fs::create_dir_all(&cwd).unwrap();
+
+    let dir = transcript_dir_for(&projects, &cwd);
+
+    assert_eq!(dir.parent(), Some(projects.as_path()), "directly under the projects directory: {dir:?}");
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with('-'), "the leading `/` becomes a dash: {name}");
+    assert!(name.ends_with("-my-proj-v1-2-h-llo"), "space, dot, underscore and a non-ASCII letter are each one dash: {name}");
+    assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "{name}");
+    let real = fs::canonicalize(&cwd).unwrap();
+    let expected: String = real.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    assert_eq!(name, expected);
+}
+
+#[test]
+fn a_transcript_directory_is_named_after_the_canonical_cwd_not_a_symlink_to_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let real = tmp.path().join("realdir");
+    let link = tmp.path().join("linkdir");
+    fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let via_link = transcript_dir_for(&projects, &link);
+    let via_real = transcript_dir_for(&projects, &real);
+
+    assert_eq!(via_link, via_real);
+    let name = via_link.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.ends_with("-realdir") && !name.contains("linkdir"), "{name}");
+    // On macOS the temp dir itself is behind /var -> /private/var; whatever it is, the name is its real path's.
+    let real_path = fs::canonicalize(&real).unwrap().to_string_lossy().into_owned();
+    assert_eq!(name.len(), real_path.len(), "one dash per character of the canonical path");
 }
 
 // ── 6. MCP ────────────────────────────────────────────────────────────────────

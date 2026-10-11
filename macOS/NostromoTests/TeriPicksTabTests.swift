@@ -694,6 +694,130 @@ final class TeriPicksTabTests: XCTestCase {
         XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "showing it again asks: \(rig.log.frames)")
     }
 
+    // MARK: A pending first open is retried only just after the activation that wanted it
+    //
+    // A first_open goes out only on a person arriving (the tab shown, the window coming to
+    // the front). If it cannot go out at that moment (no connection, no snapshot yet), a store
+    // change may carry it out, but only within `TeriPicksTab.pendingRetryWindow` of that
+    // activation. A reconnect at 3 a.m. with the tab left open must send nothing.
+
+    private var retryWindow: TimeInterval { TeriPicksTab.pendingRetryWindow }
+
+    func testThePendingRetryWindowIsThirtySeconds() {
+        XCTAssertEqual(TeriPicksTab.pendingRetryWindow, 30)
+    }
+
+    func testAReconnectLongAfterTheTabWasShownDisconnectedSendsNothingAndShowingItAgainDoes() {
+        let rig = ViewRig(picks: staleSnapshot()) { $0.setConnected(false) }
+        rig.view.tabDidShow()
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "no connection to send on: \(rig.log.frames)")
+
+        rig.clock.now = morning.addingTimeInterval(retryWindow + 1)   // nobody has touched it since
+        rig.store.setConnected(true)
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "an unattended reconnect must not start a generation: \(rig.log.frames)")
+
+        rig.store.apply(status: jiraStatusChange())
+        rig.store.apply(picks: staleSnapshot())
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "nor may any later store change: \(rig.log.frames)")
+
+        rig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "a fresh activation asks: \(rig.log.frames)")
+        drain()
+        XCTAssertEqual(rig.log.frames, [.picksRefresh(reason: "first_open")])
+    }
+
+    func testAReconnectJustInsideTheWindowStillSendsTheFirstOpen() {
+        let rig = ViewRig(picks: staleSnapshot()) { $0.setConnected(false) }
+        rig.view.tabDidShow()
+        drain()
+
+        rig.clock.now = morning.addingTimeInterval(retryWindow - 1)
+        rig.store.setConnected(true)
+
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "frames: \(rig.log.frames)")
+        drain()
+        XCTAssertEqual(rig.log.frames, [.picksRefresh(reason: "first_open")])
+    }
+
+    func testTheWindowIsMeasuredFromTheActivationNotFromTheLastStoreChange() {
+        let rig = ViewRig(picks: staleSnapshot()) { $0.setConnected(false) }
+        rig.view.tabDidShow()
+        drain()
+
+        // Store changes keep arriving while still disconnected; each is inside the window of the
+        // activation, but the one that finally carries the reconnect is not.
+        rig.clock.now = morning.addingTimeInterval(retryWindow - 5)
+        rig.store.apply(status: jiraStatusChange())
+        drain()
+        rig.clock.now = morning.addingTimeInterval(retryWindow + 5)
+        rig.store.setConnected(true)
+        drain()
+
+        XCTAssertTrue(rig.log.frames.isEmpty, "\(rig.log.frames)")
+    }
+
+    func testAPickSnapshotArrivingAfterTheWindowDoesNotStartAGenerationButAnActivationDoes() {
+        let rig = ViewRig()
+        rig.view.tabDidShow()
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "nothing to go on yet: \(rig.log.frames)")
+
+        rig.clock.now = morning.addingTimeInterval(retryWindow + 1)
+        rig.store.apply(picks: staleSnapshot())
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "the snapshot came in unattended: \(rig.log.frames)")
+
+        rig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "frames: \(rig.log.frames)")
+    }
+
+    func testAPickSnapshotArrivingInsideTheWindowStillStartsTheGeneration() {
+        let rig = ViewRig()
+        rig.view.tabDidShow()
+        drain()
+
+        rig.clock.now = morning.addingTimeInterval(retryWindow - 1)
+        rig.store.apply(picks: staleSnapshot())
+
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "frames: \(rig.log.frames)")
+    }
+
+    func testTheWindowComingToTheFrontIsAnActivationThatStartsAFreshRetryWindow() {
+        let win = makeRigWindow(self)
+        let rig = ViewRig(picks: staleSnapshot(), window: win) { $0.setConnected(false) }
+        rig.view.tabDidShow()
+        drain()
+
+        // Long after the tab was shown, the person comes back to the window: a new activation.
+        rig.clock.now = morning.addingTimeInterval(10 * retryWindow)
+        postKey(win)
+        drain()
+        XCTAssertTrue(rig.log.frames.isEmpty, "still no connection: \(rig.log.frames)")
+
+        rig.clock.now = morning.addingTimeInterval(10 * retryWindow + retryWindow - 1)
+        rig.store.setConnected(true)
+
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 },
+                      "inside the window of the key activation: \(rig.log.frames)")
+    }
+
+    func testAnActivationThatSentItsFirstOpenLeavesNothingPendingForLaterStoreChanges() {
+        let rig = ViewRig(picks: staleSnapshot())
+        rig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 })
+
+        rig.clock.now = morning.addingTimeInterval(retryWindow + 1)
+        rig.store.setConnected(false)
+        rig.store.setConnected(true)
+        rig.store.apply(picks: staleSnapshot())
+        drain()
+
+        XCTAssertEqual(rig.log.frames, [.picksRefresh(reason: "first_open")], "\(rig.log.frames)")
+    }
+
     func testTheHostingWindowBecomingKeyAsksWhenTheTabIsShowingAndANewDayHasStarted() {
         let window = makeRigWindow(self)
         let rig = ViewRig(picks: freshSnapshot(), window: window)

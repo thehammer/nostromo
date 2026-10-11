@@ -44,9 +44,10 @@ fn invisible_code_points() -> Vec<char> {
     v
 }
 
-/// Text that has to come through untouched.
+/// Text that has to come through untouched (already in NFKC form: a reason is normalised, so
+/// half-width kana, compatibility jamo and combining sequences would come back rewritten).
 const VISIBLE: &str = "Caf\u{e9} \u{1F680} \u{2705} \u{65E5}\u{672C}\u{8A9E} \u{D55C}\u{AD6D}\u{C5B4} \
-                       \u{FF76}\u{FF80}\u{FF76}\u{FF85} e\u{301} \u{3163} \u{FE10} \u{2014} (3 of 5)";
+                       \u{30AB}\u{30BF}\u{30AB}\u{30CA} \u{F1} \u{AC00} \u{B7} \u{2014} (3 of 5)";
 
 fn all_invisible() -> String {
     invisible_code_points().into_iter().collect()

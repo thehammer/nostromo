@@ -37,6 +37,26 @@ fn has(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
 }
 
+/// What the hidden picks session must be started with, whoever built the vector: no agent (the
+/// plugin agent's own `tools:` list would override the allow-list and leave the session with no
+/// tools at all), only project settings, no slash commands, and the closed tool list.
+fn assert_is_the_picks_session_vector(args: &[String]) {
+    assert!(!has(args, "--agent"), "no --agent flag at all: {args:?}");
+    assert!(!args.iter().any(|a| a.contains("teri:teri")), "`teri:teri` appears nowhere: {args:?}");
+    assert_eq!(value_of(args, "--setting-sources"), Some("project"), "user hooks, CLAUDE.md and plugins must not load: {args:?}");
+    assert!(has(args, "--disable-slash-commands"), "{args:?}");
+    assert_eq!(value_of(args, "--tools"), Some("ToolSearch"), "{args:?}");
+    let allowed: std::collections::BTreeSet<&str> =
+        value_of(args, "--allowedTools").expect("an allow-list").split(',').collect();
+    let expected: std::collections::BTreeSet<&str> = PICKS_MCP_TOOLS.iter().copied().chain(["ToolSearch"]).collect();
+    assert_eq!(allowed, expected, "the three picks tools plus ToolSearch: {args:?}");
+    assert_eq!(value_of(args, "--permission-mode"), Some("dontAsk"), "{args:?}");
+    assert!(has(args, "--strict-mcp-config"), "{args:?}");
+    assert!(!has(args, "--dangerously-skip-permissions"), "{args:?}");
+    let budget: f64 = value_of(args, "--max-budget-usd").expect("a spend cap").parse().expect("a number");
+    assert!((budget - PICKS_MAX_BUDGET_USD).abs() < 1e-9, "{budget}");
+}
+
 // ── the argument vector ───────────────────────────────────────────────────────
 
 #[test]
@@ -48,6 +68,40 @@ fn a_restricted_session_runs_without_the_permission_bypass_and_denies_what_is_no
     assert!(!has(&args, "--dangerously-skip-permissions"), "{args:?}");
     assert_eq!(value_of(&args, "--permission-mode"), Some("dontAsk"), "{args:?}");
     assert!(has(&args, "--strict-mcp-config"), "only the daemon's own MCP server may load: {args:?}");
+}
+
+#[test]
+fn the_picks_session_is_built_with_no_agent_only_project_settings_and_the_closed_tool_list() {
+    // Exactly as production builds it: an empty agent name and the picks restrictions.
+    let args = build_claude_args_with("", "Teri picks", false, "sid-1", false, Some(&picks_restrictions()));
+
+    assert_is_the_picks_session_vector(&args);
+    assert_eq!(value_of(&args, "-n"), Some("Teri picks"));
+    assert_eq!(value_of(&args, "--session-id"), Some("sid-1"));
+    assert_eq!(value_of(&args, "--input-format"), Some("stream-json"));
+    assert_eq!(value_of(&args, "--output-format"), Some("stream-json"));
+}
+
+#[test]
+fn every_restricted_session_loads_only_project_settings_and_no_slash_commands() {
+    for agent in ["", "teri:teri", "some-agent"] {
+        let args = build_claude_args_with(agent, "View", false, "sid-1", false, Some(&restrictions()));
+
+        assert_eq!(value_of(&args, "--setting-sources"), Some("project"), "agent {agent:?}: {args:?}");
+        assert!(has(&args, "--disable-slash-commands"), "agent {agent:?}: {args:?}");
+    }
+}
+
+#[test]
+fn an_empty_agent_name_means_no_agent_flag_and_a_real_name_still_gets_one() {
+    for restricted in [None, Some(restrictions())] {
+        let none = build_claude_args_with("", "View", false, "sid-1", false, restricted.as_ref());
+        assert!(!has(&none, "--agent"), "restricted: {}: {none:?}", restricted.is_some());
+        assert!(!none.iter().any(|a| a.is_empty()), "no empty argument is passed either: {none:?}");
+
+        let named = build_claude_args_with("cody", "View", false, "sid-1", false, restricted.as_ref());
+        assert_eq!(value_of(&named, "--agent"), Some("cody"), "restricted: {}: {named:?}", restricted.is_some());
+    }
 }
 
 #[test]
@@ -93,7 +147,36 @@ fn an_unrestricted_session_is_exactly_what_it_was_before() {
 
     assert_eq!(plain, build_claude_args_with("cody", "Cody view", true, "sid-2", true, None));
     assert!(has(&plain, "--dangerously-skip-permissions"), "{plain:?}");
-    for flag in ["--permission-mode", "--tools", "--allowedTools", "--strict-mcp-config", "--max-budget-usd"] {
+    assert_eq!(
+        plain,
+        [
+            "--dangerously-skip-permissions",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--replay-user-messages",
+            "--agent",
+            "cody",
+            "-n",
+            "Cody view",
+            "--remote-control",
+            "Cody view",
+            "--resume",
+            "sid-2",
+        ],
+        "an ordinary session's arguments do not change"
+    );
+    for flag in [
+        "--permission-mode",
+        "--tools",
+        "--allowedTools",
+        "--strict-mcp-config",
+        "--max-budget-usd",
+        "--setting-sources",
+        "--disable-slash-commands",
+    ] {
         assert!(!has(&plain, flag), "{flag} must not appear on an ordinary session: {plain:?}");
     }
 }
@@ -171,10 +254,33 @@ async fn runs_of(view: &str, runs: usize) -> Vec<Vec<String>> {
     panic!("the fake claude `{view}` never recorded {runs} run(s)");
 }
 
-fn manager() -> (SessionManager, tempfile::TempDir) {
+/// A manager that stops every fake claude it started when it goes out of scope, a failed
+/// assertion included (a fake still holding its stdin open would keep the test run from ending).
+struct Mgr(SessionManager);
+
+impl std::ops::Deref for Mgr {
+    type Target = SessionManager;
+    fn deref(&self) -> &SessionManager {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Mgr {
+    fn deref_mut(&mut self) -> &mut SessionManager {
+        &mut self.0
+    }
+}
+
+impl Drop for Mgr {
+    fn drop(&mut self) {
+        self.0.kill_all_on_shutdown();
+    }
+}
+
+fn manager() -> (Mgr, tempfile::TempDir) {
     install_fake_claude();
     let dir = tempfile::tempdir().unwrap();
-    (SessionManager::with_store_path(dir.path().join("daemon-sessions.json")), dir)
+    (Mgr(SessionManager::with_store_path(dir.path().join("daemon-sessions.json"))), dir)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -201,11 +307,13 @@ async fn a_restricted_tag_is_started_with_the_restricted_arguments() {
     mgr.restrict_tag(PICKS_TAG, picks_restrictions());
     let view = "restricted-view-start";
 
-    mgr.spawn_session(PICKS_TAG.into(), "teri:teri".into(), view.into(), Some(dir.path().to_path_buf()), None, false)
+    // The way the picks host starts it: no agent name.
+    mgr.spawn_session(PICKS_TAG.into(), String::new(), view.into(), Some(dir.path().to_path_buf()), None, false)
         .expect("the session starts");
 
     let runs = runs_of(view, 1).await;
     let args = &runs[0];
+    assert_is_the_picks_session_vector(args);
     assert!(!has(args, "--dangerously-skip-permissions"), "{args:?}");
     assert_eq!(value_of(args, "--permission-mode"), Some("dontAsk"), "{args:?}");
     assert!(has(args, "--strict-mcp-config"), "{args:?}");
@@ -221,8 +329,8 @@ async fn a_restricted_tag_stays_restricted_when_its_session_is_started_again() {
     let (mut mgr, dir) = manager();
     mgr.restrict_tag(PICKS_TAG, picks_restrictions());
     let view = "restricted-view-again";
-    let spawn = |mgr: &mut SessionManager| {
-        mgr.spawn_session(PICKS_TAG.into(), "teri:teri".into(), view.into(), Some(dir.path().to_path_buf()), None, false)
+    let spawn = |mgr: &mut Mgr| {
+        mgr.spawn_session(PICKS_TAG.into(), String::new(), view.into(), Some(dir.path().to_path_buf()), None, false)
             .expect("the session starts")
     };
 
@@ -238,6 +346,7 @@ async fn a_restricted_tag_stays_restricted_when_its_session_is_started_again() {
         assert!(!has(args, "--dangerously-skip-permissions"), "run {n}: {args:?}");
         assert_eq!(value_of(args, "--permission-mode"), Some("dontAsk"), "run {n}: {args:?}");
         assert!(has(args, "--strict-mcp-config"), "run {n}: {args:?}");
+        assert_is_the_picks_session_vector(args);
     }
     mgr.kill_all_on_shutdown();
 }
@@ -253,8 +362,82 @@ async fn a_tag_nobody_restricted_keeps_the_permission_bypass() {
 
     let runs = runs_of(view, 1).await;
     assert!(has(&runs[0], "--dangerously-skip-permissions"), "{:?}", runs[0]);
-    for flag in ["--permission-mode", "--tools", "--allowedTools", "--strict-mcp-config", "--max-budget-usd"] {
+    assert_eq!(value_of(&runs[0], "--agent"), Some("cody"), "a real agent name is still passed: {:?}", runs[0]);
+    for flag in [
+        "--permission-mode",
+        "--tools",
+        "--allowedTools",
+        "--strict-mcp-config",
+        "--max-budget-usd",
+        "--setting-sources",
+        "--disable-slash-commands",
+    ] {
         assert!(!has(&runs[0], flag), "{flag}: {:?}", runs[0]);
     }
+    mgr.kill_all_on_shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restricted_session_with_a_real_agent_name_still_passes_it() {
+    let (mut mgr, dir) = manager();
+    mgr.restrict_tag("boxed-with-agent", restrictions());
+    let view = "restricted-view-named-agent";
+
+    mgr.spawn_session(
+        "boxed-with-agent".into(),
+        "some-agent".into(),
+        view.into(),
+        Some(dir.path().to_path_buf()),
+        None,
+        false,
+    )
+    .expect("the session starts");
+
+    let runs = runs_of(view, 1).await;
+    assert_eq!(value_of(&runs[0], "--agent"), Some("some-agent"), "{:?}", runs[0]);
+    mgr.kill_all_on_shutdown();
+}
+
+// ── sensitivity does not depend on the agent name ─────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_restricted_picks_tag_is_sensitive_even_when_it_runs_with_no_agent() {
+    // The picks session reads third-party work data, so a network peer must not see or drive it,
+    // whatever agent (here none) it is started as.
+    let (mut mgr, dir) = manager();
+    let tags = mgr.sensitive_tags();
+
+    mgr.spawn_session(PICKS_TAG.into(), String::new(), "sensitive-picks-view".into(), Some(dir.path().to_path_buf()), None, false)
+        .expect("the session starts");
+
+    assert!(tags.tag_is_sensitive(PICKS_TAG));
+    mgr.kill_all_on_shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn any_tag_that_was_restricted_is_sensitive_once_started() {
+    let (mut mgr, dir) = manager();
+    let tags = mgr.sensitive_tags();
+    mgr.restrict_tag("boxed-other", restrictions());
+
+    mgr.spawn_session("boxed-other".into(), String::new(), "sensitive-other-view".into(), Some(dir.path().to_path_buf()), None, false)
+        .expect("the session starts");
+
+    assert!(tags.tag_is_sensitive("boxed-other"));
+    mgr.kill_all_on_shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrestricted_tag_is_not_made_sensitive_by_having_an_empty_or_ordinary_agent_name() {
+    let (mut mgr, dir) = manager();
+    let tags = mgr.sensitive_tags();
+
+    mgr.spawn_session("plain-no-agent".into(), String::new(), "plain-no-agent-view".into(), Some(dir.path().to_path_buf()), None, false)
+        .expect("the session starts");
+    mgr.spawn_session("plain-cody".into(), "cody".into(), "plain-cody-view".into(), Some(dir.path().to_path_buf()), None, false)
+        .expect("the session starts");
+
+    assert!(!tags.tag_is_sensitive("plain-no-agent"));
+    assert!(!tags.tag_is_sensitive("plain-cody"));
     mgr.kill_all_on_shutdown();
 }

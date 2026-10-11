@@ -104,6 +104,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 serde_yaml = "0.9"
 url = "2"
 unicode-width = "0.1"
+unicode-normalization = "0.1.25"
 
 [dev-dependencies]
 nostromo = { path = ".", features = ["test-support"] }

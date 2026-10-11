@@ -25,7 +25,14 @@
 //!   by the daemon's MCP dispatch for the [`PICKS_TAG`] caller.
 //! - **Permissions**: the session does NOT run with
 //!   `--dangerously-skip-permissions`; the allow-list is the control.
-//! - **Working directory**: an empty temp directory, not `$HOME`.
+//! - **No agent**: it runs with no `--agent`. A plugin agent's own `tools:` list
+//!   overrides `--tools` (verified against the real `claude`: with `--agent teri:teri`
+//!   the session could call nothing), so the instructions are [`PICKS_PROMPT`].
+//!   `--setting-sources project` and `--disable-slash-commands` keep the operator's
+//!   hooks, CLAUDE.md, plugins and skills out of an unattended run.
+//! - **Working directory**: an empty temp directory, not `$HOME`; the run's
+//!   transcript directory under `~/.claude/projects` (third-party text) is
+//!   deleted when the run ends.
 //! - **Spend**: a hard `--max-budget-usd` cap ([`PICKS_MAX_BUDGET_USD`]) and the
 //!   [`GENERATION_TIMEOUT`] deadline. (The `claude` CLI has no max-turns flag;
 //!   these two are the daemon-side bound.) Ending the session kills its whole
@@ -48,12 +55,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use regex::Regex;
 use serde::Deserialize;
 use tokio::sync::{broadcast, watch};
 use tokio::time::Instant;
 use tracing::warn;
+use unicode_normalization::UnicodeNormalization as _;
 
 use crate::ipc::protocol::ServerMsg;
 use crate::ipc::session_manager::SessionRestrictions;
@@ -65,8 +73,6 @@ use super::untrusted::{escape_id, one_line, MAX_LINE_CHARS};
 
 /// Tag of the hidden generation session.
 pub const PICKS_TAG: &str = "teri-picks";
-/// Agent the generation session runs as.
-pub const PICKS_AGENT: &str = "teri:teri";
 
 /// The MCP tools the picking session may call, as the daemon names them. The
 /// daemon's MCP dispatch refuses every other tool for the [`PICKS_TAG`] caller.
@@ -121,8 +127,9 @@ pub const GENERATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// After any failed generation, a `first_open` request starts nothing for this long.
 pub const FIRST_OPEN_FAILURE_COOLDOWN: Duration = Duration::from_secs(30 * 60);
-/// After any generation ends, a `manual` request starts nothing for this long.
-pub const MANUAL_COOLDOWN: Duration = Duration::from_secs(60);
+/// After any generation ends, a `manual` request starts nothing for this long (a
+/// run can cost up to [`PICKS_MAX_BUDGET_USD`] and take [`GENERATION_TIMEOUT`]).
+pub const MANUAL_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 /// How often a running generation checks that its session is still alive.
 const ALIVE_POLL: Duration = Duration::from_millis(500);
@@ -138,18 +145,27 @@ const ALIVE_POLL: Duration = Duration::from_millis(500);
 pub fn sanitize_reason(raw: &str) -> Option<String> {
     static MARKDOWN_LINK: OnceLock<Regex> = OnceLock::new();
     static URL: OnceLock<Regex> = OnceLock::new();
+    static BARE_DOMAIN: OnceLock<Regex> = OnceLock::new();
     if raw.chars().count() > MAX_RAW_REASON_CHARS {
         return None;
     }
     // Invisible characters first: they must not split a URL past the scanners below.
-    let flat = one_line(raw, usize::MAX);
+    // Then NFKC, so full-width `ｈｔｔｐ：／／` and the like read as the ASCII they imitate.
+    let flat = one_line(&one_line(raw, usize::MAX).nfkc().collect::<String>(), usize::MAX);
     let markdown_link = MARKDOWN_LINK.get_or_init(|| Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").expect("static regex"));
     let url = URL.get_or_init(|| {
         Regex::new(r"(?i)\b(?:[a-z][a-z0-9+.\-]*://|www\.|mailto:|javascript:|data:|vbscript:|file:|tel:|sms:)\S*")
             .expect("static regex")
     });
+    // `host.tld/...`: a domain with a path is a link. A bare `host.tld` is kept: it cannot
+    // be told from a file name (`main.py`, `README.md` and `foo.rs` are country domains).
+    let bare_domain = BARE_DOMAIN.get_or_init(|| {
+        Regex::new(r"(?i)\b[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?)*\.[a-z]{2,}(?::\d+)?/\S*")
+            .expect("static regex")
+    });
     let text = markdown_link.replace_all(&flat, "$1");
     let text = url.replace_all(&text, " ");
+    let text = bare_domain.replace_all(&text, " ");
     let text: String = text.chars().filter(|&c| c != '`').collect();
     let clean = one_line(&text, usize::MAX);
     let n = clean.chars().count();
@@ -496,9 +512,9 @@ fn repo_group_failed(status: &SourceStatus, item_id: &str) -> bool {
 
 /// What the generator needs from the daemon's session manager.
 pub trait PicksSessionHost: Send + Sync {
-    /// Start a fresh hidden session in `cwd` under `restrictions`. Must not
-    /// register it as a focus.
-    fn spawn(&self, tag: &str, agent: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String>;
+    /// Start a fresh hidden session in `cwd` under `restrictions`, with no
+    /// agent (the instructions are the prompt). Must not register it as a focus.
+    fn spawn(&self, tag: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String>;
     /// Send the session its one message.
     fn send(&self, tag: &str, text: &str) -> Result<(), String>;
     fn is_alive(&self, _tag: &str) -> bool {
@@ -525,13 +541,13 @@ impl SessionManagerHost {
 }
 
 impl PicksSessionHost for SessionManagerHost {
-    fn spawn(&self, tag: &str, agent: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String> {
+    fn spawn(&self, tag: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String> {
         let mut mgr = self.mgr();
         // The tag runs restricted for good: a restart or a respawn of it is boxed in too.
         mgr.restrict_tag(tag, restrictions.clone());
         // Every generation starts from a blank conversation, never a resumed one.
         mgr.new_session(tag);
-        mgr.spawn_session(tag.into(), agent.into(), "Teri picks".into(), Some(cwd.to_path_buf()), None, false)
+        mgr.spawn_session(tag.into(), String::new(), "Teri picks".into(), Some(cwd.to_path_buf()), None, false)
             .map(|_| ())
             .map_err(|e| format!("{e:#}"))
     }
@@ -567,11 +583,13 @@ impl Attempts {
         at.is_some_and(|at| now.saturating_duration_since(at) < window)
     }
 
-    /// May a run for `reason` start now?
-    fn allows(&self, reason: Reason, today: NaiveDate, now: Instant) -> bool {
+    /// May a run for `reason` start now? `picks_made_today`: the stored picks were
+    /// published on today's local date, by any run, in this process or an earlier one.
+    fn allows(&self, reason: Reason, today: NaiveDate, picks_made_today: bool, now: Instant) -> bool {
         match reason {
             Reason::FirstOpen => {
-                self.first_open_ok_day != Some(today)
+                !picks_made_today
+                    && self.first_open_ok_day != Some(today)
                     && !Self::within(self.last_failure, now, FIRST_OPEN_FAILURE_COOLDOWN)
             }
             Reason::Manual => !Self::within(self.last_end, now, MANUAL_COOLDOWN),
@@ -587,13 +605,46 @@ enum Reason {
 
 /// The local calendar day, as the daemon's clock gives it.
 type TodayFn = Arc<dyn Fn() -> NaiveDate + Send + Sync>;
+/// The local calendar day an instant falls on.
+type LocalDateFn = Arc<dyn Fn(DateTime<Utc>) -> NaiveDate + Send + Sync>;
+
+/// What a generator needs from the machine it runs on; tests supply their own.
+#[derive(Clone)]
+pub struct GeneratorEnv {
+    /// The local calendar day now.
+    pub today: TodayFn,
+    /// The local calendar day an instant falls on (DST-safe: a calendar date, not a 24-hour span).
+    pub date_of: LocalDateFn,
+    /// Where `claude` keeps its per-directory transcripts (`~/.claude/projects`);
+    /// `None` leaves them alone.
+    pub projects_dir: Option<PathBuf>,
+}
+
+impl GeneratorEnv {
+    /// The machine's local calendar and the real `~/.claude/projects`.
+    pub fn local() -> Self {
+        Self {
+            today: Arc::new(|| chrono::Local::now().date_naive()),
+            date_of: Arc::new(|at| at.with_timezone(&chrono::Local).date_naive()),
+            projects_dir: dirs_next::home_dir().map(|h| h.join(".claude").join("projects")),
+        }
+    }
+}
+
+/// Where `claude` keeps the transcripts of a session started in `cwd`: the real
+/// path with every non-alphanumeric character turned into `-`, under `projects_dir`.
+pub fn transcript_dir_for(projects_dir: &Path, cwd: &Path) -> PathBuf {
+    let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let name: String = real.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    projects_dir.join(name)
+}
 
 /// Runs picks generations, one at a time.
 pub struct PicksGenerator {
     store: Arc<PicksStore>,
     host: Arc<dyn PicksSessionHost>,
     timeout: Duration,
-    today: TodayFn,
+    env: GeneratorEnv,
     attempts: Mutex<Attempts>,
     in_flight: AtomicBool,
 }
@@ -602,21 +653,33 @@ impl PicksGenerator {
     /// A generator that counts days by the machine's local calendar (DST-safe: it
     /// is the calendar date, not a 24-hour span).
     pub fn new(store: Arc<PicksStore>, host: Arc<dyn PicksSessionHost>, timeout: Duration) -> Arc<Self> {
-        Self::with_clock(store, host, timeout, Arc::new(|| chrono::Local::now().date_naive()))
+        Self::with_env(store, host, timeout, GeneratorEnv::local())
     }
 
-    /// A generator with its own idea of "today" (tests).
+    /// A generator with its own idea of "today" (tests). A snapshot's date is never
+    /// "today" and no transcripts are touched.
     pub fn with_clock(
         store: Arc<PicksStore>,
         host: Arc<dyn PicksSessionHost>,
         timeout: Duration,
         today: TodayFn,
     ) -> Arc<Self> {
+        let env = GeneratorEnv { today, date_of: Arc::new(|_| NaiveDate::MIN), projects_dir: None };
+        Self::with_env(store, host, timeout, env)
+    }
+
+    /// A generator on its own clock, calendar and transcript directory.
+    pub fn with_env(
+        store: Arc<PicksStore>,
+        host: Arc<dyn PicksSessionHost>,
+        timeout: Duration,
+        env: GeneratorEnv,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             host,
             timeout,
-            today,
+            env,
             attempts: Mutex::new(Attempts::default()),
             in_flight: AtomicBool::new(false),
         })
@@ -640,8 +703,16 @@ impl PicksGenerator {
         if self.in_flight.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let today = (self.today)();
-        if !self.attempts.lock().unwrap_or_else(|e| e.into_inner()).allows(reason, today, Instant::now()) {
+        let today = (self.env.today)();
+        let picks_made_today =
+            self.store.snapshot().generated_at.is_some_and(|at| (self.env.date_of)(at) == today);
+        let allowed = self.attempts.lock().unwrap_or_else(|e| e.into_inner()).allows(
+            reason,
+            today,
+            picks_made_today,
+            Instant::now(),
+        );
+        if !allowed {
             self.store.broadcast();
             return Ok(());
         }
@@ -662,6 +733,11 @@ impl PicksGenerator {
 
     async fn run(self: Arc<Self>, reason: Reason, today: NaiveDate, publishes: watch::Receiver<u64>) {
         let scratch = ScratchDir::create();
+        // Worked out while the directory exists: `claude` files transcripts under its real path.
+        let transcripts = match (&self.env.projects_dir, &scratch) {
+            (Some(projects), Ok(dir)) => Some(transcript_dir_for(projects, dir.path())),
+            _ => None,
+        };
         let outcome = match &scratch {
             Ok(dir) => self.drive(dir.path(), publishes).await,
             Err(e) => Err(format!("could not make a working directory: {e}")),
@@ -669,6 +745,9 @@ impl PicksGenerator {
         // The session ends on every path, before anyone is told it is over.
         self.host.stop(PICKS_TAG);
         drop(scratch);
+        if let Some(dir) = transcripts {
+            remove_transcripts(&dir);
+        }
         {
             let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
@@ -689,7 +768,7 @@ impl PicksGenerator {
     /// Start the session in `cwd`, seed it and wait for it to publish.
     async fn drive(&self, cwd: &Path, mut publishes: watch::Receiver<u64>) -> Result<(), String> {
         self.host
-            .spawn(PICKS_TAG, PICKS_AGENT, cwd, &picks_restrictions())
+            .spawn(PICKS_TAG, cwd, &picks_restrictions())
             .map_err(|e| format!("could not start the session: {e}"))?;
         self.host.send(PICKS_TAG, PICKS_PROMPT).map_err(|e| format!("could not send the request: {e}"))?;
 
@@ -712,13 +791,25 @@ impl PicksGenerator {
     }
 }
 
+/// Name prefix of a run's scratch directory (it survives in the transcript directory's name).
+const SCRATCH_PREFIX: &str = "nostromo-picks-";
+
+/// Remove one run's transcripts (third-party text the session read), best effort.
+/// Only a directory derived from a run's own scratch directory is ever removed.
+fn remove_transcripts(dir: &Path) {
+    let ours = dir.file_name().is_some_and(|n| n.to_string_lossy().contains(SCRATCH_PREFIX));
+    if ours {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// An empty, private temp directory the picking session runs in (so it never
 /// starts in `$HOME`), removed when dropped.
 struct ScratchDir(PathBuf);
 
 impl ScratchDir {
     fn create() -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!("nostromo-picks-{}", uuid::Uuid::new_v4().simple()));
+        let path = std::env::temp_dir().join(format!("{SCRATCH_PREFIX}{}", uuid::Uuid::new_v4().simple()));
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {

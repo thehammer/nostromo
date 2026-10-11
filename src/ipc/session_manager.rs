@@ -631,7 +631,9 @@ impl SessionManager {
         // child exists, so nothing it produces can precede the registration.
         // A session spawned while a work item is being sent holds that item's
         // content likewise (see `peer::within_work_send`).
-        if is_teri_or_fred_agent(&agent_name) || in_work_send() {
+        // A restricted session (the picks session) reads work-item data with no
+        // agent name to say so, so it is sensitive by its restriction.
+        if is_teri_or_fred_agent(&agent_name) || in_work_send() || self.restrictions.contains_key(&tag) {
             self.sensitive.mark_tag(&tag);
         }
 
@@ -1965,7 +1967,8 @@ fn capture_exit_code(child: &mut Child) -> Option<i32> {
     }
 }
 
-/// Build the `claude` argument vector for a persistent stream-json session.
+/// Build the `claude` argument vector for a persistent stream-json session. An
+/// empty `agent_name` starts the session with no `--agent`.
 pub fn build_claude_args(
     agent_name: &str,
     view_name: &str,
@@ -2009,6 +2012,11 @@ pub fn build_claude_args_with(
             args.extend(["--tools".into(), r.builtin_tools.join(",")]);
             args.extend(["--allowedTools".into(), r.allowed_tools.join(",")]);
             args.push("--strict-mcp-config".into());
+            // An unattended run must not execute the operator's code: only the
+            // (empty) project's settings load, so no user hooks, CLAUDE.md,
+            // plugins, user agents or skills; and no slash commands or skills.
+            args.extend(["--setting-sources".into(), "project".into()]);
+            args.push("--disable-slash-commands".into());
             if let Some(budget) = r.max_budget_usd {
                 args.extend(["--max-budget-usd".into(), format!("{budget}")]);
             }
@@ -2024,11 +2032,15 @@ pub fn build_claude_args_with(
             // Re-emit stdin-origin user messages on stdout (tagged isReplay) so the
             // daemon renders every user message off the output stream.
             "--replay-user-messages",
-            "--agent",
         ]
         .map(String::from),
     );
-    args.push(agent_name.into());
+    // No name, no `--agent`: a restricted session carries its instructions in its
+    // prompt, because a plugin agent's own `tools:` list overrides `--tools` and
+    // leaves the session without the tools it needs.
+    if !agent_name.is_empty() {
+        args.extend(["--agent".into(), agent_name.into()]);
+    }
     args.extend(["-n".into(), view_name.into()]);
     if remote_control {
         args.push("--remote-control".into());
@@ -2363,12 +2375,28 @@ mod tests {
             assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
         }
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        // A named agent is still passed to a restricted session ...
         assert!(args.windows(2).any(|w| w == ["--agent", "teri:teri"]));
+        // ... which never loads user settings, hooks, plugins or slash commands.
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", "project"]), "{args:?}");
+        assert!(args.iter().any(|a| a == "--disable-slash-commands"), "{args:?}");
         // The unrestricted vector is unchanged.
         assert_eq!(
             build_claude_args_with("a", "v", false, "sid", false, None),
             build_claude_args("a", "v", false, "sid", false)
         );
+    }
+
+    #[test]
+    fn a_restricted_session_with_no_agent_name_gets_no_agent_flag() {
+        let args = build_claude_args_with("", "Teri picks", false, "sid", false, Some(&restricted()));
+        assert!(!args.iter().any(|a| a == "--agent"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("teri:teri")), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", "project"]), "{args:?}");
+        assert!(args.iter().any(|a| a == "--disable-slash-commands"), "{args:?}");
+        // An unrestricted session with no agent name has no agent flag either, and gains nothing else.
+        let plain = build_claude_args_with("", "v", false, "sid", false, None);
+        assert!(!plain.iter().any(|a| a == "--agent" || a == "--setting-sources" || a == "--disable-slash-commands"), "{plain:?}");
     }
 
     #[tokio::test]

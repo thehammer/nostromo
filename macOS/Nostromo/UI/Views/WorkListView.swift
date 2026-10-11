@@ -749,21 +749,27 @@ private final class WorkRowCellView: NSTableCellView {
         setAccessibilityLabel(content.accessibilityLabel)
     }
 
-    /// The row sits on the system selection fill (a saturated blue) when selected in
-    /// the key window; the dark-surface colours (muted grey, amber, red) are
-    /// unreadable on it, so the text goes light there.
+    /// AppKit hands the cell its background style whenever the row's selection or its
+    /// window's activation changes, even to the style it already has, so colours are
+    /// re-applied every time (no "unchanged" guard).
     override var backgroundStyle: NSView.BackgroundStyle {
-        didSet { if backgroundStyle != oldValue { applyColors() } }
+        didSet { applyColors() }
     }
 
+    /// Three fills, three palettes:
+    /// - selected in the key window: the system selection colour (a saturated accent
+    ///   blue by default). White is the lightest text there is (about 3.65:1 on the
+    ///   default blue, less on other accents: the platform colour cannot reach 4.5:1
+    ///   with anything), so ALL text is white;
+    /// - selected in an inactive window: `unemphasizedSelectedContentBackgroundColor`,
+    ///   a grey that flips with the appearance, so the adaptive label colour;
+    /// - unselected: the dark-surface colours.
     private func applyColors() {
         guard let content else { return }
         if backgroundStyle == .emphasized {
-            priority.textColor = .white
-            kind.textColor = Theme.tabCaptionOnActive
-            title.textColor = .white
-            due.textColor = .white
-            status.textColor = Theme.tabCaptionOnActive
+            for field in [priority, kind, title, due, status] { field.textColor = .white }
+        } else if isInSelectedRow {
+            for field in [priority, kind, title, due, status] { field.textColor = .labelColor }
         } else {
             priority.textColor = Self.color(forRank: content.priorityRank)
             kind.textColor = Theme.fgMuted
@@ -771,6 +777,15 @@ private final class WorkRowCellView: NSTableCellView {
             due.textColor = content.dueIsUrgent ? Theme.redSweater : Theme.fgMuted
             status.textColor = Theme.fgMuted
         }
+    }
+
+    private var isInSelectedRow: Bool {
+        var view = superview
+        while let current = view {
+            if let row = current as? NSTableRowView { return row.isSelected }
+            view = current.superview
+        }
+        return false
     }
 
     private static func color(forRank rank: Int?) -> NSColor {
