@@ -3,8 +3,8 @@ import AppKit
 
 // PR #223 review fix-up: a healthy source can still have something worth
 // saying (Sentry shows only the first 300 issues per search). A `.fresh` status
-// with a reason now shows that reason as a note; with no reason, and for the
-// positive empty state, the banner stays hidden as before.
+// or `.empty` status with a reason shows that reason as an informational note
+// (no retry); with no reason the banner stays hidden as before.
 
 final class SourceStateBannerNoteTests: XCTestCase {
     private let truncation = "Showing the first 300 issues per search; narrow with a project filter."
@@ -44,11 +44,13 @@ final class SourceStateBannerNoteTests: XCTestCase {
             state: .fresh, updatedAt: nil, reason: "", retryAt: nil, sourceName: "Sentry", now: now))
     }
 
-    func testTheEmptyStateStaysHiddenWithOrWithoutAReason() {
+    func testTheEmptyStateIsHiddenWithoutAReasonAndShowsAReasonAsANote() {
         XCTAssertNil(SourceStateBanner.content(
             state: .empty, updatedAt: nil, reason: nil, retryAt: nil, sourceName: "Sentry", now: now))
-        XCTAssertNil(SourceStateBanner.content(
-            state: .empty, updatedAt: nil, reason: truncation, retryAt: nil, sourceName: "Sentry", now: now))
+        XCTAssertEqual(
+            SourceStateBanner.content(
+                state: .empty, updatedAt: nil, reason: truncation, retryAt: nil, sourceName: "Sentry", now: now),
+            SourceStateBanner.Content(message: "Sentry: \(truncation)", showsRetry: false))
     }
 
     func testTheOtherStatesAreUnchanged() {

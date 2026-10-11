@@ -1297,7 +1297,7 @@ final class TeriSentryTruncationNoteTests: TeriSentryClockedTestCase {
         XCTAssertNil(holder.live.visibleBannerMessage)
     }
 
-    func testAnEmptySentryShowsNoBannerEvenWithAReason() {
+    func testAnEmptySentryShowsItsNoteAsABannerAlongsideTheEmptyMessage() {
         let store = WorkStore()
         store.sendFrame = { _ in }
         store.apply(status: SourceStatus(source: .sentry, state: .empty, reason: note, count: 0))
@@ -1305,7 +1305,7 @@ final class TeriSentryTruncationNoteTests: TeriSentryClockedTestCase {
 
         holder.select(.sentry)
 
-        XCTAssertNil(holder.live.visibleBannerMessage)
+        XCTAssertEqual(holder.live.visibleBannerMessage, "Sentry: \(note)")
         XCTAssertFalse(holder.live.emptyMessage?.isEmpty ?? true, "the positive empty message still shows")
     }
 }
