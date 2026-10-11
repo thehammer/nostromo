@@ -350,8 +350,18 @@ impl GraphClient {
     /// go through the same status check, so a failed retry can never be read
     /// as data.
     pub async fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
+        self.get_json_with_headers(url, &[]).await
+    }
+
+    /// [`get_json`](Self::get_json) with extra request headers (e.g. Graph's
+    /// `Prefer: outlook.body-content-type="text"`).
+    pub async fn get_json_with_headers<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<T> {
         let url = self.absolute_url(url);
-        let mut resp = self.authenticated_get(&url).await?;
+        let mut resp = self.authenticated_get(&url, headers).await?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             // If the token cannot be refreshed it is no good any more: forget
@@ -366,7 +376,7 @@ impl GraphClient {
                     retry_after: None,
                 }));
             }
-            resp = self.authenticated_get(&url).await?;
+            resp = self.authenticated_get(&url, headers).await?;
         }
 
         let resp = ensure_success(resp, &url).await?;
@@ -462,7 +472,11 @@ impl GraphClient {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    async fn authenticated_get(&self, url: &str) -> Result<reqwest::Response> {
+    async fn authenticated_get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<reqwest::Response> {
         let token = {
             let guard = self.token.lock().await;
             guard
@@ -471,10 +485,11 @@ impl GraphClient {
                 .unwrap_or_default()
         };
 
-        self.http
-            .get(url)
-            .bearer_auth(&token)
-            .send()
+        let mut req = self.http.get(url).bearer_auth(&token);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        req.send()
             .await
             .with_context(|| format!("GET {url}"))
     }
