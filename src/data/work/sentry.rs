@@ -249,6 +249,14 @@ pub fn spawn(refresh: Arc<Notify>) -> watch::Receiver<SourceUpdate> {
     spawn_with(SentryConfig::from_environment(), refresh)
 }
 
+/// The dormant placeholder for a hub that was not given a Sentry configuration
+/// (tests): it reads no credentials and never touches the network.
+pub fn spawn_dormant(_refresh: Arc<Notify>) -> watch::Receiver<SourceUpdate> {
+    let status = status(SourceState::NotConfigured, Some("Coming soon".into()), None, None, 0);
+    // The sender is dropped on purpose: the placeholder never changes.
+    watch::channel((status, Vec::new())).1
+}
+
 /// Detail for one of this source's item ids.
 pub async fn detail(item_id: &str) -> Result<WorkDetail, WorkError> {
     detail_with(&SentryConfig::from_environment(), item_id).await

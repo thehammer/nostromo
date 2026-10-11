@@ -70,6 +70,9 @@ pub struct HubDeps {
     /// The live Jira source. `None` (tests) leaves the dormant placeholder, so
     /// nothing reaches a real Jira.
     pub jira: Option<Arc<jira::JiraWorkSource>>,
+    /// The live Sentry configuration. `None` (tests) leaves the dormant
+    /// placeholder, so nothing reads real credentials or reaches a real Sentry.
+    pub sentry: Option<sentry::SentryConfig>,
     /// The folder whose children are the repos for Repo docs; `None` is [`repo_docs::code_root`].
     pub repo_docs_root: Option<PathBuf>,
 }
@@ -87,6 +90,7 @@ impl HubDeps {
             jira_site: credentials::JiraSite::default(),
             todos_refresh: None,
             jira: None,
+            sentry: None,
             repo_docs_root: None,
         }
     }
@@ -106,6 +110,8 @@ pub struct WorkHub {
     jira_site: Arc<credentials::JiraSite>,
     /// The live Jira source, when there is one (detail requests go to it).
     jira: Option<Arc<jira::JiraWorkSource>>,
+    /// The live Sentry configuration, when there is one (detail requests use it).
+    sentry: Option<Arc<sentry::SentryConfig>>,
     /// Where Repo docs items live.
     repo_docs_root: PathBuf,
 }
@@ -180,8 +186,10 @@ impl WorkHub {
             jira_site,
             todos_refresh,
             jira,
+            sentry,
             repo_docs_root,
         } = deps;
+        let sentry = sentry.map(Arc::new);
         let repo_docs_root = repo_docs_root.unwrap_or_else(repo_docs::code_root);
         let mut refresh: HashMap<WorkSource, Arc<Notify>> =
             [WorkSource::RepoDocs, WorkSource::Jira, WorkSource::Sentry]
@@ -203,6 +211,7 @@ impl WorkHub {
             refresh,
             jira_site: Arc::new(jira_site),
             jira: jira.clone(),
+            sentry: sentry.clone(),
             repo_docs_root: repo_docs_root.clone(),
         });
 
@@ -211,10 +220,15 @@ impl WorkHub {
             Some(source) => source.spawn(jira_refresh),
             None => jira::spawn(jira_refresh),
         };
+        let sentry_refresh = hub.refresh[&WorkSource::Sentry].clone();
+        let sentry_rx = match sentry {
+            Some(config) => sentry::spawn_with((*config).clone(), sentry_refresh),
+            None => sentry::spawn_dormant(sentry_refresh),
+        };
         let sources = [
             (WorkSource::RepoDocs, repo_docs::spawn_at(repo_docs_root, hub.refresh[&WorkSource::RepoDocs].clone())),
             (WorkSource::Jira, jira_rx),
-            (WorkSource::Sentry, sentry::spawn(hub.refresh[&WorkSource::Sentry].clone())),
+            (WorkSource::Sentry, sentry_rx),
         ];
         for (source, rx) in sources {
             // Apply the initial value now so `status()` is right on return.
@@ -457,7 +471,10 @@ impl WorkService for WorkHub {
                 Some(source) => source.detail(item_id).await,
                 None => Err(WorkError::not_available()),
             },
-            "sentry" => sentry::detail(item_id).await,
+            "sentry" => match &self.sentry {
+                Some(config) => sentry::detail_with(config, item_id).await,
+                None => Err(WorkError::not_available()),
+            },
             _ => Err(WorkError::new("unknown_item", "Unknown kind of work item")),
         }
     }
