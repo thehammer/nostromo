@@ -36,6 +36,7 @@ use tracing::warn;
 use super::credentials::{default_env_path, EnvFile};
 use super::endpoint::{https_api_base, https_link, is_slug};
 use super::hub::SourceUpdate;
+use super::untrusted::{one_line, MAX_LINE_CHARS};
 use super::model::{
     Link, Priority, SourceState, SourceStatus, WorkDetail, WorkError, WorkItem, WorkSource,
 };
@@ -64,6 +65,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shown when no token can be found.
 pub const NOT_CONFIGURED_REASON: &str = "Sentry: no credentials found. Set SENTRY_API_TOKEN in ~/.claude/credentials/.env, as the sentry skill uses.";
+
+/// What a 403 says: the token works but may lack a scope. Names the variable and the scopes, never a value.
+const MISSING_PERMISSION_REASON: &str = "Sentry accepted the token but it is missing a permission. Check SENTRY_API_TOKEN in ~/.claude/credentials/.env (scopes needed: project:read, event:read, org:read).";
 
 const TRUNCATED_REASON: &str =
     "Showing the first 300 issues per search; Sentry has more. Narrow the search in Sentry to see the rest.";
@@ -122,7 +126,8 @@ impl SentryConfig {
 
     /// For tests that point the source at a local fake: skips the base URL
     /// host/scheme check (the organization is still validated). Never used by
-    /// the daemon.
+    /// the daemon, and not even compiled into it.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn for_test_server(base_url: String, org: String, env_path: PathBuf, repos_path: PathBuf) -> Self {
         let error = check_org(&org, "the configured organization");
@@ -294,6 +299,8 @@ fn status(
         retry_at,
         count,
         group_errors: Vec::new(),
+        // Callers that know the list is whole say so (see `fetch_round`).
+        complete: false,
     }
 }
 
@@ -360,8 +367,9 @@ async fn fetch_round(
     let now = config.now();
     *hold_until = hold.filter(|t| *t > now);
 
-    let publish = |state, reason, retry_at, items: &Vec<WorkItem>, last_ok| -> SourceUpdate {
-        (status(state, reason, last_ok, retry_at, items.len()), vec![(None, items.clone())])
+    let publish = |state, reason, retry_at, complete, items: &Vec<WorkItem>, last_ok| -> SourceUpdate {
+        let status = SourceStatus { complete, ..status(state, reason, last_ok, retry_at, items.len()) };
+        (status, vec![(None, items.clone())])
     };
     let hold_wait = |base: Duration, hold_until: &Option<DateTime<Utc>>| {
         hold_until
@@ -374,6 +382,8 @@ async fn fetch_round(
             *failures = 0;
             *last_ok = Some(now);
             *items = fetched.items;
+            // Unreadable issues leave the list incomplete too, but only a cut gets the banner.
+            let partial = fetched.truncated || fetched.unreadable > 0;
             let truncated = fetched.truncated.then(|| TRUNCATED_REASON.to_string());
             // A hold that outlasts the freshness window means the list will be
             // out of date before it can be refreshed: say so.
@@ -386,13 +396,19 @@ async fn fetch_round(
                 None if items.is_empty() => (SourceState::Empty, None, None),
                 None => (SourceState::Fresh, truncated, None),
             };
-            (publish(state, reason, retry_at, items, *last_ok), hold_wait(config.poll_interval, hold_until))
+            // Whole only when nothing was cut or unreadable and the list is not held past its freshness window.
+            let complete = !partial && matches!(state, SourceState::Fresh | SourceState::Empty);
+            (publish(state, reason, retry_at, complete, items, *last_ok), hold_wait(config.poll_interval, hold_until))
         }
-        Err(ApiError::Unauthenticated) => {
+        Err(rejected @ (ApiError::Unauthenticated | ApiError::Forbidden)) => {
             items.clear();
             *last_ok = None;
             *failures = 0;
-            let reason = "Sentry rejected the token. Check SENTRY_API_TOKEN in ~/.claude/credentials/.env (scopes: project:read, event:read, org:read).";
+            let reason = if matches!(rejected, ApiError::Forbidden) {
+                MISSING_PERMISSION_REASON
+            } else {
+                "Sentry rejected the token. Check SENTRY_API_TOKEN in ~/.claude/credentials/.env (scopes: project:read, event:read, org:read)."
+            };
             (
                 (status(SourceState::Unauthenticated, Some(reason.into()), None, None, 0), Vec::new()),
                 config.poll_interval,
@@ -403,7 +419,7 @@ async fn fetch_round(
             *hold_until = Some(retry_at);
             let wait = (retry_at - now).to_std().unwrap_or_default();
             let reason = "Sentry is rate-limiting requests; waiting before the next try".to_string();
-            (publish(SourceState::RateLimited, Some(reason), Some(retry_at), items, *last_ok), wait)
+            (publish(SourceState::RateLimited, Some(reason), Some(retry_at), false, items, *last_ok), wait)
         }
         Err(other) => {
             *failures = failures.saturating_add(1);
@@ -415,7 +431,7 @@ async fn fetch_round(
             } else {
                 (SourceState::Error, format!("Couldn't load Sentry issues ({what})"))
             };
-            (publish(state, Some(reason), None, items, *last_ok), hold_wait(delay, hold_until))
+            (publish(state, Some(reason), None, false, items, *last_ok), hold_wait(delay, hold_until))
         }
     }
 }
@@ -447,7 +463,10 @@ async fn read_repos(path: &std::path::Path) -> HashMap<String, String> {
 // ── HTTP ──────────────────────────────────────────────────────────────────────
 
 enum ApiError {
+    /// 401: the token is not accepted.
     Unauthenticated,
+    /// 403: the token is accepted but may not do this (a missing scope).
+    Forbidden,
     NotFound,
     RateLimited { retry_at: DateTime<Utc> },
     Status(u16),
@@ -464,6 +483,7 @@ impl ApiError {
             ApiError::Malformed => "unexpected response".into(),
             ApiError::NotFound => "HTTP 404".into(),
             ApiError::Unauthenticated => "HTTP 401".into(),
+            ApiError::Forbidden => "HTTP 403".into(),
             ApiError::RateLimited { .. } => "HTTP 429".into(),
         }
     }
@@ -513,7 +533,8 @@ impl Api<'_> {
         }
         match status.as_u16() {
             200..=299 => {}
-            401 | 403 => return Err(ApiError::Unauthenticated),
+            401 => return Err(ApiError::Unauthenticated),
+            403 => return Err(ApiError::Forbidden),
             404 => return Err(ApiError::NotFound),
             429 => {
                 let after = headers
@@ -570,6 +591,8 @@ struct Fetched {
     items: Vec<WorkItem>,
     /// A search had more issues than [`MAX_ISSUES_PER_QUERY`].
     truncated: bool,
+    /// Issues in the responses that could not be turned into items.
+    unreadable: usize,
 }
 
 /// Every page of every search, or an error: a failure part-way never yields a
@@ -584,6 +607,7 @@ async fn fetch_issues(
     let mut seen = HashSet::new();
     let mut items = Vec::new();
     let mut truncated = false;
+    let mut unreadable = 0usize;
     for search in &SEARCHES {
         let mut cursor: Option<String> = None;
         let mut count = 0usize;
@@ -611,11 +635,14 @@ async fn fetch_issues(
                     break;
                 }
                 count += 1;
-                if let Some(item) = to_item(issue, repos) {
-                    parsed += 1;
-                    if seen.insert(item.id.clone()) {
-                        items.push(item);
+                match to_item(issue, repos) {
+                    Some(item) => {
+                        parsed += 1;
+                        if seen.insert(item.id.clone()) {
+                            items.push(item);
+                        }
                     }
+                    None => unreadable += 1,
                 }
             }
             // A page of things that are not issues is a broken response, not "no issues".
@@ -632,7 +659,7 @@ async fn fetch_issues(
             }
         }
     }
-    Ok(Fetched { items, truncated })
+    Ok(Fetched { items, truncated, unreadable })
 }
 
 // ── mapping ───────────────────────────────────────────────────────────────────
@@ -685,7 +712,7 @@ fn priority_for(level: &str) -> Priority {
 
 fn to_item(issue: &Value, repos: &HashMap<String, String>) -> Option<WorkItem> {
     let id = text(&issue["id"]).or_else(|| number(&issue["id"]).map(|n| n.to_string()))?;
-    let title = text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into());
+    let title = one_line(&text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()), MAX_LINE_CHARS);
     let project = text(&issue["project"]["slug"]);
     let short_id = text(&issue["shortId"]);
     let level = text(&issue["level"]);
@@ -750,8 +777,8 @@ pub async fn detail_with(config: &SentryConfig, item_id: &str) -> Result<WorkDet
     // worth showing without it, but the reader is told why the stack is missing.
     let event = match api.get(&format!("{issue_path}events/latest/"), &[], &mut hold).await {
         Ok((event, _)) => Ok(event),
-        Err(ApiError::Unauthenticated) => return Err(detail_error(&ApiError::Unauthenticated)),
-        Err(other) => Err(format!("Stack unavailable ({})", other.describe())),
+        Err(rejected @ (ApiError::Unauthenticated | ApiError::Forbidden)) => return Err(detail_error(&rejected)),
+        Err(other) => Err(other.describe()),
     };
     Ok(build_detail(item_id, &issue, event.as_ref().map_err(String::as_str)))
 }
@@ -763,6 +790,7 @@ fn detail_error(e: &ApiError) -> WorkError {
             "unauthenticated",
             "Sentry rejected the token. Check SENTRY_API_TOKEN in ~/.claude/credentials/.env.",
         ),
+        ApiError::Forbidden => WorkError::new("unauthenticated", MISSING_PERMISSION_REASON),
         ApiError::RateLimited { .. } => {
             WorkError::new("rate_limited", "Sentry is rate-limiting requests; try again shortly")
         }
@@ -770,7 +798,9 @@ fn detail_error(e: &ApiError) -> WorkError {
     }
 }
 
-/// `event` is the latest event, or why there is none to show.
+/// `event` is the latest event, or why there is none to show. A stack that
+/// cannot be shown is said in its own `Stack` field, never in `markdown`, which
+/// holds frames only (so a reason cannot pass for one).
 fn build_detail(item_id: &str, issue: &Value, event: Result<&Value, &str>) -> WorkDetail {
     let when = |v: &Value| timestamp(v).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string());
     let mut fields: Vec<(String, String)> = Vec::new();
@@ -795,25 +825,35 @@ fn build_detail(item_id: &str, issue: &Value, event: Result<&Value, &str>) -> Wo
         fields.push(("Culprit".into(), culprit));
     }
 
+    let stack = match event {
+        Ok(event) => stack_markdown(event).ok_or("no exception data"),
+        Err(why) => Err(why),
+    };
+    let markdown = match stack {
+        Ok(frames) => frames,
+        Err(why) => {
+            fields.push(("Stack".into(), format!("unavailable ({why})")));
+            String::new()
+        }
+    };
+
     let links = sentry_link(&issue["permalink"])
         .map(|url| vec![Link { label: "Open in Sentry".into(), url }])
         .unwrap_or_default();
     WorkDetail {
         item_id: item_id.to_string(),
-        title: text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()),
+        title: one_line(&text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()), MAX_LINE_CHARS),
         fields,
-        markdown: match event {
-            Ok(event) => stack_markdown(event),
-            Err(why) => why.to_string(),
-        },
+        markdown,
         files: Vec::new(),
         links,
     }
 }
 
 /// The top (innermost) frames of the first exception, one per line:
-/// `● file:line in function`, in-app frames marked.
-fn stack_markdown(event: &Value) -> String {
+/// `● file:line in function`, in-app frames marked. `None` when the event has
+/// no exception with frames.
+fn stack_markdown(event: &Value) -> Option<String> {
     let frames = event["entries"]
         .as_array()
         .into_iter()
@@ -821,9 +861,9 @@ fn stack_markdown(event: &Value) -> String {
         .filter(|e| e["type"].as_str() == Some("exception"))
         .flat_map(|e| e["data"]["values"].as_array().into_iter().flatten())
         .find_map(|v| v["stacktrace"]["frames"].as_array());
-    let Some(frames) = frames else { return String::new() };
+    let frames = frames.filter(|f| !f.is_empty())?;
     // Sentry lists frames oldest first: the top of the stack is the end.
-    frames
+    let lines = frames
         .iter()
         .rev()
         .take(MAX_FRAMES)
@@ -842,5 +882,6 @@ fn stack_markdown(event: &Value) -> String {
             format!("{mark}{line}")
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    Some(lines)
 }

@@ -126,6 +126,8 @@ impl Rig {
         let (ttx, trx) = watch::channel(Some(snapshot(&[(1, "First todo"), (2, "Second todo")])));
         let hub = WorkHub::spawn(HubDeps {
             session_mgr: Some(Arc::clone(&sessions)),
+            // Not the user's real code folder (a hub with no root of its own reads and watches it).
+            repo_docs_root: Some(dir.path().join("no-code-here")),
             ..HubDeps::new(btx, trx)
         });
         Rig { _guard: guard, _dir: dir, ledger, sessions, hub, rx, _todos_tx: ttx }

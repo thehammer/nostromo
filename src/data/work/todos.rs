@@ -46,6 +46,8 @@ pub fn adapt(snap: &TeriTodosSnapshot) -> (SourceStatus, Vec<WorkItem>) {
         retry_at: None,
         count: items.len(),
         group_errors: Vec::new(),
+        // The todo store is read whole: complete exactly when the read is good.
+        complete: matches!(state, SourceState::Fresh | SourceState::Empty),
     };
     (status, items)
 }

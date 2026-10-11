@@ -3911,6 +3911,7 @@ mod work_wire_tests {
             retry_at: Some(ts()),
             count: 4,
             group_errors: vec![GroupError { group: "repo".into(), reason: "boom".into() }],
+            complete: true,
         }
     }
 
@@ -3926,6 +3927,39 @@ mod work_wire_tests {
         let back: ClientMsg = serde_json::from_str(&json).unwrap();
         assert_eq!(json, serde_json::to_string(&back).unwrap(), "mismatch: {json}");
         json
+    }
+
+    #[test]
+    fn a_status_without_complete_from_an_older_sender_decodes_as_not_complete() {
+        // "Completeness unknown" must never read as "complete".
+        let minimal: SourceStatus = serde_json::from_str(r#"{"source":"jira","state":"fresh"}"#).unwrap();
+        assert!(!minimal.complete);
+        assert_eq!(minimal.state, SourceState::Fresh);
+        assert_eq!(minimal.count, 0);
+
+        // The same through a whole frame: drop `complete` from what this build sends.
+        let mut frame = serde_json::to_value(ServerMsg::WorkSourceStatus { status: status() }).unwrap();
+        let sent = frame.pointer_mut("/status").and_then(|s| s.as_object_mut()).expect("a status object");
+        assert_eq!(sent.remove("complete"), Some(serde_json::json!(true)), "this build always sends it");
+        let ServerMsg::WorkSourceStatus { status: decoded } = serde_json::from_value(frame).unwrap() else {
+            panic!("not a WorkSourceStatus frame");
+        };
+        assert!(!decoded.complete, "absent decodes as false, deliberately");
+        assert_eq!(decoded.count, 4, "everything else is read as sent");
+    }
+
+    #[test]
+    fn complete_is_always_sent_and_survives_a_round_trip_either_way() {
+        for complete in [true, false] {
+            let sent = SourceStatus { complete, ..status() };
+            let json = serde_json::to_string(&ServerMsg::WorkSourceStatus { status: sent.clone() }).unwrap();
+            assert!(json.contains(&format!("\"complete\":{complete}")), "always on the wire, even when false: {json}");
+            let ServerMsg::WorkSourceStatus { status: back } = serde_json::from_str(&json).unwrap() else {
+                panic!("not a WorkSourceStatus frame");
+            };
+            assert_eq!(back, sent);
+            assert_eq!(back.complete, complete);
+        }
     }
 
     #[test]

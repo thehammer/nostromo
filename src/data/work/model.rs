@@ -71,6 +71,16 @@ pub struct SourceStatus {
     pub count: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_errors: Vec<GroupError>,
+    /// True only when the published list is known to be the whole list: nothing
+    /// cut at a cap, no unreadable or skipped item, no partial scan. A consumer
+    /// that infers "done" from an item's absence (T4's `recompute_done_since`)
+    /// must require this, because `state` stays `fresh` (with a `reason` note)
+    /// for a partial list.
+    ///
+    /// Absent on the wire (an older sender) decodes as `false`, deliberately:
+    /// "completeness unknown" must never read as "complete". It is always sent.
+    #[serde(default)]
+    pub complete: bool,
 }
 
 /// Priority with a sortable rank (1 = most urgent).

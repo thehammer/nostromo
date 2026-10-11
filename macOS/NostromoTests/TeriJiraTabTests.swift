@@ -510,6 +510,23 @@ final class TeriJiraTabTests: XCTestCase {
         XCTAssertEqual(rig.log.frames, [.refresh(source: .jira, fred: false)])
     }
 
+    /// A list cut at 500 issues (or with some issues unreadable) is published `fresh`
+    /// with the note as its reason: informational, so no Retry and no "Stale".
+    func testAFreshJiraListWithATruncationNoteShowsItAsInformationOnlyWithNoRetry() throws {
+        let note = "showing the first 500 issues; Jira has more"
+        let rig = makeRig(seed: { seedJira($0, self.projectIssues(), state: .fresh, reason: note) })
+
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 4 }, "the issues stay visible")
+        let message = try XCTUnwrap(rig.surface.visibleBannerMessage)
+        XCTAssertEqual(message, "Jira: \(note)")
+        let banner = try XCTUnwrap(visibleBanner(rig))
+        XCTAssertEqual(banner.content?.showsRetry, false, "there is nothing to retry")
+        if let retry = retryButton(in: banner) {
+            XCTAssertTrue(retry.isHidden, "a fresh list with a note offers no Retry")
+        }
+        XCTAssertFalse(message.hasPrefix("Stale"), message)
+    }
+
     func testAFreshSourceShowsNoBanner() {
         let rig = makeRig(seed: { seedJira($0, self.projectIssues()) })
 

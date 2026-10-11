@@ -13,8 +13,13 @@
 //!   issue list              -> `stale` while there is previous data, else `error`
 //! - more than 500 issues, or
 //!   issues that could not be
-//!   read                    -> `stale` (with the reason), never plain `fresh`
+//!   read                    -> `fresh` with the note as `reason` (an informational
+//!   banner, no Retry: refetching would return the same capped list) and
+//!   `complete: false`
 //! - healthy, no issues      -> `empty`
+//!
+//! `complete` is true only for a healthy list known to be whole (no cut, nothing
+//! unreadable). A consumer that treats an item's absence as "done" must require it.
 //!
 //! Where the credential goes: the site is validated once, in [`JiraWorkSource::credentials`]
 //! ([`validate_site`]): `<name>.atlassian.net` or a bare `<name>`. Anything else is
@@ -25,7 +30,8 @@
 //! refresh does not break it (only a changed `.env` does). A 401/403 is held for
 //! the 15-minute cap and ends on a changed `.env` or an explicit refresh. Note a
 //! 403 is not always "bad token": it can be a missing permission or a CAPTCHA /
-//! login challenge, and the state's wording says so.
+//! login challenge, and the state's wording says so. A hold earned by `detail()`
+//! binds the poller too: the next poll publishes the matching state without a request.
 //!
 //! Credentials are re-resolved on every fetch, and a change of the `.env`
 //! file's mtime triggers a fetch, so fixing a token recovers without a daemon
@@ -54,6 +60,8 @@ use tracing::warn;
 
 use super::credentials::{default_env_path, EnvFile};
 use super::hub::SourceUpdate;
+use super::sentry::Clock;
+use super::untrusted::{one_line, MAX_LINE_CHARS};
 use super::model::{
     Link, Priority, SourceState, SourceStatus, WorkDetail, WorkError, WorkItem, WorkSource,
 };
@@ -116,6 +124,8 @@ fn status(
         retry_at,
         count,
         group_errors: Vec::new(),
+        // Callers that know the list is whole say so (see `poll`).
+        complete: false,
     }
 }
 
@@ -230,6 +240,8 @@ pub struct JiraWorkSource {
     http: reqwest::Client,
     detail_cache: Mutex<DetailCache>,
     hold: Mutex<Option<Hold>>,
+    /// What "now" is for `updated_at`, `retry_at` and a `Retry-After` date.
+    clock: Clock,
 }
 
 impl JiraWorkSource {
@@ -254,6 +266,7 @@ impl JiraWorkSource {
                 .expect("build the Jira HTTP client"),
             detail_cache: Mutex::new(DetailCache::default()),
             hold: Mutex::new(None),
+            clock: Arc::new(Utc::now),
         }
     }
 
@@ -290,6 +303,16 @@ impl JiraWorkSource {
     pub fn with_backoff_base(mut self, base: Duration) -> Self {
         self.backoff_base = base;
         self
+    }
+
+    /// Read "now" from `clock` instead of the system clock (tests).
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        (self.clock)()
     }
 
     /// Ignore the process environment: only the `.env` file counts (tests).
@@ -381,20 +404,23 @@ impl JiraWorkSource {
                 return (update, self.poll_interval, Wake::RefreshOrCredentials);
             }
         };
+        // A hold `detail()` earned (429, 401/403) binds the poller too: no request until it ends.
+        if let Some((kind, remaining)) = self.active_hold(creds.fingerprint()) {
+            return self.held(st, kind, remaining);
+        }
         match self.fetch_all(&creds).await {
             Ok(fetched) => {
                 st.failures = 0;
                 self.clear_hold();
                 st.items = fetched.items;
-                let now = Utc::now();
+                let now = self.now();
                 st.last_good = Some(now);
-                let state = match (&fetched.note, st.items.is_empty()) {
-                    (Some(_), _) => SourceState::Stale,
-                    (None, true) => SourceState::Empty,
-                    (None, false) => SourceState::Fresh,
-                };
+                // A cut or partly unreadable list is a note on a fresh list, not a failure.
+                let state = if st.items.is_empty() { SourceState::Empty } else { SourceState::Fresh };
+                // `complete` only when nothing was cut at the cap or unreadable (that is what the note says).
+                let complete = fetched.note.is_none();
                 let update = (
-                    status(state, fetched.note, Some(now), None, st.items.len()),
+                    SourceStatus { complete, ..status(state, fetched.note, Some(now), None, st.items.len()) },
                     vec![(None, st.items.clone())],
                 );
                 (update, self.poll_interval, Wake::RefreshOrCredentials)
@@ -417,7 +443,7 @@ impl JiraWorkSource {
                 warn!("jira work source: rate limited, holding for {}s", hold.as_secs());
                 self.set_hold(creds.fingerprint(), HoldKind::RateLimited, hold);
                 let update = (
-                    status(SourceState::RateLimited, None, st.last_good, retry_at(hold), st.items.len()),
+                    status(SourceState::RateLimited, None, st.last_good, retry_at(hold, self.now()), st.items.len()),
                     vec![(None, st.items.clone())],
                 );
                 (update, hold, Wake::CredentialsOnly)
@@ -444,6 +470,28 @@ impl JiraWorkSource {
         }
     }
 
+    /// What the poller publishes, without a request, while a hold is running.
+    fn held(&self, st: &mut PollState, kind: HoldKind, remaining: Duration) -> (SourceUpdate, Duration, Wake) {
+        match kind {
+            HoldKind::RateLimited => (
+                (
+                    status(SourceState::RateLimited, None, st.last_good, retry_at(remaining, self.now()), st.items.len()),
+                    vec![(None, st.items.clone())],
+                ),
+                remaining,
+                Wake::CredentialsOnly,
+            ),
+            HoldKind::Rejected(code) => {
+                st.items.clear();
+                (
+                    (status(SourceState::Unauthenticated, Some(rejected_reason(code)), None, None, 0), Vec::new()),
+                    remaining,
+                    Wake::RefreshOrCredentials,
+                )
+            }
+        }
+    }
+
     /// Sleep for `delay`. Changed credentials always end the wait early (merely
     /// touching the file does not); a manual refresh only does when `wake`
     /// allows it. A refresh that arrives during a hold is consumed, not saved.
@@ -456,6 +504,8 @@ impl JiraWorkSource {
             tokio::select! {
                 _ = refresh.notified() => {
                     if wake == Wake::RefreshOrCredentials {
+                        // An explicit refresh ends a 401/403 hold (a 429 hold is never cut short).
+                        self.clear_rejected_hold();
                         return;
                     }
                 }
@@ -482,12 +532,26 @@ impl JiraWorkSource {
         *self.hold.lock().unwrap() = None;
     }
 
+    fn clear_rejected_hold(&self) {
+        let mut guard = self.hold.lock().unwrap();
+        if guard.as_ref().is_some_and(|h| matches!(h.kind, HoldKind::Rejected(_))) {
+            *guard = None;
+        }
+    }
+
+    /// The hold earned with these credentials that is still running, and how long it has left.
+    fn active_hold(&self, credentials: u64) -> Option<(HoldKind, Duration)> {
+        let guard = self.hold.lock().unwrap();
+        let hold = guard.as_ref().filter(|h| h.credentials == credentials)?;
+        let remaining = hold.until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
+        Some((hold.kind, remaining))
+    }
+
     /// The refusal `detail` gives, without a request, while a hold earned with
     /// these credentials is running.
     fn hold_error(&self, credentials: u64) -> Option<WorkError> {
-        let guard = self.hold.lock().unwrap();
-        let hold = guard.as_ref().filter(|h| h.credentials == credentials && Instant::now() < h.until)?;
-        Some(match hold.kind {
+        let (kind, _) = self.active_hold(credentials)?;
+        Some(match kind {
             HoldKind::RateLimited => WorkError::new("rate_limited", "Jira is rate-limiting requests"),
             HoldKind::Rejected(code) => WorkError::new("unauthenticated", rejected_reason(code)),
         })
@@ -694,7 +758,7 @@ impl JiraWorkSource {
         }
         let detail = WorkDetail {
             item_id: item_id.to_string(),
-            title: format!("{key} {summary}"),
+            title: one_line(&format!("{key} {summary}"), MAX_LINE_CHARS),
             fields,
             markdown,
             files: Vec::new(),
@@ -719,7 +783,7 @@ impl JiraWorkSource {
                     .headers()
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
-                    .and_then(parse_retry_after);
+                    .and_then(|raw| parse_retry_after(raw, self.now()));
                 return Err(FetchError::RateLimited(retry));
             }
             404 | 410 if gone_is_endpoint_missing => return Err(FetchError::Failed(ENDPOINT_GONE.into())),
@@ -782,7 +846,7 @@ fn validate_site(raw: &str) -> Option<String> {
 
 /// `Retry-After`: delta seconds or an HTTP date, clamped to 1 s ..= [`MAX_HOLD`].
 /// `None` for anything unusable (negative, garbage), so the caller backs off instead.
-fn parse_retry_after(raw: &str) -> Option<Duration> {
+fn parse_retry_after(raw: &str, now: DateTime<Utc>) -> Option<Duration> {
     let raw = raw.trim();
     let cap = MAX_HOLD.as_secs();
     if !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) {
@@ -791,13 +855,13 @@ fn parse_retry_after(raw: &str) -> Option<Duration> {
         return Some(Duration::from_secs(secs.clamp(1, cap)));
     }
     let when = DateTime::parse_from_rfc2822(raw).ok()?.with_timezone(&Utc);
-    let secs = when.signed_duration_since(Utc::now()).num_seconds();
+    let secs = when.signed_duration_since(now).num_seconds();
     Some(Duration::from_secs(secs.clamp(1, cap as i64) as u64))
 }
 
 /// When a hold of `hold` ends.
-fn retry_at(hold: Duration) -> Option<DateTime<Utc>> {
-    Utc::now().checked_add_signed(chrono::Duration::from_std(hold).ok()?)
+fn retry_at(hold: Duration, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    now.checked_add_signed(chrono::Duration::from_std(hold).ok()?)
 }
 
 /// `[A-Z][A-Z0-9_]+-<digits>`: the shape of a Jira issue key.
@@ -825,12 +889,45 @@ fn browse_url(site: &str, key: &str) -> Option<String> {
     plain.then_some(url)
 }
 
-/// At most `max_chars` characters, ending with a marker when cut.
+/// At most `max_chars` characters, ending with a marker when cut. A cut that
+/// lands inside a code fence (backticks or tildes) closes it first, so the
+/// marker is never part of the code; a cut inside the closing line itself
+/// drops the half line, so no stray fence characters are left.
 fn cap_text(text: String, max_chars: usize) -> String {
-    match text.char_indices().nth(max_chars) {
-        Some((cut, _)) => format!("{}\n\n… (truncated)", &text[..cut]),
-        None => text,
+    let Some((cut, _)) = text.char_indices().nth(max_chars) else { return text };
+    let mut kept = &text[..cut];
+    let mut closer = String::new();
+    if let Some((fence_char, len)) = open_fence(kept) {
+        // A last line of only fence characters, shorter than the opener, is a closing line cut short.
+        let last_line_start = kept.rfind('\n').map_or(0, |i| i + 1);
+        let last = kept[last_line_start..].trim_start();
+        if !last.is_empty() && last.chars().all(|c| c == fence_char) && last.len() < len {
+            kept = kept[..last_line_start].trim_end_matches('\n');
+        }
+        closer = format!("\n{}", fence_char.to_string().repeat(len));
     }
+    format!("{kept}{closer}\n\n… (truncated)")
+}
+
+/// The code fence still open at the end of `text`, if any: its character
+/// (`` ` `` or `~`) and length. A fence closes on a line of the same character,
+/// at least as long as the opener, with nothing else on it.
+fn open_fence(text: &str) -> Option<(char, usize)> {
+    let mut open: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let line = line.trim_start();
+        let Some(first) = line.chars().next().filter(|c| matches!(c, '`' | '~')) else { continue };
+        let run = line.chars().take_while(|&c| c == first).count();
+        if run < 3 {
+            continue;
+        }
+        match open {
+            None => open = Some((first, run)),
+            Some((c, opener)) if c == first && run >= opener && line[run..].trim().is_empty() => open = None,
+            Some(_) => {}
+        }
+    }
+    open
 }
 
 /// The `issues` array of a search page. An error body, or a body without the
@@ -894,7 +991,7 @@ fn to_work_item(issue: &Value, site: &str) -> Option<WorkItem> {
     let text = |path: &[&str]| -> Option<String> {
         path.iter().try_fold(&f, |acc, p| acc.get(p)).and_then(Value::as_str).map(str::to_string)
     };
-    let summary = text(&["summary"]).unwrap_or_default();
+    let summary = one_line(&text(&["summary"]).unwrap_or_default(), MAX_LINE_CHARS);
     let category = match text(&["status", "statusCategory", "key"]).as_deref() {
         Some("indeterminate") => "in_progress",
         Some("new") => "to_do",
@@ -1004,27 +1101,32 @@ fn spans_to_markdown(spans: &[MdSpan]) -> String {
 mod tests {
     use super::*;
 
+    /// A fixed "now" for the pure time functions.
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-11T12:00:00Z").unwrap().with_timezone(&Utc)
+    }
+
     #[test]
     fn retry_after_accepts_seconds_and_http_dates() {
-        assert_eq!(parse_retry_after("30"), Some(Duration::from_secs(30)));
-        let past = parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT").unwrap();
+        assert_eq!(parse_retry_after("30", now()), Some(Duration::from_secs(30)));
+        let past = parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", now()).unwrap();
         assert_eq!(past, Duration::from_secs(1), "a date in the past still waits a second");
-        assert_eq!(parse_retry_after("0"), Some(Duration::from_secs(1)));
-        assert_eq!(parse_retry_after("soon"), None);
+        assert_eq!(parse_retry_after("0", now()), Some(Duration::from_secs(1)));
+        assert_eq!(parse_retry_after("soon", now()), None);
     }
 
     #[test]
     fn retry_after_is_clamped_and_never_overflows() {
         for huge in ["18446744073709551615", "18446744073709551616", "99999999999999999999999999", "901", "86400"] {
-            assert_eq!(parse_retry_after(huge), Some(MAX_HOLD), "{huge}");
+            assert_eq!(parse_retry_after(huge, now()), Some(MAX_HOLD), "{huge}");
         }
-        assert_eq!(parse_retry_after("Fri, 31 Dec 9999 23:59:59 GMT"), Some(MAX_HOLD));
-        assert_eq!(parse_retry_after("900"), Some(MAX_HOLD));
+        assert_eq!(parse_retry_after("Fri, 31 Dec 9999 23:59:59 GMT", now()), Some(MAX_HOLD));
+        assert_eq!(parse_retry_after("900", now()), Some(MAX_HOLD));
         for unusable in ["-5", "-0", "", "  ", "1.5", "+5", "5 s", "NaN", "Tue, 99 Foo 2026"] {
-            assert_eq!(parse_retry_after(unusable), None, "{unusable:?}");
+            assert_eq!(parse_retry_after(unusable, now()), None, "{unusable:?}");
         }
-        let hold = retry_at(MAX_HOLD).expect("a 15 minute hold has an end time");
-        assert!((hold - Utc::now()).num_seconds() > 14 * 60);
+        let hold = retry_at(MAX_HOLD, now()).expect("a 15 minute hold has an end time");
+        assert_eq!(hold - now(), chrono::Duration::from_std(MAX_HOLD).unwrap());
     }
 
     #[test]
@@ -1221,5 +1323,109 @@ mod tests {
         assert!(still_waiting(&mut wait, Duration::from_secs(60)).await);
         refresh.notify_one();
         assert!(!still_waiting(&mut wait, Duration::from_secs(1)).await);
+    }
+
+    // ── cap_text never leaves a code fence open ──────────────────────────────
+
+    fn fence_lines(text: &str) -> usize {
+        text.lines().filter(|l| l.trim_start().starts_with("```")).count()
+    }
+
+    #[test]
+    fn a_cut_inside_a_code_fence_closes_the_fence_before_the_marker() {
+        let text = format!("intro\n```\n{}", "code line\n".repeat(50));
+        let cut = cap_text(text.clone(), 60);
+        assert!(cut.starts_with(&text[..60]), "the first 60 characters are kept: {cut}");
+        assert_eq!(fence_lines(&cut) % 2, 0, "the fences are balanced: {cut}");
+        assert!(cut.ends_with("… (truncated)"), "{cut}");
+        let marker_at = cut.rfind("… (truncated)").unwrap();
+        let last_fence_at = cut.rfind("```").unwrap();
+        assert!(last_fence_at < marker_at, "the marker is outside the fence: {cut}");
+    }
+
+    #[test]
+    fn a_cut_inside_a_fence_with_a_language_closes_it_too() {
+        let text = format!("```rust\nfn main() {{}}\n{}", "let x = 1;\n".repeat(20));
+        let cut = cap_text(text, 40);
+        assert_eq!(fence_lines(&cut) % 2, 0, "{cut}");
+        assert!(cut.rfind("```").unwrap() < cut.rfind("… (truncated)").unwrap(), "{cut}");
+    }
+
+    #[test]
+    fn a_cut_outside_any_fence_is_unchanged() {
+        let cut = cap_text("abcdefghij".repeat(5), 20);
+        assert_eq!(cut, format!("{}\n\n… (truncated)", "abcdefghij".repeat(2)));
+        assert!(!cut.contains("```"));
+    }
+
+    #[test]
+    fn a_closed_fence_before_the_cut_leaves_the_text_unchanged() {
+        let text = format!("```\ncode\n```\n{}", "plain text ".repeat(30));
+        let cut = cap_text(text.clone(), 50);
+        assert_eq!(cut, format!("{}\n\n… (truncated)", &text[..50]), "nothing is open, so nothing is added");
+        assert_eq!(fence_lines(&cut), 2);
+    }
+
+    // ── `~~~` fences, and a cut inside the closing line ──────────────────────
+
+    const MARKER: &str = "\n\n… (truncated)";
+
+    #[test]
+    fn a_cut_inside_a_tilde_fence_closes_it_with_tildes_before_the_marker() {
+        let text = format!("intro\n~~~\n{}", "code line\n".repeat(50));
+        let cut = cap_text(text.clone(), 40);
+        assert!(cut.starts_with(&text[..40]), "{cut}");
+        assert!(cut.ends_with(&format!("\n~~~{MARKER}")), "closed with `~~~`, then the marker outside the fence: {cut}");
+        assert!(!cut.contains("```"), "no backtick fence is invented: {cut}");
+        assert_eq!(open_fence(&cut), None, "balanced: {cut}");
+    }
+
+    #[test]
+    fn a_tilde_line_does_not_close_a_backtick_fence_and_the_cut_closes_it_with_backticks() {
+        let text = format!("```\ncode\n~~~\n{}", "more code\n".repeat(30));
+        let cut = cap_text(text.clone(), 40);
+        assert!(cut.ends_with(&format!("\n```{MARKER}")), "still inside the backtick fence, so it is closed with backticks: {cut}");
+        assert_eq!(cut.lines().filter(|l| l.starts_with("```")).count(), 2, "{cut}");
+        assert_eq!(open_fence(&cut), None, "{cut}");
+    }
+
+    #[test]
+    fn a_backtick_line_does_not_close_a_tilde_fence_and_the_cut_closes_it_with_tildes() {
+        let text = format!("~~~\ncode\n```\n{}", "more code\n".repeat(30));
+        let cut = cap_text(text, 40);
+        assert!(cut.ends_with(&format!("\n~~~{MARKER}")), "{cut}");
+        assert_eq!(open_fence(&cut), None, "{cut}");
+    }
+
+    #[test]
+    fn a_cut_inside_the_closing_fence_line_leaves_no_half_fence_and_a_balanced_result() {
+        for (fence, cut_after) in [("```", 2), ("```", 1), ("~~~", 2), ("````", 3), ("~~~~", 1)] {
+            let text = format!("{fence}\ncode\n{fence}\nmore text after the block");
+            let max = fence.len() + 1 + "code".len() + 1 + cut_after;
+            let cut = cap_text(text, max);
+            assert_eq!(
+                cut,
+                format!("{fence}\ncode\n{fence}{MARKER}"),
+                "{fence} cut {cut_after} characters into the closing line"
+            );
+            assert_eq!(open_fence(&cut), None);
+            assert!(cut.ends_with("… (truncated)"));
+        }
+    }
+
+    #[test]
+    fn a_cut_just_after_a_complete_closing_fence_is_balanced_without_an_extra_fence() {
+        let text = "~~~\ncode\n~~~\nmore text after the block".to_string();
+        let cut = cap_text(text, "~~~\ncode\n~~~".chars().count());
+        assert_eq!(cut, format!("~~~\ncode\n~~~{MARKER}"));
+    }
+
+    #[test]
+    fn a_closing_run_longer_than_the_opener_closes_it_and_a_shorter_one_does_not() {
+        assert_eq!(open_fence("```\ncode\n`````"), None);
+        assert_eq!(open_fence("```\ncode\n``"), Some(('`', 3)));
+        assert_eq!(open_fence("~~~\ncode\n~~~~"), None);
+        assert_eq!(open_fence("~~~~\ncode\n~~~"), Some(('~', 4)));
+        assert_eq!(open_fence("```\ncode\n``` after"), Some(('`', 3)), "a closing line has nothing else on it");
     }
 }
