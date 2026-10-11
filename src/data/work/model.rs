@@ -88,6 +88,11 @@ pub struct SentMarker {
     pub target_id: String,
     pub label: String,
     pub created_at: DateTime<Utc>,
+    /// Identifies the focus this marker was recorded for (a `"focus"` marker
+    /// only). Tags are reused once a focus closes; the nonce lets a marker
+    /// tell "my focus" from "a later focus that took the tag".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
 }
 
 /// One item in the Teri work list.

@@ -319,6 +319,9 @@ pub struct SessionManager {
     /// network (TCP) peer must neither read nor drive. See
     /// [`SensitiveTags`]; persisted beside the session id store.
     sensitive: SensitiveTags,
+    /// Per focus tag: the nonce of the focus `create_focus_core` last created
+    /// under it. In memory only (a restart forgets it).
+    focus_nonces: HashMap<String, String>,
 }
 
 impl SessionManager {
@@ -357,6 +360,7 @@ impl SessionManager {
             session_reverse: HashMap::new(),
             activity_store: crate::activity::store::ActivityStore::new(),
             sensitive,
+            focus_nonces: HashMap::new(),
         }
     }
 
@@ -1365,6 +1369,11 @@ impl SessionManager {
             .filter(|t| !departed.contains(t))
             .cloned()
             .collect();
+        // A closed focus's nonce is of no use to anyone: the next focus under
+        // the tag brings its own.
+        for tag in &departed {
+            self.focus_nonces.remove(tag);
+        }
         self.focus_registry = focuses;
         (self.focus_registry.clone(), departed)
     }
@@ -1492,6 +1501,58 @@ impl SessionManager {
 
     pub fn has_live_session(&self, tag: &str) -> bool {
         self.sessions.get(tag).map(|s| s.alive()).unwrap_or(false)
+    }
+
+    /// `tag` is in the pushed focus registry but this process has no session
+    /// for it: after a daemon restart, sessions are respawned lazily as the
+    /// Mac attaches, so this focus exists and is just not running yet. A
+    /// session that was stopped in this process keeps its (exited) entry and
+    /// is not this.
+    pub fn awaits_respawn(&self, tag: &str) -> bool {
+        !self.has_session_entry(tag) && self.is_registered(tag)
+    }
+
+    /// `tag` is in the pushed focus registry.
+    pub fn is_registered(&self, tag: &str) -> bool {
+        self.focus_registry.iter().any(|f| f.tag == tag)
+    }
+
+    /// Has the Mac reported a registry this daemon can vouch for? True after
+    /// two non-empty pushes: the evidence standard `set_focus_registry` and
+    /// `reconcilable_focus_tags` already use before they delete anything.
+    ///
+    /// A restarted daemon starts with an empty registry and no sessions, so
+    /// until this is true "not registered" means "not heard of yet", not
+    /// "closed". An empty push puts it back to false: it is
+    /// indistinguishable from a client that has not loaded yet (D8a), so it
+    /// is treated as no information rather than as "the user closed every
+    /// focus". The cost is that markers of focuses closed that way linger
+    /// (harmlessly, and a stopped session still reads as dead) until two
+    /// later non-empty pushes.
+    pub fn registry_known(&self) -> bool {
+        self.non_empty_pushes_seen >= 2
+    }
+
+    /// May a focus under `tag` still exist? Everything may while the registry
+    /// is unknown; afterwards only a registered tag, or one a single push
+    /// claimed was gone (it has not departed until a second push agrees).
+    pub fn focus_may_exist(&self, tag: &str) -> bool {
+        !self.registry_known() || self.is_registered(tag) || self.pending_departures.contains(tag)
+    }
+
+    /// Does this process hold a session entry (live or exited) for `tag`?
+    pub fn has_session_entry(&self, tag: &str) -> bool {
+        self.sessions.contains_key(tag)
+    }
+
+    /// Record `nonce` as the identity of the focus now running under `tag`.
+    pub fn set_focus_nonce(&mut self, tag: &str, nonce: String) {
+        self.focus_nonces.insert(tag.to_owned(), nonce);
+    }
+
+    /// The nonce of the focus last created under `tag` by this process.
+    pub fn focus_nonce(&self, tag: &str) -> Option<&str> {
+        self.focus_nonces.get(tag).map(String::as_str)
     }
 
     /// Insert or replace a single focus in the registry (by `tag`), returning the
@@ -2607,6 +2668,114 @@ mod tests {
             "set_focus_registry replaces the registry with the Mac's view, so a \
              daemon-created focus must be unioned back in or it reads as gone"
         );
+    }
+
+    // ── restart safety: when may the daemon vouch for the registry? ──────────
+    //
+    // After a daemon restart the registry is empty and no session exists, so
+    // "this tag is not registered" means nothing until the Mac has reported
+    // twice. These guard the dedupe / prune decisions built on that.
+
+    #[test]
+    fn the_registry_is_not_known_until_two_non_empty_pushes_have_landed() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        assert!(!mgr.registry_known(), "a fresh daemon has been told nothing");
+
+        mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            !mgr.registry_known(),
+            "one push may be a partial push from a client still loading"
+        );
+
+        mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(mgr.registry_known(), "two non-empty pushes are enough evidence");
+    }
+
+    #[test]
+    fn an_empty_push_makes_the_registry_unknown_again_until_two_more_arrive() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri")]);
+        mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(mgr.registry_known());
+
+        // An empty push is indistinguishable from a client that has not loaded
+        // yet: it is "no information", not "no focuses".
+        mgr.set_focus_registry(vec![]);
+        assert!(!mgr.registry_known());
+
+        mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            !mgr.registry_known(),
+            "the evidence standard starts over after an empty push"
+        );
+        mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(mgr.registry_known());
+    }
+
+    #[test]
+    fn any_focus_may_exist_while_the_registry_is_unknown() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        assert!(mgr.focus_may_exist("never-heard-of-it"));
+
+        mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(
+            mgr.focus_may_exist("never-heard-of-it"),
+            "one push still cannot vouch for what is absent"
+        );
+    }
+
+    #[test]
+    fn once_the_registry_is_known_only_registered_or_pending_departure_tags_may_exist() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        assert!(mgr.registry_known());
+
+        assert!(mgr.focus_may_exist("perri"));
+        assert!(mgr.focus_may_exist("cody"));
+        assert!(
+            !mgr.focus_may_exist("stranger"),
+            "a known registry that lacks the tag is a statement that it is gone"
+        );
+
+        // A tag omitted by one push is spared until a second push agrees.
+        mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(mgr.registry_known());
+        assert!(
+            mgr.focus_may_exist("cody"),
+            "a pending departure may still exist"
+        );
+
+        // ...and once the second omission lands it is gone.
+        mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(!mgr.focus_may_exist("cody"));
+        assert!(mgr.focus_may_exist("perri"));
+    }
+
+    #[test]
+    fn a_departed_tag_loses_its_nonce_while_a_still_pushed_tag_keeps_it() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.set_focus_registry(vec![focus("perri"), focus("cody")]);
+        mgr.set_focus_nonce("perri", "nonce-perri".into());
+        mgr.set_focus_nonce("cody", "nonce-cody".into());
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert!(departed.is_empty());
+        assert_eq!(
+            mgr.focus_nonce("cody"),
+            Some("nonce-cody"),
+            "a pending departure has not departed; its nonce stays"
+        );
+
+        let (_, departed) = mgr.set_focus_registry(vec![focus("perri")]);
+        assert_eq!(departed, vec!["cody".to_string()]);
+        assert_eq!(
+            mgr.focus_nonce("cody"),
+            None,
+            "a departed focus's nonce must not outlive it, or a later focus \
+             reusing the tag would match a stale marker"
+        );
+        assert_eq!(mgr.focus_nonce("perri"), Some("nonce-perri"));
     }
 
     #[test]

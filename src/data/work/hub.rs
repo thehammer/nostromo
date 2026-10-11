@@ -26,8 +26,8 @@ use crate::ipc::protocol::ServerMsg;
 use crate::ipc::SessionManager;
 
 use super::model::{
-    SendOutcome, SendPreview, SourceState, SourceStatus, WorkDetail, WorkError, WorkItem,
-    WorkSource,
+    SendOutcome, SendPreview, SentMarker, SourceState, SourceStatus, WorkDetail, WorkError,
+    WorkItem, WorkSource,
 };
 use super::query::{self, WorkFilter};
 use super::service::{SendRequest, WorkService};
@@ -43,6 +43,10 @@ pub const REFRESH_DEBOUNCE: Duration = Duration::from_secs(15);
 
 /// Changes closer together than this are sent as one round of frames.
 pub const COALESCE: Duration = Duration::from_millis(250);
+
+/// How often the hub re-checks whether a sent marker's focus is still alive
+/// (a closed focus must stop showing "sent to <label>" promptly).
+const SENT_LIVENESS_TICK: Duration = Duration::from_secs(5);
 
 /// A `WorkSnapshot` frame must stay under this (`MAX_FRAME_LEN` is 4 MiB).
 const MAX_SNAPSHOT_BYTES: usize = 3 * 1024 * 1024;
@@ -241,6 +245,7 @@ impl WorkHub {
         tokio::spawn(follow_todos(Arc::clone(&hub), todos_rx));
 
         tokio::spawn(publisher(Arc::clone(&hub)));
+        tokio::spawn(follow_sent(Arc::clone(&hub)));
         if let Some(rx) = republish_rx {
             tokio::spawn(follow_republish(Arc::clone(&hub), rx));
         }
@@ -285,7 +290,7 @@ impl WorkHub {
         let groups: BTreeMap<Option<String>, Vec<WorkItem>> = groups
             .into_iter()
             .filter(|(_, items)| !items.is_empty())
-            .map(|(group, items)| (group, prepare_group(source, items)))
+            .map(|(group, items)| (group, prepare_group(source, items, &|m| self.marker_is_live(m))))
             .collect();
         {
             let mut state = self.state.lock().unwrap();
@@ -319,6 +324,101 @@ impl WorkHub {
         }
         let (status, items) = todos::adapt(&snap);
         self.apply_update(WorkSource::Todos, (status, vec![(None, items)]));
+    }
+
+    /// Is the focus or job a sent marker points at still there? A focus is live
+    /// while its session is (or, right after a daemon restart, while the Mac's
+    /// registry lists it and its session has yet to respawn); a Mother job is
+    /// live until the periodic prune finds it archived (the hub cannot ask
+    /// Mother on the hot path).
+    fn marker_is_live(&self, marker: &SentMarker) -> bool {
+        match marker.kind.as_str() {
+            "focus" => self
+                .ctx
+                .session_mgr
+                .as_ref()
+                .is_some_and(|mgr| sent::focus_marker_is_live(&mgr.lock().unwrap(), marker)),
+            _ => true,
+        }
+    }
+
+    /// Re-attach live sent markers to every held item and, if any item's
+    /// markers changed, let the publisher re-broadcast it.
+    fn refresh_sent(&self) {
+        let ledger = sent::ledger();
+        let ids: Vec<String> = {
+            let state = self.state.lock().unwrap();
+            state
+                .slots
+                .values()
+                .flat_map(|slot| slot.groups.values().flatten())
+                .filter(|item| !item.sent.is_empty() || !ledger.markers(&item.id).is_empty())
+                .map(|item| item.id.clone())
+                .collect()
+        };
+        // Probe outside the state lock: it takes the session manager's lock.
+        let live: HashMap<String, Vec<SentMarker>> = ids
+            .into_iter()
+            .map(|id| {
+                let markers = ledger.live_markers(&id, &|m| self.marker_is_live(m));
+                (id, markers)
+            })
+            .collect();
+        let mut changed = false;
+        {
+            let mut state = self.state.lock().unwrap();
+            for slot in state.slots.values_mut() {
+                for item in slot.groups.values_mut().flatten() {
+                    if let Some(markers) = live.get(&item.id) {
+                        if item.sent != *markers {
+                            item.sent = markers.clone();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            self.dirty.notify_one();
+        }
+    }
+
+    /// Drop ledger markers whose focus is gone or whose Mother job no longer
+    /// exists.
+    ///
+    /// A focus marker is dropped only once the Mac has reported a registry the
+    /// daemon can vouch for ([`SessionManager::registry_known`]) and the tag
+    /// is neither running nor registered: a restarted daemon starts with an
+    /// empty registry, and pruning on that would forget live work and let a
+    /// resend duplicate it. A job marker made after the job list was asked for
+    /// is kept, since the list cannot know it.
+    pub async fn prune_sent(&self) {
+        let ledger = sent::ledger();
+        let listed_at = Utc::now();
+        let has_jobs = ledger
+            .item_ids()
+            .iter()
+            .any(|id| ledger.markers(id).iter().any(|m| m.kind == "mother_job"));
+        // Unknown (`None`) keeps every job marker.
+        let jobs = if has_jobs { sent::mother_job_ids().await } else { None };
+        let focus_exists = |marker: &SentMarker| {
+            self.ctx.session_mgr.as_ref().is_some_and(|mgr| {
+                let mgr = mgr.lock().unwrap();
+                !mgr.registry_known()
+                    || (sent::focus_marker_matches(&mgr, marker)
+                        && (mgr.has_live_session(&marker.target_id) || mgr.focus_may_exist(&marker.target_id)))
+            })
+        };
+        let removed = ledger.prune(&|m| match m.kind.as_str() {
+            "focus" => focus_exists(m),
+            "mother_job" => {
+                m.created_at >= listed_at || jobs.as_ref().is_none_or(|jobs| jobs.contains(&m.target_id))
+            }
+            _ => true,
+        });
+        if removed > 0 {
+            self.refresh_sent();
+        }
     }
 
     /// Forget what clients were told so the next round sends everything.
@@ -375,11 +475,16 @@ impl WorkHub {
     }
 }
 
-/// Order a group's items and attach their sent markers.
-fn prepare_group(source: WorkSource, items: Vec<WorkItem>) -> Vec<WorkItem> {
+/// Order a group's items and attach their live sent markers.
+fn prepare_group(
+    source: WorkSource,
+    items: Vec<WorkItem>,
+    is_live: &dyn Fn(&SentMarker) -> bool,
+) -> Vec<WorkItem> {
+    let ledger = sent::ledger();
     let mut items = query::default_order(&items, source);
     for item in &mut items {
-        item.sent = sent::markers_for(&item.id);
+        item.sent = ledger.live_markers(&item.id, is_live);
     }
     items
 }
@@ -435,6 +540,30 @@ async fn follow_todos(hub: Arc<WorkHub>, mut rx: watch::Receiver<Option<TeriTodo
 async fn follow_republish(hub: Arc<WorkHub>, mut rx: watch::Receiver<u64>) {
     while rx.changed().await.is_ok() {
         hub.republish();
+    }
+}
+
+/// Keeps `WorkItem.sent` true: re-merges when the ledger changes and on a
+/// short tick (a focus can die without the ledger hearing of it), and prunes
+/// dead markers for good once after the startup grace, then every 10 minutes.
+async fn follow_sent(hub: Arc<WorkHub>) {
+    let mut changes = sent::ledger().subscribe();
+    let mut tick = tokio::time::interval(SENT_LIVENESS_TICK);
+    let mut next_prune = Instant::now() + sent::STARTUP_GRACE;
+    loop {
+        tokio::select! {
+            result = changes.changed() => {
+                if result.is_err() {
+                    return;
+                }
+            }
+            _ = tick.tick() => {}
+        }
+        hub.refresh_sent();
+        if Instant::now() >= next_prune {
+            hub.prune_sent().await;
+            next_prune = Instant::now() + sent::PRUNE_INTERVAL;
+        }
     }
 }
 

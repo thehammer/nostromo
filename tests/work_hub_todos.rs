@@ -21,6 +21,23 @@ use tokio::sync::{broadcast, watch, Notify};
 
 const WAIT: Duration = Duration::from_secs(5);
 
+
+/// The hub reads (and prunes) the process-wide sent ledger, which defaults to
+/// `~/.nostromo/teri/sent.json`. Point it, and the teri dir, at a temp dir once
+/// per test process so these tests never touch the real one.
+fn isolate_sent_ledger() {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("nostromo-{}-teri-{}", "hub-todos", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp teri dir");
+        std::env::set_var("NOSTROMO_TERI_DIR", &dir);
+        nostromo::data::work::sent::install_ledger(std::sync::Arc::new(
+            nostromo::data::work::sent::SentLedger::new(dir.join("sent.json")),
+        ));
+        dir
+    });
+}
+
 // ── builders ──────────────────────────────────────────────────────────────────
 
 fn todo(
@@ -62,6 +79,7 @@ fn hub_with_channel(
 {
     let (btx, brx) = broadcast::channel(1024);
     let (ttx, trx) = watch::channel(initial);
+    isolate_sent_ledger();
     let hub = WorkHub::spawn(HubDeps::new(btx, trx));
     (hub, ttx, brx)
 }
@@ -512,6 +530,7 @@ fn hub_with_jira_site(site: JiraSite) -> (std::sync::Arc<WorkHub>, broadcast::Re
     let (btx, brx) = broadcast::channel(1024);
     let (_ttx, trx) = watch::channel(Some(fresh(mixed_todos())));
     std::mem::forget(_ttx); // keep the source alive for the test's duration
+    isolate_sent_ledger();
     let hub = WorkHub::spawn(HubDeps { jira_site: site, ..HubDeps::new(btx, trx) });
     (hub, brx)
 }
@@ -576,6 +595,7 @@ fn hub_with_todos_refresh() -> (std::sync::Arc<WorkHub>, std::sync::Arc<Notify>)
     let (btx, _brx) = broadcast::channel(1024);
     let (ttx, trx) = watch::channel(Some(fresh(mixed_todos())));
     std::mem::forget(ttx);
+    isolate_sent_ledger();
     let hub = WorkHub::spawn(HubDeps { todos_refresh: Some(notify.clone()), ..HubDeps::new(btx, trx) });
     (hub, notify)
 }
@@ -690,6 +710,7 @@ fn seeded_db() -> Db {
 fn hub_on_db(path: PathBuf) -> (std::sync::Arc<WorkHub>, broadcast::Receiver<ServerMsg>) {
     let (btx, brx) = broadcast::channel(1024); // subscribed before anything can send
     let todos_rx = TeriTodosNativeSource::spawn_at(path);
+    isolate_sent_ledger();
     let hub = WorkHub::spawn(HubDeps::new(btx, todos_rx));
     (hub, brx)
 }

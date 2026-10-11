@@ -42,6 +42,21 @@ const SENTINEL: &str = "SENTINEL-tok-9f3a7c1d5e2b4a60";
 
 // ── fixtures ──────────────────────────────────────────────────────────────
 
+/// A hub follows the sent ledger, so every test that builds one points it (and
+/// the Teri directory) at a temp folder and never reaches the real home.
+fn isolate_sent_ledger() {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("nostromo-work-jira-teri-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp teri dir");
+        std::env::set_var("NOSTROMO_TERI_DIR", &dir);
+        nostromo::data::work::sent::install_ledger(Arc::new(nostromo::data::work::sent::SentLedger::new(
+            dir.join("sent.json"),
+        )));
+        dir
+    });
+}
+
 fn b64(input: &str) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = input.as_bytes();
@@ -2049,6 +2064,7 @@ fn rig(jira: Arc<JiraWorkSource>, dir: &Path) -> Rig {
         ..Default::default()
     }));
     let jira_site = JiraSite::new(Some(SITE.into()), dir.join("no-such.env"));
+    isolate_sent_ledger();
     let hub = WorkHub::spawn(HubDeps { jira: Some(jira), jira_site, ..HubDeps::new(btx, trx) });
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let mut state = McpSharedState::for_test(event_tx);
