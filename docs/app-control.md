@@ -106,6 +106,9 @@ see `scripts/qa/attach-chip.sh`. Scenarios click and drop in the live window,
 so run them when nobody is typing in it, and keep them away from anything that
 sends a message to an agent unless that is the point.
 
+Read-only smoke scripts for Teri/Fred and window placement, and how to read them, are in
+[`scripts/qa/README.md`](../scripts/qa/README.md).
+
 Pair with `bin/fake-mother-broker` (launch the app with `MOTHER_BROKER_SOCK`)
 to drive Mother-queue UI with canned jobs.
 

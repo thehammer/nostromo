@@ -1,4 +1,4 @@
-.PHONY: build release install test python-test clean daemon install-daemon uninstall-daemon
+.PHONY: build release install test python-test qa-selftest clean daemon install-daemon uninstall-daemon
 
 build:
 	cargo build
@@ -30,6 +30,12 @@ python-test:
 	python3 -m unittest discover -s tests/app_control -v
 	python3 -m unittest discover -s tests/launch_smoke -v
 	python3 -m unittest discover -s tests/ci_policy -v
+	python3 -m unittest discover -s scripts/qa/tests -v
+
+## Self-test of the read-only QA scripts (scripts/qa) against a fake app-control CLI.
+## Hermetic: never touches the running app. Also part of `make python-test` (so CI).
+qa-selftest:
+	python3 -m unittest discover -s scripts/qa/tests -v
 
 clean:
 	cargo clean
