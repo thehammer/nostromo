@@ -1381,6 +1381,19 @@ struct FakeHost {
     /// Also leave look-alike transcript directories of other "projects" beside each real one.
     make_decoys: AtomicBool,
     decoys: Mutex<Vec<PathBuf>>,
+    /// Name transcript directories the way `claude` does for a long working directory: the
+    /// sanitised path cut at 200 characters, a dash and a hash, so the scratch name is lost.
+    hashes_long_names: AtomicBool,
+}
+
+/// What `claude` calls the transcript directory of `cwd` when the path is long: the first 200
+/// characters of the dash-for-non-alphanumerics name, then `-` and a hash of the whole path.
+fn claude_hashed_name(cwd: &Path) -> String {
+    let real = fs::canonicalize(cwd).unwrap().to_string_lossy().into_owned();
+    let full: String = real.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    assert!(full.len() > 200, "the scratch path is long enough to be hashed: {full}");
+    let hash = real.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ u32::from(b));
+    format!("{}-{}", &full[..200], hash)
 }
 
 impl FakeHost {
@@ -1426,9 +1439,16 @@ impl FakeHost {
 impl PicksSessionHost for FakeHost {
     fn spawn(&self, tag: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String> {
         if let Some(projects) = self.projects_dir.lock().unwrap().clone() {
-            let dir = transcript_dir_for(&projects, cwd);
+            let dir = if self.hashes_long_names.load(Ordering::SeqCst) {
+                projects.join(claude_hashed_name(cwd))
+            } else {
+                transcript_dir_for(&projects, cwd)
+            };
             fs::create_dir_all(&dir).expect("the fake claude can make its transcript directory");
-            fs::write(dir.join("session.jsonl"), "{\"type\":\"user\"}\n").expect("and write a transcript");
+            // Every record of a real transcript names the working directory it ran in.
+            let real = fs::canonicalize(cwd).unwrap();
+            let record = format!("{{\"type\":\"user\",\"cwd\":\"{}\"}}\n", real.display());
+            fs::write(dir.join("session.jsonl"), record).expect("and write a transcript");
             if self.make_decoys.load(Ordering::SeqCst) {
                 let name = dir.file_name().unwrap().to_string_lossy().into_owned();
                 let shorter: String = name.chars().take(name.chars().count() - 1).collect();
@@ -1491,7 +1511,7 @@ fn env_with(
     date_of: impl Fn(DateTime<Utc>) -> NaiveDate + Send + Sync + 'static,
     projects_dir: Option<PathBuf>,
 ) -> GeneratorEnv {
-    GeneratorEnv { today: Arc::new(move || today), date_of: Arc::new(date_of), projects_dir }
+    GeneratorEnv { today: Arc::new(move || today), date_of: Arc::new(date_of), projects_dir, scratch_root: None }
 }
 
 fn generator(rig: &Rig, timeout: Duration) -> (Arc<FakeHost>, Arc<PicksGenerator>) {
@@ -2376,6 +2396,67 @@ async fn after_a_run_that_timed_out_its_transcript_directory_is_deleted_and_noth
     wait_idle(&t.rig, &t.generator, "the timeout", |s| s.error.is_some()).await;
 
     t.assert_only_the_runs_transcripts_were_deleted().await;
+}
+
+/// A scratch root whose path is long enough that `claude` truncates and hashes the transcript
+/// directory's name (so it no longer ends in the scratch directory's own name).
+fn long_scratch_root(under: &Path) -> PathBuf {
+    let root = under.join("a".repeat(120)).join("b".repeat(120));
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn with_a_long_tmpdir_the_hashed_transcript_directory_is_found_and_deleted_and_decoys_are_not() {
+    let rig = paused_rig().await;
+    let projects = tempfile::tempdir().unwrap();
+    let scratch_parent = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    *host.projects_dir.lock().unwrap() = Some(projects.path().to_path_buf());
+    host.hashes_long_names.store(true, Ordering::SeqCst);
+    let mut env = env_with(ymd(2026, 10, 11), |_| NaiveDate::MIN, Some(projects.path().to_path_buf()));
+    env.scratch_root = Some(long_scratch_root(scratch_parent.path()));
+    let generator = PicksGenerator::with_env(
+        rig.hub.picks().clone(),
+        host.clone() as Arc<dyn PicksSessionHost>,
+        Duration::from_secs(120),
+        env,
+    );
+    host.publishes_on_send(&rig.hub, &["todo:1", "todo:2", "todo:3"]);
+
+    // Decoys: an unrelated project, and look-alikes that share the start of the hashed name (another
+    // run in the same long temp directory) but whose transcripts name another working directory.
+    let unrelated = projects.path().join("-Users-someone-code-project");
+    fs::create_dir_all(&unrelated).unwrap();
+    fs::write(unrelated.join("keep.jsonl"), "{\"cwd\":\"/Users/someone/code/project\"}\n").unwrap();
+    let mut lookalikes = Vec::new();
+    for (i, token) in ["nostromo-picks-0000000000000000", "not-a-picks-run"].into_iter().enumerate() {
+        let other = long_scratch_root(scratch_parent.path()).join(token);
+        fs::create_dir_all(&other).unwrap();
+        let dir = projects.path().join(format!("{}-{i}", &claude_hashed_name(&other)[..200]));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("session.jsonl"), format!("{{\"cwd\":\"{}\"}}\n", other.display())).unwrap();
+        lookalikes.push(dir);
+    }
+
+    refresh(&generator, "manual").await.unwrap();
+    wait_idle(&rig, &generator, "the run", |s| s.items.len() == 3).await;
+
+    let made = host.transcripts.lock().unwrap().clone();
+    assert_eq!(made.len(), 1, "{made:?}");
+    wait_until("the run's hashed transcript directory to be deleted", || !made[0].exists()).await;
+    assert!(
+        !made[0].file_name().unwrap().to_string_lossy().contains("nostromo-picks-"),
+        "the premise: the hashed name lost the scratch name: {made:?}"
+    );
+    for kept in lookalikes.iter().chain([&unrelated]) {
+        assert!(kept.exists(), "{kept:?} does not carry this run's token and must survive");
+    }
+    let mut left: Vec<PathBuf> = fs::read_dir(projects.path()).unwrap().map(|e| e.unwrap().path()).collect();
+    left.sort();
+    let mut expected: Vec<PathBuf> = lookalikes.into_iter().chain([unrelated]).collect();
+    expected.sort();
+    assert_eq!(left, expected, "nothing else under the projects directory was touched");
 }
 
 #[tokio::test(flavor = "current_thread")]
