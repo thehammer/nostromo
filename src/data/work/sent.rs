@@ -330,7 +330,7 @@ pub fn ledger() -> Arc<SentLedger> {
         return Arc::clone(ledger);
     }
     let mut slot = LEDGER.write().unwrap();
-    if slot.is_none() && cfg!(debug_assertions) && is_test_binary() && !teri_dir_overridden() {
+    if slot.is_none() && reaches_real_teri_dir_from_a_test(teri_dir_overridden()) {
         // Release the lock first: a panic holding it would poison the ledger for every later test.
         drop(slot);
         panic!(
@@ -339,6 +339,20 @@ pub fn ledger() -> Arc<SentLedger> {
         );
     }
     Arc::clone(slot.get_or_insert_with(|| Arc::new(SentLedger::new(default_path()))))
+}
+
+/// Panic in a debug test binary if `what` is about to write under the real
+/// `~/.nostromo/teri` because `NOSTROMO_TERI_DIR` is not set. For the writers
+/// other than the ledger (which has its own check in [`ledger`]).
+pub(crate) fn forbid_real_teri_dir_in_tests(what: &str) {
+    if reaches_real_teri_dir_from_a_test(teri_dir_overridden()) {
+        panic!("a test would write {what} under the real teri dir ({}): set NOSTROMO_TERI_DIR", teri_dir().display());
+    }
+}
+
+/// Is this a debug test binary about to use the real teri dir (no override)?
+fn reaches_real_teri_dir_from_a_test(overridden: bool) -> bool {
+    cfg!(debug_assertions) && is_test_binary() && !overridden
 }
 
 fn teri_dir_overridden() -> bool {
@@ -396,6 +410,12 @@ mod tests {
         ledger.record("jira:A-1", marker("focus", "cody-a-1")).unwrap();
         ledger.record("jira:A-1", marker("mother_job", "cody-a-1")).unwrap();
         assert_eq!(ledger.markers("jira:A-1").len(), 2, "same kind+target collapses; other kinds do not");
+    }
+
+    #[test]
+    fn a_debug_test_binary_without_the_teri_dir_override_would_reach_the_real_dir() {
+        assert!(reaches_real_teri_dir_from_a_test(false), "this unit test binary is a debug test binary");
+        assert!(!reaches_real_teri_dir_from_a_test(true), "an override makes it safe");
     }
 
     #[test]
