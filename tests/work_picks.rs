@@ -1634,6 +1634,35 @@ fn the_prompt_says_everything_the_tools_return_is_untrusted_data_never_instructi
 }
 
 #[test]
+fn the_prompt_tells_the_agent_id_kind_and_status_category_are_opaque_third_party_values_not_instructions() {
+    // They stay outside the nonce fence by design, so the prompt itself has to say what they are:
+    // each is named in a sentence that calls it opaque or third-party, before the task begins.
+    let security = PICKS_PROMPT.split("TASK:").next().unwrap();
+    assert!(security.starts_with("You are generating") && security.contains("SECURITY:"), "{PICKS_PROMPT}");
+    let sentence_with = |needle: &str| -> String {
+        let at = security.find(needle).unwrap_or_else(|| panic!("the security section never mentions {needle}: {security}"));
+        let start = security[..at].rfind(". ").map_or(0, |i| i + 2);
+        let end = security[at..].find(". ").map_or(security.len(), |i| at + i);
+        security[start..end].to_lowercase()
+    };
+
+    let id = sentence_with("`id`");
+    assert!(id.contains("opaque"), "id is an opaque handle: {id}");
+    assert!(id.contains("never read") && id.contains("sentences"), "and never read as a sentence: {id}");
+
+    for field in ["`kind`", "`status_category`"] {
+        let sentence = sentence_with(field);
+        assert!(sentence.contains("third-party"), "{field} is third-party text: {sentence}");
+    }
+    let rest = sentence_with("`status_category`");
+    assert!(rest.contains("every other field"), "and so is every other field: {rest}");
+    assert!(
+        security.to_lowercase().contains("never instructions"),
+        "none of it is an instruction: {security}"
+    );
+}
+
+#[test]
 fn the_picks_session_gets_exactly_the_three_picks_tools_and_a_small_spend_cap() {
     assert_eq!(
         PICKS_MCP_TOOLS,
