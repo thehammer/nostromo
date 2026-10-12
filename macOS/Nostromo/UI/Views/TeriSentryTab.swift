@@ -48,6 +48,14 @@ final class TeriSentryViewTracker {
         defaults.set(now(), forKey: Self.lastViewedKey)
     }
 
+    /// Store the time now if the tab is shown, without leaving it. For a quit (or a window
+    /// close) with the tab open: nothing else runs `didLeave` first, and without this the
+    /// stored time is up to `persistInterval` stale and everything shows "new" next launch.
+    func flush() {
+        guard visibleCount > 0 else { return }
+        defaults.set(now(), forKey: Self.lastViewedKey)
+    }
+
     private func schedulePersist() {
         cancelPeriodicPersist = scheduler.schedule(Self.persistInterval) { [weak self] in
             guard let self, self.visibleCount > 0 else { return }

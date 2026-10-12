@@ -146,6 +146,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         appLog.warning("applicationWillTerminate — saving state")
         FocusStore.shared.save()
+        TeriSentryTab.tracker.flush()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -493,6 +494,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NostromoWindow else { return }
         windows.removeAll { $0 === win }
+        TeriSentryTab.tracker.flush()
         let closedUUIDs = windowsByDisplayUUID.filter { $0.value === win }.map(\.key)
         for uuid in closedUUIDs {
             windowsByDisplayUUID.removeValue(forKey: uuid)

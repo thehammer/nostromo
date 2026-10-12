@@ -343,6 +343,39 @@ final class TeriSentryViewTrackerTests: XCTestCase {
                        "showing does not restamp: a crash now must leave the previous view as the baseline")
     }
 
+    func testFlushingWhileTheTabIsOpenStoresTheTimeSoAQuitDoesNotMakeEverythingNewNextLaunch() {
+        let defaults = makeDefaults()
+        let clock = FakeClock(t0)
+        let first = tracker(defaults, clock)
+        first.didShow()
+        clock.advance(40)                     // under a persist interval: only a flush can store this
+        first.flush()                         // the app is quitting with the tab open
+        let quitAt = clock.now
+        XCTAssertEqual(defaults.object(forKey: TeriSentryViewTracker.lastViewedKey) as? Date, quitAt)
+
+        clock.advance(86_400)                 // relaunch
+        let second = tracker(defaults, clock)
+        second.didShow()
+        XCTAssertEqual(second.baseline, quitAt)
+        XCTAssertFalse(second.isNew(issue(1, createdAt: t0.addingTimeInterval(20))),
+                       "an issue seen before the quit is not new next launch")
+    }
+
+    func testFlushingWhenTheTabIsNotShownStoresNothing() {
+        let defaults = makeDefaults()
+        let clock = FakeClock(t0)
+        let tracker = tracker(defaults, clock)
+        tracker.flush()
+        XCTAssertNil(defaults.object(forKey: TeriSentryViewTracker.lastViewedKey) as? Date)
+
+        tracker.didShow(); clock.advance(10); tracker.didLeave()
+        let leftAt = clock.now
+        clock.advance(500)
+        tracker.flush()
+        XCTAssertEqual(defaults.object(forKey: TeriSentryViewTracker.lastViewedKey) as? Date, leftAt,
+                       "a tab nobody is looking at must not have its time restamped")
+    }
+
     func testTheLastViewedTimeIsStoredUnderThePublishedKey() {
         XCTAssertEqual(TeriSentryViewTracker.lastViewedKey, "nostromo.teri.sentryLastViewed")
         let defaults = makeDefaults()
