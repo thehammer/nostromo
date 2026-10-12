@@ -5,11 +5,14 @@ Asks the app (`windows`) where each window is, and, when ~/.nostromo/logs/window
 exists, reads it (never writes it) to compare with the display geometry the app logged at launch
 and to summarise each window's final `window.screen`.
 
-Environment: QA_APP, QA_PLACEMENT_LOG (default ~/.nostromo/logs/window-placement.log).
-Standard library only.
+Environment: QA_APP, QA_PLACEMENT_LOG (default ~/.nostromo/logs/window-placement.log),
+QA_SYSTEM_PROFILER (the read-only `system_profiler` used to count attached displays; default
+`system_profiler`, the self-test points it at a fake). Standard library only.
 """
+import json
 import os
 import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,6 +26,8 @@ SCREEN = re.compile(r"\[[^\]]+\] screen#(\d+) uuid=(\S+) frame=\((-?\d+),(-?\d+)
 WIN_SCOPE = re.compile(r"\[win[^\]]*?→\s*([0-9A-Fa-f-]+)\]")
 FINAL = re.compile(r"FINAL \((on target|NOT on target)\): frame=\((-?\d+),(-?\d+) (\d+)x(\d+)\) "
                    r"screen=(\S+) \((.*)\) fullScreen=")
+HOT_PLUG = re.compile(r"\[screensDidChange\]")
+WIN_CREATED = re.compile(r"\[win[^\]]*?→\s*([0-9A-Fa-f-]+)\] created:")
 GAVE_UP = re.compile(r"gave up|giving up|retry exhausted", re.I)
 # The launch's display-topology line comes first; "opening windows for" is logged after the screen# lines.
 LAUNCH_START = re.compile(r"\[launch\] \d+ display\(s\); NSScreen\.screensHaveSeparateSpaces=")
@@ -52,6 +57,43 @@ def check_windows(report, wins):
         seen.setdefault(key, i)
     if len(seen) == len(wins):
         report.passed("p.distinct", f"{len(wins)} window(s) on {len(seen)} distinct display(s)")
+
+
+def attached_displays():
+    """How many displays are attached right now, from `system_profiler SPDisplaysDataType -json`
+    (read-only), or None when that cannot be found out."""
+    binary = os.environ.get("QA_SYSTEM_PROFILER") or "system_profiler"
+    try:
+        p = subprocess.run([binary, "SPDisplaysDataType", "-json"], capture_output=True, text=True,
+                           timeout=20, check=False)
+        if p.returncode != 0:
+            return None
+        gpus = json.loads(p.stdout)["SPDisplaysDataType"]
+        return sum(len(g.get("spdisplays_ndrvs") or []) for g in gpus)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.TimeoutExpired):
+        return None
+
+
+def check_live_displays(report, wins):
+    """One window per attached display, counted from the system rather than from the log."""
+    n = attached_displays()
+    if n is None:
+        report.info("p.displays", "cannot count the attached displays (system_profiler unavailable or unreadable)")
+    elif n == len(wins):
+        report.passed("p.displays", f"{n} display(s) attached, {len(wins)} window(s) open")
+    else:
+        report.fail("p.displays", f"{n} display(s) attached but {len(wins)} window(s) open")
+
+
+def log_is_stale(launch, displays):
+    """True when the last launch's display topology is older than evidence of a later change: a
+    hot-plug line (`[screensDidChange]`) after it, or a window created for a display that is not in it."""
+    last_topology = max((i for i, line in enumerate(launch) if TOPOLOGY.search(line)), default=-1)
+    if any(HOT_PLUG.search(line) for line in launch[last_topology + 1:]):
+        return True
+    logged = {d[0].lower() for d in displays}
+    created = (m.group(1).lower() for m in map(WIN_CREATED.search, launch) if m)
+    return bool(logged) and any(c not in logged for c in created)
 
 
 def last_launch(lines):
@@ -88,15 +130,22 @@ def check_log(report, wins, path):
     if spaces == "false":
         report.fail("p.spaces", "'Displays have separate Spaces' is OFF: windows cannot each get a full-screen Space")
     if displays:
+        stale = log_is_stale(launch, displays)
         if len(displays) == len(wins):
             report.passed("p.displays", f"{len(displays)} display(s) logged, {len(wins)} window(s) open")
+        elif stale:
+            report.info("p.displays", f"{len(displays)} display(s) logged but {len(wins)} window(s) open: the log is older "
+                        "than a display hot-plug / window created since, so it is not the evidence; comparing with the attached displays")
+            check_live_displays(report, wins)
         else:
             report.fail("p.displays", f"{len(displays)} display(s) logged but {len(wins)} window(s) open")
         for w in wins:
             f = w.get("frame", {})
             match = [d for d in displays if d[5] == w.get("screen") and abs(d[3] - f.get("w", 0)) <= 2 and abs(d[4] - f.get("h", 0)) <= 2]
             if not match and w.get("fullscreen"):
-                report.fail(f"p.size[{w.get('index')}]", f"fullscreen frame {int(f.get('w', 0))}x{int(f.get('h', 0))} matches no logged display named '{safe(w.get('screen'), 40)}'")
+                (report.info if stale else report.fail)(
+                    f"p.size[{w.get('index')}]", f"fullscreen frame {int(f.get('w', 0))}x{int(f.get('h', 0))} matches no logged display named '{safe(w.get('screen'), 40)}'"
+                    + (" (the log is older than a display change)" if stale else ""))
     else:
         report.info("p.displays", "no display geometry in the last launch's log lines")
 
@@ -152,6 +201,7 @@ def main():
         check_log(report, wins, path)
     else:
         report.info("p.log", f"no placement log at {path}: log checks skipped")
+        check_live_displays(report, wins)
     return report.summary()
 
 

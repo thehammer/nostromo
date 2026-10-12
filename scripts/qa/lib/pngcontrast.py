@@ -116,6 +116,26 @@ def contrast_ratio(rgb1, rgb2):
     return (hi + 0.05) / (lo + 0.05)
 
 
+# Points trimmed from (left, right) of a control before measuring its label: the bezel, a pop-up's
+# chevron, a search field's magnifier and cancel button are bright whatever the label looks like.
+_CHROME_INSET_PT = {"NSPopUpButton": (8, 22), "NSSearchField": (22, 20)}
+_DEFAULT_INSET_PT = (10, 10)
+
+
+def label_rect(rect, cls, scale):
+    """The part of a control's pixel rect (x0, y0, x1, y1) that can only hold its label.
+
+    Excludes the chrome (bezel, chevron, magnifier, cancel button) so a bright arrow cannot pass for
+    a label that is invisible, and a bright bezel cannot make a visible label fail."""
+    x0, y0, x1, y1 = rect
+    left, right = _CHROME_INSET_PT.get(cls, _DEFAULT_INSET_PT)
+    pad_y = (y1 - y0) * 0.15
+    ix0, ix1 = x0 + left * scale, x1 - right * scale
+    if ix1 <= ix0:   # a control too narrow to have chrome and a label: measure its middle
+        ix0, ix1 = x0 + (x1 - x0) * 0.25, x1 - (x1 - x0) * 0.25
+    return ix0, y0 + pad_y, ix1, y1 - pad_y
+
+
 def region_contrast(img, x0, y0, x1, y1, inset=2, specks=4):
     """Contrast of a control's label against its own surface, from its pixels.
 

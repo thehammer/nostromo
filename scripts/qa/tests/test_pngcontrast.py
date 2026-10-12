@@ -316,5 +316,114 @@ class TestFilledFractionAndSurface(PngCase):
         self.assertEqual(P.filled_fraction(img, 5, 5, 55, 25, bg), 0.0)
 
 
+class TestLabelRect(unittest.TestCase):
+    """label_rect(rect, cls, scale): the inner pixel rectangle that excludes a control's chrome.
+
+    rect and the result are (x0, y0, x1, y1) in pixels, `cls` is the tree class, `scale` pixels per point.
+    NSButton: 10pt inset left and right. NSPopUpButton: 8pt left, 22pt right (the chevron). NSSearchField: 22pt
+    left (magnifier), 20pt right (cancel). Every class: 15% of the height top and bottom.
+    """
+    RECT = (100.0, 50.0, 320.0, 130.0)   # 220 x 80 px
+
+    def assertRect(self, got, want):
+        self.assertEqual(len(got), 4)
+        for g, w, name in zip(got, want, ("x0", "y0", "x1", "y1")):
+            self.assertAlmostEqual(g, w, delta=1.0, msg=f"{name}: got {got}, want {want}")
+
+    def test_a_button_loses_ten_points_on_each_side(self):
+        self.assertRect(P.label_rect(self.RECT, "NSButton", 2), (120, 62, 300, 118))
+
+    def test_a_popup_button_loses_eight_points_on_the_left_and_twenty_two_on_the_right(self):
+        self.assertRect(P.label_rect(self.RECT, "NSPopUpButton", 2), (116, 62, 276, 118))
+
+    def test_a_search_field_loses_the_magnifier_and_the_cancel_button(self):
+        self.assertRect(P.label_rect(self.RECT, "NSSearchField", 2), (144, 62, 280, 118))
+
+    def test_the_insets_are_in_points_so_they_follow_the_scale(self):
+        rect = (10.0, 10.0, 130.0, 70.0)   # 120 x 60 px
+        self.assertRect(P.label_rect(rect, "NSButton", 1), (20, 19, 120, 61))
+        self.assertRect(P.label_rect((30.0, 30.0, 390.0, 210.0), "NSButton", 3), (60, 57, 360, 183))
+        self.assertRect(P.label_rect(rect, "NSPopUpButton", 1), (18, 19, 108, 61))
+
+    def test_the_result_is_always_inside_the_control(self):
+        for cls in ("NSButton", "NSPopUpButton", "NSSearchField"):
+            with self.subTest(cls=cls):
+                x0, y0, x1, y1 = P.label_rect(self.RECT, cls, 2)
+                self.assertGreater(x1, x0)
+                self.assertGreater(y1, y0)
+                self.assertGreaterEqual(x0, self.RECT[0])
+                self.assertGreaterEqual(y0, self.RECT[1])
+                self.assertLessEqual(x1, self.RECT[2])
+                self.assertLessEqual(y1, self.RECT[3])
+
+
+class TestChromeIsNotTheLabel(PngCase):
+    """A control's chevron / magnifier / bezel is bright whatever the label looks like."""
+    BG = (0x1e, 0x1e, 0x1e)
+    INVISIBLE = (0x2d, 0x2d, 0x2d)
+    VISIBLE = (0x8a, 0x8a, 0x8a)     # about 4.8:1 on BG: readable
+    WHITE = (255, 255, 255)
+
+    def control(self, w_pt, cls, label, chrome, scale=2):
+        """(image, rect): a control drawn the way macOS draws it, with its label in the middle."""
+        w, h = int(w_pt * scale), 30 * scale
+        rows = solid(w + 20, h + 20, self.BG)
+        x0, y0, x1, y1 = 10, 10, 10 + w, 10 + h
+        paint(rows, x0 + int(w * 0.3), y0 + int(h * 0.35), x0 + int(w * 0.7), y0 + int(h * 0.65), label)
+        if chrome == "bezel":   # a 2px bright rim and a 2x2 bright speck at each corner just inside it
+            paint(rows, x0, y0, x1, y0 + 2, self.WHITE)
+            paint(rows, x0, y1 - 2, x1, y1, self.WHITE)
+            paint(rows, x0, y0, x0 + 2, y1, self.WHITE)
+            paint(rows, x1 - 2, y0, x1, y1, self.WHITE)
+            for cx, cy in ((x0 + 2, y0 + 2), (x1 - 4, y0 + 2), (x0 + 2, y1 - 4), (x1 - 4, y1 - 4)):
+                paint(rows, cx, cy, cx + 2, cy + 2, self.WHITE)
+        elif chrome == "chevron":   # the pop-up's chevron: 16pt..6pt from the right edge
+            paint(rows, x1 - 16 * scale, y0 + int(h * 0.3), x1 - 6 * scale, y0 + int(h * 0.7), self.WHITE)
+        elif chrome == "search":    # magnifier on the left, cancel on the right
+            paint(rows, x0 + 6 * scale, y0 + int(h * 0.3), x0 + 16 * scale, y0 + int(h * 0.7), self.WHITE)
+            paint(rows, x1 - 16 * scale, y0 + int(h * 0.3), x1 - 6 * scale, y0 + int(h * 0.7), self.WHITE)
+        img = P.decode_png(self.png(rows, 2, filters=(0, 1, 2, 3, 4)))
+        return img, (x0, y0, x1, y1)
+
+    def test_an_invisible_label_with_a_bright_chevron_fails_although_the_whole_rectangle_passes(self):
+        img, rect = self.control(110, "NSPopUpButton", self.INVISIBLE, "chevron")
+        whole, _bg, _fg = P.region_contrast(img, *rect)
+        self.assertEqual(P.classify(whole), "PASS", "the regression: the chevron is mistaken for the label")
+        ratio, _bg, _fg = P.region_contrast(img, *P.label_rect(rect, "NSPopUpButton", 2))
+        self.assertLess(ratio, 3.0)
+        self.assertEqual(P.classify(ratio), "FAIL")
+
+    def test_an_invisible_label_between_a_bright_magnifier_and_cancel_button_fails(self):
+        img, rect = self.control(90, "NSSearchField", self.INVISIBLE, "search")
+        self.assertEqual(P.classify(P.region_contrast(img, *rect)[0]), "PASS")
+        ratio = P.region_contrast(img, *P.label_rect(rect, "NSSearchField", 2))[0]
+        self.assertEqual(P.classify(ratio), "FAIL")
+
+    def test_an_invisible_label_inside_a_bright_bezel_fails_with_the_inner_rectangle(self):
+        img, rect = self.control(56, "NSButton", self.INVISIBLE, "bezel")
+        ratio = P.region_contrast(img, *P.label_rect(rect, "NSButton", 2))[0]
+        self.assertEqual(P.classify(ratio), "FAIL", "a bezel is not a label")
+
+    def test_a_visible_label_inside_a_bright_bezel_passes(self):
+        img, rect = self.control(56, "NSButton", self.VISIBLE, "bezel")
+        ratio, bg, fg = P.region_contrast(img, *P.label_rect(rect, "NSButton", 2))
+        self.assertGreaterEqual(ratio, 4.5, f"label {fg} on {bg}")
+        self.assertEqual(P.classify(ratio), "PASS")
+
+    def test_a_visible_label_next_to_the_popup_chevron_and_the_search_icons_passes(self):
+        for w, cls, chrome in ((110, "NSPopUpButton", "chevron"), (90, "NSSearchField", "search")):
+            with self.subTest(cls=cls):
+                img, rect = self.control(w, cls, self.VISIBLE, chrome)
+                ratio = P.region_contrast(img, *P.label_rect(rect, cls, 2))[0]
+                self.assertGreaterEqual(ratio, 4.5)
+
+    def test_the_inner_rectangle_still_contains_the_whole_label_at_other_scales(self):
+        for scale in (1, 2, 3):
+            with self.subTest(scale=scale):
+                img, rect = self.control(110, "NSPopUpButton", self.VISIBLE, "chevron", scale=scale)
+                ratio = P.region_contrast(img, *P.label_rect(rect, "NSPopUpButton", scale))[0]
+                self.assertGreaterEqual(ratio, 4.5)
+
+
 if __name__ == "__main__":
     unittest.main()

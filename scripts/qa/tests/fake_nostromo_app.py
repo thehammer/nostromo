@@ -11,6 +11,10 @@ Every invocation is its own process, so all state lives in files under $FAKE_APP
                   Open in Outlook / Ask Fred... / Prep with Fred / Refresh picks / Retry,
                   Return while the instruction view is not the first responder, any other key
   notes.log       benign oddities (a click ignored because the window was not key, ...)
+  actions.log     one JSON object per UI action a click actually triggered ({"action": "tab:Jira",
+                  "window": 0, "tab": <tab at that moment>, "focus": <focus at that moment>}); the
+                  semantic record of "what was done to the app", independent of coordinates
+  hanging         written (with the pid) when the `hang` scenario option makes a call block
 
 The JSON shapes mirror macOS/Nostromo/AppControl/AppControlServer.swift (ping, windows, tree,
 find, click, hittest, key, screenshot, activate, restore) and the CLI conventions of
@@ -24,6 +28,7 @@ coordinate clicks are exercised. Standard library only.
 import json
 import os
 import sys
+import time
 
 DIR = os.environ.get("FAKE_APP_DIR")
 if not DIR:
@@ -46,6 +51,7 @@ DEFAULTS = {
              "Repo docs": "Repo docs 2"},
     # {"Sentry": {"after_reads": 3, "final": "Sentry 4"}}: after the tab has been clicked, its
     # title is the one in "tabs" for the first after_reads-1 tree calls, then "final".
+    # With "any_read": true the tab does not need to be clicked (reads are counted from the start).
     "tab_flip": {},
     "banners": [],                 # texts of SourceStateBanner views on the Teri surface
     "banner_retry": False,         # give the banner a "Retry" button
@@ -69,8 +75,24 @@ DEFAULTS = {
         "today": ["Standup", "1:1 with Sam"],
         "signin": False,
     },
-    "colours": {"bg": "#1e1e1e", "pill": "#333333", "label": "#e6e6e6", "label_inactive": None},
+    "colours": {"bg": "#1e1e1e", "pill": "#333333", "label": "#e6e6e6", "label_inactive": None,
+                "label_by_class": {}},      # {"NSPopUpButton": "#2d2d2d"}: that class's labels use this colour
     "restore_keeps_key": False,    # `restore` leaves the window key (the app was already frontmost)
+    # --- read-only-run scenarios ------------------------------------------------------------
+    "preselected": {},             # {"Jira": 0}: that tab already has its first row selected (every window)
+    "fred_preopen": None,          # ["inbox", 0]: FredDetailView is already open on that row
+    "tab_pill": True,              # False: the selected tab is NOT painted as a filled pill (undetectable)
+    "overlays": [],                # [{"class": "X", "frame": {x,y,w,h}}]: a top-most view that swallows clicks
+    "row_marker_button": False,    # every WorkRowCellView has an NSButton (leaf: NSImageView) over its centre line
+    # {"dx": 0, "dy": 30, "after_sheet_clicks": 0}: the LIVE sheet layout (hittest/click) is displaced by
+    # (dx, dy) from what `tree --sheet` reports, once that many sheet clicks have been delivered.
+    "sheet_drift": None,
+    # {"cmd": "screenshot", "nth": 2, "sheet": false, "seconds": 120}: the nth call of that command (only
+    # --sheet calls when "sheet" is true) writes app_dir/hanging (the pid) and blocks, killable.
+    "hang": None,
+    "chevron": False,              # screenshot: bright chevron at the right end of NSPopUpButton, bright icons on NSSearchField
+    "bezel": False,                # screenshot: 2px bright bezel around every painted control
+    "popup_label_child": False,    # the toolbar NSPopUpButton has an NSTextField child framing its label
 }
 
 
@@ -129,9 +151,11 @@ def trunc(s):
 def fresh_state(S):
     wins = []
     for w in S["windows"]:
-        wins.append({"focus": w.get("focus", "Teri"), "tab": S["initial_tab"], "row": None,
+        tab = w.get("tab", S["initial_tab"])
+        sel = dict(S["preselected"])
+        wins.append({"focus": w.get("focus", "Teri"), "tab": tab, "row": sel.get(tab), "sel": sel,
                      "sheet": bool(S["sheet"].get("preopen")), "instr": "", "instr_fr": False, "undo": [], "shared": False,
-                     "key": bool(w.get("key", False)), "fred_row": None})
+                     "key": bool(w.get("key", False)), "fred_row": S["fred_preopen"]})
     return {"calls": 0, "pings": 0, "reads": {}, "clicked": {}, "windows": wins,
             "app_active": any(w["key"] for w in wins)}
 
@@ -162,7 +186,7 @@ def strip(n):
 
 def tab_title(S, st, name):
     flip = S["tab_flip"].get(name)
-    if flip and st["clicked"].get(name) and st["reads"].get(name, 0) >= flip["after_reads"]:
+    if flip and (flip.get("any_read") or st["clicked"].get(name)) and st["reads"].get(name, 0) >= flip["after_reads"]:
         return flip["final"]
     return S["tabs"][name]
 
@@ -218,15 +242,22 @@ def teri_node(S, st, w):
         for chip in chips:
             bar.append(N("NSButton", x, 104, 56, 26, text=chip, label=f"Filter: {chip}", paint=True))
             x += 62
-        bar.append(N("NSPopUpButton", x, 104, 110, 26, text="Sort: Recent", paint=True))
+        popup_kids = None
+        if S["popup_label_child"]:
+            popup_kids = [N("NSTextField", x + 110 * 0.25, 104 + 26 * 0.3, 110 * 0.5, 26 * 0.4, text="Sort: Recent")]
+        bar.append(N("NSPopUpButton", x, 104, 110, 26, text="Sort: Recent", paint=True, children=popup_kids))
         bar.append(N("NSSearchField", x + 116, 104, 90, 26, label="Search", paint=True))
         titles = tab_rows(S, w["tab"])
         rows = []
         for i, t in enumerate(titles):
             y = 140 + ROW_H * i
-            rows.append(N("WorkRowCellView", 200, y, 500, ROW_H, action=f"row:{i}", children=[
-                N("NSTextField", 216, y + 8, 400, 20, text=t),
-                N("NSTextField", 216, y + 32, 300, 16, text=f"{w['tab'].upper()}-{i + 1} · Open")]))
+            row_kids = [N("NSTextField", 216, y + 8, 400, 20, text=t),
+                        N("NSTextField", 216, y + 32, 300, 16, text=f"{w['tab'].upper()}-{i + 1} · Open")]
+            if S["row_marker_button"]:   # a 'sent to ...' marker button: a non-Button leaf nested under an NSButton
+                bf = (210, y + ROW_H // 2 - 4, 480, 8)
+                row_kids.append(N("NSButton", *bf, label="Sent to Mother", forbidden="row marker button",
+                                  children=[N("NSImageView", *bf)]))
+            rows.append(N("WorkRowCellView", 200, y, 500, ROW_H, action=f"row:{i}", children=row_kids))
         scroll = N("NSScrollView", 200, 140, 500, 720, children=[N("WorkOutlineView", 200, 140, 500, 720, children=rows)])
         kids = bar + [scroll]
         if not titles:
@@ -297,7 +328,9 @@ def window_tree(S, st, wi):
         surface = fred_node(S, w)
     else:
         surface = N(f"{w['focus']}SurfaceView", 200, 0, 1200, 900)
-    return N("MainLayout", 0, 0, C["w"], C["h"], children=[sidebar_node(S, w), surface])
+    overlays = [N(o["class"], o["frame"]["x"], o["frame"]["y"], o["frame"]["w"], o["frame"]["h"])
+                for o in S["overlays"]]
+    return N("MainLayout", 0, 0, C["w"], C["h"], children=[sidebar_node(S, w), surface] + overlays)
 
 
 def sheet_tree(S, w):
@@ -333,6 +366,24 @@ def chain_at(node, x, y):
         if sub:
             return [node] + sub
     return [node]
+
+
+def shifted(node, dx, dy):
+    out = dict(node)
+    f = node["frame"]
+    out["frame"] = {"x": f["x"] + dx, "y": f["y"] + dy, "w": f["w"], "h": f["h"]}
+    if "children" in node:
+        out["children"] = [shifted(c, dx, dy) for c in node["children"]]
+    return out
+
+
+def live_sheet_root(S, st, w):
+    """The geometry hittest/click see. With `sheet_drift` it is displaced from what `tree --sheet` reports."""
+    root = sheet_tree(S, w)
+    d = S["sheet_drift"]
+    if d and st.get("sheet_clicks", 0) >= d.get("after_sheet_clicks", 0):
+        root = shifted(root, d.get("dx", 0), d.get("dy", 0))
+    return root
 
 
 def walk(node):
@@ -385,16 +436,29 @@ def screenshot(S, st, wi, out_path):
                 r = mods[y] = bytearray(row_bg)
             r[x0 * 3:x1 * 3] = bytes(rgb) * (x1 - x0)
 
+    bright = (255, 255, 255)
+    by_class = {k: hex_rgb(v) for k, v in col.get("label_by_class", {}).items()}
     for n in walk(window_tree(S, st, wi)):
         if not n.get("_paint"):
             continue
         f = n["frame"]
+        cls = n["class"]
         x0, y0 = f["x"] * scale, (bar + f["y"]) * scale
         x1, y1 = (f["x"] + f["w"]) * scale, (bar + f["y"] + f["h"]) * scale
-        if n.get("_selected"):
+        if n.get("_selected") and S["tab_pill"]:
             paint(x0, y0, x1, y1, pill)
         bw, bh = x1 - x0, y1 - y0
-        paint(x0 + bw * 0.25, y0 + bh * 0.3, x0 + bw * 0.75, y0 + bh * 0.7, label)
+        if S["bezel"]:
+            paint(x0, y0, x1, y0 + 2, bright)
+            paint(x0, y1 - 2, x1, y1, bright)
+            paint(x0, y0, x0 + 2, y1, bright)
+            paint(x1 - 2, y0, x1, y1, bright)
+        paint(x0 + bw * 0.25, y0 + bh * 0.3, x0 + bw * 0.75, y0 + bh * 0.7, by_class.get(cls, label))
+        if S["chevron"] and cls == "NSPopUpButton":   # the pop-up's chevron, in the last 22pt
+            paint(x1 - 16 * scale, y0 + bh * 0.3, x1 - 6 * scale, y0 + bh * 0.7, bright)
+        if S["chevron"] and cls == "NSSearchField":   # magnifier on the left, cancel button on the right
+            paint(x0 + 6 * scale, y0 + bh * 0.3, x0 + 16 * scale, y0 + bh * 0.7, bright)
+            paint(x1 - 16 * scale, y0 + bh * 0.3, x1 - 6 * scale, y0 + bh * 0.7, bright)
     write_png(out_path, W, H, mods, bg)
     return {"path": out_path, "width": W, "height": H, "windowNumber": 100 + wi, "method": "cgwindow"}
 
@@ -453,14 +517,16 @@ def close_sheet(w):
 def do_action(S, st, wi, action):
     w = st["windows"][wi]
     kind, _, rest = action.partition(":")
+    append("actions.log", json.dumps({"action": action, "window": wi, "tab": w["tab"], "focus": w["focus"]}))
     if kind == "focus":
         w["focus"] = rest
     elif kind == "tab":
         w["tab"] = rest
-        w["row"] = None
+        w["row"] = w["sel"].get(rest)   # the app keeps one selection per tab
         st["clicked"][rest] = True
         st["reads"][rest] = 0
     elif kind == "row":
+        w["sel"][w["tab"]] = int(rest)
         w["row"] = int(rest)
     elif kind == "fredrow":
         pane, _, i = rest.partition(":")
@@ -485,7 +551,8 @@ def cmd_click(S, st, wi, opts, rest, argv):
     if opts["sheet"]:
         if not w["sheet"]:
             die(f"error: window {wi} has no sheet")
-        root = sheet_tree(S, w)
+        root = live_sheet_root(S, st, w)
+        st["sheet_clicks"] = st.get("sheet_clicks", 0) + 1
     else:
         root = window_tree(S, st, wi)
     chain = chain_at(root, x, y)
@@ -550,7 +617,7 @@ def cmd_hittest(S, st, wi, opts, rest):
     if opts["sheet"]:
         if not w["sheet"]:
             die(f"error: window {wi} has no sheet")
-        root = sheet_tree(S, w)
+        root = live_sheet_root(S, st, w)
     else:
         root = window_tree(S, st, wi)
     chain = []
@@ -607,6 +674,16 @@ def main():
         die("cannot reach /nonexistent/app-control.sock: [Errno 2] No such file or directory\n"
             "Is the app running with AppControlEnabled (see --help)?")
 
+    hang = S["hang"]
+    if hang and cmd == hang["cmd"] and (opts["sheet"] or not hang.get("sheet")):
+        st["hang_seen"] = st.get("hang_seen", 0) + 1
+        if st["hang_seen"] == hang["nth"]:
+            write_json("state.json", st)
+            with open(path("hanging"), "w") as f:
+                f.write(str(os.getpid()))
+            time.sleep(hang.get("seconds", 120))
+            die("fake: hang timed out")
+
     if cmd in ("type", "paste", "drop", "drag"):
         forbid(f"command {cmd}", argv)
         write_json("state.json", st)
@@ -637,8 +714,8 @@ def main():
                     die(f"error: window {wi} has no sheet")
                 result = strip(sheet_tree(S, w))
             else:
-                for name in S["tab_flip"]:
-                    if st["clicked"].get(name):
+                for name, flip in S["tab_flip"].items():
+                    if flip.get("any_read") or st["clicked"].get(name):
                         st["reads"][name] = st["reads"].get(name, 0) + 1
                 result = strip(window_tree(S, st, wi))
         elif cmd == "find":

@@ -4,13 +4,17 @@
 Drives the REAL app through bin/nostromo-app (the app-control socket) with UI-only
 input: focus switches, tab clicks, selecting a row, opening and cancelling the Send to
 agent sheet. It never sends anything to an agent, creates a Mother job or focus, or
-changes any external system. See scripts/qa/README.md for the full list of what it touches.
+changes any external system. It also never clicks the Picks tab (the first open of the day
+can start a paid generation) and never clicks Sentry unless asked (leaving it resets the
+"new since last viewed" markers). See scripts/qa/README.md for what it touches and leaves.
 
-Environment: QA_APP (nostromo-app path), QA_TMPDIR (scratch dir, removed by the wrapper),
-QA_SCREEN, QA_LOADING_TIMEOUT, QA_INCLUDE_PICKS, QA_SLEEP_SCALE. Standard library only.
+Environment: QA_APP (nostromo-app path), QA_TMPDIR (scratch dir, removed here on exit),
+QA_SCREEN, QA_LOADING_TIMEOUT, QA_ALLOW_TERI_SWITCH, QA_INCLUDE_SENTRY, QA_SLEEP_SCALE.
+Standard library only.
 """
 import os
 import re
+import shutil
 import signal
 import sys
 import time
@@ -20,14 +24,24 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pngcontrast as P   # noqa: E402
 import uitree as U        # noqa: E402
 from report import Report   # noqa: E402
-from appctl import App, AppError   # noqa: E402
+from appctl import App, AppError, DEFAULT_TABS, RefusedError   # noqa: E402
 
 TABS = ["Picks", "Todos", "Jira", "Sentry", "Repo docs"]
 SHEET_TITLE = "send to agent"
 DISCONNECTED = "Disconnected from nostromd"
 TOOLBAR_CLASSES = ("NSButton", "NSPopUpButton", "NSSearchField")
+SKIP_TERI = ("Teri is not the active focus (switching may start a paid Picks generation; "
+             "set QA_ALLOW_TERI_SWITCH=1 to allow it)")
+SENTRY_NOT_CLICKED = ("not clicked (visiting it resets the 'new since last viewed' markers; "
+                      "set QA_INCLUDE_SENTRY=1 to include)")
+NO_SELECTION = "Select an item"   # the detail pane's placeholder while no row is selected
 SOURCE_STATES = (("Coming soon", "coming_soon"), ("Loading", "loading"), ("Not set up", "not_set_up"),
                  ("Sign in", "sign_in"), ("Rate-limited", "rate_limited"), ("Error", "error"))
+
+
+def clickable_tabs(include_sentry):
+    """The tabs a run may click: Picks never, Sentry only when asked for."""
+    return DEFAULT_TABS + (("Sentry",) if include_sentry else ())
 
 
 def env_float(name, default):
@@ -160,9 +174,13 @@ class Smoke:
         self.prev_focus = None
         self.prev_tab = None
         self.touched_tab = False
-        self.include_picks = os.environ.get("QA_INCLUDE_PICKS") == "1"
+        self.allow_switch = os.environ.get("QA_ALLOW_TERI_SWITCH") == "1"
+        self.include_sentry = os.environ.get("QA_INCLUDE_SENTRY") == "1"
+        self.clickable_tabs = clickable_tabs(self.include_sentry)
         self.loading_timeout = env_float("QA_LOADING_TIMEOUT", 20)
-        self.row_selected_in = None
+        self.mode = None   # full | passive | readonly | skipped | failed: what the run may do to Teri
+        self.activated = False
+        self.left_changed = []   # UI state this run changed and could not put back (printed in the SUMMARY)
         self.previous_sig, self.sheet_done = None, False
         self.sheet_preexisting = False   # a sheet that was open before we started is never ours to close
         self.we_opened_sheet = False
@@ -194,18 +212,37 @@ class Smoke:
                 return None
             settle(poll)
 
+    def ensure_key(self):
+        """Make the window key, once, right before the first click (AppKit ignores clicks on a window that is not
+        key). Reads never need it, and activating can itself start things (Picks asks for its first-open when its
+        window becomes key), so nothing activates until a click is about to be sent."""
+        if not self.activated:
+            self.activated = True
+            self.app.activate()
+            settle(0.6)
+
+    def click_node(self, node, kind, sheet=False):
+        if not sheet:
+            self.ensure_key()
+        return self.app.click_node(node, kind, sheet=sheet)
+
+    def click_at(self, x, y, kind):
+        self.ensure_key()
+        return self.app.click_at(x, y, kind)
+
     def select_focus(self, name, expect_class):
         tree = self.tree()
         item = sidebar_item(tree, name)
         if not item:
             return None
         if not U.first(tree, cls=expect_class):
-            self.app.click_node(item["label_node"])
+            if name.lower() == "teri" and not (self.allow_switch or (self.prev_focus or "").lower() == "teri"):
+                raise RefusedError("refusing to switch to Teri: it is not the active focus and QA_ALLOW_TERI_SWITCH is not set")
+            self.click_node(item["label_node"], "sidebar-row")
         return self.wait_for(lambda: U.first(self.tree(), cls=expect_class), 8)
 
-    def take_focus(self):
-        self.app.activate()
-        settle(0.6)   # let the window actually become key before the first click
+    def survey(self):
+        """Read only: which focus is active and whether a sheet is open. Nothing is activated or clicked yet."""
         tree = self.tree()
         active = [i for i in parse_sidebar(tree) if i["active"]]
         self.prev_focus = active[0]["name"] if active else None
@@ -219,16 +256,19 @@ class Smoke:
                         "can be tested. Close it and run again; it was left alone")
 
     def run(self):
-        self.guarded("a.focus", self.take_focus)
+        self.guarded("a.focus", self.survey)
         if self.sheet_preexisting:
             return
         self.guarded("b.select-teri", self.step_b)
-        surface = self.surface()
-        if surface:
+        if self.mode in ("full", "readonly", "passive") and self.surface():
             self.guarded("a.daemon", self.step_a_daemon)
             self.guarded("c.tabs", self.step_c)
-            self.guarded("d.legibility", self.step_d)
-        self.guarded("g.fred", self.step_g)
+            if self.mode == "full":
+                self.guarded("d.legibility", self.step_d)
+        if self.mode == "passive":
+            self.r.info("g.fred", "not run in passive mode: switching away from Teri and back is a click this mode never sends")
+        else:
+            self.guarded("g.fred", self.step_g)
         self.guarded("h.badges", self.step_h)
 
     def guarded(self, step, fn):
@@ -249,36 +289,75 @@ class Smoke:
             self.r.passed("a.daemon", "no 'Disconnected' banner on the Teri surface")
 
     def step_b(self):
-        self.r.info("b.note", "selecting Teri opens the tab it was last left on; this script never clicks "
-                    "Picks itself unless QA_INCLUDE_PICKS=1 (first open can start a paid picks generation)")
-        surface = self.select_focus("Teri", "TeriSurfaceView")
+        """Decide what this run may do to Teri, and (only if allowed) switch to it.
+
+        Teri opens on the tab it was last left on. If that is Picks, merely showing it (or activating its
+        window) can make the app start a paid generation; if it is Sentry, leaving it resets the "new since
+        last viewed" markers. So Teri is only switched to when the caller says so, and a Teri that already
+        shows Picks, Sentry or a tab nobody can identify is observed without a single click or activate."""
+        tree = self.tree()
+        surface = self.surface(tree)
         if surface:
-            self.r.passed("b.select-teri", "Teri focus selected (TeriSurfaceView on screen)")
+            self.r.passed("b.select-teri", "Teri is the active focus (TeriSurfaceView on screen)")
+        elif not self.allow_switch:
+            self.mode = "skipped"
+            self.r.skip("teri-fred", SKIP_TERI)
+            return
         else:
-            item = sidebar_item(self.tree(), "Teri")
-            why = "no 'Teri' row in the sidebar" if not item else "TeriSurfaceView did not appear within 8 s"
-            self.r.fail("b.select-teri", why)
+            self.r.info("b.note", "switching to Teri opens the tab it was last left on (QA_ALLOW_TERI_SWITCH=1); "
+                        "this script never clicks the Picks tab")
+            surface = self.select_focus("Teri", "TeriSurfaceView")
+            if not surface:
+                item = sidebar_item(self.tree(), "Teri")
+                why = "no 'Teri' row in the sidebar" if not item else "TeriSurfaceView did not appear within 8 s"
+                self.mode = "failed"
+                self.r.fail("b.select-teri", why)
+                return
+            self.r.passed("b.select-teri", "Teri focus selected (TeriSurfaceView on screen)")
+        switched = (self.prev_focus or "").lower() != "teri"
+        tab = self.stored_tab(self.surface())
+        if tab in self.clickable_tabs:
+            self.mode, self.prev_tab = "full", tab
+            return
+        shown = tab or "a tab it cannot identify"
+        why = ("Picks: re-entering it can start a paid generation" if tab == "Picks" else
+               "Sentry: leaving it resets its 'new since last viewed' markers" if tab == "Sentry" else
+               "it might be Picks or Sentry")
+        if switched:
+            self.mode = "readonly"
+            self.r.info("b.mode", f"Teri opened on {shown} ({why}): no tab is clicked and no row or sheet is tried; "
+                        "Fred and the badges still run, then the previous focus comes back")
+        else:
+            self.mode = "passive"
+            self.r.info("b.mode", f"passive mode: Teri is showing {shown} ({why}); nothing is clicked, nothing is activated, "
+                        "the focus is not switched; only what can be read is checked")
+
+    def stored_tab(self, surface):
+        """The Teri tab on screen: Picks if its view is showing, else from the screenshot (None if unclear)."""
+        _lst, picks = list_pane(surface)
+        if picks:
+            return "Picks"
+        return self.detect_selected_tab(tab_buttons(surface))
 
     # -- c: tabs (+ e, f on the first tab with rows)
     def step_c(self):
         surface = self.surface()
         tabs = tab_buttons(surface)
-        initial = self.detect_selected_tab(surface, tabs)
-        self.prev_tab = initial
-        if initial:
-            self.r.info("c.tabs", f"tab selected before the run: {initial} (restored after the tab checks)")
+        full = self.mode == "full"
+        if full:
+            self.r.info("c.tabs", f"tab selected before the run: {self.prev_tab} (restored after the tab checks)")
         else:
-            self.r.info("c.tabs", "could not tell which tab was selected; Teri is left on the last tab visited")
+            self.r.info("c.tabs", "tabs are checked from their titles only: no tab is clicked in this mode")
         self.previous_sig, self.sheet_done = None, False
         for name in TABS:
             step = f"c.{name.lower().replace(' ', '-')}"
             try:
-                self.check_tab(name, step)
+                self.check_tab(name, step, may_click=full and name in self.clickable_tabs)
             except Exception as e:   # one broken tab must not hide the others
                 self.r.fail(step, f"{type(e).__name__}: {U.safe(e, 100)}")
         self.restore_tab()
 
-    def check_tab(self, name, step):
+    def check_tab(self, name, step, may_click):
         surface = self.surface()
         node = tab_buttons(surface).get(name) if surface else None
         if node is None:
@@ -291,25 +370,26 @@ class Smoke:
             self.r.fail(step, f"title is '{U.safe(title)}': the tab is still a placeholder{more}")
             return
         clicked = False
-        if name == "Picks" and not self.include_picks:
-            self.r.info(step, "not clicked: opening Picks can start a paid generation (set QA_INCLUDE_PICKS=1)")
+        if not may_click:
+            if name == "Picks":
+                self.r.info(step, "not clicked: opening Picks can start a paid generation (this script never clicks it)")
+            elif name == "Sentry" and not self.include_sentry:
+                self.r.info(step, SENTRY_NOT_CLICKED)
+            else:
+                self.r.info(step, "not clicked (no click is sent in this mode)")
         else:
-            reply = self.app.click_node(node)
+            self.click_node(node, "tab")
             clicked = True
             self.touched_tab = True
             settle(0.6)
-            hit = (reply or {}).get("hit", "")
-            if "Button" not in hit:
-                self.r.fail(step, f"click landed on {hit or 'nothing'}, not the tab button (an overlay swallowing it?)")
-                return
             surface = self.surface()
             node = tab_buttons(surface).get(name, node)
             title = U.text_of(node)
             kind, rest = tab_state(name, title)
-        kind, rest, title = self.wait_out_loading(step, name, kind, rest, title)
+        kind, rest, title = self.wait_out_loading(name, kind, rest, title)
         if kind == "loading":
             self.r.fail(step, f"title still '{U.safe(title)}' after {self.loading_timeout:g} s: stuck loading")
-        elif kind == "coming_soon" or kind in ("empty", "unknown"):
+        elif kind in ("coming_soon", "empty", "unknown"):
             self.r.fail(step, f"title '{U.safe(title)}' is neither a count nor a known state")
         elif kind == "error":
             self.r.warn(step, f"title '{U.safe(title)}': the source reports an error")
@@ -319,19 +399,18 @@ class Smoke:
             self.r.passed(step, f"title '{U.safe(title)}' (deliberate state: {rest})")
         for text in banner_texts(self.surface()):
             self.r.info(step, f"banner: {U.safe(text, 120)}")
-        if not clicked and name == "Picks":
+        if not clicked:
             return
-        sig = self.check_pane(step, name)
+        sig = self.check_pane(step)
         if sig is not None and self.previous_sig is not None and sig == self.previous_sig:
             self.r.warn(step, "list toolbar identical to the previous tab's: tab selection not observable here")
         self.previous_sig = sig if sig is not None else self.previous_sig
-        if name != "Picks":
-            selected = self.guarded_select_row(step, name)
-            if selected and not self.sheet_done:
-                self.sheet_done = True
-                self.guarded("f.sheet", self.step_f)
+        selected = self.guarded_select_row(step, name)
+        if selected and not self.sheet_done:
+            self.sheet_done = True
+            self.guarded("f.sheet", self.step_f)
 
-    def wait_out_loading(self, step, name, kind, rest, title):
+    def wait_out_loading(self, name, kind, rest, title):
         if kind != "loading":
             return kind, rest, title
 
@@ -349,17 +428,9 @@ class Smoke:
         kind, rest = tab_state(name, title)
         return kind, rest, title
 
-    def check_pane(self, step, name):
+    def check_pane(self, step):
         surface = self.surface()
         lst, picks = list_pane(surface)
-        if name == "Picks":
-            if not picks or not U.nonzero(picks):
-                self.r.fail(step, "Picks view missing or zero-sized")
-                return None
-            header = [t for t in U.texts(picks) if t.startswith(("Generated", "No picks yet"))]
-            rows = U.find_all(picks, cls="PickRowView")
-            self.r.passed(step, f"Picks view renders: {len(rows)} row(s), header '{U.safe(header[0]) if header else '-'}'")
-            return ("picks",)
         if not lst or not U.nonzero(lst):
             self.r.fail(step, "list pane missing or zero-sized" if not picks else "still showing the Picks view")
             return None
@@ -410,8 +481,15 @@ class Smoke:
         candidates = sorted({U.text_of(n) for n in U.find_all(row, cls="NSTextField") if len(U.text_of(n)) >= 8},
                             key=len, reverse=True)
         title = candidates[0] if candidates else ""
-        if not self.click_row(e_step, row, scroll):
-            return False
+        _d, body_now, _o, _s = detail_pane(surface)
+        already = bool(body_now.strip()) and NO_SELECTION not in body_now
+        if already:
+            # A row was selected before the run: leave the selection exactly as it is and test what the detail shows.
+            self.r.info(e_step, "a row is already selected: not clicking any row (the selection is left as it was)")
+        else:
+            if not self.click_row(e_step, row, scroll, "list-row"):
+                return False
+            self.left_changed.append(f"{name}: first row selected (none was; app-control cannot deselect)")
         settle(0.5)
 
         def shown():
@@ -431,6 +509,8 @@ class Smoke:
         flat = " ".join(body.split())
         if any(" ".join(c.split())[:40] in flat for c in candidates):
             self.r.passed(e_step, f"detail shows the selected item's title ('{U.safe(title)}')")
+        elif already:
+            self.r.passed(e_step, "detail shows an item (selected before the run; its row may be off screen)")
         else:
             self.r.fail(e_step, f"detail does not show the selected row's title ('{U.safe(title)}')")
         has_links = "Links" in body
@@ -447,26 +527,27 @@ class Smoke:
             enabled, how = control_enabled(node)
             if enabled:
                 self.r.passed(e_step, f"'{label}' present and enabled ({how})")
-            elif label == "Open in…" and name in ("Todos", "Picks"):
+            elif label == "Open in…" and name == "Todos":
                 self.r.info(e_step, f"'{label}' disabled for this item: {U.safe(node.get('tooltip'), 80)}")
             else:
                 self.r.fail(e_step, f"'{label}' present but disabled ({how}): {U.safe(node.get('tooltip'), 80)}")
-        self.row_selected_in = name
         return True
 
-    def click_row(self, step, row, container):
+    def click_row(self, step, row, container, kind):
         """Click a row at a point that a read-only hit test says is the row, never a button on it
-        (a row can carry a 'sent to ...' marker button that navigates away) and never outside `container`."""
+        (a row can carry a 'sent to ...' marker button that navigates away) and never outside `container`.
+        The hit test and its refusal live in appctl: any button anywhere in the hit chain refuses the click."""
         f = row["frame"]
         for frac in (0.45, 0.25, 0.6):
             x, y = f["x"] + f["w"] * frac, f["y"] + f["h"] / 2.0
             c = container["frame"]
             if not (c["x"] <= x <= c["x"] + c["w"] and c["y"] <= y <= c["y"] + c["h"]):
                 continue
-            under = (self.app.hittest(x, y).get("chain") or [{}])[0].get("class", "")
-            if under and "Button" not in under:
-                self.app.click_xy(x, y)
+            try:
+                self.click_at(x, y, kind)
                 return True
+            except RefusedError:
+                continue
         self.r.fail(step, "every candidate point on the first row is a button or outside the list; nothing was clicked")
         return False
 
@@ -476,6 +557,7 @@ class Smoke:
         if self.sheet_preexisting or self.sheet_title():
             self.r.info(step, "skipped: a sheet is already open, and it is not ours to drive")
             return
+        self.ensure_key()
         self.app.key("s", ("cmd", "shift"))
         title = self.wait_for(self.sheet_title, 10)
         if not title:
@@ -485,8 +567,13 @@ class Smoke:
             self.r.fail(step, f"an unexpected sheet is attached ('{U.safe(title)}'); leaving it alone")
             return
         self.we_opened_sheet = True
-        self.check_sheet_controls(step, self.app.tree(sheet=True))
-        self.check_return_newline(step, self.app.tree(sheet=True))   # fresh: the preview toggle moved things
+        for check in (lambda: self.check_sheet_controls(step, self.app.tree(sheet=True)),
+                      lambda: self.check_return_newline(step, self.app.tree(sheet=True))):   # fresh: the preview toggle moved things
+            try:
+                check()
+            except RefusedError as e:   # the layout moved or something else is there: nothing was clicked
+                self.r.fail(step, U.safe(e, 140))
+        # Cancel the sheet right away, whatever happened: an open sheet blocks every click that follows.
         self.app.key("\x1b", key_code=53, sheet=True)
         gone = self.wait_for(lambda: self.sheet_title() is None, 5)
         if gone:
@@ -513,10 +600,10 @@ class Smoke:
             self.check_shared_preview(step, toggle)
 
     def check_shared_preview(self, step, toggle):
-        self.app.click_node(toggle, sheet=True)
+        self.click_node(toggle, "sheet-toggle", sheet=True)
         settle(0.4)
-        view = U.first(self.app.tree(sheet=True), cls="NSTextView",
-                       label="What will be shared with the agent, read only")
+        sheet = self.app.tree(sheet=True)   # the sheet grew: everything below the toggle moved
+        view = U.first(sheet, cls="NSTextView", label="What will be shared with the agent, read only")
         if not view or not U.nonzero(view):
             self.r.fail(step, "expanding 'What will be shared' shows no preview text view")
         else:
@@ -527,7 +614,12 @@ class Smoke:
             ok = has_text and not editable
             (self.r.passed if ok else self.r.fail)(
                 step, f"shared preview {'is read-only and non-empty' if ok else 'is empty or EDITABLE'} (text not printed)")
-        self.app.click_node(toggle, sheet=True)   # collapse again
+        # Collapse again, from a frame read AFTER the expand; appctl hit-tests it first and refuses unless it is still the toggle.
+        again = U.first(sheet, cls="NSButton", label="What will be shared")
+        if again is None:
+            self.r.fail(step, "the 'What will be shared' toggle is gone after expanding; not collapsing it")
+            return
+        self.click_node(again, "sheet-toggle", sheet=True)
         settle(0.2)
 
     def check_return_newline(self, step, sheet):
@@ -536,24 +628,21 @@ class Smoke:
         if not instr:
             return
         x, y = U.center(instr)
-        under = (self.app.hittest(x, y, sheet=True).get("chain") or [{}])[0].get("class", "")
-        if "Button" in under or "TextView" not in under:
-            self.r.fail(step, f"the instruction view's centre is covered by {under or 'nothing'}; not clicking it")
+        try:
+            self.click_node(instr, "sheet-text", sheet=True)
+        except RefusedError as e:
+            self.r.fail(step, f"{U.safe(e, 120)}; not clicking the instruction view")
             return
-        self.app.click_node(instr, sheet=True)
         settle(0.3)
-        probe = self.app.hittest(x, y, sheet=True)
-        top = (probe.get("chain") or [{}])[0]
-        in_text = (top.get("class", "").endswith("TextView") and top.get("isFirstResponder") is True
-                   and top.get("isEditable") is True and not top.get("isFieldEditor"))
-        if not in_text:
-            self.r.fail(step, "cannot prove the instruction text view has the keyboard; NOT pressing Return "
-                        "(outside a text view Return would confirm the send)")
-            return
         before = self.instruction_text()
         # app-control cuts view text at 160 characters (plus "…"): a long seeded instruction cannot be compared.
         verifiable = len(before) < 150
-        self.app.key("\r", key_code=36, sheet=True)
+        try:   # appctl hit-tests the view again right before the key and refuses unless it has the keyboard
+            self.app.key("\r", key_code=36, sheet=True, return_target=(x, y))
+        except RefusedError:
+            self.r.fail(step, "cannot prove the instruction text view has the keyboard; NOT pressing Return "
+                        "(outside a text view Return would confirm the send)")
+            return
         settle(0.4)
         if not self.sheet_title():
             self.r.fail(step, "plain Return CLOSED the sheet: it may have started a send. Check Mother's queue and the sidebar NOW")
@@ -581,6 +670,7 @@ class Smoke:
 
     # -- d: legibility
     def step_d(self):
+        self.ensure_key()   # the "active" pass needs the window key
         for state in ("active", "inactive"):
             step = f"d.legibility[{state}]"
             if state == "inactive":
@@ -614,9 +704,7 @@ class Smoke:
         y_off = max(0.0, shot["height"] - tree["frame"]["h"] * scale)   # a title bar above the content view
         rects = []
         for label, node in targets:
-            f = node["frame"]
-            rects.append((label, node, (f["x"] * scale, y_off + f["y"] * scale,
-                                        (f["x"] + f["w"]) * scale, y_off + (f["y"] + f["h"]) * scale)))
+            rects.append((label, node, self.label_pixels(node, scale, y_off)))
         max_x = int(max(r[2][2] for r in rects)) + 4 if rects else 1
         max_y = int(max(r[2][3] for r in rects)) + 4 if rects else 1
         try:
@@ -643,8 +731,19 @@ class Smoke:
         elif not worst:
             self.r.fail(step, "no controls could be measured")
 
+    @staticmethod
+    def label_pixels(node, scale, y_off):
+        """Pixel rectangle that can only hold the control's label: the frame of its own text field when the tree has
+        one, else the control's frame minus its chrome (bezel, chevron, magnifier), see pngcontrast.label_rect."""
+        def px(f):
+            return (f["x"] * scale, y_off + f["y"] * scale, (f["x"] + f["w"]) * scale, y_off + (f["y"] + f["h"]) * scale)
+        for child in U.descendants(node):
+            if child.get("class") == "NSTextField" and U.text_of(child).strip() and U.nonzero(child):
+                return px(child["frame"])
+        return P.label_rect(px(node["frame"]), node.get("class", ""), scale)
+
     # -- selected tab (pixels): used to put the tab back where it was
-    def detect_selected_tab(self, surface, tabs):
+    def detect_selected_tab(self, tabs):
         if len(tabs) < len(TABS):
             return None
         try:
@@ -676,21 +775,28 @@ class Smoke:
         self.touched_tab = False
         if not target:
             return
-        if target == "Picks" and not self.include_picks:
-            # Re-opening Picks can start a paid generation: leave that to the user.
-            self.r.info("c.tabs", "Teri was on Picks before the run; not re-opened (QA_INCLUDE_PICKS=1 would): click it to go back")
-            return
         surface = self.surface()
         node = tab_buttons(surface).get(target) if surface else None
-        if node:
-            self.app.click_node(node)
-            settle(0.4)
-            self.r.info("c.tabs", f"selected tab put back on {target}")
-        else:
-            self.r.warn("c.tabs", f"could not put the Teri tab back on {target}: the Teri surface is not on screen")
+        try:
+            if not node:
+                raise AppError("the Teri surface is not on screen")
+            self.click_node(node, "tab")
+        except AppError as e:   # includes a refused click (something is over the tab)
+            self.r.warn("c.tabs", f"could not put the Teri tab back on {target}: {U.safe(e, 100)}")
+            self.left_changed.append(f"Teri tab: not put back on {target}")
+            return
+        settle(0.4)
+        self.r.info("c.tabs", f"selected tab put back on {target}")
 
     # -- g: Fred
     def step_g(self):
+        row = sidebar_item(self.tree(), "Fred")
+        pill = (row or {}).get("pill")
+        if row and pill and not pill.strip().isdigit():
+            # a non-numeric badge on the Fred row is its sign-in / unavailable state: do not even select Fred
+            self.r.info("g.fred", f"Fred's sidebar badge says '{U.safe(pill, 30)}' (signed out or unavailable): "
+                        "Fred is not selected and nothing in it is touched")
+            return
         fred = self.select_focus("Fred", "FredSurfaceView")
         if not fred:
             if not sidebar_item(self.tree(), "Fred"):
@@ -701,6 +807,11 @@ class Smoke:
         settle(0.5)
         tree = self.tree()
         fred = U.first(tree, cls="FredSurfaceView")
+        if any("Sign in to Microsoft 365" in t for pane in U.find_all(fred, cls="FredPane") for t in U.texts(pane)):
+            self.r.info("g.fred", "Fred shows its Microsoft 365 sign-in prompt (signed out): nothing in it is clicked, "
+                        "read or tested; the sign-in flow is yours to start")
+            return
+        already_open = U.first(fred, cls="FredDetailView") is not None   # before any click of ours
         panes = {}
         for pane in U.find_all(fred, cls="FredPane"):
             header = next((t for t in U.texts(pane) if t.startswith(("Inbox", "Today"))), None)
@@ -728,7 +839,9 @@ class Smoke:
             for t in banners:
                 self.r.info(step, f"banner: {U.safe(t, 120)}")
             self.check_fred_count(step, name, header, pill, len(rows))
-            if rows:
+            if rows and already_open:
+                self.r.info(step, "a Fred detail was already open: no row is clicked (the view is left as it was)")
+            elif rows:
                 self.open_fred_detail(step, name, pane, rows[0])
 
     def check_fred_count(self, step, name, header, pill, shown_rows):
@@ -756,8 +869,9 @@ class Smoke:
                 self.r.info(step, f"{n} meeting(s) in the header, {shown_rows} row(s) drawn (cancelled/all-day rows may differ)")
 
     def open_fred_detail(self, step, name, pane, row):
-        if not self.click_row(step, row, pane):
+        if not self.click_row(step, row, pane, "fred-row"):
             return
+        self.left_changed.append(f"Fred: {name} first row open in detail")
         settle(0.5)
         fred = U.first(self.tree(), cls="FredSurfaceView")
         detail = U.first(fred, cls="FredDetailView") if fred else None
@@ -799,28 +913,34 @@ class Smoke:
         except Exception as e:   # noqa: BLE001: best effort
             self.r.warn("cleanup", f"could not check for an open sheet: {U.safe(e, 80)}")
         try:
+            if self.activated and not self.my_window().get("key"):
+                self.app.activate()   # an interrupted run may be between restore and activate: clicks need a key window
+                settle(0.4)
             if self.touched_tab and self.prev_tab and not self.surface():
                 self.select_focus("Teri", "TeriSurfaceView")   # an early exit left another focus showing
             self.restore_tab()
         except Exception as e:   # noqa: BLE001
             self.r.warn("cleanup", f"could not put the Teri tab back: {U.safe(e, 80)}")
+            self.left_changed.append(f"Teri tab: not put back on {self.prev_tab}")
         try:
             if self.prev_focus:
                 tree = self.tree()
                 item = sidebar_item(tree, self.prev_focus)
                 if item and not item["active"]:
-                    self.app.click_node(item["label_node"])
+                    self.click_node(item["label_node"], "sidebar-row")
                     settle(0.5)
                     self.r.info("b.focus", f"focus put back on {U.safe(self.prev_focus)}")
         except Exception as e:   # noqa: BLE001
             self.r.warn("cleanup", f"could not put the focus back: {U.safe(e, 80)}")
-        try:
-            self.app.restore()
-        except Exception:   # noqa: BLE001
-            pass
+            self.left_changed.append(f"focus: not put back on {U.safe(self.prev_focus, 20)}")
+        if self.activated:
+            try:
+                self.app.restore()
+            except Exception:   # noqa: BLE001
+                pass
 
 
-def locate_window(binary, screen, report):
+def locate_window(binary, screen, report, allowed_tabs):
     """The window to test: by display name when asked, else the one showing Teri."""
     base = App(binary)
     wins = base.windows()
@@ -831,31 +951,30 @@ def locate_window(binary, screen, report):
         for w in wins:
             if screen.lower() in str(w.get("screen", "")).lower():
                 report.info("a.window", f"window {w['index']} on display '{U.safe(w.get('screen'), 40)}' (QA_SCREEN)")
-                return App(binary, ["--screen", screen]), w["index"]
+                return App(binary, ["--screen", screen], allowed_tabs), w["index"]
         report.fail("a.window", f"no window on a display named like '{U.safe(screen, 40)}'")
         return None
     for w in wins:
-        app = App(binary, ["-w", str(w["index"])])
+        app = App(binary, ["-w", str(w["index"])], allowed_tabs)
         if U.first(app.tree(), cls="TeriSurfaceView"):
             report.info("a.window", f"Teri is showing in window {w['index']} (display '{U.safe(w.get('screen'), 40)}')")
             return app, w["index"]
     w = next((x for x in wins if x.get("key")), wins[0])
     report.info("a.window", f"Teri is not showing anywhere; using window {w['index']} (display '{U.safe(w.get('screen'), 40)}')")
-    return App(binary, ["-w", str(w["index"])]), w["index"]
+    return App(binary, ["-w", str(w["index"])], allowed_tabs), w["index"]
 
 
-def main():
-    binary = os.environ.get("QA_APP")
-    tmp = os.environ.get("QA_TMPDIR")
-    if not binary or not tmp:
-        sys.exit("smoke.py is run by teri-fred-smoke.sh (QA_APP and QA_TMPDIR must be set)")
-    report = Report()
-
-    def bail(signum, _frame):
-        raise KeyboardInterrupt(f"signal {signum}")
+def remove_scratch(tmp):
+    """The wrapper `exec`s this process (so a signal sent to it lands here and the clean-up still runs), which
+    leaves no shell trap to remove the scratch directory (screenshots of the user's real data): do it here, but
+    only for a directory the wrapper made."""
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, bail)
+        signal.signal(sig, signal.SIG_IGN)
+    if os.path.basename(os.path.normpath(tmp)).startswith("nostromo-qa."):
+        shutil.rmtree(tmp, ignore_errors=True)
 
+
+def run_smoke(binary, tmp, report):
     base = App(binary)
     try:
         pong = base.ping() or {}
@@ -867,7 +986,8 @@ def main():
 
     smoke = None
     try:
-        located = locate_window(binary, os.environ.get("QA_SCREEN"), report)
+        tabs = clickable_tabs(os.environ.get("QA_INCLUDE_SENTRY") == "1")
+        located = locate_window(binary, os.environ.get("QA_SCREEN"), report, tabs)
         if not located:
             report.summary()
             return 1
@@ -883,7 +1003,28 @@ def main():
             signal.signal(sig, signal.SIG_IGN)   # a second Ctrl-C must not abort the clean-up
         if smoke:
             smoke.cleanup()
-    return report.summary()
+    return report.summary(smoke.left_changed if smoke else None)
+
+
+def main():
+    binary = os.environ.get("QA_APP")
+    tmp = os.environ.get("QA_TMPDIR")
+    if not binary or not tmp:
+        sys.exit("smoke.py is run by teri-fred-smoke.sh (QA_APP and QA_TMPDIR must be set)")
+
+    def bail(signum, _frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, bail)
+
+    report = Report()
+    try:
+        return run_smoke(binary, tmp, report)
+    except KeyboardInterrupt:   # a signal during the very first calls, before there was anything to put back
+        report.fail("run", "interrupted before the run started")
+        return report.summary()
+    finally:
+        remove_scratch(tmp)
 
 
 if __name__ == "__main__":

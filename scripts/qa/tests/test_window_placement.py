@@ -1,10 +1,14 @@
 """Behavioural tests for scripts/qa/window-placement-check.sh (one fullscreen window per display).
 
+The attached displays are counted with `$QA_SYSTEM_PROFILER SPDisplaysDataType -json` (the harness points it at a
+hermetic fake, by default reporting two displays, so a developer's real monitors never leak into a result).
+
 The script asks the (fake) app for its windows and reads the window-placement log, whose format is
 the one the app writes (docs/diagnostics.md "Window placement log"; AppDelegate.logTopology /
 openLaunchWindows / WindowPlacementController): topology and per-display lines first, then
 "opening windows for N display(s)", then the `[win → UUID]` lines. The log is READ-ONLY input.
 """
+import json
 import os
 import re
 import unittest
@@ -74,11 +78,11 @@ def write_log(lines):
 
 
 class PlacementCase(H.QATestCase):
-    def check(self, lines=None, windows=TWO_WINDOWS, scenario=None, log=True):
+    def check(self, lines=None, windows=TWO_WINDOWS, scenario=None, log=True, profiler=None):
         sc = {"windows": windows}
         sc.update(scenario or {})
         hook = write_log(lines if lines is not None else healthy_log()) if log else None
-        return self.run_script(H.PLACEMENT, sc, env=LOG_ENV, preexisting=hook)
+        return self.run_script(H.PLACEMENT, sc, env=LOG_ENV, preexisting=hook, profiler=profiler)
 
     def assertFailed(self, run, step, pattern=None):
         details = [d for _lv, _st, d in run.of("FAIL", step)]
@@ -171,6 +175,175 @@ class TestPlacementWithoutALog(PlacementCase):
     def test_a_missing_log_does_not_create_one(self):
         run = self.check(log=False)
         self.assertEqual(os.listdir(run.root).count("window-placement.log"), 0)
+
+
+U3 = "AAAAAAAA-3333-4444-8555-666666666666"
+DELL = "Dell U2415"
+THREE_WINDOWS = TWO_WINDOWS + [{"screen": DELL, "fullscreen": True, "frame": {"x": 4270, "y": 0, "w": 1920, "h": 1080}}]
+PLUGGED = f"[screensDidChange] display {U3} attached — opening window"
+
+
+def profiler_calls(run):
+    path = os.path.join(run.app_dir, "profiler.log")
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [json.loads(ln) for ln in f.read().splitlines() if ln]
+
+
+def pspec(lines=None, windows=TWO_WINDOWS, profiler=None, log=True):
+    """One placement run, as a run_all spec: the fake app's windows, the placement log, the fake system_profiler."""
+    return {"script": H.PLACEMENT, "scenario": {"windows": windows}, "env": LOG_ENV, "profiler": profiler,
+            "preexisting": write_log(lines if lines is not None else healthy_log()) if log else None}
+
+
+def plugged_log(line=PLUGGED, displays=3):
+    return healthy_log([line], displays=displays)
+
+
+CREATED_FOR_NEW_DISPLAY = healthy_log(window_lines(U3, DELL, 1920, 1080))   # a 3rd window created after the 2-display topology
+BROKEN_PROFILERS = {
+    "the binary does not exist": "missing",
+    "it exits non-zero": {"exit": 1},
+    "it prints something that is not JSON": {"raw": "this is not json"},
+    "it prints JSON without the display list": {"raw": "{\"unrelated\": []}"},
+}
+
+PSPECS = {
+    # no log: the windows are compared with `system_profiler`
+    "nolog_2": pspec(log=False, profiler=2),
+    "nolog_3": pspec(log=False, profiler=3),
+    "nolog_1": pspec(log=False, profiler=1),
+    "nolog_gpus": pspec(log=False, profiler=[["Built-in Retina Display"], None, [LG]]),
+    **{f"nolog_broken_{i}": pspec(log=False, profiler=p) for i, p in enumerate(BROKEN_PROFILERS.values())},
+    # a log that hot-plug evidence makes stale
+    "stale_plugged_2": pspec(plugged_log(), profiler=2),
+    "stale_removed_2": pspec(plugged_log(f"[screensDidChange] display {U3} removed"), profiler=2),
+    "stale_plugged_3": pspec(plugged_log(), profiler=3),
+    "stale_plugged_missing": pspec(plugged_log(), profiler="missing"),
+    "created_new_3": pspec(CREATED_FOR_NEW_DISPLAY, THREE_WINDOWS, profiler=3),
+    "created_new_4": pspec(CREATED_FOR_NEW_DISPLAY, THREE_WINDOWS, profiler=4),
+    # a log that is current keeps its FAILs
+    "current_3_logged_2": pspec(healthy_log(displays=3), profiler=2),
+    "current_after_old_plug": pspec(launch_block(2) + window_lines(U1, BUILTIN, 1710, 1073) + [PLUGGED] + healthy_log(displays=3), profiler=2),
+    "current_wrong_size": pspec(windows=[TWO_WINDOWS[0], dict(TWO_WINDOWS[1], frame={"x": 1710, "y": 0, "w": 1920, "h": 1080})]),
+}
+PRUNS = {}
+
+
+def setUpModule():
+    PRUNS.update(H.run_all(PSPECS))
+
+
+def tearDownModule():
+    H.cleanup()
+
+
+class PCase(unittest.TestCase):
+    def assertFailed(self, run, step, pattern=None):
+        details = [d for _lv, _st, d in run.of("FAIL", step)]
+        self.assertTrue(details, f"expected FAIL {step}; got:\n{run.stdout}{run.stderr}")
+        if pattern:
+            self.assertTrue(any(re.search(pattern, d, re.I) for d in details), f"{step}: {details}")
+        self.assertEqual(run.returncode, 1, run.stdout)
+
+    def assertClean(self, run):
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(run.steps("FAIL"), [], run.stdout)
+
+
+class TestDisplaysCountedWithoutALog(PCase):
+    def test_as_many_windows_as_attached_displays_passes(self):
+        run = PRUNS["nolog_2"]
+        self.assertClean(run)
+        self.assertTrue(run.of("PASS", "p.displays"), run.stdout)
+
+    def test_fewer_windows_than_attached_displays_fails(self):
+        self.assertFailed(PRUNS["nolog_3"], "p.displays", r"3.*2|2.*3")   # 2 windows, 3 displays
+
+    def test_more_windows_than_attached_displays_fails(self):
+        self.assertFailed(PRUNS["nolog_1"], "p.displays", r"1.*2|2.*1")   # 2 windows, 1 display
+
+    def test_displays_are_totalled_over_every_gpu_and_a_gpu_without_displays_counts_for_none(self):
+        run = PRUNS["nolog_gpus"]
+        self.assertClean(run)
+        self.assertTrue(run.of("PASS", "p.displays"), run.stdout)
+
+    def test_system_profiler_is_only_asked_for_the_displays_data_type_as_json(self):
+        self.assertEqual(profiler_calls(PRUNS["nolog_2"]), [["SPDisplaysDataType", "-json"]])
+
+    def test_when_the_displays_cannot_be_counted_it_is_information_never_a_failure(self):
+        for i, what in enumerate(BROKEN_PROFILERS):
+            with self.subTest(what):
+                run = PRUNS[f"nolog_broken_{i}"]
+                self.assertClean(run)
+                self.assertTrue(run.of("INFO", "p.displays"), run.stdout)
+                self.assertRegex(run.detail("INFO", "p.displays"), r"count|attached", "say what could not be done")
+                self.assertEqual(run.of("PASS", "p.displays"), [])
+                self.assertTrue(run.of("PASS", "p.distinct"), "the window checks still run")
+                self.assertEqual(len(run.of("PASS", prefix="p.window[")), 2)
+
+    def test_the_summary_has_the_skip_counter_and_no_smoke_suffix(self):
+        run = PRUNS["nolog_2"]
+        self.assertRegex(run.summary_line, r"^SUMMARY: \d+ pass, 0 fail, 0 warn, \d+ info, 0 skip$")
+        self.assertIsNone(run.left_changed)
+
+    def test_the_only_other_program_it_runs_is_system_profiler_and_nothing_else_is_written(self):
+        run = PRUNS["nolog_2"]
+        self.assertEqual(sorted(os.listdir(run.root)), ["app", "home", "nostromo-app", "scratch"])
+        self.assertEqual(os.listdir(run.scratch_dir), [])
+        self.assertEqual(os.listdir(run.home), [])
+
+
+class TestALogThatIsOlderThanTheDisplaysHotPlug(PCase):
+    # The log's last topology is the launch's. A display plugged in or out afterwards is not in it, so a count
+    # mismatch between the log and the live windows is the log being old, not a failure: the live count decides.
+    def test_a_screens_did_change_line_after_the_topology_makes_a_log_mismatch_information(self):
+        run = PRUNS["stale_plugged_2"]   # 3 logged displays, 2 windows, 2 displays attached now
+        self.assertClean(run)
+        self.assertRegex(run.detail("INFO", "p.displays"), r"log is older")
+
+    def test_any_screens_did_change_line_counts_not_just_attached(self):
+        run = PRUNS["stale_removed_2"]
+        self.assertClean(run)
+        self.assertRegex(run.detail("INFO", "p.displays"), r"log is older")
+
+    def test_the_live_display_count_is_compared_with_the_windows_instead(self):
+        self.assertTrue(PRUNS["stale_plugged_2"].of("PASS", "p.displays"), PRUNS["stale_plugged_2"].stdout)
+        self.assertFailed(PRUNS["stale_plugged_3"], "p.displays", r"3.*2|2.*3")   # 3 displays attached, only 2 windows
+
+    def test_without_a_live_count_a_stale_log_is_only_information(self):
+        run = PRUNS["stale_plugged_missing"]
+        self.assertClean(run)
+        self.assertRegex(run.detail("INFO", "p.displays"), r"log is older")
+
+    def test_a_window_created_for_a_display_that_is_not_in_the_logged_topology_makes_the_log_stale(self):
+        run = PRUNS["created_new_3"]
+        self.assertClean(run)
+        self.assertRegex(run.detail("INFO", "p.displays"), r"log is older")
+        self.assertTrue(run.of("PASS", "p.displays"), "3 windows, 3 displays attached")
+
+    def test_a_window_that_matches_no_logged_display_is_information_when_the_log_is_stale(self):
+        run = PRUNS["created_new_3"]
+        self.assertEqual(run.of("FAIL", "p.size[2]"), [], run.stdout)
+        self.assertTrue(run.of("INFO", "p.size[2]"), run.stdout)
+
+    def test_a_stale_log_does_not_hide_a_real_mismatch_with_the_live_count(self):
+        self.assertFailed(PRUNS["created_new_4"], "p.displays", r"4.*3|3.*4")   # 4 displays, 3 windows
+
+
+class TestALogThatIsNotStale(PCase):
+    def test_a_mismatch_still_fails_when_nothing_happened_after_the_launch_topology(self):
+        self.assertFailed(PRUNS["current_3_logged_2"], "p.displays", r"3 display\(s\) logged but 2 window")
+
+    def test_a_hot_plug_line_from_an_earlier_launch_does_not_make_this_launch_stale(self):
+        self.assertFailed(PRUNS["current_after_old_plug"], "p.displays", r"3 display\(s\) logged but 2 window")
+
+    def test_windows_created_for_logged_displays_do_not_make_it_stale(self):
+        self.assertEqual(PRUNS["current_3_logged_2"].of("INFO", "p.displays"), [], PRUNS["current_3_logged_2"].stdout)
+
+    def test_a_missing_size_match_still_fails_when_the_log_is_current(self):
+        self.assertFailed(PRUNS["current_wrong_size"], "p.size[1]", r"matches no logged display")
 
 
 class TestPlacementIsReadOnly(PlacementCase):

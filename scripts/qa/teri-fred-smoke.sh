@@ -5,8 +5,12 @@
 #   QA_SCREEN            test the window on the display whose name contains this; default: the
 #                        window showing Teri, wherever it is
 #   QA_LOADING_TIMEOUT   seconds a tab may stay on "Loading" before it FAILs (default 20)
-#   QA_INCLUDE_PICKS=1   also click the Picks tab (first open of the day can start a paid
-#                        picks generation, so it is off by default)
+#   QA_ALLOW_TERI_SWITCH=1  switch to Teri when it is not the active focus. Off by default: Teri
+#                        opens on the tab it was last left on, and if that is Picks the app may start
+#                        a paid generation. Without it the Teri steps are skipped (Fred still runs).
+#   QA_INCLUDE_SENTRY=1  also click the Sentry tab. Off by default: leaving it resets the
+#                        "new since last viewed" markers, which cannot be put back.
+#   The Picks tab is never clicked and no Picks row is ever selected.
 #
 # Needs the app running with AppControlEnabled (docs/app-control.md); exits 2 with a message if
 # the socket is missing and never enables it. UI-only input: it takes keyboard focus briefly
@@ -18,5 +22,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/qa-common.sh"
 qa_setup
 qa_require_socket
-# Not exec: the EXIT trap in qa_setup must still remove the scratch directory.
-python3 -B -I "$QA_LIB_DIR/smoke.py"
+# exec: a signal sent to this script (kill, Ctrl-C, hangup) lands on python, whose `finally` puts the focus,
+# the tab and the keyboard back. exec drops the EXIT trap from qa_setup, so python removes the scratch
+# directory itself (smoke.py remove_scratch).
+exec python3 -B -I "$QA_LIB_DIR/smoke.py"
