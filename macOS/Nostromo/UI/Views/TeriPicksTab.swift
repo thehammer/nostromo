@@ -74,7 +74,20 @@ final class TeriPicksView: NSView {
     private let rowStack = NSStackView()
     private var rowViews: [PickRowView] = []
 
-    init(store: WorkStore, now: @escaping () -> Date = Date.init, calendar: Calendar = .current) {
+    /// The one source of "which local day is it" for Picks. The daemon decides the day a
+    /// picks run belongs to (and whether first-open picks are due) with the machine's
+    /// local zone (`chrono::Local`, src/data/work/picks.rs), so the app reads days in
+    /// that same zone: the system zone, followed live, on the Gregorian calendar (a
+    /// calendar date, so DST-safe). Every default for the picks day goes through here;
+    /// tests inject a fixed calendar instead.
+    static var machineLocalCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .autoupdatingCurrent
+        return calendar
+    }
+
+    init(store: WorkStore, now: @escaping () -> Date = Date.init,
+         calendar: Calendar = TeriPicksView.machineLocalCalendar) {
         self.store = store
         self.now = now
         self.calendar = calendar

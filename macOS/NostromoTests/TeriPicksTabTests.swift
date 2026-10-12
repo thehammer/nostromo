@@ -650,6 +650,34 @@ final class TeriPicksTabTests: XCTestCase {
         XCTAssertTrue(waitUntil { rig.log.firstOpenCount == 1 }, "frames: \(rig.log.frames)")
     }
 
+    func testTheInjectedCalendarDecidesWhichDayThePicksBelongTo() {
+        // Generated 20:00 Saturday in Chicago = 10:00 Sunday in Tokyo; "now" is Sunday 08:00 Chicago.
+        let generated = "2026-10-10T20:00:00-05:00"
+        let tokyo: Calendar = {
+            var c = Calendar(identifier: .gregorian)
+            c.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+            return c
+        }()
+        let store = WorkStore()
+        let log = FrameLog()
+        store.sendFrame = { log.frames.append($0) }
+        store.apply(picks: snapshot(generatedAt: generated, items: fiveItems))
+        let tokyoView = TeriPicksView(store: store, now: { morning }, calendar: tokyo)
+        tokyoView.tabDidShow()
+        drain()
+        XCTAssertTrue(log.frames.isEmpty, "the same instant is the same Tokyo day, so the picks are fresh: \(log.frames)")
+
+        let chicagoRig = ViewRig(picks: snapshot(generatedAt: generated, items: fiveItems))
+        chicagoRig.view.tabDidShow()
+        XCTAssertTrue(waitUntil { chicagoRig.log.firstOpenCount == 1 }, "yesterday in Chicago: \(chicagoRig.log.frames)")
+    }
+
+    func testTheDefaultCalendarIsTheMachineLocalZoneTheDaemonUses() {
+        let calendar = TeriPicksView.machineLocalCalendar
+        XCTAssertEqual(calendar.timeZone.identifier, TimeZone.autoupdatingCurrent.identifier)
+        XCTAssertEqual(calendar.identifier, .gregorian)
+    }
+
     func testPicksFromJustAfterLocalMidnightAreFreshForTheRestOfThatDay() {
         let lateEvening = at("2026-10-11T23:59:00-05:00")
         let rig = ViewRig(now: lateEvening,
