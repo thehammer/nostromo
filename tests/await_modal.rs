@@ -25,6 +25,7 @@ fn make_test_job() -> MotherJob {
         kind: None,
         phases: vec![],
         cycles: vec![],
+        origin: None,
     }
 }
 

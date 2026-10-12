@@ -564,12 +564,13 @@ impl Rig {
 
 fn send_req(item_id: &str, destination: &str, agent: &str, cwd: Option<&Path>, label: &str, context: &str) -> SendRequest {
     SendRequest {
+        request_id: String::new(),
         item_id: item_id.into(),
         destination: destination.into(),
         agent: agent.into(),
         working_directory: cwd.map(|p| p.to_string_lossy().into_owned()),
         label: label.into(),
-        context: context.into(),
+        instruction: context.into(),
         allow_duplicate: false,
         client_id: Some("mac-1".into()),
     }

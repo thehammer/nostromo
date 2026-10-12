@@ -133,6 +133,8 @@ pub struct WorkHub {
     picks: Arc<PicksStore>,
     /// Runs picks generations; `None` when there is no session host.
     picks_generator: Option<Arc<PicksGenerator>>,
+    /// Answers to recent sends, so a retried request id does not send twice.
+    recent_sends: send::RecentSends,
 }
 
 struct State {
@@ -259,6 +261,7 @@ impl WorkHub {
             repo_docs_root: repo_docs_root.clone(),
             picks: picks.clone(),
             picks_generator,
+            recent_sends: Default::default(),
         });
 
         let jira_refresh = hub.refresh[&WorkSource::Jira].clone();
@@ -338,9 +341,24 @@ impl WorkHub {
         self.sentry.as_ref().map(|config| config.repos_path.as_path())
     }
 
-    /// The sent markers for `item_id` whose focus or job is still there.
-    pub(crate) fn live_markers(&self, item_id: &str) -> Vec<SentMarker> {
-        sent::ledger().live_markers(item_id, &|m| self.marker_is_live(m))
+    /// The markers a resend of `item_id` would run into, judged by the rule
+    /// `send` applies (`sent::focus_marker_may_be_live`), so the sheet's
+    /// "already sent" notice and the send's `existing` answer agree. Right after
+    /// a daemon restart, before the Mac has pushed its focus registry, that
+    /// includes a focus this daemon has no session entry for yet.
+    pub(crate) fn live_markers_for_send(&self, item_id: &str) -> Vec<SentMarker> {
+        sent::ledger().live_markers(item_id, &|m| match m.kind.as_str() {
+            "focus" => self
+                .ctx
+                .session_mgr
+                .as_ref()
+                .is_some_and(|mgr| sent::focus_marker_may_be_live(&mgr.lock().unwrap(), m)),
+            _ => true,
+        })
+    }
+
+    pub(crate) fn recent_sends(&self) -> &send::RecentSends {
+        &self.recent_sends
     }
 
     /// Teri's picks.

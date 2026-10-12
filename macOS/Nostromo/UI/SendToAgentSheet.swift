@@ -1,11 +1,20 @@
 import AppKit
 
 // The confirmation sheet behind "Send to agent…" (Teri detail view, a pick, or ⌘⇧S on a
-// selected row). It is filled from the daemon's `SendPreview`, lets the user change
-// anything, and only a press of Start (or Return) sends. It knows nothing about
-// `AppStore`: it sends through a `WorkSending` and reports what happened through
-// `onFinished`, so tests drive the real sheet with a fake sender and `TeriBindings`
-// supplies the real one.
+// selected row). It is filled from the daemon's `SendPreview`, lets the user change the
+// agent, project, label and *instruction*, and only a deliberate confirm sends: the Start
+// button, ⌘Return anywhere, or plain Return while no text is being edited (Return in a text
+// view is a newline, and Return while an input method is composing belongs to the input
+// method). Esc cancels.
+//
+// Two kinds of text, kept apart. The instruction is the user's own words and the only text
+// the sheet sends. What the agent also receives (the item's title, fields, body, links) is
+// third-party: the sheet shows it READ-ONLY under "What will be shared" and never sends it
+// back, because the daemon rebuilds it from the item at send time and fences it as data.
+//
+// It knows nothing about `AppStore`: it sends through a `WorkSending` and reports what
+// happened through `onFinished`, so tests drive the real sheet with a fake sender and
+// `TeriBindings` supplies the real one.
 
 /// Sends a confirmed request to the daemon and reports the answer once.
 protocol WorkSending: AnyObject {
@@ -66,9 +75,50 @@ extension SentMarker {
     }
 }
 
+/// The sheet's window. Decides what Return and Esc do before the key-equivalent pass can hand
+/// them to a button: a multi-line text view keeps Return for a newline, and text being
+/// composed by an input method keeps Return and Esc for the input method.
+final class SendToAgentWindow: NSWindow {
+    /// Plain Return with no text being edited: confirm.
+    var onPlainReturn: (() -> Void)?
+    /// ⌘Return (the primary button's key equivalent) was pressed but the button is disabled:
+    /// the key is swallowed so a text view does not take it as a newline.
+    var isConfirmEnabled: () -> Bool = { true }
+
+    private static let returnKeyCodes: Set<UInt16> = [36, 76]   // Return, keypad Enter
+    private static let escapeKeyCode: UInt16 = 53
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
+        let isReturn = Self.returnKeyCodes.contains(event.keyCode)
+        guard isReturn || event.keyCode == Self.escapeKeyCode else { return super.performKeyEquivalent(with: event) }
+
+        // Composition owns the key: Return commits the candidate, Esc abandons it.
+        if (firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return false }
+        guard isReturn else { return super.performKeyEquivalent(with: event) }
+
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            .subtracting([.numericPad, .function, .capsLock])
+        if flags == .command {
+            return isConfirmEnabled() ? super.performKeyEquivalent(with: event) : true
+        }
+        if flags.isEmpty {
+            // In a text view (the field editor of a text field is one) Return is the
+            // text's: a newline, or the field's own end of editing. Never a confirm.
+            if firstResponder is NSTextView { return false }
+            onPlainReturn?()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
 
     static let motherWarning = "Mother runs unattended; a raw item is not a plan"
+    static let confirmHint = "⌘Return starts · Return adds a line in the instruction · Esc cancels"
+    static let timedOutMessage = "The daemon did not answer in time. The first attempt may have gone through: " +
+        "check the sidebar and Mother's queue. Pressing the button again retries without sending a second copy."
 
     private let itemId: String
     private let mruKey: String?
@@ -81,6 +131,9 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
     private var agents: [String]
     private var projects: [String]
     private var isFinished = false
+    /// The last attempt that timed out. A retry of the same send reuses its request id, so the
+    /// daemon hands back what the first attempt did instead of creating a second focus or job.
+    private var timedOutRequest: WorkSendRequest?
 
     private(set) var destination: SendDestination = .focus
     private(set) var isSending = false
@@ -95,7 +148,12 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
     private let chooseButton = NSButton()
     private let labelField = NSTextField()
     private let orgLabel = NSTextField(labelWithString: "—")
-    private let contextView = NSTextView()
+    private let instructionView = NSTextView()
+    private let sharedView = NSTextView()
+    private let sharedToggle = NSButton()
+    private let sharedScroll = NSScrollView()
+    private var sharedRow: NSView?
+    private let hintLabel = NSTextField(wrappingLabelWithString: SendToAgentSheet.confirmHint)
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let spinner = NSProgressIndicator()
     private let secondaryButton = NSButton()
@@ -115,12 +173,14 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
         self.agents = agents
         self.projects = projects
 
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 560),
-                           styleMask: [.titled], backing: .buffered, defer: false)
+        let win = SendToAgentWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 660),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
         win.title = "Send to agent"
         win.isReleasedWhenClosed = false
         win.appearance = NSAppearance(named: .darkAqua)
         super.init(window: win)
+        win.onPlainReturn = { [weak self] in self?.confirmFromKeyboard() }
+        win.isConfirmEnabled = { [weak self] in self?.primaryButton.isEnabled ?? false }
 
         buildContent()
         applyDefaults(preview)
@@ -136,7 +196,17 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
     var selectedAgent: String { agentPopup.titleOfSelectedItem ?? "" }
     var workingDirectory: String? { projectPopup.selectedItem?.representedObject as? String }
     var labelText: String { labelField.stringValue }
-    var contextText: String { contextView.string }
+    /// The user's editable instruction.
+    var instructionText: String { instructionView.string }
+    /// The read-only "What will be shared" preview.
+    var sharedText: String { sharedView.string }
+    var isSharedEditable: Bool { sharedView.isEditable }
+    var isSharedExpanded: Bool { !sharedScroll.isHidden }
+    var hintText: String { hintLabel.stringValue }
+    var primaryToolTip: String? { primaryButton.toolTip }
+    /// The text view Return must keep for a newline, for key-event tests.
+    var instructionTextView: NSTextView { instructionView }
+    var labelTextField: NSTextField { labelField }
     var orgText: String { orgLabel.stringValue }
     var isStartEnabled: Bool { primaryButton.isEnabled }
     var primaryButtonTitle: String { primaryButton.title }
@@ -178,8 +248,12 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
         refresh()
     }
 
-    func typeContext(_ text: String) {
-        contextView.string = text
+    func typeInstruction(_ text: String) {
+        instructionView.string = text
+    }
+
+    func toggleShared() {
+        setSharedExpanded(sharedScroll.isHidden)
     }
 
     /// Start, or Go to existing focus when the item already has one.
@@ -194,6 +268,12 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
     /// Create another: sends even though a focus or job exists.
     @objc func secondaryTapped() {
         send(allowDuplicate: true)
+    }
+
+    /// Plain Return while nothing is being edited (the window decided that).
+    private func confirmFromKeyboard() {
+        guard primaryButton.isEnabled else { return }
+        primaryTapped()
     }
 
     @objc func cancelTapped() {
@@ -217,15 +297,22 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
         guard canStart, !isFinished else { return }
         isSending = true
         errorLabel.stringValue = ""
-        let request = WorkSendRequest(
+        var request = WorkSendRequest(
             requestId: UUID().uuidString,
             itemId: itemId,
             destination: destination == .motherJob ? "mother_job" : "focus",
             agent: selectedAgent,
             workingDirectory: workingDirectory,
             label: trimmedLabel,
-            context: contextView.string,
+            instruction: instructionView.string,
             allowDuplicate: allowDuplicate)
+        if let earlier = timedOutRequest, earlier.isSameSend(as: request) {
+            request = WorkSendRequest(
+                requestId: earlier.requestId, itemId: request.itemId, destination: request.destination,
+                agent: request.agent, workingDirectory: request.workingDirectory, label: request.label,
+                instruction: request.instruction, allowDuplicate: request.allowDuplicate)
+        }
+        timedOutRequest = nil
         refresh()
         sender.sendWork(request) { [weak self] response in
             self?.received(response, for: request)
@@ -241,13 +328,25 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
             finish(.sent(outcome))
             return
         case .sendResult(.err(let error)), .failed(let error):
-            errorLabel.stringValue = error.message
+            showError(error.message)
         case .timedOut:
-            errorLabel.stringValue = "The daemon did not answer in time. Check Mother's queue and the sidebar before trying again."
+            timedOutRequest = request
+            showError(Self.timedOutMessage)
         case .detail, .sendPreview:
-            errorLabel.stringValue = "The daemon sent an unexpected answer."
+            showError("The daemon sent an unexpected answer.")
         }
         refresh()
+    }
+
+    /// Show `message` inline and have VoiceOver say it: the label appears below the fold of what
+    /// a screen-reader user is focused on.
+    private func showError(_ message: String) {
+        errorLabel.stringValue = message
+        errorLabel.isHidden = message.isEmpty
+        guard !message.isEmpty else { return }
+        NSAccessibility.post(
+            element: errorLabel, notification: .announcementRequested,
+            userInfo: [.announcement: message, .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
 
     private func finish(_ result: SendToAgentResult) {
@@ -277,7 +376,8 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
         selectProject(initial)
 
         labelField.stringValue = preview.label
-        contextView.string = preview.context
+        instructionView.string = preview.instruction
+        sharedView.string = preview.context
 
         if let existing {
             let isJob = existing.kind == "mother_job"
@@ -335,7 +435,7 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
         projectPopup.isEnabled = idle
         chooseButton.isEnabled = idle
         labelField.isEnabled = idle
-        contextView.isEditable = idle
+        instructionView.isEditable = idle
         errorLabel.isHidden = errorLabel.stringValue.isEmpty
         cancelButton.isEnabled = idle
         if idle { spinner.stopAnimation(nil) } else { spinner.startAnimation(nil) }
@@ -403,25 +503,33 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
         orgLabel.textColor = Theme.fgMuted
         orgLabel.setAccessibilityLabel("Org")
 
-        contextView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        contextView.textColor = Theme.fg
-        contextView.backgroundColor = Theme.bg
-        contextView.insertionPointColor = .white
-        contextView.isRichText = false
-        contextView.isAutomaticQuoteSubstitutionEnabled = false
-        contextView.isAutomaticDashSubstitutionEnabled = false
-        contextView.isVerticallyResizable = true
-        contextView.isHorizontallyResizable = false
-        contextView.autoresizingMask = [.width]
-        contextView.textContainer?.widthTracksTextView = true
-        contextView.textContainerInset = NSSize(width: 6, height: 6)
-        contextView.setAccessibilityLabel("Context")
-        let scroll = NSScrollView()
-        scroll.documentView = contextView
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .lineBorder
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        Self.configureTextView(instructionView, editable: true)
+        instructionView.setAccessibilityLabel("Instruction for the agent")
+        instructionView.setAccessibilityHelp("Return adds a line. Command Return starts.")
+        let instructionScroll = Self.scroll(around: instructionView, minHeight: 90)
+
+        Self.configureTextView(sharedView, editable: false)
+        sharedView.textColor = Theme.fgMuted
+        sharedView.setAccessibilityLabel("What will be shared with the agent, read only")
+        sharedScroll.documentView = sharedView
+        sharedScroll.hasVerticalScroller = true
+        sharedScroll.borderType = .lineBorder
+        sharedScroll.translatesAutoresizingMaskIntoConstraints = false
+        sharedScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
+        sharedScroll.isHidden = true
+        sharedToggle.setButtonType(.pushOnPushOff)
+        sharedToggle.bezelStyle = .disclosure
+        sharedToggle.title = ""
+        sharedToggle.target = self
+        sharedToggle.action = #selector(sharedToggled)
+        sharedToggle.setAccessibilityLabel("What will be shared")
+        sharedToggle.toolTip = "The item's own text. The agent gets it as untrusted data; you cannot edit it here."
+        let sharedCaption = NSTextField(labelWithString: "What will be shared (read-only)")
+        sharedCaption.font = .systemFont(ofSize: 11)
+        sharedCaption.textColor = Theme.fgMuted
+        let sharedHeader = NSStackView(views: [sharedToggle, sharedCaption])
+        sharedHeader.orientation = .horizontal
+        sharedHeader.spacing = 6
 
         errorLabel.font = .systemFont(ofSize: 11)
         errorLabel.textColor = Theme.redSweater
@@ -439,7 +547,10 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
 
         primaryButton.title = "Start"
         primaryButton.bezelStyle = .rounded
+        // ⌘Return, not Return: Return belongs to the text being typed (see `SendToAgentWindow`).
         primaryButton.keyEquivalent = "\r"
+        primaryButton.keyEquivalentModifierMask = .command
+        primaryButton.toolTip = "Start (⌘Return)"
         primaryButton.target = self
         primaryButton.action = #selector(primaryTapped)
 
@@ -449,10 +560,21 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
         cancelButton.target = self
         cancelButton.action = #selector(cancelTapped)
 
+        hintLabel.font = .systemFont(ofSize: 10)
+        hintLabel.textColor = Theme.fgMuted
+        agentPopup.setAccessibilityLabel("Agent")
+        projectPopup.setAccessibilityLabel("Project")
+        chooseButton.setAccessibilityLabel("Choose another project folder")
+        labelField.setAccessibilityLabel("Label")
+        errorLabel.setAccessibilityLabel("Error")
+
         let buttons = NSStackView(views: [spinner, secondaryButton, cancelButton, primaryButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
 
+        let sharedRow = Self.row("", sharedScroll, alignTop: true)
+        self.sharedRow = sharedRow
+        sharedRow.isHidden = true
         let column = NSStackView(views: [
             title,
             Self.row("Send as:", destinationControl),
@@ -462,9 +584,12 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
             Self.row("Project:", projectRow),
             Self.row("Label:", labelField),
             Self.row("Org:", orgLabel),
-            Self.row("Context:", scroll, alignTop: true),
+            Self.row("Say:", instructionScroll, alignTop: true),
+            sharedHeader,
+            sharedRow,
             errorLabel,
             buttons,
+            hintLabel,
         ])
         column.orientation = .vertical
         column.alignment = .leading
@@ -477,10 +602,48 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
             column.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
             column.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
         ])
-        for view in column.arrangedSubviews where view !== title && view !== buttons {
+        for view in column.arrangedSubviews where view !== title && view !== buttons && view !== hintLabel {
             view.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         }
         buttons.trailingAnchor.constraint(equalTo: column.trailingAnchor).isActive = true
+        hintLabel.trailingAnchor.constraint(equalTo: column.trailingAnchor).isActive = true
+    }
+
+    @objc private func sharedToggled() {
+        setSharedExpanded(sharedToggle.state == .on)
+    }
+
+    private func setSharedExpanded(_ expanded: Bool) {
+        sharedScroll.isHidden = !expanded
+        sharedRow?.isHidden = !expanded
+        sharedToggle.state = expanded ? .on : .off
+    }
+
+    private static func configureTextView(_ view: NSTextView, editable: Bool) {
+        view.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        view.textColor = Theme.fg
+        view.backgroundColor = Theme.bg
+        view.insertionPointColor = .white
+        view.isEditable = editable
+        view.isSelectable = true
+        view.isRichText = false
+        view.isAutomaticQuoteSubstitutionEnabled = false
+        view.isAutomaticDashSubstitutionEnabled = false
+        view.isVerticallyResizable = true
+        view.isHorizontallyResizable = false
+        view.autoresizingMask = [.width]
+        view.textContainer?.widthTracksTextView = true
+        view.textContainerInset = NSSize(width: 6, height: 6)
+    }
+
+    private static func scroll(around view: NSTextView, minHeight: CGFloat) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.documentView = view
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .lineBorder
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight).isActive = true
+        return scroll
     }
 
     /// A label on the left and its control filling the rest.
@@ -499,9 +662,153 @@ final class SendToAgentSheet: NSWindowController, NSTextFieldDelegate {
     }
 }
 
+// MARK: - Toast
+
+/// A short notice at the bottom of a window: a refused press ("already preparing"), a Mother job's
+/// confirmation, "not loaded yet". It also goes to VoiceOver as an announcement, because a banner
+/// that fades on its own is not something a screen-reader user finds by looking.
+enum TeriToast {
+    static let identifier = NSUserInterfaceItemIdentifier("teri.toast")
+    /// How long it stays. Not observed by tests: they look for the banner, never for its end.
+    static let lifetime: TimeInterval = 5
+
+    /// Show `text` on `window`, replacing any earlier toast there.
+    static func show(_ text: String, in window: NSWindow?) {
+        guard let content = window?.contentView else { return }
+        dismiss(in: window)
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.identifier = identifier
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .white
+        label.backgroundColor = Theme.bgBarActive
+        label.drawsBackground = true
+        label.isBordered = false
+        label.alignment = .center
+        label.setAccessibilityRole(.staticText)
+        label.setAccessibilityLabel(text)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            label.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            label.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -32),
+        ])
+        NSAccessibility.post(
+            element: label, notification: .announcementRequested,
+            userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        DispatchQueue.main.asyncAfter(deadline: .now() + lifetime) { [weak label] in label?.removeFromSuperview() }
+    }
+
+    /// The toast on `window` now, if any (tests, accessibility).
+    static func text(in window: NSWindow?) -> String? {
+        (window?.contentView?.subviews.first { $0.identifier == identifier } as? NSTextField)?.stringValue
+    }
+
+    static func dismiss(in window: NSWindow?) {
+        window?.contentView?.subviews.filter { $0.identifier == identifier }.forEach { $0.removeFromSuperview() }
+    }
+}
+
+// MARK: - The flow around the sheet
+
+/// Asks the daemon for an item's send defaults.
+protocol SendPreviewing: AnyObject {
+    func requestSendPreview(_ itemId: String, completion: @escaping (WorkResponse) -> Void)
+}
+
+/// Where "go to the existing focus / job" lands. False when there is nothing to go to yet.
+protocol SendNavigating: AnyObject {
+    func goToFocus(tag: String) -> Bool
+    func goToJob(_ jobId: String) -> Bool
+}
+
+/// Everything around the sheet that is not the sheet: the preview request in flight (the surface
+/// shows progress meanwhile), one send at a time with a notice for a press that is refused, and
+/// what to tell the user when the sheet ends (a queued Mother job's id; an existing focus the Mac
+/// cannot find yet). `TeriBindings` supplies the real store, navigation and sheet.
+final class SendToAgentFlow {
+    enum Press: Equatable {
+        case started
+        case alreadyPreparing
+        case sheetOpen
+        case noWindow
+    }
+
+    static let preparingNotice = "Still preparing the previous Send to agent. One moment."
+    static let sheetOpenNotice = "A Send to agent sheet is already open."
+    static let focusNotLoadedNotice = "A focus for this item exists but is not loaded yet; try again in a moment."
+    static let jobNotLoadedNotice = "Mother is not loaded yet; try again in a moment."
+
+    private(set) var isPreviewing = false { didSet { if isPreviewing != oldValue { onPreparingChanged?(isPreviewing) } } }
+    private(set) var isSheetOpen = false
+    /// The surface shows (or stops showing) that a send is being prepared.
+    var onPreparingChanged: ((Bool) -> Void)?
+
+    /// Ask for `itemId`'s defaults and, once they arrive, have `presentSheet` show the sheet. A
+    /// press while a preview is pending or a sheet is up is refused with a notice, never silently.
+    @discardableResult
+    func begin(itemId: String, window: NSWindow?, previewer: SendPreviewing,
+               presentSheet: @escaping (SendPreview, NSWindow) -> Bool,
+               showError: @escaping (String, NSWindow) -> Void) -> Press {
+        guard let window else { return .noWindow }
+        if isPreviewing {
+            TeriToast.show(Self.preparingNotice, in: window)
+            return .alreadyPreparing
+        }
+        if isSheetOpen {
+            TeriToast.show(Self.sheetOpenNotice, in: window)
+            return .sheetOpen
+        }
+        isPreviewing = true
+        previewer.requestSendPreview(itemId) { [weak self, weak window] response in
+            guard let self else { return }
+            self.isPreviewing = false
+            guard let window else { return }
+            switch response {
+            case .sendPreview(.ok(let preview)):
+                if presentSheet(preview, window) { self.isSheetOpen = true }
+            case .sendPreview(.err(let error)), .failed(let error):
+                showError(error.message, window)
+            case .timedOut:
+                showError("The daemon did not answer in time.", window)
+            case .detail, .sendResult:
+                break
+            }
+        }
+        return .started
+    }
+
+    /// The sheet went away (however it ended).
+    func sheetDismissed() { isSheetOpen = false }
+
+    /// What the sheet's result means for the user, on `window`.
+    func handle(_ result: SendToAgentResult, window: NSWindow?, navigator: SendNavigating) {
+        switch result {
+        case .sent(let outcome) where outcome.kind == "existing":
+            if let tag = outcome.focusTag {
+                if !navigator.goToFocus(tag: tag) { TeriToast.show(Self.focusNotLoadedNotice, in: window) }
+            } else if let job = outcome.jobId, !navigator.goToJob(job) {
+                TeriToast.show(Self.jobNotLoadedNotice, in: window)
+            }
+        case .sent(let outcome) where outcome.kind == "mother_job":
+            let id = outcome.jobId.map { " \($0)" } ?? ""
+            TeriToast.show("Queued as Mother job\(id). It runs unattended; follow it in Mother.", in: window)
+        case .goToExisting(let marker):
+            let found = marker.kind == "mother_job"
+                ? navigator.goToJob(marker.targetId) : navigator.goToFocus(tag: marker.targetId)
+            if !found {
+                TeriToast.show(marker.kind == "mother_job" ? Self.jobNotLoadedNotice : Self.focusNotLoadedNotice,
+                               in: window)
+            }
+        case .sent, .cancelled:
+            break   // a new focus selects itself (`select_for_client`)
+        }
+    }
+}
+
 // MARK: - The real sender
 
-extension WorkStore: WorkSending {
+extension WorkStore: WorkSending, SendPreviewing {
     func sendWork(_ request: WorkSendRequest, completion: @escaping (WorkResponse) -> Void) {
         guard isConnected, let sendFrame else {
             completion(.failed(WorkError(code: "not_connected", message: "Not connected to nostromd")))

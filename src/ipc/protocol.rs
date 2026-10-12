@@ -1187,7 +1187,13 @@ pub enum ClientMsg {
         #[serde(default)]
         working_directory: Option<String>,
         label: String,
-        context: String,
+        /// The user's own words from the sheet: sent to the agent as the
+        /// user's directive, outside the untrusted-data fence. The work
+        /// item's text is never part of this request: the daemon rebuilds it
+        /// from the hub item by `item_id` at send time. An old client's
+        /// `context` field is ignored.
+        #[serde(default)]
+        instruction: String,
         #[serde(default)]
         allow_duplicate: bool,
     },
@@ -4017,6 +4023,7 @@ mod work_wire_tests {
                 agent: "claude".into(),
                 working_directory: Some("/tmp/repo".into()),
                 label: "CORE-1".into(),
+                instruction: "Propose an approach".into(),
                 context: "do it".into(),
                 existing: vec![],
             }),
@@ -4059,7 +4066,7 @@ mod work_wire_tests {
             agent: "claude".into(),
             working_directory: Some("/tmp/repo".into()),
             label: "a".into(),
-            context: "b".into(),
+            instruction: "b".into(),
             allow_duplicate: true,
         });
         round_trip_client(ClientMsg::FredSeed { request_id: "r4".into(), text: "hi".into() });
@@ -4073,9 +4080,12 @@ mod work_wire_tests {
             r#"{"type":"work_send","request_id":"r","item_id":"i","destination":"focus","agent":"a","label":"l","context":"c"}"#,
         )
         .unwrap();
+        // An old client's frame (`context`, no `instruction`) still decodes; the
+        // item's text is never taken from the client, so `context` is dropped.
         assert!(matches!(
             m,
-            ClientMsg::WorkSend { working_directory: None, allow_duplicate: false, .. }
+            ClientMsg::WorkSend { working_directory: None, allow_duplicate: false, ref instruction, .. }
+                if instruction.is_empty()
         ));
     }
 

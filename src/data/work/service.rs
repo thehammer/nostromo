@@ -46,13 +46,18 @@ pub trait WorkService: Send + Sync {
 /// Parameters of `ClientMsg::WorkSend`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendRequest {
+    /// The client's request id. A repeat of one the daemon already handled in
+    /// the last few minutes (a retry after a timeout) gets that answer back
+    /// instead of creating a second focus or job. Empty: no dedup.
+    pub request_id: String,
     pub item_id: String,
     /// `"focus"` or `"mother_job"`.
     pub destination: String,
     pub agent: String,
     pub working_directory: Option<String>,
     pub label: String,
-    pub context: String,
+    /// The user's own words: the agent's directive, outside the untrusted fence.
+    pub instruction: String,
     pub allow_duplicate: bool,
     /// The `client_id` the requester gave in its `Hello`: the new focus is
     /// selected in that client's windows.

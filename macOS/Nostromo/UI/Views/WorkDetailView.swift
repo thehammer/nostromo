@@ -38,7 +38,12 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
     private let textView = NSTextView()
     private let scroll = NSScrollView()
     private let openButton = NSPopUpButton(frame: .zero, pullsDown: true)
-    private let sendButton = NSButton(title: "Send to agent…", target: nil, action: nil)
+    private let sendButton = NSButton(title: WorkDetailView.sendTitle, target: nil, action: nil)
+    private let sendSpinner = NSProgressIndicator()
+    private var isSendPreparing = false
+
+    static let sendTitle = "Send to agent…"
+    static let preparingTitle = "Preparing…"
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -86,6 +91,21 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
     /// its detail is loading or failed: the daemon builds the context itself).
     var sendToAgentEnabled: Bool { sendButton.isEnabled }
 
+    /// The Send button's title: "Preparing…" while the daemon is asked for the send defaults.
+    var sendButtonTitle: String { sendButton.title }
+    var isShowingSendProgress: Bool { !sendSpinner.isHidden }
+
+    /// Show (or stop showing) that a send is being prepared: the button says so, cannot be pressed
+    /// again meanwhile, and a spinner turns. The press is not lost silently: the flow explains a
+    /// second ⌘⇧S.
+    func setSendPreparing(_ preparing: Bool) {
+        isSendPreparing = preparing
+        sendButton.title = preparing ? Self.preparingTitle : Self.sendTitle
+        sendButton.isEnabled = !preparing && shownItemId != nil
+        sendSpinner.isHidden = !preparing
+        if preparing { sendSpinner.startAnimation(nil) } else { sendSpinner.stopAnimation(nil) }
+    }
+
     /// The id of the item being shown, nil when nothing is.
     var shownItemId: String? {
         if case .detail(let detail) = content { return detail.itemId }
@@ -97,7 +117,7 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
         self.content = content
         shownItem = item
         openTargets = Self.targets(for: content, item: item)
-        sendButton.isEnabled = shownItemId != nil
+        sendButton.isEnabled = shownItemId != nil && !isSendPreparing
         rebuildOpenMenu()
         textView.textStorage?.setAttributedString(Self.attributedText(for: content))
         textView.scrollToBeginningOfDocument(nil)
@@ -268,7 +288,12 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
         sendButton.target = self
         sendButton.action = #selector(sendPressed)
         sendButton.isEnabled = false   // enabled while an item is shown
-        let buttons = NSStackView(views: [openButton, sendButton])
+        sendButton.setAccessibilityHelp("Command Shift S")
+        sendSpinner.style = .spinning
+        sendSpinner.controlSize = .small
+        sendSpinner.isHidden = true
+        sendSpinner.setAccessibilityLabel("Preparing to send")
+        let buttons = NSStackView(views: [openButton, sendButton, sendSpinner])
         buttons.orientation = .horizontal
         buttons.spacing = 8
         buttons.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)

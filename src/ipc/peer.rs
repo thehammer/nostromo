@@ -276,6 +276,16 @@ impl SensitiveTags {
         }
     }
 
+    /// Register every job in `jobs` that was queued from a work item (by its
+    /// label) as sensitive, so frames scoped to the job by id alone (its peek)
+    /// are withheld too. Called wherever the daemon takes in the job list,
+    /// before anything is broadcast from it.
+    pub fn note_jobs(&self, jobs: &[crate::mother::MotherJob]) {
+        for job in jobs.iter().filter(|j| j.is_work_send()) {
+            self.mark_job(&job.id);
+        }
+    }
+
     /// Register Mother job `job_id` as sensitive. Idempotent.
     pub fn mark_job(&self, job_id: &str) {
         let mut registered = self.inner.write().unwrap();
@@ -646,6 +656,9 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // Scoped to one Mother job. A job started from a work item carries
         // its plan/title/transcript; classified by job id (no focus tag).
         ServerMsg::MotherPeek { job_id, .. } => ServerClass::Job(job_id),
+        // A job queued from a work item is work data from the moment it exists,
+        // whether or not its id has been registered yet.
+        ServerMsg::MotherAwaitDetected(job) if job.is_work_send() => ServerClass::Sensitive,
         ServerMsg::MotherAwaitDetected(job) => ServerClass::Job(&job.id),
 
         // Lists whose entries are filtered/trimmed by `redact_for_network`.
@@ -919,7 +932,10 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
             ServerMsg::SessionListResp { sessions }
         }
         ServerMsg::MotherJobs { mut jobs } => {
-            jobs.retain(|j| !tags.job_is_sensitive(&j.id));
+            // By label as well as by id: `mother add` returns before the daemon
+            // has registered the new job's id, and the job feed must not
+            // include it in that gap.
+            jobs.retain(|j| !j.is_work_send() && !tags.job_is_sensitive(&j.id));
             ServerMsg::MotherJobs { jobs }
         }
         other => other,
@@ -1008,7 +1024,7 @@ mod tests {
                 agent: "cody".into(),
                 working_directory: None,
                 label: "l".into(),
-                context: "c".into(),
+                instruction: "c".into(),
                 allow_duplicate: false,
             },
             ClientMsg::FredSeed { request_id: "r".into(), text: "t".into() },
@@ -1366,7 +1382,7 @@ mod tests {
                 agent: "cody".into(),
                 working_directory: None,
                 label: "l".into(),
-                context: "c".into(),
+                instruction: "c".into(),
                 allow_duplicate: false,
             },
             ClientMsg::FredSeed { request_id: "r".into(), text: "t".into() },

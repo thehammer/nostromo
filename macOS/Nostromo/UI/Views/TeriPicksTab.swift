@@ -177,8 +177,23 @@ final class TeriPicksView: NSView {
         switch event.keyCode {
         case 125: moveSelection(by: 1)    // down
         case 126: moveSelection(by: -1)   // up
+        case 36, 76:                         // Return, keypad Enter
+            // ⌘Return: go to where the selected pick was sent.
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
+                openSentOfSelection()
+            } else {
+                super.keyDown(with: event)
+            }
         default: super.keyDown(with: event)
         }
+    }
+
+    /// ⌘Return on the selected pick: go to the focus or job its newest "Sent to …" names.
+    /// False when the pick has none.
+    @discardableResult
+    func openSentOfSelection() -> Bool {
+        guard let id = selectedPickId else { return false }
+        return clickSent(itemId: id)
     }
 
     // MARK: Header wording
@@ -568,6 +583,16 @@ private final class PickRowView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel(content.accessibilityLabel)
+        // The "Sent to …" line is clickable; VoiceOver reaches it as a custom action on the row.
+        if let sentText = content.sentText {
+            setAccessibilityCustomActions([
+                NSAccessibilityCustomAction(name: "Go to: \(sentText)") { [weak self] in
+                    guard let self, let onSentClick = self.onSentClick else { return false }
+                    onSentClick()
+                    return true
+                },
+            ])
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }

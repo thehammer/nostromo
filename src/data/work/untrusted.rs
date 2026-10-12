@@ -29,6 +29,11 @@ pub(crate) const MAX_LINE_CHARS: usize = 200;
 /// where length is no injection risk, so the cap just bounds the size.
 pub(crate) const MAX_FENCED_TITLE_CHARS: usize = 50_000;
 
+/// Longest user instruction kept (characters). It is the user's own words, so
+/// it is not fenced; the cap only bounds what a client can make the daemon
+/// put in front of an agent.
+pub(crate) const MAX_INSTRUCTION_CHARS: usize = 4_000;
+
 /// Longest id handed to an agent (after escaping); a longer one is dropped from lists.
 pub(crate) const MAX_ID_CHARS: usize = 300;
 
@@ -105,6 +110,20 @@ pub(crate) fn sanitize_block(text: &str) -> String {
         kept += 1;
     }
     out
+}
+
+/// The user's own instruction: control, bidi and tag characters dropped
+/// ([`sanitize_block`]), trimmed and capped at [`MAX_INSTRUCTION_CHARS`]; line
+/// breaks and the wording are otherwise kept. `None` when nothing is left.
+pub(crate) fn sanitize_instruction(text: &str) -> Option<String> {
+    let block = sanitize_block(text);
+    let block = block.trim();
+    if block.chars().count() <= MAX_INSTRUCTION_CHARS {
+        return (!block.is_empty()).then(|| block.to_owned());
+    }
+    let mut cut: String = block.chars().take(MAX_INSTRUCTION_CHARS - 1).collect();
+    cut.push('…');
+    Some(cut)
 }
 
 /// A code fence around `text` (sanitised first) that nothing inside it can
@@ -199,6 +218,14 @@ impl NonceFence {
     /// `text` as one line of at most `max_chars` ([`one_line`]), inside the markers.
     pub(crate) fn line(&self, text: &str, max_chars: usize) -> String {
         self.wrap(&one_line(text, max_chars))
+    }
+
+    /// `text` as a sanitised block ([`sanitize_block`], trimmed, `(empty)` when
+    /// nothing is left) between the markers, each on its own line.
+    pub(crate) fn block(&self, text: &str) -> String {
+        let body = sanitize_block(text);
+        let body = body.trim();
+        self.section(if body.is_empty() { "(empty)" } else { body })
     }
 
     /// `inner` (already sanitised) between the markers, each on its own line.

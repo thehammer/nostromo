@@ -1458,6 +1458,7 @@ mod tests {
             kind: None,
             phases: vec![],
             cycles: vec![],
+            origin: None,
         }
     }
 

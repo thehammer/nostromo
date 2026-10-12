@@ -304,6 +304,7 @@ fn send_preview(item_id: &str) -> SendPreview {
         agent: "cody".into(),
         working_directory: None,
         label: "fake-preview".into(),
+        instruction: "fake instruction".into(),
         context: "fake context".into(),
         existing: vec![],
     }
@@ -575,7 +576,7 @@ async fn a_tcp_client_s_work_and_fred_requests_are_refused_with_requires_secure_
             agent: "cody".into(),
             working_directory: None,
             label: "x".into(),
-            context: "ctx".into(),
+            instruction: "ctx".into(),
             allow_duplicate: false,
         },
     )
@@ -673,7 +674,7 @@ async fn a_unix_client_s_work_requests_reach_the_work_service_and_get_its_answer
             agent: "cody".into(),
             working_directory: Some("/tmp/repo".into()),
             label: "lbl".into(),
-            context: "ctx".into(),
+            instruction: "ctx".into(),
             allow_duplicate: true,
         },
     )
@@ -1134,7 +1135,7 @@ impl WorkService for ScriptedWorkService {
             let mut mgr = mgr.lock().unwrap();
             mgr.spawn_session(tag.clone(), agent.clone(), view.clone(), None, Some(format!("sid-{view}")), false)
                 .map_err(|e| WorkError::new("spawn_failed", e.to_string()))?;
-            mgr.send_user_message(tag, &request.context, &[])
+            mgr.send_user_message(tag, &request.instruction, &[])
                 .map_err(|e| WorkError::new("seed_failed", e.to_string()))?;
         }
         Ok(self.outcome.clone())
@@ -1154,7 +1155,7 @@ async fn work_send_via(unix: &mut UnixStream, service: ScriptedWorkService, dest
             agent: "cody".into(),
             working_directory: None,
             label: "SECRET-JIRA-TITLE".into(),
-            context: "WORK-CONTEXT: summarise the confidential ticket".into(),
+            instruction: "WORK-CONTEXT: summarise the confidential ticket".into(),
             allow_duplicate: false,
         },
     )
@@ -3283,7 +3284,7 @@ async fn nothing_a_work_send_creates_reaches_a_tcp_client_even_before_the_send_h
                 agent: "cody".into(),
                 working_directory: None,
                 label: "SECRET-JIRA-TITLE".into(),
-                context: "WORK-CONTEXT".into(),
+                instruction: "WORK-CONTEXT".into(),
                 allow_duplicate: false,
             },
         )

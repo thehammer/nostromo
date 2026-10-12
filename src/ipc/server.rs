@@ -1195,17 +1195,18 @@ fn handle_client_msg(
             agent,
             working_directory,
             label,
-            context,
+            instruction,
             allow_duplicate,
         } => {
             let tx = targeted_tx.clone();
             let request = SendRequest {
+                request_id: request_id.clone(),
                 item_id,
                 destination,
                 agent,
                 working_directory,
                 label,
-                context,
+                instruction,
                 allow_duplicate,
                 client_id: Some(client_id.to_owned()),
             };
@@ -1218,7 +1219,9 @@ fn handle_client_msg(
                 let result = within_work_send(work_service().send(request)).await;
                 // The send's outcome names what it created; registering it here
                 // as well covers a service that did not go through the session
-                // manager, and the Mother job (whose id is not known sooner).
+                // manager, and the Mother job (whose id is not known sooner). Until
+                // then the job is withheld from a network peer by its
+                // `teri-send` label (`MotherJob::is_work_send`).
                 if let Ok(outcome) = &result {
                     if let Some(tag) = &outcome.focus_tag {
                         sensitive.mark_tag(tag);

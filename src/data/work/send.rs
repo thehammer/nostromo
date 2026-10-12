@@ -6,10 +6,20 @@
 //! one set of rules (item-keyed duplicate protection, tag collisions, org
 //! inference, the sent ledger, the Mother brief).
 //!
+//! Two kinds of text reach the agent and they are never mixed. The user's own
+//! words (the sheet's editable `instruction`) are the directive. The item's
+//! text (title, fields, markdown, links, the pick's reason) is third-party: the
+//! daemon rebuilds it from the hub item by id at send time and `create_focus`
+//! fences it; the client only ever sees it read-only in the preview and cannot
+//! send any of it back.
+//!
 //! Nothing here is reachable from a network peer: the server refuses
 //! `WorkSendPreviewRequest`/`WorkSend` over TCP before they get this far.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::hub::WorkHub;
 use super::model::{SendOutcome, SendPreview, WorkDetail, WorkError, WorkItem, WorkSource};
@@ -22,12 +32,42 @@ use crate::mcp::tools::create_focus::{
 /// Longest label the preview derives from a title (sidebar width).
 const MAX_LABEL_CHARS: usize = 32;
 
-/// The framing line that opens every seeded context.
-const FRAMING: &str =
-    "Here is a work item from Teri. Read it and propose an approach before changing anything.";
+/// What the sheet's instruction starts as, and what an empty one becomes.
+pub const DEFAULT_INSTRUCTION: &str = "Propose an approach before changing anything.";
 
-/// Defaults for sending `item_id`: agent, project, label and the context that
-/// will be seeded, plus the live markers that make a resend a duplicate.
+/// How long the answer to a send is remembered for its request id: long enough
+/// for a client that timed out to retry, short enough to forget.
+const RECENT_SEND_WINDOW: Duration = Duration::from_secs(600);
+
+/// Answers to recent sends, by (item, request id). A retry of a send the daemon
+/// already handled (or is still handling) gets that answer instead of a second
+/// focus or job: the Mac reuses the request id when it retries after a timeout.
+/// Errors are not remembered, so a retry of a failed send runs again.
+#[derive(Default)]
+pub(crate) struct RecentSends {
+    cells: Mutex<HashMap<String, RecentSend>>,
+}
+
+/// When a send was first seen, and the answer once there is one.
+type RecentSend = (Instant, Arc<tokio::sync::OnceCell<SendOutcome>>);
+
+impl RecentSends {
+    async fn run<F>(&self, key: String, send: F) -> Result<SendOutcome, WorkError>
+    where
+        F: std::future::Future<Output = Result<SendOutcome, WorkError>>,
+    {
+        let cell = {
+            let mut cells = self.cells.lock().unwrap();
+            cells.retain(|_, (at, _)| at.elapsed() < RECENT_SEND_WINDOW);
+            Arc::clone(&cells.entry(key).or_insert_with(|| (Instant::now(), Arc::default())).1)
+        };
+        cell.get_or_try_init(|| send).await.cloned()
+    }
+}
+
+/// Defaults for sending `item_id`: agent, project, label, the default
+/// instruction and (read-only) what the agent will also be given, plus the
+/// markers that make a resend a duplicate, judged as `send` will judge them.
 pub async fn preview(hub: &WorkHub, item_id: &str) -> Result<SendPreview, WorkError> {
     let item = hub.item(item_id).ok_or_else(unknown_item)?;
     let detail = hub.detail(item_id).await?;
@@ -37,13 +77,22 @@ pub async fn preview(hub: &WorkHub, item_id: &str) -> Result<SendPreview, WorkEr
         agent: suggested_agent(&item).to_owned(),
         working_directory: working_directory.map(|p| p.to_string_lossy().into_owned()),
         label: suggested_label(&item),
-        context: context_for(&item, &detail),
-        existing: hub.live_markers(&item.id),
+        instruction: DEFAULT_INSTRUCTION.to_owned(),
+        context: shared_material(hub, &item, &detail),
+        existing: hub.live_markers_for_send(&item.id),
     })
 }
 
 /// Create the focus or queue the Mother job the sheet asked for.
 pub async fn send(hub: &WorkHub, request: SendRequest) -> Result<SendOutcome, WorkError> {
+    if request.request_id.is_empty() {
+        return send_once(hub, request).await;
+    }
+    let key = format!("{}\0{}", request.item_id, request.request_id);
+    hub.recent_sends().run(key, send_once(hub, request)).await
+}
+
+async fn send_once(hub: &WorkHub, request: SendRequest) -> Result<SendOutcome, WorkError> {
     let destination = match request.destination.as_str() {
         "focus" => Destination::Focus,
         "mother_job" => Destination::MotherJob { max_cost: None },
@@ -69,7 +118,14 @@ pub async fn send(hub: &WorkHub, request: SendRequest) -> Result<SendOutcome, Wo
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(PathBuf::from);
-    let initial_context = Some(request.context).filter(|c| !c.trim().is_empty());
+    // The item's text is rebuilt here, from the hub, never taken from the
+    // client: whatever the client sends is only ever the user's instruction.
+    let detail = hub.detail(&item.id).await?;
+    let initial_context = Some(shared_material(hub, &item, &detail));
+    let instruction = match request.instruction.trim() {
+        "" => DEFAULT_INSTRUCTION.to_owned(),
+        _ => request.instruction,
+    };
 
     let core_request = CreateFocusRequest {
         agent: request.agent,
@@ -78,6 +134,7 @@ pub async fn send(hub: &WorkHub, request: SendRequest) -> Result<SendOutcome, Wo
         org: None,
         working_directory,
         initial_context,
+        instruction: Some(instruction),
         source_item: Some(SourceItemRef { id: item.id.clone(), title: item.title.clone() }),
         allow_duplicate: request.allow_duplicate,
         destination,
@@ -147,9 +204,15 @@ async fn sentry_repo(hub: &WorkHub, item: &WorkItem) -> Option<String> {
     item.repo.clone()
 }
 
-/// The text that will seed the agent: framing, where it came from, then the
-/// whole item as the detail view shows it.
-fn context_for(item: &WorkItem, detail: &WorkDetail) -> String {
+/// The item's own text, as the agent will be given it (fenced as untrusted
+/// data by `create_focus`) and as the sheet shows it read-only: where it came
+/// from, the whole item as the detail view shows it, and why Teri picked it.
+fn shared_material(hub: &WorkHub, item: &WorkItem, detail: &WorkDetail) -> String {
+    let reason = hub.picks().snapshot().items.into_iter().find(|p| p.item_id == item.id).map(|p| p.reason);
+    material_for(item, detail, reason.as_deref())
+}
+
+fn material_for(item: &WorkItem, detail: &WorkDetail, pick_reason: Option<&str>) -> String {
     let mut origin = vec![format!("Source: {}", item.source.as_str())];
     if let Some(repo) = &item.repo {
         origin.push(format!("Repo: {repo}"));
@@ -163,7 +226,11 @@ fn context_for(item: &WorkItem, detail: &WorkDetail) -> String {
         origin.push(format!("Link: {url}"));
     }
 
-    let mut out = format!("{FRAMING}\n\n{}\n\nTitle: {}\n", origin.join(" · "), item.title);
+    let mut out = format!("{}\n\nTitle: {}\n", origin.join(" · "), item.title);
+    if let Some(reason) = pick_reason.filter(|r| !r.trim().is_empty()) {
+        // Written by Teri's picks session from third-party text: data, like the rest.
+        out.push_str(&format!("Why Teri picked this: {reason}\n"));
+    }
     if item.source == WorkSource::Sentry {
         if let Some(short_id) = item.linked.first() {
             out.push_str(&format!("Short id: {short_id}\n"));

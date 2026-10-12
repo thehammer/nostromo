@@ -204,9 +204,30 @@ pub struct MotherJob {
     /// `#[serde(default)]`.
     #[serde(default)]
     pub cycles: Vec<CycleInfo>,
+    /// Where the job came from (`mother add --label`). Only the label is read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<MotherJobOrigin>,
 }
 
+/// The `origin` object of a Mother job record.
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize, PartialEq)]
+pub struct MotherJobOrigin {
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// The `--label` of every Mother job queued from a work item (Send to agent).
+/// Such a job holds item text in its plan, so it is work-derived from the
+/// moment `mother add` returns: the label lets the daemon withhold it from a
+/// network peer even before it has recorded the job id.
+pub const WORK_SEND_JOB_LABEL: &str = "teri-send";
+
 impl MotherJob {
+    /// Was this job queued from a work item (carries [`WORK_SEND_JOB_LABEL`])?
+    pub fn is_work_send(&self) -> bool {
+        self.origin.as_ref().and_then(|o| o.label.as_deref()) == Some(WORK_SEND_JOB_LABEL)
+    }
+
     /// True when this job is waiting for operator input.
     pub fn is_awaiting(&self) -> bool {
         self.state == "awaiting"

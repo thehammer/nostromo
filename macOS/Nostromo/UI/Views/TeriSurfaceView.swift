@@ -172,6 +172,11 @@ final class TeriSurfaceView: NSView {
         return true
     }
 
+    /// Show (or stop showing) that a send is being prepared: the detail pane's button and spinner.
+    func setSendPreparing(_ preparing: Bool) {
+        detailView.setSendPreparing(preparing)
+    }
+
     /// Click the "sent to …" marker on `itemId`'s row in the current tab (tests).
     @discardableResult
     func clickSentMarker(itemId: String) -> Bool {
