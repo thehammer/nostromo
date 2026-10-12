@@ -107,7 +107,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 ) { [weak self] reached in
                     self?.displayWaiter = nil
                     self?.placementLog.log("launch", reached ? "expected displays attached" : "display wait timed out", warning: !reached)
-                    self?.openLaunchWindows()
+                    self?.openLaunchWindows(topologyKnown: reached)
                 }
             } else {
                 openLaunchWindows()
@@ -146,6 +146,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         appLog.warning("applicationWillTerminate — saving state")
         FocusStore.shared.save()
+        TeriSentryTab.tracker.flush()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -257,12 +258,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Open one window per attached display, then activate ONCE at the end
     /// (windows are only ordered front while being placed, so activation can't
     /// drag them toward the key screen mid-placement).
-    private func openLaunchWindows() {
+    private func openLaunchWindows(topologyKnown: Bool = true) {
         launchWindowsOpened = true
         let displays = screens.displays
         placementLog.log("launch", "opening windows for \(displays.count) display(s)")
         migrateLegacyFocusKeys(onto: displays)
-        stableCountRecorder.topologyChanged()
+        stableCountRecorder.launchWindowsOpened(topologyKnown: topologyKnown)
         for (slot, display) in displays.enumerated() {
             openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot))
         }
@@ -493,6 +494,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NostromoWindow else { return }
         windows.removeAll { $0 === win }
+        TeriSentryTab.tracker.flush()
         let closedUUIDs = windowsByDisplayUUID.filter { $0.value === win }.map(\.key)
         for uuid in closedUUIDs {
             windowsByDisplayUUID.removeValue(forKey: uuid)

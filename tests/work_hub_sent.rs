@@ -194,13 +194,34 @@ async fn an_item_sent_to_a_live_focus_shows_sent_and_an_unsent_one_does_not() {
 }
 
 #[tokio::test]
-async fn a_marker_whose_focus_has_no_live_session_is_not_shown() {
-    let rig = Rig::new(|ledger, _| {
+async fn a_marker_whose_focus_has_no_live_session_is_not_shown_once_the_registry_is_known() {
+    let rig = Rig::new(|ledger, sessions| {
         ledger.record("todo:1", marker("focus", "cody-never-ran")).unwrap();
+        push(sessions, &["cody-someone-else"]);
+        push(sessions, &["cody-someone-else"]);
+        assert!(sessions.lock().unwrap().registry_known(), "precondition");
     })
     .await;
     wait_until_items_loaded(&rig).await;
     assert!(rig.item("todo:1").sent.is_empty());
+}
+
+#[tokio::test]
+async fn a_focus_still_running_between_a_restart_and_the_first_registry_push_keeps_its_chip() {
+    // The daemon restarted: no session entry for the focus yet and nothing
+    // pushed. The chip follows the rule `send` applies, so it stays.
+    let rig = Rig::new(|ledger, sessions| {
+        ledger.record("todo:1", marker("focus", "cody-still-running")).unwrap();
+        let mgr = sessions.lock().unwrap();
+        assert!(!mgr.has_session_entry("cody-still-running"), "precondition: no session entry");
+        assert!(!mgr.registry_known(), "precondition: nothing pushed");
+    })
+    .await;
+    wait_until_items_loaded(&rig).await;
+
+    let sent = rig.item("todo:1").sent;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].target_id, "cody-still-running");
 }
 
 #[tokio::test]
@@ -221,6 +242,9 @@ async fn closing_the_focus_clears_sent_and_clients_get_a_fresh_snapshot() {
     let mut rig = Rig::new(|ledger, sessions| {
         Rig::spawn_live(sessions, "cody-closing");
         ledger.record("todo:1", marker("focus", "cody-closing")).unwrap();
+        // A registry the daemon can vouch for: only then is an unlisted tag gone.
+        push(sessions, &["cody-closing"]);
+        push(sessions, &["cody-closing"]);
     })
     .await;
     rig.next_snapshot(|items| !sent_of(items, "todo:1").is_empty()).await;
@@ -258,7 +282,9 @@ async fn a_focus_known_only_from_the_pushed_registry_shows_sent_before_its_sessi
 #[tokio::test]
 async fn a_marker_whose_tag_is_neither_running_nor_registered_is_not_shown_even_with_a_registry() {
     let rig = Rig::new(|ledger, sessions| {
-        sessions.lock().unwrap().set_focus_registry(vec![registry_meta("cody-someone-else")]);
+        push(sessions, &["cody-someone-else"]);
+        push(sessions, &["cody-someone-else"]);
+        assert!(sessions.lock().unwrap().registry_known(), "precondition");
         ledger.record("todo:1", marker("focus", "cody-gone")).unwrap();
     })
     .await;

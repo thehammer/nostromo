@@ -108,7 +108,7 @@ async fn first_agent_message(agent: &str) -> String {
 
 /// Accepts the `add`/`list` grammar the daemon uses, logs every call, keeps a
 /// copy of each plan file under `plans/<n>.md`, refuses an `add` without
-/// `--max-cost 10`, fails when a `fail` marker file exists, and keeps `list.json`
+/// `--max-cost 10`, fails `add` when a `fail` marker file exists and `list` when `list-fail` does, and keeps `list.json`
 /// current.
 const FAKE_MOTHER: &str = r#"#!/bin/sh
 here="$(dirname "$0")"
@@ -141,6 +141,7 @@ case "$sub" in
     echo "abc123"
     printf '[{"id":"abc123","state":"queued"}]' > "$here/list.json" ;;
   list)
+    if [ -e "$here/list-fail" ]; then echo "boom: no list" >&2; exit 1; fi
     if [ -e "$here/list.json" ]; then cat "$here/list.json"; else echo "[]"; fi ;;
   *) echo "mother: unknown command: $sub" >&2; exit 2 ;;
 esac
@@ -590,6 +591,16 @@ impl Rig {
 
     fn mother_fail(&self) {
         std::fs::write(self.mother_dir().join("fail"), "").unwrap();
+    }
+
+    /// Mother no longer lists any job (archived or removed).
+    fn mother_forget_jobs(&self) {
+        std::fs::write(self.mother_dir().join("list.json"), "[]").unwrap();
+    }
+
+    /// `mother list` fails from now on (Mother unreachable).
+    fn mother_list_fail(&self) {
+        std::fs::write(self.mother_dir().join("list-fail"), "").unwrap();
     }
 
     fn mother_recover(&self) {
@@ -1234,6 +1245,35 @@ async fn sending_an_item_that_already_has_a_job_returns_the_job_and_queues_nothi
     assert_eq!(again.kind, "existing", "{again:?}");
     assert_eq!(again.job_id.as_deref(), Some("abc123"));
     assert_eq!(rig.mother_adds().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_job_marker_whose_job_is_gone_from_mother_is_not_live_in_the_preview_and_a_plain_send_queues_a_new_job() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+    rig.send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "ctx")).await.unwrap();
+    assert_eq!(rig.preview(DOC_BUG).await.existing.len(), 1, "precondition: Mother lists the job");
+
+    rig.mother_forget_jobs();
+
+    assert!(rig.preview(DOC_BUG).await.existing.is_empty(), "the sheet no longer warns about an archived job");
+    let outcome = rig.send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "ctx")).await.unwrap();
+    assert_eq!(outcome.kind, "mother_job", "the send agrees with the sheet: {outcome:?}");
+    assert_eq!(rig.mother_adds().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreachable_mother_keeps_the_job_marker_live_in_the_preview_and_the_send_agrees() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+    rig.send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "ctx")).await.unwrap();
+    rig.mother_forget_jobs();
+    rig.mother_list_fail();
+
+    assert_eq!(rig.preview(DOC_BUG).await.existing.len(), 1, "unknown counts as live");
+    let again = rig.send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "ctx")).await.unwrap();
+    assert_eq!(again.kind, "existing", "{again:?}");
+    assert_eq!(rig.mother_adds().len(), 1, "nothing more was queued");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1895,4 +1935,60 @@ async fn a_send_whose_agent_never_reads_its_first_message_is_seed_failed_and_lea
     assert_eq!(rig.created_metas().len(), 1, "only the good focus is announced");
     assert_eq!(rig.ledger.markers(&big).len(), 1);
     assert!(rig.is_alive(&tag_of(&later)));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A hung Mother must not make the sheet's preview outlast the Mac's request
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The Mac gives up on a request after this long.
+const MAC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A `mother` that accepts the call and never answers.
+const HUNG_MOTHER: &str = "#!/bin/sh\nexec sleep 600\n";
+
+/// Virtual time (the clock is paused once the rig is built, so nothing here
+/// waits on the wall clock): the preview must answer, with the job marker kept
+/// as live (unknown counts as live), strictly before the Mac's own request
+/// timeout, even when `mother list` hangs instead of failing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_hung_mother_answers_the_preview_in_time_for_the_mac_and_keeps_the_job_marker_live() {
+    let rig = Rig::local().await;
+    rig.ledger
+        .record(
+            DOC_BUG,
+            SentMarker {
+                kind: "mother_job".into(),
+                target_id: "job-hung".into(),
+                label: "queued before Mother hung".into(),
+                created_at: Utc::now(),
+                nonce: None,
+            },
+        )
+        .unwrap();
+    // The rig restores MOTHER_BIN when it drops.
+    let hung = rig.dir.path().join("hung-mother");
+    std::fs::create_dir_all(&hung).unwrap();
+    let script = hung.join("mother");
+    std::fs::write(&script, HUNG_MOTHER).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::env::set_var("MOTHER_BIN", &script);
+
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let preview = rig.preview(DOC_BUG).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < MAC_REQUEST_TIMEOUT,
+        "the preview took {elapsed:?} of virtual time; the Mac gives up at {MAC_REQUEST_TIMEOUT:?}"
+    );
+    assert_eq!(
+        preview.existing.iter().map(|m| (m.kind.as_str(), m.target_id.as_str())).collect::<Vec<_>>(),
+        vec![("mother_job", "job-hung")],
+        "an unknown job list counts as live"
+    );
 }

@@ -494,6 +494,60 @@ fn a_bare_domain_with_a_path_is_removed_like_a_url() {
 }
 
 #[test]
+fn a_bare_domain_with_a_query_or_a_fragment_is_removed_like_a_url() {
+    let cases = [
+        ("See evil.com?x=1 now", "See now"),
+        ("See evil.com#frag now", "See now"),
+        ("see sub.evil.co.uk?q=1&r=2", "see"),
+        ("Go EVIL.COM#Login now", "Go now"),
+        ("Fetch evil.example:8080?x=1 today", "Fetch today"),
+        ("Open evil.io/a?b#c then", "Open then"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(sr(raw), Some(expected.into()), "{raw:?}");
+    }
+    assert_eq!(sr("evil.com?x=1"), None);
+}
+
+#[test]
+fn an_internationalised_domain_with_a_path_query_or_fragment_is_removed() {
+    let cases = [
+        ("See b\u{fc}cher.example/x now", "See now"),
+        ("See \u{43f}\u{440}\u{438}\u{43c}\u{435}\u{440}.\u{440}\u{444}/x now", "See now"),
+        ("See \u{4f8b}\u{3048}.\u{30c6}\u{30b9}\u{30c8}?x=1 now", "See now"),
+        ("See xn--bcher-kva.example#frag now", "See now"),
+        ("See evil.xn--p1ai/x now", "See now"),
+        ("See caf\u{e9}.com/menu now", "See now"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(sr(raw), Some(expected.into()), "{raw:?}");
+    }
+}
+
+#[test]
+fn an_ideographic_full_stop_counts_as_a_dot_in_a_domain() {
+    let cases = [
+        ("See evil\u{3002}com/x now", "See now"),
+        ("See evil\u{3002}com?x=1 now", "See now"),
+        ("See sub\u{3002}evil\u{3002}co\u{3002}uk#f now", "See now"),
+        ("See \u{ff45}\u{ff56}\u{ff49}\u{ff4c}\u{3002}\u{ff43}\u{ff4f}\u{ff0f}x now", "See now"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(sr(raw), Some(expected.into()), "{raw:?}");
+    }
+    // A sentence that merely ends in U+3002, and a plain bare host, stay.
+    assert_eq!(sr("\u{5b8c}\u{4e86}\u{3002}"), Some("\u{5b8c}\u{4e86}\u{3002}".into()));
+    assert_eq!(sr("Ask about evil\u{3002}com"), Some("Ask about evil\u{3002}com".into()), "no path, query or fragment: kept as today");
+}
+
+#[test]
+fn a_file_name_followed_by_a_question_mark_is_still_prose() {
+    for text in ["Is it main.py?", "Did foo.rs change? Check README.md.", "Fix evil.com. Then ship"] {
+        assert_eq!(sr(text), Some(text.into()), "{text:?}");
+    }
+}
+
+#[test]
 fn a_bare_host_without_a_path_is_kept_because_it_cannot_be_told_from_a_file_name() {
     // `foo.rs`, `main.py` and `README.md` are also valid host names (Serbia, Paraguay, Moldova), so a
     // dotted word with no scheme, no `www.` and no path is ordinary prose, not a link.
@@ -1327,6 +1381,19 @@ struct FakeHost {
     /// Also leave look-alike transcript directories of other "projects" beside each real one.
     make_decoys: AtomicBool,
     decoys: Mutex<Vec<PathBuf>>,
+    /// Name transcript directories the way `claude` does for a long working directory: the
+    /// sanitised path cut at 200 characters, a dash and a hash, so the scratch name is lost.
+    hashes_long_names: AtomicBool,
+}
+
+/// What `claude` calls the transcript directory of `cwd` when the path is long: the first 200
+/// characters of the dash-for-non-alphanumerics name, then `-` and a hash of the whole path.
+fn claude_hashed_name(cwd: &Path) -> String {
+    let real = fs::canonicalize(cwd).unwrap().to_string_lossy().into_owned();
+    let full: String = real.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    assert!(full.len() > 200, "the scratch path is long enough to be hashed: {full}");
+    let hash = real.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ u32::from(b));
+    format!("{}-{}", &full[..200], hash)
 }
 
 impl FakeHost {
@@ -1372,9 +1439,16 @@ impl FakeHost {
 impl PicksSessionHost for FakeHost {
     fn spawn(&self, tag: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String> {
         if let Some(projects) = self.projects_dir.lock().unwrap().clone() {
-            let dir = transcript_dir_for(&projects, cwd);
+            let dir = if self.hashes_long_names.load(Ordering::SeqCst) {
+                projects.join(claude_hashed_name(cwd))
+            } else {
+                transcript_dir_for(&projects, cwd)
+            };
             fs::create_dir_all(&dir).expect("the fake claude can make its transcript directory");
-            fs::write(dir.join("session.jsonl"), "{\"type\":\"user\"}\n").expect("and write a transcript");
+            // Every record of a real transcript names the working directory it ran in.
+            let real = fs::canonicalize(cwd).unwrap();
+            let record = format!("{{\"type\":\"user\",\"cwd\":\"{}\"}}\n", real.display());
+            fs::write(dir.join("session.jsonl"), record).expect("and write a transcript");
             if self.make_decoys.load(Ordering::SeqCst) {
                 let name = dir.file_name().unwrap().to_string_lossy().into_owned();
                 let shorter: String = name.chars().take(name.chars().count() - 1).collect();
@@ -1437,7 +1511,7 @@ fn env_with(
     date_of: impl Fn(DateTime<Utc>) -> NaiveDate + Send + Sync + 'static,
     projects_dir: Option<PathBuf>,
 ) -> GeneratorEnv {
-    GeneratorEnv { today: Arc::new(move || today), date_of: Arc::new(date_of), projects_dir }
+    GeneratorEnv { today: Arc::new(move || today), date_of: Arc::new(date_of), projects_dir, scratch_root: None }
 }
 
 fn generator(rig: &Rig, timeout: Duration) -> (Arc<FakeHost>, Arc<PicksGenerator>) {
@@ -1557,6 +1631,35 @@ fn the_prompt_says_everything_the_tools_return_is_untrusted_data_never_instructi
     assert!(prompt.contains("never"), "{PICKS_PROMPT}");
     assert!(prompt.contains("opaque"), "item ids are handles, not prose: {PICKS_PROMPT}");
     assert!(prompt.contains("status_category") && prompt.contains("kind"), "kind and status are third-party text too: {PICKS_PROMPT}");
+}
+
+#[test]
+fn the_prompt_tells_the_agent_id_kind_and_status_category_are_opaque_third_party_values_not_instructions() {
+    // They stay outside the nonce fence by design, so the prompt itself has to say what they are:
+    // each is named in a sentence that calls it opaque or third-party, before the task begins.
+    let security = PICKS_PROMPT.split("TASK:").next().unwrap();
+    assert!(security.starts_with("You are generating") && security.contains("SECURITY:"), "{PICKS_PROMPT}");
+    let sentence_with = |needle: &str| -> String {
+        let at = security.find(needle).unwrap_or_else(|| panic!("the security section never mentions {needle}: {security}"));
+        let start = security[..at].rfind(". ").map_or(0, |i| i + 2);
+        let end = security[at..].find(". ").map_or(security.len(), |i| at + i);
+        security[start..end].to_lowercase()
+    };
+
+    let id = sentence_with("`id`");
+    assert!(id.contains("opaque"), "id is an opaque handle: {id}");
+    assert!(id.contains("never read") && id.contains("sentences"), "and never read as a sentence: {id}");
+
+    for field in ["`kind`", "`status_category`"] {
+        let sentence = sentence_with(field);
+        assert!(sentence.contains("third-party"), "{field} is third-party text: {sentence}");
+    }
+    let rest = sentence_with("`status_category`");
+    assert!(rest.contains("every other field"), "and so is every other field: {rest}");
+    assert!(
+        security.to_lowercase().contains("never instructions"),
+        "none of it is an instruction: {security}"
+    );
 }
 
 #[test]
@@ -2324,6 +2427,67 @@ async fn after_a_run_that_timed_out_its_transcript_directory_is_deleted_and_noth
     t.assert_only_the_runs_transcripts_were_deleted().await;
 }
 
+/// A scratch root whose path is long enough that `claude` truncates and hashes the transcript
+/// directory's name (so it no longer ends in the scratch directory's own name).
+fn long_scratch_root(under: &Path) -> PathBuf {
+    let root = under.join("a".repeat(120)).join("b".repeat(120));
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn with_a_long_tmpdir_the_hashed_transcript_directory_is_found_and_deleted_and_decoys_are_not() {
+    let rig = paused_rig().await;
+    let projects = tempfile::tempdir().unwrap();
+    let scratch_parent = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    *host.projects_dir.lock().unwrap() = Some(projects.path().to_path_buf());
+    host.hashes_long_names.store(true, Ordering::SeqCst);
+    let mut env = env_with(ymd(2026, 10, 11), |_| NaiveDate::MIN, Some(projects.path().to_path_buf()));
+    env.scratch_root = Some(long_scratch_root(scratch_parent.path()));
+    let generator = PicksGenerator::with_env(
+        rig.hub.picks().clone(),
+        host.clone() as Arc<dyn PicksSessionHost>,
+        Duration::from_secs(120),
+        env,
+    );
+    host.publishes_on_send(&rig.hub, &["todo:1", "todo:2", "todo:3"]);
+
+    // Decoys: an unrelated project, and look-alikes that share the start of the hashed name (another
+    // run in the same long temp directory) but whose transcripts name another working directory.
+    let unrelated = projects.path().join("-Users-someone-code-project");
+    fs::create_dir_all(&unrelated).unwrap();
+    fs::write(unrelated.join("keep.jsonl"), "{\"cwd\":\"/Users/someone/code/project\"}\n").unwrap();
+    let mut lookalikes = Vec::new();
+    for (i, token) in ["nostromo-picks-0000000000000000", "not-a-picks-run"].into_iter().enumerate() {
+        let other = long_scratch_root(scratch_parent.path()).join(token);
+        fs::create_dir_all(&other).unwrap();
+        let dir = projects.path().join(format!("{}-{i}", &claude_hashed_name(&other)[..200]));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("session.jsonl"), format!("{{\"cwd\":\"{}\"}}\n", other.display())).unwrap();
+        lookalikes.push(dir);
+    }
+
+    refresh(&generator, "manual").await.unwrap();
+    wait_idle(&rig, &generator, "the run", |s| s.items.len() == 3).await;
+
+    let made = host.transcripts.lock().unwrap().clone();
+    assert_eq!(made.len(), 1, "{made:?}");
+    wait_until("the run's hashed transcript directory to be deleted", || !made[0].exists()).await;
+    assert!(
+        !made[0].file_name().unwrap().to_string_lossy().contains("nostromo-picks-"),
+        "the premise: the hashed name lost the scratch name: {made:?}"
+    );
+    for kept in lookalikes.iter().chain([&unrelated]) {
+        assert!(kept.exists(), "{kept:?} does not carry this run's token and must survive");
+    }
+    let mut left: Vec<PathBuf> = fs::read_dir(projects.path()).unwrap().map(|e| e.unwrap().path()).collect();
+    left.sort();
+    let mut expected: Vec<PathBuf> = lookalikes.into_iter().chain([unrelated]).collect();
+    expected.sort();
+    assert_eq!(left, expected, "nothing else under the projects directory was touched");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn with_no_projects_directory_a_run_deletes_no_transcripts_and_does_not_fail() {
     let rig = paused_rig().await;
@@ -2778,4 +2942,19 @@ async fn other_callers_keep_every_tool() {
             assert!(matches!(result, ToolResult::Ok(_)), "{name} for {caller:?}");
         }
     }
+}
+
+// ── 1c. unspaced CJK prose is not a host ──────────────────────────────────────
+
+#[test]
+fn unspaced_japanese_prose_around_an_ideographic_full_stop_is_kept() {
+    // `修正済み。PR#233を確認`: read as host `修正済み。PR` plus a `#` fragment, the whole reason was deleted.
+    let raw = "\u{4fee}\u{6b63}\u{6e08}\u{307f}\u{3002}PR#233\u{3092}\u{78ba}\u{8a8d}";
+    assert_eq!(sr(raw), Some(raw.into()));
+}
+
+#[test]
+fn an_ascii_host_spelled_with_an_ideographic_full_stop_is_still_stripped() {
+    assert_eq!(sr("evil\u{3002}com/x"), None, "nothing but a link says nothing");
+    assert_eq!(sr("See evil\u{3002}com/x now"), Some("See now".into()));
 }

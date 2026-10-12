@@ -65,7 +65,8 @@ final class TeriSurfaceView: NSView {
     // MARK: Init
 
     init(store: WorkStore, defaults: UserDefaults = .standard, center: NotificationCenter = .default,
-         scheduler: WorkScheduler = .main, now: @escaping () -> Date = Date.init, calendar: Calendar = .current) {
+         scheduler: WorkScheduler = .main, now: @escaping () -> Date = Date.init,
+         calendar: Calendar = TeriPicksView.machineLocalCalendar) {
         self.store = store
         self.center = center
         self.scheduler = scheduler

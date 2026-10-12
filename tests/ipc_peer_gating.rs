@@ -3073,11 +3073,8 @@ async fn get_view_state_for_fred_teri_and_mother_is_denied_to_a_network_driven_s
 
 #[tokio::test]
 async fn create_focus_cannot_queue_a_mother_job_or_touch_the_sent_ledger_for_a_network_driven_session() {
-    // The ordinary control below really sends an item: keep it off the real ledger.
-    let ledger_dir = tempfile::tempdir().unwrap();
-    nostromo::data::work::sent::install_ledger(std::sync::Arc::new(
-        nostromo::data::work::sent::SentLedger::new(ledger_dir.path().join("sent.json")),
-    ));
+    // The ordinary control below really sends an item: `spawn_server` already keeps it off the real
+    // ledger (installing another here would swap the process-wide one under parallel tests).
     let h = spawn_server().await;
     let state = mcp_state(&h);
     let (mut unix, _) = h.unix(vec![]).await;

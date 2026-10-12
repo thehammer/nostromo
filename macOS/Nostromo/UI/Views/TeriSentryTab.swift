@@ -14,26 +14,54 @@ final class TeriSentryViewTracker {
     /// Nil until the tab has been shown once: nothing is "new" before that.
     private(set) var baseline: Date?
 
+    /// How often the stored last-viewed time is refreshed while the tab is shown.
+    static let persistInterval: TimeInterval = 60
+
     private let defaults: UserDefaults
     private let now: () -> Date
+    private let scheduler: WorkScheduler
     private var visibleCount = 0
+    private var cancelPeriodicPersist: (() -> Void)?
 
-    init(defaults: UserDefaults, now: @escaping () -> Date = Date.init) {
+    init(defaults: UserDefaults, now: @escaping () -> Date = Date.init, scheduler: WorkScheduler = .main) {
         self.defaults = defaults
         self.now = now
+        self.scheduler = scheduler
     }
 
+    /// Showing does NOT store a time: if the app dies mid-view, the next baseline must
+    /// still be the previous view, so issues from this session stay "new". The time is
+    /// stored when the tab is left and, while it is shown, every `persistInterval`.
     func didShow() {
         visibleCount += 1
         guard visibleCount == 1 else { return }
         baseline = defaults.object(forKey: Self.lastViewedKey) as? Date
-        defaults.set(now(), forKey: Self.lastViewedKey)
+        schedulePersist()
     }
 
     func didLeave() {
         guard visibleCount > 0 else { return }
         visibleCount -= 1
-        if visibleCount == 0 { defaults.set(now(), forKey: Self.lastViewedKey) }
+        guard visibleCount == 0 else { return }
+        cancelPeriodicPersist?()
+        cancelPeriodicPersist = nil
+        defaults.set(now(), forKey: Self.lastViewedKey)
+    }
+
+    /// Store the time now if the tab is shown, without leaving it. For a quit (or a window
+    /// close) with the tab open: nothing else runs `didLeave` first, and without this the
+    /// stored time is up to `persistInterval` stale and everything shows "new" next launch.
+    func flush() {
+        guard visibleCount > 0 else { return }
+        defaults.set(now(), forKey: Self.lastViewedKey)
+    }
+
+    private func schedulePersist() {
+        cancelPeriodicPersist = scheduler.schedule(Self.persistInterval) { [weak self] in
+            guard let self, self.visibleCount > 0 else { return }
+            self.defaults.set(self.now(), forKey: Self.lastViewedKey)
+            self.schedulePersist()
+        }
     }
 
     /// The user says everything so far has been seen: nothing is "new" until more arrives.

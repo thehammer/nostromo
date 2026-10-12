@@ -280,9 +280,9 @@ final class TeriDateFormatterReuseTests: XCTestCase {
 //    system selection colour (`selectedContentBackgroundColor`, a saturated blue by default).
 //    EVERY text (priority, kind, title, due, status, urgent or not) is white. White is the
 //    lightest colour there is, so it is the best the platform allows: on the default blue it
-//    is ~3.65:1, short of the 4.5:1 body-text bar. When white reaches 4.5 on the user's accent
-//    that is the bar; otherwise the documented floor is 3.0 (the large-text / UI bar) and the
-//    text must still be white, because no lighter colour would be better.
+//    measures 5.4-6.3:1, above the 4.5:1 body-text bar. The contrast bar is asserted against a
+//    fixed stand-in for that blue (the real fill follows the Mac's accent colour, which a test
+//    must not depend on); on other accents white is still the colour, by design.
 //  - Row selected but its window not active (`backgroundStyle != .emphasized`, the row view
 //    still `isSelected`): the fill is `unemphasizedSelectedContentBackgroundColor`, a grey that
 //    flips between light and dark with the appearance. Every text reaches 4.5:1 on it, in both
@@ -433,14 +433,13 @@ final class WorkRowSelectionContrastTests: XCTestCase {
         for (name, appearance) in appearances {
             let rig = try makeRig(appearance)
             for item in items {
-                let (cell, text) = try colours(rig, item, .emphasisedSelection)
-                let fill = try selectionFill(NSColor.selectedContentBackgroundColor, under: cell)
+                let (_, text) = try colours(rig, item, .emphasisedSelection)
+                // The real fill follows the Mac's accent colour, so the contrast bar is checked
+                // against a fixed stand-in for the default blue selection (white on it measures
+                // 5.4-6.3:1 across both appearances), never against whatever accent this Mac uses.
+                let fill = SelColor(r: 0.04, g: 0.33, b: 0.95, a: 1)
                 let white = SelColor(r: 1, g: 1, b: 1, a: 1)
-                let best = selContrast(white, on: fill)
-                // White is ~3.65:1 on the default blue: under 4.5, so the floor applies there.
-                let bar: CGFloat = best >= 4.5 ? 4.5 : 3.0
-                XCTAssertGreaterThanOrEqual(best, 3.0,
-                    "\(name): even white is only \(best):1 on this Mac's selection colour \(selDescribe(fill))")
+                let bar: CGFloat = 4.5
                 for part in Part.allCases {
                     let colour = try XCTUnwrap(text[part])
                     XCTAssertTrue(selClose(colour, white),

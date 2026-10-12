@@ -430,9 +430,11 @@ final class MarkdownCardView: NSView {
     /// the Mac's actual System Settings ▸ Appearance — light or dark — rather
     /// than Nostromo's own always-dark theme (every sibling view in this file's
     /// pane, `ToolResultView`, `ToolCallChipView`, etc., hardcodes a literal
-    /// `Theme`/`NSColor(white:...)` value for exactly this reason: the app never
-    /// sets `NSApp.appearance`, so nothing forces these otherwise). On a Mac set
-    /// to Light Mode, `.controlBackgroundColor` resolves to near-white with
+    /// `Theme`/`NSColor(white:...)` value for exactly this reason: these surfaces
+    /// are drawn dark by construction. `AppAppearance` now pins `NSApp.appearance`
+    /// to Dark Aqua, which is what makes system-drawn labels readable on them, but
+    /// the fixed colours stay so a card never depends on that pin). Under a Light
+    /// appearance, `.controlBackgroundColor` resolves to near-white with
     /// near-black text — a card that looks blank at a glance sitting incongruously
     /// in Nostromo's otherwise-dark UI. There is no longer an appearance-change
     /// override here because these colors no longer depend on it.

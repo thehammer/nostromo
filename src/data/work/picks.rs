@@ -53,7 +53,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use regex::Regex;
@@ -135,7 +135,7 @@ pub const MANUAL_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const ALIVE_POLL: Duration = Duration::from_millis(500);
 
 /// `reason` as it may be stored and shown: one line, no control, format, bidi or
-/// tag characters, no URLs, no markdown links (kept as their link text) and no
+/// tag characters, no URLs (a bare `host.tld` followed by a path, query or fragment counts), no markdown links (kept as their link text) and no
 /// backticks. `None` when nothing is left, or when more than
 /// [`MAX_REASON_CHARS`] is: a reason is a sentence, and an over-long one is the
 /// agent's mistake to fix, not ours to cut.
@@ -157,11 +157,24 @@ pub fn sanitize_reason(raw: &str) -> Option<String> {
         Regex::new(r"(?i)\b(?:[a-z][a-z0-9+.\-]*://|www\.|mailto:|javascript:|data:|vbscript:|file:|tel:|sms:)\S*")
             .expect("static regex")
     });
-    // `host.tld/...`: a domain with a path is a link. A bare `host.tld` is kept: it cannot
-    // be told from a file name (`main.py`, `README.md` and `foo.rs` are country domains).
+    // `host.tld/...`, `host.tld?...` and `host.tld#...`: a domain with a path, query or fragment is a
+    // link. A bare `host.tld` is kept: it cannot be told from a file name (`main.py`, `README.md` and
+    // `foo.rs` are country domains). Labels may be non-ASCII (internationalised hosts, or punycode
+    // `xn--`), and U+3002 (ideographic full stop) separates labels like a dot does; NFKC leaves it alone.
+    // U+3002 is also the full stop of unspaced CJK prose (`修正済み。PR#233を確認`), so when the LAST
+    // separator is U+3002 the final two labels must be plain ASCII (a letters-only TLD of 2+ chars
+    // after an ASCII label), the shape of a host someone typed with the wrong dot.
     let bare_domain = BARE_DOMAIN.get_or_init(|| {
-        Regex::new(r"(?i)\b[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?)*\.[a-z]{2,}(?::\d+)?/\S*")
-            .expect("static regex")
+        let label = r"[\p{L}\p{N}\p{M}](?:[\p{L}\p{N}\p{M}\-]*[\p{L}\p{N}\p{M}])?";
+        let tld = r"(?:[\p{L}\p{M}]{2,}|xn--[a-z0-9\-]+)";
+        let ascii_label = r"[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?";
+        let ascii_tld = r"[a-z]{2,}";
+        let dot = r"[.\u{3002}]";
+        let tail = r"(?::\d+)?(?:/\S*|\?\S+|\#\S+)";
+        Regex::new(&format!(
+            r"(?i)\b(?:{label}(?:{dot}{label})*\.{tld}|(?:{label}{dot})*{ascii_label}\u{{3002}}{ascii_tld}){tail}"
+        ))
+        .expect("static regex")
     });
     let text = markdown_link.replace_all(&flat, "$1");
     let text = url.replace_all(&text, " ");
@@ -618,6 +631,9 @@ pub struct GeneratorEnv {
     /// Where `claude` keeps its per-directory transcripts (`~/.claude/projects`);
     /// `None` leaves them alone.
     pub projects_dir: Option<PathBuf>,
+    /// Where each run's scratch working directory is made; `None` is the system
+    /// temp directory (`$TMPDIR`).
+    pub scratch_root: Option<PathBuf>,
 }
 
 impl GeneratorEnv {
@@ -627,6 +643,7 @@ impl GeneratorEnv {
             today: Arc::new(|| chrono::Local::now().date_naive()),
             date_of: Arc::new(|at| at.with_timezone(&chrono::Local).date_naive()),
             projects_dir: dirs_next::home_dir().map(|h| h.join(".claude").join("projects")),
+            scratch_root: None,
         }
     }
 }
@@ -664,7 +681,7 @@ impl PicksGenerator {
         timeout: Duration,
         today: TodayFn,
     ) -> Arc<Self> {
-        let env = GeneratorEnv { today, date_of: Arc::new(|_| NaiveDate::MIN), projects_dir: None };
+        let env = GeneratorEnv { today, date_of: Arc::new(|_| NaiveDate::MIN), projects_dir: None, scratch_root: None };
         Self::with_env(store, host, timeout, env)
     }
 
@@ -732,10 +749,11 @@ impl PicksGenerator {
     }
 
     async fn run(self: Arc<Self>, reason: Reason, today: NaiveDate, publishes: watch::Receiver<u64>) {
-        let scratch = ScratchDir::create();
+        let started = SystemTime::now();
+        let scratch = ScratchDir::create(self.env.scratch_root.as_deref());
         // Worked out while the directory exists: `claude` files transcripts under its real path.
         let transcripts = match (&self.env.projects_dir, &scratch) {
-            (Some(projects), Ok(dir)) => Some(transcript_dir_for(projects, dir.path())),
+            (Some(projects), Ok(dir)) => Some(RunTranscripts::new(projects, dir.path(), started)),
             _ => None,
         };
         let outcome = match &scratch {
@@ -745,8 +763,8 @@ impl PicksGenerator {
         // The session ends on every path, before anyone is told it is over.
         self.host.stop(PICKS_TAG);
         drop(scratch);
-        if let Some(dir) = transcripts {
-            remove_transcripts(&dir);
+        if let Some(transcripts) = transcripts {
+            transcripts.remove();
         }
         {
             let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
@@ -794,12 +812,83 @@ impl PicksGenerator {
 /// Name prefix of a run's scratch directory (it survives in the transcript directory's name).
 const SCRATCH_PREFIX: &str = "nostromo-picks-";
 
-/// Remove one run's transcripts (third-party text the session read), best effort.
-/// Only a directory derived from a run's own scratch directory is ever removed.
-fn remove_transcripts(dir: &Path) {
-    let ours = dir.file_name().is_some_and(|n| n.to_string_lossy().contains(SCRATCH_PREFIX));
-    if ours {
-        let _ = std::fs::remove_dir_all(dir);
+/// How far before a run's start a directory's modification time may fall and still
+/// count as the run's (coarse file-system timestamps).
+const START_SLACK: Duration = Duration::from_secs(2);
+
+/// Leading characters of the derived transcript-directory name every candidate
+/// must share: a truncated name keeps the start of the path, and this bounds how
+/// many other projects' directories are even looked at.
+const SWEEP_PREFIX_CHARS: usize = 40;
+
+/// The most of a transcript file read when looking for a run's scratch name (the
+/// first records carry the working directory).
+const SWEEP_READ_BYTES: u64 = 1 << 20;
+
+/// One run's transcripts under `~/.claude/projects` (third-party text the session
+/// read), to be deleted when the run ends.
+///
+/// `claude` names a project's directory after its working directory with every
+/// non-alphanumeric character turned into `-`, but when that is long (a long
+/// `$TMPDIR`) it truncates the name and appends a hash, which loses the scratch
+/// directory's unique name at the end of the path. So the directory derived from
+/// the path ([`transcript_dir_for`]) is removed when it carries the run's
+/// unique scratch name, and the projects directory is also swept for a
+/// directory that is newer than the run's start, shares the derived name's
+/// beginning AND has a transcript naming this run's scratch directory (the
+/// name alone proves nothing: it may be another project's). Anything that does
+/// not carry the run's unique token is never touched.
+struct RunTranscripts {
+    projects: PathBuf,
+    derived: PathBuf,
+    /// `nostromo-picks-<uuid>`: unique to the run.
+    token: String,
+    started: SystemTime,
+}
+
+impl RunTranscripts {
+    fn new(projects: &Path, scratch: &Path, started: SystemTime) -> Self {
+        let token = scratch.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Self { projects: projects.to_path_buf(), derived: transcript_dir_for(projects, scratch), token, started }
+    }
+
+    /// Best effort; never fails the run.
+    fn remove(&self) {
+        if !self.token.starts_with(SCRATCH_PREFIX) {
+            return;
+        }
+        let derived_name = self.derived.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if derived_name.contains(&self.token) {
+            let _ = std::fs::remove_dir_all(&self.derived);
+        }
+        let prefix: String = derived_name.chars().take(SWEEP_PREFIX_CHARS).collect();
+        let Ok(entries) = std::fs::read_dir(&self.projects) else { return };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&prefix) && self.is_this_runs(&entry.path()) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    fn is_this_runs(&self, dir: &Path) -> bool {
+        let Ok(meta) = std::fs::symlink_metadata(dir) else { return false };
+        if !meta.is_dir() {
+            return false;
+        }
+        let since = self.started.checked_sub(START_SLACK).unwrap_or(self.started);
+        meta.modified().is_ok_and(|m| m >= since) && self.a_transcript_names_the_scratch_directory(dir)
+    }
+
+    fn a_transcript_names_the_scratch_directory(&self, dir: &Path) -> bool {
+        use std::io::Read as _;
+        let Ok(files) = std::fs::read_dir(dir) else { return false };
+        files.flatten().filter(|f| f.path().extension().is_some_and(|e| e == "jsonl")).any(|f| {
+            let Ok(file) = std::fs::File::open(f.path()) else { return false };
+            let mut head = Vec::new();
+            file.take(SWEEP_READ_BYTES).read_to_end(&mut head).is_ok()
+                && String::from_utf8_lossy(&head).contains(&self.token)
+        })
     }
 }
 
@@ -808,8 +897,9 @@ fn remove_transcripts(dir: &Path) {
 struct ScratchDir(PathBuf);
 
 impl ScratchDir {
-    fn create() -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!("{SCRATCH_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+    fn create(root: Option<&Path>) -> std::io::Result<Self> {
+        let root = root.map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+        let path = root.join(format!("{SCRATCH_PREFIX}{}", uuid::Uuid::new_v4().simple()));
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {

@@ -639,6 +639,7 @@ const BRIEF_AGENT_RATIONALES: [(&str, &str); 4] = [
 fn write_brief(slug: &str, brief: &str) -> std::io::Result<PathBuf> {
     use std::io::Write;
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    sent::forbid_real_teri_dir_in_tests("a Mother brief");
     let dir = sent::teri_dir().join("mother-briefs");
     sent::create_private_dir(&dir)?;
     let stamp = Utc::now().format("%Y%m%dT%H%M%S%3f");

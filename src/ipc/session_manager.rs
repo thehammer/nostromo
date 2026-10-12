@@ -1582,15 +1582,6 @@ impl SessionManager {
         self.restrictions.get(tag)
     }
 
-    /// `tag` is in the pushed focus registry but this process has no session
-    /// for it: after a daemon restart, sessions are respawned lazily as the
-    /// Mac attaches, so this focus exists and is just not running yet. A
-    /// session that was stopped in this process keeps its (exited) entry and
-    /// is not this.
-    pub fn awaits_respawn(&self, tag: &str) -> bool {
-        !self.has_session_entry(tag) && self.is_registered(tag)
-    }
-
     /// `tag` is in the pushed focus registry.
     pub fn is_registered(&self, tag: &str) -> bool {
         self.focus_registry.iter().any(|f| f.tag == tag)

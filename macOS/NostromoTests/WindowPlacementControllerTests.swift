@@ -1091,6 +1091,86 @@ final class WindowPlacementControllerTests: XCTestCase {
         XCTAssertEqual(window.toggleCount, 2)
     }
 
+    func test_before_the_windows_own_re_entry_nothing_is_placed_while_a_transition_is_in_flight() {
+        awaitingOwnReentry()
+        window.currentDisplayUUID = Topology.main.uuid
+        window.transitionInFlight = true
+
+        controller.windowEvent(.willReenterFullScreen)
+
+        XCTAssertEqual(window.placedOn.count, 1, "no setFrame on top of a transition")
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_before_the_windows_own_re_entry_nothing_is_placed_while_a_display_change_is_pending() {
+        awaitingOwnReentry()
+        window.currentDisplayUUID = Topology.main.uuid
+        window.displayChangePending = true
+
+        controller.windowEvent(.willReenterFullScreen)
+
+        XCTAssertEqual(window.placedOn.count, 1)
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_before_the_windows_own_re_entry_nothing_is_placed_while_a_screen_change_is_settling() {
+        awaitingOwnReentry()
+        window.currentDisplayUUID = Topology.main.uuid
+        controller.displaysReconfigured()                  // arms the settle window
+        let placements = window.placedOn.count
+
+        controller.windowEvent(.willReenterFullScreen)
+
+        XCTAssertEqual(window.placedOn.count, placements, "settling: no setFrame")
+        XCTAssertEqual(window.toggleCount, 2)
+    }
+
+    func test_before_the_windows_own_re_entry_the_place_resumes_once_nothing_is_in_progress() {
+        awaitingOwnReentry()
+        window.currentDisplayUUID = Topology.main.uuid
+        window.transitionInFlight = true
+        controller.windowEvent(.willReenterFullScreen)
+        XCTAssertEqual(window.placedOn.count, 1)
+
+        window.transitionInFlight = false
+        controller.windowEvent(.willReenterFullScreen)
+
+        XCTAssertEqual(window.placedOn.count, 2)
+        XCTAssertEqual(window.toggleCount, 2, "never toggles")
+    }
+
+    // MARK: A real exit that is still mid-transition is not double-handled
+
+    func test_the_deferred_exit_does_not_synthesise_a_did_exit_while_the_real_exit_is_still_in_flight() {
+        makeController(windowOn: target.uuid)
+        enterFullScreen(landingOn: Topology.main.uuid)     // exit armed
+        // AppKit's own exit has begun: the style mask is already clear, the transition not over.
+        window.isFullScreen = false
+        window.transitionInFlight = true
+        scheduler.runAll()                                 // polling is bounded
+
+        XCTAssertEqual(window.toggleCount, 1)
+        XCTAssertEqual(window.placedOn.count, 0, "no post-exit placement was scheduled by a synthetic didExit")
+        XCTAssertNotEqual(controller.phase, .enteringFullScreen)
+    }
+
+    func test_a_real_exit_that_finishes_while_the_deferred_exit_is_waiting_is_handled_exactly_once() {
+        makeController(windowOn: target.uuid)
+        enterFullScreen(landingOn: Topology.main.uuid)
+        window.isFullScreen = false
+        window.transitionInFlight = true
+        fireExit()                                         // sees the transition in flight: re-polls
+        XCTAssertEqual(controller.phase, .exitingForRetry, "waiting for the real didExitFullScreen")
+
+        window.transitionInFlight = false
+        window.currentDisplayUUID = Topology.main.uuid
+        controller.windowEvent(.didExitFullScreen)         // the real one
+        scheduler.runAll()                                 // the re-poll fires, then the post-exit place
+
+        XCTAssertEqual(window.placedOn.map(\.uuid), [target.uuid], "one post-exit placement, not two")
+        XCTAssertEqual(window.toggleCount, 1)
+    }
+
     // MARK: Launch-time drift is not fought
 
     func test_a_drag_of_the_space_after_a_normal_launch_is_left_alone() {

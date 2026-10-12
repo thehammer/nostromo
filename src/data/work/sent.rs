@@ -7,6 +7,26 @@
 //! or its Mother job has not been archived; the ledger itself does not know
 //! either, so every reader passes the liveness test in (`is_live`).
 //!
+//! ## After a daemon restart
+//!
+//! A restarted daemon has no sessions and an empty focus registry until the Mac
+//! reconnects and pushes its own. [`SessionManager::registry_known`] needs TWO
+//! agreeing non-empty pushes before the daemon will call a focus closed (one
+//! push could be a client that has not loaded yet; an empty push resets it).
+//! Until then a marker with no session entry counts as live everywhere
+//! ([`focus_marker_may_be_live`]: the "sent" chip, the send sheet's notice and
+//! the `existing` answer), so after a restart with only one non-empty push a
+//! resend is conservative: it returns `existing` for a focus the user already
+//! closed until a second agreeing push arrives, or `allow_duplicate` is set. A
+//! Mother job marker is judged by Mother's job list instead (unknown, e.g.
+//! Mother unreachable, counts as live).
+//!
+//! The app and the daemon ship together: the Mac's `work_send` /
+//! `work_send_preview` frames are not understood by a daemon that predates
+//! them, which drops the frame (a "bad ClientMsg" warning in its log) without
+//! an answer, so an older daemon shows up in the app as "The daemon did not
+//! answer in time". Run `make install-daemon` with `make mac-install`.
+//!
 //! The file is written atomically (temp file + rename) and is not a secret
 //! (ids, labels, timestamps), but is still 0600 like the rest of `~/.nostromo/teri`.
 
@@ -281,13 +301,23 @@ fn open_private(mut options: std::fs::OpenOptions, path: &Path) -> std::io::Resu
     options.open(path)
 }
 
-/// How long to wait for `mother list` before treating the answer as unknown.
+/// How long the send path waits for `mother list` before treating the answer as unknown.
 const MOTHER_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the send sheet's preview waits for it. Shorter than the Mac's own
+/// request timeout (10 s), so a hung Mother yields the preview with its job
+/// markers kept ("unknown counts as live") and not a client-side timeout.
+pub const MOTHER_PREVIEW_TIMEOUT: Duration = Duration::from_millis(2_500);
 
 /// The ids of Mother's current jobs. `None` means unknown (the list failed or
 /// timed out): callers treat unknown as "still there", never as "no jobs".
 pub async fn mother_job_ids() -> Option<HashSet<String>> {
-    match tokio::time::timeout(MOTHER_LIST_TIMEOUT, crate::mother::list_jobs()).await {
+    mother_job_ids_within(MOTHER_LIST_TIMEOUT).await
+}
+
+/// [`mother_job_ids`] with its own bound.
+pub async fn mother_job_ids_within(limit: Duration) -> Option<HashSet<String>> {
+    match tokio::time::timeout(limit, crate::mother::list_jobs()).await {
         Ok(Ok(jobs)) => Some(jobs.into_iter().map(|j| j.id).collect()),
         Ok(Err(e)) => {
             warn!("sent ledger: could not list Mother jobs: {e}");
@@ -300,21 +330,13 @@ pub async fn mother_job_ids() -> Option<HashSet<String>> {
     }
 }
 
-/// Is `marker` still the focus running under (or about to resume under) its
-/// tag? It is not if a later focus took the tag (nonce mismatch), nor if its
-/// session was stopped. After a daemon restart no session exists yet until the
-/// Mac attaches, but the pushed focus registry still lists the tag: live.
-pub fn focus_marker_is_live(mgr: &SessionManager, marker: &SentMarker) -> bool {
-    focus_marker_matches(mgr, marker)
-        && (mgr.has_live_session(&marker.target_id) || mgr.awaits_respawn(&marker.target_id))
-}
-
-/// Like [`focus_marker_is_live`], for duplicate protection: where that one
-/// answers "should the chip show", this answers "is a resend a duplicate". A
-/// daemon that has not yet had a registry pushed (a restart, before the Mac
-/// reconnects) cannot tell a closed focus from one it has not heard of, so a
-/// marker with no session entry here counts as live until
-/// [`SessionManager::registry_known`]; a stopped session never does.
+/// May `marker`'s focus still be there? Used for the sent chips and for
+/// duplicate protection alike, so the chip and the "already sent" answer agree.
+/// It is not if a later focus took the tag (nonce mismatch), nor if its session
+/// was stopped. A daemon that has not yet had a registry pushed (a restart,
+/// before the Mac reconnects) cannot tell a closed focus from one it has not
+/// heard of, so a marker with no session entry here counts as live until
+/// [`SessionManager::registry_known`]; afterwards only a registered tag does.
 pub fn focus_marker_may_be_live(mgr: &SessionManager, marker: &SentMarker) -> bool {
     let tag = &marker.target_id;
     focus_marker_matches(mgr, marker)
@@ -338,7 +360,7 @@ pub fn ledger() -> Arc<SentLedger> {
         return Arc::clone(ledger);
     }
     let mut slot = LEDGER.write().unwrap();
-    if slot.is_none() && cfg!(debug_assertions) && is_test_binary() && !teri_dir_overridden() {
+    if slot.is_none() && reaches_real_teri_dir_from_a_test(teri_dir_overridden()) {
         // Release the lock first: a panic holding it would poison the ledger for every later test.
         drop(slot);
         panic!(
@@ -347,6 +369,20 @@ pub fn ledger() -> Arc<SentLedger> {
         );
     }
     Arc::clone(slot.get_or_insert_with(|| Arc::new(SentLedger::new(default_path()))))
+}
+
+/// Panic in a debug test binary if `what` is about to write under the real
+/// `~/.nostromo/teri` because `NOSTROMO_TERI_DIR` is not set. For the writers
+/// other than the ledger (which has its own check in [`ledger`]).
+pub(crate) fn forbid_real_teri_dir_in_tests(what: &str) {
+    if reaches_real_teri_dir_from_a_test(teri_dir_overridden()) {
+        panic!("a test would write {what} under the real teri dir ({}): set NOSTROMO_TERI_DIR", teri_dir().display());
+    }
+}
+
+/// Is this a debug test binary about to use the real teri dir (no override)?
+fn reaches_real_teri_dir_from_a_test(overridden: bool) -> bool {
+    cfg!(debug_assertions) && is_test_binary() && !overridden
 }
 
 fn teri_dir_overridden() -> bool {
@@ -404,6 +440,12 @@ mod tests {
         ledger.record("jira:A-1", marker("focus", "cody-a-1")).unwrap();
         ledger.record("jira:A-1", marker("mother_job", "cody-a-1")).unwrap();
         assert_eq!(ledger.markers("jira:A-1").len(), 2, "same kind+target collapses; other kinds do not");
+    }
+
+    #[test]
+    fn a_debug_test_binary_without_the_teri_dir_override_would_reach_the_real_dir() {
+        assert!(reaches_real_teri_dir_from_a_test(false), "this unit test binary is a debug test binary");
+        assert!(!reaches_real_teri_dir_from_a_test(true), "an override makes it safe");
     }
 
     #[test]

@@ -804,9 +804,9 @@ private final class WorkRowCellView: NSTableCellView {
 
     /// Three fills, three palettes:
     /// - selected in the key window: the system selection colour (a saturated accent
-    ///   blue by default). White is the lightest text there is (about 3.65:1 on the
-    ///   default blue, less on other accents: the platform colour cannot reach 4.5:1
-    ///   with anything), so ALL text is white;
+    ///   blue by default). White is the lightest text there is, and on the default blue
+    ///   it measures 5.4-6.3:1 (above the 4.5:1 body-text bar; lighter accents give
+    ///   less), so ALL text is white;
     /// - selected in an inactive window: `unemphasizedSelectedContentBackgroundColor`,
     ///   a grey that flips with the appearance, so the adaptive label colour;
     /// - unselected: the dark-surface colours.

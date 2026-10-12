@@ -247,6 +247,15 @@ final class StableDisplayCountRecorder {
         self.settle = settle
     }
 
+    /// The launch's windows were opened. Start recording only if the topology is KNOWN:
+    /// the display wait reached the last-known count (or there was no wait). After a wait
+    /// that timed out the topology is a guess (slow externals may still be waking), so
+    /// nothing is recorded from the launch itself: the next real screen change calls
+    /// `topologyChanged()` once the screens have actually settled.
+    func launchWindowsOpened(topologyKnown: Bool) {
+        if topologyKnown { topologyChanged() }
+    }
+
     func topologyChanged() {
         generation += 1
         let armed = generation
