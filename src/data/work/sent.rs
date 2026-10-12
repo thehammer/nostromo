@@ -300,21 +300,13 @@ pub async fn mother_job_ids() -> Option<HashSet<String>> {
     }
 }
 
-/// Is `marker` still the focus running under (or about to resume under) its
-/// tag? It is not if a later focus took the tag (nonce mismatch), nor if its
-/// session was stopped. After a daemon restart no session exists yet until the
-/// Mac attaches, but the pushed focus registry still lists the tag: live.
-pub fn focus_marker_is_live(mgr: &SessionManager, marker: &SentMarker) -> bool {
-    focus_marker_matches(mgr, marker)
-        && (mgr.has_live_session(&marker.target_id) || mgr.awaits_respawn(&marker.target_id))
-}
-
-/// Like [`focus_marker_is_live`], for duplicate protection: where that one
-/// answers "should the chip show", this answers "is a resend a duplicate". A
-/// daemon that has not yet had a registry pushed (a restart, before the Mac
-/// reconnects) cannot tell a closed focus from one it has not heard of, so a
-/// marker with no session entry here counts as live until
-/// [`SessionManager::registry_known`]; a stopped session never does.
+/// May `marker`'s focus still be there? Used for the sent chips and for
+/// duplicate protection alike, so the chip and the "already sent" answer agree.
+/// It is not if a later focus took the tag (nonce mismatch), nor if its session
+/// was stopped. A daemon that has not yet had a registry pushed (a restart,
+/// before the Mac reconnects) cannot tell a closed focus from one it has not
+/// heard of, so a marker with no session entry here counts as live until
+/// [`SessionManager::registry_known`]; afterwards only a registered tag does.
 pub fn focus_marker_may_be_live(mgr: &SessionManager, marker: &SentMarker) -> bool {
     let tag = &marker.target_id;
     focus_marker_matches(mgr, marker)

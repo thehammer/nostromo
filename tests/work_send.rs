@@ -108,7 +108,7 @@ async fn first_agent_message(agent: &str) -> String {
 
 /// Accepts the `add`/`list` grammar the daemon uses, logs every call, keeps a
 /// copy of each plan file under `plans/<n>.md`, refuses an `add` without
-/// `--max-cost 10`, fails when a `fail` marker file exists, and keeps `list.json`
+/// `--max-cost 10`, fails `add` when a `fail` marker file exists and `list` when `list-fail` does, and keeps `list.json`
 /// current.
 const FAKE_MOTHER: &str = r#"#!/bin/sh
 here="$(dirname "$0")"
@@ -141,6 +141,7 @@ case "$sub" in
     echo "abc123"
     printf '[{"id":"abc123","state":"queued"}]' > "$here/list.json" ;;
   list)
+    if [ -e "$here/list-fail" ]; then echo "boom: no list" >&2; exit 1; fi
     if [ -e "$here/list.json" ]; then cat "$here/list.json"; else echo "[]"; fi ;;
   *) echo "mother: unknown command: $sub" >&2; exit 2 ;;
 esac
@@ -590,6 +591,16 @@ impl Rig {
 
     fn mother_fail(&self) {
         std::fs::write(self.mother_dir().join("fail"), "").unwrap();
+    }
+
+    /// Mother no longer lists any job (archived or removed).
+    fn mother_forget_jobs(&self) {
+        std::fs::write(self.mother_dir().join("list.json"), "[]").unwrap();
+    }
+
+    /// `mother list` fails from now on (Mother unreachable).
+    fn mother_list_fail(&self) {
+        std::fs::write(self.mother_dir().join("list-fail"), "").unwrap();
     }
 
     fn mother_recover(&self) {
@@ -1234,6 +1245,35 @@ async fn sending_an_item_that_already_has_a_job_returns_the_job_and_queues_nothi
     assert_eq!(again.kind, "existing", "{again:?}");
     assert_eq!(again.job_id.as_deref(), Some("abc123"));
     assert_eq!(rig.mother_adds().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_job_marker_whose_job_is_gone_from_mother_is_not_live_in_the_preview_and_a_plain_send_queues_a_new_job() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+    rig.send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "ctx")).await.unwrap();
+    assert_eq!(rig.preview(DOC_BUG).await.existing.len(), 1, "precondition: Mother lists the job");
+
+    rig.mother_forget_jobs();
+
+    assert!(rig.preview(DOC_BUG).await.existing.is_empty(), "the sheet no longer warns about an archived job");
+    let outcome = rig.send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "ctx")).await.unwrap();
+    assert_eq!(outcome.kind, "mother_job", "the send agrees with the sheet: {outcome:?}");
+    assert_eq!(rig.mother_adds().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreachable_mother_keeps_the_job_marker_live_in_the_preview_and_the_send_agrees() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+    rig.send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "ctx")).await.unwrap();
+    rig.mother_forget_jobs();
+    rig.mother_list_fail();
+
+    assert_eq!(rig.preview(DOC_BUG).await.existing.len(), 1, "unknown counts as live");
+    let again = rig.send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "ctx")).await.unwrap();
+    assert_eq!(again.kind, "existing", "{again:?}");
+    assert_eq!(rig.mother_adds().len(), 1, "nothing more was queued");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -342,17 +342,26 @@ impl WorkHub {
     }
 
     /// The markers a resend of `item_id` would run into, judged by the rule
-    /// `send` applies (`sent::focus_marker_may_be_live`), so the sheet's
-    /// "already sent" notice and the send's `existing` answer agree. Right after
-    /// a daemon restart, before the Mac has pushed its focus registry, that
+    /// `send` applies (`sent::focus_marker_may_be_live`, and Mother's job list
+    /// for a job marker, unknown counting as live), so the sheet's "already
+    /// sent" notice and the send's `existing` answer agree. Right after a
+    /// daemon restart, before the Mac has pushed its focus registry, that
     /// includes a focus this daemon has no session entry for yet.
-    pub(crate) fn live_markers_for_send(&self, item_id: &str) -> Vec<SentMarker> {
-        sent::ledger().live_markers(item_id, &|m| match m.kind.as_str() {
+    pub(crate) async fn live_markers_for_send(&self, item_id: &str) -> Vec<SentMarker> {
+        let ledger = sent::ledger();
+        // Asked of Mother only if a job marker needs it.
+        let jobs = if ledger.markers(item_id).iter().any(|m| m.kind == "mother_job") {
+            sent::mother_job_ids().await
+        } else {
+            None
+        };
+        ledger.live_markers(item_id, &|m| match m.kind.as_str() {
             "focus" => self
                 .ctx
                 .session_mgr
                 .as_ref()
                 .is_some_and(|mgr| sent::focus_marker_may_be_live(&mgr.lock().unwrap(), m)),
+            "mother_job" => jobs.as_ref().is_none_or(|jobs| jobs.contains(&m.target_id)),
             _ => true,
         })
     }
@@ -447,10 +456,11 @@ impl WorkHub {
         self.apply_update(WorkSource::Todos, (status, vec![(None, items)]));
     }
 
-    /// Is the focus or job a sent marker points at still there? A focus is live
-    /// while its session is (or, right after a daemon restart, while the Mac's
-    /// registry lists it and its session has yet to respawn); a Mother job is
-    /// live until the periodic prune finds it archived (the hub cannot ask
+    /// Should the chip for this sent marker show? A focus's chip follows the
+    /// rule `send` applies (`sent::focus_marker_may_be_live`), so between a
+    /// daemon restart and the Mac's first registry push a focus that is still
+    /// running keeps its chip instead of losing it until the push. A Mother job
+    /// is live until the periodic prune finds it archived (the hub cannot ask
     /// Mother on the hot path).
     fn marker_is_live(&self, marker: &SentMarker) -> bool {
         match marker.kind.as_str() {
@@ -458,7 +468,7 @@ impl WorkHub {
                 .ctx
                 .session_mgr
                 .as_ref()
-                .is_some_and(|mgr| sent::focus_marker_is_live(&mgr.lock().unwrap(), marker)),
+                .is_some_and(|mgr| sent::focus_marker_may_be_live(&mgr.lock().unwrap(), marker)),
             _ => true,
         }
     }

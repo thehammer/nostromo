@@ -79,7 +79,7 @@ pub async fn preview(hub: &WorkHub, item_id: &str) -> Result<SendPreview, WorkEr
         label: suggested_label(&item),
         instruction: DEFAULT_INSTRUCTION.to_owned(),
         context: shared_material(hub, &item, &detail),
-        existing: hub.live_markers_for_send(&item.id),
+        existing: hub.live_markers_for_send(&item.id).await,
     })
 }
 
